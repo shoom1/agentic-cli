@@ -10,7 +10,7 @@ readme = "README.md"
 license = "MIT"
 requires-python = ">=3.12"
 authors = [
-    { name = "TODO", email = "TODO" }
+    { name = "Andrey Shiryaev" }
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -39,6 +39,10 @@ dev = [
     "pytest-asyncio>=0.24.0",
     "pytest-cov>=6.0.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/shoom1/agentic-cli"
+Repository = "https://github.com/shoom1/agentic-cli"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/agentic_cli"]
