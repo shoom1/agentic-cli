@@ -1,0 +1,13 @@
+# Core dependencies for agentic-cli
+# Note: thinking-prompt is a local dependency, install separately:
+#   pip install -e /path/to/thinking_prompt
+
+google-adk[genai]>=0.4.0
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+structlog>=24.0.0
+rich>=13.0.0
+prompt-toolkit>=3.0.0
+httpx>=0.27.0
+numpy>=1.26.0
+feedparser>=6.0.0
