@@ -20,9 +20,12 @@ from agentic_cli.knowledge_base.models import (
     SourceType,
 )
 from agentic_cli.knowledge_base.vector_store import MockVectorStore, VectorStore
+from agentic_cli.logging import Loggers
 
 if TYPE_CHECKING:
     from agentic_cli.config import BaseSettings
+
+logger = Loggers.knowledge_base()
 
 
 class KnowledgeBaseManager:
@@ -123,7 +126,11 @@ class KnowledgeBaseManager:
                     self._chunks[chunk.id] = chunk
         except (json.JSONDecodeError, KeyError) as e:
             # Log error but continue with empty state
-            print(f"Warning: Failed to load metadata: {e}")
+            logger.warning(
+                "failed_to_load_metadata",
+                error=str(e),
+                path=str(self.metadata_path),
+            )
 
     def _save_metadata(self) -> None:
         """Save document metadata to disk."""

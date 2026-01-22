@@ -11,11 +11,12 @@ powered by LLM agents, including:
 
 Domain-specific applications extend the base classes to provide their own
 agents, prompts, and configuration.
+
+Note: WorkflowManager is lazy-loaded to avoid slow Google ADK imports at startup.
 """
 
 from agentic_cli.cli.app import BaseCLIApp
 from agentic_cli.cli.commands import Command, CommandRegistry
-from agentic_cli.workflow.manager import WorkflowManager
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.events import WorkflowEvent, EventType
 from agentic_cli.config import (
@@ -29,6 +30,32 @@ from agentic_cli.config import (
     validate_settings,
     reload_settings,
 )
+from agentic_cli.resolvers import ModelResolver, PathResolver
+from agentic_cli.config_mixins import (
+    KnowledgeBaseMixin,
+    PythonExecutorMixin,
+    PersistenceMixin,
+    ArtifactsMixin,
+    FullFeaturesMixin,
+)
+
+# Heavy imports - lazy loaded on first access
+_lazy_imports = {
+    "WorkflowManager": "agentic_cli.workflow.manager",
+}
+
+
+def __getattr__(name: str):
+    """Lazy import for heavy modules."""
+    if name in _lazy_imports:
+        import importlib
+
+        module = importlib.import_module(_lazy_imports[name])
+        value = getattr(module, name)
+        globals()[name] = value  # Cache for future access
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 __all__ = [
     # CLI
@@ -36,7 +63,7 @@ __all__ = [
     "Command",
     "CommandRegistry",
     # Workflow
-    "WorkflowManager",
+    "WorkflowManager",  # lazy
     "AgentConfig",
     "WorkflowEvent",
     "EventType",
@@ -50,6 +77,15 @@ __all__ = [
     "get_context_settings",
     "validate_settings",
     "reload_settings",
+    # Resolvers (SRP-compliant model/path resolution)
+    "ModelResolver",
+    "PathResolver",
+    # Configuration Mixins (ISP-compliant optional features)
+    "KnowledgeBaseMixin",
+    "PythonExecutorMixin",
+    "PersistenceMixin",
+    "ArtifactsMixin",
+    "FullFeaturesMixin",
 ]
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"

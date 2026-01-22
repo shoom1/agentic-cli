@@ -6,20 +6,27 @@ agent orchestration, session management, and event streaming.
 Domain applications define agents using AgentConfig and pass them to WorkflowManager.
 """
 
+from __future__ import annotations
+
+import asyncio
+import uuid
 from typing import AsyncGenerator, Any, Callable
 
 from google.genai import types
+from google.api_core import exceptions as google_exceptions
 from google.adk import Runner
 from google.adk.agents import LlmAgent, Agent
 from google.adk.planners import BuiltInPlanner
 from google.adk.sessions import InMemorySessionService, BaseSessionService
 
-from agentic_cli.workflow.events import WorkflowEvent
+from agentic_cli.workflow.events import WorkflowEvent, UserInputRequest
 from agentic_cli.workflow.config import AgentConfig
+from agentic_cli.workflow.memory import ConversationMemory, create_summarizer
 from agentic_cli.config import (
     BaseSettings,
     get_settings,
     set_context_settings,
+    set_context_workflow,
     validate_settings,
     SettingsValidationError,
 )
@@ -97,6 +104,12 @@ class WorkflowManager:
         self._runner: Runner | None = None
         self._initialized: bool = False
 
+        # User input request handling
+        self._pending_input: dict[str, tuple[UserInputRequest, asyncio.Future[str]]] = {}
+
+        # Conversation memory with auto-summarization
+        self._memory = ConversationMemory()
+
         logger.debug(
             "workflow_manager_created",
             app_name=self.app_name,
@@ -138,6 +151,135 @@ class WorkflowManager:
         """Get the settings instance."""
         return self._settings
 
+    @property
+    def memory(self) -> ConversationMemory:
+        """Get the conversation memory."""
+        return self._memory
+
+    def has_pending_input(self) -> bool:
+        """Check if there are pending user input requests."""
+        return len(self._pending_input) > 0
+
+    def get_pending_input_request(self) -> UserInputRequest | None:
+        """Get the next pending input request without removing it."""
+        if self._pending_input:
+            request_id = next(iter(self._pending_input))
+            return self._pending_input[request_id][0]
+        return None
+
+    async def request_user_input(self, request: UserInputRequest) -> str:
+        """Request user input from the CLI.
+
+        Called by tools that need user interaction. This method blocks
+        until provide_user_input() is called with the response.
+
+        Args:
+            request: The user input request
+
+        Returns:
+            User's response string
+        """
+        loop = asyncio.get_event_loop()
+        future: asyncio.Future[str] = loop.create_future()
+        self._pending_input[request.request_id] = (request, future)
+
+        logger.debug(
+            "user_input_requested",
+            request_id=request.request_id,
+            tool_name=request.tool_name,
+        )
+
+        return await future
+
+    def provide_user_input(self, request_id: str, response: str) -> bool:
+        """Provide user input for a pending request.
+
+        Called by CLI when user responds to a USER_INPUT_REQUIRED event.
+
+        Args:
+            request_id: The request ID from the event metadata
+            response: User's response
+
+        Returns:
+            True if request was found and resolved, False otherwise
+        """
+        if request_id not in self._pending_input:
+            logger.warning("unknown_input_request", request_id=request_id)
+            return False
+
+        request, future = self._pending_input.pop(request_id)
+        future.set_result(response)
+
+        logger.debug(
+            "user_input_provided",
+            request_id=request_id,
+            tool_name=request.tool_name,
+        )
+        return True
+
+    async def generate_simple(self, prompt: str, max_tokens: int = 500) -> str:
+        """Generate a simple text response using the current model.
+
+        Used for internal operations like summarization. Does not go through
+        the full agent workflow.
+
+        Args:
+            prompt: The prompt to send
+            max_tokens: Maximum tokens in response
+
+        Returns:
+            Generated text response
+        """
+        await self._ensure_initialized()
+
+        from google import genai
+
+        client = genai.Client()
+        response = await client.aio.models.generate_content(
+            model=self.model,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                max_output_tokens=max_tokens,
+            ),
+        )
+
+        return response.text or ""
+
+    def _generate_tool_summary(self, tool_name: str, result: Any, success: bool) -> str:
+        """Generate human-readable summary for tool result.
+
+        Args:
+            tool_name: Name of the tool
+            result: Tool result data
+            success: Whether the tool succeeded
+
+        Returns:
+            Summary string for display
+        """
+        if not success:
+            if isinstance(result, dict) and "error" in result:
+                return f"Failed: {result['error']}"
+            return f"Failed: {result}"
+
+        # Check for explicit summary in result
+        if isinstance(result, dict):
+            if "summary" in result:
+                return str(result["summary"])
+            if "message" in result:
+                return str(result["message"])
+
+        # Auto-generate based on result type
+        if result is None:
+            return "Completed"
+        if isinstance(result, list):
+            return f"Returned {len(result)} items"
+        if isinstance(result, dict):
+            return f"Returned {len(result)} fields"
+
+        # Truncate string results
+        text = str(result)
+        return text[:100] + "..." if len(text) > 100 else text
+
     async def __aenter__(self) -> "WorkflowManager":
         """Async context manager entry - initialize services."""
         await self.initialize_services()
@@ -160,6 +302,12 @@ class WorkflowManager:
         self._root_agent = None
         self._session_service = None
         self._initialized = False
+
+        # Cancel any pending input requests
+        for request_id, (request, future) in self._pending_input.items():
+            if not future.done():
+                future.cancel()
+        self._pending_input.clear()
 
         logger.info("workflow_manager_cleaned_up")
 
@@ -421,8 +569,21 @@ class WorkflowManager:
 
         logger.info("processing_message", message_length=len(message))
 
+        # Add user message to memory
+        self._memory.add_message("user", message)
+
+        # Check if summarization is needed
+        if self._memory.should_summarize():
+            logger.info("summarizing_conversation")
+            summarizer = await create_summarizer(self)
+            await self._memory.summarize(summarizer)
+
         # Set context settings so tools use this manager's settings
         set_context_settings(self._settings)
+        # Set workflow context so tools can request user input
+        set_context_workflow(self)
+
+        full_response_parts: list[str] = []
 
         try:
             # Get or create session
@@ -442,33 +603,107 @@ class WorkflowManager:
                 parts=[types.Part.from_text(text=message)],
             )
 
-            events_async = self._runner.run_async(
-                session_id=current_session_id,
-                user_id=user_id,
-                new_message=new_message,
-            )
+            # Retry configuration for transient errors
+            max_retries = 3
+            base_delay = 2.0
+            transient_codes = {503, 429, 500, 502, 504}
 
             event_count = 0
-            async for event in events_async:
-                if event.content and event.content.parts:
-                    for part in event.content.parts:
-                        event_count += 1
-                        workflow_event = self._process_part(part, current_session_id)
-                        if workflow_event:
-                            # Apply optional event hook
-                            if self._on_event:
-                                workflow_event = self._on_event(workflow_event)
-                            if workflow_event:
-                                yield workflow_event
+            last_error = None
+
+            for attempt in range(max_retries):
+                try:
+                    events_async = self._runner.run_async(
+                        session_id=current_session_id,
+                        user_id=user_id,
+                        new_message=new_message,
+                    )
+
+                    async for event in events_async:
+                        # Check for pending user input requests
+                        if self.has_pending_input():
+                            pending_request = self.get_pending_input_request()
+                            if pending_request:
+                                yield WorkflowEvent.user_input_required(
+                                    request_id=pending_request.request_id,
+                                    tool_name=pending_request.tool_name,
+                                    prompt=pending_request.prompt,
+                                    input_type=pending_request.input_type,
+                                    choices=pending_request.choices,
+                                    default=pending_request.default,
+                                )
+
+                        if event.content and event.content.parts:
+                            for part in event.content.parts:
+                                event_count += 1
+                                workflow_event = self._process_part(part, current_session_id)
+                                if workflow_event:
+                                    # Track text responses for memory
+                                    if workflow_event.type.value == "text":
+                                        full_response_parts.append(workflow_event.content)
+
+                                    # Apply optional event hook
+                                    if self._on_event:
+                                        workflow_event = self._on_event(workflow_event)
+                                    if workflow_event:
+                                        yield workflow_event
+
+                    # Success - break out of retry loop
+                    break
+
+                except google_exceptions.ServiceUnavailable as e:
+                    last_error = e
+                    if attempt < max_retries - 1:
+                        delay = base_delay * (2 ** attempt)
+                        logger.warning(
+                            "retrying_after_transient_error",
+                            attempt=attempt + 1,
+                            max_retries=max_retries,
+                            delay=delay,
+                            error=str(e),
+                        )
+                        yield WorkflowEvent.error(
+                            f"Model temporarily unavailable, retrying in {delay}s...",
+                            error_code="TRANSIENT_ERROR",
+                            recoverable=True,
+                        )
+                        await asyncio.sleep(delay)
+                    else:
+                        raise
+
+                except google_exceptions.ResourceExhausted as e:
+                    last_error = e
+                    if attempt < max_retries - 1:
+                        delay = base_delay * (2 ** attempt)
+                        logger.warning(
+                            "retrying_after_rate_limit",
+                            attempt=attempt + 1,
+                            max_retries=max_retries,
+                            delay=delay,
+                        )
+                        yield WorkflowEvent.error(
+                            f"Rate limited, retrying in {delay}s...",
+                            error_code="RATE_LIMITED",
+                            recoverable=True,
+                        )
+                        await asyncio.sleep(delay)
+                    else:
+                        raise
+
+            # Add assistant response to memory
+            if full_response_parts:
+                full_response = "\n".join(full_response_parts)
+                self._memory.add_message("assistant", full_response)
 
             logger.info("message_processed", event_count=event_count)
         finally:
-            # Clear context settings after processing
+            # Clear context after processing
             set_context_settings(None)
+            set_context_workflow(None)
 
     def _process_part(self, part: Any, session_id: str) -> WorkflowEvent | None:
         """Process a single part from the agent response."""
-        from agentic_cli.llm.thinking import ThinkingDetector
+        from agentic_cli.workflow.thinking import ThinkingDetector
 
         if part.text:
             result = ThinkingDetector.detect_from_part(part)
@@ -478,7 +713,33 @@ class WorkflowManager:
 
         if part.function_call:
             logger.debug("tool_call", tool_name=part.function_call.name)
-            return WorkflowEvent.tool_call(part.function_call.name)
+            return WorkflowEvent.tool_call(
+                tool_name=part.function_call.name,
+                tool_args=dict(part.function_call.args) if part.function_call.args else None,
+            )
+
+        # Handle function response (tool result)
+        if hasattr(part, "function_response") and part.function_response:
+            tool_name = part.function_response.name
+            response = part.function_response.response
+
+            # Determine success and extract result
+            success = True
+            result_data = response
+
+            if isinstance(response, dict):
+                if "error" in response:
+                    success = False
+                result_data = response
+
+            summary = self._generate_tool_summary(tool_name, result_data, success)
+            logger.debug("tool_result", tool_name=tool_name, success=success)
+
+            return WorkflowEvent.tool_result(
+                tool_name=tool_name,
+                result=summary,
+                success=success,
+            )
 
         if part.code_execution_result:
             return WorkflowEvent.code_execution(str(part.code_execution_result.outcome))

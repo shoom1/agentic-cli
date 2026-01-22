@@ -40,6 +40,28 @@ class EventType(Enum):
     EXECUTABLE_CODE = "executable_code"
     FILE_DATA = "file_data"
     ERROR = "error"
+    USER_INPUT_REQUIRED = "user_input_required"
+
+
+@dataclass
+class UserInputRequest:
+    """Request for user input from a tool.
+
+    Attributes:
+        request_id: Unique ID to correlate response
+        tool_name: Which tool is asking for input
+        prompt: Question/prompt to show user
+        input_type: Type of input expected ("text", "choice", "confirm")
+        choices: Available choices for "choice" input type
+        default: Default value if user provides no input
+    """
+
+    request_id: str
+    tool_name: str
+    prompt: str
+    input_type: str = "text"
+    choices: list[str] | None = None
+    default: str | None = None
 
 
 @dataclass
@@ -189,3 +211,43 @@ class WorkflowEvent:
             metadata["details"] = details
 
         return cls(type=EventType.ERROR, content=message, metadata=metadata)
+
+    @classmethod
+    def user_input_required(
+        cls,
+        request_id: str,
+        tool_name: str,
+        prompt: str,
+        input_type: str = "text",
+        choices: list[str] | None = None,
+        default: str | None = None,
+    ) -> "WorkflowEvent":
+        """Create a user input required event.
+
+        This event signals that a tool needs user input to proceed.
+        The CLI should prompt the user and call workflow.provide_user_input()
+        with the response.
+
+        Args:
+            request_id: Unique ID to correlate the response
+            tool_name: Name of the tool requesting input
+            prompt: Question/prompt to show the user
+            input_type: Type of input ("text", "choice", "confirm")
+            choices: Available choices for "choice" input type
+            default: Default value if user provides no input
+        """
+        metadata: dict[str, Any] = {
+            "request_id": request_id,
+            "tool_name": tool_name,
+            "input_type": input_type,
+        }
+        if choices:
+            metadata["choices"] = choices
+        if default is not None:
+            metadata["default"] = default
+
+        return cls(
+            type=EventType.USER_INPUT_REQUIRED,
+            content=prompt,
+            metadata=metadata,
+        )

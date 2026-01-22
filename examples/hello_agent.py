@@ -1,0 +1,104 @@
+"""Hello Agent - A simple example showcasing the agentic-cli package.
+
+Run with: python examples/hello_agent.py
+"""
+
+import asyncio
+from datetime import datetime
+from functools import lru_cache
+from pathlib import Path
+
+from rich.panel import Panel
+from rich.text import Text
+from pydantic import Field
+from pydantic_settings import SettingsConfigDict
+
+from agentic_cli import BaseCLIApp, BaseSettings
+from agentic_cli.cli import AppInfo
+from agentic_cli.config import set_settings
+from agentic_cli.workflow import AgentConfig, WorkflowManager
+
+
+# =============================================================================
+# Settings
+# =============================================================================
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_prefix="HELLO_",
+        env_file=str(Path.home() / ".hello_agent" / ".env"),
+        extra="ignore",
+    )
+    app_name: str = Field(default="hello_agent")
+    workspace_dir: Path = Field(default=Path.home() / ".hello_agent")
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()
+
+
+# =============================================================================
+# Tools
+# =============================================================================
+
+def get_current_time() -> dict:
+    """Get the current date and time."""
+    now = datetime.now()
+    return {"date": now.strftime("%Y-%m-%d"), "time": now.strftime("%H:%M:%S")}
+
+
+def calculate(expression: str) -> dict:
+    """Evaluate a mathematical expression (e.g., "2 + 2" or "sqrt(16)")."""
+    import math
+    allowed = {"abs": abs, "round": round, "min": min, "max": max, "sum": sum,
+               "pow": pow, "sqrt": math.sqrt, "sin": math.sin, "cos": math.cos,
+               "tan": math.tan, "pi": math.pi, "e": math.e}
+    try:
+        return {"expression": expression, "result": eval(expression, {"__builtins__": {}}, allowed)}
+    except Exception as e:
+        return {"expression": expression, "error": str(e)}
+
+
+def echo(message: str) -> dict:
+    """Echo back a message."""
+    return {"echoed": message, "length": len(message)}
+
+
+# =============================================================================
+# Agent & App
+# =============================================================================
+
+AGENT_CONFIGS = [
+    AgentConfig(
+        name="assistant",
+        prompt="You are a friendly assistant with tools: get_current_time, calculate, echo.",
+        tools=[get_current_time, calculate, echo],
+        description="Friendly assistant with utility tools",
+    ),
+]
+
+
+class HelloAgentApp(BaseCLIApp):
+    def get_app_info(self) -> AppInfo:
+        text = Text()
+        text.append("Hello Agent\n\n", style="bold cyan")
+        text.append("Tools: get_current_time, calculate, echo\n", style="dim")
+        text.append("Type /help for commands", style="dim")
+        return AppInfo(
+            name="Hello Agent",
+            version="0.1.0",
+            welcome_message=lambda: Panel(text, border_style="cyan"),
+            echo_thinking=False,
+        )
+
+    def get_settings(self) -> Settings:
+        return get_settings()
+
+    def create_workflow_manager(self) -> WorkflowManager:
+        set_settings(self._settings)
+        return WorkflowManager(agent_configs=AGENT_CONFIGS, settings=self._settings)
+
+
+if __name__ == "__main__":
+    asyncio.run(HelloAgentApp().run())

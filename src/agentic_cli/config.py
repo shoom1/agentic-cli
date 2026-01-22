@@ -17,7 +17,6 @@ Settings Management:
 """
 
 from contextvars import ContextVar
-from functools import lru_cache
 from pathlib import Path
 from typing import Literal, Generator
 from contextlib import contextmanager
@@ -25,26 +24,33 @@ from contextlib import contextmanager
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings as PydanticBaseSettings, SettingsConfigDict
 
+from agentic_cli.resolvers import (
+    ModelResolver,
+    PathResolver,
+    GOOGLE_MODELS,
+    ANTHROPIC_MODELS,
+    ALL_MODELS,
+    THINKING_EFFORT_LEVELS,
+)
 
-# Available models by provider
-GOOGLE_MODELS = [
-    "gemini-3-pro-preview",
-    "gemini-3-flash-preview",
-    "gemini-2.5-pro",
-    "gemini-2.5-flash",
+# Re-export for backward compatibility
+__all__ = [
+    "BaseSettings",
+    "SettingsContext",
+    "SettingsValidationError",
+    "get_settings",
+    "set_settings",
+    "set_context_settings",
+    "get_context_settings",
+    "get_context_workflow",
+    "set_context_workflow",
+    "validate_settings",
+    "reload_settings",
+    "GOOGLE_MODELS",
+    "ANTHROPIC_MODELS",
+    "ALL_MODELS",
+    "THINKING_EFFORT_LEVELS",
 ]
-
-ANTHROPIC_MODELS = [
-    "claude-opus-4-5",
-    "claude-opus-4",
-    "claude-sonnet-4-5",
-    "claude-sonnet-4",
-]
-
-ALL_MODELS = GOOGLE_MODELS + ANTHROPIC_MODELS
-
-# Thinking effort levels (for models that support it)
-THINKING_EFFORT_LEVELS = ["none", "low", "medium", "high"]
 
 
 class BaseSettings(PydanticBaseSettings):
@@ -146,30 +152,62 @@ class BaseSettings(PydanticBaseSettings):
             return Path(v).expanduser()
         return v
 
+    # Lazy-initialized resolvers
+    _model_resolver: ModelResolver | None = None
+    _path_resolver: PathResolver | None = None
+
+    @property
+    def model_resolver(self) -> ModelResolver:
+        """Get the model resolver instance (lazy-initialized)."""
+        if self._model_resolver is None:
+            object.__setattr__(
+                self,
+                "_model_resolver",
+                ModelResolver(
+                    google_api_key=self.google_api_key,
+                    anthropic_api_key=self.anthropic_api_key,
+                    default_model=self.default_model,
+                ),
+            )
+        return self._model_resolver
+
+    @property
+    def path_resolver(self) -> PathResolver:
+        """Get the path resolver instance (lazy-initialized)."""
+        if self._path_resolver is None:
+            object.__setattr__(
+                self,
+                "_path_resolver",
+                PathResolver(workspace_dir=self.workspace_dir),
+            )
+        return self._path_resolver
+
+    # === Model-related properties (delegated to ModelResolver) ===
+
     @property
     def has_google_key(self) -> bool:
         """Check if Google API key is available."""
-        return bool(self.google_api_key)
+        return self.model_resolver.has_google_key
 
     @property
     def has_anthropic_key(self) -> bool:
         """Check if Anthropic API key is available."""
-        return bool(self.anthropic_api_key)
+        return self.model_resolver.has_anthropic_key
 
     @property
     def has_any_api_key(self) -> bool:
         """Check if any API key is available."""
-        return self.has_google_key or self.has_anthropic_key
+        return self.model_resolver.has_any_api_key
 
     @property
     def default_model_google(self) -> str:
         """Default Google model."""
-        return "gemini-3-flash-preview"
+        return ModelResolver.DEFAULT_GOOGLE_MODEL
 
     @property
     def default_model_anthropic(self) -> str:
         """Default Anthropic model."""
-        return "claude-sonnet-4-5"
+        return ModelResolver.DEFAULT_ANTHROPIC_MODEL
 
     def get_model(self) -> str:
         """Get the model to use based on configuration and available keys.
@@ -180,56 +218,30 @@ class BaseSettings(PydanticBaseSettings):
         Raises:
             RuntimeError: If no API keys are available
         """
-        if self.default_model:
-            return self.default_model
-
-        if self.has_google_key:
-            return self.default_model_google
-        if self.has_anthropic_key:
-            return self.default_model_anthropic
-
-        raise RuntimeError(
-            "No API keys found. Please set GOOGLE_API_KEY or ANTHROPIC_API_KEY "
-            f"in your environment or in {self.workspace_dir}/.env file."
-        )
+        return self.model_resolver.get_model()
 
     def get_available_models(self) -> list[str]:
         """Get list of models available based on configured API keys."""
-        models = []
-        if self.has_google_key:
-            models.extend(GOOGLE_MODELS)
-        if self.has_anthropic_key:
-            models.extend(ANTHROPIC_MODELS)
-        return models
+        return self.model_resolver.get_available_models()
 
     def is_google_model(self, model: str | None = None) -> bool:
         """Check if the given model (or current model) is a Google model."""
-        model = model or self.get_model()
-        return model in GOOGLE_MODELS or model.startswith("gemini")
+        return self.model_resolver.is_google_model(model)
 
     def is_anthropic_model(self, model: str | None = None) -> bool:
         """Check if the given model (or current model) is an Anthropic model."""
-        model = model or self.get_model()
-        return model in ANTHROPIC_MODELS or model.startswith("claude")
+        return self.model_resolver.is_anthropic_model(model)
 
     def supports_thinking_effort(self, model: str | None = None) -> bool:
         """Check if the model supports thinking effort configuration."""
-        model = model or self.get_model()
-        return (
-            self.is_anthropic_model(model)
-            or "gemini-2.5" in model
-            or "gemini-3" in model
-        )
+        return self.model_resolver.supports_thinking_effort(model)
 
     def set_model(self, model: str) -> None:
         """Set the default model."""
-        available = self.get_available_models()
-        if model not in available:
-            raise ValueError(
-                f"Model '{model}' is not available. "
-                f"Available models: {', '.join(available)}"
-            )
+        self.model_resolver.validate_model(model)
         object.__setattr__(self, "default_model", model)
+        # Invalidate resolver cache to pick up new model
+        object.__setattr__(self, "_model_resolver", None)
 
     def set_thinking_effort(self, effort: str) -> None:
         """Set the thinking effort level."""
@@ -242,10 +254,7 @@ class BaseSettings(PydanticBaseSettings):
 
     def get_api_key_status(self) -> dict[str, bool]:
         """Get status of all API keys."""
-        return {
-            "google": self.has_google_key,
-            "anthropic": self.has_anthropic_key,
-        }
+        return self.model_resolver.get_api_key_status()
 
     def export_api_keys_to_env(self) -> None:
         """Export API keys to environment variables."""
@@ -257,44 +266,46 @@ class BaseSettings(PydanticBaseSettings):
         if self.anthropic_api_key and not os.environ.get("ANTHROPIC_API_KEY"):
             os.environ["ANTHROPIC_API_KEY"] = self.anthropic_api_key
 
+    # === Path-related properties (delegated to PathResolver) ===
+
     def ensure_workspace_exists(self) -> None:
         """Create workspace directory if it doesn't exist."""
-        self.workspace_dir.mkdir(parents=True, exist_ok=True)
+        self.path_resolver.ensure_workspace_exists()
 
     @property
     def sessions_dir(self) -> Path:
         """Directory for session storage."""
-        return self.workspace_dir / "sessions"
+        return self.path_resolver.sessions_dir
 
     @property
     def artifacts_dir(self) -> Path:
         """Directory for artifact storage."""
-        return self.workspace_dir / "workspace"
+        return self.path_resolver.artifacts_dir
 
     @property
     def templates_dir(self) -> Path:
         """Directory for report templates."""
-        return self.workspace_dir / "templates"
+        return self.path_resolver.templates_dir
 
     @property
     def reports_dir(self) -> Path:
         """Directory for generated reports."""
-        return self.workspace_dir / "reports"
+        return self.path_resolver.reports_dir
 
     @property
     def knowledge_base_dir(self) -> Path:
         """Directory for knowledge base storage."""
-        return self.workspace_dir / "knowledge_base"
+        return self.path_resolver.knowledge_base_dir
 
     @property
     def knowledge_base_documents_dir(self) -> Path:
         """Directory for knowledge base documents."""
-        return self.knowledge_base_dir / "documents"
+        return self.path_resolver.knowledge_base_documents_dir
 
     @property
     def knowledge_base_embeddings_dir(self) -> Path:
         """Directory for knowledge base embeddings."""
-        return self.knowledge_base_dir / "embeddings"
+        return self.path_resolver.knowledge_base_embeddings_dir
 
 
 # Context variable for settings (takes precedence over global singleton)
@@ -372,6 +383,36 @@ def get_context_settings() -> BaseSettings | None:
         Settings from current context, or None if not set
     """
     return _settings_context.get()
+
+
+# Context variable for workflow manager (allows tools to request user input)
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from agentic_cli.workflow.manager import WorkflowManager
+
+_workflow_context: ContextVar[Any] = ContextVar("workflow_context", default=None)
+
+
+def set_context_workflow(workflow: "WorkflowManager | None") -> None:
+    """Set the workflow manager for the current context.
+
+    This allows tools to access the workflow manager for operations
+    like requesting user input.
+
+    Args:
+        workflow: WorkflowManager instance, or None to clear
+    """
+    _workflow_context.set(workflow)
+
+
+def get_context_workflow() -> "WorkflowManager | None":
+    """Get the workflow manager from the current context.
+
+    Returns:
+        WorkflowManager instance, or None if not in a workflow context
+    """
+    return _workflow_context.get()
 
 
 @contextmanager

@@ -39,9 +39,12 @@ import importlib
 import inspect
 import re
 
+from agentic_cli.logging import Loggers
+
 if TYPE_CHECKING:
     from agentic_cli.cli.app import BaseCLIApp
 
+logger = Loggers.cli()
 T = TypeVar("T")
 
 
@@ -134,6 +137,7 @@ class Command(ABC):
         usage: str | None = None,
         examples: list[str] | None = None,
         category: CommandCategory = CommandCategory.GENERAL,
+        silent: bool = False,
     ) -> None:
         """Initialize the command.
 
@@ -144,6 +148,7 @@ class Command(ABC):
             usage: Usage string showing syntax (e.g., "/cmd <arg> [--opt]")
             examples: List of example usages
             category: Category for organizing in help
+            silent: If True, suppress "Executing command:" echo
         """
         self.name = name
         self.description = description
@@ -151,6 +156,7 @@ class Command(ABC):
         self.usage = usage or f"/{name}"
         self.examples = examples or []
         self.category = category
+        self.silent = silent
 
     @abstractmethod
     async def execute(self, args: str, app: Any) -> None:
@@ -364,7 +370,12 @@ class CommandRegistry:
         """
         try:
             module = importlib.import_module(module_path)
-        except ImportError:
+        except ImportError as e:
+            logger.debug(
+                "command_module_import_failed",
+                module_path=module_path,
+                error=str(e),
+            )
             return []
 
         discovered = []
@@ -379,9 +390,14 @@ class CommandRegistry:
                     instance = obj()
                     self.register(instance)
                     discovered.append(instance)
-                except Exception:
-                    # Skip commands that fail to instantiate
-                    pass
+                except Exception as e:
+                    # Log but skip commands that fail to instantiate
+                    logger.debug(
+                        "command_instantiation_failed",
+                        command_class=name,
+                        module_path=module_path,
+                        error=str(e),
+                    )
 
         return discovered
 

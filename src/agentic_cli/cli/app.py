@@ -18,7 +18,6 @@ from typing import TYPE_CHECKING, Any, Callable
 
 from prompt_toolkit.completion import WordCompleter
 from prompt_toolkit.history import InMemoryHistory
-from rich.console import Console
 
 from thinking_prompt import ThinkingPromptSession, AppInfo
 from thinking_prompt.styles import ThinkingPromptStyles
@@ -28,7 +27,7 @@ from agentic_cli.config import BaseSettings
 from agentic_cli.logging import Loggers, configure_logging, bind_context
 
 if TYPE_CHECKING:
-    from agentic_cli.workflow import WorkflowManager, EventType
+    from agentic_cli.workflow import WorkflowManager, EventType, WorkflowEvent
 
 logger = Loggers.cli()
 
@@ -173,13 +172,11 @@ class BaseCLIApp(ABC):
             completer=completer,
             enable_status_bar=True,
             status_text="Ctrl+C: cancel | Ctrl+D: exit | /help: commands",
+            echo_input=True,
         )
 
         # === State ===
         self.should_exit = False
-
-        # === Rich Console (for commands that need direct console access) ===
-        self.console = Console()
 
         logger.debug("app_initialized_fast")
 
@@ -249,6 +246,50 @@ class BaseCLIApp(ABC):
         self.should_exit = True
         self.session.exit()
 
+    async def apply_settings(self, changes: dict[str, Any]) -> None:
+        """Apply changed settings and reinitialize workflow if needed.
+
+        Args:
+            changes: Dictionary of changed settings (key -> new_value)
+        """
+        if not changes:
+            self.session.add_message("system", "No changes made.")
+            return
+
+        needs_reinit = False
+        new_model = changes.get("model")
+
+        # Apply model change
+        if new_model:
+            try:
+                self._settings.set_model(new_model)
+                needs_reinit = True
+            except ValueError as e:
+                self.session.add_error(f"Failed to set model: {e}")
+                return
+
+        # Apply thinking effort change
+        if "thinking_effort" in changes:
+            try:
+                self._settings.set_thinking_effort(changes["thinking_effort"])
+                needs_reinit = True
+            except ValueError as e:
+                self.session.add_error(f"Failed to set thinking effort: {e}")
+                return
+
+        # Reinitialize workflow if needed
+        if needs_reinit and self._workflow is not None:
+            try:
+                await self._workflow.reinitialize(model=new_model, preserve_sessions=True)
+            except Exception as e:
+                self.session.add_error(f"Failed to reinitialize workflow: {e}")
+                return
+
+        # Report changes
+        for key, value in changes.items():
+            label = key.replace("_", " ").title()
+            self.session.add_success(f"{label}: {value}")
+
     def _register_builtin_commands(self) -> None:
         """Register built-in commands."""
         from agentic_cli.cli.builtin_commands import (
@@ -259,8 +300,8 @@ class BaseCLIApp(ABC):
             SaveCommand,
             LoadCommand,
             SessionsCommand,
-            SettingsCommand,
         )
+        from agentic_cli.cli.settings_command import SettingsCommand
 
         self.command_registry.register(HelpCommand())
         self.command_registry.register(ClearCommand())
@@ -351,7 +392,6 @@ class BaseCLIApp(ABC):
         if command:
             logger.debug("executing_command", command=command.name, args=args)
             try:
-                self.session.add_response(f"Executing command: /{command.name} {args}")
                 await command.execute(args, self)
                 logger.debug("command_completed", command=command.name)
             except Exception as e:
@@ -359,6 +399,48 @@ class BaseCLIApp(ABC):
         else:
             self.session.add_error(f"Unknown command: /{command_name}")
             self.session.add_message("system", "Type /help to see available commands")
+
+    async def _prompt_user_input(self, event: "WorkflowEvent") -> str:
+        """Prompt user for input requested by a tool.
+
+        Args:
+            event: USER_INPUT_REQUIRED event with prompt details
+
+        Returns:
+            User's response string
+        """
+        from agentic_cli.workflow import WorkflowEvent  # noqa: F811
+
+        input_type = event.metadata.get("input_type", "text")
+        tool_name = event.metadata.get("tool_name", "Tool")
+        choices = event.metadata.get("choices")
+        default = event.metadata.get("default")
+
+        if input_type == "choice" and choices:
+            # Use choice dialog for multiple options
+            result = await self.session.choice_dialog(
+                title=f"{tool_name} - Input Required",
+                text=event.content,
+                choices=choices,
+            )
+            return result or (default or "")
+
+        elif input_type == "confirm":
+            # Use yes/no dialog for confirmation
+            result = await self.session.yes_no_dialog(
+                title=f"{tool_name} - Confirmation",
+                text=event.content,
+            )
+            return "yes" if result else "no"
+
+        else:
+            # Use text input dialog for free-form input
+            result = await self.session.input_dialog(
+                title=f"{tool_name} - Input Required",
+                text=event.content,
+                default=default or "",
+            )
+            return result or ""
 
     async def _handle_message(self, message: str) -> None:
         """Route message through agentic workflow.
@@ -417,6 +499,37 @@ class BaseCLIApp(ABC):
                     # Update status line in thinking box
                     tool_name = event.metadata.get("tool_name", "unknown")
                     status_line = f"Calling: {tool_name}"
+
+                elif event.type == EventType.TOOL_RESULT:
+                    # Display tool result summary
+                    tool_name = event.metadata.get("tool_name", "unknown")
+                    success = event.metadata.get("success", True)
+                    duration = event.metadata.get("duration_ms")
+                    icon = "✓" if success else "✗"
+                    duration_str = f" ({duration}ms)" if duration else ""
+                    status_line = f"{icon} {tool_name}: {event.content}{duration_str}"
+                    # Also show in message area for visibility
+                    style = "green" if success else "red"
+                    self.session.add_message(
+                        "system",
+                        f"[{style}]{icon}[/{style}] {tool_name}: {event.content}{duration_str}"
+                    )
+
+                elif event.type == EventType.USER_INPUT_REQUIRED:
+                    # Pause thinking, prompt user, resume
+                    if thinking_started:
+                        self.session.finish_thinking(add_to_history=False)
+                        thinking_started = False
+
+                    response = await self._prompt_user_input(event)
+                    self.workflow.provide_user_input(
+                        event.metadata["request_id"],
+                        response,
+                    )
+
+                    # Resume thinking box
+                    self.session.start_thinking(get_status)
+                    thinking_started = True
 
                 elif event.type == EventType.CODE_EXECUTION:
                     # Update status with execution result

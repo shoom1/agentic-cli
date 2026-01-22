@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agentic-cli"
-version = "0.1.0"
+version = "0.1.1"
 description = "A framework for building domain-specific agentic CLI applications"
 readme = "README.md"
 license = "MIT"
@@ -21,7 +21,7 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
 ]
 dependencies = [
-    "thinking-prompt>=0.1.0",
+    "thinking-prompt>=0.2.0",
     "google-adk[genai]>=0.4.0",
     "pydantic>=2.0.0",
     "pydantic-settings>=2.0.0",
