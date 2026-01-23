@@ -9,11 +9,10 @@ Domain applications define agents using AgentConfig and pass them to WorkflowMan
 from __future__ import annotations
 
 import asyncio
-import uuid
-from typing import AsyncGenerator, Any, Callable
+import contextlib
+from typing import AsyncGenerator, Any, Callable, Iterator
 
 from google.genai import types
-from google.api_core import exceptions as google_exceptions
 from google.adk import Runner
 from google.adk.agents import LlmAgent, Agent
 from google.adk.planners import BuiltInPlanner
@@ -22,6 +21,9 @@ from google.adk.sessions import InMemorySessionService, BaseSessionService
 from agentic_cli.workflow.events import WorkflowEvent, UserInputRequest
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.memory import ConversationMemory, create_summarizer
+from agentic_cli.workflow.retry import RetryConfig, RetryHandler
+from agentic_cli.workflow.session_handler import SessionHandler
+from agentic_cli.workflow.event_processor import EventProcessor
 from agentic_cli.config import (
     BaseSettings,
     get_settings,
@@ -100,9 +102,16 @@ class WorkflowManager:
 
         # Lazy-initialized components
         self._session_service: BaseSessionService | None = None
+        self._session_handler: SessionHandler | None = None
         self._root_agent: Agent | None = None
         self._runner: Runner | None = None
         self._initialized: bool = False
+
+        # Event processor for transforming ADK events
+        self._event_processor = EventProcessor(on_event=on_event)
+
+        # Retry handler for transient errors
+        self._retry_handler = RetryHandler(RetryConfig())
 
         # User input request handling
         self._pending_input: dict[str, tuple[UserInputRequest, asyncio.Future[str]]] = {}
@@ -245,41 +254,6 @@ class WorkflowManager:
 
         return response.text or ""
 
-    def _generate_tool_summary(self, tool_name: str, result: Any, success: bool) -> str:
-        """Generate human-readable summary for tool result.
-
-        Args:
-            tool_name: Name of the tool
-            result: Tool result data
-            success: Whether the tool succeeded
-
-        Returns:
-            Summary string for display
-        """
-        if not success:
-            if isinstance(result, dict) and "error" in result:
-                return f"Failed: {result['error']}"
-            return f"Failed: {result}"
-
-        # Check for explicit summary in result
-        if isinstance(result, dict):
-            if "summary" in result:
-                return str(result["summary"])
-            if "message" in result:
-                return str(result["message"])
-
-        # Auto-generate based on result type
-        if result is None:
-            return "Completed"
-        if isinstance(result, list):
-            return f"Returned {len(result)} items"
-        if isinstance(result, dict):
-            return f"Returned {len(result)} fields"
-
-        # Truncate string results
-        text = str(result)
-        return text[:100] + "..." if len(text) > 100 else text
-
     async def __aenter__(self) -> "WorkflowManager":
         """Async context manager entry - initialize services."""
         await self.initialize_services()
@@ -301,6 +275,7 @@ class WorkflowManager:
         self._runner = None
         self._root_agent = None
         self._session_service = None
+        self._session_handler = None
         self._initialized = False
 
         # Cancel any pending input requests
@@ -353,6 +328,7 @@ class WorkflowManager:
         # Restore session service if preserving
         if old_session_service is not None and preserve_sessions:
             self._session_service = old_session_service
+            self._session_handler = SessionHandler(self._session_service, self.app_name)
             # Update runner with preserved session service
             if self._runner and self._root_agent:
                 self._runner = Runner(
@@ -508,11 +484,12 @@ class WorkflowManager:
         # Export API keys to environment
         self._settings.export_api_keys_to_env()
 
-        # Create session service
+        # Create session service and handler
         if self.session_service_uri:
             logger.debug("using_remote_session_service", uri=self.session_service_uri)
         else:
             self._session_service = InMemorySessionService()
+            self._session_handler = SessionHandler(self._session_service, self.app_name)
             logger.debug("using_in_memory_session_service")
 
         # Create agent hierarchy from configs
@@ -537,6 +514,100 @@ class WorkflowManager:
         if not self._initialized:
             await self.initialize_services()
 
+    def _validate_initialized(self) -> None:
+        """Validate that all required components are initialized.
+
+        Raises:
+            RuntimeError: If required components are not initialized
+        """
+        if not self._runner or not self._session_service or not self._root_agent:
+            raise RuntimeError(
+                "Workflow Manager failed to initialize. Check API keys and configuration."
+            )
+
+    @contextlib.contextmanager
+    def _workflow_context(self) -> Iterator[None]:
+        """Context manager for settings and workflow context.
+
+        Sets context variables that allow tools to access settings
+        and the workflow manager during execution.
+        """
+        set_context_settings(self._settings)
+        set_context_workflow(self)
+        try:
+            yield
+        finally:
+            set_context_settings(None)
+            set_context_workflow(None)
+
+    async def _prepare_memory(self, message: str) -> None:
+        """Prepare memory for processing a new message.
+
+        Adds the user message to memory and performs summarization
+        if the conversation has grown too long.
+
+        Args:
+            message: User message to add
+        """
+        self._memory.add_message("user", message)
+
+        if self._memory.should_summarize():
+            logger.info("summarizing_conversation")
+            summarizer = await create_summarizer(self)
+            await self._memory.summarize(summarizer)
+
+    def _finalize_memory(self, response_parts: list[str]) -> None:
+        """Finalize memory after processing.
+
+        Adds the assistant response to memory.
+
+        Args:
+            response_parts: Collected response text parts
+        """
+        if response_parts:
+            full_response = "\n".join(response_parts)
+            self._memory.add_message("assistant", full_response)
+
+    def _create_message(self, message: str) -> types.Content:
+        """Create an ADK Content message from text.
+
+        Args:
+            message: User message text
+
+        Returns:
+            ADK Content object
+        """
+        return types.Content(
+            role="user",
+            parts=[types.Part.from_text(text=message)],
+        )
+
+    async def _on_retry_callback(
+        self, attempt: int, delay: float, error: Exception
+    ) -> AsyncGenerator[WorkflowEvent, None]:
+        """Callback invoked when a retry is about to happen.
+
+        This is a factory that returns events to yield during retry.
+
+        Args:
+            attempt: Current attempt number (0-indexed)
+            delay: Delay before next retry in seconds
+            error: The exception that triggered the retry
+
+        Yields:
+            WorkflowEvent describing the retry
+        """
+        from google.api_core import exceptions as google_exceptions
+
+        if isinstance(error, google_exceptions.ResourceExhausted):
+            error_code = "RATE_LIMITED"
+            message = f"Rate limited, retrying in {delay}s..."
+        else:
+            error_code = "TRANSIENT_ERROR"
+            message = f"Model temporarily unavailable, retrying in {delay}s..."
+
+        return WorkflowEvent.error(message, error_code=error_code, recoverable=True)
+
     async def process(
         self,
         message: str,
@@ -557,200 +628,75 @@ class WorkflowManager:
             WorkflowEvent objects representing workflow output
         """
         await self._ensure_initialized()
-
-        if not self._runner or not self._session_service or not self._root_agent:
-            raise RuntimeError(
-                "Workflow Manager failed to initialize. Check API keys and configuration."
-            )
+        self._validate_initialized()
 
         current_session_id = session_id or self.session_id
-
         bind_context(session_id=current_session_id, user_id=user_id)
 
         logger.info("processing_message", message_length=len(message))
 
-        # Add user message to memory
-        self._memory.add_message("user", message)
+        # Memory management
+        await self._prepare_memory(message)
 
-        # Check if summarization is needed
-        if self._memory.should_summarize():
-            logger.info("summarizing_conversation")
-            summarizer = await create_summarizer(self)
-            await self._memory.summarize(summarizer)
-
-        # Set context settings so tools use this manager's settings
-        set_context_settings(self._settings)
-        # Set workflow context so tools can request user input
-        set_context_workflow(self)
-
-        full_response_parts: list[str] = []
-
-        try:
-            # Get or create session
-            session = await self._session_service.get_session(
-                app_name=self.app_name, user_id=user_id, session_id=current_session_id
-            )
-            if session is None:
-                session = await self._session_service.create_session(
-                    app_name=self.app_name, user_id=user_id, session_id=current_session_id
-                )
-                logger.debug("session_created", session_id=current_session_id)
-            else:
-                logger.debug("session_resumed", session_id=current_session_id)
-
-            new_message = types.Content(
-                role="user",
-                parts=[types.Part.from_text(text=message)],
+        # Context setup
+        with self._workflow_context():
+            # Session handling
+            session = await self._session_handler.get_or_create_session(
+                user_id, current_session_id
             )
 
-            # Retry configuration for transient errors
-            max_retries = 3
-            base_delay = 2.0
-            transient_codes = {503, 429, 500, 502, 504}
+            # Create message
+            new_message = self._create_message(message)
 
+            # Track response for memory
+            full_response_parts: list[str] = []
             event_count = 0
-            last_error = None
 
-            for attempt in range(max_retries):
-                try:
-                    events_async = self._runner.run_async(
-                        session_id=current_session_id,
-                        user_id=user_id,
-                        new_message=new_message,
-                    )
+            # Create the workflow operation
+            def create_workflow():
+                return self._runner.run_async(
+                    session_id=current_session_id,
+                    user_id=user_id,
+                    new_message=new_message,
+                )
 
-                    async for event in events_async:
-                        # Check for pending user input requests
-                        if self.has_pending_input():
-                            pending_request = self.get_pending_input_request()
-                            if pending_request:
-                                yield WorkflowEvent.user_input_required(
-                                    request_id=pending_request.request_id,
-                                    tool_name=pending_request.tool_name,
-                                    prompt=pending_request.prompt,
-                                    input_type=pending_request.input_type,
-                                    choices=pending_request.choices,
-                                    default=pending_request.default,
-                                )
+            # Process with retry
+            async for adk_event in self._retry_handler.execute_with_retry(
+                create_workflow,
+                on_retry=self._emit_retry_event,
+            ):
+                # Process ADK event into workflow events
+                async for workflow_event in self._event_processor.process_events(
+                    adk_event,
+                    current_session_id,
+                    self.get_pending_input_request,
+                ):
+                    event_count += 1
 
-                        if event.content and event.content.parts:
-                            for part in event.content.parts:
-                                event_count += 1
-                                workflow_event = self._process_part(part, current_session_id)
-                                if workflow_event:
-                                    # Track text responses for memory
-                                    if workflow_event.type.value == "text":
-                                        full_response_parts.append(workflow_event.content)
+                    # Track text responses for memory
+                    if workflow_event.type.value == "text":
+                        full_response_parts.append(workflow_event.content)
 
-                                    # Apply optional event hook
-                                    if self._on_event:
-                                        workflow_event = self._on_event(workflow_event)
-                                    if workflow_event:
-                                        yield workflow_event
+                    yield workflow_event
 
-                    # Success - break out of retry loop
-                    break
-
-                except google_exceptions.ServiceUnavailable as e:
-                    last_error = e
-                    if attempt < max_retries - 1:
-                        delay = base_delay * (2 ** attempt)
-                        logger.warning(
-                            "retrying_after_transient_error",
-                            attempt=attempt + 1,
-                            max_retries=max_retries,
-                            delay=delay,
-                            error=str(e),
-                        )
-                        yield WorkflowEvent.error(
-                            f"Model temporarily unavailable, retrying in {delay}s...",
-                            error_code="TRANSIENT_ERROR",
-                            recoverable=True,
-                        )
-                        await asyncio.sleep(delay)
-                    else:
-                        raise
-
-                except google_exceptions.ResourceExhausted as e:
-                    last_error = e
-                    if attempt < max_retries - 1:
-                        delay = base_delay * (2 ** attempt)
-                        logger.warning(
-                            "retrying_after_rate_limit",
-                            attempt=attempt + 1,
-                            max_retries=max_retries,
-                            delay=delay,
-                        )
-                        yield WorkflowEvent.error(
-                            f"Rate limited, retrying in {delay}s...",
-                            error_code="RATE_LIMITED",
-                            recoverable=True,
-                        )
-                        await asyncio.sleep(delay)
-                    else:
-                        raise
-
-            # Add assistant response to memory
-            if full_response_parts:
-                full_response = "\n".join(full_response_parts)
-                self._memory.add_message("assistant", full_response)
+            # Update memory with assistant response
+            self._finalize_memory(full_response_parts)
 
             logger.info("message_processed", event_count=event_count)
-        finally:
-            # Clear context after processing
-            set_context_settings(None)
-            set_context_workflow(None)
 
-    def _process_part(self, part: Any, session_id: str) -> WorkflowEvent | None:
-        """Process a single part from the agent response."""
-        from agentic_cli.workflow.thinking import ThinkingDetector
+    async def _emit_retry_event(
+        self, attempt: int, delay: float, error: Exception
+    ) -> None:
+        """Emit a retry event (callback for RetryHandler).
 
-        if part.text:
-            result = ThinkingDetector.detect_from_part(part)
-            if result.is_thinking:
-                return WorkflowEvent.thinking(result.content, session_id)
-            return WorkflowEvent.text(result.content, session_id)
+        Note: This callback doesn't yield events directly. The retry events
+        are handled differently - we log them but don't yield because we're
+        in a callback context. The main process loop handles event yielding.
 
-        if part.function_call:
-            logger.debug("tool_call", tool_name=part.function_call.name)
-            return WorkflowEvent.tool_call(
-                tool_name=part.function_call.name,
-                tool_args=dict(part.function_call.args) if part.function_call.args else None,
-            )
-
-        # Handle function response (tool result)
-        if hasattr(part, "function_response") and part.function_response:
-            tool_name = part.function_response.name
-            response = part.function_response.response
-
-            # Determine success and extract result
-            success = True
-            result_data = response
-
-            if isinstance(response, dict):
-                if "error" in response:
-                    success = False
-                result_data = response
-
-            summary = self._generate_tool_summary(tool_name, result_data, success)
-            logger.debug("tool_result", tool_name=tool_name, success=success)
-
-            return WorkflowEvent.tool_result(
-                tool_name=tool_name,
-                result=summary,
-                success=success,
-            )
-
-        if part.code_execution_result:
-            return WorkflowEvent.code_execution(str(part.code_execution_result.outcome))
-
-        if part.executable_code:
-            return WorkflowEvent.executable_code(
-                part.executable_code.code,
-                str(part.executable_code.language),
-            )
-
-        if part.file_data:
-            return WorkflowEvent.file_data(part.file_data.display_name or "unknown")
-
-        return None
+        Args:
+            attempt: Current attempt number (0-indexed)
+            delay: Delay before next retry in seconds
+            error: The exception that triggered the retry
+        """
+        # Logging is handled by RetryHandler, this is a hook for custom behavior
+        pass

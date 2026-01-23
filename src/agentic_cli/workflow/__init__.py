@@ -10,6 +10,9 @@ from agentic_cli.workflow.events import WorkflowEvent, EventType, UserInputReque
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.thinking import ThinkingDetector, ThinkingResult
 from agentic_cli.workflow.memory import ConversationMemory
+from agentic_cli.workflow.retry import RetryConfig, RetryHandler
+from agentic_cli.workflow.session_handler import SessionHandler
+from agentic_cli.workflow.event_processor import EventProcessor
 
 # Heavy imports - lazy loaded on first access
 _lazy_imports = {
@@ -38,4 +41,8 @@ __all__ = [
     "ThinkingDetector",
     "ThinkingResult",
     "ConversationMemory",
+    "RetryConfig",
+    "RetryHandler",
+    "SessionHandler",
+    "EventProcessor",
 ]
