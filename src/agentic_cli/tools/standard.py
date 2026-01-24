@@ -158,39 +158,6 @@ def search_arxiv(
     }
 
 
-def web_search(
-    query: str,
-    max_results: int = 10,
-    allowed_domains: list[str] | None = None,
-    blocked_domains: list[str] | None = None,
-    *,
-    settings: "BaseSettings | None" = None,
-) -> dict[str, Any]:
-    """Search the web for relevant information.
-
-    Args:
-        query: Search query
-        max_results: Maximum number of results
-        allowed_domains: Only include results from these domains
-        blocked_domains: Exclude results from these domains
-        settings: Optional settings instance for explicit dependency injection.
-                  If not provided, uses the current context settings.
-
-    Returns:
-        Dictionary with search results
-    """
-    from agentic_cli.tools.search import WebSearchClient
-
-    resolved_settings = settings or get_settings()
-    client = WebSearchClient(api_key=resolved_settings.serper_api_key)
-    return client.search(
-        query,
-        max_results=max_results,
-        allowed_domains=allowed_domains,
-        blocked_domains=blocked_domains,
-    )
-
-
 def execute_python(
     code: str,
     context: dict | None = None,

@@ -393,7 +393,6 @@ from agentic_cli.knowledge_base.sources import (
     SearchSourceResult,
     SearchSourceRegistry,
     ArxivSearchSource,
-    WebSearchSource,
     get_search_registry,
     register_search_source,
 )
@@ -727,53 +726,6 @@ class TestArxivSearchSource:
         assert results == []
 
 
-class TestWebSearchSource:
-    """Tests for WebSearchSource."""
-
-    def test_properties(self):
-        """Test source properties."""
-        source = WebSearchSource()
-
-        assert source.name == "web"
-        assert source.description == "Search the web using Serper.dev"
-        assert source.requires_api_key == "serper_api_key"
-
-    def test_not_available_without_key(self):
-        """Test not available without API key."""
-        source = WebSearchSource()
-
-        with patch("agentic_cli.config.get_settings") as mock_settings:
-            mock_settings.return_value = MagicMock(serper_api_key=None)
-            assert source.is_available() is False
-
-    @patch("agentic_cli.config.get_settings")
-    @patch("agentic_cli.tools.search.WebSearchClient")
-    def test_search(self, mock_client_class, mock_settings):
-        """Test web search."""
-        mock_settings.return_value = MagicMock(serper_api_key="test-key")
-        mock_client = MagicMock()
-        mock_client.search.return_value = {
-            "results": [
-                {
-                    "title": "Test Page",
-                    "url": "https://example.com",
-                    "snippet": "Test snippet",
-                    "domain": "example.com",
-                }
-            ]
-        }
-        mock_client_class.return_value = mock_client
-
-        source = WebSearchSource()
-        results = source.search("test query", max_results=5)
-
-        assert len(results) == 1
-        assert results[0].title == "Test Page"
-        assert results[0].url == "https://example.com"
-        assert results[0].source_name == "web"
-        assert results[0].metadata["domain"] == "example.com"
-
-
 class TestDefaultRegistry:
     """Tests for default registry functions."""
 
@@ -787,7 +739,6 @@ class TestDefaultRegistry:
         assert hasattr(registry, "search")
         # Default registry should have built-in sources
         assert registry.get("arxiv") is not None
-        assert registry.get("web") is not None
 
     def test_register_search_source(self):
         """Test registering to default registry."""

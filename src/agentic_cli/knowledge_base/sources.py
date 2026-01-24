@@ -288,65 +288,6 @@ class ArxivSearchSource(SearchSource):
         return results
 
 
-class WebSearchSource(SearchSource):
-    """Web search source using Serper.dev API."""
-
-    @property
-    def name(self) -> str:
-        return "web"
-
-    @property
-    def description(self) -> str:
-        return "Search the web using Serper.dev"
-
-    @property
-    def requires_api_key(self) -> str | None:
-        return "serper_api_key"
-
-    def search(
-        self,
-        query: str,
-        max_results: int = 10,
-        allowed_domains: list[str] | None = None,
-        blocked_domains: list[str] | None = None,
-        **kwargs,
-    ) -> list[SearchSourceResult]:
-        """Search the web.
-
-        Args:
-            query: Search query
-            max_results: Maximum results
-            allowed_domains: Only include results from these domains
-            blocked_domains: Exclude results from these domains
-        """
-        from agentic_cli.tools.search import WebSearchClient
-        from agentic_cli.config import get_settings
-
-        settings = get_settings()
-        client = WebSearchClient(api_key=settings.serper_api_key)
-
-        search_result = client.search(
-            query,
-            max_results=max_results,
-            allowed_domains=allowed_domains,
-            blocked_domains=blocked_domains,
-        )
-
-        results = []
-        for item in search_result.get("results", []):
-            results.append(
-                SearchSourceResult(
-                    title=item.get("title", ""),
-                    url=item.get("url", ""),
-                    snippet=item.get("snippet", ""),
-                    source_name=self.name,
-                    metadata={"domain": item.get("domain", "")},
-                )
-            )
-
-        return results
-
-
 # Register built-in sources
+# Note: For web search, use google_search_tool from google.adk.tools with LlmAgent
 register_search_source(ArxivSearchSource())
-register_search_source(WebSearchSource())

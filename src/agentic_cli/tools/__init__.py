@@ -1,6 +1,6 @@
 """Tools module for agentic CLI applications.
 
-Provides function tools for agents including web search and Python execution.
+Provides function tools for agents including Python execution and knowledge base access.
 
 Tool System:
     The module provides a standardized tool system with:
@@ -9,15 +9,16 @@ Tool System:
     - ToolResult: Standard result wrapper
     - ToolRegistry: Registry for tool management and discovery
     - register_tool: Decorator for easy tool registration
+
+For web search, use google_search_tool directly from google.adk.tools.
+For resilience patterns, use tenacity, pybreaker, aiolimiter directly.
 """
 
 from agentic_cli.tools.executor import SafePythonExecutor, MockPythonExecutor
-from agentic_cli.tools.search import WebSearchClient, MockWebSearchClient
 from agentic_cli.tools.standard import (
     search_knowledge_base,
     ingest_to_knowledge_base,
     search_arxiv,
-    web_search,
     execute_python,
     ask_clarification,
 )
@@ -32,14 +33,9 @@ from agentic_cli.tools.registry import (
     register_tool,
     with_result_wrapper,
 )
-from agentic_cli.tools.resilience import (
-    retry,
-    CircuitBreaker,
-    CircuitState,
-    RateLimiter,
-    RetryConfig,
-    with_timeout,
-)
+
+# Re-export google_search_tool from ADK for convenience
+from google.adk.tools import google_search as google_search_tool
 
 __all__ = [
     # Registry classes
@@ -52,24 +48,15 @@ __all__ = [
     "get_registry",
     "register_tool",
     "with_result_wrapper",
-    # Resilience patterns
-    "retry",
-    "CircuitBreaker",
-    "CircuitState",
-    "RateLimiter",
-    "RetryConfig",
-    "with_timeout",
     # Executor classes
     "SafePythonExecutor",
     "MockPythonExecutor",
-    # Search classes
-    "WebSearchClient",
-    "MockWebSearchClient",
+    # Search (ADK built-in)
+    "google_search_tool",
     # Standard tool functions (ready to use with agents)
     "search_knowledge_base",
     "ingest_to_knowledge_base",
     "search_arxiv",
-    "web_search",
     "execute_python",
     "ask_clarification",
 ]
