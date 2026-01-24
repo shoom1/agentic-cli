@@ -19,7 +19,7 @@ class HelpCommand(Command):
         super().__init__(
             name="help",
             description="Show available commands and usage information",
-            aliases=["h", "?"],
+            aliases=[],
             usage="/help [command]",
             examples=["/help", "/help settings"],
             category=CommandCategory.GENERAL,
@@ -49,7 +49,7 @@ class ClearCommand(Command):
         super().__init__(
             name="clear",
             description="Clear the screen",
-            aliases=["cls"],
+            aliases=[],
             category=CommandCategory.GENERAL,
             silent=True,
         )
@@ -66,7 +66,7 @@ class ExitCommand(Command):
         super().__init__(
             name="exit",
             description="Exit the application",
-            aliases=["quit", "q"],
+            aliases=["quit"],
             category=CommandCategory.GENERAL,
         )
 
@@ -83,7 +83,7 @@ class StatusCommand(Command):
         super().__init__(
             name="status",
             description="Show current session and workflow status",
-            aliases=["st"],
+            aliases=[],
             category=CommandCategory.WORKFLOW,
         )
 

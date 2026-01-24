@@ -355,9 +355,9 @@ class CommandRegistry:
         """Get all command names and aliases for auto-completion.
 
         Returns:
-            List of all command names and aliases
+            List of all command names and aliases, sorted alphabetically
         """
-        return list(self._commands.keys())
+        return sorted(self._commands.keys())
 
     def discover_commands(self, module_path: str) -> list[Command]:
         """Discover and register Command subclasses from a module.

@@ -16,7 +16,8 @@ from datetime import datetime
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Callable
 
-from prompt_toolkit.completion import WordCompleter
+from prompt_toolkit.completion import Completer, Completion
+from prompt_toolkit.document import Document
 from prompt_toolkit.history import InMemoryHistory
 
 from thinking_prompt import ThinkingPromptSession, AppInfo
@@ -101,6 +102,42 @@ class MessageHistory:
         return len(self._messages)
 
 
+# === Slash Command Completer ===
+
+
+class SlashCommandCompleter(Completer):
+    """Completer that only triggers for slash commands."""
+
+    def __init__(self, commands: list[str]) -> None:
+        """Initialize with a list of command names (without leading slash).
+
+        Args:
+            commands: List of command names, e.g., ["help", "settings", "quit"]
+        """
+        self.commands = sorted(commands)
+
+    def get_completions(self, document: Document, complete_event):
+        """Yield completions only when text starts with /."""
+        text = document.text_before_cursor
+
+        # Only complete if input starts with /
+        if not text.startswith("/"):
+            return
+
+        # Get the partial command (without the leading /)
+        partial = text[1:].lower()
+
+        # Find matching commands
+        for cmd in self.commands:
+            if cmd.lower().startswith(partial):
+                # Calculate how much to complete (replace everything after /)
+                yield Completion(
+                    text=f"/{cmd}",
+                    start_position=-len(text),
+                    display=f"/{cmd}",
+                )
+
+
 # === Default Styles ===
 
 
@@ -159,10 +196,7 @@ class BaseCLIApp(ABC):
         self._init_error: Exception | None = None
 
         # === UI: ThinkingPromptSession ===
-        command_completions = [
-            "/" + name for name in self.command_registry.get_completions()
-        ]
-        completer = WordCompleter(command_completions, ignore_case=True)
+        completer = SlashCommandCompleter(self.command_registry.get_completions())
 
         self.session = ThinkingPromptSession(
             message=">>> ",
@@ -170,9 +204,11 @@ class BaseCLIApp(ABC):
             styles=self.get_styles(),
             history=InMemoryHistory(),
             completer=completer,
+            complete_while_typing=True,
+            completions_menu_height=8,
             enable_status_bar=True,
             status_text="Ctrl+C: cancel | Ctrl+D: exit | /help: commands",
-            echo_input=True,
+            echo_input=False,  # We handle echoing manually based on command type
         )
 
         # === State ===
@@ -390,6 +426,9 @@ class BaseCLIApp(ABC):
 
         command = self.command_registry.get(command_name)
         if command:
+            # Echo command if not silent
+            if not command.silent:
+                self.session.add_message("user", user_input)
             logger.debug("executing_command", command=command.name, args=args)
             try:
                 await command.execute(args, self)
@@ -397,6 +436,8 @@ class BaseCLIApp(ABC):
             except Exception as e:
                 self.session.add_error(f"Error executing command: {e}")
         else:
+            # Echo unknown command before error
+            self.session.add_message("user", user_input)
             self.session.add_error(f"Unknown command: /{command_name}")
             self.session.add_message("system", "Type /help to see available commands")
 
@@ -448,6 +489,9 @@ class BaseCLIApp(ABC):
         Args:
             message: User message to process
         """
+        # Echo user input for regular messages
+        self.session.add_message("user", message)
+
         # Wait for initialization if needed
         if not await self._ensure_initialized():
             self.session.add_error(
