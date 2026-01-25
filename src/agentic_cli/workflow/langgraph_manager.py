@@ -39,8 +39,9 @@ def _import_langgraph():
     try:
         from langgraph.graph import StateGraph, END
         from langgraph.checkpoint.memory import MemorySaver
+        from langgraph.pregel import RetryPolicy
 
-        return StateGraph, END, MemorySaver
+        return StateGraph, END, MemorySaver, RetryPolicy
     except ImportError as e:
         raise ImportError(
             "LangGraph dependencies not installed. "
@@ -284,7 +285,7 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
 
     def _create_checkpointer(self):
         """Create the appropriate checkpointer based on configuration."""
-        StateGraph, END, MemorySaver = _import_langgraph()
+        StateGraph, END, MemorySaver, RetryPolicy = _import_langgraph()
 
         if self._checkpointer_type == "memory":
             return MemorySaver()
@@ -305,13 +306,27 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
                 )
         return None
 
+    def _get_retry_policy(self):
+        """Build RetryPolicy from settings configuration.
+
+        Returns:
+            RetryPolicy configured with settings values for retry behavior.
+        """
+        StateGraph, END, MemorySaver, RetryPolicy = _import_langgraph()
+
+        return RetryPolicy(
+            max_attempts=self._settings.retry_max_attempts,
+            initial_interval=self._settings.retry_initial_delay,
+            backoff_factor=self._settings.retry_backoff_factor,
+        )
+
     def _build_graph(self):
         """Build the LangGraph workflow from agent configs.
 
         Creates a graph where each agent config becomes a node,
         with edges based on sub_agent relationships.
         """
-        StateGraph, END, MemorySaver = _import_langgraph()
+        StateGraph, END, MemorySaver, RetryPolicy = _import_langgraph()
         from agentic_cli.workflow.langgraph_state import AgentState
 
         # Build config map
@@ -320,10 +335,13 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
         # Create graph
         graph = StateGraph(AgentState)
 
-        # Create nodes for each agent
+        # Get retry policy for nodes
+        retry_policy = self._get_retry_policy()
+
+        # Create nodes for each agent with retry policy
         for config in self._agent_configs:
             node_fn = self._create_agent_node(config)
-            graph.add_node(config.name, node_fn)
+            graph.add_node(config.name, node_fn, retry=retry_policy)
 
         # Determine entry point (root agent)
         root_agent = None

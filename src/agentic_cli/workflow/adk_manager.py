@@ -23,7 +23,6 @@ from google.adk.sessions import InMemorySessionService, BaseSessionService, Sess
 from agentic_cli.workflow.base_manager import BaseWorkflowManager
 from agentic_cli.workflow.events import WorkflowEvent, UserInputRequest
 from agentic_cli.workflow.config import AgentConfig
-from agentic_cli.workflow.retry import RetryConfig, RetryHandler
 from agentic_cli.workflow.thinking import ThinkingDetector
 from agentic_cli.config import (
     BaseSettings,
@@ -108,9 +107,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         self._session_service: BaseSessionService | None = None
         self._root_agent: Agent | None = None
         self._runner: Runner | None = None
-
-        # Retry handler for transient errors
-        self._retry_handler = RetryHandler(RetryConfig())
 
         # User input request handling
         self._pending_input: dict[str, tuple[UserInputRequest, asyncio.Future[str]]] = {}
@@ -359,6 +355,20 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
 
         return BuiltInPlanner(thinking_config=thinking_config)
 
+    def _get_generate_content_config(self) -> types.GenerateContentConfig:
+        """Build GenerateContentConfig with retry-enabled HTTP options.
+
+        Returns:
+            GenerateContentConfig with HttpRetryOptions configured from settings.
+        """
+        http_options = types.HttpOptions(
+            retry_options=types.HttpRetryOptions(
+                initial_delay=self._settings.retry_initial_delay,
+                attempts=self._settings.retry_max_attempts,
+            )
+        )
+        return types.GenerateContentConfig(http_options=http_options)
+
     def _create_agents(self) -> Agent:
         """Create agent hierarchy from configs.
 
@@ -371,6 +381,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         # Build agents (non-coordinators first, then coordinators)
         agent_map: dict[str, Agent] = {}
         planner = self._get_planner()
+        generate_config = self._get_generate_content_config()
 
         # First pass: create agents without sub_agents (leaf agents)
         for config in self._agent_configs:
@@ -382,6 +393,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     tools=config.tools or [],
                     description=config.description or None,
                     planner=planner,
+                    generate_content_config=generate_config,
                 )
                 logger.debug("agent_created", name=config.name, type="leaf")
 
@@ -407,6 +419,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     description=config.description or None,
                     sub_agents=sub_agent_instances,
                     planner=planner,
+                    generate_content_config=generate_config,
                 )
                 logger.debug(
                     "agent_created",
@@ -702,32 +715,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
     # Main processing
     # -------------------------------------------------------------------------
 
-    async def _on_retry_callback(
-        self, attempt: int, delay: float, error: Exception
-    ) -> AsyncGenerator[WorkflowEvent, None]:
-        """Callback invoked when a retry is about to happen.
-
-        This is a factory that returns events to yield during retry.
-
-        Args:
-            attempt: Current attempt number (0-indexed)
-            delay: Delay before next retry in seconds
-            error: The exception that triggered the retry
-
-        Yields:
-            WorkflowEvent describing the retry
-        """
-        from google.api_core import exceptions as google_exceptions
-
-        if isinstance(error, google_exceptions.ResourceExhausted):
-            error_code = "RATE_LIMITED"
-            message = f"Rate limited, retrying in {delay}s..."
-        else:
-            error_code = "TRANSIENT_ERROR"
-            message = f"Model temporarily unavailable, retrying in {delay}s..."
-
-        return WorkflowEvent.error(message, error_code=error_code, recoverable=True)
-
     async def process(
         self,
         message: str,
@@ -763,22 +750,13 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             # Create message
             new_message = self._create_message(message)
 
-            # Track response for memory
-            full_response_parts: list[str] = []
             event_count = 0
 
-            # Create the workflow operation
-            def create_workflow():
-                return self._runner.run_async(
-                    session_id=current_session_id,
-                    user_id=user_id,
-                    new_message=new_message,
-                )
-
-            # Process with retry
-            async for adk_event in self._retry_handler.execute_with_retry(
-                create_workflow,
-                on_retry=self._emit_retry_event,
+            # Process ADK events directly - retry is handled by HttpRetryOptions
+            async for adk_event in self._runner.run_async(
+                session_id=current_session_id,
+                user_id=user_id,
+                new_message=new_message,
             ):
                 # Process ADK event into workflow events
                 async for workflow_event in self._process_adk_event(
@@ -789,20 +767,3 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     yield workflow_event
 
             logger.info("message_processed", event_count=event_count)
-
-    async def _emit_retry_event(
-        self, attempt: int, delay: float, error: Exception
-    ) -> None:
-        """Emit a retry event (callback for RetryHandler).
-
-        Note: This callback doesn't yield events directly. The retry events
-        are handled differently - we log them but don't yield because we're
-        in a callback context. The main process loop handles event yielding.
-
-        Args:
-            attempt: Current attempt number (0-indexed)
-            delay: Delay before next retry in seconds
-            error: The exception that triggered the retry
-        """
-        # Logging is handled by RetryHandler, this is a hook for custom behavior
-        pass

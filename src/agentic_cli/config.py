@@ -160,6 +160,20 @@ class BaseSettings(PydanticBaseSettings):
         description="Default timeout for Python execution (seconds)",
     )
 
+    # Retry Configuration
+    retry_max_attempts: int = Field(
+        default=3,
+        description="Maximum retry attempts for transient errors",
+    )
+    retry_initial_delay: float = Field(
+        default=2.0,
+        description="Initial delay in seconds before first retry",
+    )
+    retry_backoff_factor: float = Field(
+        default=2.0,
+        description="Multiplier for exponential backoff between retries",
+    )
+
     @field_validator("workspace_dir", mode="before")
     @classmethod
     def expand_path(cls, v: str | Path) -> Path:
