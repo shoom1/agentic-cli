@@ -229,6 +229,73 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
         )
         return True
 
+    def _get_thinking_config(self, model: str) -> dict[str, Any] | None:
+        """Get thinking configuration for the model.
+
+        Returns provider-specific thinking configuration based on
+        settings.thinking_effort and model support.
+
+        Args:
+            model: Model name to check.
+
+        Returns:
+            Provider-specific thinking config dict, or None if thinking is disabled.
+        """
+        thinking_effort = self._settings.thinking_effort
+
+        if thinking_effort == "none":
+            return None
+
+        if not self._settings.supports_thinking_effort(model):
+            logger.debug(
+                "thinking_not_supported",
+                model=model,
+                effort=thinking_effort,
+            )
+            return None
+
+        # Map effort levels to budget tokens for Anthropic
+        # These are reasonable defaults based on Claude's capabilities
+        anthropic_budgets = {
+            "low": 4096,
+            "medium": 10000,
+            "high": 32000,
+        }
+
+        # Map effort levels for Google Gemini
+        # Gemini uses thinking_budget with similar ranges
+        google_budgets = {
+            "low": 4096,
+            "medium": 10000,
+            "high": 32000,
+        }
+
+        logger.debug(
+            "thinking_config_created",
+            model=model,
+            effort=thinking_effort,
+        )
+
+        # Return provider-specific config
+        if model.startswith("claude-"):
+            return {
+                "provider": "anthropic",
+                "thinking": {
+                    "type": "enabled",
+                    "budget_tokens": anthropic_budgets.get(thinking_effort, 10000),
+                },
+            }
+        elif model.startswith("gemini-"):
+            return {
+                "provider": "google",
+                "thinking_config": {
+                    "include_thoughts": True,
+                    "thinking_budget": google_budgets.get(thinking_effort, 10000),
+                },
+            }
+
+        return None
+
     def _get_llm_for_model(self, model: str):
         """Get a LangChain LLM instance for the specified model.
 
@@ -242,6 +309,7 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
             ValueError: If model provider is not supported.
         """
         models = _import_langchain_models()
+        thinking_config = self._get_thinking_config(model)
 
         # Determine provider from model name
         if model.startswith("gpt-") or model.startswith("o1"):
@@ -258,6 +326,12 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
                     f"Model {model} requires langchain-anthropic. "
                     "Install with: pip install langchain-anthropic"
                 )
+            # Apply Anthropic thinking config if available
+            if thinking_config and thinking_config.get("provider") == "anthropic":
+                return models["anthropic"](
+                    model=model,
+                    thinking=thinking_config["thinking"],
+                )
             return models["anthropic"](model=model)
 
         elif model.startswith("gemini-"):
@@ -265,6 +339,12 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
                 raise ValueError(
                     f"Model {model} requires langchain-google-genai. "
                     "Install with: pip install langchain-google-genai"
+                )
+            # Apply Google thinking config if available
+            if thinking_config and thinking_config.get("provider") == "google":
+                return models["google"](
+                    model=model,
+                    thinking_config=thinking_config["thinking_config"],
                 )
             return models["google"](model=model)
 

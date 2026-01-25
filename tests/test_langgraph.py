@@ -302,6 +302,120 @@ class TestOrchestratorSelection:
         assert settings.langgraph_checkpointer == "postgres"
 
 
+class TestLangGraphThinkingConfig:
+    """Tests for thinking configuration in LangGraph manager."""
+
+    @pytest.fixture
+    def agent_configs(self):
+        """Create test agent configs."""
+        return [AgentConfig(name="test", prompt="test")]
+
+    def test_thinking_config_none_effort(self, agent_configs):
+        """Test _get_thinking_config returns None when effort is 'none'."""
+        settings = BaseSettings(
+            google_api_key="test-key",
+            thinking_effort="none",
+        )
+        manager = LangGraphWorkflowManager(
+            agent_configs=agent_configs,
+            settings=settings,
+        )
+
+        config = manager._get_thinking_config("claude-sonnet-4")
+        assert config is None
+
+    def test_thinking_config_unsupported_model(self, agent_configs):
+        """Test _get_thinking_config returns None for unsupported models."""
+        settings = BaseSettings(
+            google_api_key="test-key",
+            thinking_effort="medium",
+        )
+        manager = LangGraphWorkflowManager(
+            agent_configs=agent_configs,
+            settings=settings,
+        )
+
+        # GPT models don't support thinking effort
+        config = manager._get_thinking_config("gpt-4o")
+        assert config is None
+
+    def test_thinking_config_anthropic_model(self, agent_configs):
+        """Test _get_thinking_config returns correct Anthropic config."""
+        settings = BaseSettings(
+            anthropic_api_key="test-key",
+            thinking_effort="high",
+        )
+        manager = LangGraphWorkflowManager(
+            agent_configs=agent_configs,
+            settings=settings,
+        )
+
+        config = manager._get_thinking_config("claude-sonnet-4")
+        assert config is not None
+        assert config["provider"] == "anthropic"
+        assert config["thinking"]["type"] == "enabled"
+        assert config["thinking"]["budget_tokens"] == 32000  # high
+
+    def test_thinking_config_anthropic_medium(self, agent_configs):
+        """Test _get_thinking_config with medium effort for Anthropic."""
+        settings = BaseSettings(
+            anthropic_api_key="test-key",
+            thinking_effort="medium",
+        )
+        manager = LangGraphWorkflowManager(
+            agent_configs=agent_configs,
+            settings=settings,
+        )
+
+        config = manager._get_thinking_config("claude-opus-4")
+        assert config["thinking"]["budget_tokens"] == 10000
+
+    def test_thinking_config_anthropic_low(self, agent_configs):
+        """Test _get_thinking_config with low effort for Anthropic."""
+        settings = BaseSettings(
+            anthropic_api_key="test-key",
+            thinking_effort="low",
+        )
+        manager = LangGraphWorkflowManager(
+            agent_configs=agent_configs,
+            settings=settings,
+        )
+
+        config = manager._get_thinking_config("claude-sonnet-4-5")
+        assert config["thinking"]["budget_tokens"] == 4096
+
+    def test_thinking_config_google_model(self, agent_configs):
+        """Test _get_thinking_config returns correct Google config."""
+        settings = BaseSettings(
+            google_api_key="test-key",
+            thinking_effort="high",
+        )
+        manager = LangGraphWorkflowManager(
+            agent_configs=agent_configs,
+            settings=settings,
+        )
+
+        config = manager._get_thinking_config("gemini-2.5-pro")
+        assert config is not None
+        assert config["provider"] == "google"
+        assert config["thinking_config"]["include_thoughts"] is True
+        assert config["thinking_config"]["thinking_budget"] == 32000
+
+    def test_thinking_config_google_medium(self, agent_configs):
+        """Test _get_thinking_config with medium effort for Google."""
+        settings = BaseSettings(
+            google_api_key="test-key",
+            thinking_effort="medium",
+        )
+        manager = LangGraphWorkflowManager(
+            agent_configs=agent_configs,
+            settings=settings,
+        )
+
+        config = manager._get_thinking_config("gemini-3-flash-preview")
+        assert config["thinking_config"]["thinking_budget"] == 10000
+
+
 class TestCreateWorkflowManagerFromSettings:
     """Tests for the factory function."""
 
