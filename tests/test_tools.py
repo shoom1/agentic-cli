@@ -2,6 +2,22 @@
 
 import pytest
 
+from agentic_cli.tools.registry import ToolCategory
+
+
+def test_tool_category_has_new_categories():
+    """Test that ToolCategory includes new categories for framework enhancements."""
+    # New categories for P0/P1 features
+    assert hasattr(ToolCategory, "MEMORY")
+    assert hasattr(ToolCategory, "PLANNING")
+    assert hasattr(ToolCategory, "SYSTEM")
+
+    # Verify values
+    assert ToolCategory.MEMORY.value == "memory"
+    assert ToolCategory.PLANNING.value == "planning"
+    assert ToolCategory.SYSTEM.value == "system"
+
+
 from agentic_cli.tools.executor import (
     MockPythonExecutor,
     SafePythonExecutor,

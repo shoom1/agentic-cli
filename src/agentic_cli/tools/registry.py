@@ -24,6 +24,9 @@ class ToolCategory(Enum):
     COMMUNICATION = "communication"
     FILE = "file"
     ANALYSIS = "analysis"
+    MEMORY = "memory"
+    PLANNING = "planning"
+    SYSTEM = "system"
     OTHER = "other"
 
 
