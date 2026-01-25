@@ -134,7 +134,6 @@ class TestLangGraphWorkflowManagerCreation:
 
         assert manager.app_name == settings.app_name
         assert not manager.is_initialized
-        assert manager.memory is not None
 
     def test_manager_with_model_override(self, settings, agent_configs):
         """Test manager creation with model override."""

@@ -19,7 +19,6 @@ from typing import AsyncGenerator, Any, Callable, Literal, TYPE_CHECKING
 from agentic_cli.workflow.base_manager import BaseWorkflowManager
 from agentic_cli.workflow.events import WorkflowEvent, UserInputRequest, EventType
 from agentic_cli.workflow.config import AgentConfig
-from agentic_cli.workflow.memory import ConversationMemory
 from agentic_cli.config import (
     get_settings,
     set_context_settings,
@@ -163,9 +162,6 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
             {}
         )
 
-        # Conversation memory
-        self._memory = ConversationMemory()
-
         # Session tracking
         self.session_id = "default_session"
 
@@ -185,11 +181,6 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
             self._model_resolved = True
             logger.info("model_resolved", model=self._model)
         return self._model  # type: ignore[return-value]
-
-    @property
-    def memory(self) -> ConversationMemory:
-        """Get the conversation memory."""
-        return self._memory
 
     @property
     def graph(self):
@@ -624,9 +615,6 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
 
         logger.info("processing_message_langgraph", message_length=len(message))
 
-        # Update memory
-        self._memory.add_message("user", message)
-
         # Set up context
         set_context_settings(self._settings)
         set_context_workflow(self)
@@ -709,11 +697,6 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
                             success=True,
                         )
                     )
-
-            # Update memory with response
-            if full_response_parts:
-                full_response = "".join(full_response_parts)
-                self._memory.add_message("assistant", full_response)
 
             logger.info("message_processed_langgraph")
 

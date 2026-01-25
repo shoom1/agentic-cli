@@ -23,7 +23,6 @@ from google.adk.sessions import InMemorySessionService, BaseSessionService, Sess
 from agentic_cli.workflow.base_manager import BaseWorkflowManager
 from agentic_cli.workflow.events import WorkflowEvent, UserInputRequest
 from agentic_cli.workflow.config import AgentConfig
-from agentic_cli.workflow.memory import ConversationMemory, create_summarizer
 from agentic_cli.workflow.retry import RetryConfig, RetryHandler
 from agentic_cli.workflow.thinking import ThinkingDetector
 from agentic_cli.config import (
@@ -116,9 +115,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         # User input request handling
         self._pending_input: dict[str, tuple[UserInputRequest, asyncio.Future[str]]] = {}
 
-        # Conversation memory with auto-summarization
-        self._memory = ConversationMemory()
-
         logger.debug(
             "workflow_manager_created",
             app_name=self.app_name,
@@ -149,11 +145,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
     def runner(self) -> Runner | None:
         """Get the runner."""
         return self._runner
-
-    @property
-    def memory(self) -> ConversationMemory:
-        """Get the conversation memory."""
-        return self._memory
 
     def has_pending_input(self) -> bool:
         """Check if there are pending user input requests."""
@@ -518,34 +509,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             set_context_settings(None)
             set_context_workflow(None)
 
-    async def _prepare_memory(self, message: str) -> None:
-        """Prepare memory for processing a new message.
-
-        Adds the user message to memory and performs summarization
-        if the conversation has grown too long.
-
-        Args:
-            message: User message to add
-        """
-        self._memory.add_message("user", message)
-
-        if self._memory.should_summarize():
-            logger.info("summarizing_conversation")
-            summarizer = await create_summarizer(self)
-            await self._memory.summarize(summarizer)
-
-    def _finalize_memory(self, response_parts: list[str]) -> None:
-        """Finalize memory after processing.
-
-        Adds the assistant response to memory.
-
-        Args:
-            response_parts: Collected response text parts
-        """
-        if response_parts:
-            full_response = "\n".join(response_parts)
-            self._memory.add_message("assistant", full_response)
-
     def _create_message(self, message: str) -> types.Content:
         """Create an ADK Content message from text.
 
@@ -792,9 +755,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
 
         logger.info("processing_message", message_length=len(message))
 
-        # Memory management
-        await self._prepare_memory(message)
-
         # Context setup
         with self._workflow_context():
             # Session handling
@@ -826,15 +786,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     current_session_id,
                 ):
                     event_count += 1
-
-                    # Track text responses for memory
-                    if workflow_event.type.value == "text":
-                        full_response_parts.append(workflow_event.content)
-
                     yield workflow_event
-
-            # Update memory with assistant response
-            self._finalize_memory(full_response_parts)
 
             logger.info("message_processed", event_count=event_count)
 

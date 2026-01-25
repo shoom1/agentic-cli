@@ -9,7 +9,6 @@ are available immediately.
 from agentic_cli.workflow.events import WorkflowEvent, EventType, UserInputRequest
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.thinking import ThinkingDetector, ThinkingResult
-from agentic_cli.workflow.memory import ConversationMemory
 from agentic_cli.workflow.retry import RetryConfig, RetryHandler
 
 # Heavy imports - lazy loaded on first access
@@ -38,7 +37,6 @@ __all__ = [
     "GoogleADKWorkflowManager",  # lazy
     "ThinkingDetector",
     "ThinkingResult",
-    "ConversationMemory",
     "RetryConfig",
     "RetryHandler",
 ]

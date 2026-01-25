@@ -14,7 +14,6 @@ from agentic_cli.workflow.config import AgentConfig
 
 if TYPE_CHECKING:
     from agentic_cli.config import BaseSettings
-    from agentic_cli.workflow.memory import ConversationMemory
 
 
 class BaseWorkflowManager(ABC):
@@ -91,12 +90,6 @@ class BaseWorkflowManager(ABC):
 
         Implementations may resolve this lazily from settings.
         """
-        pass
-
-    @property
-    @abstractmethod
-    def memory(self) -> "ConversationMemory":
-        """Get the conversation memory."""
         pass
 
     @abstractmethod
