@@ -123,3 +123,137 @@ class TestLongTermMemory:
         entry_id = memory1.store(type=MemoryType.FACT, content="Persistent", source="s1")
         memory2 = LongTermMemory(mock_context.settings)
         assert memory2.get(entry_id).content == "Persistent"
+
+
+class TestMemoryManager:
+    """Tests for MemoryManager class."""
+
+    def test_access_working_and_longterm(self, mock_context):
+        from agentic_cli.memory import MemoryManager, MemoryType
+
+        manager = MemoryManager(mock_context.settings)
+        manager.working.set("task", "analyzing papers")
+        assert manager.working.get("task") == "analyzing papers"
+        entry_id = manager.longterm.store(
+            type=MemoryType.FACT, content="Test", source="test"
+        )
+        assert manager.longterm.get(entry_id) is not None
+
+    def test_search_across_all_memory(self, mock_context):
+        from agentic_cli.memory import MemoryManager, MemoryType
+
+        manager = MemoryManager(mock_context.settings)
+        manager.working.set("current_topic", "VaR calculation", tags=["risk"])
+        manager.longterm.store(
+            type=MemoryType.FACT, content="VaR requires 99% confidence", source="s1"
+        )
+        results = manager.search("VaR")
+        assert results.working_results is not None
+        assert results.longterm_results is not None
+        assert len(results.longterm_results) > 0
+
+    def test_search_with_tier_filtering(self, mock_context):
+        from agentic_cli.memory import MemoryManager, MemoryType
+
+        manager = MemoryManager(mock_context.settings)
+        manager.working.set("note", "working note about VaR")
+        manager.longterm.store(
+            type=MemoryType.FACT, content="Long-term fact about VaR", source="s1"
+        )
+        results = manager.search("VaR", include_working=True, include_longterm=False)
+        assert results.working_results is not None
+        assert results.longterm_results == []
+
+    def test_clear_working(self, mock_context):
+        from agentic_cli.memory import MemoryManager
+
+        manager = MemoryManager(mock_context.settings)
+        manager.working.set("key1", "value1")
+        manager.working.set("key2", "value2")
+        manager.clear_working()
+        assert manager.working.list() == []
+
+    def test_get_working_snapshot(self, mock_context):
+        from agentic_cli.memory import MemoryManager
+
+        manager = MemoryManager(mock_context.settings)
+        manager.working.set("key1", "value1", tags=["tag1"])
+        manager.working.set("key2", {"nested": "data"})
+        snapshot = manager.get_working_snapshot()
+        assert "entries" in snapshot
+        assert "key1" in snapshot["entries"]
+        assert snapshot["entries"]["key1"]["value"] == "value1"
+
+    def test_restore_working(self, mock_context):
+        from agentic_cli.memory import MemoryManager
+
+        manager = MemoryManager(mock_context.settings)
+        manager.working.set("key1", "value1", tags=["tag1"])
+        snapshot = manager.get_working_snapshot()
+
+        # Clear and restore
+        manager.clear_working()
+        assert manager.working.list() == []
+
+        manager.restore_working(snapshot)
+        assert manager.working.get("key1") == "value1"
+        assert "key1" in manager.working.list(tags=["tag1"])
+
+    def test_search_working_by_key(self, mock_context):
+        from agentic_cli.memory import MemoryManager
+
+        manager = MemoryManager(mock_context.settings)
+        manager.working.set("current_analysis", "some value")
+        manager.working.set("other_key", "other value")
+        results = manager.search("analysis", include_longterm=False)
+        # Should find by key match
+        assert len(results.working_results) >= 1
+        assert any(key == "current_analysis" for key, _ in results.working_results)
+
+    def test_search_working_by_string_value(self, mock_context):
+        from agentic_cli.memory import MemoryManager
+
+        manager = MemoryManager(mock_context.settings)
+        manager.working.set("task", "analyzing papers about risk")
+        manager.working.set("note", {"dict": "value"})  # Should not match string search
+        results = manager.search("risk", include_longterm=False)
+        # Should find by string value match
+        assert len(results.working_results) >= 1
+        assert any(key == "task" for key, _ in results.working_results)
+
+
+class TestMemorySearchResult:
+    """Tests for MemorySearchResult dataclass."""
+
+    def test_default_values(self):
+        from agentic_cli.memory import MemorySearchResult
+
+        result = MemorySearchResult(query="test")
+        assert result.query == "test"
+        assert result.working_results == []
+        assert result.longterm_results == []
+        assert result.kb_results == []
+
+    def test_with_values(self, mock_context):
+        from agentic_cli.memory import (
+            MemorySearchResult,
+            LongTermMemoryEntry,
+            MemoryType,
+        )
+
+        entry = LongTermMemoryEntry(
+            id="123",
+            type=MemoryType.FACT,
+            content="Test",
+            source="test",
+        )
+        result = MemorySearchResult(
+            query="search",
+            working_results=[("key1", "value1")],
+            longterm_results=[entry],
+            kb_results=[{"doc_id": "doc1"}],
+        )
+        assert result.query == "search"
+        assert len(result.working_results) == 1
+        assert len(result.longterm_results) == 1
+        assert len(result.kb_results) == 1

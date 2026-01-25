@@ -6,6 +6,7 @@ from agentic_cli.memory.longterm import (
     MemoryEntry as LongTermMemoryEntry,
     MemoryType,
 )
+from agentic_cli.memory.manager import MemoryManager, MemorySearchResult
 
 __all__ = [
     "MemoryEntry",
@@ -13,4 +14,6 @@ __all__ = [
     "LongTermMemory",
     "LongTermMemoryEntry",
     "MemoryType",
+    "MemoryManager",
+    "MemorySearchResult",
 ]
