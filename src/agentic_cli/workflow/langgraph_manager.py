@@ -263,6 +263,7 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
         }
 
         # Map effort levels for Google Gemini (uses thinking_level parameter)
+        # Note: Gemini 3 Pro only supports "low" and "high", not "medium"
         google_levels = {
             "low": "low",
             "medium": "medium",
@@ -285,10 +286,25 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
                 },
             }
         elif model.startswith("gemini-"):
+            # Gemini 3 Pro only supports "low" and "high" thinking levels
+            # Gemini 3 Flash supports all levels including "medium"
+            is_gemini_3_pro = "gemini-3" in model and "pro" in model
+            thinking_level = google_levels.get(thinking_effort, "high")
+
+            if thinking_level == "medium" and is_gemini_3_pro:
+                thinking_level = "high"
+                logger.debug(
+                    "thinking_level_fallback",
+                    model=model,
+                    requested="medium",
+                    actual="high",
+                    reason="Gemini 3 Pro only supports low and high",
+                )
+
             return {
                 "provider": "google",
                 "include_thoughts": True,
-                "thinking_level": google_levels.get(thinking_effort, "medium"),
+                "thinking_level": thinking_level,
             }
 
         return None

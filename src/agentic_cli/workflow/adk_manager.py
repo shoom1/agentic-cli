@@ -336,9 +336,26 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             )
             return None
 
+        # Gemini 3 Pro only supports LOW and HIGH thinking levels
+        # Gemini 3 Flash supports MINIMAL, LOW, MEDIUM, HIGH
+        is_gemini_3_pro = "gemini-3" in self.model and "pro" in self.model
+
         thinking_level = None
         if thinking_effort == "low":
             thinking_level = types.ThinkingLevel.LOW
+        elif thinking_effort == "medium":
+            if is_gemini_3_pro:
+                # Gemini 3 Pro doesn't support MEDIUM, fall back to HIGH
+                thinking_level = types.ThinkingLevel.HIGH
+                logger.debug(
+                    "thinking_level_fallback",
+                    model=self.model,
+                    requested="medium",
+                    actual="high",
+                    reason="Gemini 3 Pro only supports LOW and HIGH",
+                )
+            else:
+                thinking_level = types.ThinkingLevel.MEDIUM
         elif thinking_effort == "high":
             thinking_level = types.ThinkingLevel.HIGH
 

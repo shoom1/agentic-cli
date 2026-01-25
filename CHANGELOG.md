@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2025-01-25
+
+### Added
+
+- LangGraph as pluggable orchestration backend (`LangGraphWorkflowManager`)
+- `create_workflow_manager_from_settings()` factory function for auto-selecting orchestrator
+- Thinking level support for LangGraphWorkflowManager (Anthropic and Google models)
+- `log_activity` setting for optional conversation activity logging
+- `hello_langgraph.py` example demonstrating LangGraph orchestration
+- Comprehensive README documentation with architecture, examples, and API reference
+
+### Changed
+
+- Renamed `WorkflowManager` to `GoogleADKWorkflowManager` for clarity
+- Replaced custom retry logic with framework built-in mechanisms (ADK HttpRetryOptions, LangGraph RetryPolicy)
+- Removed `ConversationMemory` in favor of native framework session/state management
+- Gemini 3 Pro thinking level now falls back to HIGH when MEDIUM is requested (Pro only supports LOW/HIGH)
+
+### Fixed
+
+- LangGraph compatibility issues with content block extraction
+- Thinking level configuration for Gemini 3 Pro models
+
 ## [0.1.2] - 2026-01-24
 
 ### Added
