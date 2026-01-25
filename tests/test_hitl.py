@@ -150,3 +150,101 @@ class TestApprovalManager:
 
         result = manager.get_result(request.id)
         assert result.modified_args["command"] == "rm /tmp/test/specific_file.txt"
+
+
+class TestCheckpointManager:
+    """Tests for CheckpointManager class."""
+
+    def test_create_checkpoint(self):
+        """Test creating a checkpoint."""
+        from agentic_cli.hitl import CheckpointManager, Checkpoint
+
+        manager = CheckpointManager()
+
+        checkpoint = manager.create_checkpoint(
+            name="draft_review",
+            content="## Draft Summary\n\nKey findings...",
+            content_type="markdown",
+        )
+
+        assert checkpoint.name == "draft_review"
+        assert checkpoint.content_type == "markdown"
+
+    def test_checkpoint_allows_edit(self):
+        """Test checkpoint with edit allowed."""
+        from agentic_cli.hitl import CheckpointManager
+
+        manager = CheckpointManager()
+
+        checkpoint = manager.create_checkpoint(
+            name="review",
+            content="Content to review",
+            allow_edit=True,
+            allow_regenerate=False,
+        )
+
+        assert checkpoint.allow_edit is True
+        assert checkpoint.allow_regenerate is False
+
+    @pytest.mark.asyncio
+    async def test_checkpoint_continue_action(self):
+        """Test continuing from a checkpoint."""
+        from agentic_cli.hitl import CheckpointManager, CheckpointAction
+
+        manager = CheckpointManager()
+
+        checkpoint = manager.create_checkpoint(
+            name="review",
+            content="Content",
+        )
+
+        # Simulate user choosing to continue
+        result = manager.resolve_checkpoint(
+            checkpoint.id,
+            action=CheckpointAction.CONTINUE,
+        )
+
+        assert result.action == CheckpointAction.CONTINUE
+        assert result.edited_content is None
+
+    @pytest.mark.asyncio
+    async def test_checkpoint_edit_action(self):
+        """Test editing at a checkpoint."""
+        from agentic_cli.hitl import CheckpointManager, CheckpointAction
+
+        manager = CheckpointManager()
+
+        checkpoint = manager.create_checkpoint(
+            name="review",
+            content="Original content",
+            allow_edit=True,
+        )
+
+        result = manager.resolve_checkpoint(
+            checkpoint.id,
+            action=CheckpointAction.EDIT,
+            edited_content="Modified content",
+        )
+
+        assert result.action == CheckpointAction.EDIT
+        assert result.edited_content == "Modified content"
+
+    def test_checkpoint_abort_action(self):
+        """Test aborting at a checkpoint."""
+        from agentic_cli.hitl import CheckpointManager, CheckpointAction
+
+        manager = CheckpointManager()
+
+        checkpoint = manager.create_checkpoint(
+            name="review",
+            content="Content",
+        )
+
+        result = manager.resolve_checkpoint(
+            checkpoint.id,
+            action=CheckpointAction.ABORT,
+            feedback="Don't proceed with this approach",
+        )
+
+        assert result.action == CheckpointAction.ABORT
+        assert result.feedback == "Don't proceed with this approach"
