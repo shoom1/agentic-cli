@@ -121,6 +121,16 @@ class BaseSettings(PydanticBaseSettings):
         description="Default user identifier",
     )
 
+    # Orchestrator Selection
+    orchestrator: Literal["adk", "langgraph"] = Field(
+        default="adk",
+        description="Workflow orchestrator backend (adk=Google ADK, langgraph=LangGraph)",
+    )
+    langgraph_checkpointer: Literal["memory", "postgres"] | None = Field(
+        default="memory",
+        description="LangGraph checkpointer type for state persistence",
+    )
+
     # Knowledge Base & Exploration
     embedding_model: str = Field(
         default="all-MiniLM-L6-v2",

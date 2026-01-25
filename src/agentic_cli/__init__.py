@@ -4,7 +4,7 @@ This package provides the core infrastructure for building CLI applications
 powered by LLM agents, including:
 
 - CLI framework with thinking boxes and rich output
-- Workflow management for agent orchestration
+- Workflow management for agent orchestration (Google ADK or LangGraph)
 - Generic tools (search, code execution, document generation)
 - Knowledge base with vector search
 - Session persistence
@@ -12,10 +12,17 @@ powered by LLM agents, including:
 Domain-specific applications extend the base classes to provide their own
 agents, prompts, and configuration.
 
-Note: WorkflowManager is lazy-loaded to avoid slow Google ADK imports at startup.
+Orchestrator Selection:
+- Default: Google ADK (WorkflowManager)
+- Optional: LangGraph (LangGraphWorkflowManager) - requires `pip install agentic-cli[langgraph]`
+
+Use settings.orchestrator = "langgraph" or the factory function
+`create_workflow_manager_from_settings()` to switch orchestrators.
+
+Note: WorkflowManager and LangGraphWorkflowManager are lazy-loaded to avoid slow imports.
 """
 
-from agentic_cli.cli.app import BaseCLIApp
+from agentic_cli.cli.app import BaseCLIApp, create_workflow_manager_from_settings
 from agentic_cli.cli.commands import Command, CommandRegistry
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.events import WorkflowEvent, EventType
@@ -42,6 +49,8 @@ from agentic_cli.config_mixins import (
 # Heavy imports - lazy loaded on first access
 _lazy_imports = {
     "WorkflowManager": "agentic_cli.workflow.manager",
+    "BaseWorkflowManager": "agentic_cli.workflow.base_manager",
+    "LangGraphWorkflowManager": "agentic_cli.workflow.langgraph_manager",
 }
 
 
@@ -62,8 +71,11 @@ __all__ = [
     "BaseCLIApp",
     "Command",
     "CommandRegistry",
+    "create_workflow_manager_from_settings",
     # Workflow
-    "WorkflowManager",  # lazy
+    "BaseWorkflowManager",  # lazy
+    "WorkflowManager",  # lazy (Google ADK)
+    "LangGraphWorkflowManager",  # lazy (requires langgraph extra)
     "AgentConfig",
     "WorkflowEvent",
     "EventType",

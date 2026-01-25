@@ -1,9 +1,11 @@
-"""Workflow Manager for agentic CLI applications.
+"""Workflow Manager for agentic CLI applications using Google ADK.
 
 This module provides a complete, config-based WorkflowManager that handles
-agent orchestration, session management, and event streaming.
+agent orchestration, session management, and event streaming using Google ADK.
 
 Domain applications define agents using AgentConfig and pass them to WorkflowManager.
+
+For alternative orchestration backends (e.g., LangGraph), see the base_manager module.
 """
 
 from __future__ import annotations
@@ -18,6 +20,7 @@ from google.adk.agents import LlmAgent, Agent
 from google.adk.planners import BuiltInPlanner
 from google.adk.sessions import InMemorySessionService, BaseSessionService
 
+from agentic_cli.workflow.base_manager import BaseWorkflowManager
 from agentic_cli.workflow.events import WorkflowEvent, UserInputRequest
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.memory import ConversationMemory, create_summarizer
@@ -37,7 +40,7 @@ from agentic_cli.logging import Loggers, bind_context
 logger = Loggers.workflow()
 
 
-class WorkflowManager:
+class WorkflowManager(BaseWorkflowManager):
     """Config-based workflow manager for agentic applications.
 
     This manager handles all the infrastructure for agent orchestration:
@@ -88,24 +91,26 @@ class WorkflowManager:
             session_service_uri: Optional URI for remote session service
             on_event: Optional hook to transform/filter events before yielding
         """
-        self._agent_configs = agent_configs
-        self._settings = settings or get_settings()
-        self._on_event = on_event
+        super().__init__(
+            agent_configs=agent_configs,
+            settings=settings,
+            app_name=app_name,
+            model=model,
+        )
 
+        self._on_event = on_event
         self.session_service_uri = session_service_uri
-        self.app_name = app_name or self._settings.app_name
         self.session_id = "default_session"
 
         # Model is resolved lazily to allow startup without API keys
         self._model: str | None = model
         self._model_resolved: bool = model is not None
 
-        # Lazy-initialized components
+        # Lazy-initialized ADK components
         self._session_service: BaseSessionService | None = None
         self._session_handler: SessionHandler | None = None
         self._root_agent: Agent | None = None
         self._runner: Runner | None = None
-        self._initialized: bool = False
 
         # Event processor for transforming ADK events
         self._event_processor = EventProcessor(on_event=on_event)
@@ -149,16 +154,6 @@ class WorkflowManager:
     def runner(self) -> Runner | None:
         """Get the runner."""
         return self._runner
-
-    @property
-    def is_initialized(self) -> bool:
-        """Check if services have been initialized."""
-        return self._initialized
-
-    @property
-    def settings(self) -> BaseSettings:
-        """Get the settings instance."""
-        return self._settings
 
     @property
     def memory(self) -> ConversationMemory:
@@ -253,15 +248,6 @@ class WorkflowManager:
         )
 
         return response.text or ""
-
-    async def __aenter__(self) -> "WorkflowManager":
-        """Async context manager entry - initialize services."""
-        await self.initialize_services()
-        return self
-
-    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
-        """Async context manager exit - cleanup resources."""
-        await self.cleanup()
 
     async def cleanup(self) -> None:
         """Clean up workflow manager resources.

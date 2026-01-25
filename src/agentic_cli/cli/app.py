@@ -29,11 +29,79 @@ from agentic_cli.logging import Loggers, configure_logging, bind_context
 
 if TYPE_CHECKING:
     from agentic_cli.workflow import WorkflowManager, EventType, WorkflowEvent
+    from agentic_cli.workflow.base_manager import BaseWorkflowManager
+    from agentic_cli.workflow.config import AgentConfig
 
 logger = Loggers.cli()
 
 # Thread pool for background initialization (single worker)
 _init_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="workflow-init")
+
+
+def create_workflow_manager_from_settings(
+    agent_configs: list["AgentConfig"],
+    settings: BaseSettings,
+    app_name: str | None = None,
+    model: str | None = None,
+    **kwargs,
+) -> "BaseWorkflowManager":
+    """Factory function to create the appropriate workflow manager based on settings.
+
+    Creates either a Google ADK WorkflowManager or LangGraphWorkflowManager
+    based on the settings.orchestrator configuration.
+
+    Args:
+        agent_configs: List of agent configurations.
+        settings: Application settings (determines orchestrator type).
+        app_name: Application name for services.
+        model: Model override.
+        **kwargs: Additional arguments passed to the specific manager.
+
+    Returns:
+        WorkflowManager instance (ADK or LangGraph based on settings).
+
+    Raises:
+        ImportError: If LangGraph is selected but not installed.
+
+    Example:
+        settings = MySettings(orchestrator="langgraph")
+        configs = [AgentConfig(name="agent", prompt="...")]
+        manager = create_workflow_manager_from_settings(configs, settings)
+    """
+    orchestrator = getattr(settings, "orchestrator", "adk")
+
+    if orchestrator == "langgraph":
+        try:
+            from agentic_cli.workflow.langgraph_manager import (
+                LangGraphWorkflowManager,
+            )
+
+            checkpointer = getattr(settings, "langgraph_checkpointer", "memory")
+            return LangGraphWorkflowManager(
+                agent_configs=agent_configs,
+                settings=settings,
+                app_name=app_name,
+                model=model,
+                checkpointer=checkpointer,
+                **kwargs,
+            )
+        except ImportError as e:
+            raise ImportError(
+                f"LangGraph orchestrator selected but dependencies not installed. "
+                f"Install with: pip install agentic-cli[langgraph]\n"
+                f"Original error: {e}"
+            ) from e
+
+    else:  # Default to ADK
+        from agentic_cli.workflow.manager import WorkflowManager
+
+        return WorkflowManager(
+            agent_configs=agent_configs,
+            settings=settings,
+            app_name=app_name,
+            model=model,
+            **kwargs,
+        )
 
 
 # === Message History for Persistence ===
@@ -191,7 +259,7 @@ class BaseCLIApp(ABC):
         self.register_commands()  # Domain-specific commands
 
         # === Workflow Manager (initialized in background) ===
-        self._workflow: WorkflowManager | None = None
+        self._workflow: BaseWorkflowManager | None = None
         self._init_task: asyncio.Task[None] | None = None
         self._init_error: Exception | None = None
 
@@ -234,11 +302,23 @@ class BaseCLIApp(ABC):
         ...
 
     @abstractmethod
-    def create_workflow_manager(self) -> "WorkflowManager":
+    def create_workflow_manager(self) -> "BaseWorkflowManager":
         """Create the workflow manager for this domain.
 
         Domain projects implement this to create their workflow manager
         with domain-specific agents.
+
+        Use the factory function `create_workflow_manager_from_settings()` to
+        automatically select the orchestrator based on settings.orchestrator.
+
+        Example:
+            def create_workflow_manager(self) -> BaseWorkflowManager:
+                from agentic_cli.cli.app import create_workflow_manager_from_settings
+                return create_workflow_manager_from_settings(
+                    agent_configs=self._get_agent_configs(),
+                    settings=self._settings,
+                    app_name=self._settings.app_name,
+                )
         """
         ...
 
@@ -257,7 +337,7 @@ class BaseCLIApp(ABC):
         pass
 
     @property
-    def workflow(self) -> "WorkflowManager":
+    def workflow(self) -> "BaseWorkflowManager":
         """Get the workflow manager.
 
         Raises:
