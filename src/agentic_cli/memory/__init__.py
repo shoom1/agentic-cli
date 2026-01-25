@@ -7,6 +7,11 @@ from agentic_cli.memory.longterm import (
     MemoryType,
 )
 from agentic_cli.memory.manager import MemoryManager, MemorySearchResult
+from agentic_cli.memory.tools import (
+    working_memory_tool,
+    long_term_memory_tool,
+    reset_working_memory,
+)
 
 __all__ = [
     "MemoryEntry",
@@ -16,4 +21,8 @@ __all__ = [
     "MemoryType",
     "MemoryManager",
     "MemorySearchResult",
+    # Tools for agent use
+    "working_memory_tool",
+    "long_term_memory_tool",
+    "reset_working_memory",
 ]

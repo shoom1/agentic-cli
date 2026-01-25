@@ -257,3 +257,340 @@ class TestMemorySearchResult:
         assert len(result.working_results) == 1
         assert len(result.longterm_results) == 1
         assert len(result.kb_results) == 1
+
+
+class TestMemoryTools:
+    """Tests for memory tools that agents can use."""
+
+    def test_working_memory_tool_set_get(self, mock_context):
+        from agentic_cli.memory.tools import working_memory_tool, reset_working_memory
+
+        reset_working_memory()
+        result = working_memory_tool(
+            operation="set", key="task", value="analyzing", settings=mock_context.settings
+        )
+        assert result["success"] is True
+        result = working_memory_tool(
+            operation="get", key="task", settings=mock_context.settings
+        )
+        assert result["success"] is True
+        assert result["value"] == "analyzing"
+
+    def test_working_memory_tool_list(self, mock_context):
+        from agentic_cli.memory.tools import working_memory_tool, reset_working_memory
+
+        reset_working_memory()
+        working_memory_tool(
+            operation="set",
+            key="item1",
+            value="v1",
+            tags=["tag1"],
+            settings=mock_context.settings,
+        )
+        working_memory_tool(
+            operation="set",
+            key="item2",
+            value="v2",
+            tags=["tag2"],
+            settings=mock_context.settings,
+        )
+        result = working_memory_tool(operation="list", settings=mock_context.settings)
+        assert result["success"] is True
+        assert set(result["keys"]) == {"item1", "item2"}
+
+    def test_working_memory_tool_list_with_tags(self, mock_context):
+        from agentic_cli.memory.tools import working_memory_tool, reset_working_memory
+
+        reset_working_memory()
+        working_memory_tool(
+            operation="set",
+            key="item1",
+            value="v1",
+            tags=["research"],
+            settings=mock_context.settings,
+        )
+        working_memory_tool(
+            operation="set",
+            key="item2",
+            value="v2",
+            tags=["personal"],
+            settings=mock_context.settings,
+        )
+        result = working_memory_tool(
+            operation="list", tags=["research"], settings=mock_context.settings
+        )
+        assert result["success"] is True
+        assert result["keys"] == ["item1"]
+
+    def test_working_memory_tool_delete(self, mock_context):
+        from agentic_cli.memory.tools import working_memory_tool, reset_working_memory
+
+        reset_working_memory()
+        working_memory_tool(
+            operation="set", key="to_delete", value="temp", settings=mock_context.settings
+        )
+        result = working_memory_tool(
+            operation="delete", key="to_delete", settings=mock_context.settings
+        )
+        assert result["success"] is True
+        assert result["key"] == "to_delete"
+        result = working_memory_tool(
+            operation="get", key="to_delete", settings=mock_context.settings
+        )
+        assert result["value"] is None
+
+    def test_working_memory_tool_clear(self, mock_context):
+        from agentic_cli.memory.tools import working_memory_tool, reset_working_memory
+
+        reset_working_memory()
+        working_memory_tool(
+            operation="set", key="item1", value="v1", settings=mock_context.settings
+        )
+        working_memory_tool(
+            operation="set", key="item2", value="v2", settings=mock_context.settings
+        )
+        result = working_memory_tool(operation="clear", settings=mock_context.settings)
+        assert result["success"] is True
+        result = working_memory_tool(operation="list", settings=mock_context.settings)
+        assert result["keys"] == []
+
+    def test_working_memory_tool_invalid_operation(self, mock_context):
+        from agentic_cli.memory.tools import working_memory_tool, reset_working_memory
+
+        reset_working_memory()
+        result = working_memory_tool(
+            operation="invalid", settings=mock_context.settings
+        )
+        assert result["success"] is False
+        assert "error" in result
+
+    def test_working_memory_tool_set_missing_key(self, mock_context):
+        from agentic_cli.memory.tools import working_memory_tool, reset_working_memory
+
+        reset_working_memory()
+        result = working_memory_tool(
+            operation="set", value="no key", settings=mock_context.settings
+        )
+        assert result["success"] is False
+        assert "error" in result
+
+    def test_working_memory_tool_get_missing_key(self, mock_context):
+        from agentic_cli.memory.tools import working_memory_tool, reset_working_memory
+
+        reset_working_memory()
+        result = working_memory_tool(
+            operation="get", settings=mock_context.settings
+        )
+        assert result["success"] is False
+        assert "error" in result
+
+    def test_long_term_memory_tool_store_recall(self, mock_context):
+        from agentic_cli.memory.tools import long_term_memory_tool
+
+        result = long_term_memory_tool(
+            operation="store",
+            content="User prefers markdown",
+            type="preference",
+            settings=mock_context.settings,
+        )
+        assert result["success"] is True
+        assert "entry_id" in result
+        result = long_term_memory_tool(
+            operation="recall", query="markdown", settings=mock_context.settings
+        )
+        assert result["success"] is True
+        assert len(result["entries"]) > 0
+
+    def test_long_term_memory_tool_store_with_tags(self, mock_context):
+        from agentic_cli.memory.tools import long_term_memory_tool
+
+        result = long_term_memory_tool(
+            operation="store",
+            content="Risk management fact",
+            type="fact",
+            tags=["risk", "finance"],
+            settings=mock_context.settings,
+        )
+        assert result["success"] is True
+        assert "entry_id" in result
+
+    def test_long_term_memory_tool_store_with_kb_references(self, mock_context):
+        from agentic_cli.memory.tools import long_term_memory_tool
+
+        result = long_term_memory_tool(
+            operation="store",
+            content="Related to document",
+            type="reference",
+            kb_references=["doc_123", "doc_456"],
+            settings=mock_context.settings,
+        )
+        assert result["success"] is True
+        assert "entry_id" in result
+
+    def test_long_term_memory_tool_update(self, mock_context):
+        from agentic_cli.memory.tools import long_term_memory_tool
+
+        # First store an entry
+        store_result = long_term_memory_tool(
+            operation="store",
+            content="Original content",
+            type="fact",
+            settings=mock_context.settings,
+        )
+        entry_id = store_result["entry_id"]
+
+        # Update it
+        result = long_term_memory_tool(
+            operation="update",
+            entry_id=entry_id,
+            content="Updated content",
+            settings=mock_context.settings,
+        )
+        assert result["success"] is True
+        assert result["entry_id"] == entry_id
+
+        # Recall and verify
+        recall_result = long_term_memory_tool(
+            operation="recall", query="Updated", settings=mock_context.settings
+        )
+        assert len(recall_result["entries"]) > 0
+        assert "Updated content" in recall_result["entries"][0]["content"]
+
+    def test_long_term_memory_tool_forget(self, mock_context):
+        from agentic_cli.memory.tools import long_term_memory_tool
+
+        # Store an entry
+        store_result = long_term_memory_tool(
+            operation="store",
+            content="To be forgotten",
+            type="fact",
+            settings=mock_context.settings,
+        )
+        entry_id = store_result["entry_id"]
+
+        # Forget it
+        result = long_term_memory_tool(
+            operation="forget", entry_id=entry_id, settings=mock_context.settings
+        )
+        assert result["success"] is True
+        assert result["entry_id"] == entry_id
+
+        # Verify it's gone
+        recall_result = long_term_memory_tool(
+            operation="recall", query="forgotten", settings=mock_context.settings
+        )
+        assert len(recall_result["entries"]) == 0
+
+    def test_long_term_memory_tool_recall_by_type(self, mock_context):
+        from agentic_cli.memory.tools import long_term_memory_tool
+
+        # Store entries of different types
+        long_term_memory_tool(
+            operation="store",
+            content="A fact",
+            type="fact",
+            settings=mock_context.settings,
+        )
+        long_term_memory_tool(
+            operation="store",
+            content="A preference",
+            type="preference",
+            settings=mock_context.settings,
+        )
+
+        # Recall only preferences
+        result = long_term_memory_tool(
+            operation="recall", query="", type="preference", settings=mock_context.settings
+        )
+        assert result["success"] is True
+        assert len(result["entries"]) == 1
+        assert result["entries"][0]["type"] == "preference"
+
+    def test_long_term_memory_tool_invalid_operation(self, mock_context):
+        from agentic_cli.memory.tools import long_term_memory_tool
+
+        result = long_term_memory_tool(
+            operation="invalid", settings=mock_context.settings
+        )
+        assert result["success"] is False
+        assert "error" in result
+
+    def test_long_term_memory_tool_store_missing_content(self, mock_context):
+        from agentic_cli.memory.tools import long_term_memory_tool
+
+        result = long_term_memory_tool(
+            operation="store", type="fact", settings=mock_context.settings
+        )
+        assert result["success"] is False
+        assert "error" in result
+
+    def test_long_term_memory_tool_store_missing_type(self, mock_context):
+        from agentic_cli.memory.tools import long_term_memory_tool
+
+        result = long_term_memory_tool(
+            operation="store", content="some content", settings=mock_context.settings
+        )
+        assert result["success"] is False
+        assert "error" in result
+
+    def test_long_term_memory_tool_invalid_type(self, mock_context):
+        from agentic_cli.memory.tools import long_term_memory_tool
+
+        result = long_term_memory_tool(
+            operation="store",
+            content="some content",
+            type="invalid_type",
+            settings=mock_context.settings,
+        )
+        assert result["success"] is False
+        assert "error" in result
+
+    def test_long_term_memory_tool_update_missing_entry_id(self, mock_context):
+        from agentic_cli.memory.tools import long_term_memory_tool
+
+        result = long_term_memory_tool(
+            operation="update", content="new content", settings=mock_context.settings
+        )
+        assert result["success"] is False
+        assert "error" in result
+
+    def test_long_term_memory_tool_forget_missing_entry_id(self, mock_context):
+        from agentic_cli.memory.tools import long_term_memory_tool
+
+        result = long_term_memory_tool(
+            operation="forget", settings=mock_context.settings
+        )
+        assert result["success"] is False
+        assert "error" in result
+
+    def test_long_term_memory_tool_recall_entry_format(self, mock_context):
+        from agentic_cli.memory.tools import long_term_memory_tool
+
+        # Store an entry with all fields
+        store_result = long_term_memory_tool(
+            operation="store",
+            content="Full entry content",
+            type="learning",
+            tags=["test", "full"],
+            kb_references=["doc_1"],
+            settings=mock_context.settings,
+        )
+        entry_id = store_result["entry_id"]
+
+        # Recall and check format
+        result = long_term_memory_tool(
+            operation="recall", query="Full entry", settings=mock_context.settings
+        )
+        assert result["success"] is True
+        assert len(result["entries"]) > 0
+        entry = result["entries"][0]
+        assert "id" in entry
+        assert "type" in entry
+        assert "content" in entry
+        assert "tags" in entry
+        assert "kb_references" in entry
+        assert entry["id"] == entry_id
+        assert entry["type"] == "learning"
+        assert entry["content"] == "Full entry content"
+        assert entry["tags"] == ["test", "full"]
+        assert entry["kb_references"] == ["doc_1"]
