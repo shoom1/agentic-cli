@@ -39,7 +39,7 @@ def _import_langgraph():
     try:
         from langgraph.graph import StateGraph, END
         from langgraph.checkpoint.memory import MemorySaver
-        from langgraph.pregel import RetryPolicy
+        from langgraph.types import RetryPolicy
 
         return StateGraph, END, MemorySaver, RetryPolicy
     except ImportError as e:
@@ -262,12 +262,11 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
             "high": 32000,
         }
 
-        # Map effort levels for Google Gemini
-        # Gemini uses thinking_budget with similar ranges
-        google_budgets = {
-            "low": 4096,
-            "medium": 10000,
-            "high": 32000,
+        # Map effort levels for Google Gemini (uses thinking_level parameter)
+        google_levels = {
+            "low": "low",
+            "medium": "medium",
+            "high": "high",
         }
 
         logger.debug(
@@ -288,10 +287,8 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
         elif model.startswith("gemini-"):
             return {
                 "provider": "google",
-                "thinking_config": {
-                    "include_thoughts": True,
-                    "thinking_budget": google_budgets.get(thinking_effort, 10000),
-                },
+                "include_thoughts": True,
+                "thinking_level": google_levels.get(thinking_effort, "medium"),
             }
 
         return None
@@ -344,7 +341,8 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
             if thinking_config and thinking_config.get("provider") == "google":
                 return models["google"](
                     model=model,
-                    thinking_config=thinking_config["thinking_config"],
+                    include_thoughts=thinking_config.get("include_thoughts", True),
+                    thinking_level=thinking_config.get("thinking_level"),
                 )
             return models["google"](model=model)
 
@@ -515,12 +513,13 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
             try:
                 response = await llm.ainvoke(messages)
 
-                # Extract content
-                content = (
+                # Extract and normalize content
+                raw_content = (
                     response.content
                     if hasattr(response, "content")
                     else str(response)
                 )
+                content = self._normalize_content(raw_content)
 
                 # Handle tool calls if present
                 tool_calls = []
@@ -759,22 +758,36 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
                     # Streaming response
                     chunk = event_data.get("chunk")
                     if chunk and hasattr(chunk, "content") and chunk.content:
-                        content = chunk.content
-                        full_response_parts.append(content)
-                        yield self._maybe_transform(
-                            WorkflowEvent.text(content, current_session_id)
-                        )
+                        # Extract content blocks with type info
+                        blocks = self._extract_content_blocks(chunk.content)
+                        for block_type, text in blocks:
+                            if text:
+                                full_response_parts.append(text)
+                                if block_type == "thinking":
+                                    yield self._maybe_transform(
+                                        WorkflowEvent.thinking(text, current_session_id)
+                                    )
+                                else:
+                                    yield self._maybe_transform(
+                                        WorkflowEvent.text(text, current_session_id)
+                                    )
 
                 elif event_kind == "on_chat_model_end":
                     # Agent finished
                     output = event_data.get("output")
                     if output and hasattr(output, "content") and output.content:
-                        content = output.content
-                        if content not in "".join(full_response_parts):
-                            full_response_parts.append(content)
-                            yield self._maybe_transform(
-                                WorkflowEvent.text(content, current_session_id)
-                            )
+                        blocks = self._extract_content_blocks(output.content)
+                        for block_type, text in blocks:
+                            if text and text not in "".join(full_response_parts):
+                                full_response_parts.append(text)
+                                if block_type == "thinking":
+                                    yield self._maybe_transform(
+                                        WorkflowEvent.thinking(text, current_session_id)
+                                    )
+                                else:
+                                    yield self._maybe_transform(
+                                        WorkflowEvent.text(text, current_session_id)
+                                    )
 
                 elif event_kind == "on_tool_start":
                     # Tool invocation
@@ -808,6 +821,85 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
             transformed = self._on_event(event)
             return transformed if transformed is not None else event
         return event
+
+    def _normalize_content(self, content: Any) -> str:
+        """Normalize LLM response content to a string.
+
+        Handles various content formats from different providers:
+        - String: returned as-is
+        - List of dicts with 'text' key: extracts and joins text
+        - List of strings: joins them
+        - Other: converts to string
+
+        Args:
+            content: Raw content from LLM response.
+
+        Returns:
+            Normalized string content.
+        """
+        if isinstance(content, str):
+            return content
+
+        if isinstance(content, list):
+            parts = []
+            for item in content:
+                if isinstance(item, dict):
+                    # Handle {'type': 'text', 'text': '...'} format
+                    if "text" in item:
+                        parts.append(item["text"])
+                    elif "content" in item:
+                        parts.append(str(item["content"]))
+                elif isinstance(item, str):
+                    parts.append(item)
+                else:
+                    parts.append(str(item))
+            return "".join(parts)
+
+        return str(content) if content else ""
+
+    def _extract_content_blocks(
+        self, content: Any
+    ) -> list[tuple[str, str]]:
+        """Extract content blocks with type information.
+
+        Returns list of (block_type, text) tuples where block_type is
+        'thinking' or 'text'.
+
+        Args:
+            content: Raw content from LLM response.
+
+        Returns:
+            List of (type, text) tuples.
+        """
+        blocks = []
+
+        if isinstance(content, str):
+            if content:
+                blocks.append(("text", content))
+            return blocks
+
+        if isinstance(content, list):
+            for item in content:
+                if isinstance(item, dict):
+                    block_type = item.get("type", "text")
+                    text = item.get("text", "")
+
+                    # Check for thinking blocks
+                    if block_type == "thinking" or item.get("thinking"):
+                        if text:
+                            blocks.append(("thinking", text))
+                    elif text:
+                        blocks.append(("text", text))
+                elif isinstance(item, str) and item:
+                    blocks.append(("text", item))
+                # Handle LangChain message objects
+                elif hasattr(item, "type") and hasattr(item, "content"):
+                    if item.type == "thinking":
+                        blocks.append(("thinking", str(item.content)))
+                    else:
+                        blocks.append(("text", str(item.content)))
+
+        return blocks
 
     async def generate_simple(self, prompt: str, max_tokens: int = 500) -> str:
         """Generate a simple text response using the current model."""

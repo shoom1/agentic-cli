@@ -1,6 +1,13 @@
-"""Hello Agent - A simple example showcasing the agentic-cli package.
+"""Hello LangGraph - A simple example using LangGraphWorkflowManager.
 
-Run with: python examples/hello_agent.py
+This example demonstrates using the LangGraph orchestration backend
+instead of Google ADK for agent workflows.
+
+Run with: python examples/hello_langgraph.py
+
+Requires LangGraph dependencies:
+    pip install agentic-cli[langgraph]
+    pip install langchain-anthropic  # or langchain-google-genai
 """
 
 import asyncio
@@ -16,7 +23,8 @@ from pydantic_settings import SettingsConfigDict
 from agentic_cli import BaseCLIApp, BaseSettings
 from agentic_cli.cli import AppInfo
 from agentic_cli.config import set_settings
-from agentic_cli.workflow import AgentConfig, GoogleADKWorkflowManager
+from agentic_cli.workflow import AgentConfig
+from agentic_cli.workflow.langgraph_manager import LangGraphWorkflowManager
 
 
 # =============================================================================
@@ -24,17 +32,19 @@ from agentic_cli.workflow import AgentConfig, GoogleADKWorkflowManager
 # =============================================================================
 
 class Settings(BaseSettings):
-    """Settings for the Hello Agent example.
+    """Settings for the Hello LangGraph example.
 
     API keys are read from standard environment variables (GOOGLE_API_KEY,
-    ANTHROPIC_API_KEY) while app-specific settings can be in the .env file.
+    ANTHROPIC_API_KEY) while app-specific settings use the HELLO_LG_ prefix.
     """
     model_config = SettingsConfigDict(
-        env_file=str(Path.home() / ".hello_agent" / ".env"),
+        env_file=str(Path.home() / ".hello_langgraph" / ".env"),
         extra="ignore",
     )
-    app_name: str = Field(default="hello_agent")
-    workspace_dir: Path = Field(default=Path.home() / ".hello_agent")
+    app_name: str = Field(default="hello_langgraph")
+    workspace_dir: Path = Field(default=Path.home() / ".hello_langgraph")
+    # Use LangGraph as the orchestrator
+    orchestrator: str = Field(default="langgraph")
 
 
 @lru_cache
@@ -43,7 +53,7 @@ def get_settings() -> Settings:
 
 
 # =============================================================================
-# Tools
+# Tools (using LangChain tool format)
 # =============================================================================
 
 def get_current_time() -> dict:
@@ -55,11 +65,14 @@ def get_current_time() -> dict:
 def calculate(expression: str) -> dict:
     """Evaluate a mathematical expression (e.g., "2 + 2" or "sqrt(16)")."""
     import math
-    allowed = {"abs": abs, "round": round, "min": min, "max": max, "sum": sum,
-               "pow": pow, "sqrt": math.sqrt, "sin": math.sin, "cos": math.cos,
-               "tan": math.tan, "pi": math.pi, "e": math.e}
+    allowed = {
+        "abs": abs, "round": round, "min": min, "max": max, "sum": sum,
+        "pow": pow, "sqrt": math.sqrt, "sin": math.sin, "cos": math.cos,
+        "tan": math.tan, "pi": math.pi, "e": math.e,
+    }
     try:
-        return {"expression": expression, "result": eval(expression, {"__builtins__": {}}, allowed)}
+        result = eval(expression, {"__builtins__": {}}, allowed)
+        return {"expression": expression, "result": result}
     except Exception as e:
         return {"expression": expression, "error": str(e)}
 
@@ -70,7 +83,7 @@ def echo(message: str) -> dict:
 
 
 # =============================================================================
-# Agent & App
+# Agent Configuration
 # =============================================================================
 
 AGENT_CONFIGS = [
@@ -83,26 +96,37 @@ AGENT_CONFIGS = [
 ]
 
 
-class HelloAgentApp(BaseCLIApp):
+# =============================================================================
+# Application
+# =============================================================================
+
+class HelloLangGraphApp(BaseCLIApp):
+    """Example CLI app using LangGraph for orchestration."""
+
     def get_app_info(self) -> AppInfo:
         text = Text()
-        text.append("Hello Agent\n\n", style="bold cyan")
+        text.append("Hello LangGraph\n\n", style="bold magenta")
+        text.append("Orchestrator: LangGraph\n", style="dim")
         text.append("Tools: get_current_time, calculate, echo\n", style="dim")
         text.append("Type /help for commands", style="dim")
         return AppInfo(
-            name="Hello Agent",
+            name="Hello LangGraph",
             version="0.1.0",
-            welcome_message=lambda: Panel(text, border_style="cyan"),
+            welcome_message=lambda: Panel(text, border_style="magenta"),
             echo_thinking=False,
         )
 
     def get_settings(self) -> Settings:
         return get_settings()
 
-    def create_workflow_manager(self) -> GoogleADKWorkflowManager:
+    def create_workflow_manager(self) -> LangGraphWorkflowManager:
         set_settings(self._settings)
-        return GoogleADKWorkflowManager(agent_configs=AGENT_CONFIGS, settings=self._settings)
+        return LangGraphWorkflowManager(
+            agent_configs=AGENT_CONFIGS,
+            settings=self._settings,
+            checkpointer="memory",  # Use in-memory checkpointing
+        )
 
 
 if __name__ == "__main__":
-    asyncio.run(HelloAgentApp().run())
+    asyncio.run(HelloLangGraphApp().run())

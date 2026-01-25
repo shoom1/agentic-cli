@@ -398,8 +398,8 @@ class TestLangGraphThinkingConfig:
         config = manager._get_thinking_config("gemini-2.5-pro")
         assert config is not None
         assert config["provider"] == "google"
-        assert config["thinking_config"]["include_thoughts"] is True
-        assert config["thinking_config"]["thinking_budget"] == 32000
+        assert config["include_thoughts"] is True
+        assert config["thinking_level"] == "high"
 
     def test_thinking_config_google_medium(self, agent_configs):
         """Test _get_thinking_config with medium effort for Google."""
@@ -413,7 +413,7 @@ class TestLangGraphThinkingConfig:
         )
 
         config = manager._get_thinking_config("gemini-3-flash-preview")
-        assert config["thinking_config"]["thinking_budget"] == 10000
+        assert config["thinking_level"] == "medium"
 
 
 class TestCreateWorkflowManagerFromSettings:
