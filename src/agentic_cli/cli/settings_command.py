@@ -3,6 +3,7 @@
 from typing import TYPE_CHECKING, Any
 
 from thinking_prompt import (
+    CheckboxItem,
     DropdownItem,
     InlineSelectItem,
     SettingsDialog,
@@ -51,6 +52,12 @@ class SettingsCommand(Command):
                 description="Controls depth of reasoning",
                 options=list(THINKING_EFFORT_LEVELS),
                 default=current_effort,
+            ),
+            CheckboxItem(
+                key="log_activity",
+                label="Log Activity",
+                description="Save conversation to file for audit",
+                default=settings.log_activity,
             ),
         ]
 

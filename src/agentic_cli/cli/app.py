@@ -393,6 +393,10 @@ class BaseCLIApp(ABC):
                 self.session.add_error(f"Failed to set thinking effort: {e}")
                 return
 
+        # Apply log_activity change
+        if "log_activity" in changes:
+            object.__setattr__(self._settings, "log_activity", changes["log_activity"])
+
         # Reinitialize workflow if needed
         if needs_reinit and self._workflow is not None:
             try:
@@ -413,9 +417,6 @@ class BaseCLIApp(ABC):
             ClearCommand,
             ExitCommand,
             StatusCommand,
-            SaveCommand,
-            LoadCommand,
-            SessionsCommand,
         )
         from agentic_cli.cli.settings_command import SettingsCommand
 
@@ -423,9 +424,6 @@ class BaseCLIApp(ABC):
         self.command_registry.register(ClearCommand())
         self.command_registry.register(ExitCommand())
         self.command_registry.register(StatusCommand())
-        self.command_registry.register(SaveCommand())
-        self.command_registry.register(LoadCommand())
-        self.command_registry.register(SessionsCommand())
         self.command_registry.register(SettingsCommand())
 
     async def _background_init(self) -> None:
@@ -586,8 +584,9 @@ class BaseCLIApp(ABC):
         bind_context(user_id=self._settings.default_user)
         logger.info("handling_message", message_length=len(message))
 
-        # Track message in history
-        self.message_history.add(message, MessageType.USER)
+        # Track message in history (if logging enabled)
+        if self._settings.log_activity:
+            self.message_history.add(message, MessageType.USER)
 
         # Status line for thinking box (single line updates)
         status_line = "Processing..."
@@ -677,15 +676,16 @@ class BaseCLIApp(ABC):
             if thinking_started:
                 self.session.finish_thinking(add_to_history=False)
 
-            # Add accumulated content to message history
-            if thinking_content:
-                self.message_history.add(
-                    "".join(thinking_content), MessageType.THINKING
-                )
-            if response_content:
-                self.message_history.add(
-                    "".join(response_content), MessageType.ASSISTANT
-                )
+            # Add accumulated content to message history (if logging enabled)
+            if self._settings.log_activity:
+                if thinking_content:
+                    self.message_history.add(
+                        "".join(thinking_content), MessageType.THINKING
+                    )
+                if response_content:
+                    self.message_history.add(
+                        "".join(response_content), MessageType.ASSISTANT
+                    )
 
             logger.debug("message_handled_successfully")
 
@@ -693,7 +693,30 @@ class BaseCLIApp(ABC):
             if thinking_started:
                 self.session.finish_thinking(add_to_history=False)
             self.session.add_error(f"Workflow error: {e}")
-            self.message_history.add(str(e), MessageType.ERROR)
+            if self._settings.log_activity:
+                self.message_history.add(str(e), MessageType.ERROR)
+
+    async def _save_activity_log(self) -> None:
+        """Save activity log to file on exit."""
+        from datetime import datetime
+        from agentic_cli.persistence import SessionPersistence
+
+        session_name = f"activity_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        persistence = SessionPersistence(self._settings)
+
+        try:
+            metadata = {"app_name": self._settings.app_name}
+            if self._workflow:
+                metadata["model"] = self._workflow.model
+
+            saved_path = persistence.save_session(
+                session_id=session_name,
+                message_history=self.message_history,
+                metadata=metadata,
+            )
+            logger.info("activity_log_saved", path=str(saved_path))
+        except Exception as e:
+            logger.error("activity_log_save_failed", error=str(e))
 
     async def run(self) -> None:
         """Run the main application loop."""
@@ -719,6 +742,10 @@ class BaseCLIApp(ABC):
                 await self._init_task
             except asyncio.CancelledError:
                 pass
+
+        # Auto-save activity log if enabled
+        if self._settings.log_activity and len(self.message_history) > 0:
+            await self._save_activity_log()
 
         logger.info("app_ending")
         self.session.add_message("system", "Goodbye!")

@@ -131,6 +131,12 @@ class BaseSettings(PydanticBaseSettings):
         description="LangGraph checkpointer type for state persistence",
     )
 
+    # Activity Logging
+    log_activity: bool = Field(
+        default=False,
+        description="Log conversation activity to file for audit purposes",
+    )
+
     # Knowledge Base & Exploration
     embedding_model: str = Field(
         default="all-MiniLM-L6-v2",
