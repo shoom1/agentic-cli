@@ -28,7 +28,7 @@ from agentic_cli.config import BaseSettings
 from agentic_cli.logging import Loggers, configure_logging, bind_context
 
 if TYPE_CHECKING:
-    from agentic_cli.workflow import WorkflowManager, EventType, WorkflowEvent
+    from agentic_cli.workflow import GoogleADKWorkflowManager, EventType, WorkflowEvent
     from agentic_cli.workflow.base_manager import BaseWorkflowManager
     from agentic_cli.workflow.config import AgentConfig
 
@@ -47,7 +47,7 @@ def create_workflow_manager_from_settings(
 ) -> "BaseWorkflowManager":
     """Factory function to create the appropriate workflow manager based on settings.
 
-    Creates either a Google ADK WorkflowManager or LangGraphWorkflowManager
+    Creates either a GoogleADKWorkflowManager or LangGraphWorkflowManager
     based on the settings.orchestrator configuration.
 
     Args:
@@ -58,7 +58,7 @@ def create_workflow_manager_from_settings(
         **kwargs: Additional arguments passed to the specific manager.
 
     Returns:
-        WorkflowManager instance (ADK or LangGraph based on settings).
+        BaseWorkflowManager instance (ADK or LangGraph based on settings).
 
     Raises:
         ImportError: If LangGraph is selected but not installed.
@@ -93,9 +93,9 @@ def create_workflow_manager_from_settings(
             ) from e
 
     else:  # Default to ADK
-        from agentic_cli.workflow.manager import WorkflowManager
+        from agentic_cli.workflow.adk_manager import GoogleADKWorkflowManager
 
-        return WorkflowManager(
+        return GoogleADKWorkflowManager(
             agent_configs=agent_configs,
             settings=settings,
             app_name=app_name,
@@ -427,10 +427,10 @@ class BaseCLIApp(ABC):
         self.command_registry.register(SettingsCommand())
 
     async def _background_init(self) -> None:
-        """Initialize WorkflowManager in background thread."""
+        """Initialize workflow manager in background thread."""
         loop = asyncio.get_running_loop()
 
-        def _create_workflow() -> "WorkflowManager":
+        def _create_workflow() -> "BaseWorkflowManager":
             return self.create_workflow_manager()
 
         try:

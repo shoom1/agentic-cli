@@ -344,7 +344,7 @@ def get_settings() -> BaseSettings:
     This allows tools to work with the correct settings regardless of
     how they're called:
     - Direct calls use global settings
-    - Calls within WorkflowManager.process use context settings
+    - Calls within workflow manager's process use context settings
 
     Returns:
         BaseSettings instance for the current context
@@ -405,28 +405,28 @@ def get_context_settings() -> BaseSettings | None:
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from agentic_cli.workflow.manager import WorkflowManager
+    from agentic_cli.workflow.base_manager import BaseWorkflowManager
 
 _workflow_context: ContextVar[Any] = ContextVar("workflow_context", default=None)
 
 
-def set_context_workflow(workflow: "WorkflowManager | None") -> None:
+def set_context_workflow(workflow: "BaseWorkflowManager | None") -> None:
     """Set the workflow manager for the current context.
 
     This allows tools to access the workflow manager for operations
     like requesting user input.
 
     Args:
-        workflow: WorkflowManager instance, or None to clear
+        workflow: BaseWorkflowManager instance, or None to clear
     """
     _workflow_context.set(workflow)
 
 
-def get_context_workflow() -> "WorkflowManager | None":
+def get_context_workflow() -> "BaseWorkflowManager | None":
     """Get the workflow manager from the current context.
 
     Returns:
-        WorkflowManager instance, or None if not in a workflow context
+        BaseWorkflowManager instance, or None if not in a workflow context
     """
     return _workflow_context.get()
 

@@ -16,7 +16,7 @@ from pydantic_settings import SettingsConfigDict
 from agentic_cli import BaseCLIApp, BaseSettings
 from agentic_cli.cli import AppInfo
 from agentic_cli.config import set_settings
-from agentic_cli.workflow import AgentConfig, WorkflowManager
+from agentic_cli.workflow import AgentConfig, GoogleADKWorkflowManager
 
 
 # =============================================================================
@@ -95,9 +95,9 @@ class HelloAgentApp(BaseCLIApp):
     def get_settings(self) -> Settings:
         return get_settings()
 
-    def create_workflow_manager(self) -> WorkflowManager:
+    def create_workflow_manager(self) -> GoogleADKWorkflowManager:
         set_settings(self._settings)
-        return WorkflowManager(agent_configs=AGENT_CONFIGS, settings=self._settings)
+        return GoogleADKWorkflowManager(agent_configs=AGENT_CONFIGS, settings=self._settings)
 
 
 if __name__ == "__main__":

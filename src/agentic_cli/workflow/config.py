@@ -8,8 +8,8 @@ from typing import Callable, Any
 class AgentConfig:
     """Configuration for an agent in the workflow.
 
-    Agents are defined declaratively using this config, and the WorkflowManager
-    creates the actual ADK Agent instances from these configs.
+    Agents are defined declaratively using this config, and the workflow manager
+    creates the actual agent instances from these configs.
 
     Attributes:
         name: Unique identifier for the agent

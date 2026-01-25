@@ -21,7 +21,7 @@ pip install agentic-cli
 Create a domain-specific CLI application by extending the base classes:
 
 ```python
-from agentic_cli import BaseCLIApp, WorkflowManager
+from agentic_cli import BaseCLIApp, GoogleADKWorkflowManager
 from thinking_prompt import AppInfo
 
 class MyApp(BaseCLIApp):

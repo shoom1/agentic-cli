@@ -318,10 +318,10 @@ class TestCreateWorkflowManagerFromSettings:
 
         manager = create_workflow_manager_from_settings(configs, settings)
 
-        # Should be WorkflowManager (ADK)
-        from agentic_cli.workflow.manager import WorkflowManager
+        # Should be GoogleADKWorkflowManager (ADK)
+        from agentic_cli.workflow.adk_manager import GoogleADKWorkflowManager
 
-        assert isinstance(manager, WorkflowManager)
+        assert isinstance(manager, GoogleADKWorkflowManager)
 
     def test_factory_creates_langgraph_manager(self):
         """Test factory creates LangGraph manager when configured."""

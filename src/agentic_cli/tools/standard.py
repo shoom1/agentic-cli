@@ -6,7 +6,7 @@ They use the context settings to get API keys and configuration.
 Design Note:
     Tools accept an optional `settings` parameter for explicit dependency injection.
     When not provided, they fall back to get_settings() for backward compatibility
-    and to work seamlessly within WorkflowManager's settings context.
+    and to work seamlessly within workflow manager's settings context.
 """
 
 from typing import TYPE_CHECKING, Any

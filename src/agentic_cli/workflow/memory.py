@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 if TYPE_CHECKING:
-    from agentic_cli.workflow.manager import WorkflowManager
+    from agentic_cli.workflow.base_manager import BaseWorkflowManager
 
 
 @dataclass
@@ -140,11 +140,11 @@ Conversation:
 """
 
 
-async def create_summarizer(workflow: "WorkflowManager") -> Callable:
+async def create_summarizer(workflow: "BaseWorkflowManager") -> Callable:
     """Create a summarizer function using the workflow's model.
 
     Args:
-        workflow: WorkflowManager instance to use for LLM calls
+        workflow: BaseWorkflowManager instance to use for LLM calls
 
     Returns:
         Async function that summarizes a list of messages

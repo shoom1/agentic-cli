@@ -1,6 +1,6 @@
 """LangGraph-based Workflow Manager for agentic CLI applications.
 
-This module provides a WorkflowManager implementation using LangGraph for
+This module provides a BaseWorkflowManager implementation using LangGraph for
 agent orchestration. It offers:
 - Cyclical workflows (self-validation, iterative refinement)
 - Native HITL support with interrupt mechanism

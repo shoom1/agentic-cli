@@ -1,6 +1,6 @@
 """Workflow management for agentic CLI applications.
 
-This module uses lazy loading for WorkflowManager to avoid slow
+This module uses lazy loading for GoogleADKWorkflowManager to avoid slow
 Google ADK imports at startup. Light types (EventType, AgentConfig, etc.)
 are available immediately.
 """
@@ -11,12 +11,10 @@ from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.thinking import ThinkingDetector, ThinkingResult
 from agentic_cli.workflow.memory import ConversationMemory
 from agentic_cli.workflow.retry import RetryConfig, RetryHandler
-from agentic_cli.workflow.session_handler import SessionHandler
-from agentic_cli.workflow.event_processor import EventProcessor
 
 # Heavy imports - lazy loaded on first access
 _lazy_imports = {
-    "WorkflowManager": "agentic_cli.workflow.manager",
+    "GoogleADKWorkflowManager": "agentic_cli.workflow.adk_manager",
 }
 
 
@@ -37,12 +35,10 @@ __all__ = [
     "EventType",
     "UserInputRequest",
     "AgentConfig",
-    "WorkflowManager",  # lazy
+    "GoogleADKWorkflowManager",  # lazy
     "ThinkingDetector",
     "ThinkingResult",
     "ConversationMemory",
     "RetryConfig",
     "RetryHandler",
-    "SessionHandler",
-    "EventProcessor",
 ]

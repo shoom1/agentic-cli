@@ -13,13 +13,13 @@ Domain-specific applications extend the base classes to provide their own
 agents, prompts, and configuration.
 
 Orchestrator Selection:
-- Default: Google ADK (WorkflowManager)
+- Default: Google ADK (GoogleADKWorkflowManager)
 - Optional: LangGraph (LangGraphWorkflowManager) - requires `pip install agentic-cli[langgraph]`
 
 Use settings.orchestrator = "langgraph" or the factory function
 `create_workflow_manager_from_settings()` to switch orchestrators.
 
-Note: WorkflowManager and LangGraphWorkflowManager are lazy-loaded to avoid slow imports.
+Note: GoogleADKWorkflowManager and LangGraphWorkflowManager are lazy-loaded to avoid slow imports.
 """
 
 from agentic_cli.cli.app import BaseCLIApp, create_workflow_manager_from_settings
@@ -48,7 +48,7 @@ from agentic_cli.config_mixins import (
 
 # Heavy imports - lazy loaded on first access
 _lazy_imports = {
-    "WorkflowManager": "agentic_cli.workflow.manager",
+    "GoogleADKWorkflowManager": "agentic_cli.workflow.adk_manager",
     "BaseWorkflowManager": "agentic_cli.workflow.base_manager",
     "LangGraphWorkflowManager": "agentic_cli.workflow.langgraph_manager",
 }
@@ -74,7 +74,7 @@ __all__ = [
     "create_workflow_manager_from_settings",
     # Workflow
     "BaseWorkflowManager",  # lazy
-    "WorkflowManager",  # lazy (Google ADK)
+    "GoogleADKWorkflowManager",  # lazy (Google ADK)
     "LangGraphWorkflowManager",  # lazy (requires langgraph extra)
     "AgentConfig",
     "WorkflowEvent",

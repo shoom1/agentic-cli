@@ -314,7 +314,7 @@ from unittest.mock import patch, MagicMock, AsyncMock
 
 
 class TestWorkflowManagerLifecycle:
-    """Tests for WorkflowManager lifecycle methods."""
+    """Tests for GoogleADKWorkflowManager lifecycle methods."""
 
     @pytest.fixture
     def mock_settings(self):
@@ -339,9 +339,9 @@ class TestWorkflowManagerLifecycle:
 
     def test_workflow_manager_creation(self, mock_settings, agent_configs):
         """Test workflow manager is created with correct initial state."""
-        from agentic_cli.workflow.manager import WorkflowManager
+        from agentic_cli.workflow.adk_manager import GoogleADKWorkflowManager
 
-        manager = WorkflowManager(
+        manager = GoogleADKWorkflowManager(
             agent_configs=agent_configs,
             settings=mock_settings,
         )
@@ -354,9 +354,9 @@ class TestWorkflowManagerLifecycle:
 
     def test_workflow_manager_with_model_override(self, mock_settings, agent_configs):
         """Test workflow manager with explicit model."""
-        from agentic_cli.workflow.manager import WorkflowManager
+        from agentic_cli.workflow.adk_manager import GoogleADKWorkflowManager
 
-        manager = WorkflowManager(
+        manager = GoogleADKWorkflowManager(
             agent_configs=agent_configs,
             settings=mock_settings,
             model="claude-sonnet-4",
@@ -368,9 +368,9 @@ class TestWorkflowManagerLifecycle:
 
     def test_model_resolved_from_settings(self, mock_settings, agent_configs):
         """Test model is resolved from settings when not provided."""
-        from agentic_cli.workflow.manager import WorkflowManager
+        from agentic_cli.workflow.adk_manager import GoogleADKWorkflowManager
 
-        manager = WorkflowManager(
+        manager = GoogleADKWorkflowManager(
             agent_configs=agent_configs,
             settings=mock_settings,
         )
@@ -383,9 +383,9 @@ class TestWorkflowManagerLifecycle:
 
     def test_settings_property(self, mock_settings, agent_configs):
         """Test settings property returns correct settings."""
-        from agentic_cli.workflow.manager import WorkflowManager
+        from agentic_cli.workflow.adk_manager import GoogleADKWorkflowManager
 
-        manager = WorkflowManager(
+        manager = GoogleADKWorkflowManager(
             agent_configs=agent_configs,
             settings=mock_settings,
         )
@@ -394,9 +394,9 @@ class TestWorkflowManagerLifecycle:
 
     def test_update_settings(self, mock_settings, agent_configs):
         """Test updating settings."""
-        from agentic_cli.workflow.manager import WorkflowManager
+        from agentic_cli.workflow.adk_manager import GoogleADKWorkflowManager
 
-        manager = WorkflowManager(
+        manager = GoogleADKWorkflowManager(
             agent_configs=agent_configs,
             settings=mock_settings,
         )
@@ -411,9 +411,9 @@ class TestWorkflowManagerLifecycle:
     @pytest.mark.asyncio
     async def test_cleanup(self, mock_settings, agent_configs):
         """Test cleanup resets state."""
-        from agentic_cli.workflow.manager import WorkflowManager
+        from agentic_cli.workflow.adk_manager import GoogleADKWorkflowManager
 
-        manager = WorkflowManager(
+        manager = GoogleADKWorkflowManager(
             agent_configs=agent_configs,
             settings=mock_settings,
         )
@@ -434,15 +434,15 @@ class TestWorkflowManagerLifecycle:
     @pytest.mark.asyncio
     async def test_context_manager(self, mock_settings, agent_configs):
         """Test async context manager support."""
-        from agentic_cli.workflow.manager import WorkflowManager
+        from agentic_cli.workflow.adk_manager import GoogleADKWorkflowManager
 
         with patch.object(
-            WorkflowManager, "initialize_services", new_callable=AsyncMock
+            GoogleADKWorkflowManager, "initialize_services", new_callable=AsyncMock
         ) as mock_init:
             with patch.object(
-                WorkflowManager, "cleanup", new_callable=AsyncMock
+                GoogleADKWorkflowManager, "cleanup", new_callable=AsyncMock
             ) as mock_cleanup:
-                manager = WorkflowManager(
+                manager = GoogleADKWorkflowManager(
                     agent_configs=agent_configs,
                     settings=mock_settings,
                 )
@@ -456,12 +456,12 @@ class TestWorkflowManagerLifecycle:
     @pytest.mark.asyncio
     async def test_reinitialize_with_new_model(self, mock_settings, agent_configs):
         """Test reinitialize updates model."""
-        from agentic_cli.workflow.manager import WorkflowManager
+        from agentic_cli.workflow.adk_manager import GoogleADKWorkflowManager
 
         with patch.object(
-            WorkflowManager, "initialize_services", new_callable=AsyncMock
+            GoogleADKWorkflowManager, "initialize_services", new_callable=AsyncMock
         ):
-            manager = WorkflowManager(
+            manager = GoogleADKWorkflowManager(
                 agent_configs=agent_configs,
                 settings=mock_settings,
                 model="old-model",
@@ -477,14 +477,14 @@ class TestWorkflowManagerLifecycle:
         self, mock_settings, agent_configs
     ):
         """Test reinitialize re-resolves model from settings when not specified."""
-        from agentic_cli.workflow.manager import WorkflowManager
+        from agentic_cli.workflow.adk_manager import GoogleADKWorkflowManager
 
         mock_settings.get_model.return_value = "resolved-model"
 
         with patch.object(
-            WorkflowManager, "initialize_services", new_callable=AsyncMock
+            GoogleADKWorkflowManager, "initialize_services", new_callable=AsyncMock
         ):
-            manager = WorkflowManager(
+            manager = GoogleADKWorkflowManager(
                 agent_configs=agent_configs,
                 settings=mock_settings,
                 model="initial-model",
@@ -501,12 +501,12 @@ class TestWorkflowManagerLifecycle:
         self, mock_settings, agent_configs
     ):
         """Test reinitialize preserves session service by default."""
-        from agentic_cli.workflow.manager import WorkflowManager
+        from agentic_cli.workflow.adk_manager import GoogleADKWorkflowManager
 
         with patch.object(
-            WorkflowManager, "initialize_services", new_callable=AsyncMock
+            GoogleADKWorkflowManager, "initialize_services", new_callable=AsyncMock
         ):
-            manager = WorkflowManager(
+            manager = GoogleADKWorkflowManager(
                 agent_configs=agent_configs,
                 settings=mock_settings,
             )
@@ -527,12 +527,12 @@ class TestWorkflowManagerLifecycle:
         self, mock_settings, agent_configs
     ):
         """Test reinitialize can discard sessions."""
-        from agentic_cli.workflow.manager import WorkflowManager
+        from agentic_cli.workflow.adk_manager import GoogleADKWorkflowManager
 
         with patch.object(
-            WorkflowManager, "initialize_services", new_callable=AsyncMock
+            GoogleADKWorkflowManager, "initialize_services", new_callable=AsyncMock
         ):
-            manager = WorkflowManager(
+            manager = GoogleADKWorkflowManager(
                 agent_configs=agent_configs,
                 settings=mock_settings,
             )
