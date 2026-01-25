@@ -15,6 +15,7 @@ For resilience patterns, use tenacity, pybreaker, aiolimiter directly.
 """
 
 from agentic_cli.tools.executor import SafePythonExecutor, MockPythonExecutor
+from agentic_cli.tools.shell import shell_executor
 from agentic_cli.tools.standard import (
     search_knowledge_base,
     ingest_to_knowledge_base,
@@ -51,6 +52,8 @@ __all__ = [
     # Executor classes
     "SafePythonExecutor",
     "MockPythonExecutor",
+    # Shell executor
+    "shell_executor",
     # Search (ADK built-in)
     "google_search_tool",
     # Standard tool functions (ready to use with agents)
