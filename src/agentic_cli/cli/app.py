@@ -233,19 +233,24 @@ class BaseCLIApp(ABC):
     Base CLI Application for agentic applications.
 
     Domain-specific applications extend this class and implement:
-    - get_app_info(): Provide app name, version, welcome message
     - get_settings(): Provide domain-specific settings
     - create_workflow_manager(): Create domain-specific workflow manager
     - register_commands(): Register domain-specific commands (optional)
     """
 
-    def __init__(self, settings: BaseSettings | None = None) -> None:
+    def __init__(
+        self,
+        app_info: AppInfo,
+        settings: BaseSettings | None = None,
+    ) -> None:
         """Initialize the CLI application.
 
         Args:
+            app_info: Application info (name, version, welcome message)
             settings: Optional settings override
         """
         # === Configuration ===
+        self._app_info = app_info
         self._settings = settings or self.get_settings()
         configure_logging(self._settings)
 
@@ -269,7 +274,7 @@ class BaseCLIApp(ABC):
 
         self.session = ThinkingPromptSession(
             message=">>> ",
-            app_info=self.get_app_info(),
+            app_info=self._app_info,
             styles=self.get_styles(),
             history=InMemoryHistory(),
             completer=completer,
@@ -285,14 +290,10 @@ class BaseCLIApp(ABC):
 
         logger.debug("app_initialized_fast")
 
-    @abstractmethod
-    def get_app_info(self) -> AppInfo:
-        """Get the application info for ThinkingPromptSession.
-
-        Domain projects implement this to provide their app name,
-        version, and welcome message.
-        """
-        ...
+    @property
+    def app_info(self) -> AppInfo:
+        """Get the application info."""
+        return self._app_info
 
     @abstractmethod
     def get_settings(self) -> BaseSettings:

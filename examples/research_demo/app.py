@@ -27,6 +27,32 @@ from examples.research_demo.tools import set_demo_state
 logger = Loggers.cli()
 
 
+def _create_app_info() -> AppInfo:
+    """Create the application info for the welcome message."""
+    text = Text()
+    text.append("Research Demo\n\n", style="bold cyan")
+    text.append("A research assistant with memory and planning capabilities.\n\n", style="dim")
+    text.append("Features:\n", style="bold")
+    text.append("  - Working memory (session context)\n", style="dim")
+    text.append("  - Long-term memory (persistent learnings)\n", style="dim")
+    text.append("  - Task planning (research plans)\n", style="dim")
+    text.append("  - File operations (save/compare findings)\n", style="dim")
+    text.append("  - Shell commands (safe execution)\n", style="dim")
+    text.append("\n")
+    text.append("Commands:\n", style="bold")
+    text.append("  /memory  - Show memory state\n", style="cyan")
+    text.append("  /plan    - Show task plan\n", style="cyan")
+    text.append("  /files   - List saved findings\n", style="cyan")
+    text.append("  /help    - All commands\n", style="cyan")
+
+    return AppInfo(
+        name="Research Demo",
+        version="0.1.0",
+        welcome_message=lambda: Panel(text, border_style="cyan"),
+        echo_thinking=True,
+    )
+
+
 class ResearchDemoApp(BaseCLIApp):
     """Research Demo CLI Application.
 
@@ -47,8 +73,8 @@ class ResearchDemoApp(BaseCLIApp):
         self._approval_manager: ApprovalManager | None = None
         self._checkpoint_manager: CheckpointManager | None = None
 
-        # Call parent __init__ which will call get_settings(), create_workflow_manager(), etc.
-        super().__init__(settings)
+        # Call parent __init__ with app_info
+        super().__init__(app_info=_create_app_info(), settings=settings)
 
         # Now initialize our managers with the resolved settings
         self._init_feature_managers()
@@ -115,31 +141,6 @@ class ResearchDemoApp(BaseCLIApp):
     def checkpoint_manager(self) -> CheckpointManager | None:
         """Access the checkpoint manager."""
         return self._checkpoint_manager
-
-    def get_app_info(self) -> AppInfo:
-        """Get application info for the welcome message."""
-        text = Text()
-        text.append("Research Demo\n\n", style="bold cyan")
-        text.append("A research assistant with memory and planning capabilities.\n\n", style="dim")
-        text.append("Features:\n", style="bold")
-        text.append("  - Working memory (session context)\n", style="dim")
-        text.append("  - Long-term memory (persistent learnings)\n", style="dim")
-        text.append("  - Task planning (research plans)\n", style="dim")
-        text.append("  - File operations (save/compare findings)\n", style="dim")
-        text.append("  - Shell commands (safe execution)\n", style="dim")
-        text.append("\n")
-        text.append("Commands:\n", style="bold")
-        text.append("  /memory  - Show memory state\n", style="cyan")
-        text.append("  /plan    - Show task plan\n", style="cyan")
-        text.append("  /files   - List saved findings\n", style="cyan")
-        text.append("  /help    - All commands\n", style="cyan")
-
-        return AppInfo(
-            name="Research Demo",
-            version="0.1.0",
-            welcome_message=lambda: Panel(text, border_style="cyan"),
-            echo_thinking=True,
-        )
 
     def get_settings(self) -> ResearchDemoSettings:
         """Get the application settings."""

@@ -100,21 +100,26 @@ AGENT_CONFIGS = [
 # Application
 # =============================================================================
 
+def _create_app_info() -> AppInfo:
+    """Create the application info for the welcome message."""
+    text = Text()
+    text.append("Hello LangGraph\n\n", style="bold magenta")
+    text.append("Orchestrator: LangGraph\n", style="dim")
+    text.append("Tools: get_current_time, calculate, echo\n", style="dim")
+    text.append("Type /help for commands", style="dim")
+    return AppInfo(
+        name="Hello LangGraph",
+        version="0.1.0",
+        welcome_message=lambda: Panel(text, border_style="magenta"),
+        echo_thinking=False,
+    )
+
+
 class HelloLangGraphApp(BaseCLIApp):
     """Example CLI app using LangGraph for orchestration."""
 
-    def get_app_info(self) -> AppInfo:
-        text = Text()
-        text.append("Hello LangGraph\n\n", style="bold magenta")
-        text.append("Orchestrator: LangGraph\n", style="dim")
-        text.append("Tools: get_current_time, calculate, echo\n", style="dim")
-        text.append("Type /help for commands", style="dim")
-        return AppInfo(
-            name="Hello LangGraph",
-            version="0.1.0",
-            welcome_message=lambda: Panel(text, border_style="magenta"),
-            echo_thinking=False,
-        )
+    def __init__(self, settings: Settings | None = None) -> None:
+        super().__init__(app_info=_create_app_info(), settings=settings)
 
     def get_settings(self) -> Settings:
         return get_settings()
