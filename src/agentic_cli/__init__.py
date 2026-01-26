@@ -38,6 +38,9 @@ from agentic_cli.config import (
     reload_settings,
 )
 from agentic_cli.resolvers import ModelResolver, PathResolver
+from agentic_cli.settings_persistence import SettingsPersistence
+from agentic_cli.workflow.settings import WorkflowSettingsMixin
+from agentic_cli.cli.settings import CLISettingsMixin
 from agentic_cli.config_mixins import (
     KnowledgeBaseMixin,
     PythonExecutorMixin,
@@ -83,16 +86,20 @@ __all__ = [
     "BaseSettings",
     "SettingsContext",
     "SettingsValidationError",
+    "SettingsPersistence",
     "get_settings",
     "set_settings",
     "set_context_settings",
     "get_context_settings",
     "validate_settings",
     "reload_settings",
+    # Settings Mixins (organized settings by domain)
+    "WorkflowSettingsMixin",
+    "CLISettingsMixin",
     # Resolvers (SRP-compliant model/path resolution)
     "ModelResolver",
     "PathResolver",
-    # Configuration Mixins (ISP-compliant optional features)
+    # Configuration Mixins (backward compatibility)
     "KnowledgeBaseMixin",
     "PythonExecutorMixin",
     "PersistenceMixin",

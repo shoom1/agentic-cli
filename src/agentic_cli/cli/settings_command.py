@@ -1,65 +1,45 @@
-"""Settings command for configuring model and thinking effort."""
+"""Settings command for configuring application settings.
 
-from typing import TYPE_CHECKING, Any
+Uses introspection to automatically generate UI controls from Pydantic fields.
+Apps can customize which settings appear by overriding get_ui_setting_keys().
+"""
 
-from thinking_prompt import (
-    CheckboxItem,
-    DropdownItem,
-    InlineSelectItem,
-    SettingsDialog,
-)
+from typing import TYPE_CHECKING
+
+from thinking_prompt import SettingsDialog
 
 from agentic_cli.cli.commands import Command, CommandCategory
-from agentic_cli.config import THINKING_EFFORT_LEVELS
 
 if TYPE_CHECKING:
     from agentic_cli.cli.app import BaseCLIApp
 
 
 class SettingsCommand(Command):
-    """Open settings dialog to configure model and thinking effort."""
+    """Open settings dialog to configure application settings.
+
+    Uses the app's get_ui_setting_keys() method to determine which settings
+    to display, and _build_ui_items() to generate the appropriate UI controls
+    based on field types and metadata.
+    """
 
     def __init__(self) -> None:
         super().__init__(
             name="settings",
-            description="Configure model and thinking effort settings",
+            description="Configure application settings",
             aliases=["set", "config"],
             category=CommandCategory.SETTINGS,
         )
 
     async def execute(self, args: str, app: "BaseCLIApp") -> None:
         """Open interactive settings dialog."""
-        settings = app.settings
-        available_models = list(settings.get_available_models())
-        current_model = settings.get_model()
-        current_effort = settings.thinking_effort
+        # Build UI items using introspection
+        items = app._build_ui_items()
 
-        if not available_models:
-            app.session.add_error("No models available. Please configure API keys.")
+        if not items:
+            app.session.add_error(
+                "No settings available. Please configure API keys first."
+            )
             return
-
-        items = [
-            DropdownItem(
-                key="model",
-                label="Model",
-                description="Select the AI model to use",
-                options=available_models,
-                default=current_model,
-            ),
-            InlineSelectItem(
-                key="thinking_effort",
-                label="Thinking Effort",
-                description="Controls depth of reasoning",
-                options=list(THINKING_EFFORT_LEVELS),
-                default=current_effort,
-            ),
-            CheckboxItem(
-                key="log_activity",
-                label="Log Activity",
-                description="Save conversation to file for audit",
-                default=settings.log_activity,
-            ),
-        ]
 
         dialog = SettingsDialog(
             title="Settings",
@@ -72,4 +52,12 @@ class SettingsCommand(Command):
             app.session.add_message("system", "Settings unchanged.")
             return
 
+        # Apply settings changes
         await app.apply_settings(result)
+
+        # Save settings to project config file
+        try:
+            path = await app.save_settings()
+            app.session.add_success(f"Settings saved to {path}")
+        except Exception as e:
+            app.session.add_warning(f"Settings applied but not saved: {e}")

@@ -28,6 +28,7 @@ from agentic_cli.config import BaseSettings
 from agentic_cli.logging import Loggers, configure_logging, bind_context
 
 if TYPE_CHECKING:
+    from pathlib import Path
     from agentic_cli.workflow import GoogleADKWorkflowManager, EventType, WorkflowEvent
     from agentic_cli.workflow.base_manager import BaseWorkflowManager
     from agentic_cli.workflow.config import AgentConfig
@@ -335,6 +336,89 @@ class BaseCLIApp(ABC):
         Override to register additional commands.
         """
         pass
+
+    def get_ui_setting_keys(self) -> list[str]:
+        """Get field names to display in the settings dialog.
+
+        Override to customize which settings appear in the UI.
+        Default: model, thinking_effort, log_activity
+
+        Returns:
+            List of field names that should appear in the settings UI
+        """
+        return ["model", "thinking_effort", "log_activity"]
+
+    def _build_ui_items(self) -> list[Any]:
+        """Build UI items from settings fields using introspection.
+
+        Uses get_ui_setting_keys() to determine which fields to show,
+        then converts each field to an appropriate UI control using
+        the field's type annotation and metadata.
+
+        Returns:
+            List of thinking_prompt UI items sorted by ui_order
+        """
+        from agentic_cli.cli.settings_introspection import field_to_ui_item, get_ui_order
+
+        items: list[tuple[int, Any]] = []
+
+        for key in self.get_ui_setting_keys():
+            # Handle special 'model' field with dynamic options
+            if key == "model":
+                available_models = list(self._settings.get_available_models())
+                if not available_models:
+                    continue  # Skip if no models available
+
+                # Get current model
+                try:
+                    current_model = self._settings.get_model()
+                except RuntimeError:
+                    current_model = None
+
+                # Create a synthetic field for model selection
+                from pydantic.fields import FieldInfo
+                model_field = FieldInfo(
+                    default=None,
+                    title="Model",
+                    description="Select the AI model to use",
+                    json_schema_extra={"ui_order": 10},
+                )
+                item = field_to_ui_item(
+                    key="model",
+                    field=model_field,
+                    current_value=current_model,
+                    dynamic_options=available_models,
+                )
+                items.append((10, item))
+                continue
+
+            # Handle regular fields from settings
+            # Access model_fields from class to avoid Pydantic deprecation warning
+            settings_cls = type(self._settings)
+            if key in settings_cls.model_fields:
+                field = settings_cls.model_fields[key]
+                current = getattr(self._settings, key, None)
+                item = field_to_ui_item(key, field, current)
+                order = get_ui_order(field)
+                items.append((order, item))
+
+        # Sort by order and return items only
+        return [item for _, item in sorted(items, key=lambda x: x[0])]
+
+    async def save_settings(self) -> "Path":
+        """Save current settings to project config file (./settings.json).
+
+        Uses SettingsPersistence to save non-default settings to the
+        project-level config file. Secrets (API keys) are never saved.
+
+        Returns:
+            Path to the saved config file
+        """
+        from pathlib import Path
+        from agentic_cli.settings_persistence import SettingsPersistence
+
+        persistence = SettingsPersistence(self._settings.app_name)
+        return persistence.save(self._settings)
 
     @property
     def workflow(self) -> "BaseWorkflowManager":

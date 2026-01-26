@@ -14,15 +14,26 @@ Settings Management:
         with SettingsContext(my_settings):
             # Code here sees my_settings via get_settings()
             settings = get_settings()  # Returns my_settings
+
+Settings Loading Priority (highest to lowest):
+    1. Environment variables (AGENTIC_* prefix)
+    2. Project config (./settings.json)
+    3. User config (~/.appname/settings.json)
+    4. .env file
+    5. Default values
 """
 
 from contextvars import ContextVar
 from pathlib import Path
-from typing import Literal, Generator
+from typing import Literal, Generator, Any, Tuple, Type
 from contextlib import contextmanager
 
 from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings as PydanticBaseSettings, SettingsConfigDict
+from pydantic_settings import (
+    BaseSettings as PydanticBaseSettings,
+    SettingsConfigDict,
+    PydanticBaseSettingsSource,
+)
 
 from agentic_cli.resolvers import (
     ModelResolver,
@@ -32,6 +43,8 @@ from agentic_cli.resolvers import (
     ALL_MODELS,
     THINKING_EFFORT_LEVELS,
 )
+from agentic_cli.workflow.settings import WorkflowSettingsMixin
+from agentic_cli.cli.settings import CLISettingsMixin
 
 # Re-export for backward compatibility
 __all__ = [
@@ -53,7 +66,31 @@ __all__ = [
 ]
 
 
-class BaseSettings(PydanticBaseSettings):
+def _get_json_config_source(
+    settings_cls: Type[PydanticBaseSettings],
+    json_file: Path,
+) -> PydanticBaseSettingsSource | None:
+    """Create a JSON config source if the file exists.
+
+    Args:
+        settings_cls: The settings class
+        json_file: Path to JSON config file
+
+    Returns:
+        JsonConfigSettingsSource if file exists, None otherwise
+    """
+    if not json_file.exists():
+        return None
+
+    try:
+        from pydantic_settings import JsonConfigSettingsSource
+        return JsonConfigSettingsSource(settings_cls, json_file=json_file)
+    except ImportError:
+        # Older pydantic-settings without JsonConfigSettingsSource
+        return None
+
+
+class BaseSettings(WorkflowSettingsMixin, CLISettingsMixin, PydanticBaseSettings):
     """Base settings for agentic CLI applications.
 
     Domain-specific applications extend this class and override:
@@ -63,17 +100,24 @@ class BaseSettings(PydanticBaseSettings):
 
     Settings are loaded from (in order of precedence):
     1. Environment variables (with domain-specific prefix)
-    2. Domain-specific .env file
-    3. Default values
+    2. Project config (./settings.json)
+    3. User config (~/.appname/settings.json)
+    4. Domain-specific .env file
+    5. Default values
+
+    Mixins provide organized settings:
+    - WorkflowSettingsMixin: Model, orchestrator, retry settings
+    - CLISettingsMixin: Logging, activity, user settings
     """
 
     model_config = SettingsConfigDict(
         env_prefix="AGENTIC_",
         env_file_encoding="utf-8",
+        env_nested_delimiter="__",
         extra="ignore",
     )
 
-    # API Keys (common across all domains)
+    # API Keys (common across all domains, never saved to JSON)
     google_api_key: str | None = Field(
         default=None,
         description="Google API key for Gemini models",
@@ -84,95 +128,100 @@ class BaseSettings(PydanticBaseSettings):
         description="Anthropic API key for Claude models",
         validation_alias="ANTHROPIC_API_KEY",
     )
-
-    # Model Configuration
-    default_model: str | None = Field(
-        default=None,
-        description="Default model to use (auto-detected if not set)",
-    )
-    thinking_effort: Literal["none", "low", "medium", "high"] = Field(
-        default="medium",
-        description="Thinking effort level for models that support extended thinking",
-    )
-
-    # Paths (domain projects should override workspace_dir default)
-    workspace_dir: Path = Field(
-        default_factory=lambda: Path.home() / ".agentic",
-        description="Directory for storing artifacts and sessions",
-    )
-
-    # Logging
-    log_level: Literal["debug", "info", "warning", "error"] = Field(
-        default="warning",
-        description="Logging level",
-    )
-    log_format: Literal["console", "json"] = Field(
-        default="console",
-        description="Log output format (console for dev, json for production)",
-    )
-
-    # Application (domain projects should override)
-    app_name: str = Field(
-        default="agentic_cli",
-        description="Application name for agent services",
-    )
-    default_user: str = Field(
-        default="default_user",
-        description="Default user identifier",
-    )
-
-    # Orchestrator Selection
-    orchestrator: Literal["adk", "langgraph"] = Field(
-        default="adk",
-        description="Workflow orchestrator backend (adk=Google ADK, langgraph=LangGraph)",
-    )
-    langgraph_checkpointer: Literal["memory", "postgres"] | None = Field(
-        default="memory",
-        description="LangGraph checkpointer type for state persistence",
-    )
-
-    # Activity Logging
-    log_activity: bool = Field(
-        default=False,
-        description="Log conversation activity to file for audit purposes",
-    )
-
-    # Knowledge Base & Exploration
-    embedding_model: str = Field(
-        default="all-MiniLM-L6-v2",
-        description="Sentence transformer model for embeddings",
-    )
-    embedding_batch_size: int = Field(
-        default=32,
-        description="Batch size for embedding generation",
-    )
-    knowledge_base_use_mock: bool = Field(
-        default=False,
-        description="Use mock knowledge base (no ML dependencies required)",
-    )
     serper_api_key: str | None = Field(
         default=None,
         description="Serper.dev API key for web search",
         validation_alias="SERPER_API_KEY",
     )
-    python_executor_timeout: int = Field(
-        default=30,
-        description="Default timeout for Python execution (seconds)",
+
+    # Application identity (domain projects should override)
+    app_name: str = Field(
+        default="agentic_cli",
+        title="App Name",
+        description="Application name for agent services",
+        json_schema_extra={"ui_order": 200},  # Not typically shown in UI
     )
 
-    # Retry Configuration
-    retry_max_attempts: int = Field(
-        default=3,
-        description="Maximum retry attempts for transient errors",
+    # Paths (domain projects should override workspace_dir default)
+    workspace_dir: Path = Field(
+        default_factory=lambda: Path.home() / ".agentic",
+        title="Workspace Directory",
+        description="Directory for storing artifacts and sessions",
+        json_schema_extra={"ui_order": 201},
     )
-    retry_initial_delay: float = Field(
-        default=2.0,
-        description="Initial delay in seconds before first retry",
+
+    # Knowledge Base & Exploration (optional feature settings)
+    embedding_model: str = Field(
+        default="all-MiniLM-L6-v2",
+        title="Embedding Model",
+        description="Sentence transformer model for embeddings",
+        json_schema_extra={"ui_order": 150},
     )
-    retry_backoff_factor: float = Field(
-        default=2.0,
-        description="Multiplier for exponential backoff between retries",
+    embedding_batch_size: int = Field(
+        default=32,
+        title="Embedding Batch Size",
+        description="Batch size for embedding generation",
+        json_schema_extra={"ui_order": 151},
     )
+    knowledge_base_use_mock: bool = Field(
+        default=False,
+        title="Use Mock Knowledge Base",
+        description="Use mock knowledge base (no ML dependencies required)",
+        json_schema_extra={"ui_order": 152},
+    )
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: Type[PydanticBaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> Tuple[PydanticBaseSettingsSource, ...]:
+        """Customize settings sources for layered JSON configuration.
+
+        Priority (highest to lowest):
+            1. init_settings (constructor arguments)
+            2. env_settings (environment variables)
+            3. project_json (./settings.json)
+            4. user_json (~/.app_name/settings.json)
+            5. dotenv_settings (.env file)
+
+        Note: JSON sources are only included if the files exist.
+        """
+        sources: list[PydanticBaseSettingsSource] = [
+            init_settings,
+            env_settings,
+        ]
+
+        # Add project-level JSON config (./settings.json)
+        project_json = _get_json_config_source(
+            settings_cls,
+            Path.cwd() / "settings.json",
+        )
+        if project_json:
+            sources.append(project_json)
+
+        # Add user-level JSON config (~/.app_name/settings.json)
+        # Get app_name from class default or model_fields
+        app_name = "agentic_cli"
+        if hasattr(cls, "model_fields") and "app_name" in cls.model_fields:
+            field_info = cls.model_fields["app_name"]
+            if field_info.default and field_info.default != ...:
+                app_name = field_info.default
+
+        user_json = _get_json_config_source(
+            settings_cls,
+            Path.home() / f".{app_name}" / "settings.json",
+        )
+        if user_json:
+            sources.append(user_json)
+
+        # Add dotenv settings
+        sources.append(dotenv_settings)
+
+        return tuple(sources)
 
     @field_validator("workspace_dir", mode="before")
     @classmethod
@@ -416,7 +465,7 @@ def get_context_settings() -> BaseSettings | None:
 
 
 # Context variable for workflow manager (allows tools to request user input)
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from agentic_cli.workflow.base_manager import BaseWorkflowManager

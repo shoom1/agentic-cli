@@ -1,78 +1,64 @@
 """Configuration mixins for optional features.
 
-These mixins allow domain applications to opt-in to specific features
-without inheriting unnecessary configuration from BaseSettings.
+NOTE: As of v0.3.0, most settings have been consolidated into BaseSettings
+with organized mixins (WorkflowSettingsMixin, CLISettingsMixin). These mixins
+are kept for backward compatibility but may be deprecated in a future version.
 
-This addresses the Interface Segregation Principle (ISP) - clients should
-not be forced to depend on interfaces they don't use.
+The recommended approach is now:
+    - Use BaseSettings directly (includes all common settings)
+    - Override get_ui_setting_keys() in your app to control which settings appear in UI
 
-Usage:
+Legacy Usage:
     # Basic app - just CLI + workflow
     class MySettings(BaseSettings):
         pass
 
-    # App with knowledge base support
+    # App with knowledge base support (backward compatible)
     class MySettings(KnowledgeBaseMixin, BaseSettings):
-        pass
-
-    # App with full features
-    class MySettings(KnowledgeBaseMixin, PersistenceMixin, BaseSettings):
         pass
 """
 
 from pathlib import Path
-from typing import TYPE_CHECKING
-
-from pydantic import Field
-
-if TYPE_CHECKING:
-    pass
 
 
 class KnowledgeBaseMixin:
     """Mixin for knowledge base configuration.
 
-    Adds settings for semantic search, embeddings, and document management.
-    Use this mixin when your application needs the knowledge base feature.
+    NOTE: These fields are now included in BaseSettings by default.
+    This mixin is kept for backward compatibility only.
+
+    The following fields are available in BaseSettings:
+    - embedding_model
+    - embedding_batch_size
+    - knowledge_base_use_mock
+    - serper_api_key
     """
 
-    embedding_model: str = Field(
-        default="all-MiniLM-L6-v2",
-        description="Sentence transformer model for embeddings",
-    )
-    embedding_batch_size: int = Field(
-        default=32,
-        description="Batch size for embedding generation",
-    )
-    knowledge_base_use_mock: bool = Field(
-        default=False,
-        description="Use mock knowledge base (no ML dependencies required)",
-    )
-    serper_api_key: str | None = Field(
-        default=None,
-        description="Serper.dev API key for web search",
-        validation_alias="SERPER_API_KEY",
-    )
+    pass  # Fields now in BaseSettings
 
 
 class PythonExecutorMixin:
     """Mixin for Python code execution configuration.
 
-    Adds settings for safe Python code execution.
-    Use this mixin when your application needs to execute Python code.
+    NOTE: These fields are now included in WorkflowSettingsMixin
+    which is composed into BaseSettings by default.
+    This mixin is kept for backward compatibility only.
+
+    The following fields are available in BaseSettings:
+    - python_executor_timeout
     """
 
-    python_executor_timeout: int = Field(
-        default=30,
-        description="Default timeout for Python execution (seconds)",
-    )
+    pass  # Fields now in WorkflowSettingsMixin -> BaseSettings
 
 
 class PersistenceMixin:
     """Mixin for session persistence configuration.
 
-    Adds settings and path resolution for session storage.
-    Use this mixin when your application needs session save/load.
+    NOTE: These properties are now available in BaseSettings via PathResolver.
+    This mixin is kept for backward compatibility only.
+
+    The following properties are available in BaseSettings:
+    - sessions_dir
     """
 
     @property
@@ -85,8 +71,13 @@ class PersistenceMixin:
 class ArtifactsMixin:
     """Mixin for artifact management configuration.
 
-    Adds settings and path resolution for artifact storage.
-    Use this mixin when your application generates artifacts.
+    NOTE: These properties are now available in BaseSettings via PathResolver.
+    This mixin is kept for backward compatibility only.
+
+    The following properties are available in BaseSettings:
+    - artifacts_dir
+    - templates_dir
+    - reports_dir
     """
 
     @property
@@ -113,11 +104,16 @@ class FullFeaturesMixin(
 ):
     """Convenience mixin that includes all optional features.
 
-    For applications that need the complete feature set.
+    NOTE: All these features are now included in BaseSettings by default.
+    This mixin is kept for backward compatibility only.
 
-    Usage:
+    Usage (deprecated):
         class MySettings(FullFeaturesMixin, BaseSettings):
             pass
+
+    Recommended:
+        class MySettings(BaseSettings):
+            pass  # All features included by default
     """
 
     pass

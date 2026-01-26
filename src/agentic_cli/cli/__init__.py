@@ -10,6 +10,7 @@ from agentic_cli.cli.commands import (
     create_simple_command,
 )
 from agentic_cli.cli.app import BaseCLIApp
+from agentic_cli.cli.settings import CLISettingsMixin
 
 __all__ = [
     "AppInfo",
@@ -19,4 +20,5 @@ __all__ = [
     "CommandRegistry",
     "ParsedArgs",
     "create_simple_command",
+    "CLISettingsMixin",
 ]
