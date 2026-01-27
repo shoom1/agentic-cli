@@ -2,18 +2,24 @@
 
 This module defines the interface that all workflow orchestration backends
 must implement, enabling pluggable orchestrators (ADK, LangGraph, etc.).
+
+The base class provides auto-detection of required managers (memory, planning,
+HITL) based on tool requirements, creating them lazily when needed.
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import AsyncGenerator, TYPE_CHECKING
+from typing import Any, AsyncGenerator, TYPE_CHECKING
 
 from agentic_cli.workflow.events import WorkflowEvent, UserInputRequest
 from agentic_cli.workflow.config import AgentConfig
 
 if TYPE_CHECKING:
     from agentic_cli.config import BaseSettings
+    from agentic_cli.memory import MemoryManager
+    from agentic_cli.planning import TaskGraph
+    from agentic_cli.hitl import ApprovalManager, CheckpointManager
 
 
 class BaseWorkflowManager(ABC):
@@ -63,6 +69,15 @@ class BaseWorkflowManager(ABC):
         self._model_override = model
         self._initialized = False
 
+        # Auto-detect required managers from tools
+        self._required_managers = self._detect_required_managers()
+
+        # Manager slots (created lazily by _ensure_managers_initialized)
+        self._memory_manager: "MemoryManager | None" = None
+        self._task_graph: "TaskGraph | None" = None
+        self._approval_manager: "ApprovalManager | None" = None
+        self._checkpoint_manager: "CheckpointManager | None" = None
+
     @property
     def agent_configs(self) -> list[AgentConfig]:
         """Get the agent configurations."""
@@ -82,6 +97,77 @@ class BaseWorkflowManager(ABC):
     def is_initialized(self) -> bool:
         """Check if services have been initialized."""
         return self._initialized
+
+    @property
+    def required_managers(self) -> set[str]:
+        """Get the set of required manager types detected from tools."""
+        return self._required_managers
+
+    @property
+    def memory_manager(self) -> "MemoryManager | None":
+        """Get the memory manager (if required by tools)."""
+        return self._memory_manager
+
+    @property
+    def task_graph(self) -> "TaskGraph | None":
+        """Get the task graph (if required by tools)."""
+        return self._task_graph
+
+    @property
+    def approval_manager(self) -> "ApprovalManager | None":
+        """Get the approval manager (if required by tools)."""
+        return self._approval_manager
+
+    @property
+    def checkpoint_manager(self) -> "CheckpointManager | None":
+        """Get the checkpoint manager (if required by tools)."""
+        return self._checkpoint_manager
+
+    def _detect_required_managers(self) -> set[str]:
+        """Scan all agent tools for 'requires' metadata.
+
+        Tools decorated with @requires("memory_manager") etc. will have
+        their requirements detected here.
+
+        Returns:
+            Set of required manager types.
+        """
+        required: set[str] = set()
+        for config in self._agent_configs:
+            for tool in config.tools or []:
+                if hasattr(tool, "requires"):
+                    required.update(tool.requires)
+        return required
+
+    def _ensure_managers_initialized(self) -> None:
+        """Create managers based on detected requirements.
+
+        Called during initialize_services() to lazily create only the
+        managers that are actually needed by the configured tools.
+        """
+        if "memory_manager" in self._required_managers and self._memory_manager is None:
+            from agentic_cli.memory import MemoryManager
+            self._memory_manager = MemoryManager(self._settings)
+
+        if "task_graph" in self._required_managers and self._task_graph is None:
+            from agentic_cli.planning import TaskGraph
+            self._task_graph = TaskGraph()
+
+        if "approval_manager" in self._required_managers and self._approval_manager is None:
+            from agentic_cli.hitl import ApprovalManager, HITLConfig, ApprovalRule
+            # Build config from settings
+            hitl_config = HITLConfig(
+                approval_rules=[
+                    ApprovalRule(**r) for r in getattr(self._settings, "hitl_default_rules", [])
+                ],
+                checkpoint_enabled=getattr(self._settings, "hitl_checkpoint_enabled", True),
+                feedback_enabled=getattr(self._settings, "hitl_feedback_enabled", True),
+            )
+            self._approval_manager = ApprovalManager(hitl_config)
+
+        if "checkpoint_manager" in self._required_managers and self._checkpoint_manager is None:
+            from agentic_cli.hitl import CheckpointManager
+            self._checkpoint_manager = CheckpointManager()
 
     @property
     @abstractmethod

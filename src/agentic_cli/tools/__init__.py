@@ -9,10 +9,50 @@ Tool System:
     - ToolResult: Standard result wrapper
     - ToolRegistry: Registry for tool management and discovery
     - register_tool: Decorator for easy tool registration
+    - requires: Decorator to declare tool's manager requirements
+
+Framework Tools:
+    - memory_tools: Working and long-term memory tools
+    - planning_tools: Task graph management tools
+    - hitl_tools: Human-in-the-loop checkpoint and approval tools
 
 For web search, use google_search_tool directly from google.adk.tools.
 For resilience patterns, use tenacity, pybreaker, aiolimiter directly.
 """
+
+from typing import Callable, Literal, TypeVar
+
+# Type for manager requirements
+ManagerRequirement = Literal[
+    "memory_manager", "task_graph", "approval_manager", "checkpoint_manager"
+]
+
+F = TypeVar("F", bound=Callable)
+
+
+def requires(*managers: ManagerRequirement) -> Callable[[F], F]:
+    """Decorator to declare a tool's manager requirements.
+
+    Framework tools use this to declare what managers they need.
+    The workflow manager scans tools for this metadata and auto-creates
+    the required managers.
+
+    Args:
+        *managers: One or more manager requirements.
+
+    Returns:
+        Decorator that adds 'requires' attribute to the function.
+
+    Example:
+        @requires("memory_manager")
+        def remember_context(key: str, value: str) -> dict:
+            manager = get_context_memory_manager()
+            ...
+    """
+    def decorator(func: F) -> F:
+        func.requires = list(managers)  # type: ignore[attr-defined]
+        return func
+    return decorator
 
 from agentic_cli.tools.executor import SafePythonExecutor, MockPythonExecutor
 from agentic_cli.tools.shell import shell_executor
@@ -50,6 +90,9 @@ __all__ = [
     "get_registry",
     "register_tool",
     "with_result_wrapper",
+    # Manager requirements decorator
+    "requires",
+    "ManagerRequirement",
     # Executor classes
     "SafePythonExecutor",
     "MockPythonExecutor",
@@ -66,4 +109,27 @@ __all__ = [
     "search_arxiv",
     "execute_python",
     "ask_clarification",
+    # Framework tool modules (lazy loaded)
+    "memory_tools",
+    "planning_tools",
+    "hitl_tools",
 ]
+
+
+# Lazy loading for framework tool modules
+_lazy_tool_modules = {
+    "memory_tools": "agentic_cli.tools.memory_tools",
+    "planning_tools": "agentic_cli.tools.planning_tools",
+    "hitl_tools": "agentic_cli.tools.hitl_tools",
+}
+
+
+def __getattr__(name: str):
+    """Lazy import for framework tool modules."""
+    if name in _lazy_tool_modules:
+        import importlib
+
+        module = importlib.import_module(_lazy_tool_modules[name])
+        globals()[name] = module  # Cache for future access
+        return module
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

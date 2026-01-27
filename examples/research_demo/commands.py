@@ -1,6 +1,7 @@
 """Status commands for the Research Demo application.
 
 Provides commands for inspecting memory, plan, files, approvals, and checkpoints.
+Managers are accessed via app.workflow which auto-creates them based on tool requirements.
 """
 
 from typing import TYPE_CHECKING
@@ -35,14 +36,17 @@ class MemoryCommand(Command):
         parsed = self.parse_args(args)
         memory_type = parsed.get_option("type")
 
+        # Access memory manager from workflow
+        memory_manager = app.workflow.memory_manager if app.workflow else None
+
         # Working Memory Section
         working_table = Table(title="Working Memory (Session)", show_header=True)
         working_table.add_column("Key", style="cyan")
         working_table.add_column("Value", style="white")
         working_table.add_column("Tags", style="dim")
 
-        if app.memory_manager:
-            working_mem = app.memory_manager.working
+        if memory_manager:
+            working_mem = memory_manager.working
             for key in working_mem.list():
                 entry = working_mem._entries.get(key)
                 if entry:
@@ -64,10 +68,10 @@ class MemoryCommand(Command):
         longterm_table.add_column("Content", style="white")
         longterm_table.add_column("Tags", style="dim")
 
-        if app.memory_manager:
+        if memory_manager:
             from agentic_cli.memory.longterm import MemoryType
 
-            longterm_mem = app.memory_manager.longterm
+            longterm_mem = memory_manager.longterm
 
             # Get all entries, optionally filtered by type
             if memory_type:
@@ -111,12 +115,15 @@ class PlanCommand(Command):
         )
 
     async def execute(self, args: str, app: "ResearchDemoApp") -> None:
-        if app.task_graph is None:
+        # Access task graph from workflow
+        task_graph = app.workflow.task_graph if app.workflow else None
+
+        if task_graph is None:
             app.session.add_message("system", "No task graph initialized")
             return
 
         # Get progress statistics
-        progress = app.task_graph.get_progress()
+        progress = task_graph.get_progress()
 
         if progress["total"] == 0:
             app.session.add_message("system", "No tasks in the plan. Ask the agent to create a research plan.")
@@ -141,7 +148,7 @@ class PlanCommand(Command):
         app.session.add_rich(progress_text)
 
         # Task display
-        display = app.task_graph.to_display()
+        display = task_graph.to_display()
         panel = Panel(display, title="Research Plan", border_style="blue")
         app.session.add_rich(panel)
 
@@ -159,11 +166,14 @@ class ApprovalsCommand(Command):
         )
 
     async def execute(self, args: str, app: "ResearchDemoApp") -> None:
-        if app.approval_manager is None:
+        # Access approval manager from workflow
+        approval_manager = app.workflow.approval_manager if app.workflow else None
+
+        if approval_manager is None:
             app.session.add_message("system", "Approval manager not initialized")
             return
 
-        pending = app.approval_manager._pending
+        pending = approval_manager._pending
 
         if not pending:
             app.session.add_message("system", "No pending approval requests")
@@ -201,12 +211,15 @@ class CheckpointsCommand(Command):
         )
 
     async def execute(self, args: str, app: "ResearchDemoApp") -> None:
-        if app.checkpoint_manager is None:
+        # Access checkpoint manager from workflow
+        checkpoint_manager = app.workflow.checkpoint_manager if app.workflow else None
+
+        if checkpoint_manager is None:
             app.session.add_message("system", "Checkpoint manager not initialized")
             return
 
-        checkpoints = app.checkpoint_manager._checkpoints
-        resolved = app.checkpoint_manager._results
+        checkpoints = checkpoint_manager._checkpoints
+        resolved = checkpoint_manager._results
 
         # Filter to unresolved checkpoints
         unresolved = {
@@ -299,8 +312,11 @@ class ClearMemoryCommand(Command):
         )
 
     async def execute(self, args: str, app: "ResearchDemoApp") -> None:
-        if app.memory_manager:
-            app.memory_manager.clear_working()
+        # Access memory manager from workflow
+        memory_manager = app.workflow.memory_manager if app.workflow else None
+
+        if memory_manager:
+            memory_manager.clear_working()
             app.session.add_success("Working memory cleared")
         else:
             app.session.add_error("Memory manager not initialized")
@@ -319,8 +335,11 @@ class ClearPlanCommand(Command):
         )
 
     async def execute(self, args: str, app: "ResearchDemoApp") -> None:
-        if app.task_graph:
-            app.task_graph._tasks.clear()
+        # Access task graph from workflow
+        task_graph = app.workflow.task_graph if app.workflow else None
+
+        if task_graph:
+            task_graph._tasks.clear()
             app.session.add_success("Task plan cleared")
         else:
             app.session.add_error("Task graph not initialized")

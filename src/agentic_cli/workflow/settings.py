@@ -1,10 +1,12 @@
 """Workflow settings mixin.
 
 Provides settings for agentic workflow configuration, independent of UI.
-These settings control model selection, orchestration, and retry behavior.
+These settings control model selection, orchestration, retry behavior,
+HITL (human-in-the-loop), and memory management.
 """
 
-from typing import Literal
+from pathlib import Path
+from typing import Any, Literal
 
 from pydantic import Field
 
@@ -73,4 +75,38 @@ class WorkflowSettingsMixin:
         title="Python Executor Timeout",
         description="Default timeout for Python execution (seconds)",
         json_schema_extra={"ui_order": 120},
+    )
+
+    # HITL (Human-in-the-Loop) settings
+    hitl_enabled: bool = Field(
+        default=True,
+        title="HITL Enabled",
+        description="Enable human-in-the-loop features (approvals, checkpoints)",
+        json_schema_extra={"ui_order": 130},
+    )
+    hitl_checkpoint_enabled: bool = Field(
+        default=True,
+        title="Checkpoints Enabled",
+        description="Enable checkpoint creation for review points",
+        json_schema_extra={"ui_order": 131},
+    )
+    hitl_feedback_enabled: bool = Field(
+        default=True,
+        title="Feedback Enabled",
+        description="Enable feedback collection at checkpoints",
+        json_schema_extra={"ui_order": 132},
+    )
+    hitl_default_rules: list[dict[str, Any]] = Field(
+        default_factory=list,
+        title="Default Approval Rules",
+        description="Default approval rules as dicts (tool, operations, auto_approve_patterns)",
+        json_schema_extra={"ui_order": 133},
+    )
+
+    # Memory settings
+    memory_persistence_path: Path | None = Field(
+        default=None,
+        title="Memory Persistence Path",
+        description="Path for persisting long-term memory (None for default)",
+        json_schema_extra={"ui_order": 140},
     )

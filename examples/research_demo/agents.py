@@ -1,28 +1,19 @@
-"""Agent configuration for the Research Demo application."""
+"""Agent configuration for the Research Demo application.
+
+Uses framework-provided memory, planning, and HITL tools with auto-detection.
+Only app-specific tools (file operations, shell) are defined locally.
+"""
 
 from agentic_cli.workflow import AgentConfig
+from agentic_cli.tools import memory_tools, planning_tools, hitl_tools
 
+# App-specific tools (file operations and shell)
 from examples.research_demo.tools import (
-    # Memory tools
-    remember_context,
-    recall_context,
-    recall_info,
-    store_learning,
-    store_fact,
-    # Planning tools
-    create_research_plan,
-    get_next_task,
-    update_task_status,
-    get_plan_progress,
-    # File tools
     save_finding,
     read_finding,
     list_findings,
     compare_versions,
-    # Shell tool
     run_safe_command,
-    # Checkpoint tool
-    create_checkpoint,
 )
 
 
@@ -35,15 +26,17 @@ RESEARCH_AGENT_PROMPT = """You are a research assistant with memory and planning
 - `recall_context(key)` - Retrieve specific context by key
 
 **Long-term Memory (Persistent)**
-- `recall_info(query, memory_type)` - Search all memory for information
-- `store_learning(content, tags)` - Save a learning for future sessions
-- `store_fact(content, tags)` - Save a fact for future sessions
+- `search_memory(query, memory_type, limit)` - Search all memory for information
+- `save_to_longterm(content, memory_type, tags)` - Save to long-term memory
+  - memory_type: "fact", "learning", "preference", or "reference"
 
 **Task Planning**
-- `create_research_plan(topic, tasks)` - Create a structured task plan
-- `get_next_task()` - Get the next task ready to work on
+- `create_plan(topic, tasks)` - Create a structured task plan
+  - tasks: list of {description, depends_on: [indices]}
+- `get_next_tasks(limit)` - Get tasks ready to work on
 - `update_task_status(task_id, status, result)` - Update task progress
-- `get_plan_progress()` - See overall plan progress
+  - status: "pending", "in_progress", "completed", "failed", "skipped"
+- `get_plan_summary()` - See overall plan progress and display
 
 **File Operations**
 - `save_finding(filename, content)` - Save research findings
@@ -62,12 +55,12 @@ RESEARCH_AGENT_PROMPT = """You are a research assistant with memory and planning
 **You MUST explicitly output results to the user, not just think about them.**
 
 After creating a plan:
-1. Call `get_plan_progress()` to get the formatted plan
+1. Call `get_plan_summary()` to get the formatted plan
 2. OUTPUT the plan display to the user in your response
 3. Ask: "Would you like me to proceed with this plan?"
 
 After completing each task:
-1. Call `get_plan_progress()` to show updated progress
+1. Call `get_plan_summary()` to show updated progress
 2. OUTPUT the progress to the user
 3. Share what you learned from that task
 
@@ -79,12 +72,12 @@ After completing each task:
 ## Workflow Guidelines
 
 When the user asks you to research something:
-1. Check memory with `recall_info` for existing knowledge
-2. Create a task plan with `create_research_plan`
-3. **IMMEDIATELY show the plan** using `get_plan_progress()` and OUTPUT the display field
+1. Check memory with `search_memory` for existing knowledge
+2. Create a task plan with `create_plan`
+3. **IMMEDIATELY show the plan** using `get_plan_summary()` and OUTPUT the display field
 4. **WAIT for user confirmation** before executing tasks
 5. Execute ONE task at a time, showing progress after each
-6. Store learnings with `store_learning` and share them with the user
+6. Store learnings with `save_to_longterm` and share them with the user
 7. Save findings with `save_finding` when you have substantial content
 8. Use checkpoints for significant outputs that need review
 
@@ -103,7 +96,7 @@ User: "Research the history of Python"
 Assistant response:
 "I'll create a research plan for Python's history. Let me first check what I already know...
 
-[calls recall_info, remember_context, create_research_plan, get_plan_progress]
+[calls search_memory, remember_context, create_plan, get_plan_summary]
 
 Here's the research plan I've created:
 
@@ -120,7 +113,7 @@ Would you like me to proceed with this plan?"
 
 User: "Yes, go ahead"
 
-[executes first task, calls get_plan_progress]
+[executes first task, calls get_plan_summary]
 
 "I've completed the first task. Here's what I found:
 
@@ -147,26 +140,25 @@ AGENT_CONFIGS = [
         name="research_assistant",
         prompt=RESEARCH_AGENT_PROMPT,
         tools=[
-            # Memory tools
-            remember_context,
-            recall_context,
-            recall_info,
-            store_learning,
-            store_fact,
-            # Planning tools
-            create_research_plan,
-            get_next_task,
-            update_task_status,
-            get_plan_progress,
-            # File tools
+            # Framework memory tools (auto-creates MemoryManager)
+            memory_tools.remember_context,
+            memory_tools.recall_context,
+            memory_tools.search_memory,
+            memory_tools.save_to_longterm,
+            # Framework planning tools (auto-creates TaskGraph)
+            planning_tools.create_plan,
+            planning_tools.get_next_tasks,
+            planning_tools.update_task_status,
+            planning_tools.get_plan_summary,
+            # Framework HITL tools (auto-creates CheckpointManager)
+            hitl_tools.create_checkpoint,
+            # App-specific file tools
             save_finding,
             read_finding,
             list_findings,
             compare_versions,
-            # Shell tool
+            # App-specific shell tool
             run_safe_command,
-            # Checkpoint tool
-            create_checkpoint,
         ],
         description="Research assistant with memory and planning capabilities",
     ),

@@ -10,6 +10,18 @@ from agentic_cli.workflow.events import WorkflowEvent, EventType, UserInputReque
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.thinking import ThinkingDetector, ThinkingResult
 from agentic_cli.workflow.settings import WorkflowSettingsMixin
+from agentic_cli.workflow.context import (
+    # Getters for tools
+    get_context_memory_manager,
+    get_context_task_graph,
+    get_context_approval_manager,
+    get_context_checkpoint_manager,
+    # Setters for workflow managers
+    set_context_memory_manager,
+    set_context_task_graph,
+    set_context_approval_manager,
+    set_context_checkpoint_manager,
+)
 
 # Heavy imports - lazy loaded on first access
 _lazy_imports = {
@@ -38,4 +50,14 @@ __all__ = [
     "ThinkingDetector",
     "ThinkingResult",
     "WorkflowSettingsMixin",
+    # Context getters (for tools)
+    "get_context_memory_manager",
+    "get_context_task_graph",
+    "get_context_approval_manager",
+    "get_context_checkpoint_manager",
+    # Context setters (for workflow managers)
+    "set_context_memory_manager",
+    "set_context_task_graph",
+    "set_context_approval_manager",
+    "set_context_checkpoint_manager",
 ]

@@ -32,6 +32,12 @@ from agentic_cli.config import (
     validate_settings,
     SettingsValidationError,
 )
+from agentic_cli.workflow.context import (
+    set_context_memory_manager,
+    set_context_task_graph,
+    set_context_approval_manager,
+    set_context_checkpoint_manager,
+)
 from agentic_cli.logging import Loggers, bind_context
 
 logger = Loggers.workflow()
@@ -501,11 +507,15 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             session_service=self._session_service,
         )
 
+        # Initialize feature managers based on tool requirements
+        self._ensure_managers_initialized()
+
         self._initialized = True
         logger.info(
             "services_initialized",
             model=self.model,
             agent_name=self._root_agent.name if self._root_agent else None,
+            required_managers=list(self._required_managers),
         )
 
     async def _ensure_initialized(self) -> None:
@@ -526,18 +536,26 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
 
     @contextlib.contextmanager
     def _workflow_context(self) -> Iterator[None]:
-        """Context manager for settings and workflow context.
+        """Context manager for settings, workflow, and manager contexts.
 
-        Sets context variables that allow tools to access settings
-        and the workflow manager during execution.
+        Sets context variables that allow tools to access settings,
+        the workflow manager, and feature managers during execution.
         """
         set_context_settings(self._settings)
         set_context_workflow(self)
+        set_context_memory_manager(self._memory_manager)
+        set_context_task_graph(self._task_graph)
+        set_context_approval_manager(self._approval_manager)
+        set_context_checkpoint_manager(self._checkpoint_manager)
         try:
             yield
         finally:
             set_context_settings(None)
             set_context_workflow(None)
+            set_context_memory_manager(None)
+            set_context_task_graph(None)
+            set_context_approval_manager(None)
+            set_context_checkpoint_manager(None)
 
     def _create_message(self, message: str) -> types.Content:
         """Create an ADK Content message from text.

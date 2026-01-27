@@ -1,7 +1,10 @@
 """Main application for the Research Demo.
 
-Showcases all P0/P1 features through a research assistant agent
+Showcases framework features through a research assistant agent
 with memory, planning, file operations, shell commands, and HITL.
+
+Feature managers (MemoryManager, TaskGraph, CheckpointManager) are
+auto-created by the workflow manager based on tool requirements.
 """
 
 from typing import Any
@@ -12,15 +15,11 @@ from rich.text import Text
 from agentic_cli import BaseCLIApp
 from agentic_cli.cli import AppInfo
 from agentic_cli.cli.app import MessageType
-from agentic_cli.hitl import ApprovalManager, ApprovalRule, CheckpointManager, HITLConfig
 from agentic_cli.logging import bind_context, Loggers
-from agentic_cli.memory import MemoryManager
-from agentic_cli.planning import TaskGraph
 
 from examples.research_demo.agents import AGENT_CONFIGS
 from examples.research_demo.commands import DEMO_COMMANDS
 from examples.research_demo.settings import ResearchDemoSettings, get_settings
-from examples.research_demo.tools import set_demo_state
 
 logger = Loggers.cli()
 
@@ -54,95 +53,23 @@ def _create_app_info() -> AppInfo:
 class ResearchDemoApp(BaseCLIApp):
     """Research Demo CLI Application.
 
-    Demonstrates all P0/P1 features:
+    Demonstrates framework features:
     - Memory: Working memory (session) + Long-term memory (persistent)
     - Planning: Task graphs with dependencies
     - File Operations: Save/read/compare findings
     - Shell Commands: Safe command execution
-    - HITL: Approval gates and checkpoints
+    - HITL: Checkpoints for review
+
+    Feature managers are auto-created by the workflow manager based on
+    the @requires decorators on framework tools.
     """
 
     def __init__(self, settings: ResearchDemoSettings | None = None) -> None:
-        # Initialize feature managers before super().__init__
-        # These will be configured after settings are available
-
-        self._memory_manager: MemoryManager | None = None
-        self._task_graph: TaskGraph | None = None
-        self._approval_manager: ApprovalManager | None = None
-        self._checkpoint_manager: CheckpointManager | None = None
-
-        # Call parent __init__ with app_info, agent_configs, and settings
         super().__init__(
             app_info=_create_app_info(),
             agent_configs=AGENT_CONFIGS,
             settings=settings or get_settings(),
         )
-
-        # Now initialize our managers with the resolved settings
-        self._init_feature_managers()
-
-    def _init_feature_managers(self) -> None:
-        """Initialize memory, planning, and HITL managers."""
-        # Memory Manager
-        self._memory_manager = MemoryManager(self._settings)
-
-        # Task Graph
-        self._task_graph = TaskGraph()
-
-        # HITL Config with approval rules
-        hitl_config = HITLConfig(
-            approval_rules=[
-                # Require approval for shell commands (except safe ones)
-                ApprovalRule(
-                    tool="shell_executor",
-                    operations=None,  # All operations
-                    auto_approve_patterns=[
-                        "ls*", "pwd", "cat *", "head *", "tail *",
-                        "grep *", "find *", "echo *", "date", "whoami",
-                    ],
-                ),
-                # Require approval for file writes
-                ApprovalRule(
-                    tool="file_manager",
-                    operations=["write", "delete", "move"],
-                    auto_approve_patterns=[],
-                ),
-            ],
-            checkpoint_enabled=True,
-            feedback_enabled=True,
-        )
-
-        self._approval_manager = ApprovalManager(hitl_config)
-        self._checkpoint_manager = CheckpointManager()
-
-        # Share state with tools module
-        set_demo_state(
-            memory_manager=self._memory_manager,
-            task_graph=self._task_graph,
-            approval_manager=self._approval_manager,
-            checkpoint_manager=self._checkpoint_manager,
-            settings=self._settings,
-        )
-
-    @property
-    def memory_manager(self) -> MemoryManager | None:
-        """Access the memory manager."""
-        return self._memory_manager
-
-    @property
-    def task_graph(self) -> TaskGraph | None:
-        """Access the task graph."""
-        return self._task_graph
-
-    @property
-    def approval_manager(self) -> ApprovalManager | None:
-        """Access the approval manager."""
-        return self._approval_manager
-
-    @property
-    def checkpoint_manager(self) -> CheckpointManager | None:
-        """Access the checkpoint manager."""
-        return self._checkpoint_manager
 
     def register_commands(self) -> None:
         """Register demo-specific commands."""
