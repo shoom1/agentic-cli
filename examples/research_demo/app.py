@@ -11,13 +11,11 @@ from rich.text import Text
 
 from agentic_cli import BaseCLIApp
 from agentic_cli.cli import AppInfo
-from agentic_cli.cli.app import MessageType, create_workflow_manager_from_settings
-from agentic_cli.config import set_settings
+from agentic_cli.cli.app import MessageType
 from agentic_cli.hitl import ApprovalManager, ApprovalRule, CheckpointManager, HITLConfig
 from agentic_cli.logging import bind_context, Loggers
 from agentic_cli.memory import MemoryManager
 from agentic_cli.planning import TaskGraph
-from agentic_cli.workflow.base_manager import BaseWorkflowManager
 
 from examples.research_demo.agents import AGENT_CONFIGS
 from examples.research_demo.commands import DEMO_COMMANDS
@@ -73,8 +71,12 @@ class ResearchDemoApp(BaseCLIApp):
         self._approval_manager: ApprovalManager | None = None
         self._checkpoint_manager: CheckpointManager | None = None
 
-        # Call parent __init__ with app_info
-        super().__init__(app_info=_create_app_info(), settings=settings)
+        # Call parent __init__ with app_info, agent_configs, and settings
+        super().__init__(
+            app_info=_create_app_info(),
+            agent_configs=AGENT_CONFIGS,
+            settings=settings or get_settings(),
+        )
 
         # Now initialize our managers with the resolved settings
         self._init_feature_managers()
@@ -141,19 +143,6 @@ class ResearchDemoApp(BaseCLIApp):
     def checkpoint_manager(self) -> CheckpointManager | None:
         """Access the checkpoint manager."""
         return self._checkpoint_manager
-
-    def get_settings(self) -> ResearchDemoSettings:
-        """Get the application settings."""
-        return get_settings()
-
-    def create_workflow_manager(self) -> BaseWorkflowManager:
-        """Create the workflow manager with research agent."""
-        set_settings(self._settings)
-        return create_workflow_manager_from_settings(
-            agent_configs=AGENT_CONFIGS,
-            settings=self._settings,
-            app_name="research_demo",
-        )
 
     def register_commands(self) -> None:
         """Register demo-specific commands."""

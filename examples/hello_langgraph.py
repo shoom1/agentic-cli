@@ -22,9 +22,7 @@ from pydantic_settings import SettingsConfigDict
 
 from agentic_cli import BaseCLIApp, BaseSettings
 from agentic_cli.cli import AppInfo
-from agentic_cli.config import set_settings
 from agentic_cli.workflow import AgentConfig
-from agentic_cli.workflow.langgraph_manager import LangGraphWorkflowManager
 
 
 # =============================================================================
@@ -115,23 +113,10 @@ def _create_app_info() -> AppInfo:
     )
 
 
-class HelloLangGraphApp(BaseCLIApp):
-    """Example CLI app using LangGraph for orchestration."""
-
-    def __init__(self, settings: Settings | None = None) -> None:
-        super().__init__(app_info=_create_app_info(), settings=settings)
-
-    def get_settings(self) -> Settings:
-        return get_settings()
-
-    def create_workflow_manager(self) -> LangGraphWorkflowManager:
-        set_settings(self._settings)
-        return LangGraphWorkflowManager(
-            agent_configs=AGENT_CONFIGS,
-            settings=self._settings,
-            checkpointer="memory",  # Use in-memory checkpointing
-        )
-
-
 if __name__ == "__main__":
-    asyncio.run(HelloLangGraphApp().run())
+    app = BaseCLIApp(
+        app_info=_create_app_info(),
+        agent_configs=AGENT_CONFIGS,
+        settings=get_settings(),
+    )
+    asyncio.run(app.run())

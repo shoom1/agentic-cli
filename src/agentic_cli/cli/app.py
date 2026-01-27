@@ -9,7 +9,6 @@ This module provides the base CLI application that:
 from __future__ import annotations
 
 import asyncio
-from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -228,30 +227,40 @@ def get_default_styles() -> ThinkingPromptStyles:
 # === Base CLI Application ===
 
 
-class BaseCLIApp(ABC):
+class BaseCLIApp:
     """
     Base CLI Application for agentic applications.
 
-    Domain-specific applications extend this class and implement:
-    - get_settings(): Provide domain-specific settings
-    - create_workflow_manager(): Create domain-specific workflow manager
-    - register_commands(): Register domain-specific commands (optional)
+    Domain-specific applications extend this class and provide via constructor:
+    - app_info: Application name, version, welcome message
+    - agent_configs: List of agent configurations for the workflow
+    - settings: Application settings instance
+
+    Optional overrides:
+    - register_commands(): Register domain-specific commands
+    - _create_workflow_manager(): Advanced workflow customization
+    - get_styles(): Customize UI colors
+    - get_ui_setting_keys(): Customize settings dialog fields
+    - apply_settings(): Handle additional custom settings
     """
 
     def __init__(
         self,
         app_info: AppInfo,
-        settings: BaseSettings | None = None,
+        agent_configs: list["AgentConfig"],
+        settings: BaseSettings,
     ) -> None:
         """Initialize the CLI application.
 
         Args:
             app_info: Application info (name, version, welcome message)
-            settings: Optional settings override
+            agent_configs: List of agent configurations for the workflow
+            settings: Application settings instance
         """
         # === Configuration ===
         self._app_info = app_info
-        self._settings = settings or self.get_settings()
+        self._agent_configs = agent_configs
+        self._settings = settings
         configure_logging(self._settings)
 
         logger.info("app_starting", app_name=self._settings.app_name)
@@ -295,34 +304,28 @@ class BaseCLIApp(ABC):
         """Get the application info."""
         return self._app_info
 
-    @abstractmethod
-    def get_settings(self) -> BaseSettings:
-        """Get the application settings.
+    @property
+    def agent_configs(self) -> list["AgentConfig"]:
+        """Get the agent configurations."""
+        return self._agent_configs
 
-        Domain projects implement this to provide their settings class.
+    def _create_workflow_manager(self) -> "BaseWorkflowManager":
+        """Create the workflow manager for this application.
+
+        Uses create_workflow_manager_from_settings() with the agent_configs
+        provided to the constructor.
+
+        Override this method if you need advanced workflow manager creation
+        (e.g., custom initialization, additional configuration).
+
+        Returns:
+            BaseWorkflowManager instance (ADK or LangGraph based on settings)
         """
-        ...
-
-    @abstractmethod
-    def create_workflow_manager(self) -> "BaseWorkflowManager":
-        """Create the workflow manager for this domain.
-
-        Domain projects implement this to create their workflow manager
-        with domain-specific agents.
-
-        Use the factory function `create_workflow_manager_from_settings()` to
-        automatically select the orchestrator based on settings.orchestrator.
-
-        Example:
-            def create_workflow_manager(self) -> BaseWorkflowManager:
-                from agentic_cli.cli.app import create_workflow_manager_from_settings
-                return create_workflow_manager_from_settings(
-                    agent_configs=self._get_agent_configs(),
-                    settings=self._settings,
-                    app_name=self._settings.app_name,
-                )
-        """
-        ...
+        return create_workflow_manager_from_settings(
+            agent_configs=self._agent_configs,
+            settings=self._settings,
+            app_name=self._settings.app_name,
+        )
 
     def get_styles(self) -> ThinkingPromptStyles:
         """Get styles for ThinkingPromptSession.
@@ -516,7 +519,7 @@ class BaseCLIApp(ABC):
         loop = asyncio.get_running_loop()
 
         def _create_workflow() -> "BaseWorkflowManager":
-            return self.create_workflow_manager()
+            return self._create_workflow_manager()
 
         try:
             logger.debug("background_init_starting")
