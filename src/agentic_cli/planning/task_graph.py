@@ -314,6 +314,69 @@ class TaskGraph:
 
         return "\n".join(lines)
 
+    def to_compact_display(self, max_tasks: int = 5, max_desc_len: int = 30) -> str:
+        """Generate a compact display suitable for the thinking box status line.
+
+        Shows task progress in a condensed format with truncated descriptions.
+        Prioritizes showing in-progress tasks, then pending tasks.
+
+        Args:
+            max_tasks: Maximum number of tasks to display
+            max_desc_len: Maximum length for task descriptions
+
+        Returns:
+            A compact string representation with status icons.
+        """
+        if not self._tasks:
+            return ""
+
+        lines = []
+
+        # Find root tasks (no parent), sorted by status priority
+        root_tasks = [t for t in self._tasks.values() if t.parent is None]
+
+        # Sort: in_progress first, then pending, then others
+        status_order = {
+            TaskStatus.IN_PROGRESS: 0,
+            TaskStatus.PENDING: 1,
+            TaskStatus.BLOCKED: 2,
+            TaskStatus.COMPLETED: 3,
+            TaskStatus.FAILED: 4,
+            TaskStatus.SKIPPED: 5,
+        }
+        root_tasks.sort(key=lambda t: status_order.get(t.status, 99))
+
+        def format_task_compact(task: Task, indent: int = 0) -> None:
+            if len(lines) >= max_tasks:
+                return
+            icon = STATUS_ICONS.get(task.status, "?")
+            prefix = "  " * indent
+            desc = task.description
+            if len(desc) > max_desc_len:
+                desc = desc[: max_desc_len - 1] + "…"
+            lines.append(f"{prefix}{icon} {desc}")
+
+            # Format subtasks (limited)
+            for subtask_id in task.subtasks:
+                if len(lines) >= max_tasks:
+                    break
+                subtask = self._tasks.get(subtask_id)
+                if subtask:
+                    format_task_compact(subtask, indent + 1)
+
+        for task in root_tasks:
+            if len(lines) >= max_tasks:
+                break
+            format_task_compact(task)
+
+        # Add overflow indicator if needed
+        total = len(self._tasks)
+        if total > max_tasks:
+            remaining = total - len(lines)
+            lines.append(f"  ... +{remaining} more")
+
+        return "\n".join(lines)
+
     def revise(self, changes: list[dict[str, Any]]) -> None:
         """Apply a list of changes to the task graph.
 

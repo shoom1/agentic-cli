@@ -674,7 +674,7 @@ class BaseCLIApp:
         if self._settings.log_activity:
             self.message_history.add(message, MessageType.USER)
 
-        # Status line for thinking box (single line updates)
+        # Status line for thinking box (multi-line with task progress)
         status_line = "Processing..."
         thinking_started = False
 
@@ -683,7 +683,26 @@ class BaseCLIApp:
         response_content: list[str] = []
 
         def get_status() -> str:
-            return status_line
+            """Build status display with current action and task progress."""
+            lines = [status_line]
+
+            # Add task progress if task graph exists and has tasks
+            task_graph = getattr(self.workflow, "task_graph", None)
+            if task_graph is not None:
+                progress = task_graph.get_progress()
+                if progress["total"] > 0:
+                    # Add separator and progress bar
+                    completed = progress["completed"]
+                    total = progress["total"]
+                    in_progress = progress["in_progress"]
+                    lines.append(f"─── Tasks: {completed}/{total} ───")
+
+                    # Add compact task list
+                    compact_display = task_graph.to_compact_display(max_tasks=5)
+                    if compact_display:
+                        lines.append(compact_display)
+
+            return "\n".join(lines)
 
         try:
             self.session.start_thinking(get_status)
@@ -757,6 +776,13 @@ class BaseCLIApp:
                 elif event.type == EventType.FILE_DATA:
                     # Update status with file info
                     status_line = f"File: {event.content}"
+
+                elif event.type == EventType.TASK_PROGRESS:
+                    # Task progress update - status is rebuilt dynamically by get_status()
+                    # Just update the status line with current task info if available
+                    current_task = event.metadata.get("current_task_description")
+                    if current_task:
+                        status_line = f"Working on: {current_task}"
 
             # Finish thinking box (don't add status to history)
             if thinking_started:
