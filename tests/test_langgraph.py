@@ -527,39 +527,6 @@ class TestPersistenceLayer:
         assert store is None
 
 
-class TestMiddlewareLayer:
-    """Tests for the middleware layer factories."""
-
-    def test_create_retry_middleware(self):
-        """Test creating retry middleware."""
-        from agentic_cli.workflow.langgraph.middleware import create_retry_middleware
-
-        settings = BaseSettings(google_api_key="test-key")
-        middlewares = create_retry_middleware(settings)
-
-        # Currently returns empty list (placeholder)
-        assert isinstance(middlewares, list)
-
-    def test_create_hitl_middleware_disabled(self):
-        """Test HITL middleware when disabled."""
-        from agentic_cli.workflow.langgraph.middleware import create_hitl_middleware
-
-        settings = BaseSettings(google_api_key="test-key", hitl_enabled=False)
-        middleware = create_hitl_middleware(["shell"], settings)
-
-        assert middleware is None
-
-    def test_create_shell_middleware(self):
-        """Test creating shell middleware."""
-        from agentic_cli.workflow.langgraph.middleware import create_shell_middleware
-
-        settings = BaseSettings(google_api_key="test-key")
-        middleware = create_shell_middleware(settings)
-
-        # Currently returns None (placeholder)
-        assert middleware is None
-
-
 class TestToolsModule:
     """Tests for the tools module."""
 
@@ -617,8 +584,8 @@ class TestToolsModule:
         assert "blocked" in result["error"].lower()
 
 
-class TestNewManagerOptions:
-    """Tests for new middleware options in LangGraphWorkflowManager."""
+class TestManagerCheckpointerOptions:
+    """Tests for checkpointer options in LangGraphWorkflowManager."""
 
     @pytest.fixture
     def settings(self):
@@ -632,22 +599,6 @@ class TestNewManagerOptions:
     def agent_configs(self):
         """Create test agent configs."""
         return [AgentConfig(name="test", prompt="test")]
-
-    def test_manager_with_middleware_options(self, settings, agent_configs):
-        """Test manager creation with middleware options."""
-        manager = LangGraphWorkflowManager(
-            agent_configs=agent_configs,
-            settings=settings,
-            enable_retry=True,
-            enable_hitl=True,
-            hitl_tools=["shell"],
-            enable_shell=True,
-        )
-
-        assert manager._enable_retry is True
-        assert manager._enable_hitl is True
-        assert manager._hitl_tools == ["shell"]
-        assert manager._enable_shell is True
 
     def test_manager_checkpointer_sqlite(self, settings, agent_configs):
         """Test manager accepts sqlite checkpointer type."""

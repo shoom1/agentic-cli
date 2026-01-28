@@ -49,40 +49,6 @@ def _import_langgraph():
         ) from e
 
 
-def _import_langchain_models():
-    """Lazily import LangChain model integrations."""
-    models = {}
-
-    try:
-        from langchain_openai import ChatOpenAI
-
-        models["openai"] = ChatOpenAI
-    except ImportError:
-        pass
-
-    try:
-        from langchain_anthropic import ChatAnthropic
-
-        models["anthropic"] = ChatAnthropic
-    except ImportError:
-        pass
-
-    try:
-        from langchain_google_genai import ChatGoogleGenerativeAI
-
-        models["google"] = ChatGoogleGenerativeAI
-    except ImportError:
-        pass
-
-    if not models:
-        raise ImportError(
-            "No LangChain model integrations found. "
-            "Install at least one of: langchain-openai, langchain-anthropic, langchain-google-genai"
-        )
-
-    return models
-
-
 class LangGraphWorkflowManager(BaseWorkflowManager):
     """LangGraph-based workflow manager for agentic applications.
 
@@ -125,11 +91,6 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
         model: str | None = None,
         checkpointer: Literal["memory", "postgres", "sqlite"] | None = "memory",
         on_event: Callable[[WorkflowEvent], WorkflowEvent | None] | None = None,
-        # Middleware options
-        enable_retry: bool = True,
-        enable_hitl: bool = False,
-        hitl_tools: list[str] | None = None,
-        enable_shell: bool = False,
     ) -> None:
         """Initialize the LangGraph workflow manager.
 
@@ -142,10 +103,6 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
                          "memory" for in-memory, "postgres" for PostgreSQL,
                          "sqlite" for SQLite. None to disable checkpointing.
             on_event: Optional hook to transform/filter events before yielding.
-            enable_retry: Enable retry middleware for tool/model errors.
-            enable_hitl: Enable human-in-the-loop middleware.
-            hitl_tools: List of tool names requiring human approval (if HITL enabled).
-            enable_shell: Enable shell middleware with execution policies.
         """
         super().__init__(
             agent_configs=agent_configs,
@@ -156,12 +113,6 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
 
         self._checkpointer_type = checkpointer
         self._on_event = on_event
-
-        # Middleware configuration
-        self._enable_retry = enable_retry
-        self._enable_hitl = enable_hitl
-        self._hitl_tools = hitl_tools or []
-        self._enable_shell = enable_shell
 
         # Model resolved lazily
         self._model: str | None = model
@@ -188,8 +139,6 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
             model_override=model,
             agent_count=len(agent_configs),
             checkpointer=checkpointer,
-            enable_retry=enable_retry,
-            enable_hitl=enable_hitl,
         )
 
     @property
@@ -247,82 +196,36 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
         )
         return True
 
+    # Thinking budget tokens for Anthropic models
+    _THINKING_BUDGETS = {"low": 4096, "medium": 10000, "high": 32000}
+
     def _get_thinking_config(self, model: str) -> dict[str, Any] | None:
         """Get thinking configuration for the model.
 
         Returns provider-specific thinking configuration based on
         settings.thinking_effort and model support.
-
-        Args:
-            model: Model name to check.
-
-        Returns:
-            Provider-specific thinking config dict, or None if thinking is disabled.
         """
-        thinking_effort = self._settings.thinking_effort
-
-        if thinking_effort == "none":
+        effort = self._settings.thinking_effort
+        if effort == "none" or not self._settings.supports_thinking_effort(model):
             return None
 
-        if not self._settings.supports_thinking_effort(model):
-            logger.debug(
-                "thinking_not_supported",
-                model=model,
-                effort=thinking_effort,
-            )
-            return None
-
-        # Map effort levels to budget tokens for Anthropic
-        # These are reasonable defaults based on Claude's capabilities
-        anthropic_budgets = {
-            "low": 4096,
-            "medium": 10000,
-            "high": 32000,
-        }
-
-        # Map effort levels for Google Gemini (uses thinking_level parameter)
-        # Note: Gemini 3 Pro only supports "low" and "high", not "medium"
-        google_levels = {
-            "low": "low",
-            "medium": "medium",
-            "high": "high",
-        }
-
-        logger.debug(
-            "thinking_config_created",
-            model=model,
-            effort=thinking_effort,
-        )
-
-        # Return provider-specific config
         if model.startswith("claude-"):
             return {
                 "provider": "anthropic",
                 "thinking": {
                     "type": "enabled",
-                    "budget_tokens": anthropic_budgets.get(thinking_effort, 10000),
+                    "budget_tokens": self._THINKING_BUDGETS.get(effort, 10000),
                 },
             }
-        elif model.startswith("gemini-"):
-            # Gemini 3 Pro only supports "low" and "high" thinking levels
-            # Gemini 3 Flash supports all levels including "medium"
+
+        if model.startswith("gemini-"):
+            # Gemini 3 Pro only supports "low" and "high", not "medium"
             is_gemini_3_pro = "gemini-3" in model and "pro" in model
-            thinking_level = google_levels.get(thinking_effort, "high")
-
-            if thinking_level == "medium" and is_gemini_3_pro:
-                thinking_level = "high"
-                logger.debug(
-                    "thinking_level_fallback",
-                    model=model,
-                    requested="medium",
-                    actual="high",
-                    reason="Gemini 3 Pro only supports low and high",
-                )
-
+            level = "high" if (effort == "medium" and is_gemini_3_pro) else effort
             return {
                 "provider": "google",
                 "include_thoughts": True,
-                "thinking_level": thinking_level,
+                "thinking_level": level,
             }
 
         return None
@@ -330,83 +233,29 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
     def _get_llm_for_model(self, model: str):
         """Get a LangChain LLM instance for the specified model.
 
-        Args:
-            model: Model name to use.
-
-        Returns:
-            LangChain chat model instance.
-
-        Raises:
-            ValueError: If model provider is not supported.
+        Uses init_chat_model for automatic provider detection.
         """
-        models = _import_langchain_models()
-        thinking_config = self._get_thinking_config(model)
+        from langchain.chat_models import init_chat_model
 
-        # Determine provider from model name
-        if model.startswith("gpt-") or model.startswith("o1"):
-            if "openai" not in models:
-                raise ValueError(
-                    f"Model {model} requires langchain-openai. "
-                    "Install with: pip install langchain-openai"
-                )
-            return models["openai"](model=model)
+        kwargs = self._get_model_kwargs(model)
+        return init_chat_model(model, **kwargs)
 
-        elif model.startswith("claude-"):
-            if "anthropic" not in models:
-                raise ValueError(
-                    f"Model {model} requires langchain-anthropic. "
-                    "Install with: pip install langchain-anthropic"
-                )
-            # Apply Anthropic thinking config if available
-            if thinking_config and thinking_config.get("provider") == "anthropic":
-                return models["anthropic"](
-                    model=model,
-                    thinking=thinking_config["thinking"],
-                )
-            return models["anthropic"](model=model)
+    def _get_model_kwargs(self, model: str) -> dict[str, Any]:
+        """Get model-specific kwargs including thinking config."""
+        thinking = self._get_thinking_config(model)
+        if not thinking:
+            return {}
 
-        elif model.startswith("gemini-"):
-            if "google" not in models:
-                raise ValueError(
-                    f"Model {model} requires langchain-google-genai. "
-                    "Install with: pip install langchain-google-genai"
-                )
-            # Apply Google thinking config if available
-            if thinking_config and thinking_config.get("provider") == "google":
-                return models["google"](
-                    model=model,
-                    include_thoughts=thinking_config.get("include_thoughts", True),
-                    thinking_level=thinking_config.get("thinking_level"),
-                )
-            return models["google"](model=model)
+        if thinking["provider"] == "anthropic":
+            return {"thinking": thinking["thinking"]}
 
-        else:
-            # Try to infer from available keys
-            if self._settings.has_google_key and "google" in models:
-                return models["google"](model=model)
-            elif self._settings.has_anthropic_key and "anthropic" in models:
-                return models["anthropic"](model=model)
-            elif "openai" in models:
-                return models["openai"](model=model)
+        if thinking["provider"] == "google":
+            return {
+                "include_thoughts": thinking.get("include_thoughts", True),
+                "thinking_level": thinking.get("thinking_level"),
+            }
 
-            raise ValueError(
-                f"Cannot determine provider for model: {model}. "
-                "Ensure model name starts with provider prefix "
-                "(gpt-, claude-, gemini-) or install appropriate langchain integration."
-            )
-
-    def _create_checkpointer(self):
-        """Create the appropriate checkpointer based on configuration."""
-        from agentic_cli.workflow.langgraph.persistence import create_checkpointer
-
-        return create_checkpointer(self._checkpointer_type, self._settings)
-
-    def _create_store(self):
-        """Create the appropriate store based on configuration."""
-        from agentic_cli.workflow.langgraph.persistence import create_store
-
-        store_type = getattr(self._settings, "store_type", "memory")
-        return create_store(store_type, self._settings)
+        return {}
 
     def _get_retry_policy(self):
         """Build RetryPolicy from settings configuration.
@@ -437,16 +286,13 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
         # Create graph
         graph = StateGraph(AgentState)
 
-        # Get retry policy for nodes (if enabled)
-        retry_policy = self._get_retry_policy() if self._enable_retry else None
+        # Get retry policy for nodes
+        retry_policy = self._get_retry_policy()
 
         # Create nodes for each agent with retry policy
         for config in self._agent_configs:
             node_fn = self._create_agent_node(config)
-            if retry_policy:
-                graph.add_node(config.name, node_fn, retry=retry_policy)
-            else:
-                graph.add_node(config.name, node_fn)
+            graph.add_node(config.name, node_fn, retry=retry_policy)
 
         # Determine entry point (root agent)
         root_agent = None
@@ -635,11 +481,12 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
         # Export API keys
         self._settings.export_api_keys_to_env()
 
-        # Create checkpointer
-        self._checkpointer = self._create_checkpointer()
+        # Create checkpointer and store
+        from agentic_cli.workflow.langgraph.persistence import create_checkpointer, create_store
 
-        # Create store for long-term memory (if configured)
-        self._store = self._create_store()
+        self._checkpointer = create_checkpointer(self._checkpointer_type, self._settings)
+        store_type = getattr(self._settings, "store_type", "memory")
+        self._store = create_store(store_type, self._settings)
 
         # Build and compile graph
         graph = self._build_graph()

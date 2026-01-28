@@ -17,17 +17,56 @@ Example:
 from __future__ import annotations
 
 import asyncio
+import re
 import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from agentic_cli.logging import Loggers
-from agentic_cli.workflow.langgraph.middleware.shell import (
-    is_command_safe,
-    get_blocked_patterns,
-)
 
 logger = Loggers.workflow()
+
+
+def get_blocked_patterns() -> list[str]:
+    """Get list of blocked shell command patterns.
+
+    Returns patterns that should be blocked for security reasons.
+    These patterns prevent destructive or dangerous commands.
+
+    Returns:
+        List of regex patterns to block.
+    """
+    return [
+        r"rm\s+-rf\s+/",  # Recursive delete from root
+        r"rm\s+-rf\s+~",  # Recursive delete home
+        r"rm\s+-rf\s+\*",  # Recursive delete all
+        r":\(\)\{\s*:\|:&\s*\};:",  # Fork bomb
+        r"dd\s+if=/dev/zero",  # Disk wipe
+        r"mkfs\.",  # Format filesystem
+        r"chmod\s+-R\s+777\s+/",  # Dangerous permissions
+        r"curl.*\|\s*bash",  # Pipe to shell
+        r"wget.*\|\s*bash",  # Pipe to shell
+        r">\s*/dev/sd",  # Write to disk device
+    ]
+
+
+def is_command_safe(command: str) -> tuple[bool, str | None]:
+    """Check if a shell command is safe to execute.
+
+    Args:
+        command: Shell command to check.
+
+    Returns:
+        Tuple of (is_safe, reason). If is_safe is False,
+        reason contains explanation of why command was blocked.
+    """
+    patterns = get_blocked_patterns()
+
+    for pattern in patterns:
+        if re.search(pattern, command, re.IGNORECASE):
+            return False, f"Command matches blocked pattern: {pattern}"
+
+    return True, None
 
 
 def shell_execute(
