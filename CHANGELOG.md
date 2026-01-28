@@ -5,6 +5,51 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2025-01-27
+
+### Added
+
+- **Memory System** with 3-tier architecture:
+  - `WorkingMemory` - Session-scoped context with tags and serialization
+  - `LongTermMemory` - Persistent memory with knowledge base references
+  - `MemoryManager` - Unified interface for working and long-term memory
+  - Memory tools (`working_memory_tool`, `long_term_memory_tool`)
+- **Planning System**:
+  - `TaskGraph` - Work plan management with dependencies and status tracking
+  - `TaskStatus` enum for pending/in_progress/completed/blocked states
+  - `Task` dataclass with subtasks, dependencies, and metadata
+- **Human-in-the-Loop (HITL) System**:
+  - `ApprovalManager` - Configurable approval gates with auto-approve patterns
+  - `CheckpointManager` - Review checkpoints with continue/edit/regenerate/abort actions
+  - `HITLConfig` and `ApprovalRule` for configuration
+- **New Tools**:
+  - `shell_executor` with safety controls (blocks dangerous commands)
+  - `file_manager` with read/write/list/copy/move/delete operations
+  - `diff_compare` with unified/side-by-side/summary modes
+- New tool categories: `MEMORY`, `PLANNING`, `SYSTEM`
+- Framework-provided tools with auto-detection
+- Layered JSON settings persistence with organized mixins
+- `research_demo` example showcasing memory, planning, and file operations
+
+### Changed
+
+- **LangGraph Module Reorganization**:
+  - Moved to dedicated `workflow/langgraph/` submodule
+  - Added `persistence/` for checkpointers and stores
+  - Added `tools/` for shell and file search utilities
+- **Simplified LangGraphWorkflowManager**:
+  - Removed dead middleware module (~400 lines)
+  - Use explicit provider instantiation (GenAI for Gemini, not VertexAI)
+  - Simplified model creation with thinking support for Claude and Gemini
+- **BaseCLIApp Simplification**:
+  - Constructor-based configuration instead of method overrides
+  - `AppInfo` is now a constructor parameter
+
+### Fixed
+
+- LangGraph no longer requires `langchain-google-vertexai` package
+- Explicit provider detection prevents VertexAI initialization errors
+
 ## [0.2.0] - 2025-01-25
 
 ### Added
