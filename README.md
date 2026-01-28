@@ -81,8 +81,9 @@ Create a minimal CLI application in just a few lines:
 
 ```python
 import asyncio
-from agentic_cli import BaseCLIApp, BaseSettings, AgentConfig, GoogleADKWorkflowManager
+from agentic_cli import BaseCLIApp, BaseSettings
 from agentic_cli.cli import AppInfo
+from agentic_cli.workflow import AgentConfig
 
 # Define your tools
 def greet(name: str) -> dict:
@@ -98,19 +99,14 @@ AGENTS = [
     ),
 ]
 
-# Create your app
-class MyApp(BaseCLIApp):
-    def get_app_info(self) -> AppInfo:
-        return AppInfo(name="My App", version="0.1.0")
-
-    def get_settings(self) -> BaseSettings:
-        return BaseSettings()
-
-    def create_workflow_manager(self) -> GoogleADKWorkflowManager:
-        return GoogleADKWorkflowManager(agent_configs=AGENTS, settings=self._settings)
-
+# Create and run your app
 if __name__ == "__main__":
-    asyncio.run(MyApp().run())
+    app = BaseCLIApp(
+        app_info=AppInfo(name="My App", version="0.1.0"),
+        agent_configs=AGENTS,
+        settings=BaseSettings(),
+    )
+    asyncio.run(app.run())
 ```
 
 Run with your API key:
@@ -143,19 +139,25 @@ manager = GoogleADKWorkflowManager(
 
 Uses LangGraph for orchestration. Best for:
 - Cyclical workflows (self-validation, iterative refinement)
-- Model-agnostic operation (OpenAI, Anthropic, Google)
+- Model-agnostic operation (OpenAI, Anthropic, Google via GenAI)
 - State checkpointing and time-travel debugging
 - Complex multi-agent coordination
 
 ```python
-from agentic_cli import LangGraphWorkflowManager
+from agentic_cli.workflow.langgraph import LangGraphWorkflowManager
 
 manager = LangGraphWorkflowManager(
     agent_configs=AGENTS,
     settings=settings,
-    checkpointer="memory",  # or "postgres" for persistence
+    checkpointer="memory",  # "memory", "postgres", "sqlite", or None
 )
 ```
+
+Features:
+- **Explicit provider support**: Uses `langchain-google-genai` for Gemini (not VertexAI)
+- **Thinking mode**: Native support for Claude and Gemini thinking/reasoning
+- **Retry policies**: Automatic retry with exponential backoff
+- **Event streaming**: Real-time workflow events via `WorkflowEvent`
 
 Requires: `pip install agentic-cli[langgraph]`
 
@@ -165,9 +167,10 @@ Requires: `pip install agentic-cli[langgraph]`
 |---------|------------|-----------|
 | Setup complexity | Simple | Moderate |
 | Cyclical workflows | Limited | Native |
-| Multi-provider | Google only | OpenAI, Anthropic, Google |
-| State persistence | In-memory | Memory or PostgreSQL |
-| Thinking support | Native (Gemini) | Via model config |
+| Multi-provider | Google only | OpenAI, Anthropic, Google (GenAI) |
+| State persistence | In-memory | Memory, PostgreSQL, or SQLite |
+| Thinking support | Native (Gemini) | Native (Claude & Gemini) |
+| Retry handling | Manual | Built-in with backoff |
 
 ### Auto-selection via Settings
 
@@ -408,7 +411,8 @@ async for event in manager.process(message, user_id="user1"):
 See the `examples/` directory for complete working examples:
 
 - **hello_agent.py** - Simple assistant using Google ADK
-- **hello_langgraph.py** - Same assistant using LangGraph
+- **hello_langgraph.py** - Same assistant using LangGraph orchestration
+- **research_demo/** - Full-featured research assistant with memory, planning, and file operations
 
 Run examples:
 
@@ -419,6 +423,9 @@ python examples/hello_agent.py
 # Or with LangGraph (requires langgraph extra)
 pip install agentic-cli[langgraph]
 python examples/hello_langgraph.py
+
+# Research demo (full features)
+python -m examples.research_demo
 ```
 
 ## Development
@@ -450,14 +457,19 @@ agentic-cli/
 │   │   ├── events.py         # WorkflowEvent, EventType
 │   │   ├── config.py         # AgentConfig
 │   │   ├── adk_manager.py    # GoogleADKWorkflowManager
-│   │   └── langgraph_manager.py  # LangGraphWorkflowManager
+│   │   └── langgraph/        # LangGraph submodule
+│   │       ├── manager.py    # LangGraphWorkflowManager
+│   │       ├── state.py      # AgentState, CheckpointData
+│   │       ├── persistence/  # Checkpointers and stores
+│   │       └── tools/        # Shell, file search tools
 │   ├── tools/
 │   │   └── executor.py       # SafePythonExecutor
 │   └── knowledge_base/
 │       └── manager.py        # KnowledgeBaseManager
 ├── examples/
 │   ├── hello_agent.py
-│   └── hello_langgraph.py
+│   ├── hello_langgraph.py
+│   └── research_demo/        # Full-featured example
 └── tests/
 ```
 
