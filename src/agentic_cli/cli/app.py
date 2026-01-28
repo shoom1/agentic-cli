@@ -72,17 +72,18 @@ def create_workflow_manager_from_settings(
 
     if orchestrator == "langgraph":
         try:
-            from agentic_cli.workflow.langgraph_manager import (
-                LangGraphWorkflowManager,
-            )
+            from agentic_cli.workflow.langgraph import LangGraphWorkflowManager
 
             checkpointer = getattr(settings, "langgraph_checkpointer", "memory")
+            # Get middleware options from settings
+            enable_hitl = getattr(settings, "hitl_enabled", False)
             return LangGraphWorkflowManager(
                 agent_configs=agent_configs,
                 settings=settings,
                 app_name=app_name,
                 model=model,
                 checkpointer=checkpointer,
+                enable_hitl=enable_hitl,
                 **kwargs,
             )
         except ImportError as e:

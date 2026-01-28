@@ -110,3 +110,43 @@ class WorkflowSettingsMixin:
         description="Path for persisting long-term memory (None for default)",
         json_schema_extra={"ui_order": 140},
     )
+
+    # Persistence settings (LangGraph)
+    postgres_uri: str | None = Field(
+        default=None,
+        title="PostgreSQL URI",
+        description="PostgreSQL connection URI for persistent storage",
+        json_schema_extra={"ui_order": 145},
+    )
+    sqlite_uri: str | None = Field(
+        default=None,
+        title="SQLite URI",
+        description="SQLite connection URI or file path for persistent storage",
+        json_schema_extra={"ui_order": 146},
+    )
+    store_type: Literal["memory", "postgres"] | None = Field(
+        default="memory",
+        title="Store Type",
+        description="Store type for long-term memory (memory or postgres)",
+        json_schema_extra={"ui_order": 147},
+    )
+
+    # Shell execution settings (for shell middleware)
+    shell_sandbox_type: Literal["host", "docker"] = Field(
+        default="host",
+        title="Shell Sandbox Type",
+        description="Execution environment for shell commands",
+        json_schema_extra={"ui_order": 148},
+    )
+    shell_docker_image: str = Field(
+        default="python:3.12-slim",
+        title="Shell Docker Image",
+        description="Docker image to use for sandboxed shell execution",
+        json_schema_extra={"ui_order": 149},
+    )
+    shell_timeout: int = Field(
+        default=60,
+        title="Shell Timeout",
+        description="Default timeout in seconds for shell commands",
+        json_schema_extra={"ui_order": 150},
+    )

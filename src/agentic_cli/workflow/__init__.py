@@ -1,8 +1,12 @@
 """Workflow management for agentic CLI applications.
 
-This module uses lazy loading for GoogleADKWorkflowManager to avoid slow
-Google ADK imports at startup. Light types (EventType, AgentConfig, etc.)
+This module uses lazy loading for heavy workflow managers to avoid slow
+imports at startup. Light types (EventType, AgentConfig, etc.)
 are available immediately.
+
+Submodules:
+- langgraph/: LangGraph-specific implementation (manager, state, middleware, persistence, tools)
+- adk/: Google ADK-specific implementation (placeholder for future refactoring)
 """
 
 # Light imports - always available (fast)
@@ -25,7 +29,18 @@ from agentic_cli.workflow.context import (
 
 # Heavy imports - lazy loaded on first access
 _lazy_imports = {
+    # ADK manager
     "GoogleADKWorkflowManager": "agentic_cli.workflow.adk_manager",
+    # LangGraph manager (both old and new paths)
+    "LangGraphWorkflowManager": "agentic_cli.workflow.langgraph.manager",
+    "LangGraphManager": "agentic_cli.workflow.langgraph.manager",
+    # LangGraph state types (for backward compatibility)
+    "AgentState": "agentic_cli.workflow.langgraph.state",
+    "ResearchState": "agentic_cli.workflow.langgraph.state",
+    "ApprovalState": "agentic_cli.workflow.langgraph.state",
+    "FinanceResearchState": "agentic_cli.workflow.langgraph.state",
+    "CheckpointData": "agentic_cli.workflow.langgraph.state",
+    "add_messages": "agentic_cli.workflow.langgraph.state",
 }
 
 
@@ -42,14 +57,28 @@ def __getattr__(name: str):
 
 
 __all__ = [
+    # Events
     "WorkflowEvent",
     "EventType",
     "UserInputRequest",
+    # Config
     "AgentConfig",
-    "GoogleADKWorkflowManager",  # lazy
+    # Thinking
     "ThinkingDetector",
     "ThinkingResult",
+    # Settings mixin
     "WorkflowSettingsMixin",
+    # Managers (lazy)
+    "GoogleADKWorkflowManager",
+    "LangGraphWorkflowManager",
+    "LangGraphManager",
+    # LangGraph state (lazy, for backward compatibility)
+    "AgentState",
+    "ResearchState",
+    "ApprovalState",
+    "FinanceResearchState",
+    "CheckpointData",
+    "add_messages",
     # Context getters (for tools)
     "get_context_memory_manager",
     "get_context_task_graph",

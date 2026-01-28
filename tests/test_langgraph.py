@@ -12,10 +12,10 @@ from agentic_cli.config import BaseSettings
 from agentic_cli.workflow.config import AgentConfig
 
 
-# Check if LangGraph is available
+# Check if LangGraph is available - use new import paths
 try:
-    from agentic_cli.workflow.langgraph_manager import LangGraphWorkflowManager
-    from agentic_cli.workflow.langgraph_state import (
+    from agentic_cli.workflow.langgraph import LangGraphWorkflowManager
+    from agentic_cli.workflow.langgraph.state import (
         AgentState,
         ResearchState,
         ApprovalState,
@@ -449,3 +449,212 @@ class TestCreateWorkflowManagerFromSettings:
         manager = create_workflow_manager_from_settings(configs, settings)
 
         assert isinstance(manager, LangGraphWorkflowManager)
+
+
+class TestBackwardCompatibility:
+    """Tests for backward-compatible imports."""
+
+    def test_old_import_paths_still_work(self):
+        """Test that old import paths work (with deprecation warning)."""
+        import warnings
+
+        # Suppress the deprecation warning for this test
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+
+            # Old import paths should still work
+            from agentic_cli.workflow.langgraph_manager import (
+                LangGraphWorkflowManager as OldManager,
+            )
+            from agentic_cli.workflow.langgraph_state import (
+                AgentState as OldState,
+                add_messages as old_add_messages,
+            )
+
+            # Should be the same classes
+            assert OldManager is LangGraphWorkflowManager
+            assert OldState is AgentState
+            assert old_add_messages is add_messages
+
+    def test_workflow_module_exports(self):
+        """Test that workflow module exports LangGraph components."""
+        from agentic_cli.workflow import (
+            LangGraphWorkflowManager as WorkflowManager,
+            AgentState as WorkflowAgentState,
+        )
+
+        assert WorkflowManager is LangGraphWorkflowManager
+        assert WorkflowAgentState is AgentState
+
+
+class TestPersistenceLayer:
+    """Tests for the persistence layer factories."""
+
+    def test_create_checkpointer_memory(self):
+        """Test creating memory checkpointer."""
+        from agentic_cli.workflow.langgraph.persistence import create_checkpointer
+
+        settings = BaseSettings(google_api_key="test-key")
+        checkpointer = create_checkpointer("memory", settings)
+
+        assert checkpointer is not None
+
+    def test_create_checkpointer_none(self):
+        """Test disabling checkpointer."""
+        from agentic_cli.workflow.langgraph.persistence import create_checkpointer
+
+        settings = BaseSettings(google_api_key="test-key")
+        checkpointer = create_checkpointer(None, settings)
+
+        assert checkpointer is None
+
+    def test_create_store_memory(self):
+        """Test creating memory store."""
+        from agentic_cli.workflow.langgraph.persistence import create_store
+
+        settings = BaseSettings(google_api_key="test-key")
+        store = create_store("memory", settings)
+
+        assert store is not None
+
+    def test_create_store_none(self):
+        """Test disabling store."""
+        from agentic_cli.workflow.langgraph.persistence import create_store
+
+        settings = BaseSettings(google_api_key="test-key")
+        store = create_store(None, settings)
+
+        assert store is None
+
+
+class TestMiddlewareLayer:
+    """Tests for the middleware layer factories."""
+
+    def test_create_retry_middleware(self):
+        """Test creating retry middleware."""
+        from agentic_cli.workflow.langgraph.middleware import create_retry_middleware
+
+        settings = BaseSettings(google_api_key="test-key")
+        middlewares = create_retry_middleware(settings)
+
+        # Currently returns empty list (placeholder)
+        assert isinstance(middlewares, list)
+
+    def test_create_hitl_middleware_disabled(self):
+        """Test HITL middleware when disabled."""
+        from agentic_cli.workflow.langgraph.middleware import create_hitl_middleware
+
+        settings = BaseSettings(google_api_key="test-key", hitl_enabled=False)
+        middleware = create_hitl_middleware(["shell"], settings)
+
+        assert middleware is None
+
+    def test_create_shell_middleware(self):
+        """Test creating shell middleware."""
+        from agentic_cli.workflow.langgraph.middleware import create_shell_middleware
+
+        settings = BaseSettings(google_api_key="test-key")
+        middleware = create_shell_middleware(settings)
+
+        # Currently returns None (placeholder)
+        assert middleware is None
+
+
+class TestToolsModule:
+    """Tests for the tools module."""
+
+    def test_file_search_glob(self):
+        """Test glob search function."""
+        from agentic_cli.workflow.langgraph.tools import glob_search
+        import tempfile
+        import os
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Create test files
+            test_file = os.path.join(tmpdir, "test.py")
+            with open(test_file, "w") as f:
+                f.write("# test file")
+
+            results = glob_search("*.py", directory=tmpdir)
+
+            assert len(results) == 1
+            assert "test.py" in results[0]
+
+    def test_file_search_grep(self):
+        """Test grep search function."""
+        from agentic_cli.workflow.langgraph.tools import grep_search
+        import tempfile
+        import os
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Create test file
+            test_file = os.path.join(tmpdir, "test.py")
+            with open(test_file, "w") as f:
+                f.write("def hello_world():\n    pass\n")
+
+            results = grep_search("hello", directory=tmpdir, file_pattern="*.py")
+
+            assert len(results) == 1
+            assert results[0]["line"] == 1
+            assert "hello" in results[0]["content"]
+
+    def test_shell_execute_safe_command(self):
+        """Test shell execution with safe command."""
+        from agentic_cli.workflow.langgraph.tools import shell_execute
+
+        result = shell_execute("echo hello")
+
+        assert result["success"] is True
+        assert "hello" in result["stdout"]
+
+    def test_shell_execute_blocked_command(self):
+        """Test shell execution blocks dangerous commands."""
+        from agentic_cli.workflow.langgraph.tools import shell_execute
+
+        result = shell_execute("rm -rf /")
+
+        assert result["success"] is False
+        assert "blocked" in result["error"].lower()
+
+
+class TestNewManagerOptions:
+    """Tests for new middleware options in LangGraphWorkflowManager."""
+
+    @pytest.fixture
+    def settings(self):
+        """Create test settings."""
+        return BaseSettings(
+            google_api_key="test-key",
+            orchestrator="langgraph",
+        )
+
+    @pytest.fixture
+    def agent_configs(self):
+        """Create test agent configs."""
+        return [AgentConfig(name="test", prompt="test")]
+
+    def test_manager_with_middleware_options(self, settings, agent_configs):
+        """Test manager creation with middleware options."""
+        manager = LangGraphWorkflowManager(
+            agent_configs=agent_configs,
+            settings=settings,
+            enable_retry=True,
+            enable_hitl=True,
+            hitl_tools=["shell"],
+            enable_shell=True,
+        )
+
+        assert manager._enable_retry is True
+        assert manager._enable_hitl is True
+        assert manager._hitl_tools == ["shell"]
+        assert manager._enable_shell is True
+
+    def test_manager_checkpointer_sqlite(self, settings, agent_configs):
+        """Test manager accepts sqlite checkpointer type."""
+        manager = LangGraphWorkflowManager(
+            agent_configs=agent_configs,
+            settings=settings,
+            checkpointer="sqlite",
+        )
+
+        assert manager._checkpointer_type == "sqlite"
