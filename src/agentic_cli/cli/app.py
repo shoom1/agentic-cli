@@ -513,7 +513,12 @@ class BaseCLIApp:
         self.command_registry.register(SettingsCommand())
 
     async def _background_init(self) -> None:
-        """Initialize workflow manager in background thread."""
+        """Initialize workflow manager in background.
+
+        Creates the workflow manager and calls initialize_services() to
+        preload LLM, build graph, and set up checkpointing. This avoids
+        lag on the first user message.
+        """
         loop = asyncio.get_running_loop()
 
         def _create_workflow() -> "BaseWorkflowManager":
@@ -521,9 +526,15 @@ class BaseCLIApp:
 
         try:
             logger.debug("background_init_starting")
+
+            # Step 1: Create workflow manager (sync, in thread pool)
             self._workflow = await loop.run_in_executor(
                 _init_executor, _create_workflow
             )
+
+            # Step 2: Initialize services (async - builds graph, loads LLM, etc.)
+            # This is the expensive part that was previously deferred to first message
+            await self._workflow.initialize_services()
 
             # Update status bar to show ready
             model = self._workflow.model
