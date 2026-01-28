@@ -233,29 +233,71 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
     def _get_llm_for_model(self, model: str):
         """Get a LangChain LLM instance for the specified model.
 
-        Uses init_chat_model for automatic provider detection.
+        Explicitly instantiates the correct provider based on model name prefix.
+        Uses GenAI (not VertexAI) for Google models.
         """
-        from langchain.chat_models import init_chat_model
-
-        kwargs = self._get_model_kwargs(model)
-        return init_chat_model(model, **kwargs)
-
-    def _get_model_kwargs(self, model: str) -> dict[str, Any]:
-        """Get model-specific kwargs including thinking config."""
         thinking = self._get_thinking_config(model)
-        if not thinking:
-            return {}
 
-        if thinking["provider"] == "anthropic":
-            return {"thinking": thinking["thinking"]}
+        # OpenAI models
+        if model.startswith("gpt-") or model.startswith("o1"):
+            try:
+                from langchain_openai import ChatOpenAI
+                return ChatOpenAI(model=model)
+            except ImportError:
+                raise ImportError(
+                    f"Model {model} requires langchain-openai. "
+                    "Install with: pip install langchain-openai"
+                )
 
-        if thinking["provider"] == "google":
-            return {
-                "include_thoughts": thinking.get("include_thoughts", True),
-                "thinking_level": thinking.get("thinking_level"),
-            }
+        # Anthropic models
+        if model.startswith("claude-"):
+            try:
+                from langchain_anthropic import ChatAnthropic
+                kwargs = {"model": model}
+                if thinking and thinking["provider"] == "anthropic":
+                    kwargs["thinking"] = thinking["thinking"]
+                return ChatAnthropic(**kwargs)
+            except ImportError:
+                raise ImportError(
+                    f"Model {model} requires langchain-anthropic. "
+                    "Install with: pip install langchain-anthropic"
+                )
 
-        return {}
+        # Google models - use GenAI, NOT VertexAI
+        if model.startswith("gemini-"):
+            try:
+                from langchain_google_genai import ChatGoogleGenerativeAI
+                kwargs = {"model": model}
+                if thinking and thinking["provider"] == "google":
+                    kwargs["include_thoughts"] = thinking.get("include_thoughts", True)
+                    kwargs["thinking_level"] = thinking.get("thinking_level")
+                return ChatGoogleGenerativeAI(**kwargs)
+            except ImportError:
+                raise ImportError(
+                    f"Model {model} requires langchain-google-genai. "
+                    "Install with: pip install langchain-google-genai"
+                )
+
+        # Unknown model - try to infer from available API keys
+        if self._settings.has_google_key:
+            try:
+                from langchain_google_genai import ChatGoogleGenerativeAI
+                return ChatGoogleGenerativeAI(model=model)
+            except ImportError:
+                pass
+
+        if self._settings.has_anthropic_key:
+            try:
+                from langchain_anthropic import ChatAnthropic
+                return ChatAnthropic(model=model)
+            except ImportError:
+                pass
+
+        raise ValueError(
+            f"Cannot determine provider for model: {model}. "
+            "Ensure model name starts with a known prefix (gpt-, claude-, gemini-) "
+            "or install the appropriate langchain integration."
+        )
 
     def _get_retry_policy(self):
         """Build RetryPolicy from settings configuration.
