@@ -1,10 +1,10 @@
 """Google ADK-specific workflow implementation.
 
-This submodule is a placeholder for future ADK-specific components.
-Currently, ADK implementation remains in workflow/adk_manager.py.
+This submodule contains ADK-specific components:
+- manager.py: GoogleADKWorkflowManager (in adk_manager.py)
+- llm_event_logger.py: LLM traffic logging for debugging
 
 Future structure:
-- manager.py: GoogleADKWorkflowManager (refactored)
 - middleware/: ADK middleware wrappers
 - persistence/: ADK-specific storage backends
 - tools/: ADK-native tool implementations
@@ -12,7 +12,9 @@ Future structure:
 
 # Re-export the existing manager for convenience
 from agentic_cli.workflow.adk_manager import GoogleADKWorkflowManager
+from agentic_cli.workflow.adk.llm_event_logger import LLMEventLogger
 
 __all__ = [
     "GoogleADKWorkflowManager",
+    "LLMEventLogger",
 ]

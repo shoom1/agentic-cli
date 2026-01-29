@@ -150,3 +150,11 @@ class WorkflowSettingsMixin:
         description="Default timeout in seconds for shell commands",
         json_schema_extra={"ui_order": 150},
     )
+
+    # LLM debugging settings
+    raw_llm_logging: bool = Field(
+        default=False,
+        title="Raw LLM Logging",
+        description="Enable logging of raw LLM request/response traffic for debugging",
+        json_schema_extra={"ui_order": 160},
+    )

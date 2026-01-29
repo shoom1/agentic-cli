@@ -21,9 +21,10 @@ from google.adk.planners import BuiltInPlanner
 from google.adk.sessions import InMemorySessionService, BaseSessionService, Session
 
 from agentic_cli.workflow.base_manager import BaseWorkflowManager
-from agentic_cli.workflow.events import WorkflowEvent, UserInputRequest
+from agentic_cli.workflow.events import WorkflowEvent, UserInputRequest, EventType
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.thinking import ThinkingDetector
+from agentic_cli.workflow.adk.llm_event_logger import LLMEventLogger
 from agentic_cli.config import (
     BaseSettings,
     get_settings,
@@ -116,6 +117,9 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
 
         # User input request handling
         self._pending_input: dict[str, tuple[UserInputRequest, asyncio.Future[str]]] = {}
+
+        # LLM event logger (initialized lazily when raw_llm_logging is enabled)
+        self._llm_event_logger: LLMEventLogger | None = None
 
         logger.debug(
             "workflow_manager_created",
@@ -250,6 +254,11 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         self._root_agent = None
         self._session_service = None
         self._initialized = False
+
+        # Clear LLM event logger
+        if self._llm_event_logger:
+            self._llm_event_logger.clear()
+            self._llm_event_logger = None
 
         # Cancel any pending input requests
         for request_id, (request, future) in self._pending_input.items():
@@ -406,6 +415,19 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         planner = self._get_planner()
         generate_config = self._get_generate_content_config()
 
+        # Initialize LLM event logger if raw_llm_logging is enabled
+        before_callback = None
+        after_callback = None
+        if self._settings.raw_llm_logging:
+            self._llm_event_logger = LLMEventLogger(
+                model_name=self.model,
+                include_messages=True,
+                include_raw_parts=True,
+            )
+            before_callback = self._llm_event_logger.before_model_callback
+            after_callback = self._llm_event_logger.after_model_callback
+            logger.info("llm_event_logging_enabled")
+
         # First pass: create agents without sub_agents (leaf agents)
         for config in self._agent_configs:
             if not config.sub_agents:
@@ -417,6 +439,8 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     description=config.description or None,
                     planner=planner,
                     generate_content_config=generate_config,
+                    before_model_callback=before_callback,
+                    after_model_callback=after_callback,
                 )
                 logger.debug("agent_created", name=config.name, type="leaf")
 
@@ -443,6 +467,8 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     sub_agents=sub_agent_instances,
                     planner=planner,
                     generate_content_config=generate_config,
+                    before_model_callback=before_callback,
+                    after_model_callback=after_callback,
                 )
                 logger.debug(
                     "agent_created",
@@ -637,6 +663,26 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                 default=pending_request.default,
             )
 
+        # Extract usage_metadata if available (Option B - workflow event integration)
+        if hasattr(adk_event, "usage_metadata") and adk_event.usage_metadata:
+            usage = adk_event.usage_metadata
+            invocation_id = getattr(adk_event, "invocation_id", None)
+
+            usage_event = WorkflowEvent.llm_usage(
+                model=self.model,
+                prompt_tokens=getattr(usage, "prompt_token_count", None),
+                completion_tokens=getattr(usage, "candidates_token_count", None),
+                total_tokens=getattr(usage, "total_token_count", None),
+                thinking_tokens=getattr(usage, "thoughts_token_count", None),
+                cached_tokens=getattr(usage, "cached_content_token_count", None),
+                invocation_id=invocation_id,
+            )
+            # Apply optional event hook
+            if self._on_event:
+                usage_event = self._on_event(usage_event)
+            if usage_event:
+                yield usage_event
+
         if not adk_event.content or not adk_event.content.parts:
             return
 
@@ -793,6 +839,16 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                 user_id=user_id,
                 new_message=new_message,
             ):
+                # Yield LLM events from logger first (Option A - raw capture)
+                if self._llm_event_logger:
+                    for llm_event in self._llm_event_logger.drain_events():
+                        # Apply optional event hook
+                        if self._on_event:
+                            llm_event = self._on_event(llm_event)
+                        if llm_event:
+                            event_count += 1
+                            yield llm_event
+
                 # Process ADK event into workflow events
                 async for workflow_event in self._process_adk_event(
                     adk_event,
@@ -800,5 +856,14 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                 ):
                     event_count += 1
                     yield workflow_event
+
+            # Drain any remaining LLM events after processing completes
+            if self._llm_event_logger:
+                for llm_event in self._llm_event_logger.drain_events():
+                    if self._on_event:
+                        llm_event = self._on_event(llm_event)
+                    if llm_event:
+                        event_count += 1
+                        yield llm_event
 
             logger.info("message_processed", event_count=event_count)
