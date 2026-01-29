@@ -21,6 +21,8 @@ Agentic CLI provides the core infrastructure for building interactive CLI applic
 │  - Terminal UI (thinking-prompt)                                    │
 │  - Command registry (/help, /status, /clear, etc.)                  │
 │  - Message history                                                  │
+│  - Background initialization (no first-message lag)                 │
+│  - Task progress display in thinking box                            │
 └─────────────────────────────────────────────────────────────────────┘
                                  │
                                  ▼
@@ -391,6 +393,7 @@ WorkflowEvent types for UI integration:
 | `CODE_EXECUTION` | Code execution result | outcome |
 | `ERROR` | Error message | recoverable, error_code |
 | `USER_INPUT_REQUIRED` | Tool needs user input | request_id, prompt |
+| `TASK_PROGRESS` | Task graph update | current_task_description, progress |
 
 ### Processing Events
 
@@ -405,6 +408,24 @@ async for event in manager.process(message, user_id="user1"):
     elif event.type == EventType.TOOL_RESULT:
         print(f"Result: {event.metadata['result']}")
 ```
+
+### Task Progress Display
+
+When using a task graph for planning, the CLI thinking box dynamically shows task progress:
+
+```
+Calling: search_web
+─── Tasks: 2/5 ───
+◐ Researching topic
+☐ Analyzing results
+☐ Writing summary
+```
+
+Status icons:
+- `◐` In progress
+- `☐` Pending
+- `✓` Completed
+- `✗` Failed
 
 ## Examples
 
