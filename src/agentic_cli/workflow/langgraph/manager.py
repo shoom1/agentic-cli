@@ -33,22 +33,6 @@ if TYPE_CHECKING:
 logger = Loggers.workflow()
 
 
-# Lazy imports for LangGraph dependencies
-def _import_langgraph():
-    """Lazily import LangGraph dependencies."""
-    try:
-        from langgraph.graph import StateGraph, END
-        from langgraph.checkpoint.memory import MemorySaver
-        from langgraph.types import RetryPolicy
-
-        return StateGraph, END, MemorySaver, RetryPolicy
-    except ImportError as e:
-        raise ImportError(
-            "LangGraph dependencies not installed. "
-            "Install with: pip install agentic-cli[langgraph]"
-        ) from e
-
-
 class LangGraphWorkflowManager(BaseWorkflowManager):
     """LangGraph-based workflow manager for agentic applications.
 
@@ -305,7 +289,7 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
         Returns:
             RetryPolicy configured with settings values for retry behavior.
         """
-        StateGraph, END, MemorySaver, RetryPolicy = _import_langgraph()
+        from langgraph.types import RetryPolicy
 
         return RetryPolicy(
             max_attempts=self._settings.retry_max_attempts,
@@ -319,7 +303,7 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
         Creates a graph where each agent config becomes a node,
         with edges based on sub_agent relationships.
         """
-        StateGraph, END, MemorySaver, RetryPolicy = _import_langgraph()
+        from langgraph.graph import StateGraph, END
         from agentic_cli.workflow.langgraph.state import AgentState
 
         # Build config map

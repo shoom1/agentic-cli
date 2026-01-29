@@ -24,11 +24,9 @@ warnings.warn(
 from agentic_cli.workflow.langgraph.manager import (
     LangGraphWorkflowManager,
     LangGraphManager,
-    _import_langgraph,
 )
 
 __all__ = [
     "LangGraphWorkflowManager",
     "LangGraphManager",
-    "_import_langgraph",
 ]
