@@ -41,6 +41,7 @@ class EventType(Enum):
     FILE_DATA = "file_data"
     ERROR = "error"
     USER_INPUT_REQUIRED = "user_input_required"
+    TASK_PROGRESS = "task_progress"
 
 
 @dataclass
@@ -249,5 +250,38 @@ class WorkflowEvent:
         return cls(
             type=EventType.USER_INPUT_REQUIRED,
             content=prompt,
+            metadata=metadata,
+        )
+
+    @classmethod
+    def task_progress(
+        cls,
+        display: str,
+        progress: dict[str, int],
+        current_task_id: str | None = None,
+        current_task_description: str | None = None,
+    ) -> "WorkflowEvent":
+        """Create a task progress event for updating the thinking box.
+
+        This event signals that the task graph has been updated and the UI
+        should refresh its display of task progress.
+
+        Args:
+            display: Formatted string representation of the task graph
+            progress: Progress statistics (total, pending, completed, etc.)
+            current_task_id: ID of the task currently being worked on
+            current_task_description: Description of the current task
+        """
+        metadata: dict[str, Any] = {
+            "progress": progress,
+        }
+        if current_task_id is not None:
+            metadata["current_task_id"] = current_task_id
+        if current_task_description is not None:
+            metadata["current_task_description"] = current_task_description
+
+        return cls(
+            type=EventType.TASK_PROGRESS,
+            content=display,
             metadata=metadata,
         )
