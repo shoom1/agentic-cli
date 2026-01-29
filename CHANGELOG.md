@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-01-28
+
+### Added
+
+- **Task Progress Display**: Thinking box now shows dynamic task progress with status icons (◐ ☐ ✓ ✗)
+- `TASK_PROGRESS` event type for signaling task graph updates
+- `TaskGraph.to_compact_display()` for condensed status display
+
+### Changed
+
+- **Background Initialization**: Workflow manager now initializes services in background, eliminating first-message lag
+- Simplified LangGraph imports - removed `_import_langgraph` helper in favor of direct imports
+
 ## [0.3.0] - 2025-01-27
 
 ### Added
