@@ -720,6 +720,11 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
                         )
                     )
 
+                    # Emit task progress if task graph exists
+                    progress_event = self._emit_task_progress_event()
+                    if progress_event:
+                        yield self._maybe_transform(progress_event)
+
             logger.info("message_processed_langgraph")
 
         finally:
@@ -732,6 +737,36 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
             transformed = self._on_event(event)
             return transformed if transformed is not None else event
         return event
+
+    def _emit_task_progress_event(self) -> WorkflowEvent | None:
+        """Create a TASK_PROGRESS event if task graph has tasks.
+
+        Returns:
+            WorkflowEvent if task graph has tasks, None otherwise.
+        """
+        if self._task_graph is None:
+            return None
+
+        progress = self._task_graph.get_progress()
+        if progress["total"] == 0:
+            return None
+
+        # Find current in-progress task for status line
+        current_task_id = None
+        current_task_desc = None
+        for task_id, task in self._task_graph._tasks.items():
+            from agentic_cli.planning.task_graph import TaskStatus
+            if task.status == TaskStatus.IN_PROGRESS:
+                current_task_id = task_id
+                current_task_desc = task.description
+                break
+
+        return WorkflowEvent.task_progress(
+            display=self._task_graph.to_compact_display(),
+            progress=progress,
+            current_task_id=current_task_id,
+            current_task_description=current_task_desc,
+        )
 
     def _normalize_content(self, content: Any) -> str:
         """Normalize LLM response content to a string.

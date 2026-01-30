@@ -41,6 +41,14 @@ class CLISettingsMixin:
         json_schema_extra={"ui_order": 30},
     )
 
+    # Thinking output control
+    verbose_thinking: bool = Field(
+        default=True,
+        title="Verbose Thinking",
+        description="Show detailed thinking/reasoning output in the UI",
+        json_schema_extra={"ui_order": 35},
+    )
+
     # User identity
     default_user: str = Field(
         default="default_user",

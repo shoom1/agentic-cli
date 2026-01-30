@@ -31,12 +31,12 @@ class ResearchDemoSettings(BaseSettings):
     app_name: str = Field(default="research_demo")
     workspace_dir: Path = Field(default=Path.home() / ".research_demo")
 
-    # Demo-specific setting with UI metadata
-    verbose_output: bool = Field(
+    # Override verbose_thinking default for concise mode
+    verbose_thinking: bool = Field(
         default=False,
-        title="Verbose Output",
+        title="Verbose Thinking",
         description="Show detailed thinking output (default: concise mode)",
-        json_schema_extra={"ui_order": 40},
+        json_schema_extra={"ui_order": 35},
     )
 
 

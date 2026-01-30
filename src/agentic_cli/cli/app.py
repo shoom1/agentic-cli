@@ -687,6 +687,7 @@ class BaseCLIApp:
 
         # Status line for thinking box (multi-line with task progress)
         status_line = "Processing..."
+        task_progress_display = None  # Updated by TASK_PROGRESS events (str | None)
         thinking_started = False
 
         # Accumulate content for history
@@ -697,21 +698,9 @@ class BaseCLIApp:
             """Build status display with current action and task progress."""
             lines = [status_line]
 
-            # Add task progress if task graph exists and has tasks
-            task_graph = getattr(self.workflow, "task_graph", None)
-            if task_graph is not None:
-                progress = task_graph.get_progress()
-                if progress["total"] > 0:
-                    # Add separator and progress bar
-                    completed = progress["completed"]
-                    total = progress["total"]
-                    in_progress = progress["in_progress"]
-                    lines.append(f"─── Tasks: {completed}/{total} ───")
-
-                    # Add compact task list
-                    compact_display = task_graph.to_compact_display(max_tasks=5)
-                    if compact_display:
-                        lines.append(compact_display)
+            # Add task progress if available (from TASK_PROGRESS events)
+            if task_progress_display:
+                lines.append(task_progress_display)
 
             return "\n".join(lines)
 
@@ -729,9 +718,10 @@ class BaseCLIApp:
                     response_content.append(event.content)
 
                 elif event.type == EventType.THINKING:
-                    # Stream thinking directly to console
+                    # Stream thinking to console only if verbose_thinking is enabled
                     status_line = "Thinking..."
-                    self.session.add_message("system", event.content)
+                    if self._settings.verbose_thinking:
+                        self.session.add_message("system", event.content)
                     thinking_content.append(event.content)
 
                 elif event.type == EventType.TOOL_CALL:
@@ -749,8 +739,7 @@ class BaseCLIApp:
                     status_line = f"{icon} {tool_name}: {event.content}{duration_str}"
                     # Also show in message area for visibility
                     style = "green" if success else "red"
-                    self.session.add_message(
-                        "system",
+                    self.session.add_rich(
                         f"[{style}]{icon}[/{style}] {tool_name}: {event.content}{duration_str}"
                     )
 
@@ -789,8 +778,18 @@ class BaseCLIApp:
                     status_line = f"File: {event.content}"
 
                 elif event.type == EventType.TASK_PROGRESS:
-                    # Task progress update - status is rebuilt dynamically by get_status()
-                    # Just update the status line with current task info if available
+                    # Task progress update - event.content has compact display,
+                    # event.metadata has progress stats
+                    progress = event.metadata.get("progress", {})
+                    if progress.get("total", 0) > 0:
+                        completed = progress.get("completed", 0)
+                        total = progress["total"]
+                        # Build display: separator + task list
+                        task_progress_display = f"─── Tasks: {completed}/{total} ───"
+                        if event.content:
+                            task_progress_display += f"\n{event.content}"
+
+                    # Update status line with current task if available
                     current_task = event.metadata.get("current_task_description")
                     if current_task:
                         status_line = f"Working on: {current_task}"

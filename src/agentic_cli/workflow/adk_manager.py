@@ -638,6 +638,36 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
     # Event processing (inlined from EventProcessor)
     # -------------------------------------------------------------------------
 
+    def _emit_task_progress_event(self) -> WorkflowEvent | None:
+        """Create a TASK_PROGRESS event if task graph has tasks.
+
+        Returns:
+            WorkflowEvent if task graph has tasks, None otherwise.
+        """
+        if self._task_graph is None:
+            return None
+
+        progress = self._task_graph.get_progress()
+        if progress["total"] == 0:
+            return None
+
+        # Find current in-progress task for status line
+        current_task_id = None
+        current_task_desc = None
+        for task_id, task in self._task_graph._tasks.items():
+            from agentic_cli.planning.task_graph import TaskStatus
+            if task.status == TaskStatus.IN_PROGRESS:
+                current_task_id = task_id
+                current_task_desc = task.description
+                break
+
+        return WorkflowEvent.task_progress(
+            display=self._task_graph.to_compact_display(),
+            progress=progress,
+            current_task_id=current_task_id,
+            current_task_description=current_task_desc,
+        )
+
     async def _process_adk_event(
         self,
         adk_event: Any,
@@ -695,6 +725,15 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     workflow_event = self._on_event(workflow_event)
                 if workflow_event:
                     yield workflow_event
+
+                    # After tool results, emit task progress if task graph exists
+                    if workflow_event.type == EventType.TOOL_RESULT:
+                        progress_event = self._emit_task_progress_event()
+                        if progress_event:
+                            if self._on_event:
+                                progress_event = self._on_event(progress_event)
+                            if progress_event:
+                                yield progress_event
 
     def _process_part(self, part: Any, session_id: str) -> WorkflowEvent | None:
         """Process a single part from the agent response.
