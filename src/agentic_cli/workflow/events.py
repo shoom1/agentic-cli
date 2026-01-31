@@ -43,6 +43,11 @@ class EventType(Enum):
     USER_INPUT_REQUIRED = "user_input_required"
     TASK_PROGRESS = "task_progress"
 
+    # LLM debugging events (raw traffic logging)
+    LLM_REQUEST = "llm_request"
+    LLM_RESPONSE = "llm_response"
+    LLM_USAGE = "llm_usage"
+
 
 @dataclass
 class UserInputRequest:
@@ -283,5 +288,166 @@ class WorkflowEvent:
         return cls(
             type=EventType.TASK_PROGRESS,
             content=display,
+            metadata=metadata,
+        )
+
+    # -------------------------------------------------------------------------
+    # LLM debugging events (raw traffic logging)
+    # -------------------------------------------------------------------------
+
+    @classmethod
+    def llm_request(
+        cls,
+        model: str,
+        messages: list[dict[str, Any]] | None = None,
+        tools: list[str] | None = None,
+        system_instruction: str | None = None,
+        config: dict[str, Any] | None = None,
+        invocation_id: str | None = None,
+    ) -> "WorkflowEvent":
+        """Create an LLM request event for debugging.
+
+        Captures raw request data sent to the LLM before inference.
+
+        Args:
+            model: Model identifier being called
+            messages: Conversation history/messages sent
+            tools: List of tool names available to the model
+            system_instruction: System prompt/instruction
+            config: Generation config (temperature, max_tokens, etc.)
+            invocation_id: ADK invocation ID for correlation
+        """
+        metadata: dict[str, Any] = {
+            "model": model,
+        }
+        if messages is not None:
+            metadata["messages"] = messages
+        if tools is not None:
+            metadata["tools"] = tools
+        if system_instruction is not None:
+            metadata["system_instruction"] = system_instruction
+        if config is not None:
+            metadata["config"] = config
+        if invocation_id is not None:
+            metadata["invocation_id"] = invocation_id
+
+        return cls(
+            type=EventType.LLM_REQUEST,
+            content=f"LLM Request: {model}",
+            metadata=metadata,
+        )
+
+    @classmethod
+    def llm_response(
+        cls,
+        model: str,
+        content: str | None = None,
+        finish_reason: str | None = None,
+        model_version: str | None = None,
+        error_code: str | None = None,
+        error_message: str | None = None,
+        invocation_id: str | None = None,
+        author: str | None = None,
+        raw_parts: list[dict[str, Any]] | None = None,
+    ) -> "WorkflowEvent":
+        """Create an LLM response event for debugging.
+
+        Captures raw response data from the LLM after inference.
+
+        Args:
+            model: Model identifier that responded
+            content: Text content of response (may be truncated for display)
+            finish_reason: Why generation stopped (STOP, MAX_TOKENS, etc.)
+            model_version: Specific model version used
+            error_code: Error code if request failed
+            error_message: Error message if request failed
+            invocation_id: ADK invocation ID for correlation
+            author: Agent name that generated this response
+            raw_parts: Raw response parts for detailed inspection
+        """
+        metadata: dict[str, Any] = {
+            "model": model,
+        }
+        if finish_reason is not None:
+            metadata["finish_reason"] = finish_reason
+        if model_version is not None:
+            metadata["model_version"] = model_version
+        if error_code is not None:
+            metadata["error_code"] = error_code
+        if error_message is not None:
+            metadata["error_message"] = error_message
+        if invocation_id is not None:
+            metadata["invocation_id"] = invocation_id
+        if author is not None:
+            metadata["author"] = author
+        if raw_parts is not None:
+            metadata["raw_parts"] = raw_parts
+
+        display_content = content[:200] + "..." if content and len(content) > 200 else (content or "")
+        return cls(
+            type=EventType.LLM_RESPONSE,
+            content=f"LLM Response: {display_content}",
+            metadata=metadata,
+        )
+
+    @classmethod
+    def llm_usage(
+        cls,
+        model: str,
+        prompt_tokens: int | None = None,
+        completion_tokens: int | None = None,
+        total_tokens: int | None = None,
+        thinking_tokens: int | None = None,
+        cached_tokens: int | None = None,
+        invocation_id: str | None = None,
+        latency_ms: float | None = None,
+    ) -> "WorkflowEvent":
+        """Create an LLM usage event for debugging and metrics.
+
+        Captures token usage and performance metrics from an LLM call.
+
+        Args:
+            model: Model identifier
+            prompt_tokens: Input token count
+            completion_tokens: Output token count
+            total_tokens: Total token count
+            thinking_tokens: Tokens used for thinking/reasoning
+            cached_tokens: Tokens served from cache
+            invocation_id: ADK invocation ID for correlation
+            latency_ms: Response latency in milliseconds
+        """
+        metadata: dict[str, Any] = {
+            "model": model,
+        }
+        if prompt_tokens is not None:
+            metadata["prompt_tokens"] = prompt_tokens
+        if completion_tokens is not None:
+            metadata["completion_tokens"] = completion_tokens
+        if total_tokens is not None:
+            metadata["total_tokens"] = total_tokens
+        if thinking_tokens is not None:
+            metadata["thinking_tokens"] = thinking_tokens
+        if cached_tokens is not None:
+            metadata["cached_tokens"] = cached_tokens
+        if invocation_id is not None:
+            metadata["invocation_id"] = invocation_id
+        if latency_ms is not None:
+            metadata["latency_ms"] = latency_ms
+
+        # Build summary content
+        parts = []
+        if prompt_tokens is not None:
+            parts.append(f"in={prompt_tokens}")
+        if completion_tokens is not None:
+            parts.append(f"out={completion_tokens}")
+        if total_tokens is not None:
+            parts.append(f"total={total_tokens}")
+        if latency_ms is not None:
+            parts.append(f"{latency_ms:.0f}ms")
+
+        summary = ", ".join(parts) if parts else "No usage data"
+        return cls(
+            type=EventType.LLM_USAGE,
+            content=f"LLM Usage ({model}): {summary}",
             metadata=metadata,
         )
