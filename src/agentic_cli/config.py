@@ -17,8 +17,8 @@ Settings Management:
 
 Settings Loading Priority (highest to lowest):
     1. Environment variables (AGENTIC_* prefix)
-    2. Project config (./settings.json)
-    3. User config (~/.appname/settings.json)
+    2. Project config (./.{app_name}/settings.json)
+    3. User config (~/.{app_name}/settings.json)
     4. .env file
     5. Default values
 """
@@ -100,8 +100,8 @@ class BaseSettings(WorkflowSettingsMixin, CLISettingsMixin, PydanticBaseSettings
 
     Settings are loaded from (in order of precedence):
     1. Environment variables (with domain-specific prefix)
-    2. Project config (./settings.json)
-    3. User config (~/.appname/settings.json)
+    2. Project config (./.{app_name}/settings.json)
+    3. User config (~/.{app_name}/settings.json)
     4. Domain-specific .env file
     5. Default values
 

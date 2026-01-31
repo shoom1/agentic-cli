@@ -1,7 +1,7 @@
 """Settings persistence utilities.
 
 Provides functionality to save settings to JSON files for layered configuration.
-Settings are saved to ./settings.json (project config) by default.
+Settings are saved to ./.{app_name}/settings.json (project config) by default.
 """
 
 import json
@@ -23,33 +23,35 @@ SECRET_FIELDS = frozenset({
 class SettingsPersistence:
     """Manages loading and saving settings to JSON files.
 
-    Settings are saved to project config (./settings.json) by default.
-    Users can manually create ~/.appname/settings.json for user-level defaults.
+    Settings are saved to project config (./.{app_name}/settings.json) by default.
+    User config (~/.{app_name}/settings.json) serves as a fallback for loading.
 
-    Priority (highest to lowest):
+    Loading priority (highest to lowest):
         1. Environment variables
-        2. Project config (./settings.json)
-        3. User config (~/.appname/settings.json)
+        2. Project config (./.{app_name}/settings.json)
+        3. User config (~/.{app_name}/settings.json)
         4. .env file
         5. Default values
+
+    Saving: Always saves to project config (./.{app_name}/settings.json).
     """
 
     def __init__(self, app_name: str = "agentic"):
         """Initialize persistence manager.
 
         Args:
-            app_name: Application name used for user config directory
+            app_name: Application name used for config directories
         """
         self.app_name = app_name
 
     @property
     def project_config_path(self) -> Path:
-        """Get path to project config file (./settings.json)."""
-        return Path.cwd() / "settings.json"
+        """Get path to project config file (./.{app_name}/settings.json)."""
+        return Path.cwd() / f".{self.app_name}" / "settings.json"
 
     @property
     def user_config_path(self) -> Path:
-        """Get path to user config file (~/.appname/settings.json)."""
+        """Get path to user config file (~/.{app_name}/settings.json)."""
         return Path.home() / f".{self.app_name}" / "settings.json"
 
     def save(
@@ -60,7 +62,7 @@ class SettingsPersistence:
     ) -> Path:
         """Save settings to JSON config file.
 
-        By default saves to project config (./settings.json).
+        By default saves to project config (./.{app_name}/settings.json).
         Secrets (API keys) are never saved.
 
         Args:
@@ -93,19 +95,27 @@ class SettingsPersistence:
     def load(self, path: Path | None = None) -> dict[str, Any]:
         """Load settings from JSON config file.
 
+        If no path is specified, tries project config first, then user config.
+
         Args:
-            path: Optional custom path (defaults to project_config_path)
+            path: Optional custom path (if not specified, uses fallback order)
 
         Returns:
-            Dictionary of settings from file, or empty dict if file doesn't exist
+            Dictionary of settings from file, or empty dict if no file exists
         """
-        target_path = path or self.project_config_path
+        if path is not None:
+            if not path.exists():
+                return {}
+            with open(path) as f:
+                return json.load(f)
 
-        if not target_path.exists():
-            return {}
+        # Try project config first, then user config
+        for config_path in [self.project_config_path, self.user_config_path]:
+            if config_path.exists():
+                with open(config_path) as f:
+                    return json.load(f)
 
-        with open(target_path) as f:
-            return json.load(f)
+        return {}
 
     def _serialize_paths(self, data: dict[str, Any]) -> dict[str, Any]:
         """Convert Path objects to strings recursively.

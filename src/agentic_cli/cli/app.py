@@ -408,7 +408,7 @@ class BaseCLIApp:
         return [item for _, item in sorted(items, key=lambda x: x[0])]
 
     async def save_settings(self) -> "Path":
-        """Save current settings to project config file (./settings.json).
+        """Save current settings to project config file (./.{app_name}/settings.json).
 
         Uses SettingsPersistence to save non-default settings to the
         project-level config file. Secrets (API keys) are never saved.
@@ -451,6 +451,11 @@ class BaseCLIApp:
     async def apply_settings(self, changes: dict[str, Any]) -> None:
         """Apply changed settings and reinitialize workflow if needed.
 
+        Settings are applied in two ways:
+        1. Special settings (model, thinking_effort) use dedicated setters
+           and may trigger workflow reinitialization
+        2. All other settings are applied directly to the settings object
+
         Args:
             changes: Dictionary of changed settings (key -> new_value)
         """
@@ -461,7 +466,10 @@ class BaseCLIApp:
         needs_reinit = False
         new_model = changes.get("model")
 
-        # Apply model change
+        # Settings that require special handling
+        special_settings = {"model", "thinking_effort"}
+
+        # Apply model change (requires dedicated setter + reinit)
         if new_model:
             try:
                 self._settings.set_model(new_model)
@@ -470,7 +478,7 @@ class BaseCLIApp:
                 self.session.add_error(f"Failed to set model: {e}")
                 return
 
-        # Apply thinking effort change
+        # Apply thinking effort change (requires dedicated setter + reinit)
         if "thinking_effort" in changes:
             try:
                 self._settings.set_thinking_effort(changes["thinking_effort"])
@@ -479,9 +487,10 @@ class BaseCLIApp:
                 self.session.add_error(f"Failed to set thinking effort: {e}")
                 return
 
-        # Apply log_activity change
-        if "log_activity" in changes:
-            object.__setattr__(self._settings, "log_activity", changes["log_activity"])
+        # Apply all other settings directly
+        for key, value in changes.items():
+            if key not in special_settings:
+                object.__setattr__(self._settings, key, value)
 
         # Reinitialize workflow if needed
         if needs_reinit and self._workflow is not None:
