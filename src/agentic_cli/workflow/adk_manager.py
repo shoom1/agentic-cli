@@ -421,6 +421,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         if self._settings.raw_llm_logging:
             self._llm_event_logger = LLMEventLogger(
                 model_name=self.model,
+                app_name=self._settings.app_name,
                 include_messages=True,
                 include_raw_parts=True,
             )

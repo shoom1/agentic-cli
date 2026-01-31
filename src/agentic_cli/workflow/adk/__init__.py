@@ -8,13 +8,13 @@ Future structure:
 - middleware/: ADK middleware wrappers
 - persistence/: ADK-specific storage backends
 - tools/: ADK-native tool implementations
+
+Note: GoogleADKWorkflowManager is NOT re-exported here to avoid circular
+imports. Import it directly from agentic_cli.workflow.adk_manager.
 """
 
-# Re-export the existing manager for convenience
-from agentic_cli.workflow.adk_manager import GoogleADKWorkflowManager
 from agentic_cli.workflow.adk.llm_event_logger import LLMEventLogger
 
 __all__ = [
-    "GoogleADKWorkflowManager",
     "LLMEventLogger",
 ]

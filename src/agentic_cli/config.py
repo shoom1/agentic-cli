@@ -184,7 +184,7 @@ class BaseSettings(WorkflowSettingsMixin, CLISettingsMixin, PydanticBaseSettings
         Priority (highest to lowest):
             1. init_settings (constructor arguments)
             2. env_settings (environment variables)
-            3. project_json (./settings.json)
+            3. project_json (./.app_name/settings.json)
             4. user_json (~/.app_name/settings.json)
             5. dotenv_settings (.env file)
 
@@ -195,15 +195,6 @@ class BaseSettings(WorkflowSettingsMixin, CLISettingsMixin, PydanticBaseSettings
             env_settings,
         ]
 
-        # Add project-level JSON config (./settings.json)
-        project_json = _get_json_config_source(
-            settings_cls,
-            Path.cwd() / "settings.json",
-        )
-        if project_json:
-            sources.append(project_json)
-
-        # Add user-level JSON config (~/.app_name/settings.json)
         # Get app_name from class default or model_fields
         app_name = "agentic_cli"
         if hasattr(cls, "model_fields") and "app_name" in cls.model_fields:
@@ -211,6 +202,15 @@ class BaseSettings(WorkflowSettingsMixin, CLISettingsMixin, PydanticBaseSettings
             if field_info.default and field_info.default != ...:
                 app_name = field_info.default
 
+        # Add project-level JSON config (./.app_name/settings.json)
+        project_json = _get_json_config_source(
+            settings_cls,
+            Path.cwd() / f".{app_name}" / "settings.json",
+        )
+        if project_json:
+            sources.append(project_json)
+
+        # Add user-level JSON config (~/.app_name/settings.json)
         user_json = _get_json_config_source(
             settings_cls,
             Path.home() / f".{app_name}" / "settings.json",

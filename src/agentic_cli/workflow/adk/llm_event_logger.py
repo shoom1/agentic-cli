@@ -4,8 +4,13 @@ This module provides callbacks for Google ADK's before_model_callback and
 after_model_callback hooks to capture raw LLM request/response data for
 debugging and understanding model-specific behaviors.
 
+Events are written to a JSON Lines file at ./.{app_name}/logs/llm_events.jsonl
+
 Usage:
-    logger = LLMEventLogger(model_name="gemini-2.0-flash")
+    logger = LLMEventLogger(
+        model_name="gemini-2.0-flash",
+        app_name="research_demo",
+    )
 
     agent = LlmAgent(
         name="my_agent",
@@ -13,25 +18,28 @@ Usage:
         after_model_callback=logger.after_model_callback,
     )
 
-    # After processing, retrieve events:
+    # After processing, retrieve events from memory:
     for event in logger.get_events():
         print(event.type, event.metadata)
+
+    # Or read from the log file:
+    # ./.research_demo/logs/llm_events.jsonl
 """
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
 from agentic_cli.workflow.events import WorkflowEvent
-from agentic_cli.logging import Loggers
 
 if TYPE_CHECKING:
     from google.adk.models import LlmRequest, LlmResponse
     from google.adk.agents.callback_context import CallbackContext
-
-logger = Loggers.workflow()
 
 
 @dataclass
@@ -39,23 +47,55 @@ class LLMEventLogger:
     """Logger for capturing raw LLM request/response traffic.
 
     This class provides ADK callbacks that capture LLM interactions for
-    debugging purposes. Events are stored in a buffer and can be retrieved
-    via get_events() or consumed via drain_events().
+    debugging purposes. Events are written to a JSON Lines file and also
+    stored in a memory buffer for programmatic access.
 
     Attributes:
         model_name: Default model name (used if not in request)
-        max_events: Maximum events to buffer (oldest are dropped)
+        app_name: Application name for log directory (./.{app_name}/logs/)
+        max_events: Maximum events to buffer in memory (oldest are dropped)
         include_messages: Whether to include full message history
         include_raw_parts: Whether to include raw response parts
     """
 
     model_name: str = "unknown"
+    app_name: str = "agentic_cli"
     max_events: int = 1000
     include_messages: bool = True
     include_raw_parts: bool = True
 
     _events: list[WorkflowEvent] = field(default_factory=list)
     _request_timestamps: dict[str, float] = field(default_factory=dict)
+    _log_file: Path | None = field(default=None, init=False)
+
+    def __post_init__(self) -> None:
+        """Initialize log file path and ensure directory exists."""
+        log_dir = Path.cwd() / f".{self.app_name}" / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        self._log_file = log_dir / "llm_events.jsonl"
+
+    def _write_to_log(self, event: WorkflowEvent) -> None:
+        """Write event to JSON Lines log file.
+
+        Args:
+            event: WorkflowEvent to write
+        """
+        if self._log_file is None:
+            return
+
+        record = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "type": event.type.value,
+            "content": event.content,
+            "metadata": event.metadata,
+        }
+
+        try:
+            with open(self._log_file, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record, default=str) + "\n")
+        except OSError:
+            # Silently ignore write errors to avoid disrupting the workflow
+            pass
 
     def before_model_callback(
         self,
@@ -118,13 +158,7 @@ class LLMEventLogger:
         )
 
         self._add_event(event)
-        logger.debug(
-            "llm_request_captured",
-            model=model,
-            invocation_id=invocation_id,
-            message_count=len(messages) if messages else 0,
-            tool_count=len(tools) if tools else 0,
-        )
+        self._write_to_log(event)
 
         return None  # Allow request to proceed
 
@@ -191,6 +225,7 @@ class LLMEventLogger:
             raw_parts=raw_parts,
         )
         self._add_event(response_event)
+        self._write_to_log(response_event)
 
         # Create usage event if usage_metadata is available
         if llm_response.usage_metadata:
@@ -206,24 +241,7 @@ class LLMEventLogger:
                 latency_ms=latency_ms,
             )
             self._add_event(usage_event)
-
-            logger.debug(
-                "llm_response_captured",
-                model=model,
-                invocation_id=invocation_id,
-                finish_reason=finish_reason,
-                prompt_tokens=getattr(usage, "prompt_token_count", None),
-                completion_tokens=getattr(usage, "candidates_token_count", None),
-                latency_ms=latency_ms,
-            )
-        else:
-            logger.debug(
-                "llm_response_captured",
-                model=model,
-                invocation_id=invocation_id,
-                finish_reason=finish_reason,
-                latency_ms=latency_ms,
-            )
+            self._write_to_log(usage_event)
 
         return None  # Allow response to proceed
 
@@ -249,6 +267,14 @@ class LLMEventLogger:
         """Clear all captured events and pending timestamps."""
         self._events = []
         self._request_timestamps = {}
+
+    def get_log_file_path(self) -> Path | None:
+        """Get the path to the log file.
+
+        Returns:
+            Path to the JSON Lines log file, or None if not initialized
+        """
+        return self._log_file
 
     def _add_event(self, event: WorkflowEvent) -> None:
         """Add event to buffer, enforcing max_events limit."""
