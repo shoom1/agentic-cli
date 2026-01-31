@@ -768,8 +768,12 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             result_data = response
 
             if isinstance(response, dict):
-                if "error" in response:
+                # Check for error value, not just key presence
+                if response.get("error"):
                     success = False
+                # Also respect explicit "success" field if present
+                if "success" in response:
+                    success = response["success"]
                 result_data = response
 
             summary = self._generate_tool_summary(tool_name, result_data, success)
@@ -819,6 +823,9 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                 return str(result["summary"])
             if "message" in result:
                 return str(result["message"])
+            # Handle results with a "results" list (e.g., web_search)
+            if "results" in result and isinstance(result["results"], list):
+                return f"Found {len(result['results'])} results"
 
         # Auto-generate based on result type
         if result is None:

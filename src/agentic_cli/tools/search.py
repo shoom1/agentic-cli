@@ -21,10 +21,7 @@ from __future__ import annotations
 import httpx
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
-
-if TYPE_CHECKING:
-    from agentic_cli.config import BaseSettings
+from typing import Any, Literal
 
 
 @dataclass
@@ -143,7 +140,7 @@ SEARCH_BACKENDS: dict[str, type[SearchBackend]] = {
 }
 
 
-def _get_backend(settings: "BaseSettings") -> SearchBackend:
+def _get_backend(settings: Any) -> SearchBackend:
     """Get the configured search backend.
 
     Args:
@@ -194,8 +191,6 @@ def _get_backend(settings: "BaseSettings") -> SearchBackend:
 def web_search(
     query: str,
     max_results: int = 5,
-    *,
-    settings: "BaseSettings | None" = None,
 ) -> dict:
     """Search the web for information.
 
@@ -205,7 +200,6 @@ def web_search(
     Args:
         query: The search query string
         max_results: Maximum number of results to return (default: 5)
-        settings: Optional settings override (uses global settings if not provided)
 
     Returns:
         Dictionary with search results:
@@ -221,7 +215,7 @@ def web_search(
     """
     from agentic_cli.config import get_settings
 
-    resolved_settings = settings or get_settings()
+    resolved_settings = get_settings()
 
     try:
         backend = _get_backend(resolved_settings)
