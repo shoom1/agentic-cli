@@ -77,6 +77,7 @@ class BaseWorkflowManager(ABC):
         self._task_graph: "TaskGraph | None" = None
         self._approval_manager: "ApprovalManager | None" = None
         self._checkpoint_manager: "CheckpointManager | None" = None
+        self._llm_summarizer: Any | None = None
 
     @property
     def agent_configs(self) -> list[AgentConfig]:
@@ -123,6 +124,11 @@ class BaseWorkflowManager(ABC):
         """Get the checkpoint manager (if required by tools)."""
         return self._checkpoint_manager
 
+    @property
+    def llm_summarizer(self) -> Any | None:
+        """Get the LLM summarizer (if required by tools)."""
+        return self._llm_summarizer
+
     def _detect_required_managers(self) -> set[str]:
         """Scan all agent tools for 'requires' metadata.
 
@@ -168,6 +174,20 @@ class BaseWorkflowManager(ABC):
         if "checkpoint_manager" in self._required_managers and self._checkpoint_manager is None:
             from agentic_cli.hitl import CheckpointManager
             self._checkpoint_manager = CheckpointManager()
+
+        if "llm_summarizer" in self._required_managers and self._llm_summarizer is None:
+            self._llm_summarizer = self._create_summarizer()
+
+    def _create_summarizer(self) -> Any:
+        """Create an LLM summarizer for webfetch.
+
+        Subclasses should override this to return a framework-specific
+        summarizer that implements the LLMSummarizer protocol.
+
+        Returns:
+            An LLMSummarizer implementation, or None.
+        """
+        return None
 
     @property
     @abstractmethod

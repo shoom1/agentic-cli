@@ -550,3 +550,193 @@ class TestWebFetchTool:
 
         assert hasattr(web_fetch, "requires")
         assert "llm_summarizer" in web_fetch.requires
+
+
+class TestWorkflowManagerIntegration:
+    """Tests for workflow manager integration with webfetch tool."""
+
+    def test_llm_summarizer_detected_in_required_managers(self):
+        """Test that llm_summarizer is detected from web_fetch tool's @requires decorator."""
+        from agentic_cli.workflow.base_manager import BaseWorkflowManager
+        from agentic_cli.workflow.config import AgentConfig
+        from agentic_cli.workflow.events import WorkflowEvent, UserInputRequest
+        from agentic_cli.tools.webfetch_tool import web_fetch
+        from typing import AsyncGenerator
+
+        # Create a minimal test subclass of BaseWorkflowManager
+        class TestWorkflowManager(BaseWorkflowManager):
+            @property
+            def model(self) -> str:
+                return "test-model"
+
+            async def initialize_services(self, validate: bool = True) -> None:
+                self._ensure_managers_initialized()
+                self._initialized = True
+
+            async def process(
+                self, message: str, user_id: str, session_id: str | None = None
+            ) -> AsyncGenerator[WorkflowEvent, None]:
+                if False:
+                    yield  # type: ignore
+
+            async def reinitialize(
+                self, model: str | None = None, preserve_sessions: bool = True
+            ) -> None:
+                pass
+
+            async def cleanup(self) -> None:
+                pass
+
+            def has_pending_input(self) -> bool:
+                return False
+
+            def get_pending_input_request(self) -> UserInputRequest | None:
+                return None
+
+            async def request_user_input(self, request: UserInputRequest) -> str:
+                return ""
+
+            def provide_user_input(self, request_id: str, response: str) -> bool:
+                return False
+
+        # Create an agent config that uses the web_fetch tool
+        agent_config = AgentConfig(
+            name="test_agent",
+            prompt="Test prompt",
+            tools=[web_fetch],
+        )
+
+        # Instantiate the workflow manager
+        manager = TestWorkflowManager(agent_configs=[agent_config])
+
+        # Verify llm_summarizer is in required_managers
+        assert "llm_summarizer" in manager.required_managers
+
+    def test_llm_summarizer_property_exists(self):
+        """Test that llm_summarizer property exists on BaseWorkflowManager."""
+        from agentic_cli.workflow.base_manager import BaseWorkflowManager
+        from agentic_cli.workflow.config import AgentConfig
+        from agentic_cli.workflow.events import WorkflowEvent, UserInputRequest
+        from typing import AsyncGenerator
+
+        # Create a minimal test subclass
+        class TestWorkflowManager(BaseWorkflowManager):
+            @property
+            def model(self) -> str:
+                return "test-model"
+
+            async def initialize_services(self, validate: bool = True) -> None:
+                self._ensure_managers_initialized()
+                self._initialized = True
+
+            async def process(
+                self, message: str, user_id: str, session_id: str | None = None
+            ) -> AsyncGenerator[WorkflowEvent, None]:
+                if False:
+                    yield  # type: ignore
+
+            async def reinitialize(
+                self, model: str | None = None, preserve_sessions: bool = True
+            ) -> None:
+                pass
+
+            async def cleanup(self) -> None:
+                pass
+
+            def has_pending_input(self) -> bool:
+                return False
+
+            def get_pending_input_request(self) -> UserInputRequest | None:
+                return None
+
+            async def request_user_input(self, request: UserInputRequest) -> str:
+                return ""
+
+            def provide_user_input(self, request_id: str, response: str) -> bool:
+                return False
+
+        # Create a simple agent config (no web_fetch)
+        agent_config = AgentConfig(
+            name="test_agent",
+            prompt="Test prompt",
+            tools=[],
+        )
+
+        manager = TestWorkflowManager(agent_configs=[agent_config])
+
+        # The llm_summarizer property should exist
+        assert hasattr(manager, "llm_summarizer")
+        # Initially None since no tools require it
+        assert manager.llm_summarizer is None
+
+    @pytest.mark.asyncio
+    async def test_create_summarizer_called_when_required(self):
+        """Test that _create_summarizer is called when llm_summarizer is required."""
+        from agentic_cli.workflow.base_manager import BaseWorkflowManager
+        from agentic_cli.workflow.config import AgentConfig
+        from agentic_cli.workflow.events import WorkflowEvent, UserInputRequest
+        from agentic_cli.tools.webfetch_tool import web_fetch
+        from typing import AsyncGenerator
+
+        # Track if _create_summarizer was called
+        create_summarizer_called = False
+        mock_summarizer = object()
+
+        class TestWorkflowManager(BaseWorkflowManager):
+            @property
+            def model(self) -> str:
+                return "test-model"
+
+            async def initialize_services(self, validate: bool = True) -> None:
+                self._ensure_managers_initialized()
+                self._initialized = True
+
+            async def process(
+                self, message: str, user_id: str, session_id: str | None = None
+            ) -> AsyncGenerator[WorkflowEvent, None]:
+                if False:
+                    yield  # type: ignore
+
+            async def reinitialize(
+                self, model: str | None = None, preserve_sessions: bool = True
+            ) -> None:
+                pass
+
+            async def cleanup(self) -> None:
+                pass
+
+            def has_pending_input(self) -> bool:
+                return False
+
+            def get_pending_input_request(self) -> UserInputRequest | None:
+                return None
+
+            async def request_user_input(self, request: UserInputRequest) -> str:
+                return ""
+
+            def provide_user_input(self, request_id: str, response: str) -> bool:
+                return False
+
+            def _create_summarizer(self):
+                nonlocal create_summarizer_called
+                create_summarizer_called = True
+                return mock_summarizer
+
+        # Create an agent config with web_fetch tool
+        agent_config = AgentConfig(
+            name="test_agent",
+            prompt="Test prompt",
+            tools=[web_fetch],
+        )
+
+        manager = TestWorkflowManager(agent_configs=[agent_config])
+
+        # Before initialization, summarizer should be None
+        assert manager.llm_summarizer is None
+
+        # Initialize to trigger manager creation
+        await manager.initialize_services()
+
+        # Now _create_summarizer should have been called
+        assert create_summarizer_called
+        assert manager.llm_summarizer is mock_summarizer
