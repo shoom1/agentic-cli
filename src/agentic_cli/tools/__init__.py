@@ -65,6 +65,7 @@ from agentic_cli.tools.standard import (
     ask_clarification,
 )
 from agentic_cli.tools.search import web_search
+from agentic_cli.tools.webfetch_tool import web_fetch
 from agentic_cli.tools.registry import (
     ToolCategory,
     ToolDefinition,
@@ -104,6 +105,8 @@ __all__ = [
     "diff_compare",
     # Web search (pluggable backends)
     "web_search",
+    # Web fetch (content fetching and summarization)
+    "web_fetch",
     # Search (ADK built-in - note: can't mix with function calling)
     "google_search_tool",
     # Standard tool functions (ready to use with agents)

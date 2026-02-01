@@ -438,3 +438,113 @@ class TestLLMSummarizer:
         assert get_fast_model("gemini-3-pro") == "gemini-3-flash"
         assert get_fast_model("claude-opus-4-5-20251101") == "claude-haiku-4-20251101"
         assert get_fast_model("unknown-model") is None
+
+
+class TestWebFetchTool:
+    """Tests for the main web_fetch tool function."""
+
+    @pytest.mark.asyncio
+    async def test_web_fetch_success(self):
+        """Test successful web fetch with mocked fetcher and summarizer."""
+        from agentic_cli.tools.webfetch_tool import web_fetch
+        from agentic_cli.tools.webfetch.fetcher import FetchResult
+        from agentic_cli.workflow.context import set_context_llm_summarizer
+
+        # Create mock summarizer
+        class MockSummarizer:
+            async def summarize(self, content: str, prompt: str) -> str:
+                return f"Summary of: {content[:20]}..."
+
+        # Set summarizer in context
+        set_context_llm_summarizer(MockSummarizer())
+
+        try:
+            # Mock the fetcher
+            with patch("agentic_cli.tools.webfetch_tool.get_or_create_fetcher") as mock_get_fetcher:
+                mock_fetcher = AsyncMock()
+                mock_fetcher.fetch.return_value = FetchResult(
+                    success=True,
+                    content="<html><body><h1>Test Page</h1><p>Content here</p></body></html>",
+                    content_type="text/html",
+                    truncated=False,
+                    from_cache=False,
+                )
+                mock_get_fetcher.return_value = mock_fetcher
+
+                result = await web_fetch(
+                    url="https://example.com/page",
+                    prompt="Summarize this page",
+                )
+
+            assert result["success"] is True
+            assert "summary" in result
+            assert result["url"] == "https://example.com/page"
+            assert result["truncated"] is False
+            assert result["cached"] is False
+        finally:
+            set_context_llm_summarizer(None)
+
+    @pytest.mark.asyncio
+    async def test_web_fetch_redirect(self):
+        """Test web fetch returns redirect info for cross-host redirects."""
+        from agentic_cli.tools.webfetch_tool import web_fetch
+        from agentic_cli.tools.webfetch.fetcher import FetchResult, RedirectInfo
+        from agentic_cli.workflow.context import set_context_llm_summarizer
+
+        # Create mock summarizer
+        class MockSummarizer:
+            async def summarize(self, content: str, prompt: str) -> str:
+                return "Summary"
+
+        set_context_llm_summarizer(MockSummarizer())
+
+        try:
+            with patch("agentic_cli.tools.webfetch_tool.get_or_create_fetcher") as mock_get_fetcher:
+                mock_fetcher = AsyncMock()
+                mock_fetcher.fetch.return_value = FetchResult(
+                    success=False,
+                    redirect=RedirectInfo(
+                        from_url="https://example.com/page",
+                        to_url="https://other.com/page",
+                        to_host="other.com",
+                    ),
+                    error="Cross-host redirect to other.com",
+                )
+                mock_get_fetcher.return_value = mock_fetcher
+
+                result = await web_fetch(
+                    url="https://example.com/page",
+                    prompt="Summarize this page",
+                )
+
+            assert result["success"] is False
+            assert "redirect" in result
+            assert result["redirect"]["to_url"] == "https://other.com/page"
+            assert result["redirect"]["to_host"] == "other.com"
+        finally:
+            set_context_llm_summarizer(None)
+
+    @pytest.mark.asyncio
+    async def test_web_fetch_no_summarizer(self):
+        """Test web fetch returns error when no summarizer in context."""
+        from agentic_cli.tools.webfetch_tool import web_fetch
+        from agentic_cli.workflow.context import set_context_llm_summarizer
+
+        # Ensure no summarizer in context
+        set_context_llm_summarizer(None)
+
+        result = await web_fetch(
+            url="https://example.com/page",
+            prompt="Summarize this page",
+        )
+
+        assert result["success"] is False
+        assert "error" in result
+        assert "summarizer" in result["error"].lower()
+
+    def test_web_fetch_requires_decorator(self):
+        """Test web_fetch has requires attribute with llm_summarizer."""
+        from agentic_cli.tools.webfetch_tool import web_fetch
+
+        assert hasattr(web_fetch, "requires")
+        assert "llm_summarizer" in web_fetch.requires
