@@ -725,6 +725,129 @@ class TestArxivSearchSource:
 
         assert results == []
 
+    @patch("feedparser.parse")
+    @patch("agentic_cli.knowledge_base.sources.time")
+    def test_rate_limiting_enforced(self, mock_time_module, mock_parse):
+        """Test rate limiting is enforced between requests."""
+        mock_parse.return_value = MagicMock(entries=[])
+
+        # First call: time()=1.0 for check, time()=1.0 to record
+        # Second call: time()=1.0 for check (elapsed=0, needs sleep), time()=1.0 to record
+        mock_time_module.time.return_value = 1.0
+        mock_time_module.sleep = MagicMock()
+
+        source = ArxivSearchSource()
+
+        # First request - should not sleep (no previous request, _last_request_time=0)
+        source.search("first query")
+        mock_time_module.sleep.assert_not_called()
+
+        # Second request immediately after - should sleep
+        # _last_request_time is now 1.0, current is 1.0, elapsed=0 < rate_limit
+        source.search("second query")
+        mock_time_module.sleep.assert_called_once()
+        # Should sleep for approximately rate_limit seconds
+        sleep_time = mock_time_module.sleep.call_args[0][0]
+        assert 0 < sleep_time <= source.rate_limit
+
+    @patch("feedparser.parse")
+    @patch("agentic_cli.knowledge_base.sources.time")
+    def test_rate_limiting_respects_elapsed_time(self, mock_time_module, mock_parse):
+        """Test rate limiting accounts for time already elapsed."""
+        mock_parse.return_value = MagicMock(entries=[])
+
+        # First call (3 time() calls): cache check, rate limit check, cache store
+        # Second call (3 time() calls): cache check, rate limit check (elapsed=1s), cache store
+        # Times: cache=1.0, rate=1.0, store=1.0, cache=2.0, rate=2.0, store=2.0
+        mock_time_module.time.side_effect = [1.0, 1.0, 1.0, 2.0, 2.0, 2.0]
+        mock_time_module.sleep = MagicMock()
+
+        source = ArxivSearchSource()
+        source.search("first query")
+        source.search("second query")  # Different query, not cached
+
+        # Should only sleep for remaining time (3.0 - 1.0 = 2.0 seconds)
+        mock_time_module.sleep.assert_called_once()
+        sleep_time = mock_time_module.sleep.call_args[0][0]
+        assert 1.9 <= sleep_time <= 2.1  # Allow small tolerance
+
+    @patch("feedparser.parse")
+    @patch("agentic_cli.knowledge_base.sources.time")
+    def test_caching_returns_cached_results(self, mock_time_module, mock_parse):
+        """Test that repeated queries return cached results without API call."""
+        mock_time_module.time.return_value = 100.0
+        mock_time_module.sleep = MagicMock()
+
+        mock_parse.return_value = MagicMock(
+            entries=[{"title": "Paper 1", "link": "http://arxiv.org/1", "summary": "Abstract"}]
+        )
+
+        source = ArxivSearchSource()
+
+        # First search - calls API
+        results1 = source.search("machine learning")
+        assert mock_parse.call_count == 1
+
+        # Second search with same query - should use cache
+        results2 = source.search("machine learning")
+        assert mock_parse.call_count == 1  # Still 1, no new API call
+
+        # Results should be the same
+        assert len(results1) == len(results2)
+        assert results1[0].title == results2[0].title
+
+    @patch("feedparser.parse")
+    @patch("agentic_cli.knowledge_base.sources.time")
+    def test_cache_expires_after_ttl(self, mock_time_module, mock_parse):
+        """Test that cache expires after TTL."""
+        # First call at t=100
+        mock_time_module.time.return_value = 100.0
+        mock_time_module.sleep = MagicMock()
+
+        mock_parse.return_value = MagicMock(
+            entries=[{"title": "Paper 1", "link": "http://arxiv.org/1", "summary": "Abstract"}]
+        )
+
+        source = ArxivSearchSource(cache_ttl_seconds=60)
+
+        # First search
+        source.search("test query")
+        assert mock_parse.call_count == 1
+
+        # Time advances past TTL (100 + 61 = 161)
+        mock_time_module.time.return_value = 161.0
+
+        # Should call API again since cache expired
+        source.search("test query")
+        assert mock_parse.call_count == 2
+
+    @patch("feedparser.parse")
+    @patch("agentic_cli.knowledge_base.sources.time")
+    def test_different_queries_not_cached(self, mock_time_module, mock_parse):
+        """Test that different queries are not served from cache."""
+        mock_time_module.time.return_value = 100.0
+        mock_time_module.sleep = MagicMock()
+
+        mock_parse.return_value = MagicMock(entries=[])
+
+        source = ArxivSearchSource()
+
+        source.search("query one")
+        source.search("query two")
+
+        # Both should hit API
+        assert mock_parse.call_count == 2
+
+    def test_cache_ttl_default(self):
+        """Test default cache TTL is set."""
+        source = ArxivSearchSource()
+        assert source.cache_ttl_seconds == 900  # 15 minutes default
+
+    def test_cache_ttl_custom(self):
+        """Test custom cache TTL can be set."""
+        source = ArxivSearchSource(cache_ttl_seconds=300)
+        assert source.cache_ttl_seconds == 300
+
 
 class TestDefaultRegistry:
     """Tests for default registry functions."""

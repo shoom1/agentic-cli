@@ -5,7 +5,7 @@ Only app-specific tools (file operations, shell) are defined locally.
 """
 
 from agentic_cli.workflow import AgentConfig
-from agentic_cli.tools import memory_tools, planning_tools, hitl_tools, web_search
+from agentic_cli.tools import memory_tools, planning_tools, hitl_tools, web_search, search_arxiv
 
 # App-specific tools (file operations and shell)
 from examples.research_demo.tools import (
@@ -49,6 +49,9 @@ RESEARCH_AGENT_PROMPT = """You are a research assistant with memory and planning
 
 **Web Search**
 - `web_search(query, max_results)` - Search the web for current information
+
+**Academic Search**
+- `search_arxiv(query, max_results, categories)` - Search arXiv for academic papers
 
 **Checkpoints**
 - `create_checkpoint(name, content, content_type)` - Create a review point
@@ -164,6 +167,8 @@ AGENT_CONFIGS = [
             run_safe_command,
             # Web search
             web_search,
+            # Academic search
+            search_arxiv,
         ],
         description="Research assistant with memory and planning capabilities",
     ),
