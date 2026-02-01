@@ -152,6 +152,32 @@ class BaseSettings(WorkflowSettingsMixin, CLISettingsMixin, PydanticBaseSettings
         json_schema_extra={"ui_order": 55},
     )
 
+    # Web fetch configuration
+    webfetch_model: str | None = Field(
+        default=None,
+        title="WebFetch Model",
+        description="Model for summarizing fetched content (None = auto-detect)",
+        json_schema_extra={"ui_order": 56},
+    )
+    webfetch_blocked_domains: list[str] = Field(
+        default_factory=list,
+        title="WebFetch Blocked Domains",
+        description="Domains to block from fetching (supports wildcards like *.example.com)",
+        json_schema_extra={"ui_order": 57},
+    )
+    webfetch_cache_ttl_seconds: int = Field(
+        default=900,
+        title="WebFetch Cache TTL",
+        description="Cache TTL in seconds for fetched pages (default: 15 minutes)",
+        json_schema_extra={"ui_order": 58},
+    )
+    webfetch_max_content_bytes: int = Field(
+        default=102400,
+        title="WebFetch Max Content",
+        description="Maximum content size in bytes (default: 100KB)",
+        json_schema_extra={"ui_order": 59},
+    )
+
     # Application identity (domain projects should override)
     app_name: str = Field(
         default="agentic_cli",

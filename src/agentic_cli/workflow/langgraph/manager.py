@@ -25,12 +25,42 @@ from agentic_cli.config import (
     set_context_workflow,
     validate_settings,
 )
+from agentic_cli.workflow.context import set_context_llm_summarizer
 from agentic_cli.logging import Loggers, bind_context
 
 if TYPE_CHECKING:
     from agentic_cli.config import BaseSettings
 
 logger = Loggers.workflow()
+
+
+class LangGraphSummarizer:
+    """LLM Summarizer implementation using LangGraph/LangChain.
+
+    Uses the configured LLM (Anthropic, OpenAI, or Google) directly
+    to summarize web content for the webfetch tool.
+    """
+
+    def __init__(self, manager: "LangGraphWorkflowManager") -> None:
+        """Initialize the summarizer.
+
+        Args:
+            manager: The workflow manager to use for LLM calls.
+        """
+        self._manager = manager
+
+    async def summarize(self, content: str, prompt: str) -> str:
+        """Summarize content using the configured LLM.
+
+        Args:
+            content: The content to summarize (markdown).
+            prompt: The full summarization prompt.
+
+        Returns:
+            Summarized text response.
+        """
+        # Use the manager's generate_simple method
+        return await self._manager.generate_simple(prompt, max_tokens=1000)
 
 
 class LangGraphWorkflowManager(BaseWorkflowManager):
@@ -297,6 +327,14 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
             backoff_factor=self._settings.retry_backoff_factor,
         )
 
+    def _create_summarizer(self) -> LangGraphSummarizer:
+        """Create an LLM summarizer for webfetch.
+
+        Returns:
+            LangGraphSummarizer instance that uses the configured LLM.
+        """
+        return LangGraphSummarizer(self)
+
     def _build_graph(self):
         """Build the LangGraph workflow from agent configs.
 
@@ -532,6 +570,9 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
         # Initialize default LLM
         self._llm = self._get_llm_for_model(self.model)
 
+        # Initialize feature managers based on tool requirements
+        self._ensure_managers_initialized()
+
         self._initialized = True
         logger.info(
             "langgraph_services_initialized",
@@ -626,6 +667,7 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
         # Set up context
         set_context_settings(self._settings)
         set_context_workflow(self)
+        set_context_llm_summarizer(self._llm_summarizer)
 
         try:
             # Prepare initial state
@@ -730,6 +772,7 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
         finally:
             set_context_settings(None)
             set_context_workflow(None)
+            set_context_llm_summarizer(None)
 
     def _maybe_transform(self, event: WorkflowEvent) -> WorkflowEvent:
         """Apply event transformation hook if configured."""

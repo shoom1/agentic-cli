@@ -38,10 +38,40 @@ from agentic_cli.workflow.context import (
     set_context_task_graph,
     set_context_approval_manager,
     set_context_checkpoint_manager,
+    set_context_llm_summarizer,
 )
 from agentic_cli.logging import Loggers, bind_context
 
 logger = Loggers.workflow()
+
+
+class ADKSummarizer:
+    """LLM Summarizer implementation using Google ADK.
+
+    Uses the Gemini API directly (outside the agent loop) to summarize
+    web content for the webfetch tool.
+    """
+
+    def __init__(self, manager: "GoogleADKWorkflowManager") -> None:
+        """Initialize the summarizer.
+
+        Args:
+            manager: The workflow manager to use for LLM calls.
+        """
+        self._manager = manager
+
+    async def summarize(self, content: str, prompt: str) -> str:
+        """Summarize content using Gemini.
+
+        Args:
+            content: The content to summarize (markdown).
+            prompt: The full summarization prompt.
+
+        Returns:
+            Summarized text response.
+        """
+        # Use the manager's generate_simple method
+        return await self._manager.generate_simple(prompt, max_tokens=1000)
 
 
 class GoogleADKWorkflowManager(BaseWorkflowManager):
@@ -401,6 +431,14 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         )
         return types.GenerateContentConfig(http_options=http_options)
 
+    def _create_summarizer(self) -> ADKSummarizer:
+        """Create an LLM summarizer for webfetch.
+
+        Returns:
+            ADKSummarizer instance that uses Gemini for summarization.
+        """
+        return ADKSummarizer(self)
+
     def _create_agents(self) -> Agent:
         """Create agent hierarchy from configs.
 
@@ -574,6 +612,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         set_context_task_graph(self._task_graph)
         set_context_approval_manager(self._approval_manager)
         set_context_checkpoint_manager(self._checkpoint_manager)
+        set_context_llm_summarizer(self._llm_summarizer)
         try:
             yield
         finally:
@@ -583,6 +622,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             set_context_task_graph(None)
             set_context_approval_manager(None)
             set_context_checkpoint_manager(None)
+            set_context_llm_summarizer(None)
 
     def _create_message(self, message: str) -> types.Content:
         """Create an ADK Content message from text.
