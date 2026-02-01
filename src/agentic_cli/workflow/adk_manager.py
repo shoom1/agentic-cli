@@ -694,12 +694,10 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         # Find current in-progress task for status line
         current_task_id = None
         current_task_desc = None
-        for task_id, task in self._task_graph._tasks.items():
-            from agentic_cli.planning.task_graph import TaskStatus
-            if task.status == TaskStatus.IN_PROGRESS:
-                current_task_id = task_id
-                current_task_desc = task.description
-                break
+        in_progress = self._task_graph.get_in_progress_task()
+        if in_progress:
+            current_task_id, task = in_progress
+            current_task_desc = task.description
 
         return WorkflowEvent.task_progress(
             display=self._task_graph.to_compact_display(),

@@ -363,12 +363,14 @@ async def ask_clarification(
             "response": None,
         }
 
+    from agentic_cli.workflow.events import InputType
+
     # Create user input request
     request = UserInputRequest(
         request_id=str(uuid.uuid4()),
         tool_name="ask_clarification",
         prompt=question,
-        input_type="choice" if options else "text",
+        input_type=InputType.CHOICE if options else InputType.TEXT,
         choices=options,
     )
 

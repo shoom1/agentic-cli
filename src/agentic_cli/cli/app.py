@@ -63,9 +63,11 @@ def create_workflow_manager_from_settings(
         configs = [AgentConfig(name="agent", prompt="...")]
         manager = create_workflow_manager_from_settings(configs, settings)
     """
-    orchestrator = getattr(settings, "orchestrator", "adk")
+    from agentic_cli.workflow.settings import OrchestratorType
 
-    if orchestrator == "langgraph":
+    orchestrator = getattr(settings, "orchestrator", OrchestratorType.ADK)
+
+    if orchestrator == OrchestratorType.LANGGRAPH:
         try:
             from agentic_cli.workflow.langgraph import LangGraphWorkflowManager
 

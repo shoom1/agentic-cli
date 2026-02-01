@@ -314,12 +314,14 @@ class MessageProcessor:
         Returns:
             User's response string
         """
-        input_type = event.metadata.get("input_type", "text")
+        from agentic_cli.workflow.events import InputType
+
+        input_type = event.metadata.get("input_type", InputType.TEXT.value)
         tool_name = event.metadata.get("tool_name", "Tool")
         choices = event.metadata.get("choices")
         default = event.metadata.get("default")
 
-        if input_type == "choice" and choices:
+        if input_type == InputType.CHOICE.value and choices:
             # Use choice dialog for multiple options
             result = await ui.choice_dialog(
                 title=f"{tool_name} - Input Required",
@@ -328,7 +330,7 @@ class MessageProcessor:
             )
             return result or (default or "")
 
-        elif input_type == "confirm":
+        elif input_type == InputType.CONFIRM.value:
             # Use yes/no dialog for confirmation
             result = await ui.yes_no_dialog(
                 title=f"{tool_name} - Confirmation",

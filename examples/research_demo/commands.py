@@ -339,7 +339,7 @@ class ClearPlanCommand(Command):
         task_graph = app.workflow.task_graph if app.workflow else None
 
         if task_graph:
-            task_graph._tasks.clear()
+            task_graph.clear()
             app.session.add_success("Task plan cleared")
         else:
             app.session.add_error("Task graph not initialized")

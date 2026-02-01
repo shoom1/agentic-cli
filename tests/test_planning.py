@@ -221,7 +221,7 @@ class TestTaskGraphRevise:
         graph.revise(changes)
         progress = graph.get_progress()
         assert progress["total"] == 1
-        tasks = list(graph._tasks.values())
+        tasks = graph.all_tasks()
         assert tasks[0].description == "New task"
         assert tasks[0].metadata == {"priority": "high"}
 

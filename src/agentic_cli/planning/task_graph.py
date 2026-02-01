@@ -274,6 +274,33 @@ class TaskGraph:
 
         return counts
 
+    def get_in_progress_task(self) -> tuple[str, Task] | None:
+        """Get the first task that is currently in progress.
+
+        Returns:
+            A tuple of (task_id, Task) for the first in-progress task,
+            or None if no tasks are in progress.
+        """
+        for task_id, task in self._tasks.items():
+            if task.status == TaskStatus.IN_PROGRESS:
+                return task_id, task
+        return None
+
+    def clear(self) -> None:
+        """Clear all tasks from the graph.
+
+        This removes all tasks, resetting the graph to an empty state.
+        """
+        self._tasks.clear()
+
+    def all_tasks(self) -> list[Task]:
+        """Get all tasks in the graph.
+
+        Returns:
+            A list of all Task objects in the graph.
+        """
+        return list(self._tasks.values())
+
     def to_display(self) -> str:
         """Generate a formatted display of the task graph.
 

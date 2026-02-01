@@ -223,7 +223,7 @@ def create_plan(
         return {"success": False, "error": "Task graph not available"}
 
     # Clear existing tasks for a fresh plan
-    graph._tasks.clear()
+    graph.clear()
 
     # Create tasks and track their IDs
     task_ids: list[str] = []
