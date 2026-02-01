@@ -257,11 +257,19 @@ class ArxivSearchSource(SearchSource):
         return 3.0  # ArXiv requires 3 second delays
 
     def _make_cache_key(
-        self, query: str, max_results: int, categories: list[str] | None
+        self,
+        query: str,
+        max_results: int,
+        categories: list[str] | None,
+        sort_by: str,
+        sort_order: str,
+        date_from: str | None,
+        date_to: str | None,
     ) -> str:
         """Create a cache key from search parameters."""
         cat_str = ",".join(sorted(categories)) if categories else ""
-        return f"{query}|{max_results}|{cat_str}"
+        date_str = f"{date_from or ''}-{date_to or ''}"
+        return f"{query}|{max_results}|{cat_str}|{sort_by}|{sort_order}|{date_str}"
 
     def _get_cached(self, cache_key: str) -> list[SearchSourceResult] | None:
         """Get cached results if available and not expired."""
@@ -284,11 +292,26 @@ class ArxivSearchSource(SearchSource):
         """Clear all cached search results."""
         self._cache.clear()
 
+    def wait_for_rate_limit(self) -> None:
+        """Wait if necessary to respect rate limiting.
+
+        Call this before making any ArXiv API request.
+        """
+        current_time = time.time()
+        elapsed = current_time - self._last_request_time
+        if self._last_request_time > 0 and elapsed < self.rate_limit:
+            time.sleep(self.rate_limit - elapsed)
+        self._last_request_time = time.time()
+
     def search(
         self,
         query: str,
         max_results: int = 10,
         categories: list[str] | None = None,
+        sort_by: str = "relevance",
+        sort_order: str = "descending",
+        date_from: str | None = None,
+        date_to: str | None = None,
         **kwargs,
     ) -> list[SearchSourceResult]:
         """Search ArXiv.
@@ -297,9 +320,15 @@ class ArxivSearchSource(SearchSource):
             query: Search query
             max_results: Maximum results
             categories: Optional ArXiv category filters (e.g., ['cs.AI', 'cs.LG'])
+            sort_by: Sort results by 'relevance', 'lastUpdatedDate', or 'submittedDate'
+            sort_order: Sort order 'ascending' or 'descending'
+            date_from: Filter papers submitted after this date (YYYY-MM-DD)
+            date_to: Filter papers submitted before this date (YYYY-MM-DD)
         """
         # Check cache first
-        cache_key = self._make_cache_key(query, max_results, categories)
+        cache_key = self._make_cache_key(
+            query, max_results, categories, sort_by, sort_order, date_from, date_to
+        )
         cached_results = self._get_cached(cache_key)
         if cached_results is not None:
             return cached_results
@@ -310,20 +339,28 @@ class ArxivSearchSource(SearchSource):
             return []
 
         # Enforce rate limiting
-        current_time = time.time()
-        elapsed = current_time - self._last_request_time
-        if self._last_request_time > 0 and elapsed < self.rate_limit:
-            time.sleep(self.rate_limit - elapsed)
-        self._last_request_time = time.time()
+        self.wait_for_rate_limit()
 
         base_url = "http://export.arxiv.org/api/query?"
-        search_query = f"search_query=all:{query}"
+
+        # Build search query
+        query_parts = [f"all:{query}"]
 
         if categories:
             cat_query = " OR ".join(f"cat:{cat}" for cat in categories)
-            search_query = f"search_query=(all:{query}) AND ({cat_query})"
+            query_parts.append(f"({cat_query})")
 
+        # Add date range filter if specified
+        if date_from or date_to:
+            from_date = date_from.replace("-", "") if date_from else "*"
+            to_date = date_to.replace("-", "") if date_to else "*"
+            query_parts.append(f"submittedDate:[{from_date} TO {to_date}]")
+
+        search_query = "search_query=" + " AND ".join(f"({p})" if " " in p else p for p in query_parts)
+
+        # Build URL with sort parameters
         url = f"{base_url}{search_query}&start=0&max_results={max_results}"
+        url += f"&sortBy={sort_by}&sortOrder={sort_order}"
 
         try:
             feed = feedparser.parse(url)
