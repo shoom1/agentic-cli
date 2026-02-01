@@ -61,6 +61,8 @@ from agentic_cli.tools.standard import (
     search_knowledge_base,
     ingest_to_knowledge_base,
     search_arxiv,
+    fetch_arxiv_paper,
+    analyze_arxiv_paper,
     execute_python,
     ask_clarification,
 )
@@ -113,6 +115,8 @@ __all__ = [
     "search_knowledge_base",
     "ingest_to_knowledge_base",
     "search_arxiv",
+    "fetch_arxiv_paper",
+    "analyze_arxiv_paper",
     "execute_python",
     "ask_clarification",
     # Framework tool modules (lazy loaded)

@@ -5,7 +5,7 @@ Only app-specific tools (file operations, shell) are defined locally.
 """
 
 from agentic_cli.workflow import AgentConfig
-from agentic_cli.tools import memory_tools, planning_tools, hitl_tools, web_search, search_arxiv
+from agentic_cli.tools import memory_tools, planning_tools, hitl_tools, web_search, search_arxiv, fetch_arxiv_paper, analyze_arxiv_paper
 
 # App-specific tools (file operations and shell)
 from examples.research_demo.tools import (
@@ -51,7 +51,12 @@ RESEARCH_AGENT_PROMPT = """You are a research assistant with memory and planning
 - `web_search(query, max_results)` - Search the web for current information
 
 **Academic Search**
-- `search_arxiv(query, max_results, categories)` - Search arXiv for academic papers
+- `search_arxiv(query, max_results, categories, sort_by, sort_order, date_from, date_to)` - Search arXiv for academic papers
+  - sort_by: "relevance", "lastUpdatedDate", or "submittedDate"
+  - sort_order: "ascending" or "descending"
+  - date_from/date_to: filter by date (YYYY-MM-DD format)
+- `fetch_arxiv_paper(arxiv_id)` - Get detailed info about a specific paper by ID
+- `analyze_arxiv_paper(arxiv_id, prompt)` - Analyze a paper with LLM (async)
 
 **Checkpoints**
 - `create_checkpoint(name, content, content_type)` - Create a review point
@@ -169,6 +174,8 @@ AGENT_CONFIGS = [
             web_search,
             # Academic search
             search_arxiv,
+            fetch_arxiv_paper,
+            analyze_arxiv_paper,
         ],
         description="Research assistant with memory and planning capabilities",
     ),

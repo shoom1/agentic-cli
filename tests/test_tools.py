@@ -1112,3 +1112,130 @@ class TestDiffCompare:
         result = diff_compare(str(file_a), "other text")
         assert result["success"] is True
         assert result["similarity"] < 1.0
+
+
+
+class TestStandardTools:
+    """Tests for standard tool functions."""
+
+    def test_fetch_arxiv_paper_returns_paper_details(self):
+        """Test fetch_arxiv_paper returns paper details for valid ID."""
+        from unittest.mock import patch, MagicMock
+        from agentic_cli.tools.standard import fetch_arxiv_paper
+
+        with patch("feedparser.parse") as mock_parse:
+            mock_parse.return_value = MagicMock(
+                entries=[
+                    {
+                        "title": "Attention Is All You Need",
+                        "link": "https://arxiv.org/abs/1706.03762",
+                        "summary": "The dominant sequence transduction models...",
+                        "authors": [{"name": "Vaswani"}, {"name": "Shazeer"}],
+                        "published": "2017-06-12",
+                        "updated": "2017-12-06",
+                        "tags": [{"term": "cs.CL"}, {"term": "cs.LG"}],
+                        "id": "http://arxiv.org/abs/1706.03762v5",
+                        "arxiv_primary_category": {"term": "cs.CL"},
+                    }
+                ]
+            )
+
+            result = fetch_arxiv_paper("1706.03762")
+
+            assert result["success"] is True
+            assert result["paper"]["title"] == "Attention Is All You Need"
+            assert result["paper"]["arxiv_id"] == "1706.03762"
+            assert "Vaswani" in result["paper"]["authors"]
+            assert "cs.CL" in result["paper"]["categories"]
+            assert result["paper"]["pdf_url"] == "https://arxiv.org/pdf/1706.03762.pdf"
+
+    def test_fetch_arxiv_paper_not_found(self):
+        """Test fetch_arxiv_paper handles missing paper."""
+        from unittest.mock import patch, MagicMock
+        from agentic_cli.tools.standard import fetch_arxiv_paper
+
+        with patch("feedparser.parse") as mock_parse:
+            mock_parse.return_value = MagicMock(entries=[])
+
+            result = fetch_arxiv_paper("9999.99999")
+
+            assert result["success"] is False
+            assert "not found" in result["error"].lower()
+
+    def test_fetch_arxiv_paper_cleans_id(self):
+        """Test fetch_arxiv_paper handles various ID formats."""
+        from unittest.mock import patch, MagicMock
+        from agentic_cli.tools.standard import fetch_arxiv_paper
+
+        with patch("feedparser.parse") as mock_parse:
+            mock_parse.return_value = MagicMock(
+                entries=[{"title": "Test", "link": "", "summary": "", "authors": [], 
+                         "published": "", "tags": [], "id": "http://arxiv.org/abs/1234.5678v1"}]
+            )
+
+            # Test with full URL
+            fetch_arxiv_paper("https://arxiv.org/abs/1234.5678")
+            call_url = mock_parse.call_args[0][0]
+            assert "id_list=1234.5678" in call_url
+
+            # Test with version suffix
+            fetch_arxiv_paper("1234.5678v2")
+            call_url = mock_parse.call_args[0][0]
+            assert "id_list=1234.5678" in call_url
+
+
+
+    @pytest.mark.asyncio
+    async def test_analyze_arxiv_paper_success(self):
+        """Test analyze_arxiv_paper returns LLM analysis."""
+        from unittest.mock import patch, MagicMock, AsyncMock
+        from agentic_cli.tools.standard import analyze_arxiv_paper
+
+        mock_web_fetch = AsyncMock(return_value={
+            "success": True,
+            "summary": "This paper introduces the Transformer architecture...",
+            "url": "https://arxiv.org/abs/1706.03762",
+        })
+
+        with patch("agentic_cli.tools.webfetch_tool.web_fetch", mock_web_fetch):
+            result = await analyze_arxiv_paper("1706.03762", "What is the main contribution?")
+
+            assert result["success"] is True
+            assert "analysis" in result
+            mock_web_fetch.assert_called_once()
+            # Verify the URL used
+            call_args = mock_web_fetch.call_args
+            assert "arxiv.org/abs/1706.03762" in call_args[0][0]
+
+    @pytest.mark.asyncio
+    async def test_analyze_arxiv_paper_passes_prompt(self):
+        """Test analyze_arxiv_paper passes user prompt to web_fetch."""
+        from unittest.mock import patch, AsyncMock
+        from agentic_cli.tools.standard import analyze_arxiv_paper
+
+        mock_web_fetch = AsyncMock(return_value={"success": True, "summary": "Analysis"})
+
+        with patch("agentic_cli.tools.webfetch_tool.web_fetch", mock_web_fetch):
+            await analyze_arxiv_paper("1234.5678", "Summarize the methodology")
+
+            call_args = mock_web_fetch.call_args
+            # Second positional arg is the prompt
+            assert "methodology" in call_args[0][1].lower()
+
+    @pytest.mark.asyncio
+    async def test_analyze_arxiv_paper_handles_failure(self):
+        """Test analyze_arxiv_paper handles web_fetch failure."""
+        from unittest.mock import patch, AsyncMock
+        from agentic_cli.tools.standard import analyze_arxiv_paper
+
+        mock_web_fetch = AsyncMock(return_value={
+            "success": False,
+            "error": "No LLM summarizer available",
+        })
+
+        with patch("agentic_cli.tools.webfetch_tool.web_fetch", mock_web_fetch):
+            result = await analyze_arxiv_paper("1234.5678", "Analyze this")
+
+            assert result["success"] is False
+            assert "error" in result
+

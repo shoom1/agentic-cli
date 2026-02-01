@@ -905,6 +905,75 @@ class TestArxivSearchSource:
         source.clear_cache()
         assert len(source._cache) == 0
 
+    @patch("feedparser.parse")
+    @patch("agentic_cli.knowledge_base.sources.time")
+    def test_search_with_sort_by(self, mock_time_module, mock_parse):
+        """Test search with sort_by parameter."""
+        mock_time_module.time.return_value = 100.0
+        mock_time_module.sleep = MagicMock()
+        mock_parse.return_value = MagicMock(entries=[])
+
+        source = ArxivSearchSource()
+        source.search("test", sort_by="lastUpdatedDate")
+
+        call_url = mock_parse.call_args[0][0]
+        assert "sortBy=lastUpdatedDate" in call_url
+
+    @patch("feedparser.parse")
+    @patch("agentic_cli.knowledge_base.sources.time")
+    def test_search_with_sort_order(self, mock_time_module, mock_parse):
+        """Test search with sort_order parameter."""
+        mock_time_module.time.return_value = 100.0
+        mock_time_module.sleep = MagicMock()
+        mock_parse.return_value = MagicMock(entries=[])
+
+        source = ArxivSearchSource()
+        source.search("test", sort_by="submittedDate", sort_order="ascending")
+
+        call_url = mock_parse.call_args[0][0]
+        assert "sortBy=submittedDate" in call_url
+        assert "sortOrder=ascending" in call_url
+
+    @patch("feedparser.parse")
+    @patch("agentic_cli.knowledge_base.sources.time")
+    def test_search_with_date_range(self, mock_time_module, mock_parse):
+        """Test search with date range filter."""
+        mock_time_module.time.return_value = 100.0
+        mock_time_module.sleep = MagicMock()
+        mock_parse.return_value = MagicMock(entries=[])
+
+        source = ArxivSearchSource()
+        source.search("test", date_from="2024-01-01", date_to="2024-12-31")
+
+        call_url = mock_parse.call_args[0][0]
+        # ArXiv uses submittedDate:[YYYYMMDD TO YYYYMMDD] format
+        assert "submittedDate" in call_url
+        assert "20240101" in call_url
+        assert "20241231" in call_url
+
+    @patch("feedparser.parse")
+    @patch("agentic_cli.knowledge_base.sources.time")
+    def test_search_sort_and_date_in_cache_key(self, mock_time_module, mock_parse):
+        """Test that sort and date params are included in cache key."""
+        mock_time_module.time.return_value = 100.0
+        mock_time_module.sleep = MagicMock()
+        mock_parse.return_value = MagicMock(entries=[])
+
+        source = ArxivSearchSource()
+
+        # Same query with different sort should hit API twice
+        source.search("test", sort_by="relevance")
+        source.search("test", sort_by="lastUpdatedDate")
+
+        assert mock_parse.call_count == 2
+
+    def test_sort_by_default(self):
+        """Test sort_by defaults to relevance."""
+        source = ArxivSearchSource()
+        # Default is relevance (ArXiv default)
+        cache_key = source._make_cache_key("test", 10, None, "relevance", "descending", None, None)
+        assert "relevance" in cache_key
+
 
 class TestDefaultRegistry:
     """Tests for default registry functions."""
