@@ -11,7 +11,8 @@ from __future__ import annotations
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
-from typing import TYPE_CHECKING
+from contextlib import asynccontextmanager
+from typing import TYPE_CHECKING, AsyncIterator
 
 from agentic_cli.logging import Loggers
 
@@ -285,3 +286,43 @@ class WorkflowController:
             model = self._workflow.model
             ui.status_text = f"{model} | Ctrl+C: cancel | /help: commands"
         # If still initializing, leave status bar unchanged
+
+    @asynccontextmanager
+    async def background_init(
+        self,
+        ui: "ThinkingPromptSession",
+    ) -> AsyncIterator[None]:
+        """Context manager for background initialization lifecycle.
+
+        Starts background init on entry, cancels on exit.
+        Spawns a task to update status bar when init completes.
+
+        Args:
+            ui: UI session for status bar updates
+
+        Usage:
+            async with controller.background_init(session):
+                await session.run_async()
+        """
+        # Start background initialization (non-blocking)
+        await self.start_background_init()
+
+        # Spawn task to update status bar when init completes
+        async def wait_and_update() -> None:
+            await self.ensure_initialized()
+            self.update_status_bar(ui)
+
+        update_task = asyncio.create_task(wait_and_update())
+
+        try:
+            yield
+        finally:
+            # Cancel init task if still running
+            await self.cancel_init()
+            # Also cancel status update task if still running
+            if not update_task.done():
+                update_task.cancel()
+                try:
+                    await update_task
+                except asyncio.CancelledError:
+                    pass
