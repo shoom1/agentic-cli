@@ -292,6 +292,17 @@ class ArxivSearchSource(SearchSource):
         """Clear all cached search results."""
         self._cache.clear()
 
+    def wait_for_rate_limit(self) -> None:
+        """Wait if necessary to respect rate limiting.
+
+        Call this before making any ArXiv API request.
+        """
+        current_time = time.time()
+        elapsed = current_time - self._last_request_time
+        if self._last_request_time > 0 and elapsed < self.rate_limit:
+            time.sleep(self.rate_limit - elapsed)
+        self._last_request_time = time.time()
+
     def search(
         self,
         query: str,
@@ -328,11 +339,7 @@ class ArxivSearchSource(SearchSource):
             return []
 
         # Enforce rate limiting
-        current_time = time.time()
-        elapsed = current_time - self._last_request_time
-        if self._last_request_time > 0 and elapsed < self.rate_limit:
-            time.sleep(self.rate_limit - elapsed)
-        self._last_request_time = time.time()
+        self.wait_for_rate_limit()
 
         base_url = "http://export.arxiv.org/api/query?"
 

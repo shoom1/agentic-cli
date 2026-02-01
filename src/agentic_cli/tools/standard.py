@@ -117,6 +117,35 @@ def _get_arxiv_source():
     return _arxiv_source
 
 
+def _clean_arxiv_id(arxiv_id: str) -> str:
+    """Clean and normalize an arXiv paper ID.
+
+    Handles various formats:
+    - Plain ID: '1706.03762'
+    - With version: '1706.03762v2'
+    - Full URL: 'https://arxiv.org/abs/1706.03762'
+    - PDF URL: 'https://arxiv.org/pdf/1706.03762.pdf'
+
+    Args:
+        arxiv_id: The arXiv ID in any supported format
+
+    Returns:
+        Cleaned arXiv ID (e.g., '1706.03762')
+    """
+    import re
+
+    # Extract ID from URLs (handles both abs and pdf URLs)
+    if "arxiv.org" in arxiv_id:
+        match = re.search(r"(\d{4}\.\d{4,5})", arxiv_id)
+        if match:
+            arxiv_id = match.group(1)
+
+    # Remove version suffix (e.g., v1, v2)
+    arxiv_id = re.sub(r"v\d+$", "", arxiv_id)
+
+    return arxiv_id
+
+
 def search_arxiv(
     query: str,
     max_results: int = 10,
@@ -139,7 +168,19 @@ def search_arxiv(
 
     Returns:
         Dictionary with search results and metadata
+
+    Raises:
+        ValueError: If sort_by or sort_order has an invalid value
     """
+    # Validate sort options
+    valid_sort_by = ("relevance", "lastUpdatedDate", "submittedDate")
+    valid_sort_order = ("ascending", "descending")
+
+    if sort_by not in valid_sort_by:
+        raise ValueError(f"sort_by must be one of {valid_sort_by}, got '{sort_by}'")
+    if sort_order not in valid_sort_order:
+        raise ValueError(f"sort_order must be one of {valid_sort_order}, got '{sort_order}'")
+
     source = _get_arxiv_source()
     results = source.search(
         query=query,
@@ -182,22 +223,17 @@ def fetch_arxiv_paper(arxiv_id: str) -> dict[str, Any]:
     Returns:
         Dictionary with paper details or error information
     """
-    import re
-
     try:
         import feedparser
     except ImportError:
         return {"success": False, "error": "feedparser not installed"}
 
-    # Clean the arxiv_id - extract just the ID from various formats
-    # Handle URLs like https://arxiv.org/abs/1706.03762
-    if "arxiv.org" in arxiv_id:
-        match = re.search(r"(\d{4}\.\d{4,5})", arxiv_id)
-        if match:
-            arxiv_id = match.group(1)
+    # Clean the arxiv_id
+    arxiv_id = _clean_arxiv_id(arxiv_id)
 
-    # Remove version suffix (e.g., v1, v2)
-    arxiv_id = re.sub(r"v\d+$", "", arxiv_id)
+    # Enforce rate limiting using shared ArxivSearchSource
+    source = _get_arxiv_source()
+    source.wait_for_rate_limit()
 
     # Fetch using ArXiv API id_list parameter
     url = f"http://export.arxiv.org/api/query?id_list={arxiv_id}"
@@ -242,15 +278,10 @@ async def analyze_arxiv_paper(arxiv_id: str, prompt: str) -> dict[str, Any]:
     Returns:
         Dictionary with analysis results or error information
     """
-    import re
     from agentic_cli.tools.webfetch_tool import web_fetch
 
     # Clean the arxiv_id
-    if "arxiv.org" in arxiv_id:
-        match = re.search(r"(\d{4}\.\d{4,5})", arxiv_id)
-        if match:
-            arxiv_id = match.group(1)
-    arxiv_id = re.sub(r"v\d+$", "", arxiv_id)
+    arxiv_id = _clean_arxiv_id(arxiv_id)
 
     # Build the abstract URL
     url = f"https://arxiv.org/abs/{arxiv_id}"

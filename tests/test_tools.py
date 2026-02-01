@@ -1239,3 +1239,109 @@ class TestStandardTools:
             assert result["success"] is False
             assert "error" in result
 
+
+
+class TestArxivHelpers:
+    """Tests for ArXiv helper functions."""
+
+    def test_clean_arxiv_id_plain_id(self):
+        """Test cleaning plain arxiv ID."""
+        from agentic_cli.tools.standard import _clean_arxiv_id
+
+        assert _clean_arxiv_id("1706.03762") == "1706.03762"
+
+    def test_clean_arxiv_id_with_version(self):
+        """Test cleaning arxiv ID with version suffix."""
+        from agentic_cli.tools.standard import _clean_arxiv_id
+
+        assert _clean_arxiv_id("1706.03762v1") == "1706.03762"
+        assert _clean_arxiv_id("1706.03762v5") == "1706.03762"
+
+    def test_clean_arxiv_id_from_url(self):
+        """Test extracting arxiv ID from URL."""
+        from agentic_cli.tools.standard import _clean_arxiv_id
+
+        assert _clean_arxiv_id("https://arxiv.org/abs/1706.03762") == "1706.03762"
+        assert _clean_arxiv_id("http://arxiv.org/abs/1706.03762v2") == "1706.03762"
+
+    def test_clean_arxiv_id_from_pdf_url(self):
+        """Test extracting arxiv ID from PDF URL."""
+        from agentic_cli.tools.standard import _clean_arxiv_id
+
+        assert _clean_arxiv_id("https://arxiv.org/pdf/1706.03762.pdf") == "1706.03762"
+
+    def test_clean_arxiv_id_five_digit(self):
+        """Test cleaning 5-digit arxiv IDs (newer format)."""
+        from agentic_cli.tools.standard import _clean_arxiv_id
+
+        assert _clean_arxiv_id("2301.07041") == "2301.07041"
+        assert _clean_arxiv_id("2301.07041v3") == "2301.07041"
+
+
+class TestFetchArxivPaperRateLimiting:
+    """Tests for fetch_arxiv_paper rate limiting."""
+
+    def test_fetch_arxiv_paper_respects_rate_limit(self):
+        """Test fetch_arxiv_paper respects rate limiting."""
+        from unittest.mock import patch, MagicMock
+        from agentic_cli.tools.standard import fetch_arxiv_paper
+
+        # Reset the source to ensure clean state
+        import agentic_cli.tools.standard as standard_module
+        standard_module._arxiv_source = None
+
+        with patch("agentic_cli.knowledge_base.sources.time") as mock_time:
+            mock_time.time.return_value = 100.0
+            mock_time.sleep = MagicMock()
+
+            with patch("feedparser.parse") as mock_parse:
+                mock_parse.return_value = MagicMock(
+                    entries=[{"title": "Test", "link": "", "summary": "", "authors": [],
+                             "published": "", "tags": [], "id": "http://arxiv.org/abs/1234.5678v1"}]
+                )
+
+                # First call
+                fetch_arxiv_paper("1234.5678")
+                # Second call immediately - should trigger rate limiting
+                fetch_arxiv_paper("5678.1234")
+
+                # Verify sleep was called for rate limiting
+                assert mock_time.sleep.call_count >= 1
+
+
+class TestArxivSortValidation:
+    """Tests for arXiv sort option validation."""
+
+    def test_search_arxiv_invalid_sort_by_raises_error(self):
+        """Test search_arxiv raises ValueError for invalid sort_by."""
+        from agentic_cli.tools.standard import search_arxiv
+        import pytest
+
+        with pytest.raises(ValueError, match="sort_by must be one of"):
+            search_arxiv("test query", sort_by="invalid_sort")
+
+    def test_search_arxiv_invalid_sort_order_raises_error(self):
+        """Test search_arxiv raises ValueError for invalid sort_order."""
+        from agentic_cli.tools.standard import search_arxiv
+        import pytest
+
+        with pytest.raises(ValueError, match="sort_order must be one of"):
+            search_arxiv("test query", sort_order="invalid_order")
+
+    def test_search_arxiv_valid_sort_options(self):
+        """Test search_arxiv accepts valid sort options."""
+        from unittest.mock import patch, MagicMock
+        from agentic_cli.tools.standard import search_arxiv
+        import agentic_cli.tools.standard as standard_module
+
+        # Reset the source to ensure clean state
+        standard_module._arxiv_source = None
+
+        # Mock feedparser to avoid real API calls
+        with patch("feedparser.parse") as mock_parse:
+            mock_parse.return_value = MagicMock(entries=[])
+
+            # These should not raise
+            search_arxiv("test", sort_by="relevance", sort_order="ascending")
+            search_arxiv("test", sort_by="lastUpdatedDate", sort_order="descending")
+            search_arxiv("test", sort_by="submittedDate", sort_order="ascending")
