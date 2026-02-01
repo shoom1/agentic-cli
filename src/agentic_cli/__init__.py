@@ -22,7 +22,8 @@ Use settings.orchestrator = "langgraph" or the factory function
 Note: GoogleADKWorkflowManager and LangGraphWorkflowManager are lazy-loaded to avoid slow imports.
 """
 
-from agentic_cli.cli.app import BaseCLIApp, create_workflow_manager_from_settings
+from agentic_cli.cli.app import BaseCLIApp
+from agentic_cli.cli.workflow_controller import create_workflow_manager_from_settings
 from agentic_cli.cli.commands import Command, CommandRegistry
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.events import WorkflowEvent, EventType

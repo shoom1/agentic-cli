@@ -3,13 +3,15 @@
 This module provides the WorkflowController class that encapsulates
 the complex async lifecycle of workflow manager initialization,
 including background init, readiness checking, and reinitialization.
+
+Also exports create_workflow_manager_from_settings() factory function.
 """
 
 from __future__ import annotations
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING
 
 from agentic_cli.logging import Loggers
 
@@ -23,6 +25,72 @@ logger = Loggers.cli()
 
 # Thread pool for background initialization (single worker)
 _init_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="workflow-init")
+
+
+def create_workflow_manager_from_settings(
+    agent_configs: list["AgentConfig"],
+    settings: "BaseSettings",
+    app_name: str | None = None,
+    model: str | None = None,
+    **kwargs,
+) -> "BaseWorkflowManager":
+    """Factory function to create the appropriate workflow manager based on settings.
+
+    Creates either a GoogleADKWorkflowManager or LangGraphWorkflowManager
+    based on the settings.orchestrator configuration.
+
+    Args:
+        agent_configs: List of agent configurations.
+        settings: Application settings (determines orchestrator type).
+        app_name: Application name for services.
+        model: Model override.
+        **kwargs: Additional arguments passed to the specific manager.
+
+    Returns:
+        BaseWorkflowManager instance (ADK or LangGraph based on settings).
+
+    Raises:
+        ImportError: If LangGraph is selected but not installed.
+
+    Example:
+        settings = MySettings(orchestrator="langgraph")
+        configs = [AgentConfig(name="agent", prompt="...")]
+        manager = create_workflow_manager_from_settings(configs, settings)
+    """
+    from agentic_cli.workflow.settings import OrchestratorType
+
+    orchestrator = getattr(settings, "orchestrator", OrchestratorType.ADK)
+
+    if orchestrator == OrchestratorType.LANGGRAPH:
+        try:
+            from agentic_cli.workflow.langgraph import LangGraphWorkflowManager
+
+            checkpointer = getattr(settings, "langgraph_checkpointer", "memory")
+            return LangGraphWorkflowManager(
+                agent_configs=agent_configs,
+                settings=settings,
+                app_name=app_name,
+                model=model,
+                checkpointer=checkpointer,
+                **kwargs,
+            )
+        except ImportError as e:
+            raise ImportError(
+                f"LangGraph orchestrator selected but dependencies not installed. "
+                f"Install with: pip install agentic-cli[langgraph]\n"
+                f"Original error: {e}"
+            ) from e
+
+    else:  # Default to ADK
+        from agentic_cli.workflow.adk_manager import GoogleADKWorkflowManager
+
+        return GoogleADKWorkflowManager(
+            agent_configs=agent_configs,
+            settings=settings,
+            app_name=app_name,
+            model=model,
+            **kwargs,
+        )
 
 
 class WorkflowController:
@@ -52,38 +120,31 @@ class WorkflowController:
         self,
         agent_configs: list["AgentConfig"],
         settings: "BaseSettings",
-        create_fn: Callable[[], "BaseWorkflowManager"] | None = None,
     ) -> None:
         """Initialize the workflow controller.
 
         Args:
             agent_configs: List of agent configurations for the workflow
             settings: Application settings instance
-            create_fn: Optional factory function to create workflow manager.
-                      If not provided, uses default factory.
         """
-        self._agent_configs = agent_configs
         self._settings = settings
-        self._create_fn = create_fn or self._default_create
+
+        # Closure captures agent_configs for lazy creation (used by _background_init)
+        app_name = settings.app_name
+
+        def _create_workflow() -> "BaseWorkflowManager":
+            return create_workflow_manager_from_settings(
+                agent_configs=agent_configs,
+                settings=settings,
+                app_name=app_name,
+            )
+
+        self._create_fn = _create_workflow
 
         # Workflow state
         self._workflow: "BaseWorkflowManager | None" = None
         self._init_task: asyncio.Task[None] | None = None
         self._init_error: Exception | None = None
-
-    def _default_create(self) -> "BaseWorkflowManager":
-        """Default factory to create workflow manager.
-
-        Uses create_workflow_manager_from_settings() with the stored
-        agent_configs and settings.
-        """
-        from agentic_cli.cli.app import create_workflow_manager_from_settings
-
-        return create_workflow_manager_from_settings(
-            agent_configs=self._agent_configs,
-            settings=self._settings,
-            app_name=self._settings.app_name,
-        )
 
     @property
     def workflow(self) -> "BaseWorkflowManager":

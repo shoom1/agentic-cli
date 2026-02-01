@@ -33,72 +33,6 @@ if TYPE_CHECKING:
 logger = Loggers.cli()
 
 
-def create_workflow_manager_from_settings(
-    agent_configs: list["AgentConfig"],
-    settings: BaseSettings,
-    app_name: str | None = None,
-    model: str | None = None,
-    **kwargs,
-) -> "BaseWorkflowManager":
-    """Factory function to create the appropriate workflow manager based on settings.
-
-    Creates either a GoogleADKWorkflowManager or LangGraphWorkflowManager
-    based on the settings.orchestrator configuration.
-
-    Args:
-        agent_configs: List of agent configurations.
-        settings: Application settings (determines orchestrator type).
-        app_name: Application name for services.
-        model: Model override.
-        **kwargs: Additional arguments passed to the specific manager.
-
-    Returns:
-        BaseWorkflowManager instance (ADK or LangGraph based on settings).
-
-    Raises:
-        ImportError: If LangGraph is selected but not installed.
-
-    Example:
-        settings = MySettings(orchestrator="langgraph")
-        configs = [AgentConfig(name="agent", prompt="...")]
-        manager = create_workflow_manager_from_settings(configs, settings)
-    """
-    from agentic_cli.workflow.settings import OrchestratorType
-
-    orchestrator = getattr(settings, "orchestrator", OrchestratorType.ADK)
-
-    if orchestrator == OrchestratorType.LANGGRAPH:
-        try:
-            from agentic_cli.workflow.langgraph import LangGraphWorkflowManager
-
-            checkpointer = getattr(settings, "langgraph_checkpointer", "memory")
-            return LangGraphWorkflowManager(
-                agent_configs=agent_configs,
-                settings=settings,
-                app_name=app_name,
-                model=model,
-                checkpointer=checkpointer,
-                **kwargs,
-            )
-        except ImportError as e:
-            raise ImportError(
-                f"LangGraph orchestrator selected but dependencies not installed. "
-                f"Install with: pip install agentic-cli[langgraph]\n"
-                f"Original error: {e}"
-            ) from e
-
-    else:  # Default to ADK
-        from agentic_cli.workflow.adk_manager import GoogleADKWorkflowManager
-
-        return GoogleADKWorkflowManager(
-            agent_configs=agent_configs,
-            settings=settings,
-            app_name=app_name,
-            model=model,
-            **kwargs,
-        )
-
-
 # === Slash Command Completer ===
 
 
@@ -167,7 +101,6 @@ class BaseCLIApp:
 
     Optional overrides:
     - register_commands(): Register domain-specific commands
-    - _create_workflow_manager(): Advanced workflow customization
     - get_styles(): Customize UI colors
     - get_ui_setting_keys(): Customize settings dialog fields
     - apply_settings(): Handle additional custom settings
@@ -188,7 +121,6 @@ class BaseCLIApp:
         """
         # === Configuration ===
         self._app_info = app_info
-        self._agent_configs = agent_configs
         self._settings = settings
         configure_logging(self._settings)
 
@@ -203,7 +135,6 @@ class BaseCLIApp:
         self._workflow_controller = WorkflowController(
             agent_configs=agent_configs,
             settings=settings,
-            create_fn=self._create_workflow_manager,
         )
         self._message_processor = MessageProcessor()
 
@@ -227,34 +158,6 @@ class BaseCLIApp:
         self.should_exit = False
 
         logger.debug("app_initialized_fast")
-
-    @property
-    def app_info(self) -> AppInfo:
-        """Get the application info."""
-        return self._app_info
-
-    @property
-    def agent_configs(self) -> list["AgentConfig"]:
-        """Get the agent configurations."""
-        return self._agent_configs
-
-    def _create_workflow_manager(self) -> "BaseWorkflowManager":
-        """Create the workflow manager for this application.
-
-        Uses create_workflow_manager_from_settings() with the agent_configs
-        provided to the constructor.
-
-        Override this method if you need advanced workflow manager creation
-        (e.g., custom initialization, additional configuration).
-
-        Returns:
-            BaseWorkflowManager instance (ADK or LangGraph based on settings)
-        """
-        return create_workflow_manager_from_settings(
-            agent_configs=self._agent_configs,
-            settings=self._settings,
-            app_name=self._settings.app_name,
-        )
 
     def get_styles(self) -> ThinkingPromptStyles:
         """Get styles for ThinkingPromptSession.
