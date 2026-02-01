@@ -389,3 +389,52 @@ class TestHTMLToMarkdown:
         """Test binary content returns placeholder."""
         result = converter.convert(b"binary data", "application/octet-stream")
         assert "Binary content" in result or "binary" in result.lower()
+
+
+class TestLLMSummarizer:
+    """Tests for LLM summarizer protocol and context."""
+
+    def test_summarizer_protocol_exists(self):
+        """Test LLMSummarizer protocol is defined."""
+        from agentic_cli.tools.webfetch.summarizer import LLMSummarizer
+        from typing import Protocol
+        assert issubclass(LLMSummarizer, Protocol)
+
+    def test_context_getter_setter(self):
+        """Test context getter and setter for LLM summarizer."""
+        from agentic_cli.workflow.context import (
+            get_context_llm_summarizer,
+            set_context_llm_summarizer,
+        )
+
+        # Initially None
+        assert get_context_llm_summarizer() is None
+
+        # Set a mock summarizer
+        class MockSummarizer:
+            async def summarize(self, content: str, prompt: str) -> str:
+                return "Summary"
+
+        mock = MockSummarizer()
+        set_context_llm_summarizer(mock)
+        assert get_context_llm_summarizer() is mock
+
+        # Clear
+        set_context_llm_summarizer(None)
+        assert get_context_llm_summarizer() is None
+
+    def test_fast_model_map(self):
+        """Test FAST_MODEL_MAP contains expected mappings."""
+        from agentic_cli.tools.webfetch.summarizer import FAST_MODEL_MAP
+
+        assert "claude-opus-4-5-20251101" in FAST_MODEL_MAP
+        assert "gemini-3-pro" in FAST_MODEL_MAP
+        assert "gpt-5" in FAST_MODEL_MAP
+
+    def test_get_fast_model(self):
+        """Test get_fast_model returns appropriate model."""
+        from agentic_cli.tools.webfetch.summarizer import get_fast_model
+
+        assert get_fast_model("gemini-3-pro") == "gemini-3-flash"
+        assert get_fast_model("claude-opus-4-5-20251101") == "claude-haiku-4-20251101"
+        assert get_fast_model("unknown-model") is None
