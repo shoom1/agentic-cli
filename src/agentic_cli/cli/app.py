@@ -8,7 +8,6 @@ This module provides the base CLI application that:
 
 from __future__ import annotations
 
-import asyncio
 from typing import TYPE_CHECKING, Any
 
 from prompt_toolkit.completion import Completer, Completion
@@ -271,11 +270,6 @@ class BaseCLIApp:
         return self._message_processor.history
 
     @property
-    def default_user(self) -> str:
-        """Get the default user name."""
-        return self._settings.default_user
-
-    @property
     def settings(self) -> BaseSettings:
         """Get the application settings."""
         return self._settings
@@ -443,36 +437,20 @@ class BaseCLIApp:
         except Exception as e:
             logger.error("activity_log_save_failed", error=str(e))
 
-    async def _on_workflow_ready(self) -> None:
-        """Called when workflow initialization completes (success or failure)."""
-        self._workflow_controller.update_status_bar(self.session)
-
     async def run(self) -> None:
         """Run the main application loop."""
         logger.info("repl_starting")
 
-        # Start background initialization (non-blocking)
-        await self._workflow_controller.start_background_init()
+        async with self._workflow_controller.background_init(self.session):
+            # Register input handler
+            @self.session.on_input
+            async def handle_input(text: str) -> None:
+                if self.should_exit:
+                    return
+                await self.process_input(text)
 
-        # Update status bar when init completes (in background)
-        async def wait_and_update():
-            await self._workflow_controller.ensure_initialized()
-            self._workflow_controller.update_status_bar(self.session)
-
-        asyncio.create_task(wait_and_update())
-
-        # Register input handler
-        @self.session.on_input
-        async def handle_input(text: str) -> None:
-            if self.should_exit:
-                return
-            await self.process_input(text)
-
-        # Run the session - user sees prompt immediately!
-        await self.session.run_async()
-
-        # Cleanup: cancel init task if still running
-        await self._workflow_controller.cancel_init()
+            # Run the session - user sees prompt immediately!
+            await self.session.run_async()
 
         # Auto-save activity log if enabled
         if self._settings.log_activity and len(self.message_history) > 0:
