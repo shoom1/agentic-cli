@@ -4,6 +4,7 @@ Provides an abstraction for external search sources (ArXiv, SSRN, web search, et
 that can be registered and used by the knowledge base and tools.
 """
 
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -216,8 +217,32 @@ def register_search_source(source: SearchSource) -> None:
 # Built-in search source implementations
 
 
+@dataclass
+class CachedSearchResult:
+    """Cached search result with timestamp."""
+
+    results: list[SearchSourceResult]
+    timestamp: float
+
+
 class ArxivSearchSource(SearchSource):
-    """ArXiv paper search source."""
+    """ArXiv paper search source with rate limiting and caching."""
+
+    def __init__(
+        self,
+        cache_ttl_seconds: int = 900,
+        max_cache_size: int = 100,
+    ) -> None:
+        """Initialize with rate limiting and caching.
+
+        Args:
+            cache_ttl_seconds: Cache time-to-live in seconds (default: 900 = 15 minutes)
+            max_cache_size: Maximum number of cached queries (default: 100)
+        """
+        self._last_request_time: float = 0.0
+        self.cache_ttl_seconds = cache_ttl_seconds
+        self.max_cache_size = max_cache_size
+        self._cache: dict[str, CachedSearchResult] = {}
 
     @property
     def name(self) -> str:
@@ -230,6 +255,34 @@ class ArxivSearchSource(SearchSource):
     @property
     def rate_limit(self) -> float:
         return 3.0  # ArXiv requires 3 second delays
+
+    def _make_cache_key(
+        self, query: str, max_results: int, categories: list[str] | None
+    ) -> str:
+        """Create a cache key from search parameters."""
+        cat_str = ",".join(sorted(categories)) if categories else ""
+        return f"{query}|{max_results}|{cat_str}"
+
+    def _get_cached(self, cache_key: str) -> list[SearchSourceResult] | None:
+        """Get cached results if available and not expired."""
+        if cache_key not in self._cache:
+            return None
+        cached = self._cache[cache_key]
+        if time.time() - cached.timestamp > self.cache_ttl_seconds:
+            del self._cache[cache_key]
+            return None
+        return cached.results
+
+    def _evict_oldest_if_full(self) -> None:
+        """Evict oldest cache entry if cache is at max size."""
+        if len(self._cache) >= self.max_cache_size:
+            # Find oldest entry by timestamp
+            oldest_key = min(self._cache.keys(), key=lambda k: self._cache[k].timestamp)
+            del self._cache[oldest_key]
+
+    def clear_cache(self) -> None:
+        """Clear all cached search results."""
+        self._cache.clear()
 
     def search(
         self,
@@ -245,10 +298,23 @@ class ArxivSearchSource(SearchSource):
             max_results: Maximum results
             categories: Optional ArXiv category filters (e.g., ['cs.AI', 'cs.LG'])
         """
+        # Check cache first
+        cache_key = self._make_cache_key(query, max_results, categories)
+        cached_results = self._get_cached(cache_key)
+        if cached_results is not None:
+            return cached_results
+
         try:
             import feedparser
         except ImportError:
             return []
+
+        # Enforce rate limiting
+        current_time = time.time()
+        elapsed = current_time - self._last_request_time
+        if self._last_request_time > 0 and elapsed < self.rate_limit:
+            time.sleep(self.rate_limit - elapsed)
+        self._last_request_time = time.time()
 
         base_url = "http://export.arxiv.org/api/query?"
         search_query = f"search_query=all:{query}"
@@ -284,6 +350,13 @@ class ArxivSearchSource(SearchSource):
                     },
                 )
             )
+
+        # Cache results (evict oldest if at max size)
+        self._evict_oldest_if_full()
+        self._cache[cache_key] = CachedSearchResult(
+            results=results,
+            timestamp=time.time(),
+        )
 
         return results
 

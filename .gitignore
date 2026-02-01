@@ -47,3 +47,6 @@ plans/
 docs/
 changes/
 .research_demo/
+
+# Git worktrees
+.worktrees/
