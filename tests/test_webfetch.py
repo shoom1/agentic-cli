@@ -192,3 +192,64 @@ Disallow: /private/
 
             # Should only fetch robots.txt once
             assert mock_get.call_count == 1
+
+
+class TestHTMLToMarkdown:
+    """Tests for HTML to markdown conversion."""
+
+    @pytest.fixture
+    def converter(self):
+        from agentic_cli.tools.webfetch.converter import HTMLToMarkdown
+        return HTMLToMarkdown()
+
+    def test_convert_simple_html(self, converter):
+        """Test converting simple HTML."""
+        html = "<html><body><h1>Title</h1><p>Paragraph</p></body></html>"
+        result = converter.convert(html, "text/html")
+        assert "Title" in result
+        assert "Paragraph" in result
+
+    def test_convert_preserves_links(self, converter):
+        """Test links are preserved."""
+        html = '<a href="https://example.com">Link</a>'
+        result = converter.convert(html, "text/html")
+        assert "example.com" in result or "Link" in result
+
+    def test_convert_preserves_lists(self, converter):
+        """Test lists are converted."""
+        html = "<ul><li>Item 1</li><li>Item 2</li></ul>"
+        result = converter.convert(html, "text/html")
+        assert "Item 1" in result
+        assert "Item 2" in result
+
+    def test_convert_strips_scripts(self, converter):
+        """Test script tags are stripped."""
+        html = "<p>Text</p><script>alert('xss')</script>"
+        result = converter.convert(html, "text/html")
+        assert "alert" not in result
+        assert "Text" in result
+
+    def test_convert_strips_styles(self, converter):
+        """Test style tags are stripped."""
+        html = "<p>Text</p><style>.class { color: red; }</style>"
+        result = converter.convert(html, "text/html")
+        assert "color" not in result
+        assert "Text" in result
+
+    def test_convert_plain_text_passthrough(self, converter):
+        """Test plain text passes through unchanged."""
+        text = "Just plain text content"
+        result = converter.convert(text, "text/plain")
+        assert result == text
+
+    def test_convert_json_wrapped(self, converter):
+        """Test JSON is wrapped in code block."""
+        json_str = '{"key": "value"}'
+        result = converter.convert(json_str, "application/json")
+        assert "```json" in result
+        assert '{"key": "value"}' in result
+
+    def test_convert_binary_placeholder(self, converter):
+        """Test binary content returns placeholder."""
+        result = converter.convert(b"binary data", "application/octet-stream")
+        assert "Binary content" in result or "binary" in result.lower()
