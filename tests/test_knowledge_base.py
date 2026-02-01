@@ -393,6 +393,7 @@ from agentic_cli.knowledge_base.sources import (
     SearchSourceResult,
     SearchSourceRegistry,
     ArxivSearchSource,
+    CachedSearchResult,
     get_search_registry,
     register_search_source,
 )
@@ -847,6 +848,62 @@ class TestArxivSearchSource:
         """Test custom cache TTL can be set."""
         source = ArxivSearchSource(cache_ttl_seconds=300)
         assert source.cache_ttl_seconds == 300
+
+    def test_cache_max_size_default(self):
+        """Test default max cache size is set."""
+        source = ArxivSearchSource()
+        assert source.max_cache_size == 100
+
+    def test_cache_max_size_custom(self):
+        """Test custom max cache size can be set."""
+        source = ArxivSearchSource(max_cache_size=50)
+        assert source.max_cache_size == 50
+
+    @patch("feedparser.parse")
+    @patch("agentic_cli.knowledge_base.sources.time")
+    def test_cache_evicts_oldest_when_full(self, mock_time_module, mock_parse):
+        """Test that oldest cache entries are evicted when max size is reached."""
+        mock_time_module.sleep = MagicMock()
+        # Return incrementing time for proper ordering
+        time_counter = [0]
+        def get_time():
+            time_counter[0] += 1
+            return float(time_counter[0])
+        mock_time_module.time.side_effect = get_time
+
+        mock_parse.return_value = MagicMock(entries=[])
+
+        source = ArxivSearchSource(max_cache_size=3)
+
+        # Fill cache with 3 queries
+        source.search("query1")
+        source.search("query2")
+        source.search("query3")
+        assert len(source._cache) == 3
+        assert mock_parse.call_count == 3
+
+        # Add 4th query - should evict oldest (query1)
+        source.search("query4")
+        assert len(source._cache) == 3
+        assert mock_parse.call_count == 4
+
+        # query1 should be evicted, so searching again should hit API
+        source.search("query1")
+        assert mock_parse.call_count == 5
+
+        # query4 should still be cached (most recent before query1 was re-added)
+        source.search("query4")
+        assert mock_parse.call_count == 5  # No new API call - still cached
+
+    def test_clear_cache(self):
+        """Test cache can be manually cleared."""
+        source = ArxivSearchSource()
+        # Manually add something to cache
+        source._cache["test"] = CachedSearchResult(results=[], timestamp=0.0)
+        assert len(source._cache) == 1
+
+        source.clear_cache()
+        assert len(source._cache) == 0
 
 
 class TestDefaultRegistry:

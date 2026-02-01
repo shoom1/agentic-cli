@@ -228,14 +228,20 @@ class CachedSearchResult:
 class ArxivSearchSource(SearchSource):
     """ArXiv paper search source with rate limiting and caching."""
 
-    def __init__(self, cache_ttl_seconds: int = 900) -> None:
+    def __init__(
+        self,
+        cache_ttl_seconds: int = 900,
+        max_cache_size: int = 100,
+    ) -> None:
         """Initialize with rate limiting and caching.
 
         Args:
             cache_ttl_seconds: Cache time-to-live in seconds (default: 900 = 15 minutes)
+            max_cache_size: Maximum number of cached queries (default: 100)
         """
         self._last_request_time: float = 0.0
         self.cache_ttl_seconds = cache_ttl_seconds
+        self.max_cache_size = max_cache_size
         self._cache: dict[str, CachedSearchResult] = {}
 
     @property
@@ -266,6 +272,17 @@ class ArxivSearchSource(SearchSource):
             del self._cache[cache_key]
             return None
         return cached.results
+
+    def _evict_oldest_if_full(self) -> None:
+        """Evict oldest cache entry if cache is at max size."""
+        if len(self._cache) >= self.max_cache_size:
+            # Find oldest entry by timestamp
+            oldest_key = min(self._cache.keys(), key=lambda k: self._cache[k].timestamp)
+            del self._cache[oldest_key]
+
+    def clear_cache(self) -> None:
+        """Clear all cached search results."""
+        self._cache.clear()
 
     def search(
         self,
@@ -334,7 +351,8 @@ class ArxivSearchSource(SearchSource):
                 )
             )
 
-        # Cache results
+        # Cache results (evict oldest if at max size)
+        self._evict_oldest_if_full()
         self._cache[cache_key] = CachedSearchResult(
             results=results,
             timestamp=time.time(),
