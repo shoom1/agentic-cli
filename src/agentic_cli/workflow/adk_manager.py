@@ -10,7 +10,6 @@ For alternative orchestration backends (e.g., LangGraph), see the base_manager m
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
 from typing import AsyncGenerator, Any, Callable, Iterator
 
@@ -21,7 +20,7 @@ from google.adk.planners import BuiltInPlanner
 from google.adk.sessions import InMemorySessionService, BaseSessionService, Session
 
 from agentic_cli.workflow.base_manager import BaseWorkflowManager
-from agentic_cli.workflow.events import WorkflowEvent, UserInputRequest, EventType
+from agentic_cli.workflow.events import WorkflowEvent, EventType
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.thinking import ThinkingDetector
 from agentic_cli.workflow.adk.llm_event_logger import LLMEventLogger
@@ -136,17 +135,10 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         self.session_service_uri = session_service_uri
         self.session_id = "default_session"
 
-        # Model is resolved lazily to allow startup without API keys
-        self._model: str | None = model
-        self._model_resolved: bool = model is not None
-
         # Lazy-initialized ADK components
         self._session_service: BaseSessionService | None = None
         self._root_agent: Agent | None = None
         self._runner: Runner | None = None
-
-        # User input request handling
-        self._pending_input: dict[str, tuple[UserInputRequest, asyncio.Future[str]]] = {}
 
         # LLM event logger (initialized lazily when raw_llm_logging is enabled)
         self._llm_event_logger: LLMEventLogger | None = None
@@ -157,15 +149,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             model_override=model,
             agent_count=len(agent_configs),
         )
-
-    @property
-    def model(self) -> str:
-        """Get the model name, resolving from settings if needed."""
-        if not self._model_resolved:
-            self._model = self._settings.get_model()
-            self._model_resolved = True
-            logger.info("model_resolved", model=self._model)
-        return self._model  # type: ignore[return-value]
 
     @property
     def session_service(self) -> BaseSessionService | None:
@@ -181,67 +164,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
     def runner(self) -> Runner | None:
         """Get the runner."""
         return self._runner
-
-    def has_pending_input(self) -> bool:
-        """Check if there are pending user input requests."""
-        return len(self._pending_input) > 0
-
-    def get_pending_input_request(self) -> UserInputRequest | None:
-        """Get the next pending input request without removing it."""
-        if self._pending_input:
-            request_id = next(iter(self._pending_input))
-            return self._pending_input[request_id][0]
-        return None
-
-    async def request_user_input(self, request: UserInputRequest) -> str:
-        """Request user input from the CLI.
-
-        Called by tools that need user interaction. This method blocks
-        until provide_user_input() is called with the response.
-
-        Args:
-            request: The user input request
-
-        Returns:
-            User's response string
-        """
-        loop = asyncio.get_event_loop()
-        future: asyncio.Future[str] = loop.create_future()
-        self._pending_input[request.request_id] = (request, future)
-
-        logger.debug(
-            "user_input_requested",
-            request_id=request.request_id,
-            tool_name=request.tool_name,
-        )
-
-        return await future
-
-    def provide_user_input(self, request_id: str, response: str) -> bool:
-        """Provide user input for a pending request.
-
-        Called by CLI when user responds to a USER_INPUT_REQUIRED event.
-
-        Args:
-            request_id: The request ID from the event metadata
-            response: User's response
-
-        Returns:
-            True if request was found and resolved, False otherwise
-        """
-        if request_id not in self._pending_input:
-            logger.warning("unknown_input_request", request_id=request_id)
-            return False
-
-        request, future = self._pending_input.pop(request_id)
-        future.set_result(response)
-
-        logger.debug(
-            "user_input_provided",
-            request_id=request_id,
-            tool_name=request.tool_name,
-        )
-        return True
 
     async def generate_simple(self, prompt: str, max_tokens: int = 500) -> str:
         """Generate a simple text response using the current model.
@@ -677,34 +599,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
     # -------------------------------------------------------------------------
     # Event processing (inlined from EventProcessor)
     # -------------------------------------------------------------------------
-
-    def _emit_task_progress_event(self) -> WorkflowEvent | None:
-        """Create a TASK_PROGRESS event if task graph has tasks.
-
-        Returns:
-            WorkflowEvent if task graph has tasks, None otherwise.
-        """
-        if self._task_graph is None:
-            return None
-
-        progress = self._task_graph.get_progress()
-        if progress["total"] == 0:
-            return None
-
-        # Find current in-progress task for status line
-        current_task_id = None
-        current_task_desc = None
-        in_progress = self._task_graph.get_in_progress_task()
-        if in_progress:
-            current_task_id, task = in_progress
-            current_task_desc = task.description
-
-        return WorkflowEvent.task_progress(
-            display=self._task_graph.to_compact_display(),
-            progress=progress,
-            current_task_id=current_task_id,
-            current_task_description=current_task_desc,
-        )
 
     async def _process_adk_event(
         self,
