@@ -518,9 +518,11 @@ class TestWebFetchTool:
                 )
 
             assert result["success"] is False
-            assert "redirect" in result
-            assert result["redirect"]["to_url"] == "https://other.com/page"
-            assert result["redirect"]["to_host"] == "other.com"
+            assert result["redirect"] is True
+            assert result["redirect_url"] == "https://other.com/page"
+            assert result["redirect_host"] == "other.com"
+            assert "message" in result
+            assert result["url"] == "https://example.com/page"
         finally:
             set_context_llm_summarizer(None)
 

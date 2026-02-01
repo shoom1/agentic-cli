@@ -100,17 +100,17 @@ async def web_fetch(url: str, prompt: str, timeout: int = 30) -> dict[str, Any]:
         if fetch_result.redirect is not None:
             return {
                 "success": False,
-                "redirect": {
-                    "from_url": fetch_result.redirect.from_url,
-                    "to_url": fetch_result.redirect.to_url,
-                    "to_host": fetch_result.redirect.to_host,
-                },
-                "error": fetch_result.error,
+                "redirect": True,
+                "redirect_url": fetch_result.redirect.to_url,
+                "redirect_host": fetch_result.redirect.to_host,
+                "message": f"Redirect to different host: {fetch_result.redirect.to_host}",
+                "url": url,
             }
         # Other fetch error
         return {
             "success": False,
             "error": fetch_result.error,
+            "url": url,
         }
 
     # Convert HTML to markdown
