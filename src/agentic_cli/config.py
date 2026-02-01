@@ -133,6 +133,24 @@ class BaseSettings(WorkflowSettingsMixin, CLISettingsMixin, PydanticBaseSettings
         description="Serper.dev API key for web search",
         validation_alias="SERPER_API_KEY",
     )
+    tavily_api_key: str | None = Field(
+        default=None,
+        description="Tavily API key for web search",
+        validation_alias="TAVILY_API_KEY",
+    )
+    brave_api_key: str | None = Field(
+        default=None,
+        description="Brave Search API key for web search",
+        validation_alias="BRAVE_API_KEY",
+    )
+
+    # Web search configuration
+    search_backend: Literal["tavily", "brave"] | None = Field(
+        default=None,
+        title="Search Backend",
+        description="Web search provider to use (tavily or brave)",
+        json_schema_extra={"ui_order": 55},
+    )
 
     # Application identity (domain projects should override)
     app_name: str = Field(

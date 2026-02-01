@@ -15,8 +15,8 @@ Framework Tools:
     - memory_tools: Working and long-term memory tools
     - planning_tools: Task graph management tools
     - hitl_tools: Human-in-the-loop checkpoint and approval tools
+    - web_search: Web search with pluggable backends (Tavily, Brave)
 
-For web search, use google_search_tool directly from google.adk.tools.
 For resilience patterns, use tenacity, pybreaker, aiolimiter directly.
 """
 
@@ -64,6 +64,7 @@ from agentic_cli.tools.standard import (
     execute_python,
     ask_clarification,
 )
+from agentic_cli.tools.search import web_search
 from agentic_cli.tools.registry import (
     ToolCategory,
     ToolDefinition,
@@ -101,7 +102,9 @@ __all__ = [
     # File operations
     "file_manager",
     "diff_compare",
-    # Search (ADK built-in)
+    # Web search (pluggable backends)
+    "web_search",
+    # Search (ADK built-in - note: can't mix with function calling)
     "google_search_tool",
     # Standard tool functions (ready to use with agents)
     "search_knowledge_base",
