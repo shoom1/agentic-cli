@@ -46,15 +46,12 @@ class MemoryCommand(Command):
         working_table.add_column("Tags", style="dim")
 
         if memory_manager:
-            working_mem = memory_manager.working
-            for key in working_mem.list():
-                entry = working_mem._entries.get(key)
-                if entry:
-                    value_str = str(entry.value)
-                    if len(value_str) > 50:
-                        value_str = value_str[:50] + "..."
-                    tags_str = ", ".join(entry.tags) if entry.tags else ""
-                    working_table.add_row(key, value_str, tags_str)
+            for key, (value, tags) in memory_manager.get_working_entries().items():
+                value_str = str(value)
+                if len(value_str) > 50:
+                    value_str = value_str[:50] + "..."
+                tags_str = ", ".join(tags) if tags else ""
+                working_table.add_row(key, value_str, tags_str)
 
         if working_table.row_count == 0:
             working_table.add_row("(empty)", "", "")
@@ -173,7 +170,7 @@ class ApprovalsCommand(Command):
             app.session.add_message("system", "Approval manager not initialized")
             return
 
-        pending = approval_manager._pending
+        pending = approval_manager.get_pending_requests()
 
         if not pending:
             app.session.add_message("system", "No pending approval requests")
@@ -186,7 +183,7 @@ class ApprovalsCommand(Command):
         table.add_column("Description", style="white")
         table.add_column("Risk", style="red")
 
-        for request_id, request in pending.items():
+        for request in pending:
             table.add_row(
                 request.id,
                 request.tool,
@@ -218,21 +215,13 @@ class CheckpointsCommand(Command):
             app.session.add_message("system", "Checkpoint manager not initialized")
             return
 
-        checkpoints = checkpoint_manager._checkpoints
-        resolved = checkpoint_manager._results
-
-        # Filter to unresolved checkpoints
-        unresolved = {
-            cp_id: cp
-            for cp_id, cp in checkpoints.items()
-            if cp_id not in resolved
-        }
+        unresolved = checkpoint_manager.get_unresolved()
 
         if not unresolved:
             app.session.add_message("system", "No checkpoints awaiting review")
             return
 
-        for cp_id, checkpoint in unresolved.items():
+        for checkpoint in unresolved:
             content_preview = str(checkpoint.content)
             if len(content_preview) > 200:
                 content_preview = content_preview[:200] + "..."

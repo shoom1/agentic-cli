@@ -137,3 +137,14 @@ class MemoryManager:
             snapshot: A dictionary previously created by get_working_snapshot().
         """
         self._working = WorkingMemory.from_snapshot(snapshot)
+
+    def get_working_entries(self) -> dict[str, tuple[Any, set[str]]]:
+        """Get all working memory entries with their values and tags.
+
+        Returns:
+            Dictionary mapping keys to (value, tags) tuples.
+        """
+        return {
+            key: (entry.value, entry.tags)
+            for key, entry in self._working._entries.items()
+        }
