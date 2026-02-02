@@ -5,10 +5,18 @@ These settings control model selection, orchestration, retry behavior,
 HITL (human-in-the-loop), and memory management.
 """
 
+from enum import Enum
 from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import Field
+
+
+class OrchestratorType(str, Enum):
+    """Types of workflow orchestrators available."""
+
+    ADK = "adk"
+    LANGGRAPH = "langgraph"
 
 
 class WorkflowSettingsMixin:
@@ -36,8 +44,8 @@ class WorkflowSettingsMixin:
     )
 
     # Orchestrator selection
-    orchestrator: Literal["adk", "langgraph"] = Field(
-        default="adk",
+    orchestrator: OrchestratorType = Field(
+        default=OrchestratorType.ADK,
         title="Orchestrator",
         description="Workflow orchestrator backend",
         json_schema_extra={"ui_order": 100},  # Advanced setting

@@ -147,3 +147,22 @@ class CheckpointManager:
     def is_resolved(self, checkpoint_id: str) -> bool:
         """Check if a checkpoint has been resolved."""
         return checkpoint_id in self._results
+
+    def get_unresolved(self) -> list[Checkpoint]:
+        """Get checkpoints awaiting review.
+
+        Returns:
+            List of Checkpoint objects that haven't been resolved yet.
+        """
+        return [
+            cp for cp in self._checkpoints.values()
+            if cp.id not in self._results
+        ]
+
+    def get_results(self) -> dict[str, CheckpointResult]:
+        """Get all checkpoint results.
+
+        Returns:
+            Dictionary mapping checkpoint IDs to their results.
+        """
+        return dict(self._results)

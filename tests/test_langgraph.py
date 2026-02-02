@@ -421,7 +421,7 @@ class TestCreateWorkflowManagerFromSettings:
 
     def test_factory_creates_adk_manager(self):
         """Test factory creates ADK manager by default."""
-        from agentic_cli.cli.app import create_workflow_manager_from_settings
+        from agentic_cli.cli.workflow_controller import create_workflow_manager_from_settings
 
         settings = BaseSettings(
             google_api_key="test-key",
@@ -438,7 +438,7 @@ class TestCreateWorkflowManagerFromSettings:
 
     def test_factory_creates_langgraph_manager(self):
         """Test factory creates LangGraph manager when configured."""
-        from agentic_cli.cli.app import create_workflow_manager_from_settings
+        from agentic_cli.cli.workflow_controller import create_workflow_manager_from_settings
 
         settings = BaseSettings(
             google_api_key="test-key",

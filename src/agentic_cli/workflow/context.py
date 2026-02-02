@@ -26,6 +26,9 @@ _approval_manager_context: ContextVar[Any] = ContextVar(
 _checkpoint_manager_context: ContextVar[Any] = ContextVar(
     "checkpoint_manager_context", default=None
 )
+_llm_summarizer_context: ContextVar[Any] = ContextVar(
+    "llm_summarizer_context", default=None
+)
 
 
 # Setters (used by workflow manager)
@@ -49,6 +52,11 @@ def set_context_approval_manager(manager: "ApprovalManager | None") -> None:
 def set_context_checkpoint_manager(manager: "CheckpointManager | None") -> None:
     """Set the checkpoint manager in the current context."""
     _checkpoint_manager_context.set(manager)
+
+
+def set_context_llm_summarizer(summarizer: Any | None) -> None:
+    """Set the LLM summarizer in the current context."""
+    _llm_summarizer_context.set(summarizer)
 
 
 # Getters (used by tools)
@@ -88,3 +96,12 @@ def get_context_checkpoint_manager() -> "CheckpointManager | None":
         The CheckpointManager instance set by the workflow manager, or None if not set.
     """
     return _checkpoint_manager_context.get()
+
+
+def get_context_llm_summarizer() -> Any | None:
+    """Get the LLM summarizer from the current context.
+
+    Returns:
+        The LLMSummarizer instance set by the workflow manager, or None if not set.
+    """
+    return _llm_summarizer_context.get()

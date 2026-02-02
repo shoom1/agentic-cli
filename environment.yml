@@ -5,6 +5,7 @@ channels:
 dependencies:
   - python=3.12
   - pip
+  - html2text
   - pip:
     - -e .
     - -e .[dev]

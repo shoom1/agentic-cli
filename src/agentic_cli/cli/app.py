@@ -8,12 +8,7 @@ This module provides the base CLI application that:
 
 from __future__ import annotations
 
-import asyncio
-from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
-from datetime import datetime
-from enum import Enum
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
 
 from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.document import Document
@@ -23,8 +18,10 @@ from thinking_prompt import ThinkingPromptSession, AppInfo
 from thinking_prompt.styles import ThinkingPromptStyles
 
 from agentic_cli.cli.commands import Command, CommandRegistry
+from agentic_cli.cli.message_processor import MessageProcessor, MessageHistory, MessageType
+from agentic_cli.cli.workflow_controller import WorkflowController
 from agentic_cli.config import BaseSettings
-from agentic_cli.logging import Loggers, configure_logging, bind_context
+from agentic_cli.logging import Loggers, configure_logging
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -33,139 +30,6 @@ if TYPE_CHECKING:
     from agentic_cli.workflow.config import AgentConfig
 
 logger = Loggers.cli()
-
-# Thread pool for background initialization (single worker)
-_init_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="workflow-init")
-
-
-def create_workflow_manager_from_settings(
-    agent_configs: list["AgentConfig"],
-    settings: BaseSettings,
-    app_name: str | None = None,
-    model: str | None = None,
-    **kwargs,
-) -> "BaseWorkflowManager":
-    """Factory function to create the appropriate workflow manager based on settings.
-
-    Creates either a GoogleADKWorkflowManager or LangGraphWorkflowManager
-    based on the settings.orchestrator configuration.
-
-    Args:
-        agent_configs: List of agent configurations.
-        settings: Application settings (determines orchestrator type).
-        app_name: Application name for services.
-        model: Model override.
-        **kwargs: Additional arguments passed to the specific manager.
-
-    Returns:
-        BaseWorkflowManager instance (ADK or LangGraph based on settings).
-
-    Raises:
-        ImportError: If LangGraph is selected but not installed.
-
-    Example:
-        settings = MySettings(orchestrator="langgraph")
-        configs = [AgentConfig(name="agent", prompt="...")]
-        manager = create_workflow_manager_from_settings(configs, settings)
-    """
-    orchestrator = getattr(settings, "orchestrator", "adk")
-
-    if orchestrator == "langgraph":
-        try:
-            from agentic_cli.workflow.langgraph import LangGraphWorkflowManager
-
-            checkpointer = getattr(settings, "langgraph_checkpointer", "memory")
-            return LangGraphWorkflowManager(
-                agent_configs=agent_configs,
-                settings=settings,
-                app_name=app_name,
-                model=model,
-                checkpointer=checkpointer,
-                **kwargs,
-            )
-        except ImportError as e:
-            raise ImportError(
-                f"LangGraph orchestrator selected but dependencies not installed. "
-                f"Install with: pip install agentic-cli[langgraph]\n"
-                f"Original error: {e}"
-            ) from e
-
-    else:  # Default to ADK
-        from agentic_cli.workflow.adk_manager import GoogleADKWorkflowManager
-
-        return GoogleADKWorkflowManager(
-            agent_configs=agent_configs,
-            settings=settings,
-            app_name=app_name,
-            model=model,
-            **kwargs,
-        )
-
-
-# === Message History for Persistence ===
-
-
-class MessageType(Enum):
-    """Types of messages in history."""
-
-    USER = "user"
-    ASSISTANT = "assistant"
-    SYSTEM = "system"
-    ERROR = "error"
-    WARNING = "warning"
-    SUCCESS = "success"
-    THINKING = "thinking"
-
-
-@dataclass
-class Message:
-    """A message stored in history for persistence."""
-
-    content: str
-    message_type: MessageType
-    timestamp: datetime = field(default_factory=datetime.now)
-    metadata: dict = field(default_factory=dict)
-
-
-class MessageHistory:
-    """Simple message history for persistence."""
-
-    def __init__(self) -> None:
-        self._messages: list[Message] = []
-
-    def add(
-        self,
-        content: str,
-        message_type: MessageType | str,
-        timestamp: datetime | None = None,
-        **metadata: object,
-    ) -> None:
-        """Add a message to history."""
-        if isinstance(message_type, str):
-            message_type = MessageType(message_type)
-        self._messages.append(
-            Message(
-                content=content,
-                message_type=message_type,
-                timestamp=timestamp or datetime.now(),
-                metadata=dict(metadata),
-            )
-        )
-
-    def get_all(self) -> list[Message]:
-        """Get all messages."""
-        return list(self._messages)
-
-    def get_by_type(self, message_type: MessageType) -> list[Message]:
-        """Get messages of a specific type."""
-        return [m for m in self._messages if m.message_type == message_type]
-
-    def clear(self) -> None:
-        """Clear all messages."""
-        self._messages.clear()
-
-    def __len__(self) -> int:
-        return len(self._messages)
 
 
 # === Slash Command Completer ===
@@ -236,7 +100,6 @@ class BaseCLIApp:
 
     Optional overrides:
     - register_commands(): Register domain-specific commands
-    - _create_workflow_manager(): Advanced workflow customization
     - get_styles(): Customize UI colors
     - get_ui_setting_keys(): Customize settings dialog fields
     - apply_settings(): Handle additional custom settings
@@ -257,24 +120,22 @@ class BaseCLIApp:
         """
         # === Configuration ===
         self._app_info = app_info
-        self._agent_configs = agent_configs
         self._settings = settings
         configure_logging(self._settings)
 
         logger.info("app_starting", app_name=self._settings.app_name)
-
-        # === Message History (for persistence) ===
-        self.message_history = MessageHistory()
 
         # === Command Registry ===
         self.command_registry = CommandRegistry()
         self._register_builtin_commands()
         self.register_commands()  # Domain-specific commands
 
-        # === Workflow Manager (initialized in background) ===
-        self._workflow: BaseWorkflowManager | None = None
-        self._init_task: asyncio.Task[None] | None = None
-        self._init_error: Exception | None = None
+        # === Components ===
+        self._workflow_controller = WorkflowController(
+            agent_configs=agent_configs,
+            settings=settings,
+        )
+        self._message_processor = MessageProcessor()
 
         # === UI: ThinkingPromptSession ===
         completer = SlashCommandCompleter(self.command_registry.get_completions())
@@ -296,34 +157,6 @@ class BaseCLIApp:
         self.should_exit = False
 
         logger.debug("app_initialized_fast")
-
-    @property
-    def app_info(self) -> AppInfo:
-        """Get the application info."""
-        return self._app_info
-
-    @property
-    def agent_configs(self) -> list["AgentConfig"]:
-        """Get the agent configurations."""
-        return self._agent_configs
-
-    def _create_workflow_manager(self) -> "BaseWorkflowManager":
-        """Create the workflow manager for this application.
-
-        Uses create_workflow_manager_from_settings() with the agent_configs
-        provided to the constructor.
-
-        Override this method if you need advanced workflow manager creation
-        (e.g., custom initialization, additional configuration).
-
-        Returns:
-            BaseWorkflowManager instance (ADK or LangGraph based on settings)
-        """
-        return create_workflow_manager_from_settings(
-            agent_configs=self._agent_configs,
-            settings=self._settings,
-            app_name=self._settings.app_name,
-        )
 
     def get_styles(self) -> ThinkingPromptStyles:
         """Get styles for ThinkingPromptSession.
@@ -408,7 +241,7 @@ class BaseCLIApp:
         return [item for _, item in sorted(items, key=lambda x: x[0])]
 
     async def save_settings(self) -> "Path":
-        """Save current settings to project config file (./settings.json).
+        """Save current settings to project config file (./.{app_name}/settings.json).
 
         Uses SettingsPersistence to save non-default settings to the
         project-level config file. Secrets (API keys) are never saved.
@@ -429,14 +262,12 @@ class BaseCLIApp:
         Raises:
             RuntimeError: If workflow is not yet initialized
         """
-        if self._workflow is None:
-            raise RuntimeError("Workflow not initialized yet")
-        return self._workflow
+        return self._workflow_controller.workflow
 
     @property
-    def default_user(self) -> str:
-        """Get the default user name."""
-        return self._settings.default_user
+    def message_history(self) -> MessageHistory:
+        """Get the message history (for persistence)."""
+        return self._message_processor.history
 
     @property
     def settings(self) -> BaseSettings:
@@ -451,6 +282,11 @@ class BaseCLIApp:
     async def apply_settings(self, changes: dict[str, Any]) -> None:
         """Apply changed settings and reinitialize workflow if needed.
 
+        Settings are applied in two ways:
+        1. Special settings (model, thinking_effort) use dedicated setters
+           and may trigger workflow reinitialization
+        2. All other settings are applied directly to the settings object
+
         Args:
             changes: Dictionary of changed settings (key -> new_value)
         """
@@ -461,7 +297,10 @@ class BaseCLIApp:
         needs_reinit = False
         new_model = changes.get("model")
 
-        # Apply model change
+        # Settings that require special handling
+        special_settings = {"model", "thinking_effort"}
+
+        # Apply model change (requires dedicated setter + reinit)
         if new_model:
             try:
                 self._settings.set_model(new_model)
@@ -470,7 +309,7 @@ class BaseCLIApp:
                 self.session.add_error(f"Failed to set model: {e}")
                 return
 
-        # Apply thinking effort change
+        # Apply thinking effort change (requires dedicated setter + reinit)
         if "thinking_effort" in changes:
             try:
                 self._settings.set_thinking_effort(changes["thinking_effort"])
@@ -479,14 +318,15 @@ class BaseCLIApp:
                 self.session.add_error(f"Failed to set thinking effort: {e}")
                 return
 
-        # Apply log_activity change
-        if "log_activity" in changes:
-            object.__setattr__(self._settings, "log_activity", changes["log_activity"])
+        # Apply all other settings directly
+        for key, value in changes.items():
+            if key not in special_settings:
+                object.__setattr__(self._settings, key, value)
 
         # Reinitialize workflow if needed
-        if needs_reinit and self._workflow is not None:
+        if needs_reinit and self._workflow_controller.is_ready:
             try:
-                await self._workflow.reinitialize(model=new_model, preserve_sessions=True)
+                await self._workflow_controller.reinitialize(model=new_model)
             except Exception as e:
                 self.session.add_error(f"Failed to reinitialize workflow: {e}")
                 return
@@ -511,66 +351,6 @@ class BaseCLIApp:
         self.command_registry.register(ExitCommand())
         self.command_registry.register(StatusCommand())
         self.command_registry.register(SettingsCommand())
-
-    async def _background_init(self) -> None:
-        """Initialize workflow manager in background.
-
-        Creates the workflow manager and calls initialize_services() to
-        preload LLM, build graph, and set up checkpointing. This avoids
-        lag on the first user message.
-        """
-        loop = asyncio.get_running_loop()
-
-        def _create_workflow() -> "BaseWorkflowManager":
-            return self._create_workflow_manager()
-
-        try:
-            logger.debug("background_init_starting")
-
-            # Step 1: Create workflow manager (sync, in thread pool)
-            self._workflow = await loop.run_in_executor(
-                _init_executor, _create_workflow
-            )
-
-            # Step 2: Initialize services (async - builds graph, loads LLM, etc.)
-            # This is the expensive part that was previously deferred to first message
-            await self._workflow.initialize_services()
-
-            # Update status bar to show ready
-            model = self._workflow.model
-            self.session.status_text = f"{model} | Ctrl+C: cancel | /help: commands"
-            logger.info("background_init_complete", model=model)
-
-        except Exception as e:
-            self._init_error = e
-            # Don't log to console - error will be shown via UI when user interacts
-            self.session.status_text = "Init failed - check API keys"
-
-    async def _ensure_initialized(self) -> bool:
-        """Wait for background initialization to complete.
-
-        Returns:
-            True if initialization succeeded, False otherwise
-        """
-        if self._workflow is not None:
-            return True
-
-        if self._init_task is None:
-            return False
-
-        if not self._init_task.done():
-            # Show user we're waiting for initialization
-            self.session.start_thinking(lambda: "Waiting for initialization...")
-            try:
-                await self._init_task
-            finally:
-                self.session.finish_thinking(add_to_history=False)
-
-        if self._init_error:
-            self.session.add_error(f"Initialization failed: {self._init_error}")
-            return False
-
-        return self._workflow is not None
 
     async def process_input(self, user_input: str) -> None:
         """Process user input.
@@ -616,50 +396,10 @@ class BaseCLIApp:
             self.session.add_error(f"Unknown command: /{command_name}")
             self.session.add_message("system", "Type /help to see available commands")
 
-    async def _prompt_user_input(self, event: "WorkflowEvent") -> str:
-        """Prompt user for input requested by a tool.
-
-        Args:
-            event: USER_INPUT_REQUIRED event with prompt details
-
-        Returns:
-            User's response string
-        """
-        from agentic_cli.workflow import WorkflowEvent  # noqa: F811
-
-        input_type = event.metadata.get("input_type", "text")
-        tool_name = event.metadata.get("tool_name", "Tool")
-        choices = event.metadata.get("choices")
-        default = event.metadata.get("default")
-
-        if input_type == "choice" and choices:
-            # Use choice dialog for multiple options
-            result = await self.session.choice_dialog(
-                title=f"{tool_name} - Input Required",
-                text=event.content,
-                choices=choices,
-            )
-            return result or (default or "")
-
-        elif input_type == "confirm":
-            # Use yes/no dialog for confirmation
-            result = await self.session.yes_no_dialog(
-                title=f"{tool_name} - Confirmation",
-                text=event.content,
-            )
-            return "yes" if result else "no"
-
-        else:
-            # Use text input dialog for free-form input
-            result = await self.session.input_dialog(
-                title=f"{tool_name} - Input Required",
-                text=event.content,
-                default=default or "",
-            )
-            return result or ""
-
     async def _handle_message(self, message: str) -> None:
         """Route message through agentic workflow.
+
+        Delegates to MessageProcessor for event stream handling.
 
         Args:
             message: User message to process
@@ -667,156 +407,13 @@ class BaseCLIApp:
         # Echo user input for regular messages
         self.session.add_message("user", message)
 
-        # Wait for initialization if needed
-        if not await self._ensure_initialized():
-            self.session.add_error(
-                "Cannot process message - workflow not initialized. "
-                "Please check your API keys (GOOGLE_API_KEY or ANTHROPIC_API_KEY)."
-            )
-            return
-
-        # Import EventType here (workflow module is now loaded)
-        from agentic_cli.workflow import EventType
-
-        bind_context(user_id=self._settings.default_user)
-        logger.info("handling_message", message_length=len(message))
-
-        # Track message in history (if logging enabled)
-        if self._settings.log_activity:
-            self.message_history.add(message, MessageType.USER)
-
-        # Status line for thinking box (multi-line with task progress)
-        status_line = "Processing..."
-        task_progress_display = None  # Updated by TASK_PROGRESS events (str | None)
-        thinking_started = False
-
-        # Accumulate content for history
-        thinking_content: list[str] = []
-        response_content: list[str] = []
-
-        def get_status() -> str:
-            """Build status display with current action and task progress."""
-            lines = [status_line]
-
-            # Add task progress if available (from TASK_PROGRESS events)
-            if task_progress_display:
-                lines.append(task_progress_display)
-
-            return "\n".join(lines)
-
-        try:
-            self.session.start_thinking(get_status)
-            thinking_started = True
-
-            async for event in self.workflow.process(
-                message=message,
-                user_id=self._settings.default_user,
-            ):
-                if event.type == EventType.TEXT:
-                    # Stream response directly to console
-                    self.session.add_response(event.content, markdown=True)
-                    response_content.append(event.content)
-
-                elif event.type == EventType.THINKING:
-                    # Stream thinking to console only if verbose_thinking is enabled
-                    status_line = "Thinking..."
-                    if self._settings.verbose_thinking:
-                        self.session.add_message("system", event.content)
-                    thinking_content.append(event.content)
-
-                elif event.type == EventType.TOOL_CALL:
-                    # Update status line in thinking box
-                    tool_name = event.metadata.get("tool_name", "unknown")
-                    status_line = f"Calling: {tool_name}"
-
-                elif event.type == EventType.TOOL_RESULT:
-                    # Display tool result summary
-                    tool_name = event.metadata.get("tool_name", "unknown")
-                    success = event.metadata.get("success", True)
-                    duration = event.metadata.get("duration_ms")
-                    icon = "✓" if success else "✗"
-                    duration_str = f" ({duration}ms)" if duration else ""
-                    status_line = f"{icon} {tool_name}: {event.content}{duration_str}"
-                    # Also show in message area for visibility
-                    style = "green" if success else "red"
-                    self.session.add_rich(
-                        f"[{style}]{icon}[/{style}] {tool_name}: {event.content}{duration_str}"
-                    )
-
-                elif event.type == EventType.USER_INPUT_REQUIRED:
-                    # Pause thinking, prompt user, resume
-                    if thinking_started:
-                        self.session.finish_thinking(add_to_history=False)
-                        thinking_started = False
-
-                    response = await self._prompt_user_input(event)
-                    self.workflow.provide_user_input(
-                        event.metadata["request_id"],
-                        response,
-                    )
-
-                    # Resume thinking box
-                    self.session.start_thinking(get_status)
-                    thinking_started = True
-
-                elif event.type == EventType.CODE_EXECUTION:
-                    # Update status with execution result
-                    result_preview = (
-                        event.content[:40] + "..."
-                        if len(event.content) > 40
-                        else event.content
-                    )
-                    status_line = f"Result: {result_preview}"
-
-                elif event.type == EventType.EXECUTABLE_CODE:
-                    # Update status when executing code
-                    lang = event.metadata.get("language", "python")
-                    status_line = f"Running {lang} code..."
-
-                elif event.type == EventType.FILE_DATA:
-                    # Update status with file info
-                    status_line = f"File: {event.content}"
-
-                elif event.type == EventType.TASK_PROGRESS:
-                    # Task progress update - event.content has compact display,
-                    # event.metadata has progress stats
-                    progress = event.metadata.get("progress", {})
-                    if progress.get("total", 0) > 0:
-                        completed = progress.get("completed", 0)
-                        total = progress["total"]
-                        # Build display: separator + task list
-                        task_progress_display = f"─── Tasks: {completed}/{total} ───"
-                        if event.content:
-                            task_progress_display += f"\n{event.content}"
-
-                    # Update status line with current task if available
-                    current_task = event.metadata.get("current_task_description")
-                    if current_task:
-                        status_line = f"Working on: {current_task}"
-
-            # Finish thinking box (don't add status to history)
-            if thinking_started:
-                self.session.finish_thinking(add_to_history=False)
-
-            # Add accumulated content to message history (if logging enabled)
-            if self._settings.log_activity:
-                if thinking_content:
-                    self.message_history.add(
-                        "".join(thinking_content), MessageType.THINKING
-                    )
-                if response_content:
-                    self.message_history.add(
-                        "".join(response_content), MessageType.ASSISTANT
-                    )
-
-            logger.debug("message_handled_successfully")
-
-        except Exception as e:
-            if thinking_started:
-                self.session.finish_thinking(add_to_history=False)
-            self.session.add_error(f"Workflow error: {e}")
-            if self._settings.log_activity:
-                self.message_history.add(str(e), MessageType.ERROR)
+        # Delegate to message processor
+        await self._message_processor.process(
+            message=message,
+            workflow_controller=self._workflow_controller,
+            ui=self.session,
+            settings=self._settings,
+        )
 
     async def _save_activity_log(self) -> None:
         """Save activity log to file on exit."""
@@ -828,8 +425,8 @@ class BaseCLIApp:
 
         try:
             metadata = {"app_name": self._settings.app_name}
-            if self._workflow:
-                metadata["model"] = self._workflow.model
+            if self._workflow_controller.is_ready:
+                metadata["model"] = self._workflow_controller.model
 
             saved_path = persistence.save_session(
                 session_id=session_name,
@@ -844,26 +441,16 @@ class BaseCLIApp:
         """Run the main application loop."""
         logger.info("repl_starting")
 
-        # Start background initialization (non-blocking)
-        self._init_task = asyncio.create_task(self._background_init())
+        async with self._workflow_controller.background_init(self.session):
+            # Register input handler
+            @self.session.on_input
+            async def handle_input(text: str) -> None:
+                if self.should_exit:
+                    return
+                await self.process_input(text)
 
-        # Register input handler
-        @self.session.on_input
-        async def handle_input(text: str) -> None:
-            if self.should_exit:
-                return
-            await self.process_input(text)
-
-        # Run the session - user sees prompt immediately!
-        await self.session.run_async()
-
-        # Cleanup: cancel init task if still running
-        if self._init_task and not self._init_task.done():
-            self._init_task.cancel()
-            try:
-                await self._init_task
-            except asyncio.CancelledError:
-                pass
+            # Run the session - user sees prompt immediately!
+            await self.session.run_async()
 
         # Auto-save activity log if enabled
         if self._settings.log_activity and len(self.message_history) > 0:

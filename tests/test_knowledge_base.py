@@ -393,6 +393,7 @@ from agentic_cli.knowledge_base.sources import (
     SearchSourceResult,
     SearchSourceRegistry,
     ArxivSearchSource,
+    CachedSearchResult,
     get_search_registry,
     register_search_source,
 )
@@ -724,6 +725,254 @@ class TestArxivSearchSource:
         results = source.search("test")
 
         assert results == []
+
+    @patch("feedparser.parse")
+    @patch("agentic_cli.knowledge_base.sources.time")
+    def test_rate_limiting_enforced(self, mock_time_module, mock_parse):
+        """Test rate limiting is enforced between requests."""
+        mock_parse.return_value = MagicMock(entries=[])
+
+        # First call: time()=1.0 for check, time()=1.0 to record
+        # Second call: time()=1.0 for check (elapsed=0, needs sleep), time()=1.0 to record
+        mock_time_module.time.return_value = 1.0
+        mock_time_module.sleep = MagicMock()
+
+        source = ArxivSearchSource()
+
+        # First request - should not sleep (no previous request, _last_request_time=0)
+        source.search("first query")
+        mock_time_module.sleep.assert_not_called()
+
+        # Second request immediately after - should sleep
+        # _last_request_time is now 1.0, current is 1.0, elapsed=0 < rate_limit
+        source.search("second query")
+        mock_time_module.sleep.assert_called_once()
+        # Should sleep for approximately rate_limit seconds
+        sleep_time = mock_time_module.sleep.call_args[0][0]
+        assert 0 < sleep_time <= source.rate_limit
+
+    @patch("feedparser.parse")
+    @patch("agentic_cli.knowledge_base.sources.time")
+    def test_rate_limiting_respects_elapsed_time(self, mock_time_module, mock_parse):
+        """Test rate limiting accounts for time already elapsed."""
+        mock_parse.return_value = MagicMock(entries=[])
+
+        # First call (3 time() calls): cache check, rate limit check, cache store
+        # Second call (3 time() calls): cache check, rate limit check (elapsed=1s), cache store
+        # Times: cache=1.0, rate=1.0, store=1.0, cache=2.0, rate=2.0, store=2.0
+        mock_time_module.time.side_effect = [1.0, 1.0, 1.0, 2.0, 2.0, 2.0]
+        mock_time_module.sleep = MagicMock()
+
+        source = ArxivSearchSource()
+        source.search("first query")
+        source.search("second query")  # Different query, not cached
+
+        # Should only sleep for remaining time (3.0 - 1.0 = 2.0 seconds)
+        mock_time_module.sleep.assert_called_once()
+        sleep_time = mock_time_module.sleep.call_args[0][0]
+        assert 1.9 <= sleep_time <= 2.1  # Allow small tolerance
+
+    @patch("feedparser.parse")
+    @patch("agentic_cli.knowledge_base.sources.time")
+    def test_caching_returns_cached_results(self, mock_time_module, mock_parse):
+        """Test that repeated queries return cached results without API call."""
+        mock_time_module.time.return_value = 100.0
+        mock_time_module.sleep = MagicMock()
+
+        mock_parse.return_value = MagicMock(
+            entries=[{"title": "Paper 1", "link": "http://arxiv.org/1", "summary": "Abstract"}]
+        )
+
+        source = ArxivSearchSource()
+
+        # First search - calls API
+        results1 = source.search("machine learning")
+        assert mock_parse.call_count == 1
+
+        # Second search with same query - should use cache
+        results2 = source.search("machine learning")
+        assert mock_parse.call_count == 1  # Still 1, no new API call
+
+        # Results should be the same
+        assert len(results1) == len(results2)
+        assert results1[0].title == results2[0].title
+
+    @patch("feedparser.parse")
+    @patch("agentic_cli.knowledge_base.sources.time")
+    def test_cache_expires_after_ttl(self, mock_time_module, mock_parse):
+        """Test that cache expires after TTL."""
+        # First call at t=100
+        mock_time_module.time.return_value = 100.0
+        mock_time_module.sleep = MagicMock()
+
+        mock_parse.return_value = MagicMock(
+            entries=[{"title": "Paper 1", "link": "http://arxiv.org/1", "summary": "Abstract"}]
+        )
+
+        source = ArxivSearchSource(cache_ttl_seconds=60)
+
+        # First search
+        source.search("test query")
+        assert mock_parse.call_count == 1
+
+        # Time advances past TTL (100 + 61 = 161)
+        mock_time_module.time.return_value = 161.0
+
+        # Should call API again since cache expired
+        source.search("test query")
+        assert mock_parse.call_count == 2
+
+    @patch("feedparser.parse")
+    @patch("agentic_cli.knowledge_base.sources.time")
+    def test_different_queries_not_cached(self, mock_time_module, mock_parse):
+        """Test that different queries are not served from cache."""
+        mock_time_module.time.return_value = 100.0
+        mock_time_module.sleep = MagicMock()
+
+        mock_parse.return_value = MagicMock(entries=[])
+
+        source = ArxivSearchSource()
+
+        source.search("query one")
+        source.search("query two")
+
+        # Both should hit API
+        assert mock_parse.call_count == 2
+
+    def test_cache_ttl_default(self):
+        """Test default cache TTL is set."""
+        source = ArxivSearchSource()
+        assert source.cache_ttl_seconds == 900  # 15 minutes default
+
+    def test_cache_ttl_custom(self):
+        """Test custom cache TTL can be set."""
+        source = ArxivSearchSource(cache_ttl_seconds=300)
+        assert source.cache_ttl_seconds == 300
+
+    def test_cache_max_size_default(self):
+        """Test default max cache size is set."""
+        source = ArxivSearchSource()
+        assert source.max_cache_size == 100
+
+    def test_cache_max_size_custom(self):
+        """Test custom max cache size can be set."""
+        source = ArxivSearchSource(max_cache_size=50)
+        assert source.max_cache_size == 50
+
+    @patch("feedparser.parse")
+    @patch("agentic_cli.knowledge_base.sources.time")
+    def test_cache_evicts_oldest_when_full(self, mock_time_module, mock_parse):
+        """Test that oldest cache entries are evicted when max size is reached."""
+        mock_time_module.sleep = MagicMock()
+        # Return incrementing time for proper ordering
+        time_counter = [0]
+        def get_time():
+            time_counter[0] += 1
+            return float(time_counter[0])
+        mock_time_module.time.side_effect = get_time
+
+        mock_parse.return_value = MagicMock(entries=[])
+
+        source = ArxivSearchSource(max_cache_size=3)
+
+        # Fill cache with 3 queries
+        source.search("query1")
+        source.search("query2")
+        source.search("query3")
+        assert len(source._cache) == 3
+        assert mock_parse.call_count == 3
+
+        # Add 4th query - should evict oldest (query1)
+        source.search("query4")
+        assert len(source._cache) == 3
+        assert mock_parse.call_count == 4
+
+        # query1 should be evicted, so searching again should hit API
+        source.search("query1")
+        assert mock_parse.call_count == 5
+
+        # query4 should still be cached (most recent before query1 was re-added)
+        source.search("query4")
+        assert mock_parse.call_count == 5  # No new API call - still cached
+
+    def test_clear_cache(self):
+        """Test cache can be manually cleared."""
+        source = ArxivSearchSource()
+        # Manually add something to cache
+        source._cache["test"] = CachedSearchResult(results=[], timestamp=0.0)
+        assert len(source._cache) == 1
+
+        source.clear_cache()
+        assert len(source._cache) == 0
+
+    @patch("feedparser.parse")
+    @patch("agentic_cli.knowledge_base.sources.time")
+    def test_search_with_sort_by(self, mock_time_module, mock_parse):
+        """Test search with sort_by parameter."""
+        mock_time_module.time.return_value = 100.0
+        mock_time_module.sleep = MagicMock()
+        mock_parse.return_value = MagicMock(entries=[])
+
+        source = ArxivSearchSource()
+        source.search("test", sort_by="lastUpdatedDate")
+
+        call_url = mock_parse.call_args[0][0]
+        assert "sortBy=lastUpdatedDate" in call_url
+
+    @patch("feedparser.parse")
+    @patch("agentic_cli.knowledge_base.sources.time")
+    def test_search_with_sort_order(self, mock_time_module, mock_parse):
+        """Test search with sort_order parameter."""
+        mock_time_module.time.return_value = 100.0
+        mock_time_module.sleep = MagicMock()
+        mock_parse.return_value = MagicMock(entries=[])
+
+        source = ArxivSearchSource()
+        source.search("test", sort_by="submittedDate", sort_order="ascending")
+
+        call_url = mock_parse.call_args[0][0]
+        assert "sortBy=submittedDate" in call_url
+        assert "sortOrder=ascending" in call_url
+
+    @patch("feedparser.parse")
+    @patch("agentic_cli.knowledge_base.sources.time")
+    def test_search_with_date_range(self, mock_time_module, mock_parse):
+        """Test search with date range filter."""
+        mock_time_module.time.return_value = 100.0
+        mock_time_module.sleep = MagicMock()
+        mock_parse.return_value = MagicMock(entries=[])
+
+        source = ArxivSearchSource()
+        source.search("test", date_from="2024-01-01", date_to="2024-12-31")
+
+        call_url = mock_parse.call_args[0][0]
+        # ArXiv uses submittedDate:[YYYYMMDD TO YYYYMMDD] format
+        assert "submittedDate" in call_url
+        assert "20240101" in call_url
+        assert "20241231" in call_url
+
+    @patch("feedparser.parse")
+    @patch("agentic_cli.knowledge_base.sources.time")
+    def test_search_sort_and_date_in_cache_key(self, mock_time_module, mock_parse):
+        """Test that sort and date params are included in cache key."""
+        mock_time_module.time.return_value = 100.0
+        mock_time_module.sleep = MagicMock()
+        mock_parse.return_value = MagicMock(entries=[])
+
+        source = ArxivSearchSource()
+
+        # Same query with different sort should hit API twice
+        source.search("test", sort_by="relevance")
+        source.search("test", sort_by="lastUpdatedDate")
+
+        assert mock_parse.call_count == 2
+
+    def test_sort_by_default(self):
+        """Test sort_by defaults to relevance."""
+        source = ArxivSearchSource()
+        # Default is relevance (ArXiv default)
+        cache_key = source._make_cache_key("test", 10, None, "relevance", "descending", None, None)
+        assert "relevance" in cache_key
 
 
 class TestDefaultRegistry:

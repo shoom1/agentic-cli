@@ -224,3 +224,11 @@ class ApprovalManager:
     def get_result(self, request_id: str) -> ApprovalResult | None:
         """Get the result for a request."""
         return self._results.get(request_id)
+
+    def get_pending_requests(self) -> list[ApprovalRequest]:
+        """Get all pending approval requests.
+
+        Returns:
+            List of ApprovalRequest objects awaiting decision.
+        """
+        return list(self._pending.values())

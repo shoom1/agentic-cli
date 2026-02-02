@@ -5,21 +5,30 @@ must implement, enabling pluggable orchestrators (ADK, LangGraph, etc.).
 
 The base class provides auto-detection of required managers (memory, planning,
 HITL) based on tool requirements, creating them lazily when needed.
+
+It also provides shared implementations for:
+- User input handling (pending request dict + Future pattern)
+- Model resolution (lazy resolution from settings)
+- Task progress emission (task graph to WorkflowEvent)
 """
 
 from __future__ import annotations
 
+import asyncio
 from abc import ABC, abstractmethod
 from typing import Any, AsyncGenerator, TYPE_CHECKING
 
 from agentic_cli.workflow.events import WorkflowEvent, UserInputRequest
 from agentic_cli.workflow.config import AgentConfig
+from agentic_cli.logging import Loggers
 
 if TYPE_CHECKING:
     from agentic_cli.config import BaseSettings
     from agentic_cli.memory import MemoryManager
     from agentic_cli.planning import TaskGraph
     from agentic_cli.hitl import ApprovalManager, CheckpointManager
+
+logger = Loggers.workflow()
 
 
 class BaseWorkflowManager(ABC):
@@ -66,8 +75,14 @@ class BaseWorkflowManager(ABC):
         self._agent_configs = agent_configs
         self._settings = settings or get_settings()
         self._app_name = app_name or self._settings.app_name
-        self._model_override = model
         self._initialized = False
+
+        # Model resolution (lazy)
+        self._model: str | None = model
+        self._model_resolved: bool = model is not None
+
+        # User input handling
+        self._pending_input: dict[str, tuple[UserInputRequest, asyncio.Future[str]]] = {}
 
         # Auto-detect required managers from tools
         self._required_managers = self._detect_required_managers()
@@ -77,6 +92,7 @@ class BaseWorkflowManager(ABC):
         self._task_graph: "TaskGraph | None" = None
         self._approval_manager: "ApprovalManager | None" = None
         self._checkpoint_manager: "CheckpointManager | None" = None
+        self._llm_summarizer: Any | None = None
 
     @property
     def agent_configs(self) -> list[AgentConfig]:
@@ -122,6 +138,11 @@ class BaseWorkflowManager(ABC):
     def checkpoint_manager(self) -> "CheckpointManager | None":
         """Get the checkpoint manager (if required by tools)."""
         return self._checkpoint_manager
+
+    @property
+    def llm_summarizer(self) -> Any | None:
+        """Get the LLM summarizer (if required by tools)."""
+        return self._llm_summarizer
 
     def _detect_required_managers(self) -> set[str]:
         """Scan all agent tools for 'requires' metadata.
@@ -169,14 +190,32 @@ class BaseWorkflowManager(ABC):
             from agentic_cli.hitl import CheckpointManager
             self._checkpoint_manager = CheckpointManager()
 
-    @property
-    @abstractmethod
-    def model(self) -> str:
-        """Get the model name being used.
+        if "llm_summarizer" in self._required_managers and self._llm_summarizer is None:
+            self._llm_summarizer = self._create_summarizer()
 
-        Implementations may resolve this lazily from settings.
+    def _create_summarizer(self) -> Any:
+        """Create an LLM summarizer for webfetch.
+
+        Subclasses should override this to return a framework-specific
+        summarizer that implements the LLMSummarizer protocol.
+
+        Returns:
+            An LLMSummarizer implementation, or None.
         """
-        pass
+        return None
+
+    @property
+    def model(self) -> str:
+        """Get the model name, resolving from settings if needed.
+
+        This is resolved lazily to allow startup without API keys.
+        Subclasses can override if they need custom model resolution.
+        """
+        if not self._model_resolved:
+            self._model = self._settings.get_model()
+            self._model_resolved = True
+            logger.info("model_resolved", model=self._model)
+        return self._model  # type: ignore[return-value]
 
     @abstractmethod
     async def initialize_services(self, validate: bool = True) -> None:
@@ -247,19 +286,19 @@ class BaseWorkflowManager(ABC):
         """
         pass
 
-    # User input handling methods
+    # User input handling methods - concrete implementations
 
-    @abstractmethod
     def has_pending_input(self) -> bool:
         """Check if there are pending user input requests."""
-        pass
+        return len(self._pending_input) > 0
 
-    @abstractmethod
     def get_pending_input_request(self) -> UserInputRequest | None:
         """Get the next pending input request without removing it."""
-        pass
+        if self._pending_input:
+            request_id = next(iter(self._pending_input))
+            return self._pending_input[request_id][0]
+        return None
 
-    @abstractmethod
     async def request_user_input(self, request: UserInputRequest) -> str:
         """Request user input from the CLI.
 
@@ -272,9 +311,18 @@ class BaseWorkflowManager(ABC):
         Returns:
             User's response string.
         """
-        pass
+        loop = asyncio.get_event_loop()
+        future: asyncio.Future[str] = loop.create_future()
+        self._pending_input[request.request_id] = (request, future)
 
-    @abstractmethod
+        logger.debug(
+            "user_input_requested",
+            request_id=request.request_id,
+            tool_name=request.tool_name,
+        )
+
+        return await future
+
     def provide_user_input(self, request_id: str, response: str) -> bool:
         """Provide user input for a pending request.
 
@@ -287,7 +335,19 @@ class BaseWorkflowManager(ABC):
         Returns:
             True if request was found and resolved, False otherwise.
         """
-        pass
+        if request_id not in self._pending_input:
+            logger.warning("unknown_input_request", request_id=request_id)
+            return False
+
+        request, future = self._pending_input.pop(request_id)
+        future.set_result(response)
+
+        logger.debug(
+            "user_input_provided",
+            request_id=request_id,
+            tool_name=request.tool_name,
+        )
+        return True
 
     # Async context manager support
 
@@ -332,4 +392,34 @@ class BaseWorkflowManager(ABC):
         """
         raise NotImplementedError(
             f"{self.__class__.__name__} does not implement generate_simple"
+        )
+
+    # Task progress emission - concrete implementation
+
+    def _emit_task_progress_event(self) -> WorkflowEvent | None:
+        """Create a TASK_PROGRESS event if task graph has tasks.
+
+        Returns:
+            WorkflowEvent if task graph has tasks, None otherwise.
+        """
+        if self._task_graph is None:
+            return None
+
+        progress = self._task_graph.get_progress()
+        if progress["total"] == 0:
+            return None
+
+        # Find current in-progress task for status line
+        current_task_id = None
+        current_task_desc = None
+        in_progress = self._task_graph.get_in_progress_task()
+        if in_progress:
+            current_task_id, task = in_progress
+            current_task_desc = task.description
+
+        return WorkflowEvent.task_progress(
+            display=self._task_graph.to_compact_display(),
+            progress=progress,
+            current_task_id=current_task_id,
+            current_task_description=current_task_desc,
         )

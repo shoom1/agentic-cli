@@ -49,6 +49,14 @@ class EventType(Enum):
     LLM_USAGE = "llm_usage"
 
 
+class InputType(str, Enum):
+    """Types of user input that can be requested."""
+
+    TEXT = "text"
+    CHOICE = "choice"
+    CONFIRM = "confirm"
+
+
 @dataclass
 class UserInputRequest:
     """Request for user input from a tool.
@@ -57,15 +65,15 @@ class UserInputRequest:
         request_id: Unique ID to correlate response
         tool_name: Which tool is asking for input
         prompt: Question/prompt to show user
-        input_type: Type of input expected ("text", "choice", "confirm")
-        choices: Available choices for "choice" input type
+        input_type: Type of input expected (TEXT, CHOICE, CONFIRM)
+        choices: Available choices for CHOICE input type
         default: Default value if user provides no input
     """
 
     request_id: str
     tool_name: str
     prompt: str
-    input_type: str = "text"
+    input_type: InputType = InputType.TEXT
     choices: list[str] | None = None
     default: str | None = None
 
@@ -224,7 +232,7 @@ class WorkflowEvent:
         request_id: str,
         tool_name: str,
         prompt: str,
-        input_type: str = "text",
+        input_type: InputType | str = InputType.TEXT,
         choices: list[str] | None = None,
         default: str | None = None,
     ) -> "WorkflowEvent":
@@ -238,14 +246,20 @@ class WorkflowEvent:
             request_id: Unique ID to correlate the response
             tool_name: Name of the tool requesting input
             prompt: Question/prompt to show the user
-            input_type: Type of input ("text", "choice", "confirm")
-            choices: Available choices for "choice" input type
+            input_type: Type of input (TEXT, CHOICE, CONFIRM)
+            choices: Available choices for CHOICE input type
             default: Default value if user provides no input
         """
+        # Normalize input_type to enum value string for metadata
+        if isinstance(input_type, InputType):
+            input_type_value = input_type.value
+        else:
+            input_type_value = input_type
+
         metadata: dict[str, Any] = {
             "request_id": request_id,
             "tool_name": tool_name,
-            "input_type": input_type,
+            "input_type": input_type_value,
         }
         if choices:
             metadata["choices"] = choices

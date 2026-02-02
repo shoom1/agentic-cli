@@ -17,8 +17,8 @@ Settings Management:
 
 Settings Loading Priority (highest to lowest):
     1. Environment variables (AGENTIC_* prefix)
-    2. Project config (./settings.json)
-    3. User config (~/.appname/settings.json)
+    2. Project config (./.{app_name}/settings.json)
+    3. User config (~/.{app_name}/settings.json)
     4. .env file
     5. Default values
 """
@@ -100,8 +100,8 @@ class BaseSettings(WorkflowSettingsMixin, CLISettingsMixin, PydanticBaseSettings
 
     Settings are loaded from (in order of precedence):
     1. Environment variables (with domain-specific prefix)
-    2. Project config (./settings.json)
-    3. User config (~/.appname/settings.json)
+    2. Project config (./.{app_name}/settings.json)
+    3. User config (~/.{app_name}/settings.json)
     4. Domain-specific .env file
     5. Default values
 
@@ -132,6 +132,50 @@ class BaseSettings(WorkflowSettingsMixin, CLISettingsMixin, PydanticBaseSettings
         default=None,
         description="Serper.dev API key for web search",
         validation_alias="SERPER_API_KEY",
+    )
+    tavily_api_key: str | None = Field(
+        default=None,
+        description="Tavily API key for web search",
+        validation_alias="TAVILY_API_KEY",
+    )
+    brave_api_key: str | None = Field(
+        default=None,
+        description="Brave Search API key for web search",
+        validation_alias="BRAVE_API_KEY",
+    )
+
+    # Web search configuration
+    search_backend: Literal["tavily", "brave"] | None = Field(
+        default=None,
+        title="Search Backend",
+        description="Web search provider to use (tavily or brave)",
+        json_schema_extra={"ui_order": 55},
+    )
+
+    # Web fetch configuration
+    webfetch_model: str | None = Field(
+        default=None,
+        title="WebFetch Model",
+        description="Model for summarizing fetched content (None = auto-detect)",
+        json_schema_extra={"ui_order": 56},
+    )
+    webfetch_blocked_domains: list[str] = Field(
+        default_factory=list,
+        title="WebFetch Blocked Domains",
+        description="Domains to block from fetching (supports wildcards like *.example.com)",
+        json_schema_extra={"ui_order": 57},
+    )
+    webfetch_cache_ttl_seconds: int = Field(
+        default=900,
+        title="WebFetch Cache TTL",
+        description="Cache TTL in seconds for fetched pages (default: 15 minutes)",
+        json_schema_extra={"ui_order": 58},
+    )
+    webfetch_max_content_bytes: int = Field(
+        default=102400,
+        title="WebFetch Max Content",
+        description="Maximum content size in bytes (default: 100KB)",
+        json_schema_extra={"ui_order": 59},
     )
 
     # Application identity (domain projects should override)

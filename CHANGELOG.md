@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.2] - 2026-02-01
+
+### Added
+
+- **Web Fetch Tool**: Full-featured web content fetching with LLM summarization
+  - HTML-to-Markdown conversion with html2text
+  - Robots.txt compliance checking
+  - SSRF protection and URL validation
+  - Caching and redirect handling
+- **Web Search Tool**: Pluggable web search with backend abstraction
+- **arXiv Integration**: Enhanced arXiv search with rate limiting, caching, advanced query options, and paper analysis tools
+- **LLM Event Logging**: Debug logging for model interactions
+- **Task Progress Events**: `verbose_thinking` setting for detailed task progress display
+
+### Changed
+
+- **CLI Architecture Refactoring**:
+  - Extracted `WorkflowController` and `MessageProcessor` from `BaseCLIApp` for better separation of concerns
+  - Added `background_init` context manager to `WorkflowController`
+  - Added public query methods to managers to reduce command-workflow coupling
+- **BaseWorkflowManager**: Moved shared implementations from ADK/LangGraph managers to base class
+- **Code Quality**: Added enums for string literals, improved `TaskGraph` encapsulation
+- **Settings**: Use app-specific paths and generic settings application
+
+### Fixed
+
+- Circular import in workflow module
+- Web search tool integration issues
+- arXiv cache unbounded growth (added size limit)
+- Webfetch redirect response structure alignment with spec
+
 ## [0.3.1] - 2026-01-28
 
 ### Added

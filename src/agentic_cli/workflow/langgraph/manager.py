@@ -13,11 +13,11 @@ Requires the 'langgraph' optional dependency:
 
 from __future__ import annotations
 
-import asyncio
-from typing import AsyncGenerator, Any, Callable, Literal, TYPE_CHECKING
+import contextlib
+from typing import AsyncGenerator, Any, Callable, Iterator, Literal, TYPE_CHECKING
 
 from agentic_cli.workflow.base_manager import BaseWorkflowManager
-from agentic_cli.workflow.events import WorkflowEvent, UserInputRequest, EventType
+from agentic_cli.workflow.events import WorkflowEvent, EventType
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.config import (
     get_settings,
@@ -25,12 +25,48 @@ from agentic_cli.config import (
     set_context_workflow,
     validate_settings,
 )
+from agentic_cli.workflow.context import (
+    set_context_memory_manager,
+    set_context_task_graph,
+    set_context_approval_manager,
+    set_context_checkpoint_manager,
+    set_context_llm_summarizer,
+)
 from agentic_cli.logging import Loggers, bind_context
 
 if TYPE_CHECKING:
     from agentic_cli.config import BaseSettings
 
 logger = Loggers.workflow()
+
+
+class LangGraphSummarizer:
+    """LLM Summarizer implementation using LangGraph/LangChain.
+
+    Uses the configured LLM (Anthropic, OpenAI, or Google) directly
+    to summarize web content for the webfetch tool.
+    """
+
+    def __init__(self, manager: "LangGraphWorkflowManager") -> None:
+        """Initialize the summarizer.
+
+        Args:
+            manager: The workflow manager to use for LLM calls.
+        """
+        self._manager = manager
+
+    async def summarize(self, content: str, prompt: str) -> str:
+        """Summarize content using the configured LLM.
+
+        Args:
+            content: The content to summarize (markdown).
+            prompt: The full summarization prompt.
+
+        Returns:
+            Summarized text response.
+        """
+        # Use the manager's generate_simple method
+        return await self._manager.generate_simple(prompt, max_tokens=1000)
 
 
 class LangGraphWorkflowManager(BaseWorkflowManager):
@@ -98,21 +134,12 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
         self._checkpointer_type = checkpointer
         self._on_event = on_event
 
-        # Model resolved lazily
-        self._model: str | None = model
-        self._model_resolved: bool = model is not None
-
         # LangGraph components (lazy-initialized)
         self._graph = None
         self._compiled_graph = None
         self._checkpointer = None
         self._store = None
         self._llm = None
-
-        # User input handling
-        self._pending_input: dict[str, tuple[UserInputRequest, asyncio.Future[str]]] = (
-            {}
-        )
 
         # Session tracking
         self.session_id = "default_session"
@@ -126,59 +153,9 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
         )
 
     @property
-    def model(self) -> str:
-        """Get the model name, resolving from settings if needed."""
-        if not self._model_resolved:
-            self._model = self._settings.get_model()
-            self._model_resolved = True
-            logger.info("model_resolved", model=self._model)
-        return self._model  # type: ignore[return-value]
-
-    @property
     def graph(self):
         """Get the compiled LangGraph graph."""
         return self._compiled_graph
-
-    def has_pending_input(self) -> bool:
-        """Check if there are pending user input requests."""
-        return len(self._pending_input) > 0
-
-    def get_pending_input_request(self) -> UserInputRequest | None:
-        """Get the next pending input request without removing it."""
-        if self._pending_input:
-            request_id = next(iter(self._pending_input))
-            return self._pending_input[request_id][0]
-        return None
-
-    async def request_user_input(self, request: UserInputRequest) -> str:
-        """Request user input from the CLI."""
-        loop = asyncio.get_event_loop()
-        future: asyncio.Future[str] = loop.create_future()
-        self._pending_input[request.request_id] = (request, future)
-
-        logger.debug(
-            "user_input_requested",
-            request_id=request.request_id,
-            tool_name=request.tool_name,
-        )
-
-        return await future
-
-    def provide_user_input(self, request_id: str, response: str) -> bool:
-        """Provide user input for a pending request."""
-        if request_id not in self._pending_input:
-            logger.warning("unknown_input_request", request_id=request_id)
-            return False
-
-        request, future = self._pending_input.pop(request_id)
-        future.set_result(response)
-
-        logger.debug(
-            "user_input_provided",
-            request_id=request_id,
-            tool_name=request.tool_name,
-        )
-        return True
 
     # Thinking budget tokens for Anthropic models
     _THINKING_BUDGETS = {"low": 4096, "medium": 10000, "high": 32000}
@@ -296,6 +273,14 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
             initial_interval=self._settings.retry_initial_delay,
             backoff_factor=self._settings.retry_backoff_factor,
         )
+
+    def _create_summarizer(self) -> LangGraphSummarizer:
+        """Create an LLM summarizer for webfetch.
+
+        Returns:
+            LangGraphSummarizer instance that uses the configured LLM.
+        """
+        return LangGraphSummarizer(self)
 
     def _build_graph(self):
         """Build the LangGraph workflow from agent configs.
@@ -532,6 +517,9 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
         # Initialize default LLM
         self._llm = self._get_llm_for_model(self.model)
 
+        # Initialize feature managers based on tool requirements
+        self._ensure_managers_initialized()
+
         self._initialized = True
         logger.info(
             "langgraph_services_initialized",
@@ -596,6 +584,31 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
             sessions_preserved=preserve_sessions,
         )
 
+    @contextlib.contextmanager
+    def _workflow_context(self) -> Iterator[None]:
+        """Context manager for settings, workflow, and manager contexts.
+
+        Sets context variables that allow tools to access settings,
+        the workflow manager, and feature managers during execution.
+        """
+        set_context_settings(self._settings)
+        set_context_workflow(self)
+        set_context_memory_manager(self._memory_manager)
+        set_context_task_graph(self._task_graph)
+        set_context_approval_manager(self._approval_manager)
+        set_context_checkpoint_manager(self._checkpoint_manager)
+        set_context_llm_summarizer(self._llm_summarizer)
+        try:
+            yield
+        finally:
+            set_context_settings(None)
+            set_context_workflow(None)
+            set_context_memory_manager(None)
+            set_context_task_graph(None)
+            set_context_approval_manager(None)
+            set_context_checkpoint_manager(None)
+            set_context_llm_summarizer(None)
+
     async def process(
         self,
         message: str,
@@ -623,11 +636,8 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
 
         logger.info("processing_message_langgraph", message_length=len(message))
 
-        # Set up context
-        set_context_settings(self._settings)
-        set_context_workflow(self)
-
-        try:
+        # Context setup
+        with self._workflow_context():
             # Prepare initial state
             initial_state = {
                 "messages": [{"role": "user", "content": message}],
@@ -727,46 +737,12 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
 
             logger.info("message_processed_langgraph")
 
-        finally:
-            set_context_settings(None)
-            set_context_workflow(None)
-
     def _maybe_transform(self, event: WorkflowEvent) -> WorkflowEvent:
         """Apply event transformation hook if configured."""
         if self._on_event:
             transformed = self._on_event(event)
             return transformed if transformed is not None else event
         return event
-
-    def _emit_task_progress_event(self) -> WorkflowEvent | None:
-        """Create a TASK_PROGRESS event if task graph has tasks.
-
-        Returns:
-            WorkflowEvent if task graph has tasks, None otherwise.
-        """
-        if self._task_graph is None:
-            return None
-
-        progress = self._task_graph.get_progress()
-        if progress["total"] == 0:
-            return None
-
-        # Find current in-progress task for status line
-        current_task_id = None
-        current_task_desc = None
-        for task_id, task in self._task_graph._tasks.items():
-            from agentic_cli.planning.task_graph import TaskStatus
-            if task.status == TaskStatus.IN_PROGRESS:
-                current_task_id = task_id
-                current_task_desc = task.description
-                break
-
-        return WorkflowEvent.task_progress(
-            display=self._task_graph.to_compact_display(),
-            progress=progress,
-            current_task_id=current_task_id,
-            current_task_description=current_task_desc,
-        )
 
     def _normalize_content(self, content: Any) -> str:
         """Normalize LLM response content to a string.

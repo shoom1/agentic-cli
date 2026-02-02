@@ -10,7 +10,6 @@ For alternative orchestration backends (e.g., LangGraph), see the base_manager m
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
 from typing import AsyncGenerator, Any, Callable, Iterator
 
@@ -21,7 +20,7 @@ from google.adk.planners import BuiltInPlanner
 from google.adk.sessions import InMemorySessionService, BaseSessionService, Session
 
 from agentic_cli.workflow.base_manager import BaseWorkflowManager
-from agentic_cli.workflow.events import WorkflowEvent, UserInputRequest, EventType
+from agentic_cli.workflow.events import WorkflowEvent, EventType
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.thinking import ThinkingDetector
 from agentic_cli.workflow.adk.llm_event_logger import LLMEventLogger
@@ -38,10 +37,40 @@ from agentic_cli.workflow.context import (
     set_context_task_graph,
     set_context_approval_manager,
     set_context_checkpoint_manager,
+    set_context_llm_summarizer,
 )
 from agentic_cli.logging import Loggers, bind_context
 
 logger = Loggers.workflow()
+
+
+class ADKSummarizer:
+    """LLM Summarizer implementation using Google ADK.
+
+    Uses the Gemini API directly (outside the agent loop) to summarize
+    web content for the webfetch tool.
+    """
+
+    def __init__(self, manager: "GoogleADKWorkflowManager") -> None:
+        """Initialize the summarizer.
+
+        Args:
+            manager: The workflow manager to use for LLM calls.
+        """
+        self._manager = manager
+
+    async def summarize(self, content: str, prompt: str) -> str:
+        """Summarize content using Gemini.
+
+        Args:
+            content: The content to summarize (markdown).
+            prompt: The full summarization prompt.
+
+        Returns:
+            Summarized text response.
+        """
+        # Use the manager's generate_simple method
+        return await self._manager.generate_simple(prompt, max_tokens=1000)
 
 
 class GoogleADKWorkflowManager(BaseWorkflowManager):
@@ -106,17 +135,10 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         self.session_service_uri = session_service_uri
         self.session_id = "default_session"
 
-        # Model is resolved lazily to allow startup without API keys
-        self._model: str | None = model
-        self._model_resolved: bool = model is not None
-
         # Lazy-initialized ADK components
         self._session_service: BaseSessionService | None = None
         self._root_agent: Agent | None = None
         self._runner: Runner | None = None
-
-        # User input request handling
-        self._pending_input: dict[str, tuple[UserInputRequest, asyncio.Future[str]]] = {}
 
         # LLM event logger (initialized lazily when raw_llm_logging is enabled)
         self._llm_event_logger: LLMEventLogger | None = None
@@ -127,15 +149,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             model_override=model,
             agent_count=len(agent_configs),
         )
-
-    @property
-    def model(self) -> str:
-        """Get the model name, resolving from settings if needed."""
-        if not self._model_resolved:
-            self._model = self._settings.get_model()
-            self._model_resolved = True
-            logger.info("model_resolved", model=self._model)
-        return self._model  # type: ignore[return-value]
 
     @property
     def session_service(self) -> BaseSessionService | None:
@@ -151,67 +164,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
     def runner(self) -> Runner | None:
         """Get the runner."""
         return self._runner
-
-    def has_pending_input(self) -> bool:
-        """Check if there are pending user input requests."""
-        return len(self._pending_input) > 0
-
-    def get_pending_input_request(self) -> UserInputRequest | None:
-        """Get the next pending input request without removing it."""
-        if self._pending_input:
-            request_id = next(iter(self._pending_input))
-            return self._pending_input[request_id][0]
-        return None
-
-    async def request_user_input(self, request: UserInputRequest) -> str:
-        """Request user input from the CLI.
-
-        Called by tools that need user interaction. This method blocks
-        until provide_user_input() is called with the response.
-
-        Args:
-            request: The user input request
-
-        Returns:
-            User's response string
-        """
-        loop = asyncio.get_event_loop()
-        future: asyncio.Future[str] = loop.create_future()
-        self._pending_input[request.request_id] = (request, future)
-
-        logger.debug(
-            "user_input_requested",
-            request_id=request.request_id,
-            tool_name=request.tool_name,
-        )
-
-        return await future
-
-    def provide_user_input(self, request_id: str, response: str) -> bool:
-        """Provide user input for a pending request.
-
-        Called by CLI when user responds to a USER_INPUT_REQUIRED event.
-
-        Args:
-            request_id: The request ID from the event metadata
-            response: User's response
-
-        Returns:
-            True if request was found and resolved, False otherwise
-        """
-        if request_id not in self._pending_input:
-            logger.warning("unknown_input_request", request_id=request_id)
-            return False
-
-        request, future = self._pending_input.pop(request_id)
-        future.set_result(response)
-
-        logger.debug(
-            "user_input_provided",
-            request_id=request_id,
-            tool_name=request.tool_name,
-        )
-        return True
 
     async def generate_simple(self, prompt: str, max_tokens: int = 500) -> str:
         """Generate a simple text response using the current model.
@@ -401,6 +353,14 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         )
         return types.GenerateContentConfig(http_options=http_options)
 
+    def _create_summarizer(self) -> ADKSummarizer:
+        """Create an LLM summarizer for webfetch.
+
+        Returns:
+            ADKSummarizer instance that uses Gemini for summarization.
+        """
+        return ADKSummarizer(self)
+
     def _create_agents(self) -> Agent:
         """Create agent hierarchy from configs.
 
@@ -574,6 +534,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         set_context_task_graph(self._task_graph)
         set_context_approval_manager(self._approval_manager)
         set_context_checkpoint_manager(self._checkpoint_manager)
+        set_context_llm_summarizer(self._llm_summarizer)
         try:
             yield
         finally:
@@ -583,6 +544,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             set_context_task_graph(None)
             set_context_approval_manager(None)
             set_context_checkpoint_manager(None)
+            set_context_llm_summarizer(None)
 
     def _create_message(self, message: str) -> types.Content:
         """Create an ADK Content message from text.
@@ -637,36 +599,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
     # -------------------------------------------------------------------------
     # Event processing (inlined from EventProcessor)
     # -------------------------------------------------------------------------
-
-    def _emit_task_progress_event(self) -> WorkflowEvent | None:
-        """Create a TASK_PROGRESS event if task graph has tasks.
-
-        Returns:
-            WorkflowEvent if task graph has tasks, None otherwise.
-        """
-        if self._task_graph is None:
-            return None
-
-        progress = self._task_graph.get_progress()
-        if progress["total"] == 0:
-            return None
-
-        # Find current in-progress task for status line
-        current_task_id = None
-        current_task_desc = None
-        for task_id, task in self._task_graph._tasks.items():
-            from agentic_cli.planning.task_graph import TaskStatus
-            if task.status == TaskStatus.IN_PROGRESS:
-                current_task_id = task_id
-                current_task_desc = task.description
-                break
-
-        return WorkflowEvent.task_progress(
-            display=self._task_graph.to_compact_display(),
-            progress=progress,
-            current_task_id=current_task_id,
-            current_task_description=current_task_desc,
-        )
 
     async def _process_adk_event(
         self,
@@ -768,8 +700,12 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             result_data = response
 
             if isinstance(response, dict):
-                if "error" in response:
+                # Check for error value, not just key presence
+                if response.get("error"):
                     success = False
+                # Also respect explicit "success" field if present
+                if "success" in response:
+                    success = response["success"]
                 result_data = response
 
             summary = self._generate_tool_summary(tool_name, result_data, success)
@@ -819,6 +755,9 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                 return str(result["summary"])
             if "message" in result:
                 return str(result["message"])
+            # Handle results with a "results" list (e.g., web_search)
+            if "results" in result and isinstance(result["results"], list):
+                return f"Found {len(result['results'])} results"
 
         # Auto-generate based on result type
         if result is None:
