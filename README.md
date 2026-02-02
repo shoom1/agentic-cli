@@ -9,7 +9,7 @@ Agentic CLI provides the core infrastructure for building interactive CLI applic
 - **Pluggable Orchestration**: Choose between Google ADK or LangGraph for agent workflows
 - **Rich Terminal UI**: Thinking boxes, markdown rendering, and streaming responses via `thinking-prompt`
 - **Declarative Agents**: Define agents with simple configuration objects
-- **Built-in Tools**: Python execution, knowledge base search, web search
+- **Built-in Tools**: Python execution, knowledge base, web search, web fetch, arXiv search
 - **Session Persistence**: Save and restore conversation sessions
 - **Type-safe Configuration**: Settings management with pydantic-settings
 
@@ -212,6 +212,10 @@ class MySettings(BaseSettings):
 | `orchestrator` | `AGENTIC_ORCHESTRATOR` | "adk" | Orchestrator: adk or langgraph |
 | `workspace_dir` | `AGENTIC_WORKSPACE_DIR` | ~/.agentic | Storage directory |
 | `log_level` | `AGENTIC_LOG_LEVEL` | "warning" | Logging level |
+| `tavily_api_key` | `TAVILY_API_KEY` | None | Tavily API key for web search |
+| `brave_api_key` | `BRAVE_API_KEY` | None | Brave Search API key |
+| `search_backend` | `AGENTIC_SEARCH_BACKEND` | Auto | Web search provider (tavily/brave) |
+| `webfetch_model` | `AGENTIC_WEBFETCH_MODEL` | Auto | Model for web content summarization |
 
 ### Settings Context
 
@@ -326,6 +330,59 @@ np.mean(data)
 
 Allowed modules: numpy, pandas, scipy, math, json, datetime, collections, itertools, re, random
 
+#### Web Search
+
+Search the web using pluggable backends (Tavily or Brave):
+
+```python
+from agentic_cli.tools import web_search
+
+# Use as agent tool
+agent = AgentConfig(
+    name="researcher",
+    tools=[web_search],
+)
+
+# Or call directly
+results = web_search("Python async programming", max_results=5)
+# Returns: {"results": [{"title": "...", "url": "...", "snippet": "..."}], ...}
+```
+
+Backends auto-select based on available API keys. Set `TAVILY_API_KEY` or `BRAVE_API_KEY`.
+
+#### Web Fetch
+
+Fetch web content and summarize with LLM:
+
+```python
+from agentic_cli.tools import web_fetch
+
+result = web_fetch(
+    url="https://example.com/article",
+    prompt="Extract the main points from this article",
+)
+# Returns: {"url": "...", "summary": "...", "content_length": ...}
+```
+
+Features: URL validation, robots.txt compliance, SSRF protection, content caching.
+
+#### ArXiv Search
+
+Search and analyze academic papers:
+
+```python
+from agentic_cli.tools import search_arxiv, fetch_arxiv_paper, analyze_arxiv_paper
+
+# Search papers
+results = search_arxiv("transformer attention", max_results=10, categories=["cs.CL"])
+
+# Fetch paper details
+paper = fetch_arxiv_paper("1706.03762")  # "Attention Is All You Need"
+
+# Analyze with LLM
+analysis = await analyze_arxiv_paper("1706.03762", "Summarize the key contributions")
+```
+
 #### KnowledgeBaseManager
 
 Semantic search over documents:
@@ -433,6 +490,7 @@ See the `examples/` directory for complete working examples:
 
 - **hello_agent.py** - Simple assistant using Google ADK
 - **hello_langgraph.py** - Same assistant using LangGraph orchestration
+- **webfetch_demo.py** - Web fetching and summarization demo
 - **research_demo/** - Full-featured research assistant with memory, planning, and file operations
 
 Run examples:
@@ -473,7 +531,9 @@ agentic-cli/
 │   ├── config.py             # BaseSettings, SettingsContext
 │   ├── cli/
 │   │   ├── app.py            # BaseCLIApp
-│   │   └── commands.py       # Command, CommandRegistry
+│   │   ├── commands.py       # Command, CommandRegistry
+│   │   ├── workflow_controller.py  # Workflow orchestration
+│   │   └── message_processor.py    # Event stream processing
 │   ├── workflow/
 │   │   ├── events.py         # WorkflowEvent, EventType
 │   │   ├── config.py         # AgentConfig
@@ -484,12 +544,15 @@ agentic-cli/
 │   │       ├── persistence/  # Checkpointers and stores
 │   │       └── tools/        # Shell, file search tools
 │   ├── tools/
-│   │   └── executor.py       # SafePythonExecutor
+│   │   ├── executor.py       # SafePythonExecutor
+│   │   ├── search.py         # Web search (Tavily, Brave)
+│   │   └── webfetch/         # Web content fetching
 │   └── knowledge_base/
 │       └── manager.py        # KnowledgeBaseManager
 ├── examples/
 │   ├── hello_agent.py
 │   ├── hello_langgraph.py
+│   ├── webfetch_demo.py
 │   └── research_demo/        # Full-featured example
 └── tests/
 ```
