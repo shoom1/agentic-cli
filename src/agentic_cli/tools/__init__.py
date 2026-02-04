@@ -57,14 +57,13 @@ def requires(*managers: ManagerRequirement) -> Callable[[F], F]:
 from agentic_cli.tools.executor import SafePythonExecutor, MockPythonExecutor
 from agentic_cli.tools.shell import shell_executor
 
-# New file operation tools (preferred)
+# File operation tools - READ (safe)
 from agentic_cli.tools.file_read import read_file, diff_compare
-from agentic_cli.tools.file_write import write_file, edit_file
 from agentic_cli.tools.grep_tool import grep
 from agentic_cli.tools.glob_tool import glob, list_dir
 
-# Legacy file operations (deprecated, use new tools above)
-from agentic_cli.tools.file_ops import file_manager, diff_compare as _legacy_diff_compare
+# File operation tools - WRITE (caution)
+from agentic_cli.tools.file_write import write_file, edit_file
 
 from agentic_cli.tools.standard import (
     search_knowledge_base,
@@ -122,8 +121,6 @@ __all__ = [
     # File operations - WRITE tools (caution)
     "write_file",
     "edit_file",
-    # Legacy file operations (deprecated)
-    "file_manager",
     # Web search (pluggable backends)
     "web_search",
     # Web fetch (content fetching and summarization)

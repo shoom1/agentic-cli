@@ -255,7 +255,8 @@ class FilesCommand(Command):
         parsed = self.parse_args(args)
         subdir = parsed.get_option("dir", "findings")
 
-        from agentic_cli.tools.file_ops import file_manager
+        from agentic_cli.tools.glob_tool import list_dir
+        from agentic_cli.tools.registry import ToolError
 
         workspace = app.settings.workspace_dir
         target_dir = workspace / subdir
@@ -264,10 +265,10 @@ class FilesCommand(Command):
             app.session.add_message("system", f"Directory does not exist: {target_dir}")
             return
 
-        result = file_manager("list", str(target_dir))
-
-        if not result["success"]:
-            app.session.add_error(result.get("error", "Failed to list directory"))
+        try:
+            result = list_dir(str(target_dir))
+        except ToolError as e:
+            app.session.add_error(e.message)
             return
 
         table = Table(title=f"Files in {subdir}/", show_header=True)
@@ -275,17 +276,22 @@ class FilesCommand(Command):
         table.add_column("Type", style="yellow")
         table.add_column("Size", style="dim", justify="right")
 
-        for name, info in result["entries"].items():
+        # Add directories
+        for item in result["directories"]:
+            table.add_row(item["name"], "directory", "")
+
+        # Add files
+        for item in result["files"]:
             size_str = ""
-            if info["size"] is not None:
-                size_str = f"{info['size']:,} bytes"
-            table.add_row(name, info["type"], size_str)
+            if item["size"] is not None:
+                size_str = f"{item['size']:,} bytes"
+            table.add_row(item["name"], "file", size_str)
 
         if table.row_count == 0:
             table.add_row("(empty)", "", "")
 
         app.session.add_rich(table)
-        app.session.add_message("system", f"Total: {result['count']} items")
+        app.session.add_message("system", f"Total: {result['total']} items")
 
 
 class ClearMemoryCommand(Command):
