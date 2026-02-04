@@ -56,7 +56,16 @@ def requires(*managers: ManagerRequirement) -> Callable[[F], F]:
 
 from agentic_cli.tools.executor import SafePythonExecutor, MockPythonExecutor
 from agentic_cli.tools.shell import shell_executor
-from agentic_cli.tools.file_ops import file_manager, diff_compare
+
+# New file operation tools (preferred)
+from agentic_cli.tools.file_read import read_file, diff_compare
+from agentic_cli.tools.file_write import write_file, edit_file
+from agentic_cli.tools.grep_tool import grep
+from agentic_cli.tools.glob_tool import glob, list_dir
+
+# Legacy file operations (deprecated, use new tools above)
+from agentic_cli.tools.file_ops import file_manager, diff_compare as _legacy_diff_compare
+
 from agentic_cli.tools.standard import (
     search_knowledge_base,
     ingest_to_knowledge_base,
@@ -70,6 +79,7 @@ from agentic_cli.tools.search import web_search
 from agentic_cli.tools.webfetch_tool import web_fetch
 from agentic_cli.tools.registry import (
     ToolCategory,
+    PermissionLevel,
     ToolDefinition,
     ToolError,
     ToolResult,
@@ -86,6 +96,7 @@ from google.adk.tools import google_search as google_search_tool
 __all__ = [
     # Registry classes
     "ToolCategory",
+    "PermissionLevel",
     "ToolDefinition",
     "ToolError",
     "ToolResult",
@@ -102,9 +113,17 @@ __all__ = [
     "MockPythonExecutor",
     # Shell executor
     "shell_executor",
-    # File operations
-    "file_manager",
+    # File operations - READ tools (safe)
+    "read_file",
     "diff_compare",
+    "grep",
+    "glob",
+    "list_dir",
+    # File operations - WRITE tools (caution)
+    "write_file",
+    "edit_file",
+    # Legacy file operations (deprecated)
+    "file_manager",
     # Web search (pluggable backends)
     "web_search",
     # Web fetch (content fetching and summarization)

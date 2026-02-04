@@ -1,11 +1,20 @@
 """File operations tools for agentic CLI applications.
 
-Provides file_manager for common file operations and diff_compare for text comparison.
+DEPRECATED: This module is deprecated. Use the new separate tools instead:
+- read_file, diff_compare from file_read.py (READ category)
+- write_file, edit_file from file_write.py (WRITE category)
+- grep from grep_tool.py (READ category)
+- glob, list_dir from glob_tool.py (READ category)
+- For delete/move/copy, use shell_executor
+
+The file_manager function is kept for backwards compatibility but will be
+removed in a future version.
 """
 
 import difflib
 import os
 import shutil
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -42,7 +51,22 @@ def file_manager(
         - move: {"success": True, "source": str, "destination": str}
         - copy: {"success": True, "source": str, "destination": str}
         - error: {"success": False, "error": str}
+
+    .. deprecated::
+        Use the new separate tools instead:
+        - read_file() for reading files
+        - write_file() for writing files
+        - edit_file() for text replacement
+        - grep() for content search
+        - glob() for file pattern matching
+        - shell_executor() for delete/move/copy operations
     """
+    warnings.warn(
+        "file_manager is deprecated. Use read_file, write_file, edit_file, grep, glob, "
+        "or shell_executor instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     try:
         if operation == "read":
             return _read_file(path)

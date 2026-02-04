@@ -16,18 +16,59 @@ import time
 
 
 class ToolCategory(Enum):
-    """Categories for organizing tools."""
+    """Categories for organizing tools.
 
-    SEARCH = "search"
-    KNOWLEDGE = "knowledge"
-    EXECUTION = "execution"
-    COMMUNICATION = "communication"
-    FILE = "file"
-    ANALYSIS = "analysis"
-    MEMORY = "memory"
-    PLANNING = "planning"
-    SYSTEM = "system"
+    Categories are organized by primary function:
+    - READ: Read-only file operations (safe)
+    - WRITE: File modification operations (require caution)
+    - NETWORK: Network and web operations
+    - EXECUTION: Shell and code execution
+    - PLANNING: Task and workflow management
+    - MEMORY: State and context management
+    - KNOWLEDGE: External knowledge access
+    - INTERACTION: Human-in-the-loop operations
+    """
+
+    # File operations (split by safety)
+    READ = "read"  # read_file, grep, glob, diff
+    WRITE = "write"  # write_file, edit_file
+
+    # Network operations
+    NETWORK = "network"  # web_search, web_fetch, api calls
+
+    # Execution (potentially dangerous)
+    EXECUTION = "execution"  # shell, python executor
+
+    # Planning and task management
+    PLANNING = "planning"  # create_task, update_task, get_tasks
+
+    # Memory and state
+    MEMORY = "memory"  # remember, recall, search_memory
+
+    # External knowledge
+    KNOWLEDGE = "knowledge"  # arxiv, knowledge_base
+
+    # Human interaction
+    INTERACTION = "interaction"  # ask_clarification, request_approval
+
+    # Legacy categories (deprecated, use specific categories above)
+    SEARCH = "search"  # Deprecated: use KNOWLEDGE or NETWORK
+    COMMUNICATION = "communication"  # Deprecated: use INTERACTION
+    FILE = "file"  # Deprecated: use READ or WRITE
+    ANALYSIS = "analysis"  # Deprecated: use appropriate category
+    SYSTEM = "system"  # Deprecated: use EXECUTION
     OTHER = "other"
+
+
+class PermissionLevel(Enum):
+    """Permission levels for tool safety classification.
+
+    Used to determine whether user confirmation is needed before tool execution.
+    """
+
+    SAFE = "safe"  # No confirmation needed (read operations)
+    CAUTION = "caution"  # May need allowlisting (write operations)
+    DANGEROUS = "dangerous"  # Always requires confirmation (delete, shell)
 
 
 @dataclass
@@ -40,7 +81,8 @@ class ToolDefinition:
     Attributes:
         name: Tool name (defaults to function name)
         description: Human-readable description
-        category: Tool category for organization
+        category: Tool category for organization (READ, WRITE, NETWORK, etc.)
+        permission_level: Safety classification (SAFE, CAUTION, DANGEROUS)
         requires_api_key: API key type required (if any)
         is_async: Whether the tool is async
         timeout_seconds: Suggested timeout for this tool
@@ -52,6 +94,7 @@ class ToolDefinition:
     description: str
     func: Callable[..., Any]
     category: ToolCategory = ToolCategory.OTHER
+    permission_level: PermissionLevel = PermissionLevel.SAFE
     requires_api_key: str | None = None
     is_async: bool = False
     timeout_seconds: int = 30
@@ -194,6 +237,7 @@ class ToolRegistry:
         name: str | None = None,
         description: str | None = None,
         category: ToolCategory = ToolCategory.OTHER,
+        permission_level: PermissionLevel = PermissionLevel.SAFE,
         requires_api_key: str | None = None,
         timeout_seconds: int = 30,
         rate_limit: int = 0,
@@ -202,12 +246,12 @@ class ToolRegistry:
         """Register a tool function.
 
         Can be used as a decorator:
-            @registry.register(category=ToolCategory.SEARCH)
+            @registry.register(category=ToolCategory.READ, permission_level=PermissionLevel.SAFE)
             def my_tool(query: str) -> dict:
                 ...
 
         Or called directly:
-            registry.register(my_tool, category=ToolCategory.SEARCH)
+            registry.register(my_tool, category=ToolCategory.READ)
         """
 
         def decorator(f: Callable[..., Any]) -> Callable[..., Any]:
@@ -219,6 +263,7 @@ class ToolRegistry:
                 description=tool_desc,
                 func=f,
                 category=category,
+                permission_level=permission_level,
                 requires_api_key=requires_api_key,
                 timeout_seconds=timeout_seconds,
                 rate_limit=rate_limit,
@@ -259,6 +304,18 @@ class ToolRegistry:
         """Get tool functions by category."""
         return [t.func for t in self._tools.values() if t.category == category]
 
+    def list_by_permission(self, permission: PermissionLevel) -> list[ToolDefinition]:
+        """List tools by permission level."""
+        return [t for t in self._tools.values() if t.permission_level == permission]
+
+    def get_safe_tools(self) -> list[ToolDefinition]:
+        """Get all tools with SAFE permission level."""
+        return self.list_by_permission(PermissionLevel.SAFE)
+
+    def get_dangerous_tools(self) -> list[ToolDefinition]:
+        """Get all tools with DANGEROUS permission level."""
+        return self.list_by_permission(PermissionLevel.DANGEROUS)
+
     def __len__(self) -> int:
         return len(self._tools)
 
@@ -281,6 +338,7 @@ def register_tool(
     name: str | None = None,
     description: str | None = None,
     category: ToolCategory = ToolCategory.OTHER,
+    permission_level: PermissionLevel = PermissionLevel.SAFE,
     requires_api_key: str | None = None,
     timeout_seconds: int = 30,
     rate_limit: int = 0,
@@ -289,9 +347,9 @@ def register_tool(
     """Register a tool with the default registry.
 
     Decorator for registering tools:
-        @register_tool(category=ToolCategory.SEARCH)
-        def search_web(query: str) -> dict:
-            '''Search the web for information.'''
+        @register_tool(category=ToolCategory.READ, permission_level=PermissionLevel.SAFE)
+        def read_file(path: str) -> dict:
+            '''Read file contents.'''
             ...
     """
     return _default_registry.register(
@@ -299,6 +357,7 @@ def register_tool(
         name=name,
         description=description,
         category=category,
+        permission_level=permission_level,
         requires_api_key=requires_api_key,
         timeout_seconds=timeout_seconds,
         rate_limit=rate_limit,
