@@ -209,7 +209,7 @@ def demo_memory_manager(temp_dir: Path):
         source="analysis",
     )
     manager.longterm.store(
-        type=MemoryType.INSIGHT,
+        type=MemoryType.LEARNING,
         content="Review process improved code quality",
         source="observation",
     )
