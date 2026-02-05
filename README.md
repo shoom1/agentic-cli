@@ -9,7 +9,7 @@ Agentic CLI provides the core infrastructure for building interactive CLI applic
 - **Pluggable Orchestration**: Choose between Google ADK or LangGraph for agent workflows
 - **Rich Terminal UI**: Thinking boxes, markdown rendering, and streaming responses via `thinking-prompt`
 - **Declarative Agents**: Define agents with simple configuration objects
-- **Built-in Tools**: Python execution, knowledge base, web search, web fetch, arXiv search
+- **Built-in Tools**: Python execution, file operations, knowledge base, web search, web fetch, arXiv search
 - **Session Persistence**: Save and restore conversation sessions
 - **Type-safe Configuration**: Settings management with pydantic-settings
 
@@ -383,6 +383,71 @@ paper = fetch_arxiv_paper("1706.03762")  # "Attention Is All You Need"
 analysis = await analyze_arxiv_paper("1706.03762", "Summarize the key contributions")
 ```
 
+#### File Operations
+
+Categorized file tools with permission levels:
+
+**READ Tools (Safe)**
+
+```python
+from agentic_cli.tools import read_file, grep, glob, list_dir, diff_compare
+
+# Read file contents
+result = read_file("src/main.py", offset=0, limit=100)
+# Returns: {"success": True, "content": "...", "size": 1234, "lines_read": 100}
+
+# Search for patterns (ripgrep-like)
+result = grep("def.*async", path="src/", file_pattern="*.py", recursive=True)
+# Returns: {"success": True, "matches": [...], "file_count": 5}
+
+# Find files by pattern
+result = glob("**/*.py", path="src/", include_metadata=True)
+# Returns: {"success": True, "files": [...], "count": 42}
+
+# List directory contents
+result = list_dir("src/", include_hidden=False)
+# Returns: {"success": True, "entries": [...]}
+
+# Compare files or text
+result = diff_compare(source1="old.txt", source2="new.txt")
+# Returns: {"success": True, "diff": "...", "has_changes": True}
+```
+
+**WRITE Tools (Caution)**
+
+```python
+from agentic_cli.tools import write_file, edit_file
+
+# Write file (creates or overwrites)
+result = write_file("output.txt", content="Hello, World!", create_dirs=True)
+# Returns: {"success": True, "path": "...", "size": 13, "created": True}
+
+# Edit file (sed-like replacement)
+result = edit_file("config.py", old_text="DEBUG = True", new_text="DEBUG = False")
+# Returns: {"success": True, "replacements": 1}
+```
+
+#### Shell Executor
+
+> **Note**: Shell execution is currently **disabled by default** while security safeguards are being validated.
+
+The shell tool provides layered security with 8 defense layers:
+- Input preprocessing (encoding/obfuscation detection)
+- Command tokenization and classification
+- Path analysis and sandboxing
+- Risk assessment with approval workflows
+- Audit logging
+
+```python
+from agentic_cli.tools import shell_executor, is_shell_enabled
+
+# Check if shell is enabled
+if is_shell_enabled():
+    result = shell_executor("ls -la", working_dir="/project")
+else:
+    print("Shell tool disabled pending security validation")
+```
+
 #### KnowledgeBaseManager
 
 Semantic search over documents:
@@ -488,9 +553,20 @@ Status icons:
 
 See the `examples/` directory for complete working examples:
 
+**Getting Started**
 - **hello_agent.py** - Simple assistant using Google ADK
 - **hello_langgraph.py** - Same assistant using LangGraph orchestration
-- **webfetch_demo.py** - Web fetching and summarization demo
+
+**Feature Demos**
+- **arxiv_demo.py** - ArXiv paper search and analysis
+- **fileops_demo.py** - File operation tools (read, write, grep, glob)
+- **memory_demo.py** - Working and long-term memory management
+- **planning_demo.py** - Task graph and planning tools
+- **shell_demo.py** - Shell security pattern detection
+- **webfetch_demo.py** - Web fetching and summarization
+- **websearch_demo.py** - Web search with multiple backends
+
+**Full Applications**
 - **research_demo/** - Full-featured research assistant with memory, planning, and file operations
 
 Run examples:
@@ -498,6 +574,10 @@ Run examples:
 ```bash
 export GOOGLE_API_KEY="your-key"
 python examples/hello_agent.py
+
+# Feature demos (no API key needed for some)
+python examples/fileops_demo.py
+python examples/shell_demo.py
 
 # Or with LangGraph (requires langgraph extra)
 pip install agentic-cli[langgraph]
@@ -541,18 +621,27 @@ agentic-cli/
 │   │   └── langgraph/        # LangGraph submodule
 │   │       ├── manager.py    # LangGraphWorkflowManager
 │   │       ├── state.py      # AgentState, CheckpointData
-│   │       ├── persistence/  # Checkpointers and stores
-│   │       └── tools/        # Shell, file search tools
+│   │       └── persistence/  # Checkpointers and stores
 │   ├── tools/
 │   │   ├── executor.py       # SafePythonExecutor
+│   │   ├── file_read.py      # read_file, diff_compare
+│   │   ├── file_write.py     # write_file, edit_file
+│   │   ├── grep_tool.py      # grep (pattern search)
+│   │   ├── glob_tool.py      # glob, list_dir (file discovery)
 │   │   ├── search.py         # Web search (Tavily, Brave)
-│   │   └── webfetch/         # Web content fetching
+│   │   ├── webfetch_tool.py  # Web content fetching
+│   │   └── shell/            # Shell executor with security
+│   │       ├── executor.py   # Main entry point (disabled by default)
+│   │       ├── tokenizer.py  # Command parsing
+│   │       ├── classifier.py # Risk classification
+│   │       ├── sandbox.py    # Execution sandboxing
+│   │       └── audit.py      # Security logging
 │   └── knowledge_base/
 │       └── manager.py        # KnowledgeBaseManager
 ├── examples/
-│   ├── hello_agent.py
-│   ├── hello_langgraph.py
-│   ├── webfetch_demo.py
+│   ├── hello_agent.py        # Basic ADK example
+│   ├── hello_langgraph.py    # Basic LangGraph example
+│   ├── *_demo.py             # Feature demonstration scripts
 │   └── research_demo/        # Full-featured example
 └── tests/
 ```

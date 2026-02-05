@@ -55,7 +55,7 @@ def requires(*managers: ManagerRequirement) -> Callable[[F], F]:
     return decorator
 
 from agentic_cli.tools.executor import SafePythonExecutor, MockPythonExecutor
-from agentic_cli.tools.shell import shell_executor
+from agentic_cli.tools.shell import shell_executor, is_shell_enabled
 
 # File operation tools - READ (safe)
 from agentic_cli.tools.file_read import read_file, diff_compare
@@ -112,6 +112,7 @@ __all__ = [
     "MockPythonExecutor",
     # Shell executor
     "shell_executor",
+    "is_shell_enabled",
     # File operations - READ tools (safe)
     "read_file",
     "diff_compare",
