@@ -421,7 +421,7 @@ def test_package_exports_new_modules():
     from agentic_cli.hitl import HITLConfig, ApprovalManager, CheckpointManager
 
     # Tools
-    from agentic_cli.tools import shell_executor, file_manager, diff_compare
+    from agentic_cli.tools import shell_executor, read_file, write_file, diff_compare
 
     # All imports should succeed
     assert WorkingMemory is not None

@@ -21,7 +21,7 @@ class TestHITLConfig:
 
         rules = [
             ApprovalRule(tool="shell_executor"),
-            ApprovalRule(tool="file_manager", operations=["delete", "write"]),
+            ApprovalRule(tool="write_file"),
         ]
 
         config = HITLConfig(approval_rules=rules)
@@ -50,13 +50,13 @@ class TestApprovalManager:
 
         config = HITLConfig(
             approval_rules=[
-                ApprovalRule(tool="file_manager", operations=["delete", "write"])
+                ApprovalRule(tool="edit_file", operations=["replace", "delete"])
             ]
         )
         manager = ApprovalManager(config)
 
-        assert manager.requires_approval("file_manager", "delete", {}) is True
-        assert manager.requires_approval("file_manager", "read", {}) is False
+        assert manager.requires_approval("edit_file", "replace", {}) is True
+        assert manager.requires_approval("edit_file", "read", {}) is False
 
     def test_auto_approve_patterns(self):
         """Test auto-approval patterns."""

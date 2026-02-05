@@ -34,17 +34,14 @@ def save_finding(filename: str, content: str) -> dict[str, Any]:
     if settings is None:
         return {"success": False, "error": "Settings not available"}
 
-    from agentic_cli.tools.file_ops import file_manager
+    from agentic_cli.tools.file_write import write_file
 
     # Determine the full path
     findings_dir = settings.workspace_dir / "findings"
     file_path = findings_dir / filename
 
-    # Create findings directory if needed
-    findings_dir.mkdir(parents=True, exist_ok=True)
-
-    # Write the file
-    result = file_manager("write", str(file_path), content=content)
+    # Create findings directory if needed (write_file handles this)
+    result = write_file(str(file_path), content)
 
     if result["success"]:
         return {
@@ -70,12 +67,16 @@ def read_finding(filename: str) -> dict[str, Any]:
     if settings is None:
         return {"success": False, "error": "Settings not available"}
 
-    from agentic_cli.tools.file_ops import file_manager
+    from agentic_cli.tools.file_read import read_file
+    from agentic_cli.tools.registry import ToolError
 
     findings_dir = settings.workspace_dir / "findings"
     file_path = findings_dir / filename
 
-    return file_manager("read", str(file_path))
+    try:
+        return read_file(str(file_path))
+    except ToolError as e:
+        return {"success": False, "error": e.message}
 
 
 def list_findings() -> dict[str, Any]:
@@ -88,7 +89,8 @@ def list_findings() -> dict[str, Any]:
     if settings is None:
         return {"success": False, "error": "Settings not available"}
 
-    from agentic_cli.tools.file_ops import file_manager
+    from agentic_cli.tools.glob_tool import list_dir
+    from agentic_cli.tools.registry import ToolError
 
     findings_dir = settings.workspace_dir / "findings"
 
@@ -96,11 +98,15 @@ def list_findings() -> dict[str, Any]:
         return {
             "success": True,
             "path": str(findings_dir),
-            "entries": {},
-            "count": 0,
+            "directories": [],
+            "files": [],
+            "total": 0,
         }
 
-    return file_manager("list", str(findings_dir))
+    try:
+        return list_dir(str(findings_dir))
+    except ToolError as e:
+        return {"success": False, "error": e.message}
 
 
 def compare_versions(file_a: str, file_b: str) -> dict[str, Any]:
@@ -113,7 +119,7 @@ def compare_versions(file_a: str, file_b: str) -> dict[str, Any]:
     Returns:
         A dict with the diff and similarity score.
     """
-    from agentic_cli.tools.file_ops import diff_compare
+    from agentic_cli.tools.file_read import diff_compare
 
     return diff_compare(file_a, file_b, mode="unified")
 
