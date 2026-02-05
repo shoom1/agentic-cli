@@ -16,9 +16,19 @@ Example:
 from typing import Any
 
 from agentic_cli.tools import requires
+from agentic_cli.tools.registry import (
+    register_tool,
+    ToolCategory,
+    PermissionLevel,
+)
 from agentic_cli.workflow.context import get_context_memory_manager
 
 
+@register_tool(
+    category=ToolCategory.MEMORY,
+    permission_level=PermissionLevel.SAFE,
+    description="Store context in working memory for the current session",
+)
 @requires("memory_manager")
 def remember_context(
     key: str,
@@ -50,6 +60,11 @@ def remember_context(
     }
 
 
+@register_tool(
+    category=ToolCategory.MEMORY,
+    permission_level=PermissionLevel.SAFE,
+    description="Recall a specific context from working memory",
+)
 @requires("memory_manager")
 def recall_context(key: str) -> dict[str, Any]:
     """Recall a specific context from working memory.
@@ -75,6 +90,11 @@ def recall_context(key: str) -> dict[str, Any]:
     }
 
 
+@register_tool(
+    category=ToolCategory.MEMORY,
+    permission_level=PermissionLevel.SAFE,
+    description="Search across working and/or long-term memory",
+)
 @requires("memory_manager")
 def search_memory(
     query: str,
@@ -129,6 +149,11 @@ def search_memory(
     }
 
 
+@register_tool(
+    category=ToolCategory.MEMORY,
+    permission_level=PermissionLevel.SAFE,
+    description="Save information to long-term memory (persists across sessions)",
+)
 @requires("memory_manager")
 def save_to_longterm(
     content: str,
@@ -179,6 +204,11 @@ def save_to_longterm(
     }
 
 
+@register_tool(
+    category=ToolCategory.MEMORY,
+    permission_level=PermissionLevel.SAFE,
+    description="Clear all entries from working memory",
+)
 @requires("memory_manager")
 def clear_working_memory() -> dict[str, Any]:
     """Clear all entries from working memory.

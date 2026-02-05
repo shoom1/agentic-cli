@@ -16,12 +16,22 @@ Example:
 from typing import Any
 
 from agentic_cli.tools import requires
+from agentic_cli.tools.registry import (
+    register_tool,
+    ToolCategory,
+    PermissionLevel,
+)
 from agentic_cli.workflow.context import (
     get_context_approval_manager,
     get_context_checkpoint_manager,
 )
 
 
+@register_tool(
+    category=ToolCategory.INTERACTION,
+    permission_level=PermissionLevel.SAFE,
+    description="Create a checkpoint for user review before continuing",
+)
 @requires("checkpoint_manager")
 def create_checkpoint(
     name: str,
@@ -66,6 +76,11 @@ def create_checkpoint(
     }
 
 
+@register_tool(
+    category=ToolCategory.INTERACTION,
+    permission_level=PermissionLevel.SAFE,
+    description="Get the result of a checkpoint review",
+)
 @requires("checkpoint_manager")
 def get_checkpoint_result(checkpoint_id: str) -> dict[str, Any]:
     """Get the result of a checkpoint review.
@@ -100,6 +115,11 @@ def get_checkpoint_result(checkpoint_id: str) -> dict[str, Any]:
     }
 
 
+@register_tool(
+    category=ToolCategory.INTERACTION,
+    permission_level=PermissionLevel.SAFE,
+    description="Request explicit user approval before proceeding",
+)
 @requires("approval_manager")
 def request_approval(
     action: str,
@@ -143,6 +163,11 @@ def request_approval(
     }
 
 
+@register_tool(
+    category=ToolCategory.INTERACTION,
+    permission_level=PermissionLevel.SAFE,
+    description="Check the status of an approval request",
+)
 @requires("approval_manager")
 def check_approval(request_id: str) -> dict[str, Any]:
     """Check the status of an approval request.
@@ -180,6 +205,11 @@ def check_approval(request_id: str) -> dict[str, Any]:
     }
 
 
+@register_tool(
+    category=ToolCategory.INTERACTION,
+    permission_level=PermissionLevel.SAFE,
+    description="Check if a specific action requires approval",
+)
 @requires("approval_manager")
 def check_requires_approval(
     tool: str,

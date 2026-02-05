@@ -1347,3 +1347,244 @@ class TestArxivSortValidation:
             search_arxiv("test", sort_by="relevance", sort_order="ascending")
             search_arxiv("test", sort_by="lastUpdatedDate", sort_order="descending")
             search_arxiv("test", sort_by="submittedDate", sort_order="ascending")
+
+
+class TestToolRegistryConsistency:
+    """Tests for tool registry consistency after unification."""
+
+    def test_all_registered_tools_have_category(self):
+        """Test that all registered tools have a category defined."""
+        from agentic_cli.tools import get_registry
+
+        registry = get_registry()
+        tools = registry.list_tools()
+
+        for tool in tools:
+            assert tool.category is not None, f"Tool '{tool.name}' has no category"
+            assert tool.category.value is not None, f"Tool '{tool.name}' has invalid category"
+
+    def test_all_registered_tools_have_permission_level(self):
+        """Test that all registered tools have a permission level defined."""
+        from agentic_cli.tools import get_registry, PermissionLevel
+
+        registry = get_registry()
+        tools = registry.list_tools()
+
+        for tool in tools:
+            assert tool.permission_level is not None, f"Tool '{tool.name}' has no permission_level"
+            assert isinstance(tool.permission_level, PermissionLevel), (
+                f"Tool '{tool.name}' has invalid permission_level type"
+            )
+
+    def test_expected_tools_are_registered(self):
+        """Test that all expected tools are in the registry."""
+        from agentic_cli.tools import get_registry
+
+        # Import all tool modules to trigger registration
+        import agentic_cli.tools.file_read  # noqa: F401
+        import agentic_cli.tools.file_write  # noqa: F401
+        import agentic_cli.tools.grep_tool  # noqa: F401
+        import agentic_cli.tools.glob_tool  # noqa: F401
+        import agentic_cli.tools.search  # noqa: F401
+        import agentic_cli.tools.standard  # noqa: F401
+        import agentic_cli.tools.webfetch_tool  # noqa: F401
+        import agentic_cli.tools.memory_tools  # noqa: F401
+        import agentic_cli.tools.planning_tools  # noqa: F401
+        import agentic_cli.tools.hitl_tools  # noqa: F401
+        import agentic_cli.tools.shell.executor  # noqa: F401
+
+        registry = get_registry()
+
+        # Expected tool names from the unification plan
+        expected_tools = [
+            # File operations - READ (7 from file_read and glob_tool)
+            "read_file",
+            "diff_compare",
+            "grep",
+            "glob",
+            "list_dir",
+            # File operations - WRITE
+            "write_file",
+            "edit_file",
+            # Web/Network
+            "web_search",
+            "web_fetch",
+            # Knowledge base
+            "search_knowledge_base",
+            "ingest_to_knowledge_base",
+            # ArXiv
+            "search_arxiv",
+            "fetch_arxiv_paper",
+            "analyze_arxiv_paper",
+            # Execution
+            "execute_python",
+            "shell_executor",
+            # Interaction
+            "ask_clarification",
+            # Memory tools
+            "remember_context",
+            "recall_context",
+            "search_memory",
+            "save_to_longterm",
+            "clear_working_memory",
+            # Planning tools
+            "create_task",
+            "update_task_status",
+            "get_next_tasks",
+            "get_task",
+            "get_plan_summary",
+            "create_plan",
+            "revise_plan",
+            # HITL tools
+            "create_checkpoint",
+            "get_checkpoint_result",
+            "request_approval",
+            "check_approval",
+            "check_requires_approval",
+        ]
+
+        registered_names = {tool.name for tool in registry.list_tools()}
+
+        for expected in expected_tools:
+            assert expected in registered_names, (
+                f"Expected tool '{expected}' is not registered. "
+                f"Registered tools: {sorted(registered_names)}"
+            )
+
+    def test_dangerous_tools_have_correct_permission(self):
+        """Test that dangerous tools are properly marked."""
+        from agentic_cli.tools import get_registry, PermissionLevel
+
+        registry = get_registry()
+
+        # shell_executor should be DANGEROUS
+        shell_tool = registry.get("shell_executor")
+        if shell_tool:
+            assert shell_tool.permission_level == PermissionLevel.DANGEROUS, (
+                f"shell_executor should be DANGEROUS, got {shell_tool.permission_level}"
+            )
+
+    def test_caution_tools_have_correct_permission(self):
+        """Test that caution-level tools are properly marked."""
+        from agentic_cli.tools import get_registry, PermissionLevel
+
+        registry = get_registry()
+
+        caution_tools = ["write_file", "edit_file", "ingest_to_knowledge_base", "execute_python"]
+
+        for tool_name in caution_tools:
+            tool = registry.get(tool_name)
+            if tool:
+                assert tool.permission_level == PermissionLevel.CAUTION, (
+                    f"{tool_name} should be CAUTION, got {tool.permission_level}"
+                )
+
+    def test_safe_tools_have_correct_permission(self):
+        """Test that safe tools are properly marked."""
+        from agentic_cli.tools import get_registry, PermissionLevel
+
+        registry = get_registry()
+
+        safe_tools = [
+            "read_file", "diff_compare", "grep", "glob", "list_dir",
+            "web_search", "web_fetch", "search_knowledge_base",
+            "search_arxiv", "fetch_arxiv_paper", "analyze_arxiv_paper",
+            "ask_clarification",
+            "remember_context", "recall_context", "search_memory",
+            "save_to_longterm", "clear_working_memory",
+            "create_task", "update_task_status", "get_next_tasks",
+            "get_task", "get_plan_summary", "create_plan", "revise_plan",
+            "create_checkpoint", "get_checkpoint_result",
+            "request_approval", "check_approval", "check_requires_approval",
+        ]
+
+        for tool_name in safe_tools:
+            tool = registry.get(tool_name)
+            if tool:
+                assert tool.permission_level == PermissionLevel.SAFE, (
+                    f"{tool_name} should be SAFE, got {tool.permission_level}"
+                )
+
+    def test_tools_by_category(self):
+        """Test that tools are properly categorized."""
+        from agentic_cli.tools import get_registry, ToolCategory
+
+        # Import all modules to trigger registration
+        import agentic_cli.tools.file_read  # noqa: F401
+        import agentic_cli.tools.file_write  # noqa: F401
+        import agentic_cli.tools.grep_tool  # noqa: F401
+        import agentic_cli.tools.glob_tool  # noqa: F401
+        import agentic_cli.tools.search  # noqa: F401
+        import agentic_cli.tools.standard  # noqa: F401
+        import agentic_cli.tools.webfetch_tool  # noqa: F401
+        import agentic_cli.tools.memory_tools  # noqa: F401
+        import agentic_cli.tools.planning_tools  # noqa: F401
+        import agentic_cli.tools.hitl_tools  # noqa: F401
+        import agentic_cli.tools.shell.executor  # noqa: F401
+
+        registry = get_registry()
+
+        # Check that each category has the expected tools
+        read_tools = registry.list_by_category(ToolCategory.READ)
+        read_names = {t.name for t in read_tools}
+        assert "read_file" in read_names or "grep" in read_names, "READ category should have file reading tools"
+
+        write_tools = registry.list_by_category(ToolCategory.WRITE)
+        write_names = {t.name for t in write_tools}
+        assert "write_file" in write_names or "edit_file" in write_names, "WRITE category should have file writing tools"
+
+        network_tools = registry.list_by_category(ToolCategory.NETWORK)
+        network_names = {t.name for t in network_tools}
+        assert "web_search" in network_names or "web_fetch" in network_names, "NETWORK category should have web tools"
+
+        memory_tools = registry.list_by_category(ToolCategory.MEMORY)
+        memory_names = {t.name for t in memory_tools}
+        assert "remember_context" in memory_names, "MEMORY category should have memory tools"
+
+        planning_tools = registry.list_by_category(ToolCategory.PLANNING)
+        planning_names = {t.name for t in planning_tools}
+        assert "create_task" in planning_names, "PLANNING category should have planning tools"
+
+        interaction_tools = registry.list_by_category(ToolCategory.INTERACTION)
+        interaction_names = {t.name for t in interaction_tools}
+        assert "request_approval" in interaction_names, "INTERACTION category should have HITL tools"
+
+        knowledge_tools = registry.list_by_category(ToolCategory.KNOWLEDGE)
+        knowledge_names = {t.name for t in knowledge_tools}
+        assert "search_arxiv" in knowledge_names, "KNOWLEDGE category should have knowledge tools"
+
+        execution_tools = registry.list_by_category(ToolCategory.EXECUTION)
+        execution_names = {t.name for t in execution_tools}
+        assert "execute_python" in execution_names, "EXECUTION category should have execution tools"
+
+    def test_registry_tool_count(self):
+        """Test that the registry has the expected number of tools."""
+        from agentic_cli.tools import get_registry
+
+        # Import all modules to trigger registration
+        import agentic_cli.tools.file_read  # noqa: F401
+        import agentic_cli.tools.file_write  # noqa: F401
+        import agentic_cli.tools.grep_tool  # noqa: F401
+        import agentic_cli.tools.glob_tool  # noqa: F401
+        import agentic_cli.tools.search  # noqa: F401
+        import agentic_cli.tools.standard  # noqa: F401
+        import agentic_cli.tools.webfetch_tool  # noqa: F401
+        import agentic_cli.tools.memory_tools  # noqa: F401
+        import agentic_cli.tools.planning_tools  # noqa: F401
+        import agentic_cli.tools.hitl_tools  # noqa: F401
+        import agentic_cli.tools.shell.executor  # noqa: F401
+
+        registry = get_registry()
+        tool_count = len(registry.list_tools())
+
+        # We expect at least 30 tools after unification
+        # File ops: 7 (read_file, diff_compare, grep, glob, list_dir, write_file, edit_file)
+        # Web/Network: 2 (web_search, web_fetch)
+        # Knowledge: 5 (search_kb, ingest_kb, search_arxiv, fetch_arxiv, analyze_arxiv)
+        # Execution: 2 (execute_python, shell_executor)
+        # Interaction: 1 (ask_clarification)
+        # Memory: 5 (remember, recall, search_memory, save_longterm, clear_working)
+        # Planning: 7 (create_task, update_status, get_next, get_task, get_summary, create_plan, revise_plan)
+        # HITL: 5 (checkpoint create/get, approval request/check/check_requires)
+        # Total: ~34 tools
+        assert tool_count >= 30, f"Expected at least 30 registered tools, got {tool_count}"

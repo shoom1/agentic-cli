@@ -10,7 +10,7 @@ from typing import Any
 
 from agentic_cli.config import get_settings
 from agentic_cli.tools import requires
-from agentic_cli.tools.registry import register_tool, ToolCategory
+from agentic_cli.tools.registry import register_tool, ToolCategory, PermissionLevel
 from agentic_cli.tools.webfetch import (
     ContentFetcher,
     URLValidator,
@@ -56,7 +56,11 @@ def get_or_create_fetcher(settings=None) -> ContentFetcher:
     return _fetcher
 
 
-@register_tool(category=ToolCategory.SEARCH)
+@register_tool(
+    category=ToolCategory.NETWORK,
+    permission_level=PermissionLevel.SAFE,
+    description="Fetch web content and summarize it using an LLM",
+)
 @requires("llm_summarizer")
 async def web_fetch(url: str, prompt: str, timeout: int = 30) -> dict[str, Any]:
     """Fetch web content and summarize it using an LLM.

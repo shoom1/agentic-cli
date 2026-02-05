@@ -15,9 +15,19 @@ Example:
 from typing import Any
 
 from agentic_cli.tools import requires
+from agentic_cli.tools.registry import (
+    register_tool,
+    ToolCategory,
+    PermissionLevel,
+)
 from agentic_cli.workflow.context import get_context_task_graph
 
 
+@register_tool(
+    category=ToolCategory.PLANNING,
+    permission_level=PermissionLevel.SAFE,
+    description="Create a new task in the plan",
+)
 @requires("task_graph")
 def create_task(
     description: str,
@@ -55,6 +65,11 @@ def create_task(
     }
 
 
+@register_tool(
+    category=ToolCategory.PLANNING,
+    permission_level=PermissionLevel.SAFE,
+    description="Update task status",
+)
 @requires("task_graph")
 def update_task_status(
     task_id: str,
@@ -98,6 +113,11 @@ def update_task_status(
     }
 
 
+@register_tool(
+    category=ToolCategory.PLANNING,
+    permission_level=PermissionLevel.SAFE,
+    description="Get the next tasks ready to work on (no unmet dependencies)",
+)
 @requires("task_graph")
 def get_next_tasks(limit: int = 3) -> dict[str, Any]:
     """Get the next tasks ready to work on (no unmet dependencies).
@@ -147,6 +167,11 @@ def get_next_tasks(limit: int = 3) -> dict[str, Any]:
     }
 
 
+@register_tool(
+    category=ToolCategory.PLANNING,
+    permission_level=PermissionLevel.SAFE,
+    description="Get details of a specific task",
+)
 @requires("task_graph")
 def get_task(task_id: str) -> dict[str, Any]:
     """Get details of a specific task.
@@ -171,6 +196,11 @@ def get_task(task_id: str) -> dict[str, Any]:
     }
 
 
+@register_tool(
+    category=ToolCategory.PLANNING,
+    permission_level=PermissionLevel.SAFE,
+    description="Get a summary of the current plan",
+)
 @requires("task_graph")
 def get_plan_summary() -> dict[str, Any]:
     """Get a summary of the current plan.
@@ -192,6 +222,11 @@ def get_plan_summary() -> dict[str, Any]:
     }
 
 
+@register_tool(
+    category=ToolCategory.PLANNING,
+    permission_level=PermissionLevel.SAFE,
+    description="Create a complete task plan for a project",
+)
 @requires("task_graph")
 def create_plan(
     topic: str,
@@ -252,6 +287,11 @@ def create_plan(
     }
 
 
+@register_tool(
+    category=ToolCategory.PLANNING,
+    permission_level=PermissionLevel.SAFE,
+    description="Apply changes to the task plan",
+)
 @requires("task_graph")
 def revise_plan(changes: list[dict[str, Any]]) -> dict[str, Any]:
     """Apply changes to the task plan.

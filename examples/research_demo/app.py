@@ -1,10 +1,12 @@
 """Main application for the Research Demo.
 
 Showcases framework features through a research assistant agent
-with memory, planning, file operations, shell commands, and HITL.
+with memory, planning, knowledge base, web fetching, code execution,
+file operations, shell commands, and HITL.
 
-Feature managers (MemoryManager, TaskGraph, CheckpointManager) are
-auto-created by the workflow manager based on tool requirements.
+Feature managers (MemoryManager, TaskGraph, CheckpointManager,
+ApprovalManager) are auto-created by the workflow manager based on
+tool requirements.
 """
 
 from rich.panel import Panel
@@ -25,19 +27,23 @@ def _create_app_info() -> AppInfo:
     """Create the application info for the welcome message."""
     text = Text()
     text.append("Research Demo\n\n", style="bold cyan")
-    text.append("A research assistant with memory and planning capabilities.\n\n", style="dim")
+    text.append("A research assistant with memory, planning, knowledge base, and HITL capabilities.\n\n", style="dim")
     text.append("Features:\n", style="bold")
-    text.append("  - Working memory (session context)\n", style="dim")
-    text.append("  - Long-term memory (persistent learnings)\n", style="dim")
-    text.append("  - Task planning (research plans)\n", style="dim")
-    text.append("  - File operations (save/compare findings)\n", style="dim")
-    text.append("  - Shell commands (safe execution)\n", style="dim")
+    text.append("  - Working & long-term memory\n", style="dim")
+    text.append("  - Task planning with dependencies\n", style="dim")
+    text.append("  - Knowledge base (search & ingest)\n", style="dim")
+    text.append("  - Web search & content fetching\n", style="dim")
+    text.append("  - Academic research (arXiv)\n", style="dim")
+    text.append("  - Python code execution\n", style="dim")
+    text.append("  - File operations & shell commands\n", style="dim")
+    text.append("  - Human-in-the-loop (checkpoints & approvals)\n", style="dim")
     text.append("\n")
     text.append("Commands:\n", style="bold")
-    text.append("  /memory  - Show memory state\n", style="cyan")
-    text.append("  /plan    - Show task plan\n", style="cyan")
-    text.append("  /files   - List saved findings\n", style="cyan")
-    text.append("  /help    - All commands\n", style="cyan")
+    text.append("  /memory     - Show memory state\n", style="cyan")
+    text.append("  /plan       - Show task plan\n", style="cyan")
+    text.append("  /files      - List saved findings\n", style="cyan")
+    text.append("  /approvals  - Show pending approvals\n", style="cyan")
+    text.append("  /help       - All commands\n", style="cyan")
 
     return AppInfo(
         name="Research Demo",
@@ -52,10 +58,14 @@ class ResearchDemoApp(BaseCLIApp):
 
     Demonstrates framework features:
     - Memory: Working memory (session) + Long-term memory (persistent)
-    - Planning: Task graphs with dependencies
+    - Planning: Task graphs with dependencies and mid-execution revision
+    - Knowledge Base: Search and ingest documents
+    - Web: Search and fetch/summarize URL content
+    - Code Execution: Sandboxed Python execution
     - File Operations: Save/read/compare findings
     - Shell Commands: Safe command execution
-    - HITL: Checkpoints for review
+    - User Interaction: Clarification questions
+    - HITL: Checkpoints, approvals, and review workflows
 
     Feature managers are auto-created by the workflow manager based on
     the @requires decorators on framework tools.
