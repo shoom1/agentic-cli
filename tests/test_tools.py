@@ -764,229 +764,231 @@ class TestShellExecutor:
         assert result["success"] is True
 
 
-class TestFileOperations:
-    """Tests for file_manager function."""
+class TestReadFile:
+    """Tests for read_file function."""
 
     def test_read_file(self, tmp_path):
         """Test reading a file."""
-        from agentic_cli.tools.file_ops import file_manager
+        from agentic_cli.tools.file_read import read_file
 
         test_file = tmp_path / "test.txt"
         test_file.write_text("Hello, world!")
-        result = file_manager("read", str(test_file))
+        result = read_file(str(test_file))
         assert result["success"] is True
         assert result["content"] == "Hello, world!"
 
-    def test_write_file(self, tmp_path):
-        """Test writing a file."""
-        from agentic_cli.tools.file_ops import file_manager
-
-        test_file = tmp_path / "output.txt"
-        result = file_manager("write", str(test_file), content="New content")
-        assert result["success"] is True
-        assert test_file.read_text() == "New content"
-
-    def test_list_directory(self, tmp_path):
-        """Test listing directory contents."""
-        from agentic_cli.tools.file_ops import file_manager
-
-        (tmp_path / "file1.txt").touch()
-        (tmp_path / "subdir").mkdir()
-        result = file_manager("list", str(tmp_path))
-        assert result["success"] is True
-        assert "file1.txt" in result["entries"]
-
-    def test_copy_file(self, tmp_path):
-        """Test copying a file."""
-        from agentic_cli.tools.file_ops import file_manager
-
-        source = tmp_path / "source.txt"
-        source.write_text("Copy me")
-        dest = tmp_path / "dest.txt"
-        result = file_manager("copy", str(source), destination=str(dest))
-        assert result["success"] is True
-        assert dest.read_text() == "Copy me"
-
-    def test_move_file(self, tmp_path):
-        """Test moving a file."""
-        from agentic_cli.tools.file_ops import file_manager
-
-        source = tmp_path / "source.txt"
-        source.write_text("Move me")
-        dest = tmp_path / "dest.txt"
-        result = file_manager("move", str(source), destination=str(dest))
-        assert result["success"] is True
-        assert not source.exists()
-        assert dest.read_text() == "Move me"
-
-    def test_delete_file(self, tmp_path):
-        """Test deleting a file."""
-        from agentic_cli.tools.file_ops import file_manager
-
-        test_file = tmp_path / "delete_me.txt"
-        test_file.write_text("Delete me")
-        result = file_manager("delete", str(test_file))
-        assert result["success"] is True
-        assert not test_file.exists()
-
-    def test_read_nonexistent_file(self, tmp_path):
-        """Test reading a non-existent file returns error."""
-        from agentic_cli.tools.file_ops import file_manager
-
-        result = file_manager("read", str(tmp_path / "nonexistent.txt"))
-        assert result["success"] is False
-
     def test_read_returns_size(self, tmp_path):
         """Test read operation returns file size."""
-        from agentic_cli.tools.file_ops import file_manager
+        from agentic_cli.tools.file_read import read_file
 
         test_file = tmp_path / "test.txt"
         test_file.write_text("Hello")
-        result = file_manager("read", str(test_file))
+        result = read_file(str(test_file))
         assert result["success"] is True
         assert result["size"] == 5
-        assert result["path"] == str(test_file)
+
+    def test_read_with_offset_and_limit(self, tmp_path):
+        """Test reading with offset and limit."""
+        from agentic_cli.tools.file_read import read_file
+
+        test_file = tmp_path / "test.txt"
+        test_file.write_text("line1\nline2\nline3\nline4\nline5")
+        result = read_file(str(test_file), offset=1, limit=2)
+        assert result["success"] is True
+        assert "line2" in result["content"]
+        assert result["lines_read"] == 2
+        assert result["total_lines"] == 5
+
+    def test_read_nonexistent_file(self, tmp_path):
+        """Test reading a non-existent file raises error."""
+        from agentic_cli.tools.file_read import read_file
+        from agentic_cli.tools.registry import ToolError
+
+        with pytest.raises(ToolError) as exc_info:
+            read_file(str(tmp_path / "nonexistent.txt"))
+        assert exc_info.value.error_code == "NOT_FOUND"
+
+
+class TestWriteFile:
+    """Tests for write_file function."""
+
+    def test_write_file(self, tmp_path):
+        """Test writing a file."""
+        from agentic_cli.tools.file_write import write_file
+
+        test_file = tmp_path / "output.txt"
+        result = write_file(str(test_file), "New content")
+        assert result["success"] is True
+        assert test_file.read_text() == "New content"
 
     def test_write_returns_size(self, tmp_path):
         """Test write operation returns file size."""
-        from agentic_cli.tools.file_ops import file_manager
+        from agentic_cli.tools.file_write import write_file
 
         test_file = tmp_path / "test.txt"
-        result = file_manager("write", str(test_file), content="Hello")
+        result = write_file(str(test_file), "Hello")
         assert result["success"] is True
         assert result["size"] == 5
-        assert result["path"] == str(test_file)
 
-    def test_list_returns_count(self, tmp_path):
-        """Test list operation returns entry count."""
-        from agentic_cli.tools.file_ops import file_manager
+    def test_write_creates_parent_dirs(self, tmp_path):
+        """Test write creates parent directories."""
+        from agentic_cli.tools.file_write import write_file
+
+        test_file = tmp_path / "subdir" / "nested" / "test.txt"
+        result = write_file(str(test_file), "content")
+        assert result["success"] is True
+        assert test_file.exists()
+
+    def test_write_indicates_created(self, tmp_path):
+        """Test write indicates if file was created or overwritten."""
+        from agentic_cli.tools.file_write import write_file
+
+        test_file = tmp_path / "test.txt"
+        result1 = write_file(str(test_file), "first")
+        assert result1["created"] is True
+
+        result2 = write_file(str(test_file), "second")
+        assert result2["created"] is False
+
+
+class TestEditFile:
+    """Tests for edit_file function."""
+
+    def test_edit_file(self, tmp_path):
+        """Test editing a file."""
+        from agentic_cli.tools.file_write import edit_file
+
+        test_file = tmp_path / "test.txt"
+        test_file.write_text("Hello world")
+        result = edit_file(str(test_file), "world", "universe")
+        assert result["success"] is True
+        assert test_file.read_text() == "Hello universe"
+        assert result["replacements"] == 1
+
+    def test_edit_file_replace_all(self, tmp_path):
+        """Test editing with replace_all."""
+        from agentic_cli.tools.file_write import edit_file
+
+        test_file = tmp_path / "test.txt"
+        test_file.write_text("foo bar foo baz foo")
+        result = edit_file(str(test_file), "foo", "qux", replace_all=True)
+        assert result["success"] is True
+        assert test_file.read_text() == "qux bar qux baz qux"
+        assert result["replacements"] == 3
+
+    def test_edit_file_with_regex(self, tmp_path):
+        """Test editing with regex pattern."""
+        from agentic_cli.tools.file_write import edit_file
+
+        test_file = tmp_path / "test.txt"
+        test_file.write_text("foo123bar456baz")
+        result = edit_file(str(test_file), r"\d+", "NUM", replace_all=True, use_regex=True)
+        assert result["success"] is True
+        assert test_file.read_text() == "fooNUMbarNUMbaz"
+
+    def test_edit_file_text_not_found(self, tmp_path):
+        """Test editing raises error when text not found."""
+        from agentic_cli.tools.file_write import edit_file
+        from agentic_cli.tools.registry import ToolError
+
+        test_file = tmp_path / "test.txt"
+        test_file.write_text("Hello world")
+        with pytest.raises(ToolError) as exc_info:
+            edit_file(str(test_file), "notfound", "replacement")
+        assert exc_info.value.error_code == "NOT_FOUND"
+
+
+class TestGlob:
+    """Tests for glob function."""
+
+    def test_glob_all_files(self, tmp_path):
+        """Test globbing all files."""
+        from agentic_cli.tools.glob_tool import glob
+
+        (tmp_path / "file1.txt").touch()
+        (tmp_path / "file2.py").touch()
+        (tmp_path / "subdir").mkdir()
+        result = glob("*", str(tmp_path))
+        assert result["success"] is True
+        assert result["count"] == 3
+
+    def test_glob_pattern(self, tmp_path):
+        """Test globbing with pattern."""
+        from agentic_cli.tools.glob_tool import glob
 
         (tmp_path / "file1.txt").touch()
         (tmp_path / "file2.txt").touch()
-        result = file_manager("list", str(tmp_path))
+        (tmp_path / "file3.py").touch()
+        result = glob("*.txt", str(tmp_path))
         assert result["success"] is True
         assert result["count"] == 2
-        assert result["path"] == str(tmp_path)
 
-    def test_list_shows_entry_types(self, tmp_path):
-        """Test list operation shows entry types."""
-        from agentic_cli.tools.file_ops import file_manager
+    def test_glob_recursive(self, tmp_path):
+        """Test recursive globbing."""
+        from agentic_cli.tools.glob_tool import glob
+
+        (tmp_path / "file1.py").touch()
+        subdir = tmp_path / "subdir"
+        subdir.mkdir()
+        (subdir / "file2.py").touch()
+        result = glob("**/*.py", str(tmp_path))
+        assert result["success"] is True
+        assert result["count"] == 2
+
+    def test_glob_with_metadata(self, tmp_path):
+        """Test globbing with metadata."""
+        from agentic_cli.tools.glob_tool import glob
 
         (tmp_path / "file1.txt").write_text("content")
-        (tmp_path / "subdir").mkdir()
-        result = file_manager("list", str(tmp_path))
-        assert result["entries"]["file1.txt"]["type"] == "file"
-        assert result["entries"]["file1.txt"]["size"] == 7
-        assert result["entries"]["subdir"]["type"] == "directory"
-        assert result["entries"]["subdir"]["size"] is None
-
-    def test_delete_returns_deleted_path(self, tmp_path):
-        """Test delete operation returns deleted path."""
-        from agentic_cli.tools.file_ops import file_manager
-
-        test_file = tmp_path / "delete_me.txt"
-        test_file.write_text("Delete me")
-        result = file_manager("delete", str(test_file))
-        assert result["deleted"] == str(test_file)
-
-    def test_move_returns_paths(self, tmp_path):
-        """Test move operation returns source and destination."""
-        from agentic_cli.tools.file_ops import file_manager
-
-        source = tmp_path / "source.txt"
-        source.write_text("Move me")
-        dest = tmp_path / "dest.txt"
-        result = file_manager("move", str(source), destination=str(dest))
-        assert result["source"] == str(source)
-        assert result["destination"] == str(dest)
-
-    def test_copy_returns_paths(self, tmp_path):
-        """Test copy operation returns source and destination."""
-        from agentic_cli.tools.file_ops import file_manager
-
-        source = tmp_path / "source.txt"
-        source.write_text("Copy me")
-        dest = tmp_path / "dest.txt"
-        result = file_manager("copy", str(source), destination=str(dest))
-        assert result["source"] == str(source)
-        assert result["destination"] == str(dest)
-
-    def test_copy_preserves_source(self, tmp_path):
-        """Test copy operation preserves the source file."""
-        from agentic_cli.tools.file_ops import file_manager
-
-        source = tmp_path / "source.txt"
-        source.write_text("Copy me")
-        dest = tmp_path / "dest.txt"
-        file_manager("copy", str(source), destination=str(dest))
-        assert source.exists()
-        assert source.read_text() == "Copy me"
-
-    def test_delete_directory_recursive(self, tmp_path):
-        """Test recursive directory deletion."""
-        from agentic_cli.tools.file_ops import file_manager
-
-        subdir = tmp_path / "subdir"
-        subdir.mkdir()
-        (subdir / "file.txt").write_text("content")
-        result = file_manager("delete", str(subdir), recursive=True)
+        result = glob("*.txt", str(tmp_path), include_metadata=True)
         assert result["success"] is True
-        assert not subdir.exists()
+        assert len(result["files"]) == 1
+        assert result["files"][0]["type"] == "file"
+        assert result["files"][0]["size"] == 7
 
-    def test_delete_directory_non_recursive_fails(self, tmp_path):
-        """Test non-recursive directory deletion fails for non-empty dir."""
-        from agentic_cli.tools.file_ops import file_manager
 
-        subdir = tmp_path / "subdir"
-        subdir.mkdir()
-        (subdir / "file.txt").write_text("content")
-        result = file_manager("delete", str(subdir), recursive=False)
-        assert result["success"] is False
+class TestGrep:
+    """Tests for grep function."""
 
-    def test_copy_directory_recursive(self, tmp_path):
-        """Test recursive directory copy."""
-        from agentic_cli.tools.file_ops import file_manager
+    def test_grep_finds_pattern(self, tmp_path):
+        """Test grep finds pattern in files."""
+        from agentic_cli.tools.grep_tool import grep
 
-        source = tmp_path / "source_dir"
-        source.mkdir()
-        (source / "file.txt").write_text("content")
-        dest = tmp_path / "dest_dir"
-        result = file_manager("copy", str(source), destination=str(dest), recursive=True)
+        test_file = tmp_path / "test.txt"
+        test_file.write_text("line1\nfoo bar\nline3")
+        result = grep("foo", str(tmp_path))
         assert result["success"] is True
-        assert (dest / "file.txt").read_text() == "content"
+        assert result["total_matches"] >= 1
 
-    def test_invalid_operation(self, tmp_path):
-        """Test invalid operation returns error."""
-        from agentic_cli.tools.file_ops import file_manager
+    def test_grep_case_insensitive(self, tmp_path):
+        """Test grep with case insensitive search."""
+        from agentic_cli.tools.grep_tool import grep
 
-        result = file_manager("invalid_op", str(tmp_path))
-        assert result["success"] is False
-        assert "error" in result
+        test_file = tmp_path / "test.txt"
+        test_file.write_text("Hello World")
+        result = grep("hello", str(tmp_path), ignore_case=True)
+        assert result["success"] is True
+        assert result["total_matches"] >= 1
 
-    def test_write_without_content_fails(self, tmp_path):
-        """Test write operation without content fails."""
-        from agentic_cli.tools.file_ops import file_manager
+    def test_grep_file_pattern(self, tmp_path):
+        """Test grep with file pattern filter."""
+        from agentic_cli.tools.grep_tool import grep
 
-        result = file_manager("write", str(tmp_path / "test.txt"))
-        assert result["success"] is False
+        (tmp_path / "file.txt").write_text("find me")
+        (tmp_path / "file.py").write_text("find me")
+        result = grep("find", str(tmp_path), file_pattern="*.txt")
+        assert result["success"] is True
+        assert result["files_searched"] == 1
 
-    def test_move_without_destination_fails(self, tmp_path):
-        """Test move operation without destination fails."""
-        from agentic_cli.tools.file_ops import file_manager
+    def test_grep_output_mode_files(self, tmp_path):
+        """Test grep with files output mode."""
+        from agentic_cli.tools.grep_tool import grep
 
-        source = tmp_path / "source.txt"
-        source.write_text("content")
-        result = file_manager("move", str(source))
-        assert result["success"] is False
-
-    def test_copy_without_destination_fails(self, tmp_path):
-        """Test copy operation without destination fails."""
-        from agentic_cli.tools.file_ops import file_manager
-
-        source = tmp_path / "source.txt"
-        source.write_text("content")
-        result = file_manager("copy", str(source))
-        assert result["success"] is False
+        (tmp_path / "file1.txt").write_text("pattern")
+        (tmp_path / "file2.txt").write_text("pattern")
+        result = grep("pattern", str(tmp_path), output_mode="files")
+        assert result["success"] is True
+        assert len(result["matches"]) == 2
 
 
 class TestDiffCompare:
@@ -994,7 +996,7 @@ class TestDiffCompare:
 
     def test_compare_identical(self):
         """Test comparing identical text returns similarity of 1.0."""
-        from agentic_cli.tools.file_ops import diff_compare
+        from agentic_cli.tools.file_read import diff_compare
 
         result = diff_compare("hello world", "hello world")
         assert result["success"] is True
@@ -1003,7 +1005,7 @@ class TestDiffCompare:
 
     def test_compare_different(self):
         """Test comparing different text returns similarity < 1.0."""
-        from agentic_cli.tools.file_ops import diff_compare
+        from agentic_cli.tools.file_read import diff_compare
 
         result = diff_compare("line1\nline2\nline3", "line1\nmodified\nline3")
         assert result["success"] is True
@@ -1011,7 +1013,7 @@ class TestDiffCompare:
 
     def test_compare_files(self, tmp_path):
         """Test comparing file contents."""
-        from agentic_cli.tools.file_ops import diff_compare
+        from agentic_cli.tools.file_read import diff_compare
 
         file_a = tmp_path / "a.txt"
         file_b = tmp_path / "b.txt"
@@ -1023,7 +1025,7 @@ class TestDiffCompare:
 
     def test_compare_returns_diff(self):
         """Test that comparison returns diff output."""
-        from agentic_cli.tools.file_ops import diff_compare
+        from agentic_cli.tools.file_read import diff_compare
 
         result = diff_compare("line1\nline2", "line1\nmodified")
         assert result["success"] is True
@@ -1032,7 +1034,7 @@ class TestDiffCompare:
 
     def test_compare_summary_counts(self):
         """Test that summary counts added/removed/changed lines."""
-        from agentic_cli.tools.file_ops import diff_compare
+        from agentic_cli.tools.file_read import diff_compare
 
         # Test with replacement (counts as changed)
         result = diff_compare("line1\nline2\nline3", "line1\nnew_line\nline3")
@@ -1051,7 +1053,7 @@ class TestDiffCompare:
 
     def test_unified_mode(self):
         """Test unified diff mode."""
-        from agentic_cli.tools.file_ops import diff_compare
+        from agentic_cli.tools.file_read import diff_compare
 
         result = diff_compare("a\nb\nc", "a\nx\nc", mode="unified")
         assert result["success"] is True
@@ -1059,7 +1061,7 @@ class TestDiffCompare:
 
     def test_summary_mode(self):
         """Test summary diff mode."""
-        from agentic_cli.tools.file_ops import diff_compare
+        from agentic_cli.tools.file_read import diff_compare
 
         result = diff_compare("a\nb\nc", "a\nx\nc", mode="summary")
         assert result["success"] is True
@@ -1068,7 +1070,7 @@ class TestDiffCompare:
 
     def test_context_lines(self):
         """Test context lines parameter."""
-        from agentic_cli.tools.file_ops import diff_compare
+        from agentic_cli.tools.file_read import diff_compare
 
         result = diff_compare(
             "a\nb\nc\nd\ne\nf",
@@ -1079,7 +1081,7 @@ class TestDiffCompare:
 
     def test_empty_strings(self):
         """Test comparing empty strings."""
-        from agentic_cli.tools.file_ops import diff_compare
+        from agentic_cli.tools.file_read import diff_compare
 
         result = diff_compare("", "")
         assert result["success"] is True
@@ -1087,7 +1089,7 @@ class TestDiffCompare:
 
     def test_one_empty_string(self):
         """Test comparing one empty string with non-empty."""
-        from agentic_cli.tools.file_ops import diff_compare
+        from agentic_cli.tools.file_read import diff_compare
 
         result = diff_compare("content", "")
         assert result["success"] is True
@@ -1096,7 +1098,7 @@ class TestDiffCompare:
 
     def test_side_by_side_mode(self):
         """Test side-by-side diff mode."""
-        from agentic_cli.tools.file_ops import diff_compare
+        from agentic_cli.tools.file_read import diff_compare
 
         result = diff_compare("a\nb\nc", "a\nx\nc", mode="side_by_side")
         assert result["success"] is True
@@ -1105,7 +1107,7 @@ class TestDiffCompare:
 
     def test_mixed_file_and_text(self, tmp_path):
         """Test comparing a file with text."""
-        from agentic_cli.tools.file_ops import diff_compare
+        from agentic_cli.tools.file_read import diff_compare
 
         file_a = tmp_path / "a.txt"
         file_a.write_text("file content")
