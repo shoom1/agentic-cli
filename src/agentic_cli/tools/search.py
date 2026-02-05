@@ -23,6 +23,12 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from agentic_cli.tools.registry import (
+    register_tool,
+    ToolCategory,
+    PermissionLevel,
+)
+
 
 @dataclass
 class SearchResult:
@@ -188,6 +194,11 @@ def _get_backend(settings: Any) -> SearchBackend:
     return backend_class(api_key)
 
 
+@register_tool(
+    category=ToolCategory.NETWORK,
+    permission_level=PermissionLevel.SAFE,
+    description="Search the web for information using configured backend",
+)
 def web_search(
     query: str,
     max_results: int = 5,

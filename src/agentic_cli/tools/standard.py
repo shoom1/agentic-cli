@@ -12,6 +12,11 @@ Design Note:
 from typing import TYPE_CHECKING, Any
 
 from agentic_cli.config import get_settings
+from agentic_cli.tools.registry import (
+    register_tool,
+    ToolCategory,
+    PermissionLevel,
+)
 
 if TYPE_CHECKING:
     from agentic_cli.config import BaseSettings
@@ -40,6 +45,11 @@ def _get_knowledge_base_manager(
     )
 
 
+@register_tool(
+    category=ToolCategory.KNOWLEDGE,
+    permission_level=PermissionLevel.SAFE,
+    description="Search the knowledge base for relevant information",
+)
 def search_knowledge_base(
     query: str,
     filters: dict | None = None,
@@ -63,6 +73,11 @@ def search_knowledge_base(
     return kb.search(query, filters=filters, top_k=top_k)
 
 
+@register_tool(
+    category=ToolCategory.KNOWLEDGE,
+    permission_level=PermissionLevel.CAUTION,
+    description="Ingest a document into the knowledge base",
+)
 def ingest_to_knowledge_base(
     content: str,
     title: str,
@@ -146,6 +161,11 @@ def _clean_arxiv_id(arxiv_id: str) -> str:
     return arxiv_id
 
 
+@register_tool(
+    category=ToolCategory.KNOWLEDGE,
+    permission_level=PermissionLevel.SAFE,
+    description="Search arXiv for academic papers",
+)
 def search_arxiv(
     query: str,
     max_results: int = 10,
@@ -213,6 +233,11 @@ def search_arxiv(
     }
 
 
+@register_tool(
+    category=ToolCategory.KNOWLEDGE,
+    permission_level=PermissionLevel.SAFE,
+    description="Fetch detailed information about a specific arXiv paper",
+)
 def fetch_arxiv_paper(arxiv_id: str) -> dict[str, Any]:
     """Fetch detailed information about a specific arXiv paper.
 
@@ -265,6 +290,11 @@ def fetch_arxiv_paper(arxiv_id: str) -> dict[str, Any]:
     return {"success": True, "paper": paper}
 
 
+@register_tool(
+    category=ToolCategory.KNOWLEDGE,
+    permission_level=PermissionLevel.SAFE,
+    description="Analyze an arXiv paper using LLM-powered content extraction",
+)
 async def analyze_arxiv_paper(arxiv_id: str, prompt: str) -> dict[str, Any]:
     """Analyze an arXiv paper using LLM-powered content extraction.
 
@@ -305,6 +335,11 @@ async def analyze_arxiv_paper(arxiv_id: str, prompt: str) -> dict[str, Any]:
     }
 
 
+@register_tool(
+    category=ToolCategory.EXECUTION,
+    permission_level=PermissionLevel.CAUTION,
+    description="Execute Python code safely in a sandboxed environment",
+)
 def execute_python(
     code: str,
     context: dict | None = None,
@@ -331,6 +366,11 @@ def execute_python(
     return executor.execute(code, context=context, timeout_seconds=timeout_seconds)
 
 
+@register_tool(
+    category=ToolCategory.INTERACTION,
+    permission_level=PermissionLevel.SAFE,
+    description="Ask the user for clarification",
+)
 async def ask_clarification(
     question: str,
     options: list[str] | None = None,
