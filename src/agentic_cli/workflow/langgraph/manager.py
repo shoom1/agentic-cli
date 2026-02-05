@@ -382,7 +382,18 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
             # Add system prompt
             system_prompt = config.get_prompt()
             if system_prompt:
-                messages.append(SystemMessage(content=system_prompt))
+                if self._settings.prompt_caching_enabled and model_name.startswith("claude-"):
+                    messages.append(
+                        SystemMessage(
+                            content=[{
+                                "type": "text",
+                                "text": system_prompt,
+                                "cache_control": {"type": "ephemeral"},
+                            }]
+                        )
+                    )
+                else:
+                    messages.append(SystemMessage(content=system_prompt))
 
             # Add conversation history
             for msg in state.get("messages", []):
@@ -709,6 +720,21 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
                                     yield self._maybe_transform(
                                         WorkflowEvent.text(text, current_session_id)
                                     )
+
+                    # Extract usage metadata
+                    if output and hasattr(output, "usage_metadata") and output.usage_metadata:
+                        usage = output.usage_metadata
+                        cached_read = usage.get("cache_read_input_tokens") if isinstance(usage, dict) else getattr(usage, "cache_read_input_tokens", None)
+                        cache_creation = usage.get("cache_creation_input_tokens") if isinstance(usage, dict) else getattr(usage, "cache_creation_input_tokens", None)
+                        usage_event = WorkflowEvent.llm_usage(
+                            model=self.model,
+                            prompt_tokens=usage.get("input_tokens") if isinstance(usage, dict) else getattr(usage, "input_tokens", None),
+                            completion_tokens=usage.get("output_tokens") if isinstance(usage, dict) else getattr(usage, "output_tokens", None),
+                            total_tokens=usage.get("total_tokens") if isinstance(usage, dict) else getattr(usage, "total_tokens", None),
+                            cached_tokens=cached_read,
+                            cache_creation_tokens=cache_creation,
+                        )
+                        yield self._maybe_transform(usage_event)
 
                 elif event_kind == "on_tool_start":
                     # Tool invocation

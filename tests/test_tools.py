@@ -621,6 +621,7 @@ class TestWithResultWrapper:
         assert "Unexpected bug" in result["error"]["message"]
 
 
+@pytest.mark.xfail(reason="Shell tool disabled (_SHELL_TOOL_ENABLED=False) pending security review")
 class TestShellExecutor:
     """Tests for shell_executor function."""
 
@@ -729,15 +730,6 @@ class TestShellExecutor:
         assert result["success"] is True
         assert "error" in result["stderr"]
 
-    def test_return_format_contains_duration(self):
-        """Test that result contains duration field."""
-        from agentic_cli.tools.shell import shell_executor
-
-        result = shell_executor("echo test")
-        assert "duration" in result
-        assert isinstance(result["duration"], float)
-        assert result["duration"] >= 0
-
     def test_output_truncation(self):
         """Test that long output is truncated."""
         from agentic_cli.tools.shell import shell_executor
@@ -762,6 +754,19 @@ class TestShellExecutor:
 
         result = shell_executor("whoami")
         assert result["success"] is True
+
+
+class TestShellExecutorFormat:
+    """Tests for shell_executor response format (works even when disabled)."""
+
+    def test_return_format_contains_duration(self):
+        """Test that result contains duration field."""
+        from agentic_cli.tools.shell import shell_executor
+
+        result = shell_executor("echo test")
+        assert "duration" in result
+        assert isinstance(result["duration"], float)
+        assert result["duration"] >= 0
 
 
 class TestReadFile:

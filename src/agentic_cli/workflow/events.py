@@ -413,6 +413,7 @@ class WorkflowEvent:
         total_tokens: int | None = None,
         thinking_tokens: int | None = None,
         cached_tokens: int | None = None,
+        cache_creation_tokens: int | None = None,
         invocation_id: str | None = None,
         latency_ms: float | None = None,
     ) -> "WorkflowEvent":
@@ -427,6 +428,7 @@ class WorkflowEvent:
             total_tokens: Total token count
             thinking_tokens: Tokens used for thinking/reasoning
             cached_tokens: Tokens served from cache
+            cache_creation_tokens: Tokens written to cache (one-time cost)
             invocation_id: ADK invocation ID for correlation
             latency_ms: Response latency in milliseconds
         """
@@ -443,6 +445,8 @@ class WorkflowEvent:
             metadata["thinking_tokens"] = thinking_tokens
         if cached_tokens is not None:
             metadata["cached_tokens"] = cached_tokens
+        if cache_creation_tokens is not None:
+            metadata["cache_creation_tokens"] = cache_creation_tokens
         if invocation_id is not None:
             metadata["invocation_id"] = invocation_id
         if latency_ms is not None:
@@ -456,6 +460,10 @@ class WorkflowEvent:
             parts.append(f"out={completion_tokens}")
         if total_tokens is not None:
             parts.append(f"total={total_tokens}")
+        if cached_tokens is not None:
+            parts.append(f"cached={cached_tokens}")
+        if cache_creation_tokens is not None:
+            parts.append(f"cache_write={cache_creation_tokens}")
         if latency_ms is not None:
             parts.append(f"{latency_ms:.0f}ms")
 
