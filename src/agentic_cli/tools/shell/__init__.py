@@ -34,6 +34,7 @@ from agentic_cli.tools.shell.executor import (
     shell_executor,
     analyze_command,
     execute_with_approval,
+    is_shell_enabled,
 )
 from agentic_cli.tools.shell.config import (
     ShellSecurityConfig,
@@ -65,6 +66,7 @@ __all__ = [
     "shell_executor",
     "analyze_command",
     "execute_with_approval",
+    "is_shell_enabled",
     # Configuration
     "ShellSecurityConfig",
     "get_strict_config",

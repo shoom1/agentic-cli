@@ -10,9 +10,31 @@ Integrates all security layers including:
 - Layer 6: HITL Approval
 - Layer 7: Sandboxed Execution
 - Layer 8: Audit Logging
+
+SECURITY NOTE:
+    The shell tool is currently DISABLED by default while security safeguards
+    are being validated. Set _SHELL_TOOL_ENABLED = True to enable execution.
 """
 
 import time
+
+# =============================================================================
+# SHELL TOOL DISABLED
+# =============================================================================
+# The shell tool is disabled until security safeguards are fully validated.
+# To enable: set _SHELL_TOOL_ENABLED = True
+# WARNING: Only enable after thorough security review and testing.
+# =============================================================================
+_SHELL_TOOL_ENABLED = False
+
+
+def is_shell_enabled() -> bool:
+    """Check if the shell tool is enabled.
+
+    Returns:
+        True if shell execution is enabled, False otherwise.
+    """
+    return _SHELL_TOOL_ENABLED
 from pathlib import Path
 from typing import Any
 
@@ -233,6 +255,22 @@ def shell_executor(
         >>> if result.get("pending_approval"):
         ...     print(f"Awaiting approval: {result['approval_request_id']}")
     """
+    # Check if shell tool is enabled
+    if not _SHELL_TOOL_ENABLED:
+        return {
+            "success": False,
+            "stdout": "",
+            "stderr": "",
+            "return_code": -1,
+            "duration": 0.0,
+            "error": (
+                "Shell tool is DISABLED. Security safeguards are being validated. "
+                "To enable, set _SHELL_TOOL_ENABLED = True in "
+                "agentic_cli/tools/shell/executor.py after security review."
+            ),
+            "disabled": True,
+        }
+
     # Resolve working directory
     if working_dir is None:
         working_dir_path = Path.cwd()
@@ -482,6 +520,22 @@ def execute_with_approval(
     Returns:
         Execution result dictionary.
     """
+    # Check if shell tool is enabled
+    if not _SHELL_TOOL_ENABLED:
+        return {
+            "success": False,
+            "stdout": "",
+            "stderr": "",
+            "return_code": -1,
+            "duration": 0.0,
+            "error": (
+                "Shell tool is DISABLED. Security safeguards are being validated. "
+                "To enable, set _SHELL_TOOL_ENABLED = True in "
+                "agentic_cli/tools/shell/executor.py after security review."
+            ),
+            "disabled": True,
+        }
+
     # Resolve working directory
     if working_dir is None:
         working_dir_path = Path.cwd()
