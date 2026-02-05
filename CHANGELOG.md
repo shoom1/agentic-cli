@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.3] - 2026-02-04
+
+### Added
+
+- **Shell Security Architecture**: Modular shell executor with 8-layer defense-in-depth security
+  - Input preprocessing with encoding/obfuscation detection
+  - Command tokenization and classification
+  - Path analysis and sandboxing
+  - Risk assessment with HITL approval workflows
+  - Comprehensive audit logging
+  - **Note**: Shell tool is disabled by default pending security validation
+- **File Operation Tools**: New categorized file tools with permission levels
+  - READ tools (safe): `read_file`, `grep`, `glob`, `list_dir`, `diff_compare`
+  - WRITE tools (caution): `write_file`, `edit_file`
+- **Feature Demo Scripts**: New examples for arxiv, fileops, memory, planning, shell, and websearch
+
+### Changed
+
+- **File Operations Refactoring**: Replaced monolithic `file_manager` with distinct, categorized tools
+- **Tool Registry**: Added `PermissionLevel` enum for tool categorization (SAFE, CAUTION, DANGEROUS)
+
+### Removed
+
+- Deprecated `file_manager` tool (replaced by new file operation tools)
+
 ## [0.3.2] - 2026-02-01
 
 ### Added
