@@ -10,8 +10,7 @@ For alternative orchestration backends (e.g., LangGraph), see the base_manager m
 
 from __future__ import annotations
 
-import contextlib
-from typing import AsyncGenerator, Any, Callable, Iterator
+from typing import AsyncGenerator, Any, Callable
 
 from google.genai import types
 from google.adk import Runner
@@ -27,17 +26,8 @@ from agentic_cli.workflow.adk.llm_event_logger import LLMEventLogger
 from agentic_cli.config import (
     BaseSettings,
     get_settings,
-    set_context_settings,
-    set_context_workflow,
     validate_settings,
     SettingsValidationError,
-)
-from agentic_cli.workflow.context import (
-    set_context_memory_manager,
-    set_context_task_graph,
-    set_context_approval_manager,
-    set_context_checkpoint_manager,
-    set_context_llm_summarizer,
 )
 from agentic_cli.logging import Loggers, bind_context
 
@@ -520,31 +510,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             raise RuntimeError(
                 "Workflow Manager failed to initialize. Check API keys and configuration."
             )
-
-    @contextlib.contextmanager
-    def _workflow_context(self) -> Iterator[None]:
-        """Context manager for settings, workflow, and manager contexts.
-
-        Sets context variables that allow tools to access settings,
-        the workflow manager, and feature managers during execution.
-        """
-        set_context_settings(self._settings)
-        set_context_workflow(self)
-        set_context_memory_manager(self._memory_manager)
-        set_context_task_graph(self._task_graph)
-        set_context_approval_manager(self._approval_manager)
-        set_context_checkpoint_manager(self._checkpoint_manager)
-        set_context_llm_summarizer(self._llm_summarizer)
-        try:
-            yield
-        finally:
-            set_context_settings(None)
-            set_context_workflow(None)
-            set_context_memory_manager(None)
-            set_context_task_graph(None)
-            set_context_approval_manager(None)
-            set_context_checkpoint_manager(None)
-            set_context_llm_summarizer(None)
 
     def _create_message(self, message: str) -> types.Content:
         """Create an ADK Content message from text.

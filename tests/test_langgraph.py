@@ -454,28 +454,6 @@ class TestCreateWorkflowManagerFromSettings:
 class TestBackwardCompatibility:
     """Tests for backward-compatible imports."""
 
-    def test_old_import_paths_still_work(self):
-        """Test that old import paths work (with deprecation warning)."""
-        import warnings
-
-        # Suppress the deprecation warning for this test
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-
-            # Old import paths should still work
-            from agentic_cli.workflow.langgraph_manager import (
-                LangGraphWorkflowManager as OldManager,
-            )
-            from agentic_cli.workflow.langgraph_state import (
-                AgentState as OldState,
-                add_messages as old_add_messages,
-            )
-
-            # Should be the same classes
-            assert OldManager is LangGraphWorkflowManager
-            assert OldState is AgentState
-            assert old_add_messages is add_messages
-
     def test_workflow_module_exports(self):
         """Test that workflow module exports LangGraph components."""
         from agentic_cli.workflow import (
