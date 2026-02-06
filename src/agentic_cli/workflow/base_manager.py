@@ -15,11 +15,20 @@ It also provides shared implementations for:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from abc import ABC, abstractmethod
-from typing import Any, AsyncGenerator, TYPE_CHECKING
+from typing import Any, AsyncGenerator, Iterator, TYPE_CHECKING
 
 from agentic_cli.workflow.events import WorkflowEvent, UserInputRequest
 from agentic_cli.workflow.config import AgentConfig
+from agentic_cli.config import set_context_settings, set_context_workflow
+from agentic_cli.workflow.context import (
+    set_context_memory_manager,
+    set_context_task_graph,
+    set_context_approval_manager,
+    set_context_checkpoint_manager,
+    set_context_llm_summarizer,
+)
 from agentic_cli.logging import Loggers
 
 if TYPE_CHECKING:
@@ -203,6 +212,29 @@ class BaseWorkflowManager(ABC):
             An LLMSummarizer implementation, or None.
         """
         return None
+
+    @contextlib.contextmanager
+    def _workflow_context(self) -> Iterator[None]:
+        """Context manager for settings, workflow, and manager contexts.
+
+        Sets context variables that allow tools to access settings,
+        the workflow manager, and feature managers during execution.
+        Uses token-based reset to correctly restore parent context.
+        """
+        tokens = [
+            set_context_settings(self._settings),
+            set_context_workflow(self),
+            set_context_memory_manager(self._memory_manager),
+            set_context_task_graph(self._task_graph),
+            set_context_approval_manager(self._approval_manager),
+            set_context_checkpoint_manager(self._checkpoint_manager),
+            set_context_llm_summarizer(self._llm_summarizer),
+        ]
+        try:
+            yield
+        finally:
+            for token in tokens:
+                token.var.reset(token)
 
     @property
     def model(self) -> str:

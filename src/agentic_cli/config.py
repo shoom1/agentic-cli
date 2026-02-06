@@ -23,7 +23,7 @@ Settings Loading Priority (highest to lowest):
     5. Default values
 """
 
-from contextvars import ContextVar
+from contextvars import ContextVar, Token
 from pathlib import Path
 from typing import Literal, Generator, Any, Tuple, Type
 from contextlib import contextmanager
@@ -484,7 +484,7 @@ def set_settings(settings: BaseSettings) -> None:
     _settings_instance = settings
 
 
-def set_context_settings(settings: BaseSettings | None) -> None:
+def set_context_settings(settings: BaseSettings | None) -> Token:
     """Set settings for the current context.
 
     This sets settings that will be returned by get_settings() for the
@@ -495,8 +495,11 @@ def set_context_settings(settings: BaseSettings | None) -> None:
 
     Args:
         settings: Settings to use in current context, or None to clear
+
+    Returns:
+        Token that can be used to reset the context variable.
     """
-    _settings_context.set(settings)
+    return _settings_context.set(settings)
 
 
 def get_context_settings() -> BaseSettings | None:
@@ -517,7 +520,7 @@ if TYPE_CHECKING:
 _workflow_context: ContextVar[Any] = ContextVar("workflow_context", default=None)
 
 
-def set_context_workflow(workflow: "BaseWorkflowManager | None") -> None:
+def set_context_workflow(workflow: "BaseWorkflowManager | None") -> Token:
     """Set the workflow manager for the current context.
 
     This allows tools to access the workflow manager for operations
@@ -525,8 +528,11 @@ def set_context_workflow(workflow: "BaseWorkflowManager | None") -> None:
 
     Args:
         workflow: BaseWorkflowManager instance, or None to clear
+
+    Returns:
+        Token that can be used to reset the context variable.
     """
-    _workflow_context.set(workflow)
+    return _workflow_context.set(workflow)
 
 
 def get_context_workflow() -> "BaseWorkflowManager | None":

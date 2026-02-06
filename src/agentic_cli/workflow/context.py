@@ -5,7 +5,7 @@ The workflow manager sets these context variables before processing, and tools
 can access them via the getter functions.
 """
 
-from contextvars import ContextVar
+from contextvars import ContextVar, Token
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -34,29 +34,29 @@ _llm_summarizer_context: ContextVar[Any] = ContextVar(
 # Setters (used by workflow manager)
 
 
-def set_context_memory_manager(manager: "MemoryManager | None") -> None:
+def set_context_memory_manager(manager: "MemoryManager | None") -> Token:
     """Set the memory manager in the current context."""
-    _memory_manager_context.set(manager)
+    return _memory_manager_context.set(manager)
 
 
-def set_context_task_graph(graph: "TaskGraph | None") -> None:
+def set_context_task_graph(graph: "TaskGraph | None") -> Token:
     """Set the task graph in the current context."""
-    _task_graph_context.set(graph)
+    return _task_graph_context.set(graph)
 
 
-def set_context_approval_manager(manager: "ApprovalManager | None") -> None:
+def set_context_approval_manager(manager: "ApprovalManager | None") -> Token:
     """Set the approval manager in the current context."""
-    _approval_manager_context.set(manager)
+    return _approval_manager_context.set(manager)
 
 
-def set_context_checkpoint_manager(manager: "CheckpointManager | None") -> None:
+def set_context_checkpoint_manager(manager: "CheckpointManager | None") -> Token:
     """Set the checkpoint manager in the current context."""
-    _checkpoint_manager_context.set(manager)
+    return _checkpoint_manager_context.set(manager)
 
 
-def set_context_llm_summarizer(summarizer: Any | None) -> None:
+def set_context_llm_summarizer(summarizer: Any | None) -> Token:
     """Set the LLM summarizer in the current context."""
-    _llm_summarizer_context.set(summarizer)
+    return _llm_summarizer_context.set(summarizer)
 
 
 # Getters (used by tools)

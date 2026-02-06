@@ -42,19 +42,12 @@ from agentic_cli.resolvers import ModelResolver, PathResolver
 from agentic_cli.settings_persistence import SettingsPersistence
 from agentic_cli.workflow.settings import WorkflowSettingsMixin
 from agentic_cli.cli.settings import CLISettingsMixin
-from agentic_cli.config_mixins import (
-    KnowledgeBaseMixin,
-    PythonExecutorMixin,
-    PersistenceMixin,
-    ArtifactsMixin,
-    FullFeaturesMixin,
-)
 
 # Heavy imports - lazy loaded on first access
 _lazy_imports = {
     "GoogleADKWorkflowManager": "agentic_cli.workflow.adk_manager",
     "BaseWorkflowManager": "agentic_cli.workflow.base_manager",
-    "LangGraphWorkflowManager": "agentic_cli.workflow.langgraph_manager",
+    "LangGraphWorkflowManager": "agentic_cli.workflow.langgraph.manager",
 }
 
 
@@ -100,12 +93,6 @@ __all__ = [
     # Resolvers (SRP-compliant model/path resolution)
     "ModelResolver",
     "PathResolver",
-    # Configuration Mixins (backward compatibility)
-    "KnowledgeBaseMixin",
-    "PythonExecutorMixin",
-    "PersistenceMixin",
-    "ArtifactsMixin",
-    "FullFeaturesMixin",
 ]
 
 __version__ = "0.3.3"
