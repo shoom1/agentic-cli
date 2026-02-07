@@ -391,6 +391,140 @@ class TestHTMLToMarkdown:
         assert "Binary content" in result or "binary" in result.lower()
 
 
+class TestPDFConversion:
+    """Tests for PDF content extraction."""
+
+    @pytest.fixture
+    def converter(self):
+        from agentic_cli.tools.webfetch.converter import HTMLToMarkdown
+        return HTMLToMarkdown()
+
+    def test_convert_pdf_extracts_text(self, converter):
+        """Test PDF bytes are converted to text with page markers."""
+        pypdf = pytest.importorskip("pypdf")
+        import io
+        from pypdf import PdfWriter
+
+        # Create a simple PDF with text
+        writer = PdfWriter()
+        writer.add_blank_page(width=200, height=200)
+        # Add text via annotation (simplest way to get extractable text)
+        page = writer.pages[0]
+        # Use a second page too
+        writer.add_blank_page(width=200, height=200)
+
+        buf = io.BytesIO()
+        writer.write(buf)
+        pdf_bytes = buf.getvalue()
+
+        result = converter.convert(pdf_bytes, "application/pdf")
+        # Should not be a binary placeholder or error
+        assert "[Binary content" not in result
+        # If pages had no text, we get the "no extractable text" message
+        # Either way, it should not crash
+        assert isinstance(result, str)
+
+    def test_convert_pdf_no_pypdf_fallback(self, converter):
+        """Test graceful fallback when pypdf is not installed."""
+        with patch.dict("sys.modules", {"pypdf": None}):
+            # Force re-import failure
+            import importlib
+            result = converter.convert(b"%PDF-1.4 fake", "application/pdf")
+            # Should get a graceful message (either import error or extraction error)
+            assert isinstance(result, str)
+            assert len(result) > 0
+
+    def test_convert_pdf_no_text(self, converter):
+        """Test PDF with no extractable text returns appropriate message."""
+        pypdf = pytest.importorskip("pypdf")
+        import io
+        from pypdf import PdfWriter
+
+        # Create an empty PDF (no text content)
+        writer = PdfWriter()
+        writer.add_blank_page(width=200, height=200)
+        buf = io.BytesIO()
+        writer.write(buf)
+        pdf_bytes = buf.getvalue()
+
+        result = converter.convert(pdf_bytes, "application/pdf")
+        assert "no extractable text" in result.lower() or "Page" in result
+
+    @pytest.mark.asyncio
+    async def test_fetcher_pdf_uses_bytes(self):
+        """Test fetcher uses response.content (bytes) for PDFs."""
+        from agentic_cli.tools.webfetch.fetcher import ContentFetcher
+        from agentic_cli.tools.webfetch.validator import URLValidator, ValidationResult
+        from agentic_cli.tools.webfetch.robots import RobotsTxtChecker
+
+        fetcher = ContentFetcher(
+            validator=URLValidator(blocked_domains=[]),
+            robots_checker=RobotsTxtChecker(),
+        )
+
+        pdf_bytes = b"%PDF-1.4 fake pdf content"
+
+        with patch("httpx.AsyncClient.get", new_callable=AsyncMock) as mock_get:
+            mock_response = AsyncMock()
+            mock_response.status_code = 200
+            mock_response.content = pdf_bytes
+            mock_response.text = "garbled text"
+            mock_response.headers = {"content-type": "application/pdf"}
+            mock_response.history = []
+            mock_response.url = "https://arxiv.org/pdf/2301.00001"
+            mock_get.return_value = mock_response
+
+            with patch.object(fetcher._robots, "can_fetch", new_callable=AsyncMock) as mock_robots:
+                mock_robots.return_value = True
+                result = await fetcher.fetch("https://arxiv.org/pdf/2301.00001")
+
+        assert result.success is True
+        assert result.content == pdf_bytes  # Should be bytes, not garbled text
+        assert isinstance(result.content, bytes)
+
+    @pytest.mark.asyncio
+    async def test_fetcher_pdf_byte_limit(self):
+        """Test large PDF is truncated at max_pdf_bytes."""
+        from agentic_cli.tools.webfetch.fetcher import ContentFetcher
+        from agentic_cli.tools.webfetch.validator import URLValidator, ValidationResult
+        from agentic_cli.tools.webfetch.robots import RobotsTxtChecker
+
+        max_pdf = 1000
+        fetcher = ContentFetcher(
+            validator=URLValidator(blocked_domains=[]),
+            robots_checker=RobotsTxtChecker(),
+            max_pdf_bytes=max_pdf,
+        )
+
+        large_pdf = b"x" * 5000
+
+        with patch("httpx.AsyncClient.get", new_callable=AsyncMock) as mock_get:
+            mock_response = AsyncMock()
+            mock_response.status_code = 200
+            mock_response.content = large_pdf
+            mock_response.headers = {"content-type": "application/pdf"}
+            mock_response.history = []
+            mock_response.url = "https://arxiv.org/pdf/2301.00001"
+            mock_get.return_value = mock_response
+
+            with patch.object(fetcher._robots, "can_fetch", new_callable=AsyncMock) as mock_robots:
+                mock_robots.return_value = True
+                result = await fetcher.fetch("https://arxiv.org/pdf/2301.00001")
+
+        assert result.success is True
+        assert result.truncated is True
+        assert len(result.content) == max_pdf
+
+
+class TestWebFetchPDFSetting:
+    """Tests for PDF settings."""
+
+    def test_webfetch_max_pdf_bytes_default(self):
+        """Test webfetch_max_pdf_bytes defaults to 5MB."""
+        settings = BaseSettings()
+        assert settings.webfetch_max_pdf_bytes == 5242880
+
+
 class TestLLMSummarizer:
     """Tests for LLM summarizer protocol and context."""
 

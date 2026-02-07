@@ -177,6 +177,12 @@ class BaseSettings(WorkflowSettingsMixin, CLISettingsMixin, PydanticBaseSettings
         description="Maximum content size in bytes (default: 100KB)",
         json_schema_extra={"ui_order": 59},
     )
+    webfetch_max_pdf_bytes: int = Field(
+        default=5242880,
+        title="WebFetch Max PDF Size",
+        description="Maximum PDF size in bytes (default: 5MB). Separate from HTML limit because PDFs are larger but extracted text is compact.",
+        json_schema_extra={"ui_order": 60},
+    )
 
     # Application identity (domain projects should override)
     app_name: str = Field(

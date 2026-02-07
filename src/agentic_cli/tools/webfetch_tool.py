@@ -51,6 +51,7 @@ def get_or_create_fetcher(settings=None) -> ContentFetcher:
         robots_checker=robots_checker,
         cache_ttl_seconds=settings.webfetch_cache_ttl_seconds,
         max_content_bytes=settings.webfetch_max_content_bytes,
+        max_pdf_bytes=settings.webfetch_max_pdf_bytes,
     )
 
     return _fetcher
