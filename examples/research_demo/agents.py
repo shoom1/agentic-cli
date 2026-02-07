@@ -1,8 +1,6 @@
 """Agent configuration for the Research Demo application.
 
-Uses framework-provided memory, planning, HITL, knowledge base, web fetch,
-code execution, and user interaction tools with auto-detection.
-Only app-specific tools (file operations, shell) are defined locally.
+Uses framework-provided tools exclusively — no app-specific tools needed.
 """
 
 from agentic_cli.workflow import AgentConfig
@@ -20,15 +18,12 @@ from agentic_cli.tools import (
     ingest_to_knowledge_base,
     execute_python,
     ask_clarification,
-)
-
-# App-specific tools (file operations and shell)
-from examples.research_demo.tools import (
-    save_finding,
-    read_finding,
-    list_findings,
-    compare_versions,
-    run_safe_command,
+    read_file,
+    write_file,
+    list_dir,
+    diff_compare,
+    grep,
+    glob,
 )
 
 
@@ -65,13 +60,12 @@ RESEARCH_AGENT_PROMPT = """You are a research assistant with memory, planning, k
 - `execute_python(code, context, timeout_seconds)` - Run Python code in a sandboxed environment
 
 **File Operations**
-- `save_finding(filename, content)` - Save research findings
-- `read_finding(filename)` - Read a saved finding
-- `list_findings()` - List all saved findings
-- `compare_versions(file_a, file_b)` - Compare two documents
-
-**Shell Commands**
-- `run_safe_command(command)` - Run safe shell commands (ls, cat, grep, etc.)
+- `write_file(path, content)` - Write content to a file (creates directories as needed)
+- `read_file(path)` - Read file contents
+- `list_dir(path)` - List directory contents
+- `glob(pattern, path)` - Find files by name pattern
+- `grep(pattern, path)` - Search file contents
+- `diff_compare(source_a, source_b, mode)` - Compare two files or text strings
 
 **User Interaction**
 - `ask_clarification(question, options)` - Ask the user a clarifying question
@@ -112,7 +106,7 @@ When the user asks you to research something:
 10. Update the plan with `save_plan` if you discover changes are needed
 11. Store learnings with `save_memory` and share them with the user
 12. Ingest substantial findings into the knowledge base with `ingest_to_knowledge_base`
-13. Save findings with `save_finding` when you have substantial content
+13. Save findings with `write_file` to the workspace findings directory
 14. Use checkpoints for significant outputs that need review
 
 ## Communication Style
@@ -156,13 +150,13 @@ AGENT_CONFIGS = [
             execute_python,
             # User interaction (1 tool)
             ask_clarification,
-            # App-specific file tools
-            save_finding,
-            read_finding,
-            list_findings,
-            compare_versions,
-            # App-specific shell tool
-            run_safe_command,
+            # File operations (6 tools)
+            read_file,
+            write_file,
+            list_dir,
+            glob,
+            grep,
+            diff_compare,
         ],
         description="Research assistant with memory, planning, task management, knowledge base, and HITL capabilities",
     ),

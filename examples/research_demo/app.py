@@ -1,10 +1,10 @@
 """Main application for the Research Demo.
 
 Showcases framework features through a research assistant agent
-with memory, planning, knowledge base, web fetching, code execution,
-file operations, shell commands, and HITL.
+with memory, planning, task management, knowledge base, web fetching,
+code execution, file operations, and HITL.
 
-Feature managers (MemoryStore, PlanStore, CheckpointManager,
+Feature managers (MemoryStore, PlanStore, TaskStore, CheckpointManager,
 ApprovalManager) are auto-created by the workflow manager based on
 tool requirements.
 """
@@ -36,7 +36,7 @@ def _create_app_info() -> AppInfo:
     text.append("  - Web search & content fetching\n", style="dim")
     text.append("  - Academic research (arXiv)\n", style="dim")
     text.append("  - Python code execution\n", style="dim")
-    text.append("  - File operations & shell commands\n", style="dim")
+    text.append("  - File operations (read, write, search)\n", style="dim")
     text.append("  - Human-in-the-loop (checkpoints & approvals)\n", style="dim")
     text.append("\n")
     text.append("Commands:\n", style="bold")
@@ -65,8 +65,7 @@ class ResearchDemoApp(BaseCLIApp):
     - Knowledge Base: Search and ingest documents
     - Web: Search and fetch/summarize URL content
     - Code Execution: Sandboxed Python execution
-    - File Operations: Save/read/compare findings
-    - Shell Commands: Safe command execution
+    - File Operations: Read, write, search, compare files
     - User Interaction: Clarification questions
     - HITL: Checkpoints, approvals, and review workflows
 
