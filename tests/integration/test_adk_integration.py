@@ -470,7 +470,7 @@ class TestParseRetryDelay:
 
 
 class TestTaskProgressAutoClean:
-    """Tests for auto-clear when all tasks are done and clear_ephemeral_stores."""
+    """Tests for auto-clear when all tasks are done and plan-based progress."""
 
     def test_auto_clears_when_all_done(self, mock_settings):
         """When all tasks are completed, emit final event then clear store."""
@@ -514,32 +514,35 @@ class TestTaskProgressAutoClean:
         assert event is not None
         assert not store.is_empty()
 
-    def test_clear_ephemeral_stores(self, mock_settings):
-        """clear_ephemeral_stores() clears both task store and plan store."""
-        from agentic_cli.tools.task_tools import TaskStore
+    def test_plan_progress_after_save_plan(self, mock_settings):
+        """PlanStore with checkboxes emits TASK_PROGRESS when no TaskStore."""
         from agentic_cli.tools.planning_tools import PlanStore
 
-        task_store = TaskStore(mock_settings)
-        task_store.replace_all([{"description": "Task"}])
-
         plan_store = PlanStore()
-        plan_store.save("My plan")
+        plan_store.save(
+            "## Setup\n"
+            "- [x] Install deps\n"
+            "- [ ] Configure env\n"
+            "\n"
+            "## Build\n"
+            "- [ ] Compile\n"
+        )
 
-        mgr = _create_manager(mock_settings, [AgentConfig(name="test", prompt="test")])
-        mgr._task_store = task_store
-        mgr._task_graph = plan_store
-
-        mgr.clear_ephemeral_stores()
-
-        assert task_store.is_empty()
-        assert plan_store.is_empty()
-
-    def test_clear_ephemeral_stores_none_stores(self, mock_settings):
-        """clear_ephemeral_stores() with None stores does not raise."""
         mgr = _create_manager(mock_settings, [AgentConfig(name="test", prompt="test")])
         mgr._task_store = None
-        mgr._task_graph = None
-        mgr.clear_ephemeral_stores()  # should not raise
+        mgr._task_graph = plan_store
+
+        event = mgr._emit_task_progress_event()
+        assert event is not None
+        assert event.type == EventType.TASK_PROGRESS
+        assert "Setup:" in event.content
+        assert "[x] Install deps" in event.content
+        assert "[ ] Configure env" in event.content
+        assert "Build:" in event.content
+        assert "[ ] Compile" in event.content
+        assert event.metadata["progress"]["total"] == 3
+        assert event.metadata["progress"]["completed"] == 1
+        assert event.metadata["progress"]["pending"] == 2
 
 
 class TestMessageProcessorRateLimit:

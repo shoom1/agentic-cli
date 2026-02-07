@@ -18,7 +18,6 @@ Example:
     )
 """
 
-import json
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -35,7 +34,7 @@ from agentic_cli.workflow.context import get_context_task_store
 
 
 # ---------------------------------------------------------------------------
-# TaskItem / TaskStore – simple file-based task persistence
+# TaskItem / TaskStore – in-memory task tracking
 # ---------------------------------------------------------------------------
 
 
@@ -76,9 +75,9 @@ class TaskItem:
 
 
 class TaskStore:
-    """Simple persistent task store using bulk replacement.
+    """In-memory task store using bulk replacement.
 
-    Stores tasks in a JSON file in the workspace directory.
+    Tasks are ephemeral within a session — no file persistence.
     The LLM writes the full task list each time via replace_all().
 
     Example:
@@ -92,32 +91,10 @@ class TaskStore:
 
     def __init__(self, settings: BaseSettings) -> None:
         self._settings = settings
-        self._tasks_dir = settings.workspace_dir / "tasks"
-        self._storage_path = self._tasks_dir / "tasks.json"
         self._items: dict[str, TaskItem] = {}
-        self._load()
-
-    def _load(self) -> None:
-        if self._storage_path.exists():
-            try:
-                with open(self._storage_path, "r") as f:
-                    data = json.load(f)
-                for item_data in data.get("items", []):
-                    item = TaskItem.from_dict(item_data)
-                    self._items[item.id] = item
-            except (json.JSONDecodeError, KeyError):
-                self._items = {}
-
-    def _save(self) -> None:
-        self._tasks_dir.mkdir(parents=True, exist_ok=True)
-        data = {"items": [item.to_dict() for item in self._items.values()]}
-        tmp_path = self._storage_path.with_suffix(".tmp")
-        with open(tmp_path, "w") as f:
-            json.dump(data, f, indent=2)
-        tmp_path.rename(self._storage_path)
 
     def replace_all(self, tasks: list[dict[str, Any]]) -> list[str]:
-        """Replace the entire task list atomically.
+        """Replace the entire task list.
 
         Each dict must have "description" and "status". Optional keys:
         "id" (preserved if provided), "priority", "tags".
@@ -149,7 +126,6 @@ class TaskStore:
             )
             self._items[task_id] = item
             ids.append(task_id)
-        self._save()
         return ids
 
     def get(self, task_id: str) -> TaskItem | None:
@@ -186,10 +162,8 @@ class TaskStore:
         return not self._items
 
     def clear(self) -> None:
-        """Clear all tasks from memory and delete the backing file."""
+        """Clear all tasks from memory."""
         self._items.clear()
-        if self._storage_path.exists():
-            self._storage_path.unlink()
 
     def all_done(self) -> bool:
         """Check if all tasks are in a terminal state (completed/cancelled).
