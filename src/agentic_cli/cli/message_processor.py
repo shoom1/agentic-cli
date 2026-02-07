@@ -7,6 +7,7 @@ This module provides:
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -183,120 +184,148 @@ class MessageProcessor:
 
             return "\n".join(lines)
 
-        try:
-            ui.start_thinking(get_status)
-            thinking_started = True
+        while True:
+            try:
+                ui.start_thinking(get_status)
+                thinking_started = True
 
-            workflow = workflow_controller.workflow
-            async for event in workflow.process(
-                message=message,
-                user_id=settings.default_user,
-            ):
-                if event.type == EventType.TEXT:
-                    # Stream response directly to console
-                    ui.add_response(event.content, markdown=True)
-                    response_content.append(event.content)
+                workflow = workflow_controller.workflow
+                async for event in workflow.process(
+                    message=message,
+                    user_id=settings.default_user,
+                ):
+                    if event.type == EventType.TEXT:
+                        # Stream response directly to console
+                        ui.add_response(event.content, markdown=True)
+                        response_content.append(event.content)
 
-                elif event.type == EventType.THINKING:
-                    # Stream thinking to console only if verbose_thinking is enabled
-                    status_line = "Thinking..."
-                    if settings.verbose_thinking:
-                        ui.add_message("system", event.content)
-                    thinking_content.append(event.content)
+                    elif event.type == EventType.THINKING:
+                        # Stream thinking to console only if verbose_thinking is enabled
+                        status_line = "Thinking..."
+                        if settings.verbose_thinking:
+                            ui.add_message("system", event.content)
+                        thinking_content.append(event.content)
 
-                elif event.type == EventType.TOOL_CALL:
-                    # Update status line in thinking box
-                    tool_name = event.metadata.get("tool_name", "unknown")
-                    status_line = f"Calling: {tool_name}"
+                    elif event.type == EventType.TOOL_CALL:
+                        # Update status line in thinking box
+                        tool_name = event.metadata.get("tool_name", "unknown")
+                        status_line = f"Calling: {tool_name}"
 
-                elif event.type == EventType.TOOL_RESULT:
-                    # Display tool result summary
-                    tool_name = event.metadata.get("tool_name", "unknown")
-                    success = event.metadata.get("success", True)
-                    duration = event.metadata.get("duration_ms")
-                    icon = "+" if success else "x"
-                    duration_str = f" ({duration}ms)" if duration else ""
-                    status_line = f"{icon} {tool_name}: {event.content}{duration_str}"
-                    # Also show in message area for visibility
-                    style = "green" if success else "red"
-                    ui.add_rich(
-                        f"[{style}]{icon}[/{style}] {tool_name}: {event.content}{duration_str}"
+                    elif event.type == EventType.TOOL_RESULT:
+                        # Display tool result summary
+                        tool_name = event.metadata.get("tool_name", "unknown")
+                        success = event.metadata.get("success", True)
+                        duration = event.metadata.get("duration_ms")
+                        icon = "+" if success else "x"
+                        duration_str = f" ({duration}ms)" if duration else ""
+                        status_line = f"{icon} {tool_name}: {event.content}{duration_str}"
+                        # Also show in message area for visibility
+                        style = "green" if success else "red"
+                        ui.add_rich(
+                            f"[{style}]{icon}[/{style}] {tool_name}: {event.content}{duration_str}"
+                        )
+
+                    elif event.type == EventType.USER_INPUT_REQUIRED:
+                        # Pause thinking, prompt user, resume
+                        if thinking_started:
+                            ui.finish_thinking(add_to_history=False)
+                            thinking_started = False
+
+                        response = await self._prompt_user_input(event, workflow, ui)
+                        workflow.provide_user_input(
+                            event.metadata["request_id"],
+                            response,
+                        )
+
+                        # Resume thinking box
+                        ui.start_thinking(get_status)
+                        thinking_started = True
+
+                    elif event.type == EventType.CODE_EXECUTION:
+                        # Update status with execution result
+                        result_preview = (
+                            event.content[:40] + "..."
+                            if len(event.content) > 40
+                            else event.content
+                        )
+                        status_line = f"Result: {result_preview}"
+
+                    elif event.type == EventType.EXECUTABLE_CODE:
+                        # Update status when executing code
+                        lang = event.metadata.get("language", "python")
+                        status_line = f"Running {lang} code..."
+
+                    elif event.type == EventType.FILE_DATA:
+                        # Update status with file info
+                        status_line = f"File: {event.content}"
+
+                    elif event.type == EventType.TASK_PROGRESS:
+                        # Task progress update - event.content has compact display,
+                        # event.metadata has progress stats
+                        progress = event.metadata.get("progress", {})
+                        if progress.get("total", 0) > 0:
+                            completed = progress.get("completed", 0)
+                            total = progress["total"]
+                            # Build display: separator + task list
+                            task_progress_display = f"--- Tasks: {completed}/{total} ---"
+                            if event.content:
+                                task_progress_display += f"\n{event.content}"
+
+                        # Update status line with current task if available
+                        current_task = event.metadata.get("current_task_description")
+                        if current_task:
+                            status_line = f"Working on: {current_task}"
+
+                # Finish thinking box (don't add status to history)
+                if thinking_started:
+                    ui.finish_thinking(add_to_history=False)
+
+                # Add accumulated content to message history (if logging enabled)
+                if settings.log_activity:
+                    if thinking_content:
+                        self._message_history.add(
+                            "".join(thinking_content), MessageType.THINKING
+                        )
+                    if response_content:
+                        self._message_history.add(
+                            "".join(response_content), MessageType.ASSISTANT
+                        )
+
+                logger.debug("message_handled_successfully")
+                break  # Success — exit retry loop
+
+            except Exception as e:
+                if thinking_started:
+                    ui.finish_thinking(add_to_history=False)
+                    thinking_started = False
+
+                # Check for 429 rate limit errors — prompt user to wait and retry
+                from agentic_cli.workflow.adk_manager import (
+                    _is_rate_limit_error,
+                    _parse_retry_delay,
+                )
+
+                if _is_rate_limit_error(e):
+                    delay = _parse_retry_delay(e) or 60.0
+                    retry = await ui.yes_no_dialog(
+                        title="Rate Limited",
+                        text=f"API rate limit reached. Retry in {delay:.0f}s?",
                     )
+                    if retry:
+                        ui.add_warning(f"Waiting {delay:.0f}s before retrying...")
+                        await asyncio.sleep(delay)
+                        # Reset state for retry
+                        status_line = "Processing..."
+                        task_progress_display = None
+                        thinking_content.clear()
+                        response_content.clear()
+                        continue  # Retry the loop
 
-                elif event.type == EventType.USER_INPUT_REQUIRED:
-                    # Pause thinking, prompt user, resume
-                    if thinking_started:
-                        ui.finish_thinking(add_to_history=False)
-                        thinking_started = False
-
-                    response = await self._prompt_user_input(event, workflow, ui)
-                    workflow.provide_user_input(
-                        event.metadata["request_id"],
-                        response,
-                    )
-
-                    # Resume thinking box
-                    ui.start_thinking(get_status)
-                    thinking_started = True
-
-                elif event.type == EventType.CODE_EXECUTION:
-                    # Update status with execution result
-                    result_preview = (
-                        event.content[:40] + "..."
-                        if len(event.content) > 40
-                        else event.content
-                    )
-                    status_line = f"Result: {result_preview}"
-
-                elif event.type == EventType.EXECUTABLE_CODE:
-                    # Update status when executing code
-                    lang = event.metadata.get("language", "python")
-                    status_line = f"Running {lang} code..."
-
-                elif event.type == EventType.FILE_DATA:
-                    # Update status with file info
-                    status_line = f"File: {event.content}"
-
-                elif event.type == EventType.TASK_PROGRESS:
-                    # Task progress update - event.content has compact display,
-                    # event.metadata has progress stats
-                    progress = event.metadata.get("progress", {})
-                    if progress.get("total", 0) > 0:
-                        completed = progress.get("completed", 0)
-                        total = progress["total"]
-                        # Build display: separator + task list
-                        task_progress_display = f"--- Tasks: {completed}/{total} ---"
-                        if event.content:
-                            task_progress_display += f"\n{event.content}"
-
-                    # Update status line with current task if available
-                    current_task = event.metadata.get("current_task_description")
-                    if current_task:
-                        status_line = f"Working on: {current_task}"
-
-            # Finish thinking box (don't add status to history)
-            if thinking_started:
-                ui.finish_thinking(add_to_history=False)
-
-            # Add accumulated content to message history (if logging enabled)
-            if settings.log_activity:
-                if thinking_content:
-                    self._message_history.add(
-                        "".join(thinking_content), MessageType.THINKING
-                    )
-                if response_content:
-                    self._message_history.add(
-                        "".join(response_content), MessageType.ASSISTANT
-                    )
-
-            logger.debug("message_handled_successfully")
-
-        except Exception as e:
-            if thinking_started:
-                ui.finish_thinking(add_to_history=False)
-            ui.add_error(f"Workflow error: {e}")
-            if settings.log_activity:
-                self._message_history.add(str(e), MessageType.ERROR)
+                # Non-429 or user chose cancel
+                ui.add_error(f"Workflow error: {e}")
+                if settings.log_activity:
+                    self._message_history.add(str(e), MessageType.ERROR)
+                break
 
     async def _prompt_user_input(
         self,
