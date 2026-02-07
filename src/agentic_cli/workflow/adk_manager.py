@@ -10,6 +10,7 @@ For alternative orchestration backends (e.g., LangGraph), see the base_manager m
 
 from __future__ import annotations
 
+import re
 from typing import AsyncGenerator, Any, Callable
 
 from google.genai import types
@@ -33,6 +34,44 @@ from agentic_cli.constants import truncate, TOOL_SUMMARY_MAX_LENGTH
 from agentic_cli.logging import Loggers, bind_context
 
 logger = Loggers.workflow()
+
+
+def _is_rate_limit_error(error: Exception) -> bool:
+    """Check if an exception is a 429 rate-limit / RESOURCE_EXHAUSTED error."""
+    if getattr(error, "code", None) == 429:
+        return True
+    if "RESOURCE_EXHAUSTED" in str(error):
+        return True
+    return False
+
+
+def _parse_retry_delay(error: Exception) -> float | None:
+    """Extract retry delay in seconds from a rate-limit error.
+
+    Looks for retryDelay in the structured error details first,
+    then falls back to regex on the error message string.
+
+    Returns:
+        Delay in seconds, or None if unparseable.
+    """
+    # Try structured details: error.details["error"]["details"][*]["retryDelay"]
+    details = getattr(error, "details", None)
+    if isinstance(details, dict):
+        inner_error = details.get("error", {})
+        for detail_entry in inner_error.get("details", []):
+            if isinstance(detail_entry, dict):
+                retry_delay = detail_entry.get("retryDelay")
+                if retry_delay:
+                    match = re.search(r"([\d.]+)\s*s", str(retry_delay))
+                    if match:
+                        return float(match.group(1))
+
+    # Fallback: regex on error message string
+    match = re.search(r"retry\s+in\s+([\d.]+)\s*s", str(error), re.IGNORECASE)
+    if match:
+        return float(match.group(1))
+
+    return None
 
 
 class ADKSummarizer:
@@ -340,6 +379,8 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             retry_options=types.HttpRetryOptions(
                 initial_delay=self._settings.retry_initial_delay,
                 attempts=self._settings.retry_max_attempts,
+                exp_base=self._settings.retry_backoff_factor,
+                http_status_codes=[500, 502, 503, 504],  # Don't auto-retry 429
             )
         )
         return types.GenerateContentConfig(http_options=http_options)

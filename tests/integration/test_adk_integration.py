@@ -17,7 +17,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from agentic_cli.workflow.adk_manager import GoogleADKWorkflowManager
+from agentic_cli.workflow.adk_manager import (
+    GoogleADKWorkflowManager,
+    _is_rate_limit_error,
+    _parse_retry_delay,
+)
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.events import EventType, WorkflowEvent
 
@@ -394,3 +398,219 @@ class TestADKUsageMetadata:
         assert len(usage_events) == 1
         assert usage_events[0].metadata["prompt_tokens"] == 100
         assert usage_events[0].metadata["completion_tokens"] == 50
+
+
+# ---------------------------------------------------------------------------
+# Rate limit helper tests
+# ---------------------------------------------------------------------------
+
+
+class TestIsRateLimitError:
+    """Tests for _is_rate_limit_error helper."""
+
+    def test_rate_limit_error_by_code(self):
+        """ClientError with code=429 is detected."""
+        error = Exception("Too many requests")
+        error.code = 429
+        assert _is_rate_limit_error(error) is True
+
+    def test_rate_limit_error_by_status_string(self):
+        """Error containing RESOURCE_EXHAUSTED is detected."""
+        error = Exception("RESOURCE_EXHAUSTED: quota exceeded")
+        assert _is_rate_limit_error(error) is True
+
+    def test_non_rate_limit_error_500(self):
+        """Server error (500) is not a rate limit error."""
+        error = Exception("Internal server error")
+        error.code = 500
+        assert _is_rate_limit_error(error) is False
+
+    def test_non_rate_limit_generic(self):
+        """Generic exception is not a rate limit error."""
+        error = ValueError("something went wrong")
+        assert _is_rate_limit_error(error) is False
+
+
+class TestParseRetryDelay:
+    """Tests for _parse_retry_delay helper."""
+
+    def test_parse_delay_from_details(self):
+        """Extracts delay from structured error.details."""
+        error = Exception("rate limited")
+        error.details = {
+            "error": {
+                "details": [
+                    {"retryDelay": "41s"},
+                ]
+            }
+        }
+        assert _parse_retry_delay(error) == 41.0
+
+    def test_parse_delay_from_message(self):
+        """Extracts delay from error message string."""
+        error = Exception("Please retry in 2.5s")
+        assert _parse_retry_delay(error) == 2.5
+
+    def test_parse_delay_none_for_generic(self):
+        """Returns None for generic exception without delay info."""
+        error = Exception("something failed")
+        assert _parse_retry_delay(error) is None
+
+    def test_parse_delay_from_details_float(self):
+        """Handles float seconds in retryDelay field."""
+        error = Exception("rate limited")
+        error.details = {
+            "error": {
+                "details": [
+                    {"retryDelay": "10.5s"},
+                ]
+            }
+        }
+        assert _parse_retry_delay(error) == 10.5
+
+
+class TestMessageProcessorRateLimit:
+    """Tests that MessageProcessor handles 429 errors with user prompt."""
+
+    async def test_rate_limit_retry_on_user_accept(self):
+        """When user accepts retry, processor waits and retries."""
+        from agentic_cli.cli.message_processor import MessageProcessor
+
+        processor = MessageProcessor()
+
+        # Mock workflow controller
+        workflow_controller = MagicMock()
+        workflow_controller.ensure_initialized = AsyncMock(return_value=True)
+
+        # First call raises 429, second call succeeds
+        call_count = 0
+
+        async def mock_process(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                error = Exception("RESOURCE_EXHAUSTED: retry in 5s")
+                error.code = 429
+                raise error
+            # Second call: yield a text event
+            yield WorkflowEvent.text("Success!", "session")
+
+        mock_workflow = MagicMock()
+        mock_workflow.process = mock_process
+        workflow_controller.workflow = mock_workflow
+
+        # Mock UI
+        ui = MagicMock()
+        ui.start_thinking = MagicMock()
+        ui.finish_thinking = MagicMock()
+        ui.add_response = MagicMock()
+        ui.add_warning = MagicMock()
+        ui.add_error = MagicMock()
+        ui.add_rich = MagicMock()
+        ui.yes_no_dialog = AsyncMock(return_value=True)  # User accepts retry
+
+        # Mock settings
+        settings = MagicMock()
+        settings.default_user = "test-user"
+        settings.log_activity = False
+        settings.verbose_thinking = False
+
+        with patch("agentic_cli.cli.message_processor.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            await processor.process(
+                message="test",
+                workflow_controller=workflow_controller,
+                ui=ui,
+                settings=settings,
+            )
+
+        # Verify retry happened
+        assert call_count == 2
+        ui.yes_no_dialog.assert_called_once()
+        mock_sleep.assert_called_once_with(5.0)
+        ui.add_warning.assert_called_once()
+        # Success path should have been reached
+        ui.add_response.assert_called_once_with("Success!", markdown=True)
+        ui.add_error.assert_not_called()
+
+    async def test_rate_limit_cancel_on_user_decline(self):
+        """When user declines retry, processor shows error and stops."""
+        from agentic_cli.cli.message_processor import MessageProcessor
+
+        processor = MessageProcessor()
+
+        workflow_controller = MagicMock()
+        workflow_controller.ensure_initialized = AsyncMock(return_value=True)
+
+        async def mock_process(**kwargs):
+            error = Exception("RESOURCE_EXHAUSTED: retry in 30s")
+            error.code = 429
+            raise error
+            yield  # make it an async generator  # noqa: E501
+
+        mock_workflow = MagicMock()
+        mock_workflow.process = mock_process
+        workflow_controller.workflow = mock_workflow
+
+        ui = MagicMock()
+        ui.start_thinking = MagicMock()
+        ui.finish_thinking = MagicMock()
+        ui.add_error = MagicMock()
+        ui.add_rich = MagicMock()
+        ui.yes_no_dialog = AsyncMock(return_value=False)  # User declines
+
+        settings = MagicMock()
+        settings.default_user = "test-user"
+        settings.log_activity = False
+        settings.verbose_thinking = False
+
+        await processor.process(
+            message="test",
+            workflow_controller=workflow_controller,
+            ui=ui,
+            settings=settings,
+        )
+
+        ui.yes_no_dialog.assert_called_once()
+        ui.add_error.assert_called_once()
+        assert "Workflow error" in ui.add_error.call_args[0][0]
+
+    async def test_non_rate_limit_error_not_retried(self):
+        """Non-429 errors are not retried, shown as workflow error."""
+        from agentic_cli.cli.message_processor import MessageProcessor
+
+        processor = MessageProcessor()
+
+        workflow_controller = MagicMock()
+        workflow_controller.ensure_initialized = AsyncMock(return_value=True)
+
+        async def mock_process(**kwargs):
+            raise RuntimeError("Something broke")
+            yield  # noqa: E501
+
+        mock_workflow = MagicMock()
+        mock_workflow.process = mock_process
+        workflow_controller.workflow = mock_workflow
+
+        ui = MagicMock()
+        ui.start_thinking = MagicMock()
+        ui.finish_thinking = MagicMock()
+        ui.add_error = MagicMock()
+        ui.add_rich = MagicMock()
+        ui.yes_no_dialog = AsyncMock()
+
+        settings = MagicMock()
+        settings.default_user = "test-user"
+        settings.log_activity = False
+        settings.verbose_thinking = False
+
+        await processor.process(
+            message="test",
+            workflow_controller=workflow_controller,
+            ui=ui,
+            settings=settings,
+        )
+
+        # Should NOT prompt user for retry
+        ui.yes_no_dialog.assert_not_called()
+        ui.add_error.assert_called_once()
+        assert "Something broke" in ui.add_error.call_args[0][0]
