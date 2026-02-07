@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import pytest
 
-from agentic_cli.tasks.store import TaskStore, TaskItem
+from agentic_cli.tools.task_tools import TaskStore, TaskItem
 
 
 class TestTaskItem:
@@ -186,7 +186,7 @@ class TestTaskTools:
     """Tests for save_tasks and get_tasks tool functions."""
 
     def test_save_tasks_create(self, mock_context):
-        from agentic_cli.tasks.store import TaskStore
+        from agentic_cli.tools.task_tools import TaskStore
         from agentic_cli.tools.task_tools import save_tasks
         from agentic_cli.workflow.context import set_context_task_store
 
@@ -200,7 +200,7 @@ class TestTaskTools:
             token.var.reset(token)
 
     def test_save_tasks_create_missing_description(self, mock_context):
-        from agentic_cli.tasks.store import TaskStore
+        from agentic_cli.tools.task_tools import TaskStore
         from agentic_cli.tools.task_tools import save_tasks
         from agentic_cli.workflow.context import set_context_task_store
 
@@ -214,7 +214,7 @@ class TestTaskTools:
             token.var.reset(token)
 
     def test_save_tasks_update(self, mock_context):
-        from agentic_cli.tasks.store import TaskStore
+        from agentic_cli.tools.task_tools import TaskStore
         from agentic_cli.tools.task_tools import save_tasks
         from agentic_cli.workflow.context import set_context_task_store
 
@@ -229,7 +229,7 @@ class TestTaskTools:
             token.var.reset(token)
 
     def test_save_tasks_delete(self, mock_context):
-        from agentic_cli.tasks.store import TaskStore
+        from agentic_cli.tools.task_tools import TaskStore
         from agentic_cli.tools.task_tools import save_tasks
         from agentic_cli.workflow.context import set_context_task_store
 
@@ -244,7 +244,7 @@ class TestTaskTools:
             token.var.reset(token)
 
     def test_save_tasks_unknown_operation(self, mock_context):
-        from agentic_cli.tasks.store import TaskStore
+        from agentic_cli.tools.task_tools import TaskStore
         from agentic_cli.tools.task_tools import save_tasks
         from agentic_cli.workflow.context import set_context_task_store
 
@@ -270,7 +270,7 @@ class TestTaskTools:
             token.var.reset(token)
 
     def test_get_tasks(self, mock_context):
-        from agentic_cli.tasks.store import TaskStore
+        from agentic_cli.tools.task_tools import TaskStore
         from agentic_cli.tools.task_tools import get_tasks
         from agentic_cli.workflow.context import set_context_task_store
 
@@ -287,7 +287,7 @@ class TestTaskTools:
             token.var.reset(token)
 
     def test_get_tasks_with_filter(self, mock_context):
-        from agentic_cli.tasks.store import TaskStore
+        from agentic_cli.tools.task_tools import TaskStore
         from agentic_cli.tools.task_tools import get_tasks
         from agentic_cli.workflow.context import set_context_task_store
 

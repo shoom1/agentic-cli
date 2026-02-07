@@ -412,10 +412,10 @@ class TestSettingsValidation:
 def test_package_exports_new_modules():
     """Test that new modules are exported from package."""
     # Memory
-    from agentic_cli.memory import MemoryStore, MemoryItem
+    from agentic_cli.tools.memory_tools import MemoryStore, MemoryItem
 
     # Planning
-    from agentic_cli.planning import PlanStore
+    from agentic_cli.tools.planning_tools import PlanStore
 
     # HITL
     from agentic_cli.hitl import HITLConfig, ApprovalManager, CheckpointManager
