@@ -9,6 +9,7 @@ from agentic_cli.workflow import AgentConfig
 from agentic_cli.tools import (
     memory_tools,
     planning_tools,
+    task_tools,
     hitl_tools,
     web_search,
     web_fetch,
@@ -42,6 +43,10 @@ RESEARCH_AGENT_PROMPT = """You are a research assistant with memory, planning, k
 **Planning**
 - `save_plan(content)` - Save or update your task plan (use markdown checkboxes)
 - `get_plan()` - Retrieve the current plan
+
+**Task Management**
+- `save_tasks(operation, description, task_id, status, priority, tags)` - Create, update, or delete tasks
+- `get_tasks(status, priority, tag)` - List tasks with optional filters
 
 **Knowledge Base**
 - `search_knowledge_base(query, limit)` - Search ingested documents for relevant info
@@ -131,6 +136,9 @@ AGENT_CONFIGS = [
             # Planning (2 tools)
             planning_tools.save_plan,
             planning_tools.get_plan,
+            # Task management (2 tools)
+            task_tools.save_tasks,
+            task_tools.get_tasks,
             # HITL (2 tools)
             hitl_tools.request_approval,
             hitl_tools.create_checkpoint,
@@ -156,6 +164,6 @@ AGENT_CONFIGS = [
             # App-specific shell tool
             run_safe_command,
         ],
-        description="Research assistant with memory, planning, knowledge base, and HITL capabilities",
+        description="Research assistant with memory, planning, task management, knowledge base, and HITL capabilities",
     ),
 ]

@@ -68,15 +68,11 @@ def read_finding(filename: str) -> dict[str, Any]:
         return {"success": False, "error": "Settings not available"}
 
     from agentic_cli.tools.file_read import read_file
-    from agentic_cli.tools.registry import ToolError
 
     findings_dir = settings.workspace_dir / "findings"
     file_path = findings_dir / filename
 
-    try:
-        return read_file(str(file_path))
-    except ToolError as e:
-        return {"success": False, "error": e.message}
+    return read_file(str(file_path))
 
 
 def list_findings() -> dict[str, Any]:
@@ -90,7 +86,6 @@ def list_findings() -> dict[str, Any]:
         return {"success": False, "error": "Settings not available"}
 
     from agentic_cli.tools.glob_tool import list_dir
-    from agentic_cli.tools.registry import ToolError
 
     findings_dir = settings.workspace_dir / "findings"
 
@@ -103,10 +98,7 @@ def list_findings() -> dict[str, Any]:
             "total": 0,
         }
 
-    try:
-        return list_dir(str(findings_dir))
-    except ToolError as e:
-        return {"success": False, "error": e.message}
+    return list_dir(str(findings_dir))
 
 
 def compare_versions(file_a: str, file_b: str) -> dict[str, Any]:

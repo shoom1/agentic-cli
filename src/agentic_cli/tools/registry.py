@@ -51,12 +51,6 @@ class ToolCategory(Enum):
     # Human interaction
     INTERACTION = "interaction"  # ask_clarification, request_approval
 
-    # Legacy categories (deprecated, use specific categories above)
-    SEARCH = "search"  # Deprecated: use KNOWLEDGE or NETWORK
-    COMMUNICATION = "communication"  # Deprecated: use INTERACTION
-    FILE = "file"  # Deprecated: use READ or WRITE
-    ANALYSIS = "analysis"  # Deprecated: use appropriate category
-    SYSTEM = "system"  # Deprecated: use EXECUTION
     OTHER = "other"
 
 

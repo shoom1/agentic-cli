@@ -30,7 +30,7 @@ from agentic_cli.workflow.events import UserInputRequest, InputType
 @register_tool(
     category=ToolCategory.INTERACTION,
     permission_level=PermissionLevel.SAFE,
-    description="Request user approval before proceeding (blocks until resolved)",
+    description="Request user approval before a risky or consequential action. Blocks execution until the user approves or rejects. Use this for destructive operations, external API calls, or anything that can't be easily undone.",
 )
 @requires("approval_manager")
 async def request_approval(
@@ -80,7 +80,7 @@ async def request_approval(
 @register_tool(
     category=ToolCategory.INTERACTION,
     permission_level=PermissionLevel.SAFE,
-    description="Create a review checkpoint for the user (blocks until reviewed)",
+    description="Create a review checkpoint presenting draft content to the user. Blocks until the user reviews and responds (continue/edit/abort). Use this for draft summaries, reports, or code that should be reviewed before finalizing.",
 )
 @requires("checkpoint_manager")
 async def create_checkpoint(

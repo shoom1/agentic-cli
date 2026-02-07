@@ -29,7 +29,7 @@ from agentic_cli.workflow.context import get_context_memory_manager
 @register_tool(
     category=ToolCategory.MEMORY,
     permission_level=PermissionLevel.SAFE,
-    description="Save information to persistent memory (survives across sessions)",
+    description="Save information to persistent memory that survives across sessions. Use this to remember user preferences, important facts, or learnings for future conversations.",
 )
 @requires("memory_manager")
 def save_memory(
@@ -63,7 +63,7 @@ def save_memory(
 @register_tool(
     category=ToolCategory.MEMORY,
     permission_level=PermissionLevel.SAFE,
-    description="Search persistent memory for stored information",
+    description="Search persistent memory by keyword/substring. Use this to recall previously saved facts, preferences, or learnings.",
 )
 @requires("memory_manager")
 def search_memory(

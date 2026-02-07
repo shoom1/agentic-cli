@@ -19,72 +19,70 @@ from agentic_cli.tools.registry import (
 )
 
 if TYPE_CHECKING:
-    from agentic_cli.config import BaseSettings
     from agentic_cli.knowledge_base import KnowledgeBaseManager
 
 
-def _get_knowledge_base_manager(
-    settings: "BaseSettings | None" = None,
-) -> "KnowledgeBaseManager":
+def _get_knowledge_base_manager() -> "KnowledgeBaseManager":
     """Factory function to create a KnowledgeBaseManager instance.
 
     Eliminates duplication of KB manager instantiation across tools.
-
-    Args:
-        settings: Optional settings instance. Uses get_settings() if not provided.
+    Uses context settings via get_settings().
 
     Returns:
         Configured KnowledgeBaseManager instance
     """
     from agentic_cli.knowledge_base import KnowledgeBaseManager
 
-    resolved_settings = settings or get_settings()
+    settings = get_settings()
     return KnowledgeBaseManager(
-        settings=resolved_settings,
-        use_mock=resolved_settings.knowledge_base_use_mock,
+        settings=settings,
+        use_mock=settings.knowledge_base_use_mock,
     )
 
 
 @register_tool(
     category=ToolCategory.KNOWLEDGE,
     permission_level=PermissionLevel.SAFE,
-    description="Search the knowledge base for relevant information",
+    description="Search the local knowledge base for relevant documents using semantic similarity. Use this when you need to find previously ingested papers, notes, or documents.",
 )
 def search_knowledge_base(
     query: str,
-    filters: dict | None = None,
+    filters: str = "",
     top_k: int = 10,
-    *,
-    settings: "BaseSettings | None" = None,
 ) -> dict[str, Any]:
     """Search the knowledge base for relevant information.
 
     Args:
         query: Natural language search query
-        filters: Optional filters (source_type, date_from, date_to)
+        filters: Optional JSON string with filters (e.g. '{"source_type": "arxiv", "date_from": "2024-01-01"}')
         top_k: Maximum number of results
-        settings: Optional settings instance for explicit dependency injection.
-                  If not provided, uses the current context settings.
 
     Returns:
         Dictionary with search results and timing information
     """
-    kb = _get_knowledge_base_manager(settings)
-    return kb.search(query, filters=filters, top_k=top_k)
+    import json as _json
+
+    parsed_filters = None
+    if filters:
+        try:
+            parsed_filters = _json.loads(filters)
+        except _json.JSONDecodeError:
+            return {"success": False, "error": f"Invalid JSON in filters: {filters}"}
+
+    kb = _get_knowledge_base_manager()
+    return kb.search(query, filters=parsed_filters, top_k=top_k)
 
 
 @register_tool(
     category=ToolCategory.KNOWLEDGE,
     permission_level=PermissionLevel.CAUTION,
-    description="Ingest a document into the knowledge base",
+    description="Ingest a document into the knowledge base for later semantic search. Use this to store papers, articles, or notes for future reference.",
 )
 def ingest_to_knowledge_base(
     content: str,
     title: str,
     source_type: str = "user",
     source_url: str | None = None,
-    *,
-    settings: "BaseSettings | None" = None,
 ) -> dict[str, Any]:
     """Ingest a document into the knowledge base.
 
@@ -93,15 +91,13 @@ def ingest_to_knowledge_base(
         title: Document title
         source_type: Type of source (arxiv, web, user, internal)
         source_url: Optional URL of the source
-        settings: Optional settings instance for explicit dependency injection.
-                  If not provided, uses the current context settings.
 
     Returns:
         Dictionary with ingestion result
     """
     from agentic_cli.knowledge_base import SourceType
 
-    kb = _get_knowledge_base_manager(settings)
+    kb = _get_knowledge_base_manager()
 
     source = SourceType(source_type)
     doc = kb.ingest_document(
@@ -164,7 +160,7 @@ def _clean_arxiv_id(arxiv_id: str) -> str:
 @register_tool(
     category=ToolCategory.KNOWLEDGE,
     permission_level=PermissionLevel.SAFE,
-    description="Search arXiv for academic papers",
+    description="Search arXiv for academic papers by query, category, or date range. Use this to find research papers on a topic.",
 )
 def search_arxiv(
     query: str,
@@ -236,7 +232,7 @@ def search_arxiv(
 @register_tool(
     category=ToolCategory.KNOWLEDGE,
     permission_level=PermissionLevel.SAFE,
-    description="Fetch detailed information about a specific arXiv paper",
+    description="Fetch metadata for a specific arXiv paper by ID or URL (title, authors, abstract, categories). Use this when you have a paper ID and need details.",
 )
 def fetch_arxiv_paper(arxiv_id: str) -> dict[str, Any]:
     """Fetch detailed information about a specific arXiv paper.
@@ -293,7 +289,7 @@ def fetch_arxiv_paper(arxiv_id: str) -> dict[str, Any]:
 @register_tool(
     category=ToolCategory.KNOWLEDGE,
     permission_level=PermissionLevel.SAFE,
-    description="Analyze an arXiv paper using LLM-powered content extraction",
+    description="Analyze an arXiv paper's abstract page using LLM-powered content extraction. Use this when you need deeper analysis beyond metadata (e.g., key contributions, methodology).",
 )
 async def analyze_arxiv_paper(arxiv_id: str, prompt: str) -> dict[str, Any]:
     """Analyze an arXiv paper using LLM-powered content extraction.
@@ -338,38 +334,42 @@ async def analyze_arxiv_paper(arxiv_id: str, prompt: str) -> dict[str, Any]:
 @register_tool(
     category=ToolCategory.EXECUTION,
     permission_level=PermissionLevel.CAUTION,
-    description="Execute Python code safely in a sandboxed environment",
+    description="Execute Python code in a sandboxed environment with restricted imports. Use this for calculations, data processing, or prototyping. Only whitelisted modules (math, numpy, pandas, json, etc.) are available.",
 )
 def execute_python(
     code: str,
-    context: dict | None = None,
-    timeout_seconds: int | None = None,
-    *,
-    settings: "BaseSettings | None" = None,
+    context: str = "",
+    timeout_seconds: int = 30,
 ) -> dict[str, Any]:
     """Execute Python code safely.
 
     Args:
         code: Python code to execute
-        context: Optional variables to inject
-        timeout_seconds: Maximum execution time
-        settings: Optional settings instance for explicit dependency injection.
-                  If not provided, uses the current context settings.
+        context: Optional JSON string of variables to inject (e.g. '{"x": 5, "name": "test"}')
+        timeout_seconds: Maximum execution time in seconds
 
     Returns:
         Dictionary with execution results
     """
+    import json as _json
     from agentic_cli.tools.executor import SafePythonExecutor
 
-    resolved_settings = settings or get_settings()
-    executor = SafePythonExecutor(default_timeout=resolved_settings.python_executor_timeout)
-    return executor.execute(code, context=context, timeout_seconds=timeout_seconds)
+    parsed_context = None
+    if context:
+        try:
+            parsed_context = _json.loads(context)
+        except _json.JSONDecodeError:
+            return {"success": False, "error": f"Invalid JSON in context: {context}"}
+
+    settings = get_settings()
+    executor = SafePythonExecutor(default_timeout=settings.python_executor_timeout)
+    return executor.execute(code, context=parsed_context, timeout_seconds=timeout_seconds)
 
 
 @register_tool(
     category=ToolCategory.INTERACTION,
     permission_level=PermissionLevel.SAFE,
-    description="Ask the user for clarification",
+    description="Ask the user a clarifying question and wait for their response. Use this when requirements are ambiguous or you need user input to proceed.",
 )
 async def ask_clarification(
     question: str,

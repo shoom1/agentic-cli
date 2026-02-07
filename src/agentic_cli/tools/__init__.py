@@ -24,7 +24,7 @@ from typing import Callable, Literal, TypeVar
 
 # Type for manager requirements
 ManagerRequirement = Literal[
-    "memory_manager", "task_graph", "approval_manager", "checkpoint_manager", "llm_summarizer"
+    "memory_manager", "task_graph", "task_store", "approval_manager", "checkpoint_manager", "llm_summarizer"
 ]
 
 F = TypeVar("F", bound=Callable)
@@ -54,7 +54,7 @@ def requires(*managers: ManagerRequirement) -> Callable[[F], F]:
         return func
     return decorator
 
-from agentic_cli.tools.executor import SafePythonExecutor, MockPythonExecutor
+from agentic_cli.tools.executor import SafePythonExecutor, MockPythonExecutor, ExecutionTimeoutError
 from agentic_cli.tools.shell import shell_executor, is_shell_enabled
 
 # File operation tools - READ (safe)
@@ -110,6 +110,7 @@ __all__ = [
     # Executor classes
     "SafePythonExecutor",
     "MockPythonExecutor",
+    "ExecutionTimeoutError",
     # Shell executor
     "shell_executor",
     "is_shell_enabled",
@@ -139,6 +140,7 @@ __all__ = [
     # Framework tool modules (lazy loaded)
     "memory_tools",
     "planning_tools",
+    "task_tools",
     "hitl_tools",
 ]
 
@@ -147,6 +149,7 @@ __all__ = [
 _lazy_tool_modules = {
     "memory_tools": "agentic_cli.tools.memory_tools",
     "planning_tools": "agentic_cli.tools.planning_tools",
+    "task_tools": "agentic_cli.tools.task_tools",
     "hitl_tools": "agentic_cli.tools.hitl_tools",
 }
 

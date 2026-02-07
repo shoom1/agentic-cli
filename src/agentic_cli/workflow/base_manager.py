@@ -24,6 +24,7 @@ from agentic_cli.config import set_context_settings, set_context_workflow
 from agentic_cli.workflow.context import (
     set_context_memory_manager,
     set_context_task_graph,
+    set_context_task_store,
     set_context_approval_manager,
     set_context_checkpoint_manager,
     set_context_llm_summarizer,
@@ -34,6 +35,7 @@ if TYPE_CHECKING:
     from agentic_cli.config import BaseSettings
     from agentic_cli.memory import MemoryStore
     from agentic_cli.planning import PlanStore
+    from agentic_cli.tasks import TaskStore
     from agentic_cli.hitl import ApprovalManager, CheckpointManager
 
 logger = Loggers.workflow()
@@ -98,6 +100,7 @@ class BaseWorkflowManager(ABC):
         # Manager slots (created lazily by _ensure_managers_initialized)
         self._memory_manager: "MemoryStore | None" = None
         self._task_graph: "PlanStore | None" = None
+        self._task_store: "TaskStore | None" = None
         self._approval_manager: "ApprovalManager | None" = None
         self._checkpoint_manager: "CheckpointManager | None" = None
         self._llm_summarizer: Any | None = None
@@ -136,6 +139,11 @@ class BaseWorkflowManager(ABC):
     def task_graph(self) -> "PlanStore | None":
         """Get the plan store (if required by tools)."""
         return self._task_graph
+
+    @property
+    def task_store(self) -> "TaskStore | None":
+        """Get the task store (if required by tools)."""
+        return self._task_store
 
     @property
     def approval_manager(self) -> "ApprovalManager | None":
@@ -182,6 +190,10 @@ class BaseWorkflowManager(ABC):
             from agentic_cli.planning import PlanStore
             self._task_graph = PlanStore()
 
+        if "task_store" in self._required_managers and self._task_store is None:
+            from agentic_cli.tasks import TaskStore
+            self._task_store = TaskStore(self._settings)
+
         if "approval_manager" in self._required_managers and self._approval_manager is None:
             from agentic_cli.hitl import ApprovalManager
             self._approval_manager = ApprovalManager()
@@ -217,6 +229,7 @@ class BaseWorkflowManager(ABC):
             set_context_workflow(self),
             set_context_memory_manager(self._memory_manager),
             set_context_task_graph(self._task_graph),
+            set_context_task_store(self._task_store),
             set_context_approval_manager(self._approval_manager),
             set_context_checkpoint_manager(self._checkpoint_manager),
             set_context_llm_summarizer(self._llm_summarizer),

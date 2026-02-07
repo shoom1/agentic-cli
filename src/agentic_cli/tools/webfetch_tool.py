@@ -59,7 +59,7 @@ def get_or_create_fetcher(settings=None) -> ContentFetcher:
 @register_tool(
     category=ToolCategory.NETWORK,
     permission_level=PermissionLevel.SAFE,
-    description="Fetch web content and summarize it using an LLM",
+    description="Fetch a web page, convert it to markdown, and summarize it using an LLM based on your prompt. Use this to extract specific information from a URL (e.g., documentation, articles).",
 )
 @requires("llm_summarizer")
 async def web_fetch(url: str, prompt: str, timeout: int = 30) -> dict[str, Any]:

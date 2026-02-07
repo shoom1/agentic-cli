@@ -27,7 +27,7 @@ from agentic_cli.workflow.context import get_context_task_graph
 @register_tool(
     category=ToolCategory.PLANNING,
     permission_level=PermissionLevel.SAFE,
-    description="Save or update the task plan (use markdown checkboxes)",
+    description="Save or update the execution plan as markdown with checkboxes. Use this to record your strategy and track task completion (- [ ] pending, - [x] done).",
 )
 @requires("task_graph")
 def save_plan(content: str) -> dict[str, Any]:
@@ -58,7 +58,7 @@ def save_plan(content: str) -> dict[str, Any]:
 @register_tool(
     category=ToolCategory.PLANNING,
     permission_level=PermissionLevel.SAFE,
-    description="Retrieve the current plan",
+    description="Retrieve the current execution plan. Use this to check progress or review the plan before updating it.",
 )
 @requires("task_graph")
 def get_plan() -> dict[str, Any]:

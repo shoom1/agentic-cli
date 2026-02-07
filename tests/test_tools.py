@@ -6,16 +6,23 @@ from agentic_cli.tools.registry import ToolCategory
 
 
 def test_tool_category_has_new_categories():
-    """Test that ToolCategory includes new categories for framework enhancements."""
-    # New categories for P0/P1 features
+    """Test that ToolCategory includes current categories."""
+    # Current categories
     assert hasattr(ToolCategory, "MEMORY")
     assert hasattr(ToolCategory, "PLANNING")
-    assert hasattr(ToolCategory, "SYSTEM")
+    assert hasattr(ToolCategory, "INTERACTION")
 
     # Verify values
     assert ToolCategory.MEMORY.value == "memory"
     assert ToolCategory.PLANNING.value == "planning"
-    assert ToolCategory.SYSTEM.value == "system"
+    assert ToolCategory.OTHER.value == "other"
+
+    # Deprecated categories should be removed
+    assert not hasattr(ToolCategory, "SYSTEM")
+    assert not hasattr(ToolCategory, "FILE")
+    assert not hasattr(ToolCategory, "SEARCH")
+    assert not hasattr(ToolCategory, "COMMUNICATION")
+    assert not hasattr(ToolCategory, "ANALYSIS")
 
 
 from agentic_cli.tools.executor import (
@@ -467,14 +474,14 @@ class TestToolDefinition:
             name="search",
             description="Search tool",
             func=search,
-            category=ToolCategory.SEARCH,
+            category=ToolCategory.NETWORK,
             requires_api_key="SERPER_API_KEY",
             timeout_seconds=60,
             rate_limit=100,
             metadata={"version": "1.0"},
         )
 
-        assert definition.category == ToolCategory.SEARCH
+        assert definition.category == ToolCategory.NETWORK
         assert definition.requires_api_key == "SERPER_API_KEY"
         assert definition.timeout_seconds == 60
         assert definition.rate_limit == 100
@@ -500,27 +507,27 @@ class TestToolRegistry:
             """Multiply by two."""
             return x * 2
 
-        registry.register(my_tool, category=ToolCategory.ANALYSIS)
+        registry.register(my_tool, category=ToolCategory.KNOWLEDGE)
 
         assert len(registry) == 1
         assert "my_tool" in registry
         tool = registry.get("my_tool")
         assert tool is not None
         assert tool.description == "Multiply by two."
-        assert tool.category == ToolCategory.ANALYSIS
+        assert tool.category == ToolCategory.KNOWLEDGE
 
     def test_registry_register_decorator(self):
         """Test decorator registration."""
         registry = ToolRegistry()
 
-        @registry.register(category=ToolCategory.SEARCH)
+        @registry.register(category=ToolCategory.NETWORK)
         def search_tool(query: str) -> dict:
             """Search for things."""
             return {"results": []}
 
         assert len(registry) == 1
         assert "search_tool" in registry
-        assert registry.get("search_tool").category == ToolCategory.SEARCH
+        assert registry.get("search_tool").category == ToolCategory.NETWORK
 
     def test_registry_custom_name(self):
         """Test registration with custom name."""
@@ -556,11 +563,11 @@ class TestToolRegistry:
         """Test listing tools by category."""
         registry = ToolRegistry()
 
-        @registry.register(category=ToolCategory.SEARCH)
+        @registry.register(category=ToolCategory.NETWORK)
         def search1():
             pass
 
-        @registry.register(category=ToolCategory.SEARCH)
+        @registry.register(category=ToolCategory.NETWORK)
         def search2():
             pass
 
@@ -568,7 +575,7 @@ class TestToolRegistry:
         def execute():
             pass
 
-        search_tools = registry.list_by_category(ToolCategory.SEARCH)
+        search_tools = registry.list_by_category(ToolCategory.NETWORK)
         assert len(search_tools) == 2
 
         exec_tools = registry.list_by_category(ToolCategory.EXECUTION)
@@ -805,13 +812,12 @@ class TestReadFile:
         assert result["total_lines"] == 5
 
     def test_read_nonexistent_file(self, tmp_path):
-        """Test reading a non-existent file raises error."""
+        """Test reading a non-existent file returns error dict."""
         from agentic_cli.tools.file_read import read_file
-        from agentic_cli.tools.registry import ToolError
 
-        with pytest.raises(ToolError) as exc_info:
-            read_file(str(tmp_path / "nonexistent.txt"))
-        assert exc_info.value.error_code == "NOT_FOUND"
+        result = read_file(str(tmp_path / "nonexistent.txt"))
+        assert result["success"] is False
+        assert "not found" in result["error"].lower()
 
 
 class TestWriteFile:
@@ -892,15 +898,14 @@ class TestEditFile:
         assert test_file.read_text() == "fooNUMbarNUMbaz"
 
     def test_edit_file_text_not_found(self, tmp_path):
-        """Test editing raises error when text not found."""
+        """Test editing returns error dict when text not found."""
         from agentic_cli.tools.file_write import edit_file
-        from agentic_cli.tools.registry import ToolError
 
         test_file = tmp_path / "test.txt"
         test_file.write_text("Hello world")
-        with pytest.raises(ToolError) as exc_info:
-            edit_file(str(test_file), "notfound", "replacement")
-        assert exc_info.value.error_code == "NOT_FOUND"
+        result = edit_file(str(test_file), "notfound", "replacement")
+        assert result["success"] is False
+        assert "not found" in result["error"].lower()
 
 
 class TestGlob:

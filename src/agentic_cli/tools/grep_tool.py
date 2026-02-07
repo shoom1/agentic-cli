@@ -14,8 +14,6 @@ from typing import Any, Literal
 from agentic_cli.tools.registry import (
     ToolCategory,
     PermissionLevel,
-    ToolError,
-    ErrorCode,
     register_tool,
 )
 
@@ -23,7 +21,7 @@ from agentic_cli.tools.registry import (
 @register_tool(
     category=ToolCategory.READ,
     permission_level=PermissionLevel.SAFE,
-    description="Search for patterns in file contents",
+    description="Search for text patterns inside file contents (regex or literal). Use this to find code references, function definitions, or any text across files. For finding files by name, use glob instead.",
 )
 def grep(
     pattern: str,
@@ -36,10 +34,12 @@ def grep(
     use_regex: bool = True,
     output_mode: Literal["content", "files", "count"] = "content",
 ) -> dict[str, Any]:
-    """Search for patterns in file contents.
+    """Search for text patterns inside file contents.
 
-    Provides ripgrep-like functionality for searching text patterns
-    across files. Respects .gitignore by default when ripgrep is available.
+    Use this to find code references, definitions, usage sites, or any
+    text across a project. Uses ripgrep when available (faster, respects
+    .gitignore), falls back to Python implementation.
+    For finding files by name/extension, use glob instead.
 
     Args:
         pattern: Search pattern (regex by default, literal if use_regex=False).
@@ -62,31 +62,15 @@ def grep(
         - total_matches: Total number of matches found
         - files_searched: Number of files searched
         - truncated: True if results were truncated due to max_results
-
-    Match object format (for output_mode="content"):
-        {
-            "file": str,
-            "line_number": int,
-            "content": str,
-            "context_before": list[str],  # if context_lines > 0
-            "context_after": list[str],   # if context_lines > 0
-        }
-
-    Match object format (for output_mode="files"):
-        {"file": str, "match_count": int}
-
-    Match object format (for output_mode="count"):
-        {"file": str, "count": int}
     """
     search_path = Path(path).resolve()
 
     if not search_path.exists():
-        raise ToolError(
-            message=f"Path not found: {path}",
-            error_code=ErrorCode.NOT_FOUND,
-            recoverable=False,
-            details={"path": str(search_path)},
-        )
+        return {
+            "success": False,
+            "error": f"Path not found: {path}",
+            "path": str(search_path),
+        }
 
     # Try to use ripgrep if available (faster, respects .gitignore)
     if _ripgrep_available():
@@ -171,12 +155,14 @@ def _grep_with_ripgrep(
             timeout=30,
         )
     except subprocess.TimeoutExpired:
-        raise ToolError(
-            message="Search timed out after 30 seconds",
-            error_code=ErrorCode.TIMEOUT,
-            recoverable=True,
-            details={"pattern": pattern, "path": str(path)},
-        )
+        return {
+            "success": False,
+            "error": "Search timed out after 30 seconds",
+            "matches": [],
+            "total_matches": 0,
+            "files_searched": 0,
+            "truncated": False,
+        }
     except FileNotFoundError:
         # Ripgrep not found, fall back to Python
         return _grep_python(
@@ -260,12 +246,14 @@ def _grep_python(
         else:
             regex = re.compile(re.escape(pattern), flags)
     except re.error as e:
-        raise ToolError(
-            message=f"Invalid regex pattern: {e}",
-            error_code=ErrorCode.INVALID_INPUT,
-            recoverable=True,
-            details={"pattern": pattern, "error": str(e)},
-        )
+        return {
+            "success": False,
+            "error": f"Invalid regex pattern: {e}",
+            "matches": [],
+            "total_matches": 0,
+            "files_searched": 0,
+            "truncated": False,
+        }
 
     matches = []
     files_searched = 0

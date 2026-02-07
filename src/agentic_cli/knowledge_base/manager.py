@@ -30,6 +30,48 @@ if TYPE_CHECKING:
 logger = Loggers.knowledge_base()
 
 
+def matches_document_filters(doc: Document, filters: dict[str, Any]) -> bool:
+    """Check if a document matches the given filters.
+
+    Standalone function for reuse outside the manager.
+
+    Args:
+        doc: Document to check.
+        filters: Filter dict with optional keys:
+            - source_type: SourceType or string
+            - date_from: ISO date string (inclusive lower bound)
+            - date_to: ISO date string (inclusive upper bound)
+            - keywords: list of strings (all must be present, case-insensitive)
+
+    Returns:
+        True if document matches all filters.
+    """
+    if "source_type" in filters:
+        expected = filters["source_type"]
+        if isinstance(expected, str):
+            expected = SourceType(expected)
+        if doc.source_type != expected:
+            return False
+
+    if "date_from" in filters:
+        date_from = datetime.fromisoformat(filters["date_from"])
+        if doc.created_at < date_from:
+            return False
+
+    if "date_to" in filters:
+        date_to = datetime.fromisoformat(filters["date_to"])
+        if doc.created_at > date_to:
+            return False
+
+    if "keywords" in filters:
+        content_lower = doc.content.lower()
+        for keyword in filters["keywords"]:
+            if keyword.lower() not in content_lower:
+                return False
+
+    return True
+
+
 class KnowledgeBaseManager:
     """Main interface for knowledge base operations.
 
@@ -72,47 +114,47 @@ class KnowledgeBaseManager:
         self.documents_dir.mkdir(parents=True, exist_ok=True)
         self.embeddings_dir.mkdir(parents=True, exist_ok=True)
 
-        # Initialize services
-        # Fall back to mock mode if real embedding service can't be loaded
-        # (e.g., sentence_transformers not installed)
-        if use_mock:
-            self._use_mock = True
-            self._embedding_service: EmbeddingService | MockEmbeddingService = (
-                MockEmbeddingService(
-                    model_name=embedding_model,
-                    batch_size=batch_size,
-                )
-            )
-            self._vector_store: VectorStore | MockVectorStore = MockVectorStore(
-                index_path=self.embeddings_dir / "index.mock",
-                embedding_dim=self._embedding_service.embedding_dim,
-            )
-        else:
-            try:
-                self._embedding_service = EmbeddingService(
-                    model_name=embedding_model,
-                    batch_size=batch_size,
-                )
-                self._vector_store = VectorStore(
-                    index_path=self.embeddings_dir / "index.faiss",
-                    embedding_dim=self._embedding_service.embedding_dim,
-                )
-            except ImportError:
-                # Fall back to mock services if dependencies not available
-                self._use_mock = True
-                self._embedding_service = MockEmbeddingService(
-                    model_name=embedding_model,
-                    batch_size=batch_size,
-                )
-                self._vector_store = MockVectorStore(
-                    index_path=self.embeddings_dir / "index.mock",
-                    embedding_dim=self._embedding_service.embedding_dim,
-                )
+        # Initialize services (fall back to mock if real deps unavailable)
+        self._embedding_service, self._vector_store = self._create_services(
+            embedding_model, batch_size
+        )
 
         # Load document metadata
         self._documents: dict[str, Document] = {}
         self._chunks: dict[str, DocumentChunk] = {}
         self._load_metadata()
+
+    def _create_services(
+        self, embedding_model: str, batch_size: int
+    ) -> tuple["EmbeddingService | MockEmbeddingService", "VectorStore | MockVectorStore"]:
+        """Create embedding service and vector store.
+
+        Tries real implementations first; falls back to mocks if
+        dependencies (sentence_transformers, faiss) are unavailable.
+        """
+        if not self._use_mock:
+            try:
+                emb = EmbeddingService(
+                    model_name=embedding_model,
+                    batch_size=batch_size,
+                )
+                vs = VectorStore(
+                    index_path=self.embeddings_dir / "index.faiss",
+                    embedding_dim=emb.embedding_dim,
+                )
+                return emb, vs
+            except ImportError:
+                self._use_mock = True
+
+        emb = MockEmbeddingService(
+            model_name=embedding_model,
+            batch_size=batch_size,
+        )
+        vs = MockVectorStore(
+            index_path=self.embeddings_dir / "index.mock",
+            embedding_dim=emb.embedding_dim,
+        )
+        return emb, vs
 
     def _load_metadata(self) -> None:
         """Load document metadata from disk."""
@@ -283,34 +325,7 @@ class KnowledgeBaseManager:
 
     def _matches_filters(self, doc: Document, filters: dict[str, Any]) -> bool:
         """Check if document matches the given filters."""
-        # Source type filter
-        if "source_type" in filters:
-            expected = filters["source_type"]
-            if isinstance(expected, str):
-                expected = SourceType(expected)
-            if doc.source_type != expected:
-                return False
-
-        # Date range filter
-        if "date_from" in filters:
-            date_from = datetime.fromisoformat(filters["date_from"])
-            if doc.created_at < date_from:
-                return False
-
-        if "date_to" in filters:
-            date_to = datetime.fromisoformat(filters["date_to"])
-            if doc.created_at > date_to:
-                return False
-
-        # Keywords filter
-        if "keywords" in filters:
-            keywords = filters["keywords"]
-            content_lower = doc.content.lower()
-            for keyword in keywords:
-                if keyword.lower() not in content_lower:
-                    return False
-
-        return True
+        return matches_document_filters(doc, filters)
 
     def get_document(self, doc_id: str) -> Document | None:
         """Retrieve a specific document by ID.
