@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING
 
 from rich.panel import Panel
 from rich.table import Table
-from rich.text import Text
 
 from agentic_cli.cli.commands import Command, CommandCategory
 
@@ -64,127 +63,98 @@ class PlanCommand(Command):
         )
 
     async def execute(self, args: str, app: "ResearchDemoApp") -> None:
-        # Access task graph from workflow
-        task_graph = app.workflow.task_graph if app.workflow else None
+        plan_store = app.workflow.task_graph if app.workflow else None
 
-        if task_graph is None:
-            app.session.add_message("system", "No task graph initialized")
+        if plan_store is None:
+            app.session.add_message("system", "Plan store not initialized")
             return
 
-        # Get progress statistics
-        progress = task_graph.get_progress()
-
-        if progress["total"] == 0:
-            app.session.add_message("system", "No tasks in the plan. Ask the agent to create a research plan.")
+        if plan_store.is_empty():
+            app.session.add_message("system", "No plan created yet. Ask the agent to create a research plan.")
             return
 
-        # Progress summary
-        completed = progress["completed"]
-        total = progress["total"]
-        in_progress = progress["in_progress"]
-        pending = progress["pending"]
-        failed = progress["failed"]
-
-        progress_text = Text()
-        progress_text.append(f"Progress: {completed}/{total} completed")
-        if in_progress > 0:
-            progress_text.append(f", {in_progress} in progress", style="yellow")
-        if pending > 0:
-            progress_text.append(f", {pending} pending", style="dim")
-        if failed > 0:
-            progress_text.append(f", {failed} failed", style="red")
-
-        app.session.add_rich(progress_text)
-
-        # Task display
-        display = task_graph.to_display()
-        panel = Panel(display, title="Research Plan", border_style="blue")
+        panel = Panel(plan_store.get(), title="Research Plan", border_style="blue")
         app.session.add_rich(panel)
 
 
 class ApprovalsCommand(Command):
-    """Show pending approvals."""
+    """Show approval history."""
 
     def __init__(self) -> None:
         super().__init__(
             name="approvals",
-            description="Show pending approval requests",
+            description="Show approval history",
             aliases=["approve"],
             usage="/approvals",
             category=CommandCategory.GENERAL,
         )
 
     async def execute(self, args: str, app: "ResearchDemoApp") -> None:
-        # Access approval manager from workflow
         approval_manager = app.workflow.approval_manager if app.workflow else None
 
         if approval_manager is None:
             app.session.add_message("system", "Approval manager not initialized")
             return
 
-        pending = approval_manager.get_pending_requests()
+        history = approval_manager.history
 
-        if not pending:
-            app.session.add_message("system", "No pending approval requests")
+        if not history:
+            app.session.add_message("system", "No approval history")
             return
 
-        table = Table(title="Pending Approvals", show_header=True)
+        table = Table(title="Approval History", show_header=True)
         table.add_column("ID", style="dim")
-        table.add_column("Tool", style="cyan")
-        table.add_column("Operation", style="yellow")
-        table.add_column("Description", style="white")
-        table.add_column("Risk", style="red")
+        table.add_column("Approved", style="cyan")
+        table.add_column("Reason", style="white")
 
-        for request in pending:
+        for result in history:
             table.add_row(
-                request.id,
-                request.tool,
-                request.operation,
-                request.description,
-                request.risk_level,
+                result.request_id,
+                "Yes" if result.approved else "No",
+                result.reason or "",
             )
 
         app.session.add_rich(table)
 
 
 class CheckpointsCommand(Command):
-    """Show checkpoints awaiting review."""
+    """Show checkpoint history."""
 
     def __init__(self) -> None:
         super().__init__(
             name="checkpoints",
-            description="Show checkpoints awaiting review",
+            description="Show checkpoint review history",
             aliases=[],
             usage="/checkpoints",
             category=CommandCategory.GENERAL,
         )
 
     async def execute(self, args: str, app: "ResearchDemoApp") -> None:
-        # Access checkpoint manager from workflow
         checkpoint_manager = app.workflow.checkpoint_manager if app.workflow else None
 
         if checkpoint_manager is None:
             app.session.add_message("system", "Checkpoint manager not initialized")
             return
 
-        unresolved = checkpoint_manager.get_unresolved()
+        history = checkpoint_manager.history
 
-        if not unresolved:
-            app.session.add_message("system", "No checkpoints awaiting review")
+        if not history:
+            app.session.add_message("system", "No checkpoint history")
             return
 
-        for checkpoint in unresolved:
-            content_preview = str(checkpoint.content)
-            if len(content_preview) > 200:
-                content_preview = content_preview[:200] + "..."
+        table = Table(title="Checkpoint History", show_header=True)
+        table.add_column("ID", style="dim")
+        table.add_column("Action", style="cyan")
+        table.add_column("Feedback", style="white")
 
-            panel = Panel(
-                content_preview,
-                title=f"Checkpoint: {checkpoint.name} ({cp_id})",
-                subtitle=f"Type: {checkpoint.content_type}",
-                border_style="yellow",
+        for result in history:
+            table.add_row(
+                result.checkpoint_id,
+                result.action,
+                result.feedback or "",
             )
-            app.session.add_rich(panel)
+
+        app.session.add_rich(table)
 
 
 class FilesCommand(Command):
@@ -278,14 +248,13 @@ class ClearPlanCommand(Command):
         )
 
     async def execute(self, args: str, app: "ResearchDemoApp") -> None:
-        # Access task graph from workflow
-        task_graph = app.workflow.task_graph if app.workflow else None
+        plan_store = app.workflow.task_graph if app.workflow else None
 
-        if task_graph:
-            task_graph.clear()
-            app.session.add_success("Task plan cleared")
+        if plan_store:
+            plan_store.clear()
+            app.session.add_success("Plan cleared")
         else:
-            app.session.add_error("Task graph not initialized")
+            app.session.add_error("Plan store not initialized")
 
 
 # Export all commands for registration

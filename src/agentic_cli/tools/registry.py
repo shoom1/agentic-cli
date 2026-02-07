@@ -40,7 +40,7 @@ class ToolCategory(Enum):
     EXECUTION = "execution"  # shell, python executor
 
     # Planning and task management
-    PLANNING = "planning"  # create_task, update_task, get_tasks
+    PLANNING = "planning"  # save_plan, get_plan
 
     # Memory and state
     MEMORY = "memory"  # remember, recall, search_memory

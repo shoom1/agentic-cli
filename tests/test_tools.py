@@ -1430,19 +1430,11 @@ class TestToolRegistryConsistency:
             "save_memory",
             "search_memory",
             # Planning tools
-            "create_task",
-            "update_task_status",
-            "get_next_tasks",
-            "get_task",
-            "get_plan_summary",
-            "create_plan",
-            "revise_plan",
+            "save_plan",
+            "get_plan",
             # HITL tools
-            "create_checkpoint",
-            "get_checkpoint_result",
             "request_approval",
-            "check_approval",
-            "check_requires_approval",
+            "create_checkpoint",
         ]
 
         registered_names = {tool.name for tool in registry.list_tools()}
@@ -1493,10 +1485,8 @@ class TestToolRegistryConsistency:
             "search_arxiv", "fetch_arxiv_paper", "analyze_arxiv_paper",
             "ask_clarification",
             "save_memory", "search_memory",
-            "create_task", "update_task_status", "get_next_tasks",
-            "get_task", "get_plan_summary", "create_plan", "revise_plan",
-            "create_checkpoint", "get_checkpoint_result",
-            "request_approval", "check_approval", "check_requires_approval",
+            "save_plan", "get_plan",
+            "request_approval", "create_checkpoint",
         ]
 
         for tool_name in safe_tools:
@@ -1544,7 +1534,7 @@ class TestToolRegistryConsistency:
 
         planning_tools = registry.list_by_category(ToolCategory.PLANNING)
         planning_names = {t.name for t in planning_tools}
-        assert "create_task" in planning_names, "PLANNING category should have planning tools"
+        assert "save_plan" in planning_names, "PLANNING category should have planning tools"
 
         interaction_tools = registry.list_by_category(ToolCategory.INTERACTION)
         interaction_names = {t.name for t in interaction_tools}
@@ -1578,14 +1568,14 @@ class TestToolRegistryConsistency:
         registry = get_registry()
         tool_count = len(registry.list_tools())
 
-        # We expect at least 30 tools after unification
+        # We expect at least 22 tools after simplification
         # File ops: 7 (read_file, diff_compare, grep, glob, list_dir, write_file, edit_file)
         # Web/Network: 2 (web_search, web_fetch)
         # Knowledge: 5 (search_kb, ingest_kb, search_arxiv, fetch_arxiv, analyze_arxiv)
         # Execution: 2 (execute_python, shell_executor)
         # Interaction: 1 (ask_clarification)
-        # Memory: 5 (remember, recall, search_memory, save_longterm, clear_working)
-        # Planning: 7 (create_task, update_status, get_next, get_task, get_summary, create_plan, revise_plan)
-        # HITL: 5 (checkpoint create/get, approval request/check/check_requires)
-        # Total: ~34 tools
-        assert tool_count >= 30, f"Expected at least 30 registered tools, got {tool_count}"
+        # Memory: 2 (save_memory, search_memory)
+        # Planning: 2 (save_plan, get_plan)
+        # HITL: 2 (request_approval, create_checkpoint)
+        # Total: ~23 tools
+        assert tool_count >= 22, f"Expected at least 22 registered tools, got {tool_count}"

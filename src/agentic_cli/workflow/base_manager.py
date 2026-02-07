@@ -9,7 +9,6 @@ HITL) based on tool requirements, creating them lazily when needed.
 It also provides shared implementations for:
 - User input handling (pending request dict + Future pattern)
 - Model resolution (lazy resolution from settings)
-- Task progress emission (task graph to WorkflowEvent)
 """
 
 from __future__ import annotations
@@ -34,7 +33,7 @@ from agentic_cli.logging import Loggers
 if TYPE_CHECKING:
     from agentic_cli.config import BaseSettings
     from agentic_cli.memory import MemoryStore
-    from agentic_cli.planning import TaskGraph
+    from agentic_cli.planning import PlanStore
     from agentic_cli.hitl import ApprovalManager, CheckpointManager
 
 logger = Loggers.workflow()
@@ -98,7 +97,7 @@ class BaseWorkflowManager(ABC):
 
         # Manager slots (created lazily by _ensure_managers_initialized)
         self._memory_manager: "MemoryStore | None" = None
-        self._task_graph: "TaskGraph | None" = None
+        self._task_graph: "PlanStore | None" = None
         self._approval_manager: "ApprovalManager | None" = None
         self._checkpoint_manager: "CheckpointManager | None" = None
         self._llm_summarizer: Any | None = None
@@ -134,8 +133,8 @@ class BaseWorkflowManager(ABC):
         return self._memory_manager
 
     @property
-    def task_graph(self) -> "TaskGraph | None":
-        """Get the task graph (if required by tools)."""
+    def task_graph(self) -> "PlanStore | None":
+        """Get the plan store (if required by tools)."""
         return self._task_graph
 
     @property
@@ -180,20 +179,12 @@ class BaseWorkflowManager(ABC):
             self._memory_manager = MemoryStore(self._settings)
 
         if "task_graph" in self._required_managers and self._task_graph is None:
-            from agentic_cli.planning import TaskGraph
-            self._task_graph = TaskGraph()
+            from agentic_cli.planning import PlanStore
+            self._task_graph = PlanStore()
 
         if "approval_manager" in self._required_managers and self._approval_manager is None:
-            from agentic_cli.hitl import ApprovalManager, HITLConfig, ApprovalRule
-            # Build config from settings
-            hitl_config = HITLConfig(
-                approval_rules=[
-                    ApprovalRule(**r) for r in getattr(self._settings, "hitl_default_rules", [])
-                ],
-                checkpoint_enabled=getattr(self._settings, "hitl_checkpoint_enabled", True),
-                feedback_enabled=getattr(self._settings, "hitl_feedback_enabled", True),
-            )
-            self._approval_manager = ApprovalManager(hitl_config)
+            from agentic_cli.hitl import ApprovalManager
+            self._approval_manager = ApprovalManager()
 
         if "checkpoint_manager" in self._required_managers and self._checkpoint_manager is None:
             from agentic_cli.hitl import CheckpointManager
@@ -426,32 +417,3 @@ class BaseWorkflowManager(ABC):
             f"{self.__class__.__name__} does not implement generate_simple"
         )
 
-    # Task progress emission - concrete implementation
-
-    def _emit_task_progress_event(self) -> WorkflowEvent | None:
-        """Create a TASK_PROGRESS event if task graph has tasks.
-
-        Returns:
-            WorkflowEvent if task graph has tasks, None otherwise.
-        """
-        if self._task_graph is None:
-            return None
-
-        progress = self._task_graph.get_progress()
-        if progress["total"] == 0:
-            return None
-
-        # Find current in-progress task for status line
-        current_task_id = None
-        current_task_desc = None
-        in_progress = self._task_graph.get_in_progress_task()
-        if in_progress:
-            current_task_id, task = in_progress
-            current_task_desc = task.description
-
-        return WorkflowEvent.task_progress(
-            display=self._task_graph.to_compact_display(),
-            progress=progress,
-            current_task_id=current_task_id,
-            current_task_description=current_task_desc,
-        )

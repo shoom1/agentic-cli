@@ -13,8 +13,8 @@ Tool System:
 
 Framework Tools:
     - memory_tools: Working and long-term memory tools
-    - planning_tools: Task graph management tools
-    - hitl_tools: Human-in-the-loop checkpoint and approval tools
+    - planning_tools: Flat markdown plan tools (save_plan, get_plan)
+    - hitl_tools: Human-in-the-loop approval and checkpoint tools
     - web_search: Web search with pluggable backends (Tavily, Brave)
 
 For resilience patterns, use tenacity, pybreaker, aiolimiter directly.

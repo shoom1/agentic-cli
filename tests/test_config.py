@@ -415,7 +415,7 @@ def test_package_exports_new_modules():
     from agentic_cli.memory import MemoryStore, MemoryItem
 
     # Planning
-    from agentic_cli.planning import TaskGraph, TaskStatus
+    from agentic_cli.planning import PlanStore
 
     # HITL
     from agentic_cli.hitl import HITLConfig, ApprovalManager, CheckpointManager
@@ -426,6 +426,6 @@ def test_package_exports_new_modules():
     # All imports should succeed
     assert MemoryStore is not None
     assert MemoryItem is not None
-    assert TaskGraph is not None
+    assert PlanStore is not None
     assert HITLConfig is not None
     assert shell_executor is not None
