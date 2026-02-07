@@ -9,9 +9,9 @@ from contextvars import ContextVar, Token
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from agentic_cli.memory import MemoryStore
-    from agentic_cli.planning import PlanStore
-    from agentic_cli.tasks import TaskStore
+    from agentic_cli.tools.memory_tools import MemoryStore
+    from agentic_cli.tools.planning_tools import PlanStore
+    from agentic_cli.tools.task_tools import TaskStore
     from agentic_cli.hitl import ApprovalManager, CheckpointManager
 
 # Context variables for manager instances

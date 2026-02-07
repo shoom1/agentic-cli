@@ -7,7 +7,7 @@ class TestMemoryStore:
     """Tests for MemoryStore class."""
 
     def test_store_and_search(self, mock_context):
-        from agentic_cli.memory import MemoryStore
+        from agentic_cli.tools.memory_tools import MemoryStore
 
         store = MemoryStore(mock_context.settings)
         item_id = store.store("User prefers markdown output")
@@ -19,7 +19,7 @@ class TestMemoryStore:
         assert results[0].id == item_id
 
     def test_store_with_tags(self, mock_context):
-        from agentic_cli.memory import MemoryStore
+        from agentic_cli.tools.memory_tools import MemoryStore
 
         store = MemoryStore(mock_context.settings)
         item_id = store.store("Important fact", tags=["fact", "finance"])
@@ -29,7 +29,7 @@ class TestMemoryStore:
         assert results[0].tags == ["fact", "finance"]
 
     def test_search_case_insensitive(self, mock_context):
-        from agentic_cli.memory import MemoryStore
+        from agentic_cli.tools.memory_tools import MemoryStore
 
         store = MemoryStore(mock_context.settings)
         store.store("Basel III requires 99% confidence")
@@ -39,7 +39,7 @@ class TestMemoryStore:
         assert "Basel" in results[0].content
 
     def test_search_empty_query_returns_all(self, mock_context):
-        from agentic_cli.memory import MemoryStore
+        from agentic_cli.tools.memory_tools import MemoryStore
 
         store = MemoryStore(mock_context.settings)
         store.store("Item 1")
@@ -50,7 +50,7 @@ class TestMemoryStore:
         assert len(results) == 3
 
     def test_search_with_limit(self, mock_context):
-        from agentic_cli.memory import MemoryStore
+        from agentic_cli.tools.memory_tools import MemoryStore
 
         store = MemoryStore(mock_context.settings)
         for i in range(5):
@@ -60,7 +60,7 @@ class TestMemoryStore:
         assert len(results) == 3
 
     def test_search_no_match(self, mock_context):
-        from agentic_cli.memory import MemoryStore
+        from agentic_cli.tools.memory_tools import MemoryStore
 
         store = MemoryStore(mock_context.settings)
         store.store("Something about Python")
@@ -69,13 +69,13 @@ class TestMemoryStore:
         assert len(results) == 0
 
     def test_load_all_empty(self, mock_context):
-        from agentic_cli.memory import MemoryStore
+        from agentic_cli.tools.memory_tools import MemoryStore
 
         store = MemoryStore(mock_context.settings)
         assert store.load_all() == ""
 
     def test_load_all_with_items(self, mock_context):
-        from agentic_cli.memory import MemoryStore
+        from agentic_cli.tools.memory_tools import MemoryStore
 
         store = MemoryStore(mock_context.settings)
         store.store("Fact one", tags=["fact"])
@@ -87,7 +87,7 @@ class TestMemoryStore:
         assert "[fact]" in output
 
     def test_persistence_across_instances(self, mock_context):
-        from agentic_cli.memory import MemoryStore
+        from agentic_cli.tools.memory_tools import MemoryStore
 
         store1 = MemoryStore(mock_context.settings)
         store1.store("Persistent data")
@@ -98,7 +98,7 @@ class TestMemoryStore:
         assert results[0].content == "Persistent data"
 
     def test_corrupted_file_starts_fresh(self, mock_context):
-        from agentic_cli.memory import MemoryStore
+        from agentic_cli.tools.memory_tools import MemoryStore
 
         # Create a store and add data
         store = MemoryStore(mock_context.settings)
@@ -113,7 +113,7 @@ class TestMemoryStore:
         assert store2.search("") == []
 
     def test_atomic_write(self, mock_context):
-        from agentic_cli.memory import MemoryStore
+        from agentic_cli.tools.memory_tools import MemoryStore
 
         store = MemoryStore(mock_context.settings)
         store.store("Test data")
@@ -123,7 +123,7 @@ class TestMemoryStore:
         assert not tmp_path.exists()
 
     def test_created_at_is_set(self, mock_context):
-        from agentic_cli.memory import MemoryStore
+        from agentic_cli.tools.memory_tools import MemoryStore
 
         store = MemoryStore(mock_context.settings)
         store.store("Timestamped item")
@@ -136,7 +136,7 @@ class TestMemoryItem:
     """Tests for MemoryItem dataclass."""
 
     def test_to_dict_and_from_dict(self):
-        from agentic_cli.memory import MemoryItem
+        from agentic_cli.tools.memory_tools import MemoryItem
 
         item = MemoryItem(
             id="test-id",
@@ -152,7 +152,7 @@ class TestMemoryItem:
         assert restored.created_at == item.created_at
 
     def test_from_dict_defaults(self):
-        from agentic_cli.memory import MemoryItem
+        from agentic_cli.tools.memory_tools import MemoryItem
 
         data = {"id": "abc", "content": "Hello"}
         item = MemoryItem.from_dict(data)
@@ -178,7 +178,7 @@ class TestMemoryToolFunctions:
         assert "not available" in result["error"]
 
     def test_save_and_search_with_context(self, mock_context):
-        from agentic_cli.memory import MemoryStore
+        from agentic_cli.tools.memory_tools import MemoryStore
         from agentic_cli.tools.memory_tools import save_memory, search_memory
         from agentic_cli.workflow.context import (
             set_context_memory_manager,
@@ -202,7 +202,7 @@ class TestMemoryToolFunctions:
             token.var.reset(token)
 
     def test_save_memory_with_tags(self, mock_context):
-        from agentic_cli.memory import MemoryStore
+        from agentic_cli.tools.memory_tools import MemoryStore
         from agentic_cli.tools.memory_tools import save_memory, search_memory
         from agentic_cli.workflow.context import set_context_memory_manager
 
@@ -218,7 +218,7 @@ class TestMemoryToolFunctions:
             token.var.reset(token)
 
     def test_search_memory_with_limit(self, mock_context):
-        from agentic_cli.memory import MemoryStore
+        from agentic_cli.tools.memory_tools import MemoryStore
         from agentic_cli.tools.memory_tools import save_memory, search_memory
         from agentic_cli.workflow.context import set_context_memory_manager
 

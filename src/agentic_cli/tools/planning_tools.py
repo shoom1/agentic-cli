@@ -24,6 +24,51 @@ from agentic_cli.tools.registry import (
 from agentic_cli.workflow.context import get_context_task_graph
 
 
+# ---------------------------------------------------------------------------
+# PlanStore – simple string store for agent plans
+# ---------------------------------------------------------------------------
+
+
+class PlanStore:
+    """Simple string store for agent plans.
+
+    Follows the same pattern as MemoryStore — minimal backing store
+    that lets the LLM handle structure in-context.
+    """
+
+    def __init__(self) -> None:
+        """Initialize an empty plan store."""
+        self._content: str = ""
+
+    def save(self, content: str) -> None:
+        """Save or overwrite the plan content.
+
+        Args:
+            content: Markdown plan string (use checkboxes for tasks).
+        """
+        self._content = content
+
+    def get(self) -> str:
+        """Get the current plan content.
+
+        Returns:
+            The plan string, or empty string if no plan exists.
+        """
+        return self._content
+
+    def is_empty(self) -> bool:
+        """Check if the plan store has content.
+
+        Returns:
+            True if no plan has been saved.
+        """
+        return not self._content
+
+    def clear(self) -> None:
+        """Clear the plan content."""
+        self._content = ""
+
+
 @register_tool(
     category=ToolCategory.PLANNING,
     permission_level=PermissionLevel.SAFE,

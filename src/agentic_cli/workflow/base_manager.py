@@ -33,9 +33,9 @@ from agentic_cli.logging import Loggers
 
 if TYPE_CHECKING:
     from agentic_cli.config import BaseSettings
-    from agentic_cli.memory import MemoryStore
-    from agentic_cli.planning import PlanStore
-    from agentic_cli.tasks import TaskStore
+    from agentic_cli.tools.memory_tools import MemoryStore
+    from agentic_cli.tools.planning_tools import PlanStore
+    from agentic_cli.tools.task_tools import TaskStore
     from agentic_cli.hitl import ApprovalManager, CheckpointManager
 
 logger = Loggers.workflow()
@@ -183,15 +183,15 @@ class BaseWorkflowManager(ABC):
         managers that are actually needed by the configured tools.
         """
         if "memory_manager" in self._required_managers and self._memory_manager is None:
-            from agentic_cli.memory import MemoryStore
+            from agentic_cli.tools.memory_tools import MemoryStore
             self._memory_manager = MemoryStore(self._settings)
 
         if "task_graph" in self._required_managers and self._task_graph is None:
-            from agentic_cli.planning import PlanStore
+            from agentic_cli.tools.planning_tools import PlanStore
             self._task_graph = PlanStore()
 
         if "task_store" in self._required_managers and self._task_store is None:
-            from agentic_cli.tasks import TaskStore
+            from agentic_cli.tools.task_tools import TaskStore
             self._task_store = TaskStore(self._settings)
 
         if "approval_manager" in self._required_managers and self._approval_manager is None:
