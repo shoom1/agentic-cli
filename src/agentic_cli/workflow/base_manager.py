@@ -23,7 +23,7 @@ from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.config import set_context_settings, set_context_workflow
 from agentic_cli.workflow.context import (
     set_context_memory_manager,
-    set_context_task_graph,
+    set_context_plan_store,
     set_context_task_store,
     set_context_approval_manager,
     set_context_checkpoint_manager,
@@ -99,7 +99,7 @@ class BaseWorkflowManager(ABC):
 
         # Manager slots (created lazily by _ensure_managers_initialized)
         self._memory_manager: "MemoryStore | None" = None
-        self._task_graph: "PlanStore | None" = None
+        self._plan_store: "PlanStore | None" = None
         self._task_store: "TaskStore | None" = None
         self._approval_manager: "ApprovalManager | None" = None
         self._checkpoint_manager: "CheckpointManager | None" = None
@@ -136,9 +136,9 @@ class BaseWorkflowManager(ABC):
         return self._memory_manager
 
     @property
-    def task_graph(self) -> "PlanStore | None":
+    def plan_store(self) -> "PlanStore | None":
         """Get the plan store (if required by tools)."""
-        return self._task_graph
+        return self._plan_store
 
     @property
     def task_store(self) -> "TaskStore | None":
@@ -186,9 +186,9 @@ class BaseWorkflowManager(ABC):
             from agentic_cli.tools.memory_tools import MemoryStore
             self._memory_manager = MemoryStore(self._settings)
 
-        if "task_graph" in self._required_managers and self._task_graph is None:
+        if "plan_store" in self._required_managers and self._plan_store is None:
             from agentic_cli.tools.planning_tools import PlanStore
-            self._task_graph = PlanStore()
+            self._plan_store = PlanStore()
 
         if "task_store" in self._required_managers and self._task_store is None:
             from agentic_cli.tools.task_tools import TaskStore
@@ -228,7 +228,7 @@ class BaseWorkflowManager(ABC):
             set_context_settings(self._settings),
             set_context_workflow(self),
             set_context_memory_manager(self._memory_manager),
-            set_context_task_graph(self._task_graph),
+            set_context_plan_store(self._plan_store),
             set_context_task_store(self._task_store),
             set_context_approval_manager(self._approval_manager),
             set_context_checkpoint_manager(self._checkpoint_manager),
@@ -494,10 +494,10 @@ class BaseWorkflowManager(ABC):
         Returns:
             (display_str, progress_dict) or None if no checkboxes found.
         """
-        if self._task_graph is None or self._task_graph.is_empty():
+        if self._plan_store is None or self._plan_store.is_empty():
             return None
 
-        content = self._task_graph.get()
+        content = self._plan_store.get()
         current_section: str | None = None
         sections: list[tuple[str | None, list[tuple[bool, str]]]] = []
         current_items: list[tuple[bool, str]] = []

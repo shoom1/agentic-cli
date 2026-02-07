@@ -23,7 +23,11 @@ from pathlib import Path
 from typing import Any
 
 from agentic_cli.config import BaseSettings
-from agentic_cli.tools import requires
+from agentic_cli.logging import get_logger
+from agentic_cli.persistence._utils import atomic_write_json
+from agentic_cli.tools import requires, require_context
+
+logger = get_logger("agentic_cli.tools.memory")
 from agentic_cli.tools.registry import (
     register_tool,
     ToolCategory,
@@ -94,15 +98,13 @@ class MemoryStore:
                     item = MemoryItem.from_dict(item_data)
                     self._items[item.id] = item
             except (json.JSONDecodeError, KeyError):
+                logger.warning("memory_load_failed", path=str(self._storage_path))
                 self._items = {}
 
     def _save(self) -> None:
         self._memory_dir.mkdir(parents=True, exist_ok=True)
         data = {"items": [item.to_dict() for item in self._items.values()]}
-        tmp_path = self._storage_path.with_suffix(".tmp")
-        with open(tmp_path, "w") as f:
-            json.dump(data, f, indent=2)
-        tmp_path.rename(self._storage_path)
+        atomic_write_json(self._storage_path, data)
 
     def store(self, content: str, tags: list[str] | None = None) -> str:
         """Append a memory to the persistent store.
@@ -165,6 +167,7 @@ class MemoryStore:
     description="Save information to persistent memory that survives across sessions. Use this to remember user preferences, important facts, or learnings for future conversations.",
 )
 @requires("memory_manager")
+@require_context("Memory store", get_context_memory_manager)
 def save_memory(
     content: str,
     tags: list[str] | None = None,
@@ -182,9 +185,6 @@ def save_memory(
         A dict with the stored item ID.
     """
     store = get_context_memory_manager()
-    if store is None:
-        return {"success": False, "error": "Memory store not available"}
-
     item_id = store.store(content, tags=tags)
     return {
         "success": True,
@@ -199,6 +199,7 @@ def save_memory(
     description="Search persistent memory by keyword/substring. Use this to recall previously saved facts, preferences, or learnings.",
 )
 @requires("memory_manager")
+@require_context("Memory store", get_context_memory_manager)
 def search_memory(
     query: str,
     limit: int = 10,
@@ -213,9 +214,6 @@ def search_memory(
         A dict with matching memory items.
     """
     store = get_context_memory_manager()
-    if store is None:
-        return {"success": False, "error": "Memory store not available"}
-
     results = store.search(query, limit=limit)
     items = [
         {

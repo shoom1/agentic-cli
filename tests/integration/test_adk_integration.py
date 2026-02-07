@@ -530,7 +530,7 @@ class TestTaskProgressAutoClean:
 
         mgr = _create_manager(mock_settings, [AgentConfig(name="test", prompt="test")])
         mgr._task_store = None
-        mgr._task_graph = plan_store
+        mgr._plan_store = plan_store
 
         event = mgr._emit_task_progress_event()
         assert event is not None
