@@ -430,3 +430,24 @@ class BaseWorkflowManager(ABC):
             f"{self.__class__.__name__} does not implement generate_simple"
         )
 
+    def _emit_task_progress_event(self) -> WorkflowEvent | None:
+        """Build a TASK_PROGRESS event from the current task store.
+
+        Returns:
+            A WorkflowEvent.task_progress() if the store has tasks, else None.
+        """
+        store = self._task_store
+        if store is None or store.is_empty():
+            return None
+
+        progress = store.get_progress()
+        display = store.to_compact_display()
+        current = store.get_current_task()
+
+        return WorkflowEvent.task_progress(
+            display=display,
+            progress=progress,
+            current_task_id=current.id if current else None,
+            current_task_description=current.description if current else None,
+        )
+

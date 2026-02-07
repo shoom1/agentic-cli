@@ -624,6 +624,15 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                 if workflow_event:
                     yield workflow_event
 
+                    # Emit task progress after tool results
+                    if workflow_event.type == EventType.TOOL_RESULT:
+                        progress_event = self._emit_task_progress_event()
+                        if progress_event:
+                            if self._on_event:
+                                progress_event = self._on_event(progress_event)
+                            if progress_event:
+                                yield progress_event
+
 
     def _process_part(self, part: Any, session_id: str) -> WorkflowEvent | None:
         """Process a single part from the agent response.

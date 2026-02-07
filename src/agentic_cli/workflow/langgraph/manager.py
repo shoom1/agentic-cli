@@ -721,6 +721,11 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
                         )
                     )
 
+                    # Emit task progress after tool results
+                    progress_event = self._emit_task_progress_event()
+                    if progress_event:
+                        yield self._maybe_transform(progress_event)
+
 
             logger.info("message_processed_langgraph")
 
