@@ -178,7 +178,6 @@ class FilesCommand(Command):
         subdir = parsed.get_option("dir", "findings")
 
         from agentic_cli.tools.glob_tool import list_dir
-        from agentic_cli.tools.registry import ToolError
 
         workspace = app.settings.workspace_dir
         target_dir = workspace / subdir
@@ -187,10 +186,9 @@ class FilesCommand(Command):
             app.session.add_message("system", f"Directory does not exist: {target_dir}")
             return
 
-        try:
-            result = list_dir(str(target_dir))
-        except ToolError as e:
-            app.session.add_error(e.message)
+        result = list_dir(str(target_dir))
+        if not result.get("success"):
+            app.session.add_error(result.get("error", "Failed to list directory"))
             return
 
         table = Table(title=f"Files in {subdir}/", show_header=True)
@@ -214,6 +212,65 @@ class FilesCommand(Command):
 
         app.session.add_rich(table)
         app.session.add_message("system", f"Total: {result['total']} items")
+
+
+class TasksCommand(Command):
+    """Show execution tasks."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            name="tasks",
+            description="Show execution tasks and progress",
+            aliases=[],
+            usage="/tasks [--status=STATUS]",
+            examples=[
+                "/tasks",
+                "/tasks --status=pending",
+                "/tasks --status=in_progress",
+            ],
+            category=CommandCategory.GENERAL,
+        )
+
+    async def execute(self, args: str, app: "ResearchDemoApp") -> None:
+        task_store = app.workflow.task_store if app.workflow else None
+
+        if task_store is None:
+            app.session.add_message("system", "Task store not initialized")
+            return
+
+        parsed = self.parse_args(args)
+        status_filter = parsed.get_option("status")
+
+        tasks = task_store.list_tasks(status=status_filter or None)
+
+        if not tasks:
+            app.session.add_message("system", "No tasks found")
+            return
+
+        table = Table(title="Execution Tasks", show_header=True)
+        table.add_column("ID", style="dim", width=8)
+        table.add_column("Description", style="white")
+        table.add_column("Status", style="cyan")
+        table.add_column("Priority", style="yellow")
+        table.add_column("Tags", style="dim")
+
+        for task in tasks:
+            status_style = {
+                "pending": "dim",
+                "in_progress": "bold cyan",
+                "completed": "green",
+                "cancelled": "red",
+            }.get(task.status, "white")
+            tags_str = ", ".join(task.tags) if task.tags else ""
+            table.add_row(
+                task.id[:8],
+                task.description,
+                f"[{status_style}]{task.status}[/]",
+                task.priority,
+                tags_str,
+            )
+
+        app.session.add_rich(table)
 
 
 class ClearMemoryCommand(Command):
@@ -263,6 +320,7 @@ class ClearPlanCommand(Command):
 DEMO_COMMANDS = [
     MemoryCommand,
     PlanCommand,
+    TasksCommand,
     ApprovalsCommand,
     CheckpointsCommand,
     FilesCommand,

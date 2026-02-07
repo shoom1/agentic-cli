@@ -31,6 +31,7 @@ def _create_app_info() -> AppInfo:
     text.append("Features:\n", style="bold")
     text.append("  - Working & long-term memory\n", style="dim")
     text.append("  - Task planning with dependencies\n", style="dim")
+    text.append("  - Task management (track execution)\n", style="dim")
     text.append("  - Knowledge base (search & ingest)\n", style="dim")
     text.append("  - Web search & content fetching\n", style="dim")
     text.append("  - Academic research (arXiv)\n", style="dim")
@@ -41,6 +42,7 @@ def _create_app_info() -> AppInfo:
     text.append("Commands:\n", style="bold")
     text.append("  /memory     - Show memory state\n", style="cyan")
     text.append("  /plan       - Show task plan\n", style="cyan")
+    text.append("  /tasks      - Show execution tasks\n", style="cyan")
     text.append("  /files      - List saved findings\n", style="cyan")
     text.append("  /approvals  - Show pending approvals\n", style="cyan")
     text.append("  /help       - All commands\n", style="cyan")
@@ -59,6 +61,7 @@ class ResearchDemoApp(BaseCLIApp):
     Demonstrates framework features:
     - Memory: Working memory (session) + Long-term memory (persistent)
     - Planning: Task graphs with dependencies and mid-execution revision
+    - Task Management: Track execution tasks with status and priority
     - Knowledge Base: Search and ingest documents
     - Web: Search and fetch/summarize URL content
     - Code Execution: Sandboxed Python execution
