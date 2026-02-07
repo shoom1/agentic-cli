@@ -33,6 +33,14 @@ class HTMLToMarkdown:
         Returns:
             Markdown string.
         """
+        content_type_lower = content_type.lower()
+
+        # Handle PDF before any text decoding (PDF is binary)
+        if "application/pdf" in content_type_lower:
+            if isinstance(content, bytes):
+                return self._convert_pdf(content)
+            return "[PDF content received as text — binary data was likely corrupted]"
+
         # Handle bytes
         if isinstance(content, bytes):
             try:
@@ -41,8 +49,6 @@ class HTMLToMarkdown:
                 return f"[Binary content: {content_type}]"
 
         # Route by content type
-        content_type_lower = content_type.lower()
-
         if "text/html" in content_type_lower:
             return self._convert_html(content)
         elif "text/plain" in content_type_lower:
@@ -53,6 +59,34 @@ class HTMLToMarkdown:
             return f"```xml\n{content}\n```"
         else:
             return f"[Binary content: {content_type}]"
+
+    def _convert_pdf(self, content: bytes) -> str:
+        """Extract text from PDF bytes.
+
+        Args:
+            content: Raw PDF bytes.
+
+        Returns:
+            Extracted text with page markers, or fallback message.
+        """
+        try:
+            import pypdf
+        except ImportError:
+            return "[PDF extraction unavailable: pypdf not installed]"
+
+        try:
+            import io
+            reader = pypdf.PdfReader(io.BytesIO(content))
+            pages = []
+            for i, page in enumerate(reader.pages, 1):
+                text = page.extract_text() or ""
+                if text.strip():
+                    pages.append(f"--- Page {i} ---\n{text.strip()}")
+            if not pages:
+                return "[PDF contained no extractable text]"
+            return "\n\n".join(pages)
+        except Exception as e:
+            return f"[PDF extraction failed: {e}]"
 
     def _convert_html(self, html: str) -> str:
         """Convert HTML to markdown.

@@ -1,8 +1,8 @@
 """Main application for the Research Demo.
 
-Showcases framework features through a research assistant agent
-with memory, planning, task management, knowledge base, web fetching,
-code execution, file operations, and HITL.
+Multi-agent research assistant showcasing framework features:
+- research_coordinator: Root agent with memory, planning, tasks, HITL, web, code, files
+- arxiv_specialist: Sub-agent for focused arXiv paper search, analysis, and cataloging
 
 Feature managers (MemoryStore, PlanStore, TaskStore, CheckpointManager,
 ApprovalManager) are auto-created by the workflow manager based on
@@ -27,13 +27,16 @@ def _create_app_info() -> AppInfo:
     """Create the application info for the welcome message."""
     text = Text()
     text.append("Research Demo\n\n", style="bold cyan")
-    text.append("A research assistant powered by the agentic-cli framework.\n\n", style="dim")
-    text.append("Features:\n", style="bold")
+    text.append("A multi-agent research assistant powered by the agentic-cli framework.\n\n", style="dim")
+    text.append("Agents:\n", style="bold")
+    text.append("  - research_coordinator — plans, coordinates, manages workflow\n", style="dim")
+    text.append("  - arxiv_specialist — arXiv paper search, analysis, cataloging\n", style="dim")
+    text.append("\nFeatures:\n", style="bold")
     text.append("  - Persistent memory across sessions\n", style="dim")
     text.append("  - Planning (markdown checkboxes)\n", style="dim")
     text.append("  - Task tracking (status & priority)\n", style="dim")
     text.append("  - Knowledge base (search & ingest)\n", style="dim")
-    text.append("  - Web search & content fetching\n", style="dim")
+    text.append("  - Web search & content fetching (incl. PDF)\n", style="dim")
     text.append("  - Academic research (arXiv)\n", style="dim")
     text.append("  - Python code execution\n", style="dim")
     text.append("  - File operations (read, write, search)\n", style="dim")
@@ -58,15 +61,11 @@ def _create_app_info() -> AppInfo:
 class ResearchDemoApp(BaseCLIApp):
     """Research Demo CLI Application.
 
-    Demonstrates framework features:
-    - Memory: Persistent memory across sessions
-    - Planning: Flat markdown plans with checkbox tracking
-    - Task Management: Track execution tasks with status and priority
-    - Knowledge Base: Search and ingest documents
-    - Web: Search and fetch/summarize URL content
-    - Code Execution: Sandboxed Python execution
-    - File Operations: Read, write, search, compare files
-    - HITL: Approvals and checkpoint reviews
+    Multi-agent architecture:
+    - research_coordinator: Root agent with memory, planning, tasks, HITL,
+      web search, code execution, file operations
+    - arxiv_specialist: Sub-agent for arXiv paper search, analysis, and
+      knowledge base ingestion (incl. PDF full-text extraction)
 
     Feature managers are auto-created by the workflow manager based on
     the @requires decorators on framework tools.

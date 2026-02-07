@@ -24,7 +24,7 @@ class RedirectInfo:
 class FetchResult:
     """Result of a content fetch operation."""
     success: bool
-    content: str | None = None
+    content: str | bytes | None = None
     content_type: str | None = None
     redirect: RedirectInfo | None = None
     error: str | None = None
@@ -35,7 +35,7 @@ class FetchResult:
 @dataclass
 class CachedResponse:
     """Cached HTTP response."""
-    content: str
+    content: str | bytes
     content_type: str
     timestamp: float
     truncated: bool = False
@@ -50,11 +50,13 @@ class ContentFetcher:
         robots_checker: RobotsTxtChecker,
         cache_ttl_seconds: int = 900,
         max_content_bytes: int = 102400,
+        max_pdf_bytes: int = 5242880,
     ) -> None:
         self._validator = validator
         self._robots = robots_checker
         self._cache_ttl = cache_ttl_seconds
         self._max_content_bytes = max_content_bytes
+        self._max_pdf_bytes = max_pdf_bytes
         self._cache: dict[str, CachedResponse] = {}
 
     async def fetch(self, url: str, timeout: int = 30) -> FetchResult:
@@ -101,15 +103,23 @@ class ContentFetcher:
                         error=f"Cross-host redirect to {redirect_info.to_host}",
                     )
 
-                content = response.text
                 content_type = response.headers.get("content-type", "text/html")
 
-                # Truncate if needed
-                truncated = False
-                if len(content) > self._max_content_bytes:
-                    content = content[:self._max_content_bytes]
-                    content += f"\n\n[Content truncated at {self._max_content_bytes} bytes]"
-                    truncated = True
+                # Use bytes for PDF, text for everything else
+                is_pdf = "application/pdf" in content_type.lower()
+                if is_pdf:
+                    content: str | bytes = response.content
+                    truncated = False
+                    if len(content) > self._max_pdf_bytes:
+                        content = content[:self._max_pdf_bytes]
+                        truncated = True
+                else:
+                    content = response.text
+                    truncated = False
+                    if len(content) > self._max_content_bytes:
+                        content = content[:self._max_content_bytes]
+                        content += f"\n\n[Content truncated at {self._max_content_bytes} bytes]"
+                        truncated = True
 
                 # Cache the response
                 self._cache[url] = CachedResponse(
