@@ -14,8 +14,6 @@ from typing import Any, Literal
 from agentic_cli.tools.registry import (
     ToolCategory,
     PermissionLevel,
-    ToolError,
-    ErrorCode,
     register_tool,
 )
 
@@ -23,7 +21,7 @@ from agentic_cli.tools.registry import (
 @register_tool(
     category=ToolCategory.READ,
     permission_level=PermissionLevel.SAFE,
-    description="Find files matching a glob pattern",
+    description="Find files by name pattern (e.g. '**/*.py'). Use this to discover files in a directory tree. For searching inside file contents, use grep instead.",
 )
 def glob(
     pattern: str = "*",
@@ -36,8 +34,10 @@ def glob(
 ) -> dict[str, Any]:
     """Find files matching a glob pattern.
 
-    Supports standard glob patterns and can also serve as a directory
-    listing when pattern="*".
+    Use this tool to discover files by name/extension. Supports recursive
+    search with '**'. Use pattern='*' for a directory listing.
+    For searching inside file contents, use grep instead.
+    For detailed directory listing with type separation, use list_dir.
 
     Args:
         pattern: Glob pattern to match (default "*" lists all files).
@@ -60,41 +60,22 @@ def glob(
         - count: Number of matches found
         - truncated: True if results were truncated
         - path: Resolved search path
-
-    File entry format (when include_metadata=False):
-        str (file path relative to search path)
-
-    File entry format (when include_metadata=True):
-        {
-            "path": str,
-            "type": "file" | "directory",
-            "size": int | None,  # bytes, None for directories
-            "modified": str,     # ISO format timestamp
-        }
-
-    Examples:
-        glob()                          # List current directory
-        glob("*.py")                    # Find Python files
-        glob("**/*.test.ts", "src")     # Find test files under src/
-        glob("*", include_metadata=True) # List with file details
     """
     search_path = Path(path).resolve()
 
     if not search_path.exists():
-        raise ToolError(
-            message=f"Path not found: {path}",
-            error_code=ErrorCode.NOT_FOUND,
-            recoverable=False,
-            details={"path": str(search_path)},
-        )
+        return {
+            "success": False,
+            "error": f"Path not found: {path}",
+            "path": str(search_path),
+        }
 
     if not search_path.is_dir():
-        raise ToolError(
-            message=f"Not a directory: {path}",
-            error_code=ErrorCode.INVALID_INPUT,
-            recoverable=False,
-            details={"path": str(search_path)},
-        )
+        return {
+            "success": False,
+            "error": f"Not a directory: {path}",
+            "path": str(search_path),
+        }
 
     # Determine if recursive
     is_recursive = "**" in pattern
@@ -166,7 +147,7 @@ def glob(
 @register_tool(
     category=ToolCategory.READ,
     permission_level=PermissionLevel.SAFE,
-    description="List directory contents with metadata",
+    description="List directory contents organized by type (directories first, then files). Use this when you need a structured overview of a directory; for pattern-based file search use glob.",
 )
 def list_dir(
     path: str = ".",
@@ -175,8 +156,9 @@ def list_dir(
 ) -> dict[str, Any]:
     """List directory contents with detailed metadata.
 
-    A convenience wrapper around glob() that always returns metadata
-    and organizes output by file type.
+    Returns directories and files separately with size and modification time.
+    Use this for understanding project structure. For finding files by
+    pattern across subdirectories, use glob with '**' instead.
 
     Args:
         path: Directory to list (default "." = current directory).
@@ -190,88 +172,38 @@ def list_dir(
         - directories: List of directory entries
         - files: List of file entries
         - total: Total count of entries
-
-    Each entry contains:
-        {
-            "name": str,
-            "size": int | None,
-            "modified": str,
-        }
     """
-    search_path = Path(path).resolve()
+    # Delegate to glob for the actual file listing
+    result = glob(
+        pattern="*",
+        path=path,
+        include_hidden=include_hidden,
+        include_dirs=True,
+        include_metadata=True,
+        sort_by=sort_by if sort_by in ("name", "size", "modified") else "name",
+    )
 
-    if not search_path.exists():
-        raise ToolError(
-            message=f"Path not found: {path}",
-            error_code=ErrorCode.NOT_FOUND,
-            recoverable=False,
-            details={"path": str(search_path)},
-        )
+    if not result.get("success"):
+        return result
 
-    if not search_path.is_dir():
-        raise ToolError(
-            message=f"Not a directory: {path}",
-            error_code=ErrorCode.INVALID_INPUT,
-            recoverable=False,
-            details={"path": str(search_path)},
-        )
-
+    # Separate directories and files, reformat entries
     directories: list[dict[str, Any]] = []
     files: list[dict[str, Any]] = []
 
-    try:
-        entries = list(search_path.iterdir())
-    except PermissionError:
-        raise ToolError(
-            message=f"Permission denied: {path}",
-            error_code=ErrorCode.PERMISSION_DENIED,
-            recoverable=False,
-            details={"path": str(search_path)},
-        )
-
-    for entry in entries:
-        # Skip hidden files if not requested
-        if not include_hidden and entry.name.startswith("."):
-            continue
-
-        try:
-            stat = entry.stat()
-            item = {
-                "name": entry.name,
-                "size": stat.st_size if entry.is_file() else None,
-                "modified": datetime.fromtimestamp(stat.st_mtime).isoformat(),
-            }
-        except (OSError, PermissionError):
-            item = {
-                "name": entry.name,
-                "size": None,
-                "modified": None,
-            }
-
-        if entry.is_dir():
+    for entry in result.get("files", []):
+        item = {
+            "name": entry["path"],
+            "size": entry.get("size"),
+            "modified": entry.get("modified"),
+        }
+        if entry.get("type") == "directory":
             directories.append(item)
         else:
             files.append(item)
 
-    # Sort based on sort_by
-    def sort_key(item: dict[str, Any]) -> Any:
-        if sort_by == "name":
-            return item["name"].lower()
-        elif sort_by == "size":
-            return item.get("size") or 0
-        elif sort_by == "modified":
-            return item.get("modified") or ""
-        return item["name"].lower()
-
-    reverse = sort_by in ("size", "modified")
-
-    if sort_by != "type":
-        directories.sort(key=sort_key, reverse=reverse)
-        files.sort(key=sort_key, reverse=reverse)
-
     return {
         "success": True,
-        "path": str(search_path),
+        "path": result["path"],
         "directories": directories,
         "files": files,
         "total": len(directories) + len(files),

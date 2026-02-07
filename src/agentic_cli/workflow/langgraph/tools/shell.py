@@ -1,8 +1,7 @@
 """Shell execution tools for LangGraph workflows.
 
-Provides shell execution tools with safety checks and configurable
-execution policies. Commands are validated against blocked patterns
-before execution.
+Thin wrapper around the main shell executor that provides
+LangChain-compatible @tool decorators for LangGraph agents.
 
 Example:
     from agentic_cli.workflow.langgraph.tools import create_shell_tool
@@ -16,56 +15,47 @@ Example:
 
 from __future__ import annotations
 
-import asyncio
-import re
-import subprocess
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from agentic_cli.logging import Loggers
+from agentic_cli.tools.shell import shell_executor as main_shell_executor, is_shell_enabled
 
 logger = Loggers.workflow()
 
 
+# Re-export safety utilities from main shell module
 def get_blocked_patterns() -> list[str]:
     """Get list of blocked shell command patterns.
 
-    Returns patterns that should be blocked for security reasons.
-    These patterns prevent destructive or dangerous commands.
-
-    Returns:
-        List of regex patterns to block.
+    Delegates to the main shell security module.
     """
+    from agentic_cli.tools.shell.config import get_strict_config
+    config = get_strict_config()
+    # Return a representative list for backward compatibility
     return [
-        r"rm\s+-rf\s+/",  # Recursive delete from root
-        r"rm\s+-rf\s+~",  # Recursive delete home
-        r"rm\s+-rf\s+\*",  # Recursive delete all
-        r":\(\)\{\s*:\|:&\s*\};:",  # Fork bomb
-        r"dd\s+if=/dev/zero",  # Disk wipe
-        r"mkfs\.",  # Format filesystem
-        r"chmod\s+-R\s+777\s+/",  # Dangerous permissions
-        r"curl.*\|\s*bash",  # Pipe to shell
-        r"wget.*\|\s*bash",  # Pipe to shell
-        r">\s*/dev/sd",  # Write to disk device
+        r"rm\s+-rf\s+/",
+        r"rm\s+-rf\s+~",
+        r"rm\s+-rf\s+\*",
+        r":\(\)\{\s*:\|:&\s*\};:",
+        r"dd\s+if=/dev/zero",
+        r"mkfs\.",
+        r"chmod\s+-R\s+777\s+/",
+        r"curl.*\|\s*bash",
+        r"wget.*\|\s*bash",
+        r">\s*/dev/sd",
     ]
 
 
 def is_command_safe(command: str) -> tuple[bool, str | None]:
     """Check if a shell command is safe to execute.
 
-    Args:
-        command: Shell command to check.
-
-    Returns:
-        Tuple of (is_safe, reason). If is_safe is False,
-        reason contains explanation of why command was blocked.
+    Delegates to the main shell security analysis.
     """
-    patterns = get_blocked_patterns()
-
-    for pattern in patterns:
-        if re.search(pattern, command, re.IGNORECASE):
-            return False, f"Command matches blocked pattern: {pattern}"
-
+    from agentic_cli.tools.shell import analyze_command
+    analysis = analyze_command(command)
+    if analysis.get("blocked"):
+        return False, analysis.get("reason", "Command blocked by security policy")
     return True, None
 
 
@@ -77,8 +67,7 @@ def shell_execute(
 ) -> dict[str, Any]:
     """Execute a shell command with safety checks.
 
-    Validates the command against blocked patterns before execution.
-    Returns structured output with stdout, stderr, and return code.
+    Delegates to the main shell executor.
 
     Args:
         command: Shell command to execute.
@@ -87,98 +76,10 @@ def shell_execute(
         capture_stderr: Whether to capture stderr separately.
 
     Returns:
-        Dictionary with keys:
-        - success: Whether command succeeded (return code 0)
-        - stdout: Standard output
-        - stderr: Standard error (if capture_stderr=True)
-        - return_code: Process return code
-        - error: Error message if command was blocked or failed
-
-    Example:
-        >>> shell_execute("ls -la", "/path/to/dir")
-        {'success': True, 'stdout': '...', 'return_code': 0}
+        Dictionary with success, stdout, stderr, return_code, error keys.
     """
-    # Validate command safety
-    is_safe, reason = is_command_safe(command)
-    if not is_safe:
-        logger.warning(
-            "shell_command_blocked",
-            command=command[:100],
-            reason=reason,
-        )
-        return {
-            "success": False,
-            "stdout": "",
-            "stderr": "",
-            "return_code": -1,
-            "error": f"Command blocked: {reason}",
-        }
-
-    cwd = Path(working_dir) if working_dir else None
-    if cwd and not cwd.exists():
-        return {
-            "success": False,
-            "stdout": "",
-            "stderr": "",
-            "return_code": -1,
-            "error": f"Working directory does not exist: {cwd}",
-        }
-
-    logger.debug(
-        "shell_execute_start",
-        command=command[:100],
-        cwd=str(cwd) if cwd else None,
-        timeout=timeout,
-    )
-
-    try:
-        result = subprocess.run(
-            command,
-            shell=True,
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-
-        success = result.returncode == 0
-        output = {
-            "success": success,
-            "stdout": result.stdout,
-            "return_code": result.returncode,
-        }
-
-        if capture_stderr:
-            output["stderr"] = result.stderr
-
-        logger.debug(
-            "shell_execute_complete",
-            success=success,
-            return_code=result.returncode,
-            stdout_len=len(result.stdout),
-        )
-
-        return output
-
-    except subprocess.TimeoutExpired:
-        logger.warning("shell_execute_timeout", command=command[:100], timeout=timeout)
-        return {
-            "success": False,
-            "stdout": "",
-            "stderr": "",
-            "return_code": -1,
-            "error": f"Command timed out after {timeout} seconds",
-        }
-
-    except Exception as e:
-        logger.error("shell_execute_error", command=command[:100], error=str(e))
-        return {
-            "success": False,
-            "stdout": "",
-            "stderr": "",
-            "return_code": -1,
-            "error": str(e),
-        }
+    cwd = str(working_dir) if working_dir else None
+    return main_shell_executor(command, working_dir=cwd, timeout=timeout)
 
 
 async def shell_execute_async(
@@ -189,7 +90,7 @@ async def shell_execute_async(
 ) -> dict[str, Any]:
     """Execute a shell command asynchronously with safety checks.
 
-    Async version of shell_execute for use in async workflows.
+    Delegates to the main shell executor (runs sync in executor).
 
     Args:
         command: Shell command to execute.
@@ -198,102 +99,14 @@ async def shell_execute_async(
         capture_stderr: Whether to capture stderr separately.
 
     Returns:
-        Dictionary with keys:
-        - success: Whether command succeeded (return code 0)
-        - stdout: Standard output
-        - stderr: Standard error (if capture_stderr=True)
-        - return_code: Process return code
-        - error: Error message if command was blocked or failed
+        Dictionary with success, stdout, stderr, return_code, error keys.
     """
-    # Validate command safety
-    is_safe, reason = is_command_safe(command)
-    if not is_safe:
-        logger.warning(
-            "shell_command_blocked",
-            command=command[:100],
-            reason=reason,
-        )
-        return {
-            "success": False,
-            "stdout": "",
-            "stderr": "",
-            "return_code": -1,
-            "error": f"Command blocked: {reason}",
-        }
-
-    cwd = Path(working_dir) if working_dir else None
-    if cwd and not cwd.exists():
-        return {
-            "success": False,
-            "stdout": "",
-            "stderr": "",
-            "return_code": -1,
-            "error": f"Working directory does not exist: {cwd}",
-        }
-
-    logger.debug(
-        "shell_execute_async_start",
-        command=command[:100],
-        cwd=str(cwd) if cwd else None,
-        timeout=timeout,
+    import asyncio
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(
+        None,
+        lambda: shell_execute(command, working_dir, timeout, capture_stderr),
     )
-
-    try:
-        process = await asyncio.create_subprocess_shell(
-            command,
-            cwd=cwd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE if capture_stderr else None,
-        )
-
-        try:
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(),
-                timeout=timeout,
-            )
-        except asyncio.TimeoutError:
-            process.kill()
-            await process.wait()
-            logger.warning(
-                "shell_execute_async_timeout",
-                command=command[:100],
-                timeout=timeout,
-            )
-            return {
-                "success": False,
-                "stdout": "",
-                "stderr": "",
-                "return_code": -1,
-                "error": f"Command timed out after {timeout} seconds",
-            }
-
-        success = process.returncode == 0
-        output = {
-            "success": success,
-            "stdout": stdout.decode("utf-8", errors="replace") if stdout else "",
-            "return_code": process.returncode or 0,
-        }
-
-        if capture_stderr and stderr:
-            output["stderr"] = stderr.decode("utf-8", errors="replace")
-
-        logger.debug(
-            "shell_execute_async_complete",
-            success=success,
-            return_code=process.returncode,
-        )
-
-        return output
-
-    except Exception as e:
-        logger.error("shell_execute_async_error", command=command[:100], error=str(e))
-        return {
-            "success": False,
-            "stdout": "",
-            "stderr": "",
-            "return_code": -1,
-            "error": str(e),
-        }
 
 
 def create_shell_tool(
@@ -308,17 +121,11 @@ def create_shell_tool(
 
     Args:
         workspace_dir: Base directory for shell commands.
-            Defaults to current working directory.
         timeout: Default timeout in seconds for commands.
         require_approval: Whether this tool requires human approval.
-            (Used as metadata hint for HITL middleware)
 
     Returns:
         Shell tool instance.
-
-    Example:
-        shell = create_shell_tool("/path/to/project", timeout=120)
-        llm_with_tools = llm.bind_tools([shell])
     """
     try:
         from langchain_core.tools import tool

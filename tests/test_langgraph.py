@@ -543,6 +543,7 @@ class TestToolsModule:
             assert results[0]["line"] == 1
             assert "hello" in results[0]["content"]
 
+    @pytest.mark.xfail(reason="Shell tool disabled pending security review")
     def test_shell_execute_safe_command(self):
         """Test shell execution with safe command."""
         from agentic_cli.workflow.langgraph.tools import shell_execute
@@ -553,13 +554,14 @@ class TestToolsModule:
         assert "hello" in result["stdout"]
 
     def test_shell_execute_blocked_command(self):
-        """Test shell execution blocks dangerous commands."""
+        """Test shell execution blocks dangerous commands or is disabled."""
         from agentic_cli.workflow.langgraph.tools import shell_execute
 
         result = shell_execute("rm -rf /")
 
         assert result["success"] is False
-        assert "blocked" in result["error"].lower()
+        # Either blocked by security or disabled entirely
+        assert "blocked" in result["error"].lower() or "disabled" in result["error"].lower()
 
 
 class TestManagerCheckpointerOptions:

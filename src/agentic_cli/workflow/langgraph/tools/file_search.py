@@ -1,7 +1,7 @@
 """File search tools for LangGraph workflows.
 
-Provides glob and grep search tools that can be bound to LangGraph agents.
-These tools wrap filesystem operations with appropriate safety checks.
+Thin wrappers around the main glob/grep tools that provide
+LangChain-compatible @tool decorators for LangGraph agents.
 
 Example:
     from agentic_cli.workflow.langgraph.tools import create_file_search_tools
@@ -12,12 +12,12 @@ Example:
 
 from __future__ import annotations
 
-import fnmatch
-import re
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from agentic_cli.logging import Loggers
+from agentic_cli.tools.glob_tool import glob as main_glob
+from agentic_cli.tools.grep_tool import grep as main_grep
 
 logger = Loggers.workflow()
 
@@ -29,6 +29,8 @@ def glob_search(
 ) -> list[str]:
     """Search for files matching a glob pattern.
 
+    Delegates to the main glob tool and returns a flat list of paths.
+
     Args:
         pattern: Glob pattern to match (e.g., "**/*.py", "src/*.ts").
         directory: Base directory to search in. Defaults to current directory.
@@ -36,42 +38,18 @@ def glob_search(
 
     Returns:
         List of matching file paths relative to the search directory.
-
-    Example:
-        >>> glob_search("**/*.py", "/path/to/project")
-        ['src/main.py', 'src/utils/helpers.py', 'tests/test_main.py']
     """
-    base_dir = Path(directory) if directory else Path.cwd()
-
-    if not base_dir.exists():
-        logger.warning("glob_search_dir_not_found", directory=str(base_dir))
-        return []
-
-    logger.debug(
-        "glob_search_start",
+    path = directory or "."
+    result = main_glob(
         pattern=pattern,
-        directory=str(base_dir),
+        path=path,
+        include_dirs=False,
+        max_results=max_results,
     )
-
-    results = []
-    try:
-        for path in base_dir.glob(pattern):
-            if path.is_file():
-                # Return relative path
-                try:
-                    rel_path = path.relative_to(base_dir)
-                    results.append(str(rel_path))
-                except ValueError:
-                    results.append(str(path))
-
-                if len(results) >= max_results:
-                    logger.debug("glob_search_max_results", count=max_results)
-                    break
-    except Exception as e:
-        logger.error("glob_search_error", error=str(e))
-
-    logger.debug("glob_search_complete", matches=len(results))
-    return results
+    if not result.get("success"):
+        logger.warning("glob_search_failed", error=result.get("error"))
+        return []
+    return result.get("files", [])
 
 
 def grep_search(
@@ -84,6 +62,8 @@ def grep_search(
 ) -> list[dict[str, Any]]:
     """Search for content matching a regex pattern in files.
 
+    Delegates to the main grep tool and reformats output for LangGraph.
+
     Args:
         pattern: Regex pattern to search for.
         directory: Base directory to search in. Defaults to current directory.
@@ -93,93 +73,36 @@ def grep_search(
         case_insensitive: Whether to ignore case in pattern matching.
 
     Returns:
-        List of match dictionaries with keys:
-        - file: File path
-        - line: Line number (1-indexed)
-        - content: Matching line content
-        - context_before: Lines before match (if context_lines > 0)
-        - context_after: Lines after match (if context_lines > 0)
-
-    Example:
-        >>> grep_search("def main", "/path/to/project", "*.py")
-        [{'file': 'src/main.py', 'line': 10, 'content': 'def main():'}]
+        List of match dictionaries with keys: file, line, content.
     """
-    base_dir = Path(directory) if directory else Path.cwd()
-
-    if not base_dir.exists():
-        logger.warning("grep_search_dir_not_found", directory=str(base_dir))
-        return []
-
-    logger.debug(
-        "grep_search_start",
+    path = directory or "."
+    result = main_grep(
         pattern=pattern,
-        directory=str(base_dir),
-        file_pattern=file_pattern,
+        path=path,
+        ignore_case=case_insensitive,
+        file_pattern=file_pattern if file_pattern != "*" else None,
+        context_lines=context_lines,
+        max_results=max_results,
+        output_mode="content",
     )
-
-    flags = re.IGNORECASE if case_insensitive else 0
-    try:
-        regex = re.compile(pattern, flags)
-    except re.error as e:
-        logger.error("grep_search_invalid_pattern", pattern=pattern, error=str(e))
+    if not result.get("success"):
+        logger.warning("grep_search_failed", error=result.get("error"))
         return []
 
-    results = []
-    files_searched = 0
-
-    # Get files matching the file pattern
-    for file_path in base_dir.glob(f"**/{file_pattern}"):
-        if not file_path.is_file():
-            continue
-
-        # Skip binary files and very large files
-        try:
-            if file_path.stat().st_size > 10_000_000:  # 10MB limit
-                continue
-        except OSError:
-            continue
-
-        files_searched += 1
-
-        try:
-            lines = file_path.read_text(encoding="utf-8", errors="ignore").splitlines()
-        except Exception:
-            continue
-
-        for i, line in enumerate(lines):
-            if regex.search(line):
-                match = {
-                    "file": str(file_path.relative_to(base_dir)),
-                    "line": i + 1,
-                    "content": line.strip(),
-                }
-
-                if context_lines > 0:
-                    start = max(0, i - context_lines)
-                    end = min(len(lines), i + context_lines + 1)
-                    match["context_before"] = [
-                        l.strip() for l in lines[start:i]
-                    ]
-                    match["context_after"] = [
-                        l.strip() for l in lines[i + 1:end]
-                    ]
-
-                results.append(match)
-
-                if len(results) >= max_results:
-                    logger.debug(
-                        "grep_search_max_results",
-                        count=max_results,
-                        files_searched=files_searched,
-                    )
-                    return results
-
-    logger.debug(
-        "grep_search_complete",
-        matches=len(results),
-        files_searched=files_searched,
-    )
-    return results
+    # Reformat matches: main grep uses "line_number", LangGraph uses "line"
+    matches = []
+    for m in result.get("matches", []):
+        entry: dict[str, Any] = {
+            "file": m["file"],
+            "line": m.get("line_number", 0),
+            "content": m.get("content", ""),
+        }
+        if "context_before" in m:
+            entry["context_before"] = m["context_before"]
+        if "context_after" in m:
+            entry["context_after"] = m["context_after"]
+        matches.append(entry)
+    return matches
 
 
 def create_file_search_tools(
@@ -196,10 +119,6 @@ def create_file_search_tools(
 
     Returns:
         List of tool instances [glob_tool, grep_tool].
-
-    Example:
-        tools = create_file_search_tools("/path/to/project")
-        llm_with_tools = llm.bind_tools(tools)
     """
     try:
         from langchain_core.tools import tool

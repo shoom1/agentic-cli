@@ -48,7 +48,7 @@ def _get_knowledge_base_manager(
 @register_tool(
     category=ToolCategory.KNOWLEDGE,
     permission_level=PermissionLevel.SAFE,
-    description="Search the knowledge base for relevant information",
+    description="Search the local knowledge base for relevant documents using semantic similarity. Use this when you need to find previously ingested papers, notes, or documents.",
 )
 def search_knowledge_base(
     query: str,
@@ -76,7 +76,7 @@ def search_knowledge_base(
 @register_tool(
     category=ToolCategory.KNOWLEDGE,
     permission_level=PermissionLevel.CAUTION,
-    description="Ingest a document into the knowledge base",
+    description="Ingest a document into the knowledge base for later semantic search. Use this to store papers, articles, or notes for future reference.",
 )
 def ingest_to_knowledge_base(
     content: str,
@@ -164,7 +164,7 @@ def _clean_arxiv_id(arxiv_id: str) -> str:
 @register_tool(
     category=ToolCategory.KNOWLEDGE,
     permission_level=PermissionLevel.SAFE,
-    description="Search arXiv for academic papers",
+    description="Search arXiv for academic papers by query, category, or date range. Use this to find research papers on a topic.",
 )
 def search_arxiv(
     query: str,
@@ -236,7 +236,7 @@ def search_arxiv(
 @register_tool(
     category=ToolCategory.KNOWLEDGE,
     permission_level=PermissionLevel.SAFE,
-    description="Fetch detailed information about a specific arXiv paper",
+    description="Fetch metadata for a specific arXiv paper by ID or URL (title, authors, abstract, categories). Use this when you have a paper ID and need details.",
 )
 def fetch_arxiv_paper(arxiv_id: str) -> dict[str, Any]:
     """Fetch detailed information about a specific arXiv paper.
@@ -293,7 +293,7 @@ def fetch_arxiv_paper(arxiv_id: str) -> dict[str, Any]:
 @register_tool(
     category=ToolCategory.KNOWLEDGE,
     permission_level=PermissionLevel.SAFE,
-    description="Analyze an arXiv paper using LLM-powered content extraction",
+    description="Analyze an arXiv paper's abstract page using LLM-powered content extraction. Use this when you need deeper analysis beyond metadata (e.g., key contributions, methodology).",
 )
 async def analyze_arxiv_paper(arxiv_id: str, prompt: str) -> dict[str, Any]:
     """Analyze an arXiv paper using LLM-powered content extraction.
@@ -338,7 +338,7 @@ async def analyze_arxiv_paper(arxiv_id: str, prompt: str) -> dict[str, Any]:
 @register_tool(
     category=ToolCategory.EXECUTION,
     permission_level=PermissionLevel.CAUTION,
-    description="Execute Python code safely in a sandboxed environment",
+    description="Execute Python code in a sandboxed environment with restricted imports. Use this for calculations, data processing, or prototyping. Only whitelisted modules (math, numpy, pandas, json, etc.) are available.",
 )
 def execute_python(
     code: str,
@@ -369,7 +369,7 @@ def execute_python(
 @register_tool(
     category=ToolCategory.INTERACTION,
     permission_level=PermissionLevel.SAFE,
-    description="Ask the user for clarification",
+    description="Ask the user a clarifying question and wait for their response. Use this when requirements are ambiguous or you need user input to proceed.",
 )
 async def ask_clarification(
     question: str,

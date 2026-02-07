@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from agentic_cli.memory import MemoryStore
     from agentic_cli.planning import PlanStore
+    from agentic_cli.tasks import TaskStore
     from agentic_cli.hitl import ApprovalManager, CheckpointManager
 
 # Context variables for manager instances
@@ -25,6 +26,9 @@ _approval_manager_context: ContextVar[Any] = ContextVar(
 )
 _checkpoint_manager_context: ContextVar[Any] = ContextVar(
     "checkpoint_manager_context", default=None
+)
+_task_store_context: ContextVar[Any] = ContextVar(
+    "task_store_context", default=None
 )
 _llm_summarizer_context: ContextVar[Any] = ContextVar(
     "llm_summarizer_context", default=None
@@ -52,6 +56,11 @@ def set_context_approval_manager(manager: "ApprovalManager | None") -> Token:
 def set_context_checkpoint_manager(manager: "CheckpointManager | None") -> Token:
     """Set the checkpoint manager in the current context."""
     return _checkpoint_manager_context.set(manager)
+
+
+def set_context_task_store(store: "TaskStore | None") -> Token:
+    """Set the task store in the current context."""
+    return _task_store_context.set(store)
 
 
 def set_context_llm_summarizer(summarizer: Any | None) -> Token:
@@ -96,6 +105,15 @@ def get_context_checkpoint_manager() -> "CheckpointManager | None":
         The CheckpointManager instance set by the workflow manager, or None if not set.
     """
     return _checkpoint_manager_context.get()
+
+
+def get_context_task_store() -> "TaskStore | None":
+    """Get the task store from the current context.
+
+    Returns:
+        The TaskStore instance set by the workflow manager, or None if not set.
+    """
+    return _task_store_context.get()
 
 
 def get_context_llm_summarizer() -> Any | None:
