@@ -4,7 +4,7 @@ Showcases framework features through a research assistant agent
 with memory, planning, knowledge base, web fetching, code execution,
 file operations, shell commands, and HITL.
 
-Feature managers (MemoryStore, TaskGraph, CheckpointManager,
+Feature managers (MemoryStore, PlanStore, CheckpointManager,
 ApprovalManager) are auto-created by the workflow manager based on
 tool requirements.
 """

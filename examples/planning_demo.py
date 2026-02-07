@@ -1,285 +1,144 @@
 #!/usr/bin/env python
-"""Standalone demo for the TaskGraph planning system.
+"""Standalone demo for the PlanStore planning system.
 
-This demo tests the task planning system:
-1. Task creation with descriptions
-2. Dependency management between tasks
-3. Status tracking (pending, in_progress, completed, failed)
-4. Subtask hierarchy
-5. Progress monitoring and display
+This demo shows the simplified flat-markdown planning pattern:
+1. Agent creates a plan with markdown checkboxes
+2. Agent updates the plan as tasks complete
+3. Framework just stores the string
 
 Usage:
     conda run -n agenticcli python examples/planning_demo.py
 """
 
-import sys
-from datetime import datetime
-
-from agentic_cli.planning.task_graph import TaskGraph, TaskStatus, STATUS_ICONS
+from agentic_cli.planning import PlanStore
 
 
-# =============================================================================
-# Demo Functions
-# =============================================================================
-
-
-def demo_basic_task_creation():
-    """Demo basic task creation and retrieval."""
+def demo_basic_plan():
+    """Demo creating and retrieving a plan."""
     print("\n" + "=" * 60)
-    print("Basic Task Creation Demo")
+    print("Basic Plan Demo")
     print("=" * 60)
 
-    graph = TaskGraph()
+    store = PlanStore()
 
-    # Create some tasks
-    task1_id = graph.add_task("Research topic")
-    task2_id = graph.add_task("Write outline")
-    task3_id = graph.add_task("Draft content")
+    # Agent creates a plan
+    plan = (
+        "## Research Plan: Python History\n"
+        "\n"
+        "- [ ] Search for key milestones in Python development\n"
+        "- [ ] Identify major version releases and their features\n"
+        "- [ ] Find notable Python community events\n"
+        "- [ ] Write summary document\n"
+    )
+    store.save(plan)
 
-    print(f"  Created 3 tasks:")
-    for task_id in [task1_id, task2_id, task3_id]:
-        task = graph.get_task(task_id)
-        icon = STATUS_ICONS[task.status]
-        print(f"    {icon} [{task_id}] {task.description}")
-
+    print("  Created plan:")
+    print(store.get())
     print()
-    print(f"  Total tasks: {len(graph.all_tasks())}")
-    print()
 
 
-def demo_dependencies():
-    """Demo task dependencies and ready task detection."""
+def demo_progress_tracking():
+    """Demo updating plan with progress."""
     print("\n" + "=" * 60)
-    print("Task Dependencies Demo")
+    print("Progress Tracking Demo")
     print("=" * 60)
 
-    graph = TaskGraph()
+    store = PlanStore()
 
-    # Create tasks with dependencies
-    research_id = graph.add_task("Research topic")
-    outline_id = graph.add_task("Write outline", dependencies=[research_id])
-    draft_id = graph.add_task("Draft content", dependencies=[outline_id])
-    review_id = graph.add_task("Review draft", dependencies=[draft_id])
+    # Initial plan
+    store.save(
+        "## ML Pipeline\n"
+        "- [ ] Prepare dataset\n"
+        "- [ ] Train model\n"
+        "- [ ] Evaluate performance\n"
+        "- [ ] Deploy to production\n"
+    )
+    print("  Initial plan:")
+    print(store.get())
 
-    print("  Task dependency chain:")
-    print(f"    Research -> Outline -> Draft -> Review")
+    # Agent completes first two tasks
+    store.save(
+        "## ML Pipeline\n"
+        "- [x] Prepare dataset\n"
+        "- [x] Train model (accuracy: 94.2%)\n"
+        "- [ ] Evaluate performance\n"
+        "- [ ] Deploy to production\n"
+    )
+    print("\n  After completing 2 tasks:")
+    print(store.get())
+
+    # Agent adds notes and completes more
+    store.save(
+        "## ML Pipeline\n"
+        "- [x] Prepare dataset\n"
+        "- [x] Train model (accuracy: 94.2%)\n"
+        "- [x] Evaluate performance\n"
+        "  - Precision: 0.93, Recall: 0.95\n"
+        "  - Exceeds baseline by 12%\n"
+        "- [ ] Deploy to production\n"
+    )
+    print("\n  After evaluation with notes:")
+    print(store.get())
     print()
 
-    # Check initial ready tasks
-    ready = graph.get_ready_tasks()
-    print(f"  Initial ready tasks: {[t.description for t in ready]}")
-    print()
 
-    # Complete research task
-    graph.update_status(research_id, TaskStatus.COMPLETED)
-    ready = graph.get_ready_tasks()
-    print(f"  After completing 'Research': {[t.description for t in ready]}")
-
-    # Complete outline task
-    graph.update_status(outline_id, TaskStatus.COMPLETED)
-    ready = graph.get_ready_tasks()
-    print(f"  After completing 'Outline': {[t.description for t in ready]}")
-    print()
-
-
-def demo_status_tracking():
-    """Demo status transitions and progress tracking."""
+def demo_plan_revision():
+    """Demo revising a plan mid-execution."""
     print("\n" + "=" * 60)
-    print("Status Tracking Demo")
+    print("Plan Revision Demo")
     print("=" * 60)
 
-    graph = TaskGraph()
+    store = PlanStore()
 
-    # Create tasks
-    ids = [
-        graph.add_task("Task A"),
-        graph.add_task("Task B"),
-        graph.add_task("Task C"),
-        graph.add_task("Task D"),
-    ]
+    # Original plan
+    store.save(
+        "## API Integration\n"
+        "- [x] Design API schema\n"
+        "- [ ] Implement endpoints\n"
+        "- [ ] Write tests\n"
+    )
+    print("  Original plan:")
+    print(store.get())
 
-    print("  Initial status:")
-    print_progress(graph)
-
-    # Simulate workflow
-    print("\n  Simulating workflow...")
-
-    # Start Task A
-    graph.update_status(ids[0], TaskStatus.IN_PROGRESS)
-    print(f"    Started Task A")
-
-    # Complete Task A
-    graph.update_status(ids[0], TaskStatus.COMPLETED, result="Done!")
-    print(f"    Completed Task A with result")
-
-    # Start and fail Task B
-    graph.update_status(ids[1], TaskStatus.IN_PROGRESS)
-    graph.update_status(ids[1], TaskStatus.FAILED, error="Something went wrong")
-    print(f"    Task B failed with error")
-
-    # Skip Task C
-    graph.update_status(ids[2], TaskStatus.SKIPPED)
-    print(f"    Skipped Task C")
-
-    print("\n  Final status:")
-    print_progress(graph)
-
-    # Verify timestamps
-    task_a = graph.get_task(ids[0])
-    print(f"\n  Task A timestamps:")
-    print(f"    Created:   {task_a.created_at.strftime('%H:%M:%S')}")
-    print(f"    Started:   {task_a.started_at.strftime('%H:%M:%S') if task_a.started_at else 'N/A'}")
-    print(f"    Completed: {task_a.completed_at.strftime('%H:%M:%S') if task_a.completed_at else 'N/A'}")
+    # Agent discovers need for auth — revises plan
+    store.save(
+        "## API Integration\n"
+        "- [x] Design API schema\n"
+        "- [x] Implement endpoints\n"
+        "- [ ] Add authentication (discovered requirement)\n"
+        "- [ ] Write tests\n"
+        "- [ ] Update documentation\n"
+    )
+    print("\n  Revised plan (added auth + docs):")
+    print(store.get())
     print()
 
 
-def print_progress(graph: TaskGraph):
-    """Print progress statistics."""
-    progress = graph.get_progress()
-    for status in ["pending", "in_progress", "completed", "failed", "skipped"]:
-        count = progress.get(status, 0)
-        if count > 0:
-            print(f"    {status}: {count}")
-
-
-def demo_subtasks():
-    """Demo parent-child task hierarchy."""
+def demo_clear():
+    """Demo clearing the plan."""
     print("\n" + "=" * 60)
-    print("Subtask Hierarchy Demo")
+    print("Clear Plan Demo")
     print("=" * 60)
 
-    graph = TaskGraph()
+    store = PlanStore()
+    store.save("- [ ] Some task")
+    print(f"  Has plan: {not store.is_empty()}")
 
-    # Create parent task
-    parent_id = graph.add_task("Build feature")
-
-    # Create subtasks
-    sub1_id = graph.add_task("Design API", parent=parent_id)
-    sub2_id = graph.add_task("Implement logic", parent=parent_id)
-    sub3_id = graph.add_task("Write tests", parent=parent_id)
-
-    print("  Created hierarchy:")
-    print(graph.to_display())
-    print()
-
-    # Update subtask statuses
-    graph.update_status(sub1_id, TaskStatus.COMPLETED)
-    graph.update_status(sub2_id, TaskStatus.IN_PROGRESS)
-
-    print("  After updates:")
-    print(graph.to_display())
-    print()
-
-
-def demo_display_formats():
-    """Demo different display format options."""
-    print("\n" + "=" * 60)
-    print("Display Formats Demo")
-    print("=" * 60)
-
-    graph = TaskGraph()
-
-    # Create a more complex graph
-    research = graph.add_task("Research machine learning algorithms")
-    data_prep = graph.add_task("Prepare training dataset", dependencies=[research])
-    model = graph.add_task("Train model", dependencies=[data_prep])
-    eval_task = graph.add_task("Evaluate model performance", dependencies=[model])
-    deploy = graph.add_task("Deploy to production", dependencies=[eval_task])
-    docs = graph.add_task("Write documentation")
-    tests = graph.add_task("Write integration tests", dependencies=[deploy])
-
-    # Set various statuses
-    graph.update_status(research, TaskStatus.COMPLETED)
-    graph.update_status(data_prep, TaskStatus.COMPLETED)
-    graph.update_status(model, TaskStatus.IN_PROGRESS)
-    graph.update_status(docs, TaskStatus.IN_PROGRESS)
-
-    print("  Full display format:")
-    print("-" * 40)
-    print(graph.to_display())
-    print()
-
-    print("  Compact display format (for status line):")
-    print("-" * 40)
-    print(graph.to_compact_display(max_tasks=4))
-    print()
-
-
-def demo_serialization():
-    """Demo saving and loading task graphs."""
-    print("\n" + "=" * 60)
-    print("Serialization Demo")
-    print("=" * 60)
-
-    # Create original graph
-    graph = TaskGraph()
-    t1 = graph.add_task("First task", priority="high")
-    t2 = graph.add_task("Second task", dependencies=[t1])
-    graph.update_status(t1, TaskStatus.COMPLETED)
-
-    print("  Original graph:")
-    print(graph.to_display())
-
-    # Serialize to dict
-    data = graph.to_dict()
-    print(f"\n  Serialized to dict with {len(data['tasks'])} tasks")
-
-    # Restore from dict
-    restored = TaskGraph.from_dict(data)
-    print("\n  Restored graph:")
-    print(restored.to_display())
-
-    # Verify metadata preserved
-    task = restored.get_task(t1)
-    print(f"\n  Metadata preserved: priority={task.metadata.get('priority')}")
-    print()
-
-
-def demo_revise():
-    """Demo graph revision (add/remove/update tasks)."""
-    print("\n" + "=" * 60)
-    print("Graph Revision Demo")
-    print("=" * 60)
-
-    graph = TaskGraph()
-    t1 = graph.add_task("Original task 1")
-    t2 = graph.add_task("Original task 2")
-
-    print("  Initial graph:")
-    print(graph.to_display())
-
-    # Apply revisions
-    changes = [
-        {"action": "add", "description": "New task added"},
-        {"action": "update", "task_id": t1, "description": "Updated task 1"},
-        {"action": "update", "task_id": t2, "status": "completed"},
-    ]
-
-    graph.revise(changes)
-
-    print("\n  After revisions:")
-    print(graph.to_display())
+    store.clear()
+    print(f"  After clear, is empty: {store.is_empty()}")
     print()
 
 
 def main():
     """Run all demos."""
     print("\n" + "#" * 60)
-    print("#  TaskGraph Planning System Demo")
+    print("#  PlanStore Planning System Demo")
     print("#" * 60)
 
-    print("\nStatus icons:")
-    for status, icon in STATUS_ICONS.items():
-        print(f"  {icon} = {status.value}")
-
-    # Run demos
-    demo_basic_task_creation()
-    demo_dependencies()
-    demo_status_tracking()
-    demo_subtasks()
-    demo_display_formats()
-    demo_serialization()
-    demo_revise()
+    demo_basic_plan()
+    demo_progress_tracking()
+    demo_plan_revision()
+    demo_clear()
 
     print("\n" + "#" * 60)
     print("#  Demo Complete!")

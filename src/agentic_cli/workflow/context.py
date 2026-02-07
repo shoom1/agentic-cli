@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from agentic_cli.memory import MemoryStore
-    from agentic_cli.planning import TaskGraph
+    from agentic_cli.planning import PlanStore
     from agentic_cli.hitl import ApprovalManager, CheckpointManager
 
 # Context variables for manager instances
@@ -39,9 +39,9 @@ def set_context_memory_manager(manager: "MemoryStore | None") -> Token:
     return _memory_manager_context.set(manager)
 
 
-def set_context_task_graph(graph: "TaskGraph | None") -> Token:
-    """Set the task graph in the current context."""
-    return _task_graph_context.set(graph)
+def set_context_task_graph(store: "PlanStore | None") -> Token:
+    """Set the plan store in the current context."""
+    return _task_graph_context.set(store)
 
 
 def set_context_approval_manager(manager: "ApprovalManager | None") -> Token:
@@ -71,11 +71,11 @@ def get_context_memory_manager() -> "MemoryStore | None":
     return _memory_manager_context.get()
 
 
-def get_context_task_graph() -> "TaskGraph | None":
-    """Get the task graph from the current context.
+def get_context_task_graph() -> "PlanStore | None":
+    """Get the plan store from the current context.
 
     Returns:
-        The TaskGraph instance set by the workflow manager, or None if not set.
+        The PlanStore instance set by the workflow manager, or None if not set.
     """
     return _task_graph_context.get()
 

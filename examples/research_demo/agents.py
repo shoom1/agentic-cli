@@ -39,16 +39,9 @@ RESEARCH_AGENT_PROMPT = """You are a research assistant with memory, planning, k
 - `save_memory(content, tags)` - Save information that persists across sessions
 - `search_memory(query, limit)` - Search stored memories by keyword
 
-**Task Planning**
-- `create_plan(topic, tasks)` - Create a structured task plan
-  - tasks: list of {description, depends_on: [indices]}
-- `create_task(description, depends_on)` - Add a single task to the current plan
-- `get_task(task_id)` - Get details of a specific task
-- `get_next_tasks(limit)` - Get tasks ready to work on
-- `update_task_status(task_id, status, result)` - Update task progress
-  - status: "pending", "in_progress", "completed", "failed", "skipped"
-- `get_plan_summary()` - See overall plan progress and display
-- `revise_plan(changes)` - Revise the current plan mid-execution
+**Planning**
+- `save_plan(content)` - Save or update your task plan (use markdown checkboxes)
+- `get_plan()` - Retrieve the current plan
 
 **Knowledge Base**
 - `search_knowledge_base(query, limit)` - Search ingested documents for relevant info
@@ -77,24 +70,21 @@ RESEARCH_AGENT_PROMPT = """You are a research assistant with memory, planning, k
 
 **User Interaction**
 - `ask_clarification(question, options)` - Ask the user a clarifying question
-- `create_checkpoint(name, content, content_type)` - Create a review point
-- `get_checkpoint_result(checkpoint_id)` - Get user feedback on a checkpoint
-- `request_approval(action, details, risk_level)` - Request approval for an action
-- `check_approval(approval_id)` - Check if an approval was granted
-- `check_requires_approval(action)` - Check if an action needs approval first
+- `request_approval(action, details, risk_level)` - Request approval before proceeding (blocks until resolved)
+- `create_checkpoint(name, content, allow_edit)` - Create a review point for the user (blocks until reviewed)
 
 ## CRITICAL: Show Your Work to the User
 
 **You MUST explicitly output results to the user, not just think about them.**
 
 After creating a plan:
-1. Call `get_plan_summary()` to get the formatted plan
-2. OUTPUT the plan display to the user in your response
+1. Call `save_plan(content)` with a markdown plan using checkboxes
+2. OUTPUT the plan to the user in your response
 3. Ask: "Would you like me to proceed with this plan?"
 
 After completing each task:
-1. Call `get_plan_summary()` to show updated progress
-2. OUTPUT the progress to the user
+1. Update the plan with `save_plan(content)` marking completed tasks with [x]
+2. OUTPUT the updated plan to the user
 3. Share what you learned from that task
 
 **DO NOT:**
@@ -107,14 +97,14 @@ After completing each task:
 When the user asks you to research something:
 1. Search the knowledge base with `search_knowledge_base` for existing documents
 2. Check memory with `search_memory` for prior learnings
-3. Create a task plan with `create_plan`
-4. **IMMEDIATELY show the plan** using `get_plan_summary()` and OUTPUT the display field
+3. Create a task plan with `save_plan(content)` using markdown checkboxes
+4. **IMMEDIATELY show the plan** to the user in your response
 5. **WAIT for user confirmation** before executing tasks
-6. Execute ONE task at a time, showing progress after each
+6. Execute ONE task at a time, updating the plan after each
 7. Use `web_fetch` to extract information from specific URLs found during research
 8. Use `execute_python` for data analysis, calculations, or processing
 9. Use `ask_clarification` when you need user input to proceed
-10. Use `revise_plan` if you discover the plan needs changes mid-execution
+10. Update the plan with `save_plan` if you discover changes are needed
 11. Store learnings with `save_memory` and share them with the user
 12. Ingest substantial findings into the knowledge base with `ingest_to_knowledge_base`
 13. Save findings with `save_finding` when you have substantial content
@@ -138,20 +128,12 @@ AGENT_CONFIGS = [
             # Memory (2 tools)
             memory_tools.save_memory,
             memory_tools.search_memory,
-            # Planning (7 tools)
-            planning_tools.create_plan,
-            planning_tools.create_task,
-            planning_tools.get_task,
-            planning_tools.get_next_tasks,
-            planning_tools.update_task_status,
-            planning_tools.get_plan_summary,
-            planning_tools.revise_plan,
-            # HITL (5 tools)
-            hitl_tools.create_checkpoint,
-            hitl_tools.get_checkpoint_result,
+            # Planning (2 tools)
+            planning_tools.save_plan,
+            planning_tools.get_plan,
+            # HITL (2 tools)
             hitl_tools.request_approval,
-            hitl_tools.check_approval,
-            hitl_tools.check_requires_approval,
+            hitl_tools.create_checkpoint,
             # Knowledge base (2 tools)
             search_knowledge_base,
             ingest_to_knowledge_base,
