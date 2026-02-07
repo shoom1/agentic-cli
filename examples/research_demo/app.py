@@ -27,24 +27,24 @@ def _create_app_info() -> AppInfo:
     """Create the application info for the welcome message."""
     text = Text()
     text.append("Research Demo\n\n", style="bold cyan")
-    text.append("A research assistant with memory, planning, knowledge base, and HITL capabilities.\n\n", style="dim")
+    text.append("A research assistant powered by the agentic-cli framework.\n\n", style="dim")
     text.append("Features:\n", style="bold")
-    text.append("  - Working & long-term memory\n", style="dim")
-    text.append("  - Task planning with dependencies\n", style="dim")
-    text.append("  - Task management (track execution)\n", style="dim")
+    text.append("  - Persistent memory across sessions\n", style="dim")
+    text.append("  - Planning (markdown checkboxes)\n", style="dim")
+    text.append("  - Task tracking (status & priority)\n", style="dim")
     text.append("  - Knowledge base (search & ingest)\n", style="dim")
     text.append("  - Web search & content fetching\n", style="dim")
     text.append("  - Academic research (arXiv)\n", style="dim")
     text.append("  - Python code execution\n", style="dim")
     text.append("  - File operations (read, write, search)\n", style="dim")
-    text.append("  - Human-in-the-loop (checkpoints & approvals)\n", style="dim")
+    text.append("  - Human-in-the-loop (approvals & checkpoints)\n", style="dim")
     text.append("\n")
     text.append("Commands:\n", style="bold")
-    text.append("  /memory     - Show memory state\n", style="cyan")
-    text.append("  /plan       - Show task plan\n", style="cyan")
+    text.append("  /memory     - Show saved memories\n", style="cyan")
+    text.append("  /plan       - Show current plan\n", style="cyan")
     text.append("  /tasks      - Show execution tasks\n", style="cyan")
-    text.append("  /files      - List saved findings\n", style="cyan")
-    text.append("  /approvals  - Show pending approvals\n", style="cyan")
+    text.append("  /files      - List workspace files\n", style="cyan")
+    text.append("  /approvals  - Show approval history\n", style="cyan")
     text.append("  /help       - All commands\n", style="cyan")
 
     return AppInfo(
@@ -59,15 +59,14 @@ class ResearchDemoApp(BaseCLIApp):
     """Research Demo CLI Application.
 
     Demonstrates framework features:
-    - Memory: Working memory (session) + Long-term memory (persistent)
-    - Planning: Task graphs with dependencies and mid-execution revision
+    - Memory: Persistent memory across sessions
+    - Planning: Flat markdown plans with checkbox tracking
     - Task Management: Track execution tasks with status and priority
     - Knowledge Base: Search and ingest documents
     - Web: Search and fetch/summarize URL content
     - Code Execution: Sandboxed Python execution
     - File Operations: Read, write, search, compare files
-    - User Interaction: Clarification questions
-    - HITL: Checkpoints, approvals, and review workflows
+    - HITL: Approvals and checkpoint reviews
 
     Feature managers are auto-created by the workflow manager based on
     the @requires decorators on framework tools.

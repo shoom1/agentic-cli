@@ -163,24 +163,24 @@ class FilesCommand(Command):
     def __init__(self) -> None:
         super().__init__(
             name="files",
-            description="List files in workspace (findings, artifacts)",
+            description="List files in workspace directory",
             aliases=[],
             usage="/files [--dir=DIR]",
             examples=[
                 "/files",
-                "/files --dir=findings",
+                "/files --dir=tasks",
             ],
             category=CommandCategory.GENERAL,
         )
 
     async def execute(self, args: str, app: "ResearchDemoApp") -> None:
         parsed = self.parse_args(args)
-        subdir = parsed.get_option("dir", "findings")
+        subdir = parsed.get_option("dir")
 
         from agentic_cli.tools.glob_tool import list_dir
 
         workspace = app.settings.workspace_dir
-        target_dir = workspace / subdir
+        target_dir = workspace / subdir if subdir else workspace
 
         if not target_dir.exists():
             app.session.add_message("system", f"Directory does not exist: {target_dir}")
@@ -191,7 +191,8 @@ class FilesCommand(Command):
             app.session.add_error(result.get("error", "Failed to list directory"))
             return
 
-        table = Table(title=f"Files in {subdir}/", show_header=True)
+        title = f"Files in {subdir}/" if subdir else "Workspace files"
+        table = Table(title=title, show_header=True)
         table.add_column("Name", style="cyan")
         table.add_column("Type", style="yellow")
         table.add_column("Size", style="dim", justify="right")
@@ -273,25 +274,6 @@ class TasksCommand(Command):
         app.session.add_rich(table)
 
 
-class ClearMemoryCommand(Command):
-    """No-op — persistent memory cannot be bulk-cleared from the CLI."""
-
-    def __init__(self) -> None:
-        super().__init__(
-            name="clear-memory",
-            description="(Deprecated) Memory is now persistent-only",
-            aliases=["clearmem"],
-            usage="/clear-memory",
-            category=CommandCategory.GENERAL,
-        )
-
-    async def execute(self, args: str, app: "ResearchDemoApp") -> None:
-        app.session.add_warning(
-            "Working memory has been removed. Persistent memories "
-            "are managed via save_memory/search_memory tools."
-        )
-
-
 class ClearPlanCommand(Command):
     """Clear the task plan."""
 
@@ -324,6 +306,5 @@ DEMO_COMMANDS = [
     ApprovalsCommand,
     CheckpointsCommand,
     FilesCommand,
-    ClearMemoryCommand,
     ClearPlanCommand,
 ]
