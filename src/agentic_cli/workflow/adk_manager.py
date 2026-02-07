@@ -29,6 +29,7 @@ from agentic_cli.config import (
     validate_settings,
     SettingsValidationError,
 )
+from agentic_cli.constants import truncate, TOOL_SUMMARY_MAX_LENGTH
 from agentic_cli.logging import Loggers, bind_context
 
 logger = Loggers.workflow()
@@ -734,7 +735,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
 
         # Truncate string results
         text = str(result)
-        return text[:100] + "..." if len(text) > 100 else text
+        return truncate(text, TOOL_SUMMARY_MAX_LENGTH)
 
     # -------------------------------------------------------------------------
     # Main processing

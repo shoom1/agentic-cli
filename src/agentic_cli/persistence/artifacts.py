@@ -10,6 +10,8 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from agentic_cli.persistence._utils import atomic_write_json, atomic_write_text
+
 if TYPE_CHECKING:
     from agentic_cli.config import BaseSettings
 
@@ -120,19 +122,35 @@ class ArtifactManager:
         """Get path to artifact index file."""
         return self.workspace_path / ".artifacts.json"
 
+    @staticmethod
+    def _make_key(name: str, artifact_type: str) -> str:
+        """Create a dict key from artifact name and type."""
+        return f"{name}:{artifact_type}"
+
     def _load_index(self) -> dict:
-        """Load artifact index from disk."""
+        """Load artifact index from disk.
+
+        Returns dict-based index: {"artifacts": {"name:type": {...}}}.
+        Migrates from legacy list format on the fly.
+        """
         index_path = self._get_index_path()
         if index_path.exists():
             with open(index_path, "r") as f:
-                return json.load(f)
-        return {"artifacts": []}
+                data = json.load(f)
+            # Migrate from legacy list format if needed
+            if isinstance(data.get("artifacts"), list):
+                migrated: dict[str, dict] = {}
+                for entry in data["artifacts"]:
+                    key = self._make_key(entry["name"], entry["artifact_type"])
+                    migrated[key] = entry
+                return {"artifacts": migrated}
+            return data
+        return {"artifacts": {}}
 
     def _save_index(self, index: dict) -> None:
         """Save artifact index to disk."""
         index_path = self._get_index_path()
-        with open(index_path, "w") as f:
-            json.dump(index, f, indent=2)
+        atomic_write_json(index_path, index)
 
     def save(self, artifact: Artifact) -> Path:
         """Save an artifact to disk.
@@ -148,23 +166,14 @@ class ArtifactManager:
 
         # Save content to file
         file_path = self._get_artifact_path(artifact)
-        file_path.write_text(artifact.content)
+        atomic_write_text(file_path, artifact.content)
 
-        # Update index
+        # Update index — direct dict assignment (O(1))
         index = self._load_index()
-        # Remove existing entry with same name and type
-        index["artifacts"] = [
-            a
-            for a in index["artifacts"]
-            if not (
-                a["name"] == artifact.name
-                and a["artifact_type"] == artifact.artifact_type.value
-            )
-        ]
-        # Add new entry
+        key = self._make_key(artifact.name, artifact.artifact_type.value)
         artifact_entry = artifact.to_dict()
         artifact_entry["file_path"] = str(file_path)
-        index["artifacts"].append(artifact_entry)
+        index["artifacts"][key] = artifact_entry
         self._save_index(index)
 
         return file_path
@@ -180,15 +189,15 @@ class ArtifactManager:
             Artifact if found, None otherwise
         """
         index = self._load_index()
-        for entry in index["artifacts"]:
-            if entry["name"] == name and entry["artifact_type"] == artifact_type.value:
-                # Load content from file
-                file_path = Path(entry["file_path"])
-                if file_path.exists():
-                    content = file_path.read_text()
-                    artifact = Artifact.from_dict(entry)
-                    artifact.content = content
-                    return artifact
+        key = self._make_key(name, artifact_type.value)
+        entry = index["artifacts"].get(key)
+        if entry:
+            file_path = Path(entry["file_path"])
+            if file_path.exists():
+                content = file_path.read_text()
+                artifact = Artifact.from_dict(entry)
+                artifact.content = content
+                return artifact
         return None
 
     def list_artifacts(
@@ -204,7 +213,7 @@ class ArtifactManager:
         """
         index = self._load_index()
         artifacts = []
-        for entry in index["artifacts"]:
+        for entry in index["artifacts"].values():
             if (
                 artifact_type is None
                 or entry["artifact_type"] == artifact_type.value
@@ -227,16 +236,14 @@ class ArtifactManager:
             True if deleted, False if not found
         """
         index = self._load_index()
-        for i, entry in enumerate(index["artifacts"]):
-            if entry["name"] == name and entry["artifact_type"] == artifact_type.value:
-                # Delete file
-                file_path = Path(entry["file_path"])
-                if file_path.exists():
-                    file_path.unlink()
-                # Remove from index
-                index["artifacts"].pop(i)
-                self._save_index(index)
-                return True
+        key = self._make_key(name, artifact_type.value)
+        entry = index["artifacts"].pop(key, None)
+        if entry:
+            file_path = Path(entry["file_path"])
+            if file_path.exists():
+                file_path.unlink()
+            self._save_index(index)
+            return True
         return False
 
     def get_workspace_path(self) -> Path:

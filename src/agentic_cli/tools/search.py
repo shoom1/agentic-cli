@@ -13,7 +13,7 @@ Usage:
     )
 
     # Direct usage
-    results = web_search("Python programming", max_results=5)
+    results = await web_search("Python programming", max_results=5)
 """
 
 from __future__ import annotations
@@ -44,7 +44,7 @@ class SearchBackend(ABC):
     """Abstract base class for search backends."""
 
     @abstractmethod
-    def search(self, query: str, max_results: int = 5) -> list[SearchResult]:
+    async def search(self, query: str, max_results: int = 5) -> list[SearchResult]:
         """Execute a search query.
 
         Args:
@@ -71,18 +71,19 @@ class TavilyBackend(SearchBackend):
     def __init__(self, api_key: str) -> None:
         self.api_key = api_key
 
-    def search(self, query: str, max_results: int = 5) -> list[SearchResult]:
+    async def search(self, query: str, max_results: int = 5) -> list[SearchResult]:
         """Search using Tavily API."""
-        response = httpx.post(
-            self.BASE_URL,
-            json={
-                "api_key": self.api_key,
-                "query": query,
-                "max_results": max_results,
-                "include_answer": False,
-            },
-            timeout=30.0,
-        )
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                self.BASE_URL,
+                json={
+                    "api_key": self.api_key,
+                    "query": query,
+                    "max_results": max_results,
+                    "include_answer": False,
+                },
+                timeout=30.0,
+            )
         response.raise_for_status()
         data = response.json()
 
@@ -111,20 +112,21 @@ class BraveBackend(SearchBackend):
     def __init__(self, api_key: str) -> None:
         self.api_key = api_key
 
-    def search(self, query: str, max_results: int = 5) -> list[SearchResult]:
+    async def search(self, query: str, max_results: int = 5) -> list[SearchResult]:
         """Search using Brave Search API."""
-        response = httpx.get(
-            self.BASE_URL,
-            params={
-                "q": query,
-                "count": max_results,
-            },
-            headers={
-                "X-Subscription-Token": self.api_key,
-                "Accept": "application/json",
-            },
-            timeout=30.0,
-        )
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                self.BASE_URL,
+                params={
+                    "q": query,
+                    "count": max_results,
+                },
+                headers={
+                    "X-Subscription-Token": self.api_key,
+                    "Accept": "application/json",
+                },
+                timeout=30.0,
+            )
         response.raise_for_status()
         data = response.json()
 
@@ -199,7 +201,7 @@ def _get_backend(settings: Any) -> SearchBackend:
     permission_level=PermissionLevel.SAFE,
     description="Search the web for information using configured backend",
 )
-def web_search(
+async def web_search(
     query: str,
     max_results: int = 5,
 ) -> dict:
@@ -230,7 +232,7 @@ def web_search(
 
     try:
         backend = _get_backend(resolved_settings)
-        results = backend.search(query, max_results)
+        results = await backend.search(query, max_results)
 
         return {
             "success": True,

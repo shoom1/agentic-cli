@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from agentic_cli.logging import Loggers
+from agentic_cli.persistence._utils import atomic_write_json
 
 if TYPE_CHECKING:
     from agentic_cli.cli.app import MessageHistory
@@ -240,6 +241,50 @@ class SessionPersistence:
         safe_id = "".join(c if c.isalnum() or c in "-_" else "_" for c in session_id)
         return self.sessions_path / f"{safe_id}.json"
 
+    def _get_sessions_index_path(self) -> Path:
+        """Get path to sessions index file."""
+        return self.sessions_path / "_sessions_index.json"
+
+    def _load_sessions_index(self) -> dict[str, dict]:
+        """Load sessions index from disk.
+
+        Returns:
+            Dict mapping session_id to metadata dict.
+        """
+        index_path = self._get_sessions_index_path()
+        if index_path.exists():
+            try:
+                data = json.loads(index_path.read_text())
+                return data.get("sessions", {})
+            except (json.JSONDecodeError, KeyError):
+                pass
+        return {}
+
+    def _save_sessions_index(self, index: dict[str, dict]) -> None:
+        """Save sessions index to disk."""
+        atomic_write_json(self._get_sessions_index_path(), {"sessions": index})
+
+    def _rebuild_sessions_index(self) -> dict[str, dict]:
+        """Rebuild sessions index from individual session files (migration)."""
+        index: dict[str, dict] = {}
+        for session_file in self.sessions_path.glob("*.json"):
+            if session_file.name.startswith("_"):
+                continue
+            try:
+                with open(session_file, "r") as f:
+                    data = json.load(f)
+                sid = data["session_id"]
+                index[sid] = {
+                    "session_id": sid,
+                    "created_at": data["created_at"],
+                    "saved_at": data["saved_at"],
+                    "message_count": len(data["messages"]),
+                }
+            except (json.JSONDecodeError, KeyError):
+                continue
+        self._save_sessions_index(index)
+        return index
+
     def save_session(
         self,
         session_id: str,
@@ -283,8 +328,17 @@ class SessionPersistence:
 
         # Save to file
         session_path = self._get_session_path(session_id)
-        with open(session_path, "w") as f:
-            json.dump(snapshot.to_dict(), f, indent=2)
+        atomic_write_json(session_path, snapshot.to_dict())
+
+        # Update sessions index
+        sessions_index = self._load_sessions_index()
+        sessions_index[session_id] = {
+            "session_id": session_id,
+            "created_at": snapshot.created_at.isoformat(),
+            "saved_at": snapshot.saved_at.isoformat(),
+            "message_count": len(messages),
+        }
+        self._save_sessions_index(sessions_index)
 
         logger.info(
             "session_saved",
@@ -352,21 +406,13 @@ class SessionPersistence:
         Returns:
             List of session summaries (id, created_at, message_count)
         """
-        sessions = []
-        for session_file in self.sessions_path.glob("*.json"):
-            try:
-                with open(session_file, "r") as f:
-                    data = json.load(f)
-                sessions.append(
-                    {
-                        "session_id": data["session_id"],
-                        "created_at": data["created_at"],
-                        "saved_at": data["saved_at"],
-                        "message_count": len(data["messages"]),
-                    }
-                )
-            except (json.JSONDecodeError, KeyError):
-                continue  # Skip invalid files
+        # Try reading from sessions index first
+        sessions_index = self._load_sessions_index()
+        if not sessions_index:
+            # Fallback: rebuild from files (migration path)
+            sessions_index = self._rebuild_sessions_index()
+
+        sessions = list(sessions_index.values())
 
         # Sort by saved_at descending
         sessions.sort(key=lambda x: x["saved_at"], reverse=True)
@@ -384,5 +430,11 @@ class SessionPersistence:
         session_path = self._get_session_path(session_id)
         if session_path.exists():
             session_path.unlink()
+
+            # Update sessions index
+            sessions_index = self._load_sessions_index()
+            sessions_index.pop(session_id, None)
+            self._save_sessions_index(sessions_index)
+
             return True
         return False
