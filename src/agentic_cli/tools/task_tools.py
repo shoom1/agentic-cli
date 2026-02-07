@@ -1,8 +1,11 @@
 """Task management tools for agentic workflows.
 
 Provides two tools for tracking execution tasks:
-- save_tasks: Create, update, or delete tasks
-- get_tasks: List tasks with optional filters
+- save_tasks: Write the complete task list (bulk replacement)
+- get_tasks: Read the current task list with optional filters
+
+Uses bulk replacement (like Gemini CLI's write_todos / Claude Code's TodoWrite):
+the LLM sends the full updated list each time, avoiding N sequential tool calls.
 
 Plans are strategic ("what to do"), tasks are tactical ("track execution").
 The TaskStore is auto-created by the workflow manager when these tools are used.
@@ -19,7 +22,6 @@ import json
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import Path
 from typing import Any
 
 from agentic_cli.config import BaseSettings
@@ -74,15 +76,17 @@ class TaskItem:
 
 
 class TaskStore:
-    """Simple persistent task store.
+    """Simple persistent task store using bulk replacement.
 
     Stores tasks in a JSON file in the workspace directory.
-    Supports create, update, list, and delete operations.
+    The LLM writes the full task list each time via replace_all().
 
     Example:
         >>> store = TaskStore(settings)
-        >>> task_id = store.create("Implement feature X", priority="high")
-        >>> store.update_status(task_id, "in_progress")
+        >>> store.replace_all([
+        ...     {"description": "Implement feature X", "status": "in_progress"},
+        ...     {"description": "Write tests", "status": "pending"},
+        ... ])
         >>> tasks = store.list_tasks(status="pending")
     """
 
@@ -112,89 +116,41 @@ class TaskStore:
             json.dump(data, f, indent=2)
         tmp_path.rename(self._storage_path)
 
-    def create(
-        self,
-        description: str,
-        priority: str = "medium",
-        tags: list[str] | None = None,
-    ) -> str:
-        """Create a new task.
+    def replace_all(self, tasks: list[dict[str, Any]]) -> list[str]:
+        """Replace the entire task list atomically.
+
+        Each dict must have "description" and "status". Optional keys:
+        "id" (preserved if provided), "priority", "tags".
+        New items without an id get one auto-assigned.
 
         Args:
-            description: Task description.
-            priority: Priority level (low, medium, high).
-            tags: Optional tags for categorization.
+            tasks: Complete list of task dicts.
 
         Returns:
-            The unique ID of the created task.
+            List of task IDs in the same order as the input.
         """
-        task_id = str(uuid.uuid4())[:8]
-        item = TaskItem(
-            id=task_id,
-            description=description,
-            status="pending",
-            priority=priority,
-            tags=tags or [],
-            created_at=datetime.now().isoformat(),
-        )
-        self._items[task_id] = item
+        now = datetime.now().isoformat()
+        self._items.clear()
+        ids: list[str] = []
+        for task_data in tasks:
+            task_id = task_data.get("id") or str(uuid.uuid4())[:8]
+            status = task_data.get("status", "pending")
+            completed_at = task_data.get("completed_at", "")
+            if status == "completed" and not completed_at:
+                completed_at = now
+            item = TaskItem(
+                id=task_id,
+                description=task_data["description"],
+                status=status,
+                priority=task_data.get("priority", "medium"),
+                tags=task_data.get("tags", []),
+                created_at=task_data.get("created_at", now),
+                completed_at=completed_at,
+            )
+            self._items[task_id] = item
+            ids.append(task_id)
         self._save()
-        return task_id
-
-    def update_status(self, task_id: str, status: str) -> bool:
-        """Update task status.
-
-        Args:
-            task_id: Task ID.
-            status: New status (pending, in_progress, completed, cancelled).
-
-        Returns:
-            True if updated, False if task not found.
-        """
-        item = self._items.get(task_id)
-        if item is None:
-            return False
-        item.status = status
-        if status == "completed":
-            item.completed_at = datetime.now().isoformat()
-        self._save()
-        return True
-
-    def update(self, task_id: str, **kwargs: Any) -> bool:
-        """Update task fields.
-
-        Args:
-            task_id: Task ID.
-            **kwargs: Fields to update (description, status, priority, tags).
-
-        Returns:
-            True if updated, False if task not found.
-        """
-        item = self._items.get(task_id)
-        if item is None:
-            return False
-        for key, value in kwargs.items():
-            if hasattr(item, key) and key != "id":
-                setattr(item, key, value)
-        if kwargs.get("status") == "completed" and not item.completed_at:
-            item.completed_at = datetime.now().isoformat()
-        self._save()
-        return True
-
-    def delete(self, task_id: str) -> bool:
-        """Delete a task.
-
-        Args:
-            task_id: Task ID.
-
-        Returns:
-            True if deleted, False if not found.
-        """
-        if task_id not in self._items:
-            return False
-        del self._items[task_id]
-        self._save()
-        return True
+        return ids
 
     def get(self, task_id: str) -> TaskItem | None:
         """Get a task by ID."""
@@ -229,34 +185,70 @@ class TaskStore:
         """Check if the task store has any items."""
         return not self._items
 
+    def get_progress(self) -> dict[str, int]:
+        """Return task count by status.
+
+        Returns:
+            Dict with keys: total, pending, in_progress, completed, cancelled.
+        """
+        counts = {"total": 0, "pending": 0, "in_progress": 0, "completed": 0, "cancelled": 0}
+        for item in self._items.values():
+            counts["total"] += 1
+            if item.status in counts:
+                counts[item.status] += 1
+        return counts
+
+    def to_compact_display(self) -> str:
+        """Format tasks as a compact checklist for the thinking box.
+
+        Returns:
+            Multi-line string with status icons: [x] Done, [>] Active,
+            [ ] Pending, [-] Cancelled.
+        """
+        if not self._items:
+            return ""
+        icons = {
+            "completed": "[x]",
+            "in_progress": "[>]",
+            "pending": "[ ]",
+            "cancelled": "[-]",
+        }
+        lines = []
+        for item in self._items.values():
+            icon = icons.get(item.status, "[ ]")
+            lines.append(f"{icon} {item.description}")
+        return "\n".join(lines)
+
+    def get_current_task(self) -> TaskItem | None:
+        """Return the first in-progress task, or None."""
+        for item in self._items.values():
+            if item.status == "in_progress":
+                return item
+        return None
+
 
 @register_tool(
     category=ToolCategory.PLANNING,
     permission_level=PermissionLevel.SAFE,
-    description="Create, update, or delete execution tasks for tracking progress. Use this to break work into trackable items with status and priority.",
+    description="Write the complete task list. This replaces the existing list. Use this to create initial tasks or update statuses. Each task has a description and status (pending/in_progress/completed/cancelled). At most one task should be in_progress at a time.",
 )
 @requires("task_store")
 def save_tasks(
-    operation: str,
-    description: str = "",
-    task_id: str = "",
-    status: str = "",
-    priority: str = "medium",
-    tags: list[str] | None = None,
+    tasks: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """Create, update, or delete execution tasks.
+    """Write the complete task list (bulk replacement).
 
-    Manage tactical tasks for tracking execution progress. Each task has
-    an ID, description, status (pending/in_progress/completed/cancelled),
-    priority (low/medium/high), and optional tags.
+    Provide the full updated list of tasks every time. This replaces any
+    existing tasks. To update a single task's status, include the entire
+    list with that task's status changed.
 
     Args:
-        operation: One of "create", "update", "delete".
-        description: Task description (required for create, optional for update).
-        task_id: Task ID (required for update and delete).
-        status: Task status (for update: pending, in_progress, completed, cancelled).
-        priority: Priority level (low, medium, high). Default: medium.
-        tags: Optional tags for categorization.
+        tasks: Complete list of tasks. Each task is a dict with:
+            - description (str, required): Task description.
+            - status (str): One of pending, in_progress, completed, cancelled.
+              Default: pending.
+            - id (str, optional): Task ID. Auto-assigned if omitted.
+            - priority (str, optional): low, medium, high. Default: medium.
 
     Returns:
         A dict with the operation result.
@@ -265,56 +257,25 @@ def save_tasks(
     if store is None:
         return {"success": False, "error": "Task store not available"}
 
-    if operation == "create":
-        if not description:
-            return {"success": False, "error": "description is required for create"}
-        task_id = store.create(description, priority=priority, tags=tags)
-        return {
-            "success": True,
-            "task_id": task_id,
-            "message": "Task created",
-        }
+    if not tasks:
+        store.replace_all([])
+        return {"success": True, "task_ids": [], "count": 0, "message": "Tasks cleared"}
 
-    elif operation == "update":
-        if not task_id:
-            return {"success": False, "error": "task_id is required for update"}
-        kwargs: dict[str, Any] = {}
-        if description:
-            kwargs["description"] = description
-        if status:
-            kwargs["status"] = status
-        if priority != "medium":
-            kwargs["priority"] = priority
-        if tags is not None:
-            kwargs["tags"] = tags
-        if not kwargs:
-            return {"success": False, "error": "No fields to update"}
-        updated = store.update(task_id, **kwargs)
-        if not updated:
-            return {"success": False, "error": f"Task '{task_id}' not found"}
-        return {
-            "success": True,
-            "task_id": task_id,
-            "message": "Task updated",
-        }
+    # Validate all tasks have descriptions
+    for i, task in enumerate(tasks):
+        if not task.get("description"):
+            return {
+                "success": False,
+                "error": f"Task at index {i} is missing 'description'",
+            }
 
-    elif operation == "delete":
-        if not task_id:
-            return {"success": False, "error": "task_id is required for delete"}
-        deleted = store.delete(task_id)
-        if not deleted:
-            return {"success": False, "error": f"Task '{task_id}' not found"}
-        return {
-            "success": True,
-            "task_id": task_id,
-            "message": "Task deleted",
-        }
-
-    else:
-        return {
-            "success": False,
-            "error": f"Unknown operation '{operation}'. Use create, update, or delete.",
-        }
+    task_ids = store.replace_all(tasks)
+    return {
+        "success": True,
+        "task_ids": task_ids,
+        "count": len(task_ids),
+        "message": f"{len(task_ids)} tasks saved",
+    }
 
 
 @register_tool(
