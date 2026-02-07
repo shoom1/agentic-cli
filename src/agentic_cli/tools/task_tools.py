@@ -185,6 +185,24 @@ class TaskStore:
         """Check if the task store has any items."""
         return not self._items
 
+    def clear(self) -> None:
+        """Clear all tasks from memory and delete the backing file."""
+        self._items.clear()
+        if self._storage_path.exists():
+            self._storage_path.unlink()
+
+    def all_done(self) -> bool:
+        """Check if all tasks are in a terminal state (completed/cancelled).
+
+        Returns False if empty or any task is pending/in_progress.
+        """
+        if not self._items:
+            return False
+        return all(
+            item.status in ("completed", "cancelled")
+            for item in self._items.values()
+        )
+
     def get_progress(self) -> dict[str, int]:
         """Return task count by status.
 

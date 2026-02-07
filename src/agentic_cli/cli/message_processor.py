@@ -155,6 +155,9 @@ class MessageProcessor:
             )
             return
 
+        # Clear ephemeral stores (tasks, plans) from prior messages
+        workflow_controller.workflow.clear_ephemeral_stores()
+
         # Import EventType here (workflow module is now loaded)
         from agentic_cli.workflow import EventType
 

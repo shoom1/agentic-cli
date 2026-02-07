@@ -430,8 +430,19 @@ class BaseWorkflowManager(ABC):
             f"{self.__class__.__name__} does not implement generate_simple"
         )
 
+    def clear_ephemeral_stores(self) -> None:
+        """Clear per-message ephemeral stores (tasks and plans)."""
+        if self._task_store is not None:
+            self._task_store.clear()
+        if self._task_graph is not None:
+            self._task_graph.clear()
+
     def _emit_task_progress_event(self) -> WorkflowEvent | None:
         """Build a TASK_PROGRESS event from the current task store.
+
+        When all tasks are done, emits a final snapshot showing everything
+        complete, then clears the store so subsequent calls don't show
+        stale completed tasks.
 
         Returns:
             A WorkflowEvent.task_progress() if the store has tasks, else None.
@@ -439,6 +450,18 @@ class BaseWorkflowManager(ABC):
         store = self._task_store
         if store is None or store.is_empty():
             return None
+
+        # Auto-clear when all tasks are done — emit final snapshot first
+        if store.all_done():
+            progress = store.get_progress()
+            display = store.to_compact_display()
+            store.clear()
+            return WorkflowEvent.task_progress(
+                display=display,
+                progress=progress,
+                current_task_id=None,
+                current_task_description=None,
+            )
 
         progress = store.get_progress()
         display = store.to_compact_display()

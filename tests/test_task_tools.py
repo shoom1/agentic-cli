@@ -200,6 +200,40 @@ class TestTaskStore:
         store2 = TaskStore(mock_context.settings)
         assert store2.is_empty()
 
+    def test_clear_empties_store(self, mock_context):
+        """clear() removes all tasks from memory."""
+        store = TaskStore(mock_context.settings)
+        store.replace_all([
+            {"description": "Task 1"},
+            {"description": "Task 2"},
+        ])
+        assert not store.is_empty()
+        store.clear()
+        assert store.is_empty()
+
+    def test_clear_deletes_file(self, mock_context):
+        """clear() removes the backing JSON file."""
+        store = TaskStore(mock_context.settings)
+        store.replace_all([{"description": "Task"}])
+        assert store._storage_path.exists()
+        store.clear()
+        assert not store._storage_path.exists()
+
+    def test_clear_on_empty_store(self, mock_context):
+        """clear() on an empty store is a no-op (no exception)."""
+        store = TaskStore(mock_context.settings)
+        store.clear()  # should not raise
+        assert store.is_empty()
+
+    def test_clear_prevents_stale_reload(self, mock_context):
+        """After clear(), a new TaskStore instance loads empty."""
+        store = TaskStore(mock_context.settings)
+        store.replace_all([{"description": "Stale task"}])
+        store.clear()
+
+        store2 = TaskStore(mock_context.settings)
+        assert store2.is_empty()
+
 
 class TestTaskTools:
     """Tests for save_tasks and get_tasks tool functions."""
@@ -435,6 +469,47 @@ class TestTaskStoreProgress:
         ])
         current = store.get_current_task()
         assert current.id == ids[0]
+
+    def test_all_done_empty(self, mock_context):
+        """all_done() returns False for empty store."""
+        store = TaskStore(mock_context.settings)
+        assert store.all_done() is False
+
+    def test_all_done_all_completed(self, mock_context):
+        """all_done() returns True when all tasks are completed."""
+        store = TaskStore(mock_context.settings)
+        store.replace_all([
+            {"description": "Task 1", "status": "completed"},
+            {"description": "Task 2", "status": "completed"},
+        ])
+        assert store.all_done() is True
+
+    def test_all_done_mixed_terminal(self, mock_context):
+        """all_done() returns True for mix of completed and cancelled."""
+        store = TaskStore(mock_context.settings)
+        store.replace_all([
+            {"description": "Task 1", "status": "completed"},
+            {"description": "Task 2", "status": "cancelled"},
+        ])
+        assert store.all_done() is True
+
+    def test_all_done_with_pending(self, mock_context):
+        """all_done() returns False when any task is pending."""
+        store = TaskStore(mock_context.settings)
+        store.replace_all([
+            {"description": "Task 1", "status": "completed"},
+            {"description": "Task 2", "status": "pending"},
+        ])
+        assert store.all_done() is False
+
+    def test_all_done_with_in_progress(self, mock_context):
+        """all_done() returns False when any task is in_progress."""
+        store = TaskStore(mock_context.settings)
+        store.replace_all([
+            {"description": "Task 1", "status": "completed"},
+            {"description": "Task 2", "status": "in_progress"},
+        ])
+        assert store.all_done() is False
 
 
 class _MinimalWorkflowManager(BaseWorkflowManager):
