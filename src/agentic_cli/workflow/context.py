@@ -9,7 +9,7 @@ from contextvars import ContextVar, Token
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from agentic_cli.memory import MemoryManager
+    from agentic_cli.memory import MemoryStore
     from agentic_cli.planning import TaskGraph
     from agentic_cli.hitl import ApprovalManager, CheckpointManager
 
@@ -34,7 +34,7 @@ _llm_summarizer_context: ContextVar[Any] = ContextVar(
 # Setters (used by workflow manager)
 
 
-def set_context_memory_manager(manager: "MemoryManager | None") -> Token:
+def set_context_memory_manager(manager: "MemoryStore | None") -> Token:
     """Set the memory manager in the current context."""
     return _memory_manager_context.set(manager)
 
@@ -62,11 +62,11 @@ def set_context_llm_summarizer(summarizer: Any | None) -> Token:
 # Getters (used by tools)
 
 
-def get_context_memory_manager() -> "MemoryManager | None":
+def get_context_memory_manager() -> "MemoryStore | None":
     """Get the memory manager from the current context.
 
     Returns:
-        The MemoryManager instance set by the workflow manager, or None if not set.
+        The MemoryStore instance set by the workflow manager, or None if not set.
     """
     return _memory_manager_context.get()
 

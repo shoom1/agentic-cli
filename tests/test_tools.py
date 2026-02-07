@@ -1427,11 +1427,8 @@ class TestToolRegistryConsistency:
             # Interaction
             "ask_clarification",
             # Memory tools
-            "remember_context",
-            "recall_context",
+            "save_memory",
             "search_memory",
-            "save_to_longterm",
-            "clear_working_memory",
             # Planning tools
             "create_task",
             "update_task_status",
@@ -1495,8 +1492,7 @@ class TestToolRegistryConsistency:
             "web_search", "web_fetch", "search_knowledge_base",
             "search_arxiv", "fetch_arxiv_paper", "analyze_arxiv_paper",
             "ask_clarification",
-            "remember_context", "recall_context", "search_memory",
-            "save_to_longterm", "clear_working_memory",
+            "save_memory", "search_memory",
             "create_task", "update_task_status", "get_next_tasks",
             "get_task", "get_plan_summary", "create_plan", "revise_plan",
             "create_checkpoint", "get_checkpoint_result",
@@ -1544,7 +1540,7 @@ class TestToolRegistryConsistency:
 
         memory_tools = registry.list_by_category(ToolCategory.MEMORY)
         memory_names = {t.name for t in memory_tools}
-        assert "remember_context" in memory_names, "MEMORY category should have memory tools"
+        assert "save_memory" in memory_names, "MEMORY category should have memory tools"
 
         planning_tools = registry.list_by_category(ToolCategory.PLANNING)
         planning_names = {t.name for t in planning_tools}

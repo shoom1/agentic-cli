@@ -17,86 +17,38 @@ if TYPE_CHECKING:
 
 
 class MemoryCommand(Command):
-    """Show current memory state."""
+    """Show persistent memory contents."""
 
     def __init__(self) -> None:
         super().__init__(
             name="memory",
-            description="Show working and long-term memory contents",
+            description="Show persistent memory contents",
             aliases=[],
-            usage="/memory [--type=TYPE]",
-            examples=[
-                "/memory",
-                "/memory --type=learning",
-            ],
+            usage="/memory",
+            examples=["/memory"],
             category=CommandCategory.GENERAL,
         )
 
     async def execute(self, args: str, app: "ResearchDemoApp") -> None:
-        parsed = self.parse_args(args)
-        memory_type = parsed.get_option("type")
+        memory_store = app.workflow.memory_manager if app.workflow else None
 
-        # Access memory manager from workflow
-        memory_manager = app.workflow.memory_manager if app.workflow else None
+        table = Table(title="Persistent Memory", show_header=True)
+        table.add_column("ID", style="dim", width=8)
+        table.add_column("Content", style="white")
+        table.add_column("Tags", style="dim")
 
-        # Working Memory Section
-        working_table = Table(title="Working Memory (Session)", show_header=True)
-        working_table.add_column("Key", style="cyan")
-        working_table.add_column("Value", style="white")
-        working_table.add_column("Tags", style="dim")
-
-        if memory_manager:
-            for key, (value, tags) in memory_manager.get_working_entries().items():
-                value_str = str(value)
-                if len(value_str) > 50:
-                    value_str = value_str[:50] + "..."
-                tags_str = ", ".join(tags) if tags else ""
-                working_table.add_row(key, value_str, tags_str)
-
-        if working_table.row_count == 0:
-            working_table.add_row("(empty)", "", "")
-
-        app.session.add_rich(working_table)
-
-        # Long-term Memory Section
-        longterm_table = Table(title="Long-term Memory (Persistent)", show_header=True)
-        longterm_table.add_column("ID", style="dim", width=8)
-        longterm_table.add_column("Type", style="yellow")
-        longterm_table.add_column("Content", style="white")
-        longterm_table.add_column("Tags", style="dim")
-
-        if memory_manager:
-            from agentic_cli.memory.longterm import MemoryType
-
-            longterm_mem = memory_manager.longterm
-
-            # Get all entries, optionally filtered by type
-            if memory_type:
-                try:
-                    mem_type = MemoryType(memory_type)
-                    entries = longterm_mem.recall("", type=mem_type)
-                except ValueError:
-                    app.session.add_error(f"Invalid memory type: {memory_type}")
-                    return
-            else:
-                entries = longterm_mem.recall("")
-
-            for entry in entries[:20]:  # Limit display
-                content_str = entry.content
+        if memory_store:
+            for item in memory_store.search("", limit=20):
+                content_str = item.content
                 if len(content_str) > 60:
                     content_str = content_str[:60] + "..."
-                tags_str = ", ".join(entry.tags) if entry.tags else ""
-                longterm_table.add_row(
-                    entry.id[:8],
-                    entry.type.value,
-                    content_str,
-                    tags_str,
-                )
+                tags_str = ", ".join(item.tags) if item.tags else ""
+                table.add_row(item.id[:8], content_str, tags_str)
 
-        if longterm_table.row_count == 0:
-            longterm_table.add_row("(empty)", "", "", "")
+        if table.row_count == 0:
+            table.add_row("(empty)", "", "")
 
-        app.session.add_rich(longterm_table)
+        app.session.add_rich(table)
 
 
 class PlanCommand(Command):
@@ -295,26 +247,22 @@ class FilesCommand(Command):
 
 
 class ClearMemoryCommand(Command):
-    """Clear working memory."""
+    """No-op — persistent memory cannot be bulk-cleared from the CLI."""
 
     def __init__(self) -> None:
         super().__init__(
             name="clear-memory",
-            description="Clear working memory (session context)",
+            description="(Deprecated) Memory is now persistent-only",
             aliases=["clearmem"],
             usage="/clear-memory",
             category=CommandCategory.GENERAL,
         )
 
     async def execute(self, args: str, app: "ResearchDemoApp") -> None:
-        # Access memory manager from workflow
-        memory_manager = app.workflow.memory_manager if app.workflow else None
-
-        if memory_manager:
-            memory_manager.clear_working()
-            app.session.add_success("Working memory cleared")
-        else:
-            app.session.add_error("Memory manager not initialized")
+        app.session.add_warning(
+            "Working memory has been removed. Persistent memories "
+            "are managed via save_memory/search_memory tools."
+        )
 
 
 class ClearPlanCommand(Command):

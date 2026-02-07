@@ -33,7 +33,7 @@ from agentic_cli.logging import Loggers
 
 if TYPE_CHECKING:
     from agentic_cli.config import BaseSettings
-    from agentic_cli.memory import MemoryManager
+    from agentic_cli.memory import MemoryStore
     from agentic_cli.planning import TaskGraph
     from agentic_cli.hitl import ApprovalManager, CheckpointManager
 
@@ -97,7 +97,7 @@ class BaseWorkflowManager(ABC):
         self._required_managers = self._detect_required_managers()
 
         # Manager slots (created lazily by _ensure_managers_initialized)
-        self._memory_manager: "MemoryManager | None" = None
+        self._memory_manager: "MemoryStore | None" = None
         self._task_graph: "TaskGraph | None" = None
         self._approval_manager: "ApprovalManager | None" = None
         self._checkpoint_manager: "CheckpointManager | None" = None
@@ -129,7 +129,7 @@ class BaseWorkflowManager(ABC):
         return self._required_managers
 
     @property
-    def memory_manager(self) -> "MemoryManager | None":
+    def memory_manager(self) -> "MemoryStore | None":
         """Get the memory manager (if required by tools)."""
         return self._memory_manager
 
@@ -176,8 +176,8 @@ class BaseWorkflowManager(ABC):
         managers that are actually needed by the configured tools.
         """
         if "memory_manager" in self._required_managers and self._memory_manager is None:
-            from agentic_cli.memory import MemoryManager
-            self._memory_manager = MemoryManager(self._settings)
+            from agentic_cli.memory import MemoryStore
+            self._memory_manager = MemoryStore(self._settings)
 
         if "task_graph" in self._required_managers and self._task_graph is None:
             from agentic_cli.planning import TaskGraph

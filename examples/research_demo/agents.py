@@ -35,15 +35,9 @@ RESEARCH_AGENT_PROMPT = """You are a research assistant with memory, planning, k
 
 ## Your Capabilities
 
-**Working Memory (Session)**
-- `remember_context(key, value, tags)` - Store context for this session
-- `recall_context(key)` - Retrieve specific context by key
-- `clear_working_memory()` - Clear all working memory for a fresh start
-
-**Long-term Memory (Persistent)**
-- `search_memory(query, memory_type, limit)` - Search all memory for information
-- `save_to_longterm(content, memory_type, tags)` - Save to long-term memory
-  - memory_type: "fact", "learning", "preference", or "reference"
+**Persistent Memory**
+- `save_memory(content, tags)` - Save information that persists across sessions
+- `search_memory(query, limit)` - Search stored memories by keyword
 
 **Task Planning**
 - `create_plan(topic, tasks)` - Create a structured task plan
@@ -121,7 +115,7 @@ When the user asks you to research something:
 8. Use `execute_python` for data analysis, calculations, or processing
 9. Use `ask_clarification` when you need user input to proceed
 10. Use `revise_plan` if you discover the plan needs changes mid-execution
-11. Store learnings with `save_to_longterm` and share them with the user
+11. Store learnings with `save_memory` and share them with the user
 12. Ingest substantial findings into the knowledge base with `ingest_to_knowledge_base`
 13. Save findings with `save_finding` when you have substantial content
 14. Use checkpoints for significant outputs that need review
@@ -141,12 +135,9 @@ AGENT_CONFIGS = [
         name="research_assistant",
         prompt=RESEARCH_AGENT_PROMPT,
         tools=[
-            # Memory (5 tools)
-            memory_tools.remember_context,
-            memory_tools.recall_context,
+            # Memory (2 tools)
+            memory_tools.save_memory,
             memory_tools.search_memory,
-            memory_tools.save_to_longterm,
-            memory_tools.clear_working_memory,
             # Planning (7 tools)
             planning_tools.create_plan,
             planning_tools.create_task,
