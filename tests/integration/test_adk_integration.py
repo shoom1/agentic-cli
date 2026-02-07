@@ -469,6 +469,82 @@ class TestParseRetryDelay:
         assert _parse_retry_delay(error) == 10.5
 
 
+class TestTaskProgressAutoClean:
+    """Tests for auto-clear when all tasks are done and plan-based progress."""
+
+    def test_auto_clears_when_all_done(self, mock_settings):
+        """When all tasks are completed, emit final event then clear store."""
+        from agentic_cli.tools.task_tools import TaskStore
+
+        store = TaskStore(mock_settings)
+        store.replace_all([
+            {"description": "Task 1", "status": "completed"},
+            {"description": "Task 2", "status": "completed"},
+        ])
+
+        mgr = _create_manager(mock_settings, [AgentConfig(name="test", prompt="test")])
+        mgr._task_store = store
+
+        # First call: emits final snapshot, then clears
+        event = mgr._emit_task_progress_event()
+        assert event is not None
+        assert event.type == EventType.TASK_PROGRESS
+        assert "[x] Task 1" in event.content
+        assert "[x] Task 2" in event.content
+        assert event.metadata["progress"]["completed"] == 2
+        assert store.is_empty()
+
+        # Second call: store is empty, returns None
+        assert mgr._emit_task_progress_event() is None
+
+    def test_no_auto_clear_with_pending(self, mock_settings):
+        """When tasks are not all done, store is NOT cleared."""
+        from agentic_cli.tools.task_tools import TaskStore
+
+        store = TaskStore(mock_settings)
+        store.replace_all([
+            {"description": "Done task", "status": "completed"},
+            {"description": "Pending task", "status": "pending"},
+        ])
+
+        mgr = _create_manager(mock_settings, [AgentConfig(name="test", prompt="test")])
+        mgr._task_store = store
+
+        event = mgr._emit_task_progress_event()
+        assert event is not None
+        assert not store.is_empty()
+
+    def test_plan_progress_after_save_plan(self, mock_settings):
+        """PlanStore with checkboxes emits TASK_PROGRESS when no TaskStore."""
+        from agentic_cli.tools.planning_tools import PlanStore
+
+        plan_store = PlanStore()
+        plan_store.save(
+            "## Setup\n"
+            "- [x] Install deps\n"
+            "- [ ] Configure env\n"
+            "\n"
+            "## Build\n"
+            "- [ ] Compile\n"
+        )
+
+        mgr = _create_manager(mock_settings, [AgentConfig(name="test", prompt="test")])
+        mgr._task_store = None
+        mgr._task_graph = plan_store
+
+        event = mgr._emit_task_progress_event()
+        assert event is not None
+        assert event.type == EventType.TASK_PROGRESS
+        assert "Setup:" in event.content
+        assert "[x] Install deps" in event.content
+        assert "[ ] Configure env" in event.content
+        assert "Build:" in event.content
+        assert "[ ] Compile" in event.content
+        assert event.metadata["progress"]["total"] == 3
+        assert event.metadata["progress"]["completed"] == 1
+        assert event.metadata["progress"]["pending"] == 2
+
+
 class TestMessageProcessorRateLimit:
     """Tests that MessageProcessor handles 429 errors with user prompt."""
 

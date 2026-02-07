@@ -1,6 +1,5 @@
 """Tests for task management tools."""
 
-import json
 from typing import AsyncGenerator
 from unittest.mock import patch
 
@@ -181,24 +180,29 @@ class TestTaskStore:
         store.replace_all([{"description": "Task"}])
         assert not store.is_empty()
 
-    def test_persistence(self, mock_context):
-        """Test that tasks persist across store instances."""
-        store1 = TaskStore(mock_context.settings)
-        ids = store1.replace_all([{"description": "Persistent task"}])
-
-        store2 = TaskStore(mock_context.settings)
-        task = store2.get(ids[0])
-        assert task is not None
-        assert task.description == "Persistent task"
-
-    def test_persistence_corrupt_file(self, mock_context):
-        """Test that corrupt JSON file is handled gracefully."""
+    def test_clear_empties_store(self, mock_context):
+        """clear() removes all tasks from memory."""
         store = TaskStore(mock_context.settings)
-        store.replace_all([{"description": "Task"}])
-        # Corrupt the file
-        store._storage_path.write_text("not json")
-        store2 = TaskStore(mock_context.settings)
-        assert store2.is_empty()
+        store.replace_all([
+            {"description": "Task 1"},
+            {"description": "Task 2"},
+        ])
+        assert not store.is_empty()
+        store.clear()
+        assert store.is_empty()
+        assert len(store.list_tasks()) == 0
+
+    def test_clear_on_empty_store(self, mock_context):
+        """clear() on an empty store is a no-op (no exception)."""
+        store = TaskStore(mock_context.settings)
+        store.clear()  # should not raise
+        assert store.is_empty()
+
+    def test_in_memory_only(self, mock_context):
+        """TaskStore has no file persistence attributes."""
+        store = TaskStore(mock_context.settings)
+        assert not hasattr(store, "_storage_path")
+        assert not hasattr(store, "_tasks_dir")
 
 
 class TestTaskTools:
@@ -436,6 +440,47 @@ class TestTaskStoreProgress:
         current = store.get_current_task()
         assert current.id == ids[0]
 
+    def test_all_done_empty(self, mock_context):
+        """all_done() returns False for empty store."""
+        store = TaskStore(mock_context.settings)
+        assert store.all_done() is False
+
+    def test_all_done_all_completed(self, mock_context):
+        """all_done() returns True when all tasks are completed."""
+        store = TaskStore(mock_context.settings)
+        store.replace_all([
+            {"description": "Task 1", "status": "completed"},
+            {"description": "Task 2", "status": "completed"},
+        ])
+        assert store.all_done() is True
+
+    def test_all_done_mixed_terminal(self, mock_context):
+        """all_done() returns True for mix of completed and cancelled."""
+        store = TaskStore(mock_context.settings)
+        store.replace_all([
+            {"description": "Task 1", "status": "completed"},
+            {"description": "Task 2", "status": "cancelled"},
+        ])
+        assert store.all_done() is True
+
+    def test_all_done_with_pending(self, mock_context):
+        """all_done() returns False when any task is pending."""
+        store = TaskStore(mock_context.settings)
+        store.replace_all([
+            {"description": "Task 1", "status": "completed"},
+            {"description": "Task 2", "status": "pending"},
+        ])
+        assert store.all_done() is False
+
+    def test_all_done_with_in_progress(self, mock_context):
+        """all_done() returns False when any task is in_progress."""
+        store = TaskStore(mock_context.settings)
+        store.replace_all([
+            {"description": "Task 1", "status": "completed"},
+            {"description": "Task 2", "status": "in_progress"},
+        ])
+        assert store.all_done() is False
+
 
 class _MinimalWorkflowManager(BaseWorkflowManager):
     """Minimal concrete subclass for testing base class methods."""
@@ -503,3 +548,114 @@ class TestEmitTaskProgressEvent:
         assert "[ ] Pending task" in event.content
         assert "current_task_id" not in event.metadata
         assert event.metadata["progress"]["pending"] == 1
+
+    def test_falls_back_to_plan_store(self, mock_context):
+        """When TaskStore is None, uses PlanStore checkboxes."""
+        from agentic_cli.tools.planning_tools import PlanStore
+
+        plan_store = PlanStore()
+        plan_store.save(
+            "## Research\n- [x] Gather data\n- [ ] Analyze results\n"
+            "## Writing\n- [ ] Draft report"
+        )
+
+        mgr = _MinimalWorkflowManager(agent_configs=[], settings=mock_context.settings)
+        mgr._task_store = None
+        mgr._task_graph = plan_store
+
+        event = mgr._emit_task_progress_event()
+        assert event is not None
+        assert event.type == EventType.TASK_PROGRESS
+        assert "Research:" in event.content
+        assert "[x] Gather data" in event.content
+        assert "[ ] Analyze results" in event.content
+        assert "Writing:" in event.content
+        assert "[ ] Draft report" in event.content
+        assert event.metadata["progress"]["total"] == 3
+        assert event.metadata["progress"]["completed"] == 1
+        assert event.metadata["progress"]["pending"] == 2
+
+    def test_plan_progress_all_done_returns_none(self, mock_context):
+        """When all plan checkboxes are checked, returns None."""
+        from agentic_cli.tools.planning_tools import PlanStore
+
+        plan_store = PlanStore()
+        plan_store.save("- [x] Task A\n- [x] Task B")
+
+        mgr = _MinimalWorkflowManager(agent_configs=[], settings=mock_context.settings)
+        mgr._task_store = None
+        mgr._task_graph = plan_store
+
+        assert mgr._emit_task_progress_event() is None
+
+    def test_plan_progress_no_checkboxes_returns_none(self, mock_context):
+        """When plan has no checkboxes, returns None."""
+        from agentic_cli.tools.planning_tools import PlanStore
+
+        plan_store = PlanStore()
+        plan_store.save("## Plan\nJust some text without checkboxes.")
+
+        mgr = _MinimalWorkflowManager(agent_configs=[], settings=mock_context.settings)
+        mgr._task_store = None
+        mgr._task_graph = plan_store
+
+        assert mgr._emit_task_progress_event() is None
+
+    def test_plan_progress_empty_plan_returns_none(self, mock_context):
+        """When PlanStore is empty, returns None."""
+        from agentic_cli.tools.planning_tools import PlanStore
+
+        plan_store = PlanStore()
+
+        mgr = _MinimalWorkflowManager(agent_configs=[], settings=mock_context.settings)
+        mgr._task_store = None
+        mgr._task_graph = plan_store
+
+        assert mgr._emit_task_progress_event() is None
+
+    def test_task_store_takes_priority(self, mock_context):
+        """When TaskStore has tasks, PlanStore is ignored."""
+        from agentic_cli.tools.planning_tools import PlanStore
+
+        task_store = TaskStore(mock_context.settings)
+        task_store.replace_all([
+            {"description": "TaskStore item", "status": "in_progress"},
+        ])
+
+        plan_store = PlanStore()
+        plan_store.save("- [ ] PlanStore item")
+
+        mgr = _MinimalWorkflowManager(agent_configs=[], settings=mock_context.settings)
+        mgr._task_store = task_store
+        mgr._task_graph = plan_store
+
+        event = mgr._emit_task_progress_event()
+        assert event is not None
+        assert "TaskStore item" in event.content
+        assert "PlanStore item" not in event.content
+
+    def test_plan_progress_includes_sections(self, mock_context):
+        """Section headers from plan are included in display."""
+        from agentic_cli.tools.planning_tools import PlanStore
+
+        plan_store = PlanStore()
+        plan_store.save(
+            "## Phase 1\n"
+            "- [x] Setup\n"
+            "- [ ] Configure\n"
+            "\n"
+            "### Phase 2\n"
+            "- [ ] Build\n"
+        )
+
+        mgr = _MinimalWorkflowManager(agent_configs=[], settings=mock_context.settings)
+        mgr._task_store = None
+        mgr._task_graph = plan_store
+
+        event = mgr._emit_task_progress_event()
+        assert event is not None
+        assert "Phase 1:" in event.content
+        assert "Phase 2:" in event.content
+        assert "[x] Setup" in event.content
+        assert "[ ] Configure" in event.content
+        assert "[ ] Build" in event.content
