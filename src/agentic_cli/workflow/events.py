@@ -28,6 +28,8 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 
+from agentic_cli.constants import truncate
+
 
 class EventType(Enum):
     """Types of events yielded by the workflow."""
@@ -168,10 +170,10 @@ class WorkflowEvent:
     def _format_result_content(result: Any) -> str:
         """Format result for display, truncating large values."""
         if isinstance(result, str):
-            return result[:200] + "..." if len(result) > 200 else result
+            return truncate(result)
         if isinstance(result, (dict, list)):
             return f"Result: {len(result)} items"
-        return str(result)[:200]
+        return truncate(str(result))
 
     @classmethod
     def code_execution(cls, outcome: str) -> "WorkflowEvent":
@@ -397,7 +399,7 @@ class WorkflowEvent:
         if raw_parts is not None:
             metadata["raw_parts"] = raw_parts
 
-        display_content = content[:200] + "..." if content and len(content) > 200 else (content or "")
+        display_content = truncate(content) if content else ""
         return cls(
             type=EventType.LLM_RESPONSE,
             content=f"LLM Response: {display_content}",

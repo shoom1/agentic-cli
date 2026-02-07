@@ -20,7 +20,9 @@ from agentic_cli.knowledge_base.models import (
     SourceType,
 )
 from agentic_cli.knowledge_base.vector_store import MockVectorStore, VectorStore
+from agentic_cli.constants import truncate
 from agentic_cli.logging import Loggers
+from agentic_cli.persistence._utils import atomic_write_json
 
 if TYPE_CHECKING:
     from agentic_cli.config import BaseSettings
@@ -138,7 +140,7 @@ class KnowledgeBaseManager:
             "documents": [doc.to_dict() for doc in self._documents.values()],
             "updated_at": datetime.now().isoformat(),
         }
-        self.metadata_path.write_text(json.dumps(data, indent=2))
+        atomic_write_json(self.metadata_path, data)
 
     def ingest_document(
         self,
@@ -258,12 +260,7 @@ class KnowledgeBaseManager:
                 if not self._matches_filters(doc, filters):
                     continue
 
-            # Create highlight (first 200 chars)
-            highlight = (
-                chunk.content[:200] + "..."
-                if len(chunk.content) > 200
-                else chunk.content
-            )
+            highlight = truncate(chunk.content)
 
             results.append(
                 SearchResult(
