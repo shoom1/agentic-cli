@@ -53,8 +53,7 @@ class TestSafePythonExecutor:
     def test_executor_initialization(self, executor: SafePythonExecutor):
         """Test executor initializes correctly."""
         assert executor.default_timeout == 5
-        assert "math" in executor._namespace
-        assert "json" in executor._namespace
+        assert executor.max_memory_mb == 512
 
     def test_simple_expression(self, executor: SafePythonExecutor):
         """Test executing a simple expression."""
@@ -334,6 +333,92 @@ class TestResultTruncation:
         assert result["success"] is True
         assert "truncated" in result["result"]
         assert len(result["result"]) <= 10100  # 10000 + some buffer for message
+
+
+class TestSubprocessExecution:
+    """Tests for subprocess-based execution."""
+
+    @pytest.fixture
+    def executor(self):
+        """Create executor instance for tests."""
+        return SafePythonExecutor(default_timeout=10)
+
+    def test_subprocess_isolation(self, executor: SafePythonExecutor):
+        """Test that code runs in a subprocess, not in the parent process."""
+        # SystemExit would kill the parent if running in-process
+        # (it's a BaseException, not caught by except Exception).
+        # Subprocess isolation keeps the parent alive.
+        result = executor.execute("raise SystemExit(42)")
+        assert result["success"] is False
+        # Parent is still alive and can execute more
+        result2 = executor.execute("1 + 1")
+        assert result2["success"] is True
+        assert result2["result"] == "2"
+
+    def test_subprocess_timeout(self, executor: SafePythonExecutor):
+        """Test cross-platform timeout works."""
+        result = executor.execute(
+            "while True: pass",
+            timeout_seconds=2,
+        )
+        assert result["success"] is False
+        assert "timed out" in result["error"]
+
+    def test_subprocess_crash_handling(self, executor: SafePythonExecutor):
+        """Test graceful handling of subprocess crash."""
+        # sys.exit causes a non-zero exit without sentinel
+        result = executor.execute("import sys; sys.exit(1)")
+        assert result["success"] is False
+        assert result["error"]  # should have some error info
+
+    def test_no_cross_execution_state(self, executor: SafePythonExecutor):
+        """Test that state doesn't persist between calls."""
+        result1 = executor.execute("my_unique_var_12345 = 42")
+        assert result1["success"] is True
+
+        result2 = executor.execute("my_unique_var_12345")
+        assert result2["success"] is False  # variable should not exist
+
+    def test_sentinel_in_user_output(self, executor: SafePythonExecutor):
+        """Test user printing the sentinel doesn't break parsing."""
+        from agentic_cli.tools.executor import _RESULT_SENTINEL
+        code = f"print({repr(_RESULT_SENTINEL)})\n42"
+        result = executor.execute(code)
+        assert result["success"] is True
+        assert result["result"] == "42"
+        assert _RESULT_SENTINEL in result["output"]
+
+    def test_context_with_special_characters(self, executor: SafePythonExecutor):
+        """Test context with special characters is handled."""
+        result = executor.execute(
+            "x",
+            context={"x": "hello'world\"test\nnewline"},
+        )
+        assert result["success"] is True
+        assert "hello" in result["result"]
+
+    def test_stdout_in_result(self, executor: SafePythonExecutor):
+        """Test stdout is correctly captured."""
+        result = executor.execute("print('line1')\nprint('line2')\n42")
+        assert result["success"] is True
+        assert "line1" in result["output"]
+        assert "line2" in result["output"]
+        assert result["result"] == "42"
+
+    @pytest.mark.skipif(
+        __import__("sys").platform == "win32",
+        reason="Memory limits only enforced on Unix",
+    )
+    @pytest.mark.xfail(
+        __import__("sys").platform == "darwin",
+        reason="macOS does not reliably enforce RLIMIT_AS",
+    )
+    def test_memory_limit_unix(self):
+        """Test memory limit enforcement on Unix."""
+        executor = SafePythonExecutor(default_timeout=10, max_memory_mb=50)
+        # Try to allocate a very large block (should be killed or MemoryError)
+        result = executor.execute("x = bytearray(200 * 1024 * 1024)")
+        assert result["success"] is False
 
 
 class TestToolError:
@@ -1460,12 +1545,13 @@ class TestToolRegistryConsistency:
 
         registry = get_registry()
 
-        # shell_executor should be DANGEROUS
-        shell_tool = registry.get("shell_executor")
-        if shell_tool:
-            assert shell_tool.permission_level == PermissionLevel.DANGEROUS, (
-                f"shell_executor should be DANGEROUS, got {shell_tool.permission_level}"
-            )
+        dangerous_tools = ["shell_executor", "execute_python"]
+        for tool_name in dangerous_tools:
+            tool = registry.get(tool_name)
+            if tool:
+                assert tool.permission_level == PermissionLevel.DANGEROUS, (
+                    f"{tool_name} should be DANGEROUS, got {tool.permission_level}"
+                )
 
     def test_caution_tools_have_correct_permission(self):
         """Test that caution-level tools are properly marked."""
@@ -1473,7 +1559,7 @@ class TestToolRegistryConsistency:
 
         registry = get_registry()
 
-        caution_tools = ["write_file", "edit_file", "ingest_to_knowledge_base", "execute_python"]
+        caution_tools = ["write_file", "edit_file", "ingest_to_knowledge_base"]
 
         for tool_name in caution_tools:
             tool = registry.get(tool_name)
