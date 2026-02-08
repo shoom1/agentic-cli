@@ -103,15 +103,17 @@ from agentic_cli.tools.glob_tool import glob, list_dir
 # File operation tools - WRITE (caution)
 from agentic_cli.tools.file_write import write_file, edit_file
 
-from agentic_cli.tools.standard import (
+from agentic_cli.tools.knowledge_tools import (
     search_knowledge_base,
     ingest_to_knowledge_base,
+)
+from agentic_cli.tools.arxiv_tools import (
     search_arxiv,
     fetch_arxiv_paper,
     analyze_arxiv_paper,
-    execute_python,
-    ask_clarification,
 )
+from agentic_cli.tools.execution_tools import execute_python
+from agentic_cli.tools.interaction_tools import ask_clarification
 from agentic_cli.tools.search import web_search
 from agentic_cli.tools.webfetch_tool import web_fetch
 from agentic_cli.tools.registry import (

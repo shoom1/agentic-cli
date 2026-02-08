@@ -1384,8 +1384,8 @@ class TestFetchArxivPaperRateLimiting:
         from agentic_cli.tools.standard import fetch_arxiv_paper
 
         # Reset the source to ensure clean state
-        import agentic_cli.tools.standard as standard_module
-        standard_module._arxiv_source = None
+        import agentic_cli.tools.arxiv_tools as arxiv_module
+        arxiv_module._arxiv_source = None
 
         with patch("agentic_cli.knowledge_base.sources.time") as mock_time:
             mock_time.time.return_value = 100.0
@@ -1429,10 +1429,10 @@ class TestArxivSortValidation:
         """Test search_arxiv accepts valid sort options."""
         from unittest.mock import patch, MagicMock
         from agentic_cli.tools.standard import search_arxiv
-        import agentic_cli.tools.standard as standard_module
+        import agentic_cli.tools.arxiv_tools as arxiv_module
 
         # Reset the source to ensure clean state
-        standard_module._arxiv_source = None
+        arxiv_module._arxiv_source = None
 
         # Mock feedparser to avoid real API calls
         with patch("feedparser.parse") as mock_parse:
