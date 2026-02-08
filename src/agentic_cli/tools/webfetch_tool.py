@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 from agentic_cli.config import get_settings
-from agentic_cli.tools import requires
+from agentic_cli.tools import requires, require_context
 from agentic_cli.tools.registry import register_tool, ToolCategory, PermissionLevel
 from agentic_cli.tools.webfetch import (
     ContentFetcher,
@@ -63,6 +63,12 @@ def get_or_create_fetcher(settings=None) -> ContentFetcher:
     description="Fetch a web page, convert it to markdown, and summarize it using an LLM based on your prompt. Use this to extract specific information from a URL (e.g., documentation, articles).",
 )
 @requires("llm_summarizer")
+@require_context(
+    "LLM summarizer",
+    get_context_llm_summarizer,
+    error_message="No LLM summarizer available in context. "
+                  "Ensure the workflow manager has been configured with an LLM summarizer.",
+)
 async def web_fetch(url: str, prompt: str, timeout: int = 30) -> dict[str, Any]:
     """Fetch web content and summarize it using an LLM.
 
@@ -86,12 +92,6 @@ async def web_fetch(url: str, prompt: str, timeout: int = 30) -> dict[str, Any]:
     """
     # Get the LLM summarizer from context
     summarizer = get_context_llm_summarizer()
-    if summarizer is None:
-        return {
-            "success": False,
-            "error": "No LLM summarizer available in context. "
-                     "Ensure the workflow manager has been configured with an LLM summarizer.",
-        }
 
     # Get the fetcher
     fetcher = get_or_create_fetcher()

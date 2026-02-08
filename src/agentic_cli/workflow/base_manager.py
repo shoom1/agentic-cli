@@ -16,14 +16,14 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from abc import ABC, abstractmethod
-from typing import Any, AsyncGenerator, Iterator, TYPE_CHECKING
+from typing import Any, AsyncGenerator, Awaitable, Callable, Iterator, TYPE_CHECKING
 
 from agentic_cli.workflow.events import WorkflowEvent, UserInputRequest
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.config import set_context_settings, set_context_workflow
 from agentic_cli.workflow.context import (
     set_context_memory_manager,
-    set_context_task_graph,
+    set_context_plan_store,
     set_context_task_store,
     set_context_approval_manager,
     set_context_checkpoint_manager,
@@ -93,13 +93,14 @@ class BaseWorkflowManager(ABC):
 
         # User input handling
         self._pending_input: dict[str, tuple[UserInputRequest, asyncio.Future[str]]] = {}
+        self._user_input_callback: Callable[[UserInputRequest], Awaitable[str]] | None = None
 
         # Auto-detect required managers from tools
         self._required_managers = self._detect_required_managers()
 
         # Manager slots (created lazily by _ensure_managers_initialized)
         self._memory_manager: "MemoryStore | None" = None
-        self._task_graph: "PlanStore | None" = None
+        self._plan_store: "PlanStore | None" = None
         self._task_store: "TaskStore | None" = None
         self._approval_manager: "ApprovalManager | None" = None
         self._checkpoint_manager: "CheckpointManager | None" = None
@@ -136,9 +137,9 @@ class BaseWorkflowManager(ABC):
         return self._memory_manager
 
     @property
-    def task_graph(self) -> "PlanStore | None":
+    def plan_store(self) -> "PlanStore | None":
         """Get the plan store (if required by tools)."""
-        return self._task_graph
+        return self._plan_store
 
     @property
     def task_store(self) -> "TaskStore | None":
@@ -186,9 +187,9 @@ class BaseWorkflowManager(ABC):
             from agentic_cli.tools.memory_tools import MemoryStore
             self._memory_manager = MemoryStore(self._settings)
 
-        if "task_graph" in self._required_managers and self._task_graph is None:
+        if "plan_store" in self._required_managers and self._plan_store is None:
             from agentic_cli.tools.planning_tools import PlanStore
-            self._task_graph = PlanStore()
+            self._plan_store = PlanStore()
 
         if "task_store" in self._required_managers and self._task_store is None:
             from agentic_cli.tools.task_tools import TaskStore
@@ -228,7 +229,7 @@ class BaseWorkflowManager(ABC):
             set_context_settings(self._settings),
             set_context_workflow(self),
             set_context_memory_manager(self._memory_manager),
-            set_context_task_graph(self._task_graph),
+            set_context_plan_store(self._plan_store),
             set_context_task_store(self._task_store),
             set_context_approval_manager(self._approval_manager),
             set_context_checkpoint_manager(self._checkpoint_manager),
@@ -338,8 +339,15 @@ class BaseWorkflowManager(ABC):
     async def request_user_input(self, request: UserInputRequest) -> str:
         """Request user input from the CLI.
 
-        Called by tools that need user interaction. This method blocks
-        until provide_user_input() is called with the response.
+        Called by tools that need user interaction.
+
+        When ``_user_input_callback`` is set (by MessageProcessor), the
+        callback is invoked directly, which avoids the deadlock inherent
+        in the Future pattern (the Future can never be resolved while the
+        ADK runner is blocked awaiting it).
+
+        When no callback is set (e.g. in tests), falls back to the
+        original Future pattern for backward compatibility.
 
         Args:
             request: The user input request.
@@ -347,16 +355,19 @@ class BaseWorkflowManager(ABC):
         Returns:
             User's response string.
         """
-        loop = asyncio.get_event_loop()
-        future: asyncio.Future[str] = loop.create_future()
-        self._pending_input[request.request_id] = (request, future)
-
         logger.debug(
             "user_input_requested",
             request_id=request.request_id,
             tool_name=request.tool_name,
         )
 
+        if self._user_input_callback is not None:
+            return await self._user_input_callback(request)
+
+        # Fallback: Future pattern (for tests without callback)
+        loop = asyncio.get_event_loop()
+        future: asyncio.Future[str] = loop.create_future()
+        self._pending_input[request.request_id] = (request, future)
         return await future
 
     def provide_user_input(self, request_id: str, response: str) -> bool:
@@ -494,10 +505,10 @@ class BaseWorkflowManager(ABC):
         Returns:
             (display_str, progress_dict) or None if no checkboxes found.
         """
-        if self._task_graph is None or self._task_graph.is_empty():
+        if self._plan_store is None or self._plan_store.is_empty():
             return None
 
-        content = self._task_graph.get()
+        content = self._plan_store.get()
         current_section: str | None = None
         sections: list[tuple[str | None, list[tuple[bool, str]]]] = []
         current_items: list[tuple[bool, str]] = []

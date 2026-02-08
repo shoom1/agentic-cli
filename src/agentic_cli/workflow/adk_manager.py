@@ -621,18 +621,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         Yields:
             WorkflowEvent objects for each processed part
         """
-        # Check for pending user input requests
-        pending_request = self.get_pending_input_request()
-        if pending_request:
-            yield WorkflowEvent.user_input_required(
-                request_id=pending_request.request_id,
-                tool_name=pending_request.tool_name,
-                prompt=pending_request.prompt,
-                input_type=pending_request.input_type,
-                choices=pending_request.choices,
-                default=pending_request.default,
-            )
-
         # Extract usage_metadata if available (Option B - workflow event integration)
         if hasattr(adk_event, "usage_metadata") and adk_event.usage_metadata:
             usage = adk_event.usage_metadata

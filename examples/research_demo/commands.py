@@ -63,7 +63,7 @@ class PlanCommand(Command):
         )
 
     async def execute(self, args: str, app: "ResearchDemoApp") -> None:
-        plan_store = app.workflow.task_graph if app.workflow else None
+        plan_store = app.workflow.plan_store if app.workflow else None
 
         if plan_store is None:
             app.session.add_message("system", "Plan store not initialized")
@@ -287,7 +287,7 @@ class ClearPlanCommand(Command):
         )
 
     async def execute(self, args: str, app: "ResearchDemoApp") -> None:
-        plan_store = app.workflow.task_graph if app.workflow else None
+        plan_store = app.workflow.plan_store if app.workflow else None
 
         if plan_store:
             plan_store.clear()

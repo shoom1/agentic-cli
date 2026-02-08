@@ -1400,6 +1400,7 @@ class TestToolRegistryConsistency:
         import agentic_cli.tools.webfetch_tool  # noqa: F401
         import agentic_cli.tools.memory_tools  # noqa: F401
         import agentic_cli.tools.planning_tools  # noqa: F401
+        import agentic_cli.tools.task_tools  # noqa: F401
         import agentic_cli.tools.hitl_tools  # noqa: F401
         import agentic_cli.tools.shell.executor  # noqa: F401
 
@@ -1437,6 +1438,9 @@ class TestToolRegistryConsistency:
             # Planning tools
             "save_plan",
             "get_plan",
+            # Task tools
+            "save_tasks",
+            "get_tasks",
             # HITL tools
             "request_approval",
             "create_checkpoint",
@@ -1515,6 +1519,7 @@ class TestToolRegistryConsistency:
         import agentic_cli.tools.webfetch_tool  # noqa: F401
         import agentic_cli.tools.memory_tools  # noqa: F401
         import agentic_cli.tools.planning_tools  # noqa: F401
+        import agentic_cli.tools.task_tools  # noqa: F401
         import agentic_cli.tools.hitl_tools  # noqa: F401
         import agentic_cli.tools.shell.executor  # noqa: F401
 
@@ -1540,6 +1545,7 @@ class TestToolRegistryConsistency:
         planning_tools = registry.list_by_category(ToolCategory.PLANNING)
         planning_names = {t.name for t in planning_tools}
         assert "save_plan" in planning_names, "PLANNING category should have planning tools"
+        assert "save_tasks" in planning_names, "PLANNING category should have task tools"
 
         interaction_tools = registry.list_by_category(ToolCategory.INTERACTION)
         interaction_names = {t.name for t in interaction_tools}
@@ -1567,13 +1573,14 @@ class TestToolRegistryConsistency:
         import agentic_cli.tools.webfetch_tool  # noqa: F401
         import agentic_cli.tools.memory_tools  # noqa: F401
         import agentic_cli.tools.planning_tools  # noqa: F401
+        import agentic_cli.tools.task_tools  # noqa: F401
         import agentic_cli.tools.hitl_tools  # noqa: F401
         import agentic_cli.tools.shell.executor  # noqa: F401
 
         registry = get_registry()
         tool_count = len(registry.list_tools())
 
-        # We expect at least 22 tools after simplification
+        # We expect at least 24 tools after simplification
         # File ops: 7 (read_file, diff_compare, grep, glob, list_dir, write_file, edit_file)
         # Web/Network: 2 (web_search, web_fetch)
         # Knowledge: 5 (search_kb, ingest_kb, search_arxiv, fetch_arxiv, analyze_arxiv)
@@ -1581,6 +1588,7 @@ class TestToolRegistryConsistency:
         # Interaction: 1 (ask_clarification)
         # Memory: 2 (save_memory, search_memory)
         # Planning: 2 (save_plan, get_plan)
+        # Tasks: 2 (save_tasks, get_tasks)
         # HITL: 2 (request_approval, create_checkpoint)
-        # Total: ~23 tools
-        assert tool_count >= 22, f"Expected at least 22 registered tools, got {tool_count}"
+        # Total: ~25 tools
+        assert tool_count >= 24, f"Expected at least 24 registered tools, got {tool_count}"

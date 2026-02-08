@@ -17,7 +17,7 @@ import json
 import uuid
 from typing import Any
 
-from agentic_cli.tools import requires
+from agentic_cli.tools import requires, require_context
 from agentic_cli.tools.registry import (
     register_tool,
     ToolCategory,
@@ -33,6 +33,7 @@ from agentic_cli.workflow.events import UserInputRequest, InputType
     description="Request user approval before a risky or consequential action. Blocks execution until the user approves or rejects. Use this for destructive operations, external API calls, or anything that can't be easily undone.",
 )
 @requires("approval_manager")
+@require_context("Workflow manager", get_context_workflow)
 async def request_approval(
     action: str,
     details: str,
@@ -52,9 +53,6 @@ async def request_approval(
         A dict with {"approved": bool, "reason": str | None}.
     """
     workflow = get_context_workflow()
-    if workflow is None:
-        return {"success": False, "error": "Workflow manager not available"}
-
     request_id = str(uuid.uuid4())[:8]
     prompt = f"[{risk_level.upper()}] Approval requested: {action}\n\nDetails: {details}\n\nApprove? (yes/no)"
 
@@ -83,6 +81,7 @@ async def request_approval(
     description="Create a review checkpoint presenting draft content to the user. Blocks until the user reviews and responds (continue/edit/abort). Use this for draft summaries, reports, or code that should be reviewed before finalizing.",
 )
 @requires("checkpoint_manager")
+@require_context("Workflow manager", get_context_workflow)
 async def create_checkpoint(
     name: str,
     content: str,
@@ -106,9 +105,6 @@ async def create_checkpoint(
                       "feedback": str | None}.
     """
     workflow = get_context_workflow()
-    if workflow is None:
-        return {"success": False, "error": "Workflow manager not available"}
-
     request_id = str(uuid.uuid4())[:8]
 
     edit_hint = " You can edit the content or provide feedback." if allow_edit else ""

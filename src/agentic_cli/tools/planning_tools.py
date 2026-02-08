@@ -15,13 +15,13 @@ Example:
 
 from typing import Any
 
-from agentic_cli.tools import requires
+from agentic_cli.tools import requires, require_context
 from agentic_cli.tools.registry import (
     register_tool,
     ToolCategory,
     PermissionLevel,
 )
-from agentic_cli.workflow.context import get_context_task_graph
+from agentic_cli.workflow.context import get_context_plan_store
 
 
 # ---------------------------------------------------------------------------
@@ -104,7 +104,8 @@ def _summarize_checkboxes(content: str) -> str:
     permission_level=PermissionLevel.SAFE,
     description="Save or update the execution plan as markdown with checkboxes. Use this to record your strategy and track task completion (- [ ] pending, - [x] done).",
 )
-@requires("task_graph")
+@requires("plan_store")
+@require_context("Plan store", get_context_plan_store)
 def save_plan(content: str) -> dict[str, Any]:
     """Save or update the task plan.
 
@@ -118,10 +119,7 @@ def save_plan(content: str) -> dict[str, Any]:
     Returns:
         A dict confirming the plan was saved.
     """
-    store = get_context_task_graph()
-    if store is None:
-        return {"success": False, "error": "Plan store not available"}
-
+    store = get_context_plan_store()
     store.save(content)
 
     summary = _summarize_checkboxes(content)
@@ -138,17 +136,15 @@ def save_plan(content: str) -> dict[str, Any]:
     permission_level=PermissionLevel.SAFE,
     description="Retrieve the current execution plan. Use this to check progress or review the plan before updating it.",
 )
-@requires("task_graph")
+@requires("plan_store")
+@require_context("Plan store", get_context_plan_store)
 def get_plan() -> dict[str, Any]:
     """Retrieve the current plan.
 
     Returns:
         A dict with the plan content, or a message if no plan exists.
     """
-    store = get_context_task_graph()
-    if store is None:
-        return {"success": False, "error": "Plan store not available"}
-
+    store = get_context_plan_store()
     if store.is_empty():
         return {
             "success": True,

@@ -21,16 +21,34 @@ Example:
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
+from enum import Enum
 from typing import Any
 
 from agentic_cli.config import BaseSettings
-from agentic_cli.tools import requires
+from agentic_cli.tools import requires, require_context
 from agentic_cli.tools.registry import (
     register_tool,
     ToolCategory,
     PermissionLevel,
 )
 from agentic_cli.workflow.context import get_context_task_store
+
+
+class TaskStatus(str, Enum):
+    """Valid task statuses."""
+
+    PENDING = "pending"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
+
+
+class TaskPriority(str, Enum):
+    """Valid task priorities."""
+
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
 
 
 # ---------------------------------------------------------------------------
@@ -44,8 +62,8 @@ class TaskItem:
 
     id: str
     description: str
-    status: str = "pending"  # pending, in_progress, completed, cancelled
-    priority: str = "medium"  # low, medium, high
+    status: str = TaskStatus.PENDING
+    priority: str = TaskPriority.MEDIUM
     tags: list[str] = field(default_factory=list)
     created_at: str = ""
     completed_at: str = ""
@@ -66,8 +84,8 @@ class TaskItem:
         return cls(
             id=data["id"],
             description=data["description"],
-            status=data.get("status", "pending"),
-            priority=data.get("priority", "medium"),
+            status=TaskStatus(data.get("status", "pending")),
+            priority=TaskPriority(data.get("priority", "medium")),
             tags=data.get("tags", []),
             created_at=data.get("created_at", ""),
             completed_at=data.get("completed_at", ""),
@@ -111,15 +129,15 @@ class TaskStore:
         ids: list[str] = []
         for task_data in tasks:
             task_id = task_data.get("id") or str(uuid.uuid4())[:8]
-            status = task_data.get("status", "pending")
+            status = TaskStatus(task_data.get("status", "pending"))
             completed_at = task_data.get("completed_at", "")
-            if status == "completed" and not completed_at:
+            if status == TaskStatus.COMPLETED and not completed_at:
                 completed_at = now
             item = TaskItem(
                 id=task_id,
                 description=task_data["description"],
                 status=status,
-                priority=task_data.get("priority", "medium"),
+                priority=TaskPriority(task_data.get("priority", "medium")),
                 tags=task_data.get("tags", []),
                 created_at=task_data.get("created_at", now),
                 completed_at=completed_at,
@@ -173,7 +191,7 @@ class TaskStore:
         if not self._items:
             return False
         return all(
-            item.status in ("completed", "cancelled")
+            item.status in (TaskStatus.COMPLETED, TaskStatus.CANCELLED)
             for item in self._items.values()
         )
 
@@ -200,10 +218,10 @@ class TaskStore:
         if not self._items:
             return ""
         icons = {
-            "completed": "[x]",
-            "in_progress": "[>]",
-            "pending": "[ ]",
-            "cancelled": "[-]",
+            TaskStatus.COMPLETED: "[x]",
+            TaskStatus.IN_PROGRESS: "[>]",
+            TaskStatus.PENDING: "[ ]",
+            TaskStatus.CANCELLED: "[-]",
         }
         lines = []
         for item in self._items.values():
@@ -214,7 +232,7 @@ class TaskStore:
     def get_current_task(self) -> TaskItem | None:
         """Return the first in-progress task, or None."""
         for item in self._items.values():
-            if item.status == "in_progress":
+            if item.status == TaskStatus.IN_PROGRESS:
                 return item
         return None
 
@@ -225,6 +243,7 @@ class TaskStore:
     description="Write the complete task list. This replaces the existing list. Use this to create initial tasks or update statuses. Each task has a description and status (pending/in_progress/completed/cancelled). At most one task should be in_progress at a time.",
 )
 @requires("task_store")
+@require_context("Task store", get_context_task_store)
 def save_tasks(
     tasks: list[dict[str, Any]],
 ) -> dict[str, Any]:
@@ -246,9 +265,6 @@ def save_tasks(
         A dict with the operation result.
     """
     store = get_context_task_store()
-    if store is None:
-        return {"success": False, "error": "Task store not available"}
-
     if not tasks:
         store.replace_all([])
         return {"success": True, "task_ids": [], "count": 0, "message": "Tasks cleared"}
@@ -276,6 +292,7 @@ def save_tasks(
     description="List execution tasks with optional filters by status, priority, or tag. Use this to check progress or find tasks to work on.",
 )
 @requires("task_store")
+@require_context("Task store", get_context_task_store)
 def get_tasks(
     status: str = "",
     priority: str = "",
@@ -292,9 +309,6 @@ def get_tasks(
         A dict with matching tasks.
     """
     store = get_context_task_store()
-    if store is None:
-        return {"success": False, "error": "Task store not available"}
-
     tasks = store.list_tasks(
         status=status or None,
         priority=priority or None,
