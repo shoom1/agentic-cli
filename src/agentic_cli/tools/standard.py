@@ -333,8 +333,8 @@ async def analyze_arxiv_paper(arxiv_id: str, prompt: str) -> dict[str, Any]:
 
 @register_tool(
     category=ToolCategory.EXECUTION,
-    permission_level=PermissionLevel.CAUTION,
-    description="Execute Python code in a sandboxed environment with restricted imports. Use this for calculations, data processing, or prototyping. Only whitelisted modules (math, numpy, pandas, json, etc.) are available.",
+    permission_level=PermissionLevel.DANGEROUS,
+    description="Execute Python code in a sandboxed subprocess with restricted imports. Use this for calculations, data processing, or prototyping. Only whitelisted modules (math, numpy, pandas, json, etc.) are available.",
 )
 def execute_python(
     code: str,
@@ -362,7 +362,10 @@ def execute_python(
             return {"success": False, "error": f"Invalid JSON in context: {context}"}
 
     settings = get_settings()
-    executor = SafePythonExecutor(default_timeout=settings.python_executor_timeout)
+    executor = SafePythonExecutor(
+        default_timeout=settings.python_executor_timeout,
+        max_memory_mb=settings.python_executor_max_memory_mb,
+    )
     return executor.execute(code, context=parsed_context, timeout_seconds=timeout_seconds)
 
 

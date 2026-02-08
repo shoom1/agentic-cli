@@ -84,6 +84,12 @@ class WorkflowSettingsMixin:
         description="Default timeout for Python execution (seconds)",
         json_schema_extra={"ui_order": 120},
     )
+    python_executor_max_memory_mb: int = Field(
+        default=512,
+        title="Python Executor Memory Limit",
+        description="Maximum memory for Python executor subprocess (MB, Unix only)",
+        json_schema_extra={"ui_order": 121},
+    )
 
     # HITL (Human-in-the-Loop) settings
     hitl_enabled: bool = Field(
