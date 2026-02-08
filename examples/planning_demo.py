@@ -10,7 +10,7 @@ Usage:
     conda run -n agenticcli python examples/planning_demo.py
 """
 
-from agentic_cli.planning import PlanStore
+from agentic_cli.tools.planning_tools import PlanStore
 
 
 def demo_basic_plan():

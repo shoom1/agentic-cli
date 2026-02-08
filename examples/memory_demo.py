@@ -14,7 +14,7 @@ Usage:
 import tempfile
 from pathlib import Path
 
-from agentic_cli.memory.store import MemoryStore, MemoryItem
+from agentic_cli.tools.memory_tools import MemoryStore, MemoryItem
 from agentic_cli.config import BaseSettings
 
 
