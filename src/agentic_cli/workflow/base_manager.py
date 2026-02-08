@@ -16,7 +16,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from abc import ABC, abstractmethod
-from typing import Any, AsyncGenerator, Iterator, TYPE_CHECKING
+from typing import Any, AsyncGenerator, Awaitable, Callable, Iterator, TYPE_CHECKING
 
 from agentic_cli.workflow.events import WorkflowEvent, UserInputRequest
 from agentic_cli.workflow.config import AgentConfig
@@ -93,6 +93,7 @@ class BaseWorkflowManager(ABC):
 
         # User input handling
         self._pending_input: dict[str, tuple[UserInputRequest, asyncio.Future[str]]] = {}
+        self._user_input_callback: Callable[[UserInputRequest], Awaitable[str]] | None = None
 
         # Auto-detect required managers from tools
         self._required_managers = self._detect_required_managers()
@@ -338,8 +339,15 @@ class BaseWorkflowManager(ABC):
     async def request_user_input(self, request: UserInputRequest) -> str:
         """Request user input from the CLI.
 
-        Called by tools that need user interaction. This method blocks
-        until provide_user_input() is called with the response.
+        Called by tools that need user interaction.
+
+        When ``_user_input_callback`` is set (by MessageProcessor), the
+        callback is invoked directly, which avoids the deadlock inherent
+        in the Future pattern (the Future can never be resolved while the
+        ADK runner is blocked awaiting it).
+
+        When no callback is set (e.g. in tests), falls back to the
+        original Future pattern for backward compatibility.
 
         Args:
             request: The user input request.
@@ -347,16 +355,19 @@ class BaseWorkflowManager(ABC):
         Returns:
             User's response string.
         """
-        loop = asyncio.get_event_loop()
-        future: asyncio.Future[str] = loop.create_future()
-        self._pending_input[request.request_id] = (request, future)
-
         logger.debug(
             "user_input_requested",
             request_id=request.request_id,
             tool_name=request.tool_name,
         )
 
+        if self._user_input_callback is not None:
+            return await self._user_input_callback(request)
+
+        # Fallback: Future pattern (for tests without callback)
+        loop = asyncio.get_event_loop()
+        future: asyncio.Future[str] = loop.create_future()
+        self._pending_input[request.request_id] = (request, future)
         return await future
 
     def provide_user_input(self, request_id: str, response: str) -> bool:

@@ -22,6 +22,11 @@ class TestEventType:
             "EXECUTABLE_CODE",
             "FILE_DATA",
             "ERROR",
+            "USER_INPUT_REQUIRED",
+            "TASK_PROGRESS",
+            "LLM_REQUEST",
+            "LLM_RESPONSE",
+            "LLM_USAGE",
         ]
         for name in expected:
             assert hasattr(EventType, name)

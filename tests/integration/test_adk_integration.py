@@ -690,3 +690,66 @@ class TestMessageProcessorRateLimit:
         ui.yes_no_dialog.assert_not_called()
         ui.add_error.assert_called_once()
         assert "Something broke" in ui.add_error.call_args[0][0]
+
+
+class TestUserInputCallback:
+    """Tests for the direct _user_input_callback path in request_user_input."""
+
+    async def test_callback_invoked_when_set(self, mock_settings, simple_agent_config):
+        """When _user_input_callback is set, request_user_input calls it directly."""
+        from agentic_cli.workflow.events import UserInputRequest, InputType
+
+        manager = _create_manager(mock_settings, simple_agent_config)
+
+        captured_requests: list[UserInputRequest] = []
+
+        async def fake_callback(request: UserInputRequest) -> str:
+            captured_requests.append(request)
+            return "user answer"
+
+        manager._user_input_callback = fake_callback
+
+        request = UserInputRequest(
+            request_id="req-1",
+            tool_name="ask_clarification",
+            prompt="What color?",
+            input_type=InputType.TEXT,
+        )
+        result = await manager.request_user_input(request)
+
+        assert result == "user answer"
+        assert len(captured_requests) == 1
+        assert captured_requests[0].request_id == "req-1"
+        # Future pattern should NOT have been used
+        assert len(manager._pending_input) == 0
+
+    async def test_future_pattern_without_callback(self, mock_settings, simple_agent_config):
+        """Without callback, request_user_input uses the Future pattern."""
+        import asyncio
+        from agentic_cli.workflow.events import UserInputRequest, InputType
+
+        manager = _create_manager(mock_settings, simple_agent_config)
+        assert manager._user_input_callback is None
+
+        request = UserInputRequest(
+            request_id="req-2",
+            tool_name="ask_clarification",
+            prompt="What size?",
+            input_type=InputType.TEXT,
+        )
+
+        # Start request_user_input in background — it will block on the Future
+        task = asyncio.create_task(manager.request_user_input(request))
+
+        # Let the event loop tick so the Future is registered
+        await asyncio.sleep(0)
+
+        assert "req-2" in manager._pending_input
+
+        # Resolve via provide_user_input
+        resolved = manager.provide_user_input("req-2", "large")
+        assert resolved is True
+
+        result = await task
+        assert result == "large"
+        assert len(manager._pending_input) == 0
