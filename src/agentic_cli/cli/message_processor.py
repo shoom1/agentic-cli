@@ -11,7 +11,7 @@ import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 from agentic_cli.logging import Loggers, bind_context
 
@@ -92,6 +92,34 @@ class MessageHistory:
         return len(self._messages)
 
 
+# === Event Processing State ===
+
+
+@dataclass
+class _EventProcessingState:
+    """Mutable state shared across event handlers during process()."""
+
+    status_line: str = "Processing..."
+    task_progress_display: str | None = None
+    thinking_started: bool = False
+    thinking_content: list[str] = field(default_factory=list)
+    response_content: list[str] = field(default_factory=list)
+
+    def get_status(self) -> str:
+        """Build status display with current action and task progress."""
+        lines = [self.status_line]
+        if self.task_progress_display:
+            lines.append(self.task_progress_display)
+        return "\n".join(lines)
+
+    def reset_for_retry(self) -> None:
+        """Reset state for retry after rate limit."""
+        self.status_line = "Processing..."
+        self.task_progress_display = None
+        self.thinking_content.clear()
+        self.response_content.clear()
+
+
 # === Message Processor ===
 
 
@@ -156,8 +184,8 @@ class MessageProcessor:
             )
             return
 
-        # Import EventType and WorkflowEvent here (workflow module is now loaded)
-        from agentic_cli.workflow import EventType, WorkflowEvent
+        # Import WorkflowEvent here (workflow module is now loaded)
+        from agentic_cli.workflow import WorkflowEvent
 
         bind_context(user_id=settings.default_user)
         logger.info("handling_message", message_length=len(message))
@@ -166,35 +194,17 @@ class MessageProcessor:
         if settings.log_activity:
             self._message_history.add(message, MessageType.USER)
 
-        # Status line for thinking box (multi-line with task progress)
-        status_line = "Processing..."
-        task_progress_display: str | None = None
-        thinking_started = False
-
-        # Accumulate content for history
-        thinking_content: list[str] = []
-        response_content: list[str] = []
-
-        def get_status() -> str:
-            """Build status display with current action and task progress."""
-            lines = [status_line]
-
-            # Add task progress if available (from TASK_PROGRESS events)
-            if task_progress_display:
-                lines.append(task_progress_display)
-
-            return "\n".join(lines)
-
+        state = _EventProcessingState()
         workflow = workflow_controller.workflow
+        dispatch = self._get_event_dispatch()
 
         # Set up direct callback so HITL tools can prompt the user without
         # deadlocking (the Future pattern blocks the ADK runner, preventing
         # the USER_INPUT_REQUIRED event from ever being yielded).
         async def _handle_input(request: "UserInputRequest") -> str:
-            nonlocal thinking_started
-            if thinking_started:
+            if state.thinking_started:
                 ui.finish_thinking(add_to_history=False)
-                thinking_started = False
+                state.thinking_started = False
 
             wf_event = WorkflowEvent.user_input_required(
                 request_id=request.request_id,
@@ -206,126 +216,49 @@ class MessageProcessor:
             )
             response = await self._prompt_user_input(wf_event, workflow, ui)
 
-            ui.start_thinking(get_status)
-            thinking_started = True
+            ui.start_thinking(state.get_status)
+            state.thinking_started = True
             return response
 
         workflow._user_input_callback = _handle_input
         try:
             while True:
                 try:
-                    ui.start_thinking(get_status)
-                    thinking_started = True
+                    ui.start_thinking(state.get_status)
+                    state.thinking_started = True
 
                     async for event in workflow.process(
                         message=message,
                         user_id=settings.default_user,
                     ):
-                        if event.type == EventType.TEXT:
-                            # Stream response directly to console
-                            ui.add_response(event.content, markdown=True)
-                            response_content.append(event.content)
-
-                        elif event.type == EventType.THINKING:
-                            # Stream thinking to console only if verbose_thinking is enabled
-                            status_line = "Thinking..."
-                            if settings.verbose_thinking:
-                                ui.add_message("system", event.content)
-                            thinking_content.append(event.content)
-
-                        elif event.type == EventType.TOOL_CALL:
-                            # Update status line in thinking box
-                            tool_name = event.metadata.get("tool_name", "unknown")
-                            status_line = f"Calling: {tool_name}"
-
-                        elif event.type == EventType.TOOL_RESULT:
-                            # Display tool result summary
-                            tool_name = event.metadata.get("tool_name", "unknown")
-                            success = event.metadata.get("success", True)
-                            duration = event.metadata.get("duration_ms")
-                            icon = "+" if success else "x"
-                            duration_str = f" ({duration}ms)" if duration else ""
-                            status_line = f"{icon} {tool_name}: {event.content}{duration_str}"
-                            # Also show in message area for visibility
-                            style = "green" if success else "red"
-                            ui.add_rich(
-                                f"[{style}]{icon}[/{style}] {tool_name}: {event.content}{duration_str}"
-                            )
-
-                        elif event.type == EventType.USER_INPUT_REQUIRED:
-                            # Legacy path: handle USER_INPUT_REQUIRED events
-                            # that may still arrive from the ADK event stream.
-                            if thinking_started:
-                                ui.finish_thinking(add_to_history=False)
-                                thinking_started = False
-
-                            response = await self._prompt_user_input(event, workflow, ui)
-                            workflow.provide_user_input(
-                                event.metadata["request_id"],
-                                response,
-                            )
-
-                            # Resume thinking box
-                            ui.start_thinking(get_status)
-                            thinking_started = True
-
-                        elif event.type == EventType.CODE_EXECUTION:
-                            # Update status with execution result
-                            result_preview = (
-                                event.content[:40] + "..."
-                                if len(event.content) > 40
-                                else event.content
-                            )
-                            status_line = f"Result: {result_preview}"
-
-                        elif event.type == EventType.EXECUTABLE_CODE:
-                            # Update status when executing code
-                            lang = event.metadata.get("language", "python")
-                            status_line = f"Running {lang} code..."
-
-                        elif event.type == EventType.FILE_DATA:
-                            # Update status with file info
-                            status_line = f"File: {event.content}"
-
-                        elif event.type == EventType.TASK_PROGRESS:
-                            # Task progress update - event.content has compact display,
-                            # event.metadata has progress stats
-                            progress = event.metadata.get("progress", {})
-                            if progress.get("total", 0) > 0:
-                                completed = progress.get("completed", 0)
-                                total = progress["total"]
-                                # Build display: separator + task list
-                                task_progress_display = f"--- Tasks: {completed}/{total} ---"
-                                if event.content:
-                                    task_progress_display += f"\n{event.content}"
-
-                            # Update status line with current task if available
-                            current_task = event.metadata.get("current_task_description")
-                            if current_task:
-                                status_line = f"Working on: {current_task}"
+                        handler = dispatch.get(event.type)
+                        if handler is not None:
+                            await handler(self, event, state, ui, settings, workflow)
 
                     # Finish thinking box (don't add status to history)
-                    if thinking_started:
+                    if state.thinking_started:
                         ui.finish_thinking(add_to_history=False)
 
                     # Add accumulated content to message history (if logging enabled)
                     if settings.log_activity:
-                        if thinking_content:
+                        if state.thinking_content:
                             self._message_history.add(
-                                "".join(thinking_content), MessageType.THINKING
+                                "".join(state.thinking_content),
+                                MessageType.THINKING,
                             )
-                        if response_content:
+                        if state.response_content:
                             self._message_history.add(
-                                "".join(response_content), MessageType.ASSISTANT
+                                "".join(state.response_content),
+                                MessageType.ASSISTANT,
                             )
 
                     logger.debug("message_handled_successfully")
                     break  # Success — exit retry loop
 
                 except Exception as e:
-                    if thinking_started:
+                    if state.thinking_started:
                         ui.finish_thinking(add_to_history=False)
-                        thinking_started = False
+                        state.thinking_started = False
 
                     # Check for 429 rate limit errors — prompt user to wait and retry
                     from agentic_cli.workflow.adk_manager import (
@@ -342,11 +275,7 @@ class MessageProcessor:
                         if retry:
                             ui.add_warning(f"Waiting {delay:.0f}s before retrying...")
                             await asyncio.sleep(delay)
-                            # Reset state for retry
-                            status_line = "Processing..."
-                            task_progress_display = None
-                            thinking_content.clear()
-                            response_content.clear()
+                            state.reset_for_retry()
                             continue  # Retry the loop
 
                     # Non-429 or user chose cancel
@@ -406,3 +335,169 @@ class MessageProcessor:
                 default=default or "",
             )
             return result or ""
+
+    # === Event handler methods ===
+
+    async def _handle_text(
+        self,
+        event: "WorkflowEvent",
+        state: _EventProcessingState,
+        ui: "ThinkingPromptSession",
+        settings: "BaseSettings",
+        workflow: object,
+    ) -> None:
+        """Handle TEXT events — stream response to console."""
+        ui.add_response(event.content, markdown=True)
+        state.response_content.append(event.content)
+
+    async def _handle_thinking(
+        self,
+        event: "WorkflowEvent",
+        state: _EventProcessingState,
+        ui: "ThinkingPromptSession",
+        settings: "BaseSettings",
+        workflow: object,
+    ) -> None:
+        """Handle THINKING events — update status, optionally display."""
+        state.status_line = "Thinking..."
+        if settings.verbose_thinking:
+            ui.add_message("system", event.content)
+        state.thinking_content.append(event.content)
+
+    async def _handle_tool_call(
+        self,
+        event: "WorkflowEvent",
+        state: _EventProcessingState,
+        ui: "ThinkingPromptSession",
+        settings: "BaseSettings",
+        workflow: object,
+    ) -> None:
+        """Handle TOOL_CALL events — update status line."""
+        tool_name = event.metadata.get("tool_name", "unknown")
+        state.status_line = f"Calling: {tool_name}"
+
+    async def _handle_tool_result(
+        self,
+        event: "WorkflowEvent",
+        state: _EventProcessingState,
+        ui: "ThinkingPromptSession",
+        settings: "BaseSettings",
+        workflow: object,
+    ) -> None:
+        """Handle TOOL_RESULT events — display result summary."""
+        tool_name = event.metadata.get("tool_name", "unknown")
+        success = event.metadata.get("success", True)
+        duration = event.metadata.get("duration_ms")
+        icon = "+" if success else "x"
+        duration_str = f" ({duration}ms)" if duration else ""
+        state.status_line = f"{icon} {tool_name}: {event.content}{duration_str}"
+        style = "green" if success else "red"
+        ui.add_rich(
+            f"[{style}]{icon}[/{style}] {tool_name}: {event.content}{duration_str}"
+        )
+
+    async def _handle_user_input_required(
+        self,
+        event: "WorkflowEvent",
+        state: _EventProcessingState,
+        ui: "ThinkingPromptSession",
+        settings: "BaseSettings",
+        workflow: object,
+    ) -> None:
+        """Handle USER_INPUT_REQUIRED events — legacy ADK event stream path."""
+        if state.thinking_started:
+            ui.finish_thinking(add_to_history=False)
+            state.thinking_started = False
+
+        response = await self._prompt_user_input(event, workflow, ui)
+        workflow.provide_user_input(
+            event.metadata["request_id"],
+            response,
+        )
+
+        # Resume thinking box
+        ui.start_thinking(state.get_status)
+        state.thinking_started = True
+
+    async def _handle_code_execution(
+        self,
+        event: "WorkflowEvent",
+        state: _EventProcessingState,
+        ui: "ThinkingPromptSession",
+        settings: "BaseSettings",
+        workflow: object,
+    ) -> None:
+        """Handle CODE_EXECUTION events — update status with result preview."""
+        result_preview = (
+            event.content[:40] + "..."
+            if len(event.content) > 40
+            else event.content
+        )
+        state.status_line = f"Result: {result_preview}"
+
+    async def _handle_executable_code(
+        self,
+        event: "WorkflowEvent",
+        state: _EventProcessingState,
+        ui: "ThinkingPromptSession",
+        settings: "BaseSettings",
+        workflow: object,
+    ) -> None:
+        """Handle EXECUTABLE_CODE events — update status with language."""
+        lang = event.metadata.get("language", "python")
+        state.status_line = f"Running {lang} code..."
+
+    async def _handle_file_data(
+        self,
+        event: "WorkflowEvent",
+        state: _EventProcessingState,
+        ui: "ThinkingPromptSession",
+        settings: "BaseSettings",
+        workflow: object,
+    ) -> None:
+        """Handle FILE_DATA events — update status with filename."""
+        state.status_line = f"File: {event.content}"
+
+    async def _handle_task_progress(
+        self,
+        event: "WorkflowEvent",
+        state: _EventProcessingState,
+        ui: "ThinkingPromptSession",
+        settings: "BaseSettings",
+        workflow: object,
+    ) -> None:
+        """Handle TASK_PROGRESS events — update progress display."""
+        progress = event.metadata.get("progress", {})
+        if progress.get("total", 0) > 0:
+            completed = progress.get("completed", 0)
+            total = progress["total"]
+            state.task_progress_display = f"--- Tasks: {completed}/{total} ---"
+            if event.content:
+                state.task_progress_display += f"\n{event.content}"
+
+        current_task = event.metadata.get("current_task_description")
+        if current_task:
+            state.status_line = f"Working on: {current_task}"
+
+    # === Dispatch table ===
+
+    _EVENT_DISPATCH: ClassVar[dict | None] = None
+
+    @classmethod
+    def _get_event_dispatch(cls) -> dict:
+        """Get or build the EventType → handler dispatch table."""
+        if cls._EVENT_DISPATCH is None:
+            from agentic_cli.workflow import EventType
+
+            cls._EVENT_DISPATCH = {
+                EventType.TEXT: cls._handle_text,
+                EventType.THINKING: cls._handle_thinking,
+                EventType.TOOL_CALL: cls._handle_tool_call,
+                EventType.TOOL_RESULT: cls._handle_tool_result,
+                EventType.USER_INPUT_REQUIRED: cls._handle_user_input_required,
+                EventType.CODE_EXECUTION: cls._handle_code_execution,
+                EventType.EXECUTABLE_CODE: cls._handle_executable_code,
+                EventType.FILE_DATA: cls._handle_file_data,
+                EventType.TASK_PROGRESS: cls._handle_task_progress,
+            }
+        return cls._EVENT_DISPATCH
