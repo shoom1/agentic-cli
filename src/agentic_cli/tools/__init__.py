@@ -48,7 +48,7 @@ def requires(*managers: ManagerRequirement) -> Callable[[F], F]:
     Example:
         @requires("memory_manager")
         def save_memory(content: str, tags: list[str] | None = None) -> dict:
-            store = get_context_memory_manager()
+            store = get_context_memory_store()
             ...
     """
     def decorator(func: F) -> F:
