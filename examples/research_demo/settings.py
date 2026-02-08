@@ -31,13 +31,10 @@ class ResearchDemoSettings(BaseSettings):
     app_name: str = Field(default="research_demo")
     workspace_dir: Path = Field(default=Path.home() / ".research_demo")
 
-    # Override verbose_thinking default for concise mode
-    verbose_thinking: bool = Field(
-        default=False,
-        title="Verbose Thinking",
-        description="Show detailed thinking output (default: concise mode)",
-        json_schema_extra={"ui_order": 35},
-    )
+    def __init__(self, **kwargs):
+        # Override verbose_thinking default to False (concise mode)
+        kwargs.setdefault("verbose_thinking", False)
+        super().__init__(**kwargs)
 
 
 @lru_cache

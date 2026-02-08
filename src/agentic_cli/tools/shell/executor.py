@@ -17,6 +17,13 @@ SECURITY NOTE:
 """
 
 import time
+from pathlib import Path
+
+from agentic_cli.tools.registry import (
+    register_tool,
+    ToolCategory,
+    PermissionLevel,
+)
 
 # =============================================================================
 # SHELL TOOL DISABLED
@@ -35,7 +42,6 @@ def is_shell_enabled() -> bool:
         True if shell execution is enabled, False otherwise.
     """
     return _SHELL_TOOL_ENABLED
-from pathlib import Path
 from typing import Any
 
 from agentic_cli.tools.shell.audit import AuditLogger
@@ -193,6 +199,11 @@ def _execute_command(
     }
 
 
+@register_tool(
+    category=ToolCategory.EXECUTION,
+    permission_level=PermissionLevel.DANGEROUS,
+    description="Execute a shell command with layered security and HITL approval",
+)
 def shell_executor(
     command: str,
     working_dir: str | None = None,

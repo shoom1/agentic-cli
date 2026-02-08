@@ -10,8 +10,8 @@ For alternative orchestration backends (e.g., LangGraph), see the base_manager m
 
 from __future__ import annotations
 
-import contextlib
-from typing import AsyncGenerator, Any, Callable, Iterator
+import re
+from typing import AsyncGenerator, Any, Callable
 
 from google.genai import types
 from google.adk import Runner
@@ -27,21 +27,51 @@ from agentic_cli.workflow.adk.llm_event_logger import LLMEventLogger
 from agentic_cli.config import (
     BaseSettings,
     get_settings,
-    set_context_settings,
-    set_context_workflow,
     validate_settings,
     SettingsValidationError,
 )
-from agentic_cli.workflow.context import (
-    set_context_memory_manager,
-    set_context_task_graph,
-    set_context_approval_manager,
-    set_context_checkpoint_manager,
-    set_context_llm_summarizer,
-)
+from agentic_cli.constants import truncate, TOOL_SUMMARY_MAX_LENGTH
 from agentic_cli.logging import Loggers, bind_context
 
 logger = Loggers.workflow()
+
+
+def _is_rate_limit_error(error: Exception) -> bool:
+    """Check if an exception is a 429 rate-limit / RESOURCE_EXHAUSTED error."""
+    if getattr(error, "code", None) == 429:
+        return True
+    if "RESOURCE_EXHAUSTED" in str(error):
+        return True
+    return False
+
+
+def _parse_retry_delay(error: Exception) -> float | None:
+    """Extract retry delay in seconds from a rate-limit error.
+
+    Looks for retryDelay in the structured error details first,
+    then falls back to regex on the error message string.
+
+    Returns:
+        Delay in seconds, or None if unparseable.
+    """
+    # Try structured details: error.details["error"]["details"][*]["retryDelay"]
+    details = getattr(error, "details", None)
+    if isinstance(details, dict):
+        inner_error = details.get("error", {})
+        for detail_entry in inner_error.get("details", []):
+            if isinstance(detail_entry, dict):
+                retry_delay = detail_entry.get("retryDelay")
+                if retry_delay:
+                    match = re.search(r"([\d.]+)\s*s", str(retry_delay))
+                    if match:
+                        return float(match.group(1))
+
+    # Fallback: regex on error message string
+    match = re.search(r"retry\s+in\s+([\d.]+)\s*s", str(error), re.IGNORECASE)
+    if match:
+        return float(match.group(1))
+
+    return None
 
 
 class ADKSummarizer:
@@ -349,6 +379,8 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             retry_options=types.HttpRetryOptions(
                 initial_delay=self._settings.retry_initial_delay,
                 attempts=self._settings.retry_max_attempts,
+                exp_base=self._settings.retry_backoff_factor,
+                http_status_codes=[500, 502, 503, 504],  # Don't auto-retry 429
             )
         )
         return types.GenerateContentConfig(http_options=http_options)
@@ -521,31 +553,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                 "Workflow Manager failed to initialize. Check API keys and configuration."
             )
 
-    @contextlib.contextmanager
-    def _workflow_context(self) -> Iterator[None]:
-        """Context manager for settings, workflow, and manager contexts.
-
-        Sets context variables that allow tools to access settings,
-        the workflow manager, and feature managers during execution.
-        """
-        set_context_settings(self._settings)
-        set_context_workflow(self)
-        set_context_memory_manager(self._memory_manager)
-        set_context_task_graph(self._task_graph)
-        set_context_approval_manager(self._approval_manager)
-        set_context_checkpoint_manager(self._checkpoint_manager)
-        set_context_llm_summarizer(self._llm_summarizer)
-        try:
-            yield
-        finally:
-            set_context_settings(None)
-            set_context_workflow(None)
-            set_context_memory_manager(None)
-            set_context_task_graph(None)
-            set_context_approval_manager(None)
-            set_context_checkpoint_manager(None)
-            set_context_llm_summarizer(None)
-
     def _create_message(self, message: str) -> types.Content:
         """Create an ADK Content message from text.
 
@@ -614,18 +621,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         Yields:
             WorkflowEvent objects for each processed part
         """
-        # Check for pending user input requests
-        pending_request = self.get_pending_input_request()
-        if pending_request:
-            yield WorkflowEvent.user_input_required(
-                request_id=pending_request.request_id,
-                tool_name=pending_request.tool_name,
-                prompt=pending_request.prompt,
-                input_type=pending_request.input_type,
-                choices=pending_request.choices,
-                default=pending_request.default,
-            )
-
         # Extract usage_metadata if available (Option B - workflow event integration)
         if hasattr(adk_event, "usage_metadata") and adk_event.usage_metadata:
             usage = adk_event.usage_metadata
@@ -658,7 +653,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                 if workflow_event:
                     yield workflow_event
 
-                    # After tool results, emit task progress if task graph exists
+                    # Emit task progress after tool results
                     if workflow_event.type == EventType.TOOL_RESULT:
                         progress_event = self._emit_task_progress_event()
                         if progress_event:
@@ -666,6 +661,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                                 progress_event = self._on_event(progress_event)
                             if progress_event:
                                 yield progress_event
+
 
     def _process_part(self, part: Any, session_id: str) -> WorkflowEvent | None:
         """Process a single part from the agent response.
@@ -769,7 +765,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
 
         # Truncate string results
         text = str(result)
-        return text[:100] + "..." if len(text) > 100 else text
+        return truncate(text, TOOL_SUMMARY_MAX_LENGTH)
 
     # -------------------------------------------------------------------------
     # Main processing

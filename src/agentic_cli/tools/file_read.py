@@ -14,8 +14,6 @@ from typing import Any
 from agentic_cli.tools.registry import (
     ToolCategory,
     PermissionLevel,
-    ToolError,
-    ErrorCode,
     register_tool,
 )
 
@@ -23,7 +21,7 @@ from agentic_cli.tools.registry import (
 @register_tool(
     category=ToolCategory.READ,
     permission_level=PermissionLevel.SAFE,
-    description="Read the contents of a file",
+    description="Read the contents of a file at the given path. Use this to examine source code, config files, or any text file. For finding files by name pattern use glob instead; for searching file contents use grep.",
 )
 def read_file(
     path: str,
@@ -31,6 +29,10 @@ def read_file(
     limit: int | None = None,
 ) -> dict[str, Any]:
     """Read file contents with optional offset and line limit.
+
+    Use this tool when you know the exact file path and want to see its contents.
+    For large files, use offset/limit to read specific sections.
+    Prefer glob to find files by name, and grep to search contents.
 
     Args:
         path: Path to the file to read.
@@ -45,27 +47,22 @@ def read_file(
         - size: File size in bytes
         - lines_read: Number of lines returned (if offset/limit used)
         - total_lines: Total lines in file (if offset/limit used)
-
-    Raises:
-        ToolError: If file not found or not readable.
     """
     file_path = Path(path).resolve()
 
     if not file_path.exists():
-        raise ToolError(
-            message=f"File not found: {path}",
-            error_code=ErrorCode.NOT_FOUND,
-            recoverable=False,
-            details={"path": str(file_path)},
-        )
+        return {
+            "success": False,
+            "error": f"File not found: {path}",
+            "path": str(file_path),
+        }
 
     if not file_path.is_file():
-        raise ToolError(
-            message=f"Not a file: {path}",
-            error_code=ErrorCode.INVALID_INPUT,
-            recoverable=False,
-            details={"path": str(file_path), "type": "directory" if file_path.is_dir() else "other"},
-        )
+        return {
+            "success": False,
+            "error": f"Not a file: {path}",
+            "path": str(file_path),
+        }
 
     try:
         content = file_path.read_text()
@@ -97,26 +94,24 @@ def read_file(
             "path": str(file_path),
             "size": size,
         }
-    except UnicodeDecodeError as e:
-        raise ToolError(
-            message=f"Cannot read file as text (binary file?): {path}",
-            error_code=ErrorCode.INVALID_INPUT,
-            recoverable=False,
-            details={"path": str(file_path), "error": str(e)},
-        )
-    except PermissionError as e:
-        raise ToolError(
-            message=f"Permission denied: {path}",
-            error_code=ErrorCode.PERMISSION_DENIED,
-            recoverable=False,
-            details={"path": str(file_path), "error": str(e)},
-        )
+    except UnicodeDecodeError:
+        return {
+            "success": False,
+            "error": f"Cannot read file as text (binary file?): {path}",
+            "path": str(file_path),
+        }
+    except PermissionError:
+        return {
+            "success": False,
+            "error": f"Permission denied: {path}",
+            "path": str(file_path),
+        }
 
 
 @register_tool(
     category=ToolCategory.READ,
     permission_level=PermissionLevel.SAFE,
-    description="Compare two text sources and return diff information",
+    description="Compare two text sources (files or strings) and show differences. Use this to see what changed between two versions of content.",
 )
 def diff_compare(
     source_a: str,

@@ -434,6 +434,7 @@ class TestRiskAssessor:
         assert assessment.chaining_risk in (RiskLevel.MEDIUM, RiskLevel.HIGH, RiskLevel.CRITICAL)
 
 
+@pytest.mark.xfail(reason="Shell tool disabled (_SHELL_TOOL_ENABLED=False) pending security review")
 class TestShellExecutor:
     """Tests for the main shell executor function.
 
@@ -477,6 +478,9 @@ class TestShellExecutor:
         # Error could be timeout or exit code related
         error = result.get("error", "").lower()
         assert "timeout" in error or "exit" in error or "code" in error
+
+class TestAnalyzeCommand:
+    """Tests for analyze_command function (analysis only, no execution)."""
 
     def test_analyze_command_function(self):
         """Test the analyze_command function (analysis only)."""
@@ -541,6 +545,7 @@ class TestShellSecurityConfig:
         assert merged.timeout_seconds == 120
 
 
+@pytest.mark.xfail(reason="Shell tool disabled (_SHELL_TOOL_ENABLED=False) pending security review")
 class TestIntegration:
     """Integration tests for the complete security pipeline.
 
@@ -912,6 +917,7 @@ class TestEncodingIntegration:
     behavior - dangerous commands are blocked BEFORE execution.
     """
 
+    @pytest.mark.xfail(reason="Shell tool disabled (_SHELL_TOOL_ENABLED=False) pending security review")
     def test_base64_command_blocked(self):
         """Test that base64 encoded dangerous commands are blocked.
 

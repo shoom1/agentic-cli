@@ -9,23 +9,33 @@ HITL) based on tool requirements, creating them lazily when needed.
 It also provides shared implementations for:
 - User input handling (pending request dict + Future pattern)
 - Model resolution (lazy resolution from settings)
-- Task progress emission (task graph to WorkflowEvent)
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from abc import ABC, abstractmethod
-from typing import Any, AsyncGenerator, TYPE_CHECKING
+from typing import Any, AsyncGenerator, Awaitable, Callable, Iterator, TYPE_CHECKING
 
 from agentic_cli.workflow.events import WorkflowEvent, UserInputRequest
 from agentic_cli.workflow.config import AgentConfig
+from agentic_cli.config import set_context_settings, set_context_workflow
+from agentic_cli.workflow.context import (
+    set_context_memory_manager,
+    set_context_plan_store,
+    set_context_task_store,
+    set_context_approval_manager,
+    set_context_checkpoint_manager,
+    set_context_llm_summarizer,
+)
 from agentic_cli.logging import Loggers
 
 if TYPE_CHECKING:
     from agentic_cli.config import BaseSettings
-    from agentic_cli.memory import MemoryManager
-    from agentic_cli.planning import TaskGraph
+    from agentic_cli.tools.memory_tools import MemoryStore
+    from agentic_cli.tools.planning_tools import PlanStore
+    from agentic_cli.tools.task_tools import TaskStore
     from agentic_cli.hitl import ApprovalManager, CheckpointManager
 
 logger = Loggers.workflow()
@@ -83,13 +93,15 @@ class BaseWorkflowManager(ABC):
 
         # User input handling
         self._pending_input: dict[str, tuple[UserInputRequest, asyncio.Future[str]]] = {}
+        self._user_input_callback: Callable[[UserInputRequest], Awaitable[str]] | None = None
 
         # Auto-detect required managers from tools
         self._required_managers = self._detect_required_managers()
 
         # Manager slots (created lazily by _ensure_managers_initialized)
-        self._memory_manager: "MemoryManager | None" = None
-        self._task_graph: "TaskGraph | None" = None
+        self._memory_manager: "MemoryStore | None" = None
+        self._plan_store: "PlanStore | None" = None
+        self._task_store: "TaskStore | None" = None
         self._approval_manager: "ApprovalManager | None" = None
         self._checkpoint_manager: "CheckpointManager | None" = None
         self._llm_summarizer: Any | None = None
@@ -120,14 +132,19 @@ class BaseWorkflowManager(ABC):
         return self._required_managers
 
     @property
-    def memory_manager(self) -> "MemoryManager | None":
+    def memory_manager(self) -> "MemoryStore | None":
         """Get the memory manager (if required by tools)."""
         return self._memory_manager
 
     @property
-    def task_graph(self) -> "TaskGraph | None":
-        """Get the task graph (if required by tools)."""
-        return self._task_graph
+    def plan_store(self) -> "PlanStore | None":
+        """Get the plan store (if required by tools)."""
+        return self._plan_store
+
+    @property
+    def task_store(self) -> "TaskStore | None":
+        """Get the task store (if required by tools)."""
+        return self._task_store
 
     @property
     def approval_manager(self) -> "ApprovalManager | None":
@@ -167,24 +184,20 @@ class BaseWorkflowManager(ABC):
         managers that are actually needed by the configured tools.
         """
         if "memory_manager" in self._required_managers and self._memory_manager is None:
-            from agentic_cli.memory import MemoryManager
-            self._memory_manager = MemoryManager(self._settings)
+            from agentic_cli.tools.memory_tools import MemoryStore
+            self._memory_manager = MemoryStore(self._settings)
 
-        if "task_graph" in self._required_managers and self._task_graph is None:
-            from agentic_cli.planning import TaskGraph
-            self._task_graph = TaskGraph()
+        if "plan_store" in self._required_managers and self._plan_store is None:
+            from agentic_cli.tools.planning_tools import PlanStore
+            self._plan_store = PlanStore()
+
+        if "task_store" in self._required_managers and self._task_store is None:
+            from agentic_cli.tools.task_tools import TaskStore
+            self._task_store = TaskStore(self._settings)
 
         if "approval_manager" in self._required_managers and self._approval_manager is None:
-            from agentic_cli.hitl import ApprovalManager, HITLConfig, ApprovalRule
-            # Build config from settings
-            hitl_config = HITLConfig(
-                approval_rules=[
-                    ApprovalRule(**r) for r in getattr(self._settings, "hitl_default_rules", [])
-                ],
-                checkpoint_enabled=getattr(self._settings, "hitl_checkpoint_enabled", True),
-                feedback_enabled=getattr(self._settings, "hitl_feedback_enabled", True),
-            )
-            self._approval_manager = ApprovalManager(hitl_config)
+            from agentic_cli.hitl import ApprovalManager
+            self._approval_manager = ApprovalManager()
 
         if "checkpoint_manager" in self._required_managers and self._checkpoint_manager is None:
             from agentic_cli.hitl import CheckpointManager
@@ -203,6 +216,30 @@ class BaseWorkflowManager(ABC):
             An LLMSummarizer implementation, or None.
         """
         return None
+
+    @contextlib.contextmanager
+    def _workflow_context(self) -> Iterator[None]:
+        """Context manager for settings, workflow, and manager contexts.
+
+        Sets context variables that allow tools to access settings,
+        the workflow manager, and feature managers during execution.
+        Uses token-based reset to correctly restore parent context.
+        """
+        tokens = [
+            set_context_settings(self._settings),
+            set_context_workflow(self),
+            set_context_memory_manager(self._memory_manager),
+            set_context_plan_store(self._plan_store),
+            set_context_task_store(self._task_store),
+            set_context_approval_manager(self._approval_manager),
+            set_context_checkpoint_manager(self._checkpoint_manager),
+            set_context_llm_summarizer(self._llm_summarizer),
+        ]
+        try:
+            yield
+        finally:
+            for token in tokens:
+                token.var.reset(token)
 
     @property
     def model(self) -> str:
@@ -302,8 +339,15 @@ class BaseWorkflowManager(ABC):
     async def request_user_input(self, request: UserInputRequest) -> str:
         """Request user input from the CLI.
 
-        Called by tools that need user interaction. This method blocks
-        until provide_user_input() is called with the response.
+        Called by tools that need user interaction.
+
+        When ``_user_input_callback`` is set (by MessageProcessor), the
+        callback is invoked directly, which avoids the deadlock inherent
+        in the Future pattern (the Future can never be resolved while the
+        ADK runner is blocked awaiting it).
+
+        When no callback is set (e.g. in tests), falls back to the
+        original Future pattern for backward compatibility.
 
         Args:
             request: The user input request.
@@ -311,16 +355,19 @@ class BaseWorkflowManager(ABC):
         Returns:
             User's response string.
         """
-        loop = asyncio.get_event_loop()
-        future: asyncio.Future[str] = loop.create_future()
-        self._pending_input[request.request_id] = (request, future)
-
         logger.debug(
             "user_input_requested",
             request_id=request.request_id,
             tool_name=request.tool_name,
         )
 
+        if self._user_input_callback is not None:
+            return await self._user_input_callback(request)
+
+        # Fallback: Future pattern (for tests without callback)
+        loop = asyncio.get_event_loop()
+        future: asyncio.Future[str] = loop.create_future()
+        self._pending_input[request.request_id] = (request, future)
         return await future
 
     def provide_user_input(self, request_id: str, response: str) -> bool:
@@ -394,32 +441,129 @@ class BaseWorkflowManager(ABC):
             f"{self.__class__.__name__} does not implement generate_simple"
         )
 
-    # Task progress emission - concrete implementation
-
     def _emit_task_progress_event(self) -> WorkflowEvent | None:
-        """Create a TASK_PROGRESS event if task graph has tasks.
+        """Build a TASK_PROGRESS event from TaskStore or PlanStore.
+
+        Priority:
+        1. If TaskStore has tasks → use TaskStore (auto-clear when all done)
+        2. Else if PlanStore has checkboxes → parse plan for progress
+        3. Else → return None
 
         Returns:
-            WorkflowEvent if task graph has tasks, None otherwise.
+            A WorkflowEvent.task_progress() if progress is available, else None.
         """
-        if self._task_graph is None:
+        # Path 1: TaskStore has tasks
+        store = self._task_store
+        if store is not None and not store.is_empty():
+            # Auto-clear when all tasks are done — emit final snapshot first
+            if store.all_done():
+                progress = store.get_progress()
+                display = store.to_compact_display()
+                store.clear()
+                return WorkflowEvent.task_progress(
+                    display=display,
+                    progress=progress,
+                    current_task_id=None,
+                    current_task_description=None,
+                )
+
+            progress = store.get_progress()
+            display = store.to_compact_display()
+            current = store.get_current_task()
+
+            return WorkflowEvent.task_progress(
+                display=display,
+                progress=progress,
+                current_task_id=current.id if current else None,
+                current_task_description=current.description if current else None,
+            )
+
+        # Path 2: Fall back to PlanStore checkboxes
+        plan_result = self._parse_plan_progress()
+        if plan_result is None:
             return None
 
-        progress = self._task_graph.get_progress()
-        if progress["total"] == 0:
-            return None
+        display, progress = plan_result
 
-        # Find current in-progress task for status line
-        current_task_id = None
-        current_task_desc = None
-        in_progress = self._task_graph.get_in_progress_task()
-        if in_progress:
-            current_task_id, task = in_progress
-            current_task_desc = task.description
+        # All checkboxes done → return None (display clears)
+        if progress["total"] > 0 and progress["completed"] == progress["total"]:
+            return None
 
         return WorkflowEvent.task_progress(
-            display=self._task_graph.to_compact_display(),
+            display=display,
             progress=progress,
-            current_task_id=current_task_id,
-            current_task_description=current_task_desc,
+            current_task_id=None,
+            current_task_description=None,
         )
+
+    def _parse_plan_progress(self) -> tuple[str, dict[str, int]] | None:
+        """Parse PlanStore content for checkbox progress.
+
+        Scans plan markdown for ``- [ ]`` / ``- [x]`` checkboxes,
+        grouped under ``##`` or ``###`` section headers.
+
+        Returns:
+            (display_str, progress_dict) or None if no checkboxes found.
+        """
+        if self._plan_store is None or self._plan_store.is_empty():
+            return None
+
+        content = self._plan_store.get()
+        current_section: str | None = None
+        sections: list[tuple[str | None, list[tuple[bool, str]]]] = []
+        current_items: list[tuple[bool, str]] = []
+
+        for line in content.splitlines():
+            stripped = line.strip()
+
+            # Detect section headers (## or ###)
+            if stripped.startswith("##"):
+                # Save previous section if it has items
+                if current_items:
+                    sections.append((current_section, current_items))
+                    current_items = []
+                # Extract header text (strip leading #s and whitespace)
+                current_section = stripped.lstrip("#").strip()
+                continue
+
+            # Detect checkboxes
+            if stripped.startswith("- [x]") or stripped.startswith("- [X]"):
+                text = stripped[5:].strip()
+                current_items.append((True, text))
+            elif stripped.startswith("- [ ]"):
+                text = stripped[5:].strip()
+                current_items.append((False, text))
+
+        # Save last section
+        if current_items:
+            sections.append((current_section, current_items))
+
+        if not sections:
+            return None
+
+        # Build compact display and count progress
+        total = 0
+        completed = 0
+        display_lines: list[str] = []
+
+        for section_name, items in sections:
+            if section_name:
+                display_lines.append(f"{section_name}:")
+            for done, text in items:
+                total += 1
+                if done:
+                    completed += 1
+                    display_lines.append(f"  [x] {text}")
+                else:
+                    display_lines.append(f"  [ ] {text}")
+
+        progress = {
+            "total": total,
+            "completed": completed,
+            "pending": total - completed,
+            "in_progress": 0,
+            "cancelled": 0,
+        }
+
+        return "\n".join(display_lines), progress
+

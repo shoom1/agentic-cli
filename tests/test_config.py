@@ -412,10 +412,10 @@ class TestSettingsValidation:
 def test_package_exports_new_modules():
     """Test that new modules are exported from package."""
     # Memory
-    from agentic_cli.memory import WorkingMemory, LongTermMemory, MemoryManager
+    from agentic_cli.tools.memory_tools import MemoryStore, MemoryItem
 
     # Planning
-    from agentic_cli.planning import TaskGraph, TaskStatus
+    from agentic_cli.tools.planning_tools import PlanStore
 
     # HITL
     from agentic_cli.hitl import HITLConfig, ApprovalManager, CheckpointManager
@@ -424,8 +424,8 @@ def test_package_exports_new_modules():
     from agentic_cli.tools import shell_executor, read_file, write_file, diff_compare
 
     # All imports should succeed
-    assert WorkingMemory is not None
-    assert LongTermMemory is not None
-    assert TaskGraph is not None
+    assert MemoryStore is not None
+    assert MemoryItem is not None
+    assert PlanStore is not None
     assert HITLConfig is not None
     assert shell_executor is not None

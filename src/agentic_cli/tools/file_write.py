@@ -15,8 +15,6 @@ from typing import Any
 from agentic_cli.tools.registry import (
     ToolCategory,
     PermissionLevel,
-    ToolError,
-    ErrorCode,
     register_tool,
 )
 
@@ -24,17 +22,18 @@ from agentic_cli.tools.registry import (
 @register_tool(
     category=ToolCategory.WRITE,
     permission_level=PermissionLevel.CAUTION,
-    description="Write content to a file",
+    description="Write content to a file (creates or overwrites). Use this to create new files or replace entire file contents. For partial modifications use edit_file instead.",
 )
 def write_file(
     path: str,
     content: str,
     create_dirs: bool = True,
 ) -> dict[str, Any]:
-    """Write content to a file.
+    """Write content to a file, creating it if it doesn't exist.
 
-    Creates the file if it doesn't exist, overwrites if it does.
-    Optionally creates parent directories.
+    Use this when you need to create a new file or completely replace
+    an existing file's contents. For targeted text replacements within
+    an existing file, use edit_file instead.
 
     Args:
         path: Path to the file to write.
@@ -47,9 +46,6 @@ def write_file(
         - path: Resolved file path
         - size: File size in bytes after write
         - created: True if file was newly created, False if overwritten
-
-    Raises:
-        ToolError: If write fails (permission denied, etc.).
     """
     file_path = Path(path).resolve()
     existed = file_path.exists()
@@ -58,12 +54,11 @@ def write_file(
     if create_dirs:
         file_path.parent.mkdir(parents=True, exist_ok=True)
     elif not file_path.parent.exists():
-        raise ToolError(
-            message=f"Parent directory does not exist: {file_path.parent}",
-            error_code=ErrorCode.NOT_FOUND,
-            recoverable=True,
-            details={"path": str(file_path), "parent": str(file_path.parent)},
-        )
+        return {
+            "success": False,
+            "error": f"Parent directory does not exist: {file_path.parent}",
+            "path": str(file_path),
+        }
 
     try:
         file_path.write_text(content)
@@ -75,26 +70,24 @@ def write_file(
             "size": size,
             "created": not existed,
         }
-    except PermissionError as e:
-        raise ToolError(
-            message=f"Permission denied: {path}",
-            error_code=ErrorCode.PERMISSION_DENIED,
-            recoverable=False,
-            details={"path": str(file_path), "error": str(e)},
-        )
+    except PermissionError:
+        return {
+            "success": False,
+            "error": f"Permission denied: {path}",
+            "path": str(file_path),
+        }
     except OSError as e:
-        raise ToolError(
-            message=f"Failed to write file: {e}",
-            error_code=ErrorCode.INTERNAL_ERROR,
-            recoverable=False,
-            details={"path": str(file_path), "error": str(e)},
-        )
+        return {
+            "success": False,
+            "error": f"Failed to write file: {e}",
+            "path": str(file_path),
+        }
 
 
 @register_tool(
     category=ToolCategory.WRITE,
     permission_level=PermissionLevel.CAUTION,
-    description="Replace text in a file (sed-like operation)",
+    description="Replace specific text in an existing file. Use this for targeted edits (find-and-replace). For creating or fully rewriting files use write_file instead.",
 )
 def edit_file(
     path: str,
@@ -103,10 +96,13 @@ def edit_file(
     replace_all: bool = False,
     use_regex: bool = False,
 ) -> dict[str, Any]:
-    """Replace text in a file.
+    """Replace text in a file (sed-like find-and-replace).
 
-    Performs sed-like text replacement in a file. By default replaces
-    only the first occurrence; use replace_all=True for global replacement.
+    Use this for precise, targeted edits within existing files. Replaces
+    the first occurrence by default; use replace_all=True for global
+    replacement. Supports regex patterns via use_regex=True.
+
+    For creating new files or full rewrites, use write_file instead.
 
     Args:
         path: Path to the file to edit.
@@ -121,56 +117,47 @@ def edit_file(
         - path: Resolved file path
         - replacements: Number of replacements made
         - size: File size in bytes after edit
-
-    Raises:
-        ToolError: If file not found, text not found, or edit fails.
     """
     file_path = Path(path).resolve()
 
     if not file_path.exists():
-        raise ToolError(
-            message=f"File not found: {path}",
-            error_code=ErrorCode.NOT_FOUND,
-            recoverable=False,
-            details={"path": str(file_path)},
-        )
+        return {
+            "success": False,
+            "error": f"File not found: {path}",
+            "path": str(file_path),
+        }
 
     if not file_path.is_file():
-        raise ToolError(
-            message=f"Not a file: {path}",
-            error_code=ErrorCode.INVALID_INPUT,
-            recoverable=False,
-            details={"path": str(file_path)},
-        )
+        return {
+            "success": False,
+            "error": f"Not a file: {path}",
+            "path": str(file_path),
+        }
 
     try:
         content = file_path.read_text()
-    except UnicodeDecodeError as e:
-        raise ToolError(
-            message=f"Cannot read file as text (binary file?): {path}",
-            error_code=ErrorCode.INVALID_INPUT,
-            recoverable=False,
-            details={"path": str(file_path), "error": str(e)},
-        )
-    except PermissionError as e:
-        raise ToolError(
-            message=f"Permission denied reading file: {path}",
-            error_code=ErrorCode.PERMISSION_DENIED,
-            recoverable=False,
-            details={"path": str(file_path), "error": str(e)},
-        )
+    except UnicodeDecodeError:
+        return {
+            "success": False,
+            "error": f"Cannot read file as text (binary file?): {path}",
+            "path": str(file_path),
+        }
+    except PermissionError:
+        return {
+            "success": False,
+            "error": f"Permission denied reading file: {path}",
+            "path": str(file_path),
+        }
 
     # Perform replacement
     if use_regex:
         try:
             pattern = re.compile(old_text)
         except re.error as e:
-            raise ToolError(
-                message=f"Invalid regex pattern: {e}",
-                error_code=ErrorCode.INVALID_INPUT,
-                recoverable=True,
-                details={"pattern": old_text, "error": str(e)},
-            )
+            return {
+                "success": False,
+                "error": f"Invalid regex pattern: {e}",
+            }
 
         if replace_all:
             new_content, count = pattern.subn(new_text, content)
@@ -186,16 +173,11 @@ def edit_file(
             new_content = content.replace(old_text, new_text, 1)
 
     if count == 0:
-        raise ToolError(
-            message=f"Text not found in file: {old_text[:50]}{'...' if len(old_text) > 50 else ''}",
-            error_code=ErrorCode.NOT_FOUND,
-            recoverable=True,
-            details={
-                "path": str(file_path),
-                "search_text": old_text[:100],
-                "use_regex": use_regex,
-            },
-        )
+        return {
+            "success": False,
+            "error": f"Text not found in file: {old_text[:50]}{'...' if len(old_text) > 50 else ''}",
+            "path": str(file_path),
+        }
 
     # Write the modified content
     try:
@@ -208,10 +190,9 @@ def edit_file(
             "replacements": count,
             "size": size,
         }
-    except PermissionError as e:
-        raise ToolError(
-            message=f"Permission denied writing file: {path}",
-            error_code=ErrorCode.PERMISSION_DENIED,
-            recoverable=False,
-            details={"path": str(file_path), "error": str(e)},
-        )
+    except PermissionError:
+        return {
+            "success": False,
+            "error": f"Permission denied writing file: {path}",
+            "path": str(file_path),
+        }

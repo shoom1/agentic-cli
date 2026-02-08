@@ -6,16 +6,23 @@ from agentic_cli.tools.registry import ToolCategory
 
 
 def test_tool_category_has_new_categories():
-    """Test that ToolCategory includes new categories for framework enhancements."""
-    # New categories for P0/P1 features
+    """Test that ToolCategory includes current categories."""
+    # Current categories
     assert hasattr(ToolCategory, "MEMORY")
     assert hasattr(ToolCategory, "PLANNING")
-    assert hasattr(ToolCategory, "SYSTEM")
+    assert hasattr(ToolCategory, "INTERACTION")
 
     # Verify values
     assert ToolCategory.MEMORY.value == "memory"
     assert ToolCategory.PLANNING.value == "planning"
-    assert ToolCategory.SYSTEM.value == "system"
+    assert ToolCategory.OTHER.value == "other"
+
+    # Deprecated categories should be removed
+    assert not hasattr(ToolCategory, "SYSTEM")
+    assert not hasattr(ToolCategory, "FILE")
+    assert not hasattr(ToolCategory, "SEARCH")
+    assert not hasattr(ToolCategory, "COMMUNICATION")
+    assert not hasattr(ToolCategory, "ANALYSIS")
 
 
 from agentic_cli.tools.executor import (
@@ -467,14 +474,14 @@ class TestToolDefinition:
             name="search",
             description="Search tool",
             func=search,
-            category=ToolCategory.SEARCH,
+            category=ToolCategory.NETWORK,
             requires_api_key="SERPER_API_KEY",
             timeout_seconds=60,
             rate_limit=100,
             metadata={"version": "1.0"},
         )
 
-        assert definition.category == ToolCategory.SEARCH
+        assert definition.category == ToolCategory.NETWORK
         assert definition.requires_api_key == "SERPER_API_KEY"
         assert definition.timeout_seconds == 60
         assert definition.rate_limit == 100
@@ -500,27 +507,27 @@ class TestToolRegistry:
             """Multiply by two."""
             return x * 2
 
-        registry.register(my_tool, category=ToolCategory.ANALYSIS)
+        registry.register(my_tool, category=ToolCategory.KNOWLEDGE)
 
         assert len(registry) == 1
         assert "my_tool" in registry
         tool = registry.get("my_tool")
         assert tool is not None
         assert tool.description == "Multiply by two."
-        assert tool.category == ToolCategory.ANALYSIS
+        assert tool.category == ToolCategory.KNOWLEDGE
 
     def test_registry_register_decorator(self):
         """Test decorator registration."""
         registry = ToolRegistry()
 
-        @registry.register(category=ToolCategory.SEARCH)
+        @registry.register(category=ToolCategory.NETWORK)
         def search_tool(query: str) -> dict:
             """Search for things."""
             return {"results": []}
 
         assert len(registry) == 1
         assert "search_tool" in registry
-        assert registry.get("search_tool").category == ToolCategory.SEARCH
+        assert registry.get("search_tool").category == ToolCategory.NETWORK
 
     def test_registry_custom_name(self):
         """Test registration with custom name."""
@@ -556,11 +563,11 @@ class TestToolRegistry:
         """Test listing tools by category."""
         registry = ToolRegistry()
 
-        @registry.register(category=ToolCategory.SEARCH)
+        @registry.register(category=ToolCategory.NETWORK)
         def search1():
             pass
 
-        @registry.register(category=ToolCategory.SEARCH)
+        @registry.register(category=ToolCategory.NETWORK)
         def search2():
             pass
 
@@ -568,7 +575,7 @@ class TestToolRegistry:
         def execute():
             pass
 
-        search_tools = registry.list_by_category(ToolCategory.SEARCH)
+        search_tools = registry.list_by_category(ToolCategory.NETWORK)
         assert len(search_tools) == 2
 
         exec_tools = registry.list_by_category(ToolCategory.EXECUTION)
@@ -621,6 +628,7 @@ class TestWithResultWrapper:
         assert "Unexpected bug" in result["error"]["message"]
 
 
+@pytest.mark.xfail(reason="Shell tool disabled (_SHELL_TOOL_ENABLED=False) pending security review")
 class TestShellExecutor:
     """Tests for shell_executor function."""
 
@@ -729,15 +737,6 @@ class TestShellExecutor:
         assert result["success"] is True
         assert "error" in result["stderr"]
 
-    def test_return_format_contains_duration(self):
-        """Test that result contains duration field."""
-        from agentic_cli.tools.shell import shell_executor
-
-        result = shell_executor("echo test")
-        assert "duration" in result
-        assert isinstance(result["duration"], float)
-        assert result["duration"] >= 0
-
     def test_output_truncation(self):
         """Test that long output is truncated."""
         from agentic_cli.tools.shell import shell_executor
@@ -762,6 +761,19 @@ class TestShellExecutor:
 
         result = shell_executor("whoami")
         assert result["success"] is True
+
+
+class TestShellExecutorFormat:
+    """Tests for shell_executor response format (works even when disabled)."""
+
+    def test_return_format_contains_duration(self):
+        """Test that result contains duration field."""
+        from agentic_cli.tools.shell import shell_executor
+
+        result = shell_executor("echo test")
+        assert "duration" in result
+        assert isinstance(result["duration"], float)
+        assert result["duration"] >= 0
 
 
 class TestReadFile:
@@ -800,13 +812,12 @@ class TestReadFile:
         assert result["total_lines"] == 5
 
     def test_read_nonexistent_file(self, tmp_path):
-        """Test reading a non-existent file raises error."""
+        """Test reading a non-existent file returns error dict."""
         from agentic_cli.tools.file_read import read_file
-        from agentic_cli.tools.registry import ToolError
 
-        with pytest.raises(ToolError) as exc_info:
-            read_file(str(tmp_path / "nonexistent.txt"))
-        assert exc_info.value.error_code == "NOT_FOUND"
+        result = read_file(str(tmp_path / "nonexistent.txt"))
+        assert result["success"] is False
+        assert "not found" in result["error"].lower()
 
 
 class TestWriteFile:
@@ -887,15 +898,14 @@ class TestEditFile:
         assert test_file.read_text() == "fooNUMbarNUMbaz"
 
     def test_edit_file_text_not_found(self, tmp_path):
-        """Test editing raises error when text not found."""
+        """Test editing returns error dict when text not found."""
         from agentic_cli.tools.file_write import edit_file
-        from agentic_cli.tools.registry import ToolError
 
         test_file = tmp_path / "test.txt"
         test_file.write_text("Hello world")
-        with pytest.raises(ToolError) as exc_info:
-            edit_file(str(test_file), "notfound", "replacement")
-        assert exc_info.value.error_code == "NOT_FOUND"
+        result = edit_file(str(test_file), "notfound", "replacement")
+        assert result["success"] is False
+        assert "not found" in result["error"].lower()
 
 
 class TestGlob:
@@ -1347,3 +1357,238 @@ class TestArxivSortValidation:
             search_arxiv("test", sort_by="relevance", sort_order="ascending")
             search_arxiv("test", sort_by="lastUpdatedDate", sort_order="descending")
             search_arxiv("test", sort_by="submittedDate", sort_order="ascending")
+
+
+class TestToolRegistryConsistency:
+    """Tests for tool registry consistency after unification."""
+
+    def test_all_registered_tools_have_category(self):
+        """Test that all registered tools have a category defined."""
+        from agentic_cli.tools import get_registry
+
+        registry = get_registry()
+        tools = registry.list_tools()
+
+        for tool in tools:
+            assert tool.category is not None, f"Tool '{tool.name}' has no category"
+            assert tool.category.value is not None, f"Tool '{tool.name}' has invalid category"
+
+    def test_all_registered_tools_have_permission_level(self):
+        """Test that all registered tools have a permission level defined."""
+        from agentic_cli.tools import get_registry, PermissionLevel
+
+        registry = get_registry()
+        tools = registry.list_tools()
+
+        for tool in tools:
+            assert tool.permission_level is not None, f"Tool '{tool.name}' has no permission_level"
+            assert isinstance(tool.permission_level, PermissionLevel), (
+                f"Tool '{tool.name}' has invalid permission_level type"
+            )
+
+    def test_expected_tools_are_registered(self):
+        """Test that all expected tools are in the registry."""
+        from agentic_cli.tools import get_registry
+
+        # Import all tool modules to trigger registration
+        import agentic_cli.tools.file_read  # noqa: F401
+        import agentic_cli.tools.file_write  # noqa: F401
+        import agentic_cli.tools.grep_tool  # noqa: F401
+        import agentic_cli.tools.glob_tool  # noqa: F401
+        import agentic_cli.tools.search  # noqa: F401
+        import agentic_cli.tools.standard  # noqa: F401
+        import agentic_cli.tools.webfetch_tool  # noqa: F401
+        import agentic_cli.tools.memory_tools  # noqa: F401
+        import agentic_cli.tools.planning_tools  # noqa: F401
+        import agentic_cli.tools.task_tools  # noqa: F401
+        import agentic_cli.tools.hitl_tools  # noqa: F401
+        import agentic_cli.tools.shell.executor  # noqa: F401
+
+        registry = get_registry()
+
+        # Expected tool names from the unification plan
+        expected_tools = [
+            # File operations - READ (7 from file_read and glob_tool)
+            "read_file",
+            "diff_compare",
+            "grep",
+            "glob",
+            "list_dir",
+            # File operations - WRITE
+            "write_file",
+            "edit_file",
+            # Web/Network
+            "web_search",
+            "web_fetch",
+            # Knowledge base
+            "search_knowledge_base",
+            "ingest_to_knowledge_base",
+            # ArXiv
+            "search_arxiv",
+            "fetch_arxiv_paper",
+            "analyze_arxiv_paper",
+            # Execution
+            "execute_python",
+            "shell_executor",
+            # Interaction
+            "ask_clarification",
+            # Memory tools
+            "save_memory",
+            "search_memory",
+            # Planning tools
+            "save_plan",
+            "get_plan",
+            # Task tools
+            "save_tasks",
+            "get_tasks",
+            # HITL tools
+            "request_approval",
+            "create_checkpoint",
+        ]
+
+        registered_names = {tool.name for tool in registry.list_tools()}
+
+        for expected in expected_tools:
+            assert expected in registered_names, (
+                f"Expected tool '{expected}' is not registered. "
+                f"Registered tools: {sorted(registered_names)}"
+            )
+
+    def test_dangerous_tools_have_correct_permission(self):
+        """Test that dangerous tools are properly marked."""
+        from agentic_cli.tools import get_registry, PermissionLevel
+
+        registry = get_registry()
+
+        # shell_executor should be DANGEROUS
+        shell_tool = registry.get("shell_executor")
+        if shell_tool:
+            assert shell_tool.permission_level == PermissionLevel.DANGEROUS, (
+                f"shell_executor should be DANGEROUS, got {shell_tool.permission_level}"
+            )
+
+    def test_caution_tools_have_correct_permission(self):
+        """Test that caution-level tools are properly marked."""
+        from agentic_cli.tools import get_registry, PermissionLevel
+
+        registry = get_registry()
+
+        caution_tools = ["write_file", "edit_file", "ingest_to_knowledge_base", "execute_python"]
+
+        for tool_name in caution_tools:
+            tool = registry.get(tool_name)
+            if tool:
+                assert tool.permission_level == PermissionLevel.CAUTION, (
+                    f"{tool_name} should be CAUTION, got {tool.permission_level}"
+                )
+
+    def test_safe_tools_have_correct_permission(self):
+        """Test that safe tools are properly marked."""
+        from agentic_cli.tools import get_registry, PermissionLevel
+
+        registry = get_registry()
+
+        safe_tools = [
+            "read_file", "diff_compare", "grep", "glob", "list_dir",
+            "web_search", "web_fetch", "search_knowledge_base",
+            "search_arxiv", "fetch_arxiv_paper", "analyze_arxiv_paper",
+            "ask_clarification",
+            "save_memory", "search_memory",
+            "save_plan", "get_plan",
+            "request_approval", "create_checkpoint",
+        ]
+
+        for tool_name in safe_tools:
+            tool = registry.get(tool_name)
+            if tool:
+                assert tool.permission_level == PermissionLevel.SAFE, (
+                    f"{tool_name} should be SAFE, got {tool.permission_level}"
+                )
+
+    def test_tools_by_category(self):
+        """Test that tools are properly categorized."""
+        from agentic_cli.tools import get_registry, ToolCategory
+
+        # Import all modules to trigger registration
+        import agentic_cli.tools.file_read  # noqa: F401
+        import agentic_cli.tools.file_write  # noqa: F401
+        import agentic_cli.tools.grep_tool  # noqa: F401
+        import agentic_cli.tools.glob_tool  # noqa: F401
+        import agentic_cli.tools.search  # noqa: F401
+        import agentic_cli.tools.standard  # noqa: F401
+        import agentic_cli.tools.webfetch_tool  # noqa: F401
+        import agentic_cli.tools.memory_tools  # noqa: F401
+        import agentic_cli.tools.planning_tools  # noqa: F401
+        import agentic_cli.tools.task_tools  # noqa: F401
+        import agentic_cli.tools.hitl_tools  # noqa: F401
+        import agentic_cli.tools.shell.executor  # noqa: F401
+
+        registry = get_registry()
+
+        # Check that each category has the expected tools
+        read_tools = registry.list_by_category(ToolCategory.READ)
+        read_names = {t.name for t in read_tools}
+        assert "read_file" in read_names or "grep" in read_names, "READ category should have file reading tools"
+
+        write_tools = registry.list_by_category(ToolCategory.WRITE)
+        write_names = {t.name for t in write_tools}
+        assert "write_file" in write_names or "edit_file" in write_names, "WRITE category should have file writing tools"
+
+        network_tools = registry.list_by_category(ToolCategory.NETWORK)
+        network_names = {t.name for t in network_tools}
+        assert "web_search" in network_names or "web_fetch" in network_names, "NETWORK category should have web tools"
+
+        memory_tools = registry.list_by_category(ToolCategory.MEMORY)
+        memory_names = {t.name for t in memory_tools}
+        assert "save_memory" in memory_names, "MEMORY category should have memory tools"
+
+        planning_tools = registry.list_by_category(ToolCategory.PLANNING)
+        planning_names = {t.name for t in planning_tools}
+        assert "save_plan" in planning_names, "PLANNING category should have planning tools"
+        assert "save_tasks" in planning_names, "PLANNING category should have task tools"
+
+        interaction_tools = registry.list_by_category(ToolCategory.INTERACTION)
+        interaction_names = {t.name for t in interaction_tools}
+        assert "request_approval" in interaction_names, "INTERACTION category should have HITL tools"
+
+        knowledge_tools = registry.list_by_category(ToolCategory.KNOWLEDGE)
+        knowledge_names = {t.name for t in knowledge_tools}
+        assert "search_arxiv" in knowledge_names, "KNOWLEDGE category should have knowledge tools"
+
+        execution_tools = registry.list_by_category(ToolCategory.EXECUTION)
+        execution_names = {t.name for t in execution_tools}
+        assert "execute_python" in execution_names, "EXECUTION category should have execution tools"
+
+    def test_registry_tool_count(self):
+        """Test that the registry has the expected number of tools."""
+        from agentic_cli.tools import get_registry
+
+        # Import all modules to trigger registration
+        import agentic_cli.tools.file_read  # noqa: F401
+        import agentic_cli.tools.file_write  # noqa: F401
+        import agentic_cli.tools.grep_tool  # noqa: F401
+        import agentic_cli.tools.glob_tool  # noqa: F401
+        import agentic_cli.tools.search  # noqa: F401
+        import agentic_cli.tools.standard  # noqa: F401
+        import agentic_cli.tools.webfetch_tool  # noqa: F401
+        import agentic_cli.tools.memory_tools  # noqa: F401
+        import agentic_cli.tools.planning_tools  # noqa: F401
+        import agentic_cli.tools.task_tools  # noqa: F401
+        import agentic_cli.tools.hitl_tools  # noqa: F401
+        import agentic_cli.tools.shell.executor  # noqa: F401
+
+        registry = get_registry()
+        tool_count = len(registry.list_tools())
+
+        # We expect at least 24 tools after simplification
+        # File ops: 7 (read_file, diff_compare, grep, glob, list_dir, write_file, edit_file)
+        # Web/Network: 2 (web_search, web_fetch)
+        # Knowledge: 5 (search_kb, ingest_kb, search_arxiv, fetch_arxiv, analyze_arxiv)
+        # Execution: 2 (execute_python, shell_executor)
+        # Interaction: 1 (ask_clarification)
+        # Memory: 2 (save_memory, search_memory)
+        # Planning: 2 (save_plan, get_plan)
+        # Tasks: 2 (save_tasks, get_tasks)
+        # HITL: 2 (request_approval, create_checkpoint)
+        # Total: ~25 tools
+        assert tool_count >= 24, f"Expected at least 24 registered tools, got {tool_count}"

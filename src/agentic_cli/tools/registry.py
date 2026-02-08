@@ -40,7 +40,7 @@ class ToolCategory(Enum):
     EXECUTION = "execution"  # shell, python executor
 
     # Planning and task management
-    PLANNING = "planning"  # create_task, update_task, get_tasks
+    PLANNING = "planning"  # save_plan, get_plan
 
     # Memory and state
     MEMORY = "memory"  # remember, recall, search_memory
@@ -51,12 +51,6 @@ class ToolCategory(Enum):
     # Human interaction
     INTERACTION = "interaction"  # ask_clarification, request_approval
 
-    # Legacy categories (deprecated, use specific categories above)
-    SEARCH = "search"  # Deprecated: use KNOWLEDGE or NETWORK
-    COMMUNICATION = "communication"  # Deprecated: use INTERACTION
-    FILE = "file"  # Deprecated: use READ or WRITE
-    ANALYSIS = "analysis"  # Deprecated: use appropriate category
-    SYSTEM = "system"  # Deprecated: use EXECUTION
     OTHER = "other"
 
 

@@ -13,24 +13,14 @@ Requires the 'langgraph' optional dependency:
 
 from __future__ import annotations
 
-import contextlib
-from typing import AsyncGenerator, Any, Callable, Iterator, Literal, TYPE_CHECKING
+from typing import AsyncGenerator, Any, Callable, Literal, TYPE_CHECKING
 
 from agentic_cli.workflow.base_manager import BaseWorkflowManager
 from agentic_cli.workflow.events import WorkflowEvent, EventType
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.config import (
     get_settings,
-    set_context_settings,
-    set_context_workflow,
     validate_settings,
-)
-from agentic_cli.workflow.context import (
-    set_context_memory_manager,
-    set_context_task_graph,
-    set_context_approval_manager,
-    set_context_checkpoint_manager,
-    set_context_llm_summarizer,
 )
 from agentic_cli.logging import Loggers, bind_context
 
@@ -382,7 +372,18 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
             # Add system prompt
             system_prompt = config.get_prompt()
             if system_prompt:
-                messages.append(SystemMessage(content=system_prompt))
+                if self._settings.prompt_caching_enabled and model_name.startswith("claude-"):
+                    messages.append(
+                        SystemMessage(
+                            content=[{
+                                "type": "text",
+                                "text": system_prompt,
+                                "cache_control": {"type": "ephemeral"},
+                            }]
+                        )
+                    )
+                else:
+                    messages.append(SystemMessage(content=system_prompt))
 
             # Add conversation history
             for msg in state.get("messages", []):
@@ -584,31 +585,6 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
             sessions_preserved=preserve_sessions,
         )
 
-    @contextlib.contextmanager
-    def _workflow_context(self) -> Iterator[None]:
-        """Context manager for settings, workflow, and manager contexts.
-
-        Sets context variables that allow tools to access settings,
-        the workflow manager, and feature managers during execution.
-        """
-        set_context_settings(self._settings)
-        set_context_workflow(self)
-        set_context_memory_manager(self._memory_manager)
-        set_context_task_graph(self._task_graph)
-        set_context_approval_manager(self._approval_manager)
-        set_context_checkpoint_manager(self._checkpoint_manager)
-        set_context_llm_summarizer(self._llm_summarizer)
-        try:
-            yield
-        finally:
-            set_context_settings(None)
-            set_context_workflow(None)
-            set_context_memory_manager(None)
-            set_context_task_graph(None)
-            set_context_approval_manager(None)
-            set_context_checkpoint_manager(None)
-            set_context_llm_summarizer(None)
-
     async def process(
         self,
         message: str,
@@ -710,6 +686,21 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
                                         WorkflowEvent.text(text, current_session_id)
                                     )
 
+                    # Extract usage metadata
+                    if output and hasattr(output, "usage_metadata") and output.usage_metadata:
+                        usage = output.usage_metadata
+                        cached_read = usage.get("cache_read_input_tokens") if isinstance(usage, dict) else getattr(usage, "cache_read_input_tokens", None)
+                        cache_creation = usage.get("cache_creation_input_tokens") if isinstance(usage, dict) else getattr(usage, "cache_creation_input_tokens", None)
+                        usage_event = WorkflowEvent.llm_usage(
+                            model=self.model,
+                            prompt_tokens=usage.get("input_tokens") if isinstance(usage, dict) else getattr(usage, "input_tokens", None),
+                            completion_tokens=usage.get("output_tokens") if isinstance(usage, dict) else getattr(usage, "output_tokens", None),
+                            total_tokens=usage.get("total_tokens") if isinstance(usage, dict) else getattr(usage, "total_tokens", None),
+                            cached_tokens=cached_read,
+                            cache_creation_tokens=cache_creation,
+                        )
+                        yield self._maybe_transform(usage_event)
+
                 elif event_kind == "on_tool_start":
                     # Tool invocation
                     yield self._maybe_transform(
@@ -730,10 +721,11 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
                         )
                     )
 
-                    # Emit task progress if task graph exists
+                    # Emit task progress after tool results
                     progress_event = self._emit_task_progress_event()
                     if progress_event:
                         yield self._maybe_transform(progress_event)
+
 
             logger.info("message_processed_langgraph")
 

@@ -1,199 +1,232 @@
 """Memory tools for agentic workflows.
 
-These tools provide working memory (session-scoped) and long-term memory
-(persistent) capabilities. The MemoryManager is auto-created by the
-workflow manager when these tools are used.
+Provides two tools for persistent memory:
+- save_memory: Store information that persists across sessions
+- search_memory: Search stored memories by substring
+
+The MemoryStore is auto-created by the workflow manager when
+these tools are used (via @requires("memory_manager")).
 
 Example:
     from agentic_cli.tools import memory_tools
 
-    # In agent config
     AgentConfig(
-        tools=[memory_tools.remember_context, memory_tools.recall_context, ...],
+        tools=[memory_tools.save_memory, memory_tools.search_memory],
     )
 """
 
+import json
+import uuid
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 
-from agentic_cli.tools import requires
+from agentic_cli.config import BaseSettings
+from agentic_cli.logging import get_logger
+from agentic_cli.persistence._utils import atomic_write_json
+from agentic_cli.tools import requires, require_context
+
+logger = get_logger("agentic_cli.tools.memory")
+from agentic_cli.tools.registry import (
+    register_tool,
+    ToolCategory,
+    PermissionLevel,
+)
 from agentic_cli.workflow.context import get_context_memory_manager
 
 
+# ---------------------------------------------------------------------------
+# MemoryItem / MemoryStore – simple file-based memory persistence
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class MemoryItem:
+    """A single persistent memory entry."""
+
+    id: str
+    content: str
+    tags: list[str] = field(default_factory=list)
+    created_at: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "content": self.content,
+            "tags": self.tags,
+            "created_at": self.created_at,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "MemoryItem":
+        return cls(
+            id=data["id"],
+            content=data["content"],
+            tags=data.get("tags", []),
+            created_at=data.get("created_at", ""),
+        )
+
+
+class MemoryStore:
+    """Simple persistent memory store.
+
+    Appends memories to a JSON file in the workspace directory.
+    Supports substring search and optional tags.
+
+    Example:
+        >>> store = MemoryStore(settings)
+        >>> item_id = store.store("User prefers markdown output", tags=["preference"])
+        >>> results = store.search("markdown")
+        >>> print(results[0].content)
+        User prefers markdown output
+    """
+
+    def __init__(self, settings: BaseSettings) -> None:
+        self._settings = settings
+        self._memory_dir = settings.workspace_dir / "memory"
+        self._storage_path = self._memory_dir / "memories.json"
+        self._items: dict[str, MemoryItem] = {}
+        self._load()
+
+    def _load(self) -> None:
+        if self._storage_path.exists():
+            try:
+                with open(self._storage_path, "r") as f:
+                    data = json.load(f)
+                for item_data in data.get("items", []):
+                    item = MemoryItem.from_dict(item_data)
+                    self._items[item.id] = item
+            except (json.JSONDecodeError, KeyError):
+                logger.warning("memory_load_failed", path=str(self._storage_path))
+                self._items = {}
+
+    def _save(self) -> None:
+        self._memory_dir.mkdir(parents=True, exist_ok=True)
+        data = {"items": [item.to_dict() for item in self._items.values()]}
+        atomic_write_json(self._storage_path, data)
+
+    def store(self, content: str, tags: list[str] | None = None) -> str:
+        """Append a memory to the persistent store.
+
+        Args:
+            content: The text content to remember.
+            tags: Optional tags for categorization.
+
+        Returns:
+            The unique ID of the stored memory.
+        """
+        item_id = str(uuid.uuid4())
+        item = MemoryItem(
+            id=item_id,
+            content=content,
+            tags=tags or [],
+            created_at=datetime.now().isoformat(),
+        )
+        self._items[item_id] = item
+        self._save()
+        return item_id
+
+    def search(self, query: str, limit: int = 10) -> list[MemoryItem]:
+        """Search memories by substring match (case-insensitive).
+
+        Args:
+            query: Substring to search for. Empty string matches all.
+            limit: Maximum results to return.
+
+        Returns:
+            List of matching MemoryItem objects.
+        """
+        query_lower = query.lower()
+        results: list[MemoryItem] = []
+        for item in self._items.values():
+            if not query or query_lower in item.content.lower():
+                results.append(item)
+                if len(results) >= limit:
+                    break
+        return results
+
+    def load_all(self) -> str:
+        """Load all memories as a formatted string for system prompt injection.
+
+        Returns:
+            Formatted string of all memories, or empty string if none.
+        """
+        if not self._items:
+            return ""
+        lines = []
+        for item in self._items.values():
+            tag_str = f" [{', '.join(item.tags)}]" if item.tags else ""
+            lines.append(f"- {item.content}{tag_str}")
+        return "\n".join(lines)
+
+
+@register_tool(
+    category=ToolCategory.MEMORY,
+    permission_level=PermissionLevel.SAFE,
+    description="Save information to persistent memory that survives across sessions. Use this to remember user preferences, important facts, or learnings for future conversations.",
+)
 @requires("memory_manager")
-def remember_context(
-    key: str,
-    value: str,
+@require_context("Memory store", get_context_memory_manager)
+def save_memory(
+    content: str,
     tags: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Store context in working memory for the current session.
+    """Save information to persistent memory.
 
-    Use this to remember important context like the current research topic,
-    user preferences, or intermediate results.
+    Use this to remember important facts, preferences, or learnings
+    that should persist across sessions.
 
     Args:
-        key: A unique identifier for this context (e.g., "current_topic").
-        value: The value to store.
+        content: The content to store.
         tags: Optional tags for categorization.
 
     Returns:
-        A dict with success status and stored key.
+        A dict with the stored item ID.
     """
-    manager = get_context_memory_manager()
-    if manager is None:
-        return {"success": False, "error": "Memory manager not available"}
-
-    manager.working.set(key, value, tags=tags)
+    store = get_context_memory_manager()
+    item_id = store.store(content, tags=tags)
     return {
         "success": True,
-        "key": key,
-        "message": f"Stored '{key}' in working memory",
+        "item_id": item_id,
+        "message": "Saved to persistent memory",
     }
 
 
+@register_tool(
+    category=ToolCategory.MEMORY,
+    permission_level=PermissionLevel.SAFE,
+    description="Search persistent memory by keyword/substring. Use this to recall previously saved facts, preferences, or learnings.",
+)
 @requires("memory_manager")
-def recall_context(key: str) -> dict[str, Any]:
-    """Recall a specific context from working memory.
-
-    Args:
-        key: The key to look up.
-
-    Returns:
-        A dict with the value if found, or an error message.
-    """
-    manager = get_context_memory_manager()
-    if manager is None:
-        return {"success": False, "error": "Memory manager not available"}
-
-    value = manager.working.get(key)
-    if value is None:
-        return {"success": False, "error": f"Key '{key}' not found in working memory"}
-
-    return {
-        "success": True,
-        "key": key,
-        "value": value,
-    }
-
-
-@requires("memory_manager")
+@require_context("Memory store", get_context_memory_manager)
 def search_memory(
     query: str,
-    memory_type: str | None = None,
     limit: int = 10,
 ) -> dict[str, Any]:
-    """Search across working and/or long-term memory.
-
-    Searches both working memory (session) and long-term memory (persistent).
+    """Search persistent memory for stored information.
 
     Args:
-        query: The search query.
-        memory_type: Optional filter for long-term memory type
-            ("fact", "preference", "learning", "reference").
+        query: The search query (substring match, case-insensitive).
         limit: Maximum number of results to return.
 
     Returns:
-        A dict with matching results from both memory tiers.
+        A dict with matching memory items.
     """
-    manager = get_context_memory_manager()
-    if manager is None:
-        return {"success": False, "error": "Memory manager not available"}
-
-    # Search across tiers
-    results = manager.search(query, include_working=True, include_longterm=True)
-
-    # Format working memory results
-    working_results = [
-        {"key": key, "value": value}
-        for key, value in results.working_results[:limit]
+    store = get_context_memory_manager()
+    results = store.search(query, limit=limit)
+    items = [
+        {
+            "id": item.id,
+            "content": item.content,
+            "tags": item.tags,
+        }
+        for item in results
     ]
-
-    # Format long-term memory results with optional type filter
-    longterm_results = []
-    for entry in results.longterm_results:
-        if memory_type is None or entry.type.value == memory_type:
-            longterm_results.append({
-                "id": entry.id,
-                "type": entry.type.value,
-                "content": entry.content,
-                "tags": entry.tags,
-            })
-            if len(longterm_results) >= limit:
-                break
 
     return {
         "success": True,
         "query": query,
-        "working_memory": working_results,
-        "longterm_memory": longterm_results,
-        "count": len(working_results) + len(longterm_results),
-    }
-
-
-@requires("memory_manager")
-def save_to_longterm(
-    content: str,
-    memory_type: str = "learning",
-    tags: list[str] | None = None,
-) -> dict[str, Any]:
-    """Save information to long-term memory (persists across sessions).
-
-    Use this when you discover important information that should be
-    remembered across sessions.
-
-    Args:
-        content: The content to store.
-        memory_type: Type of memory entry ("fact", "preference", "learning", "reference").
-        tags: Optional tags for categorization.
-
-    Returns:
-        A dict with the stored entry ID.
-    """
-    manager = get_context_memory_manager()
-    if manager is None:
-        return {"success": False, "error": "Memory manager not available"}
-
-    from agentic_cli.memory.longterm import MemoryType
-
-    # Validate and convert type
-    try:
-        mem_type = MemoryType(memory_type)
-    except ValueError:
-        valid_types = [t.value for t in MemoryType]
-        return {
-            "success": False,
-            "error": f"Invalid memory_type: {memory_type}. Valid types: {', '.join(valid_types)}",
-        }
-
-    entry_id = manager.longterm.store(
-        type=mem_type,
-        content=content,
-        source="framework_tool",
-        tags=tags,
-    )
-
-    return {
-        "success": True,
-        "entry_id": entry_id,
-        "type": memory_type,
-        "message": f"Saved to long-term memory ({memory_type})",
-    }
-
-
-@requires("memory_manager")
-def clear_working_memory() -> dict[str, Any]:
-    """Clear all entries from working memory.
-
-    Use this to reset session state when starting a new task.
-
-    Returns:
-        A dict with success status.
-    """
-    manager = get_context_memory_manager()
-    if manager is None:
-        return {"success": False, "error": "Memory manager not available"}
-
-    manager.working.clear()
-    return {
-        "success": True,
-        "message": "Working memory cleared",
+        "items": items,
+        "count": len(items),
     }

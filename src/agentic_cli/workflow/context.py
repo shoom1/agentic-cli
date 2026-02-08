@@ -5,103 +5,28 @@ The workflow manager sets these context variables before processing, and tools
 can access them via the getter functions.
 """
 
-from contextvars import ContextVar
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    from agentic_cli.memory import MemoryManager
-    from agentic_cli.planning import TaskGraph
-    from agentic_cli.hitl import ApprovalManager, CheckpointManager
-
-# Context variables for manager instances
-_memory_manager_context: ContextVar[Any] = ContextVar(
-    "memory_manager_context", default=None
-)
-_task_graph_context: ContextVar[Any] = ContextVar(
-    "task_graph_context", default=None
-)
-_approval_manager_context: ContextVar[Any] = ContextVar(
-    "approval_manager_context", default=None
-)
-_checkpoint_manager_context: ContextVar[Any] = ContextVar(
-    "checkpoint_manager_context", default=None
-)
-_llm_summarizer_context: ContextVar[Any] = ContextVar(
-    "llm_summarizer_context", default=None
-)
+from contextvars import ContextVar, Token
+from typing import Any, Callable
 
 
-# Setters (used by workflow manager)
+def _make_context_accessors(name: str) -> tuple[Callable[..., Token], Callable[..., Any]]:
+    """Create a (setter, getter) pair backed by a ContextVar."""
+    var: ContextVar[Any] = ContextVar(f"{name}_context", default=None)
+
+    def setter(value: Any) -> Token:
+        return var.set(value)
+
+    def getter() -> Any:
+        return var.get()
+
+    setter.__name__ = setter.__qualname__ = f"set_context_{name}"
+    getter.__name__ = getter.__qualname__ = f"get_context_{name}"
+    return setter, getter
 
 
-def set_context_memory_manager(manager: "MemoryManager | None") -> None:
-    """Set the memory manager in the current context."""
-    _memory_manager_context.set(manager)
-
-
-def set_context_task_graph(graph: "TaskGraph | None") -> None:
-    """Set the task graph in the current context."""
-    _task_graph_context.set(graph)
-
-
-def set_context_approval_manager(manager: "ApprovalManager | None") -> None:
-    """Set the approval manager in the current context."""
-    _approval_manager_context.set(manager)
-
-
-def set_context_checkpoint_manager(manager: "CheckpointManager | None") -> None:
-    """Set the checkpoint manager in the current context."""
-    _checkpoint_manager_context.set(manager)
-
-
-def set_context_llm_summarizer(summarizer: Any | None) -> None:
-    """Set the LLM summarizer in the current context."""
-    _llm_summarizer_context.set(summarizer)
-
-
-# Getters (used by tools)
-
-
-def get_context_memory_manager() -> "MemoryManager | None":
-    """Get the memory manager from the current context.
-
-    Returns:
-        The MemoryManager instance set by the workflow manager, or None if not set.
-    """
-    return _memory_manager_context.get()
-
-
-def get_context_task_graph() -> "TaskGraph | None":
-    """Get the task graph from the current context.
-
-    Returns:
-        The TaskGraph instance set by the workflow manager, or None if not set.
-    """
-    return _task_graph_context.get()
-
-
-def get_context_approval_manager() -> "ApprovalManager | None":
-    """Get the approval manager from the current context.
-
-    Returns:
-        The ApprovalManager instance set by the workflow manager, or None if not set.
-    """
-    return _approval_manager_context.get()
-
-
-def get_context_checkpoint_manager() -> "CheckpointManager | None":
-    """Get the checkpoint manager from the current context.
-
-    Returns:
-        The CheckpointManager instance set by the workflow manager, or None if not set.
-    """
-    return _checkpoint_manager_context.get()
-
-
-def get_context_llm_summarizer() -> Any | None:
-    """Get the LLM summarizer from the current context.
-
-    Returns:
-        The LLMSummarizer instance set by the workflow manager, or None if not set.
-    """
-    return _llm_summarizer_context.get()
+set_context_memory_manager, get_context_memory_manager = _make_context_accessors("memory_manager")
+set_context_plan_store, get_context_plan_store = _make_context_accessors("plan_store")
+set_context_approval_manager, get_context_approval_manager = _make_context_accessors("approval_manager")
+set_context_checkpoint_manager, get_context_checkpoint_manager = _make_context_accessors("checkpoint_manager")
+set_context_task_store, get_context_task_store = _make_context_accessors("task_store")
+set_context_llm_summarizer, get_context_llm_summarizer = _make_context_accessors("llm_summarizer")

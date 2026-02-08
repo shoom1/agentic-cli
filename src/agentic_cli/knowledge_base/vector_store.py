@@ -132,16 +132,16 @@ class VectorStore:
         return results
 
     def remove_embeddings(self, chunk_ids: list[str]) -> int:
-        """Remove embeddings by chunk ID.
+        """Remove embeddings by chunk ID and rebuild the index.
 
-        Note: FAISS IndexFlat doesn't support direct removal.
-        This marks IDs as removed; call rebuild() to actually remove.
+        FAISS IndexFlat doesn't support direct removal, so this marks IDs
+        as removed and then rebuilds the index to free memory.
 
         Args:
             chunk_ids: List of chunk IDs to remove.
 
         Returns:
-            Number of embeddings marked for removal.
+            Number of embeddings removed.
         """
         removed = 0
         for chunk_id in chunk_ids:
@@ -149,7 +149,50 @@ class VectorStore:
                 faiss_id = self._chunk_to_faiss.pop(chunk_id)
                 self._id_map.pop(faiss_id, None)
                 removed += 1
+        if removed > 0:
+            self.rebuild()
         return removed
+
+    def rebuild(self) -> None:
+        """Rebuild the FAISS index, removing any vectors whose IDs were deleted.
+
+        This compacts the index by re-adding only vectors that still have
+        valid ID mappings. Call after remove_embeddings() to free memory.
+        """
+        if self._index is None or not self._id_map:
+            self.clear()
+            return
+
+        import faiss
+
+        # Collect valid FAISS indices in order
+        valid_ids = sorted(self._id_map.keys())
+        if not valid_ids:
+            self.clear()
+            return
+
+        # Extract valid vectors from the current index
+        total = self._index.ntotal
+        all_vectors = np.zeros((total, self.embedding_dim), dtype=np.float32)
+        for i in range(total):
+            all_vectors[i] = self._index.reconstruct(i)
+
+        valid_vectors = all_vectors[valid_ids]
+
+        # Rebuild mappings
+        new_id_map: dict[int, str] = {}
+        new_chunk_to_faiss: dict[str, int] = {}
+        for new_id, old_id in enumerate(valid_ids):
+            chunk_id = self._id_map[old_id]
+            new_id_map[new_id] = chunk_id
+            new_chunk_to_faiss[chunk_id] = new_id
+
+        # Create fresh index and add valid vectors
+        self._index = faiss.IndexFlatIP(self.embedding_dim)
+        self._index.add(np.ascontiguousarray(valid_vectors))
+        self._id_map = new_id_map
+        self._chunk_to_faiss = new_chunk_to_faiss
+        self._next_id = len(new_id_map)
 
     def save(self) -> None:
         """Persist index and mappings to disk."""
@@ -269,6 +312,9 @@ class MockVectorStore:
                 del self._vectors[chunk_id]
                 removed += 1
         return removed
+
+    def rebuild(self) -> None:
+        """No-op for mock store (vectors are removed directly)."""
 
     def save(self) -> None:
         """Save to disk."""

@@ -166,3 +166,9 @@ class WorkflowSettingsMixin:
         description="Enable logging of raw LLM request/response traffic for debugging",
         json_schema_extra={"ui_order": 160},
     )
+    prompt_caching_enabled: bool = Field(
+        default=True,
+        title="Prompt Caching",
+        description="Enable prompt caching for supported models (reduces cost and latency)",
+        json_schema_extra={"ui_order": 170},
+    )

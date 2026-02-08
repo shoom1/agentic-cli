@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-02-07
+
+### Added
+
+- **Task Management System**: `save_tasks`/`get_tasks` tools backed by `TaskStore` with flat JSON and atomic writes (`src/agentic_cli/tools/task_tools.py`)
+- **Integration Tests**: Comprehensive ADK and LangGraph workflow pipeline tests (`tests/integration/`)
+- **PDF Text Extraction**: arXiv PDF extraction in `web_fetch` tool, arXiv specialist sub-agent
+- **Prompt Caching**: Claude model prompt caching and LLM usage tracking in LangGraph
+- **Graceful 429 Handling**: Rate limit detection with user retry prompt and configurable delay
+
+### Changed
+
+- **Simplified Memory**: 5 tools → 2 (`save_memory`/`search_memory`), following Claude Code pattern
+- **Simplified Planning**: 7 tools → 2 (`save_plan`/`get_plan`), backed by `PlanStore` (flat markdown)
+- **Simplified HITL**: 5 tools → 2 (`request_approval`/`create_checkpoint`), async/blocking via workflow manager
+- **Store Consolidation**: Merged store packages into corresponding tool files
+- **Tools Review**: Standardized error handling (`{"success": bool}` dicts), improved descriptions, removed deprecated `ToolCategory` values
+- **HITL Deadlock Fix**: Direct async callback instead of Future-based pattern for user input
+- **Choice Dialog**: Switched from horizontal buttons to vertical radio list (`dropdown_dialog`)
+- **Unified Tool Registration**: All 34 tools registered through consistent pattern
+- **ContextVar Fix**: Fixed reset bug, deduplicated `_workflow_context`, removed dead modules
+- **Task Progress Display**: Fixed stale display, auto-cleanup between messages, plan checkboxes from PlanStore
+- **Research Demo**: Updated with task tools, removed app-specific tools, fixed Gemini API compatibility
+
+### Fixed
+
+- `ask_clarification` deadlock when prompting user during workflow
+- Stale task progress display between messages
+- ContextVar reset bug in workflow context
+
 ## [0.3.3] - 2026-02-04
 
 ### Added

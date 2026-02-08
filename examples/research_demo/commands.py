@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING
 
 from rich.panel import Panel
 from rich.table import Table
-from rich.text import Text
 
 from agentic_cli.cli.commands import Command, CommandCategory
 
@@ -17,86 +16,38 @@ if TYPE_CHECKING:
 
 
 class MemoryCommand(Command):
-    """Show current memory state."""
+    """Show persistent memory contents."""
 
     def __init__(self) -> None:
         super().__init__(
             name="memory",
-            description="Show working and long-term memory contents",
+            description="Show persistent memory contents",
             aliases=[],
-            usage="/memory [--type=TYPE]",
-            examples=[
-                "/memory",
-                "/memory --type=learning",
-            ],
+            usage="/memory",
+            examples=["/memory"],
             category=CommandCategory.GENERAL,
         )
 
     async def execute(self, args: str, app: "ResearchDemoApp") -> None:
-        parsed = self.parse_args(args)
-        memory_type = parsed.get_option("type")
+        memory_store = app.workflow.memory_manager if app.workflow else None
 
-        # Access memory manager from workflow
-        memory_manager = app.workflow.memory_manager if app.workflow else None
+        table = Table(title="Persistent Memory", show_header=True)
+        table.add_column("ID", style="dim", width=8)
+        table.add_column("Content", style="white")
+        table.add_column("Tags", style="dim")
 
-        # Working Memory Section
-        working_table = Table(title="Working Memory (Session)", show_header=True)
-        working_table.add_column("Key", style="cyan")
-        working_table.add_column("Value", style="white")
-        working_table.add_column("Tags", style="dim")
-
-        if memory_manager:
-            for key, (value, tags) in memory_manager.get_working_entries().items():
-                value_str = str(value)
-                if len(value_str) > 50:
-                    value_str = value_str[:50] + "..."
-                tags_str = ", ".join(tags) if tags else ""
-                working_table.add_row(key, value_str, tags_str)
-
-        if working_table.row_count == 0:
-            working_table.add_row("(empty)", "", "")
-
-        app.session.add_rich(working_table)
-
-        # Long-term Memory Section
-        longterm_table = Table(title="Long-term Memory (Persistent)", show_header=True)
-        longterm_table.add_column("ID", style="dim", width=8)
-        longterm_table.add_column("Type", style="yellow")
-        longterm_table.add_column("Content", style="white")
-        longterm_table.add_column("Tags", style="dim")
-
-        if memory_manager:
-            from agentic_cli.memory.longterm import MemoryType
-
-            longterm_mem = memory_manager.longterm
-
-            # Get all entries, optionally filtered by type
-            if memory_type:
-                try:
-                    mem_type = MemoryType(memory_type)
-                    entries = longterm_mem.recall("", type=mem_type)
-                except ValueError:
-                    app.session.add_error(f"Invalid memory type: {memory_type}")
-                    return
-            else:
-                entries = longterm_mem.recall("")
-
-            for entry in entries[:20]:  # Limit display
-                content_str = entry.content
+        if memory_store:
+            for item in memory_store.search("", limit=20):
+                content_str = item.content
                 if len(content_str) > 60:
                     content_str = content_str[:60] + "..."
-                tags_str = ", ".join(entry.tags) if entry.tags else ""
-                longterm_table.add_row(
-                    entry.id[:8],
-                    entry.type.value,
-                    content_str,
-                    tags_str,
-                )
+                tags_str = ", ".join(item.tags) if item.tags else ""
+                table.add_row(item.id[:8], content_str, tags_str)
 
-        if longterm_table.row_count == 0:
-            longterm_table.add_row("(empty)", "", "", "")
+        if table.row_count == 0:
+            table.add_row("(empty)", "", "")
 
-        app.session.add_rich(longterm_table)
+        app.session.add_rich(table)
 
 
 class PlanCommand(Command):
@@ -112,127 +63,98 @@ class PlanCommand(Command):
         )
 
     async def execute(self, args: str, app: "ResearchDemoApp") -> None:
-        # Access task graph from workflow
-        task_graph = app.workflow.task_graph if app.workflow else None
+        plan_store = app.workflow.plan_store if app.workflow else None
 
-        if task_graph is None:
-            app.session.add_message("system", "No task graph initialized")
+        if plan_store is None:
+            app.session.add_message("system", "Plan store not initialized")
             return
 
-        # Get progress statistics
-        progress = task_graph.get_progress()
-
-        if progress["total"] == 0:
-            app.session.add_message("system", "No tasks in the plan. Ask the agent to create a research plan.")
+        if plan_store.is_empty():
+            app.session.add_message("system", "No plan created yet. Ask the agent to create a research plan.")
             return
 
-        # Progress summary
-        completed = progress["completed"]
-        total = progress["total"]
-        in_progress = progress["in_progress"]
-        pending = progress["pending"]
-        failed = progress["failed"]
-
-        progress_text = Text()
-        progress_text.append(f"Progress: {completed}/{total} completed")
-        if in_progress > 0:
-            progress_text.append(f", {in_progress} in progress", style="yellow")
-        if pending > 0:
-            progress_text.append(f", {pending} pending", style="dim")
-        if failed > 0:
-            progress_text.append(f", {failed} failed", style="red")
-
-        app.session.add_rich(progress_text)
-
-        # Task display
-        display = task_graph.to_display()
-        panel = Panel(display, title="Research Plan", border_style="blue")
+        panel = Panel(plan_store.get(), title="Research Plan", border_style="blue")
         app.session.add_rich(panel)
 
 
 class ApprovalsCommand(Command):
-    """Show pending approvals."""
+    """Show approval history."""
 
     def __init__(self) -> None:
         super().__init__(
             name="approvals",
-            description="Show pending approval requests",
+            description="Show approval history",
             aliases=["approve"],
             usage="/approvals",
             category=CommandCategory.GENERAL,
         )
 
     async def execute(self, args: str, app: "ResearchDemoApp") -> None:
-        # Access approval manager from workflow
         approval_manager = app.workflow.approval_manager if app.workflow else None
 
         if approval_manager is None:
             app.session.add_message("system", "Approval manager not initialized")
             return
 
-        pending = approval_manager.get_pending_requests()
+        history = approval_manager.history
 
-        if not pending:
-            app.session.add_message("system", "No pending approval requests")
+        if not history:
+            app.session.add_message("system", "No approval history")
             return
 
-        table = Table(title="Pending Approvals", show_header=True)
+        table = Table(title="Approval History", show_header=True)
         table.add_column("ID", style="dim")
-        table.add_column("Tool", style="cyan")
-        table.add_column("Operation", style="yellow")
-        table.add_column("Description", style="white")
-        table.add_column("Risk", style="red")
+        table.add_column("Approved", style="cyan")
+        table.add_column("Reason", style="white")
 
-        for request in pending:
+        for result in history:
             table.add_row(
-                request.id,
-                request.tool,
-                request.operation,
-                request.description,
-                request.risk_level,
+                result.request_id,
+                "Yes" if result.approved else "No",
+                result.reason or "",
             )
 
         app.session.add_rich(table)
 
 
 class CheckpointsCommand(Command):
-    """Show checkpoints awaiting review."""
+    """Show checkpoint history."""
 
     def __init__(self) -> None:
         super().__init__(
             name="checkpoints",
-            description="Show checkpoints awaiting review",
+            description="Show checkpoint review history",
             aliases=[],
             usage="/checkpoints",
             category=CommandCategory.GENERAL,
         )
 
     async def execute(self, args: str, app: "ResearchDemoApp") -> None:
-        # Access checkpoint manager from workflow
         checkpoint_manager = app.workflow.checkpoint_manager if app.workflow else None
 
         if checkpoint_manager is None:
             app.session.add_message("system", "Checkpoint manager not initialized")
             return
 
-        unresolved = checkpoint_manager.get_unresolved()
+        history = checkpoint_manager.history
 
-        if not unresolved:
-            app.session.add_message("system", "No checkpoints awaiting review")
+        if not history:
+            app.session.add_message("system", "No checkpoint history")
             return
 
-        for checkpoint in unresolved:
-            content_preview = str(checkpoint.content)
-            if len(content_preview) > 200:
-                content_preview = content_preview[:200] + "..."
+        table = Table(title="Checkpoint History", show_header=True)
+        table.add_column("ID", style="dim")
+        table.add_column("Action", style="cyan")
+        table.add_column("Feedback", style="white")
 
-            panel = Panel(
-                content_preview,
-                title=f"Checkpoint: {checkpoint.name} ({cp_id})",
-                subtitle=f"Type: {checkpoint.content_type}",
-                border_style="yellow",
+        for result in history:
+            table.add_row(
+                result.checkpoint_id,
+                result.action,
+                result.feedback or "",
             )
-            app.session.add_rich(panel)
+
+        app.session.add_rich(table)
 
 
 class FilesCommand(Command):
@@ -241,37 +163,36 @@ class FilesCommand(Command):
     def __init__(self) -> None:
         super().__init__(
             name="files",
-            description="List files in workspace (findings, artifacts)",
+            description="List files in workspace directory",
             aliases=[],
             usage="/files [--dir=DIR]",
             examples=[
                 "/files",
-                "/files --dir=findings",
+                "/files --dir=tasks",
             ],
             category=CommandCategory.GENERAL,
         )
 
     async def execute(self, args: str, app: "ResearchDemoApp") -> None:
         parsed = self.parse_args(args)
-        subdir = parsed.get_option("dir", "findings")
+        subdir = parsed.get_option("dir")
 
         from agentic_cli.tools.glob_tool import list_dir
-        from agentic_cli.tools.registry import ToolError
 
         workspace = app.settings.workspace_dir
-        target_dir = workspace / subdir
+        target_dir = workspace / subdir if subdir else workspace
 
         if not target_dir.exists():
             app.session.add_message("system", f"Directory does not exist: {target_dir}")
             return
 
-        try:
-            result = list_dir(str(target_dir))
-        except ToolError as e:
-            app.session.add_error(e.message)
+        result = list_dir(str(target_dir))
+        if not result.get("success"):
+            app.session.add_error(result.get("error", "Failed to list directory"))
             return
 
-        table = Table(title=f"Files in {subdir}/", show_header=True)
+        title = f"Files in {subdir}/" if subdir else "Workspace files"
+        table = Table(title=title, show_header=True)
         table.add_column("Name", style="cyan")
         table.add_column("Type", style="yellow")
         table.add_column("Size", style="dim", justify="right")
@@ -294,27 +215,63 @@ class FilesCommand(Command):
         app.session.add_message("system", f"Total: {result['total']} items")
 
 
-class ClearMemoryCommand(Command):
-    """Clear working memory."""
+class TasksCommand(Command):
+    """Show execution tasks."""
 
     def __init__(self) -> None:
         super().__init__(
-            name="clear-memory",
-            description="Clear working memory (session context)",
-            aliases=["clearmem"],
-            usage="/clear-memory",
+            name="tasks",
+            description="Show execution tasks and progress",
+            aliases=[],
+            usage="/tasks [--status=STATUS]",
+            examples=[
+                "/tasks",
+                "/tasks --status=pending",
+                "/tasks --status=in_progress",
+            ],
             category=CommandCategory.GENERAL,
         )
 
     async def execute(self, args: str, app: "ResearchDemoApp") -> None:
-        # Access memory manager from workflow
-        memory_manager = app.workflow.memory_manager if app.workflow else None
+        task_store = app.workflow.task_store if app.workflow else None
 
-        if memory_manager:
-            memory_manager.clear_working()
-            app.session.add_success("Working memory cleared")
-        else:
-            app.session.add_error("Memory manager not initialized")
+        if task_store is None:
+            app.session.add_message("system", "Task store not initialized")
+            return
+
+        parsed = self.parse_args(args)
+        status_filter = parsed.get_option("status")
+
+        tasks = task_store.list_tasks(status=status_filter or None)
+
+        if not tasks:
+            app.session.add_message("system", "No tasks found")
+            return
+
+        table = Table(title="Execution Tasks", show_header=True)
+        table.add_column("ID", style="dim", width=8)
+        table.add_column("Description", style="white")
+        table.add_column("Status", style="cyan")
+        table.add_column("Priority", style="yellow")
+        table.add_column("Tags", style="dim")
+
+        for task in tasks:
+            status_style = {
+                "pending": "dim",
+                "in_progress": "bold cyan",
+                "completed": "green",
+                "cancelled": "red",
+            }.get(task.status, "white")
+            tags_str = ", ".join(task.tags) if task.tags else ""
+            table.add_row(
+                task.id[:8],
+                task.description,
+                f"[{status_style}]{task.status}[/]",
+                task.priority,
+                tags_str,
+            )
+
+        app.session.add_rich(table)
 
 
 class ClearPlanCommand(Command):
@@ -330,14 +287,13 @@ class ClearPlanCommand(Command):
         )
 
     async def execute(self, args: str, app: "ResearchDemoApp") -> None:
-        # Access task graph from workflow
-        task_graph = app.workflow.task_graph if app.workflow else None
+        plan_store = app.workflow.plan_store if app.workflow else None
 
-        if task_graph:
-            task_graph.clear()
-            app.session.add_success("Task plan cleared")
+        if plan_store:
+            plan_store.clear()
+            app.session.add_success("Plan cleared")
         else:
-            app.session.add_error("Task graph not initialized")
+            app.session.add_error("Plan store not initialized")
 
 
 # Export all commands for registration
@@ -346,9 +302,9 @@ class ClearPlanCommand(Command):
 DEMO_COMMANDS = [
     MemoryCommand,
     PlanCommand,
+    TasksCommand,
     ApprovalsCommand,
     CheckpointsCommand,
     FilesCommand,
-    ClearMemoryCommand,
     ClearPlanCommand,
 ]

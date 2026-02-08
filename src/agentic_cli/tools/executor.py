@@ -16,10 +16,14 @@ import traceback
 from typing import Any
 
 
-class TimeoutError(Exception):
+class ExecutionTimeoutError(Exception):
     """Raised when code execution times out."""
 
     pass
+
+
+# Backward-compatible alias
+TimeoutError = ExecutionTimeoutError
 
 
 class SafePythonExecutor:
@@ -72,9 +76,7 @@ class SafePythonExecutor:
         "getattr",
         "setattr",
         "delattr",
-        "hasattr",
-        "type",
-        "isinstance",
+        # type, isinstance, hasattr are safe introspection builtins — allowed
         "issubclass",
         "object",
         "super",
@@ -310,7 +312,7 @@ class SafePythonExecutor:
                 "execution_time_ms": round(execution_time, 2),
             }
 
-        except TimeoutError:
+        except ExecutionTimeoutError:
             return {
                 "success": False,
                 "output": stdout_capture.getvalue(),
@@ -342,7 +344,7 @@ class SafePythonExecutor:
             return
 
         def timeout_handler(signum: int, frame: Any) -> None:
-            raise TimeoutError(f"Execution timed out after {seconds} seconds")
+            raise ExecutionTimeoutError(f"Execution timed out after {seconds} seconds")
 
         # Set the signal handler
         old_handler = signal.signal(signal.SIGALRM, timeout_handler)

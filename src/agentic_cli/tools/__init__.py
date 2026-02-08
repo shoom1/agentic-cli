@@ -13,18 +13,20 @@ Tool System:
 
 Framework Tools:
     - memory_tools: Working and long-term memory tools
-    - planning_tools: Task graph management tools
-    - hitl_tools: Human-in-the-loop checkpoint and approval tools
+    - planning_tools: Flat markdown plan tools (save_plan, get_plan)
+    - hitl_tools: Human-in-the-loop approval and checkpoint tools
     - web_search: Web search with pluggable backends (Tavily, Brave)
 
 For resilience patterns, use tenacity, pybreaker, aiolimiter directly.
 """
 
-from typing import Callable, Literal, TypeVar
+import asyncio
+import functools
+from typing import Any, Callable, Literal, TypeVar
 
 # Type for manager requirements
 ManagerRequirement = Literal[
-    "memory_manager", "task_graph", "approval_manager", "checkpoint_manager", "llm_summarizer"
+    "memory_manager", "plan_store", "task_store", "approval_manager", "checkpoint_manager", "llm_summarizer"
 ]
 
 F = TypeVar("F", bound=Callable)
@@ -45,8 +47,8 @@ def requires(*managers: ManagerRequirement) -> Callable[[F], F]:
 
     Example:
         @requires("memory_manager")
-        def remember_context(key: str, value: str) -> dict:
-            manager = get_context_memory_manager()
+        def save_memory(content: str, tags: list[str] | None = None) -> dict:
+            store = get_context_memory_manager()
             ...
     """
     def decorator(func: F) -> F:
@@ -54,7 +56,43 @@ def requires(*managers: ManagerRequirement) -> Callable[[F], F]:
         return func
     return decorator
 
-from agentic_cli.tools.executor import SafePythonExecutor, MockPythonExecutor
+
+def require_context(
+    context_name: str,
+    getter: Callable[..., Any],
+    error_message: str | None = None,
+) -> Callable[[F], F]:
+    """Guard decorator: returns error dict if getter() is None.
+
+    Apply below @requires / @register_tool so it runs first (innermost).
+    functools.wraps preserves __dict__ so .requires stays visible.
+
+    Args:
+        context_name: Human-readable name for error messages.
+        getter: Zero-arg callable returning the context value or None.
+        error_message: Custom error message (defaults to "{context_name} not available").
+    """
+    msg = error_message or f"{context_name} not available"
+
+    def decorator(func: F) -> F:
+        if asyncio.iscoroutinefunction(func):
+            @functools.wraps(func)
+            async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
+                if getter() is None:
+                    return {"success": False, "error": msg}
+                return await func(*args, **kwargs)
+            return async_wrapper  # type: ignore[return-value]
+        else:
+            @functools.wraps(func)
+            def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
+                if getter() is None:
+                    return {"success": False, "error": msg}
+                return func(*args, **kwargs)
+            return sync_wrapper  # type: ignore[return-value]
+    return decorator
+
+
+from agentic_cli.tools.executor import SafePythonExecutor, MockPythonExecutor, ExecutionTimeoutError
 from agentic_cli.tools.shell import shell_executor, is_shell_enabled
 
 # File operation tools - READ (safe)
@@ -106,10 +144,12 @@ __all__ = [
     "with_result_wrapper",
     # Manager requirements decorator
     "requires",
+    "require_context",
     "ManagerRequirement",
     # Executor classes
     "SafePythonExecutor",
     "MockPythonExecutor",
+    "ExecutionTimeoutError",
     # Shell executor
     "shell_executor",
     "is_shell_enabled",
@@ -139,6 +179,7 @@ __all__ = [
     # Framework tool modules (lazy loaded)
     "memory_tools",
     "planning_tools",
+    "task_tools",
     "hitl_tools",
 ]
 
@@ -147,6 +188,7 @@ __all__ = [
 _lazy_tool_modules = {
     "memory_tools": "agentic_cli.tools.memory_tools",
     "planning_tools": "agentic_cli.tools.planning_tools",
+    "task_tools": "agentic_cli.tools.task_tools",
     "hitl_tools": "agentic_cli.tools.hitl_tools",
 }
 

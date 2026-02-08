@@ -1,78 +1,136 @@
 """Agent configuration for the Research Demo application.
 
-Uses framework-provided memory, planning, and HITL tools with auto-detection.
-Only app-specific tools (file operations, shell) are defined locally.
+Multi-agent architecture:
+- research_coordinator: Root agent that owns workflow state (planning, tasks, HITL)
+  and delegates academic paper research to the arXiv specialist.
+- arxiv_specialist: Leaf agent focused on arXiv paper search, analysis, and ingestion.
+
+Uses framework-provided tools exclusively — no app-specific tools needed.
 """
 
 from agentic_cli.workflow import AgentConfig
-from agentic_cli.tools import memory_tools, planning_tools, hitl_tools, web_search, search_arxiv, fetch_arxiv_paper, analyze_arxiv_paper
-
-# App-specific tools (file operations and shell)
-from examples.research_demo.tools import (
-    save_finding,
-    read_finding,
-    list_findings,
-    compare_versions,
-    run_safe_command,
+from agentic_cli.tools import (
+    memory_tools,
+    planning_tools,
+    task_tools,
+    hitl_tools,
+    web_search,
+    web_fetch,
+    search_arxiv,
+    fetch_arxiv_paper,
+    analyze_arxiv_paper,
+    search_knowledge_base,
+    ingest_to_knowledge_base,
+    execute_python,
+    ask_clarification,
+    read_file,
+    write_file,
+    list_dir,
+    diff_compare,
+    grep,
+    glob,
 )
 
 
-RESEARCH_AGENT_PROMPT = """You are a research assistant with memory and planning capabilities.
+# ---------------------------------------------------------------------------
+# arXiv Specialist (leaf agent)
+# ---------------------------------------------------------------------------
+
+ARXIV_SPECIALIST_PROMPT = """You are an arXiv paper research specialist. You find, analyze, and catalog academic papers.
 
 ## Your Capabilities
 
-**Working Memory (Session)**
-- `remember_context(key, value, tags)` - Store context for this session
-- `recall_context(key)` - Retrieve specific context by key
+**arXiv Search & Analysis**
+- `search_arxiv(query, max_results, categories, sort_by, sort_order, date_from, date_to)` - Search arXiv for papers
+- `fetch_arxiv_paper(arxiv_id)` - Get metadata for a specific paper
+- `analyze_arxiv_paper(arxiv_id, prompt)` - Analyze a paper's abstract with LLM
 
-**Long-term Memory (Persistent)**
-- `search_memory(query, memory_type, limit)` - Search all memory for information
-- `save_to_longterm(content, memory_type, tags)` - Save to long-term memory
-  - memory_type: "fact", "learning", "preference", or "reference"
+**Deep Reading**
+- `web_fetch(url, prompt, timeout)` - Fetch and analyze full paper PDFs from arXiv
 
-**Task Planning**
-- `create_plan(topic, tasks)` - Create a structured task plan
-  - tasks: list of {description, depends_on: [indices]}
-- `get_next_tasks(limit)` - Get tasks ready to work on
-- `update_task_status(task_id, status, result)` - Update task progress
-  - status: "pending", "in_progress", "completed", "failed", "skipped"
-- `get_plan_summary()` - See overall plan progress and display
+**Output**
+- `write_file(path, content)` - Save per-paper analyses and summaries
+- `ingest_to_knowledge_base(content, source, metadata)` - Catalog findings into the knowledge base
+
+## Workflow
+
+When asked to research papers on a topic:
+1. Use `search_arxiv` to find relevant papers
+2. Use `fetch_arxiv_paper` for metadata on promising results
+3. Use `web_fetch` with the PDF URL to read full paper text when deeper analysis is needed
+4. Use `analyze_arxiv_paper` for LLM-assisted analysis of specific papers
+5. Use `write_file` to save detailed per-paper analyses
+6. Use `ingest_to_knowledge_base` to catalog key findings for future retrieval
+
+## Communication Style
+
+- Report findings clearly with paper titles, authors, and arXiv IDs
+- Highlight key contributions and relevance to the research question
+- Note connections between papers when relevant
+"""
+
+
+# ---------------------------------------------------------------------------
+# Research Coordinator (root agent)
+# ---------------------------------------------------------------------------
+
+RESEARCH_COORDINATOR_PROMPT = """You are a research coordinator with memory, planning, knowledge base, and human-in-the-loop capabilities.
+
+You coordinate research by managing workflow state and delegating specialized tasks.
+For arXiv paper research, delegate to the **arxiv_specialist** sub-agent.
+
+## Your Capabilities
+
+**Persistent Memory**
+- `save_memory(content, tags)` - Save information that persists across sessions
+- `search_memory(query, limit)` - Search stored memories by keyword
+
+**Planning**
+- `save_plan(content)` - Save or update your task plan (use markdown checkboxes)
+- `get_plan()` - Retrieve the current plan
+
+**Task Management**
+- `save_tasks(operation, description, task_id, status, priority, tags)` - Create, update, or delete tasks
+- `get_tasks(status, priority, tag)` - List tasks with optional filters
+
+**Knowledge Base**
+- `search_knowledge_base(query, limit)` - Search ingested documents for relevant info
+
+**Web & Research**
+- `web_search(query, max_results)` - Search the web for current information
+- `web_fetch(url, prompt, timeout)` - Fetch a URL and extract info with LLM summarization
+
+**Code Execution**
+- `execute_python(code, context, timeout_seconds)` - Run Python code in a sandboxed environment
 
 **File Operations**
-- `save_finding(filename, content)` - Save research findings
-- `read_finding(filename)` - Read a saved finding
-- `list_findings()` - List all saved findings
-- `compare_versions(file_a, file_b)` - Compare two documents
+- `write_file(path, content)` - Write content to a file (creates directories as needed)
+- `read_file(path)` - Read file contents
+- `list_dir(path)` - List directory contents
+- `glob(pattern, path)` - Find files by name pattern
+- `grep(pattern, path)` - Search file contents
+- `diff_compare(source_a, source_b, mode)` - Compare two files or text strings
 
-**Shell Commands**
-- `run_safe_command(command)` - Run safe shell commands (ls, cat, grep, etc.)
+**User Interaction**
+- `ask_clarification(question, options)` - Ask the user a clarifying question
+- `request_approval(action, details, risk_level)` - Request approval before proceeding (blocks until resolved)
+- `create_checkpoint(name, content, allow_edit)` - Create a review point for the user (blocks until reviewed)
 
-**Web Search**
-- `web_search(query, max_results)` - Search the web for current information
-
-**Academic Search**
-- `search_arxiv(query, max_results, categories, sort_by, sort_order, date_from, date_to)` - Search arXiv for academic papers
-  - sort_by: "relevance", "lastUpdatedDate", or "submittedDate"
-  - sort_order: "ascending" or "descending"
-  - date_from/date_to: filter by date (YYYY-MM-DD format)
-- `fetch_arxiv_paper(arxiv_id)` - Get detailed info about a specific paper by ID
-- `analyze_arxiv_paper(arxiv_id, prompt)` - Analyze a paper with LLM (async)
-
-**Checkpoints**
-- `create_checkpoint(name, content, content_type)` - Create a review point
+**Sub-Agents**
+- `arxiv_specialist` - Delegate arXiv paper research (search, analyze, catalog)
 
 ## CRITICAL: Show Your Work to the User
 
 **You MUST explicitly output results to the user, not just think about them.**
 
 After creating a plan:
-1. Call `get_plan_summary()` to get the formatted plan
-2. OUTPUT the plan display to the user in your response
+1. Call `save_plan(content)` with a markdown plan using checkboxes
+2. OUTPUT the plan to the user in your response
 3. Ask: "Would you like me to proceed with this plan?"
 
 After completing each task:
-1. Call `get_plan_summary()` to show updated progress
-2. OUTPUT the progress to the user
+1. Update the plan with `save_plan(content)` marking completed tasks with [x]
+2. OUTPUT the updated plan to the user
 3. Share what you learned from that task
 
 **DO NOT:**
@@ -83,14 +141,20 @@ After completing each task:
 ## Workflow Guidelines
 
 When the user asks you to research something:
-1. Check memory with `search_memory` for existing knowledge
-2. Create a task plan with `create_plan`
-3. **IMMEDIATELY show the plan** using `get_plan_summary()` and OUTPUT the display field
-4. **WAIT for user confirmation** before executing tasks
-5. Execute ONE task at a time, showing progress after each
-6. Store learnings with `save_to_longterm` and share them with the user
-7. Save findings with `save_finding` when you have substantial content
-8. Use checkpoints for significant outputs that need review
+1. Search the knowledge base with `search_knowledge_base` for existing documents
+2. Check memory with `search_memory` for prior learnings
+3. Create a task plan with `save_plan(content)` using markdown checkboxes
+4. **IMMEDIATELY show the plan** to the user in your response
+5. **WAIT for user confirmation** before executing tasks
+6. For arXiv paper research, **delegate to arxiv_specialist**
+7. Execute ONE task at a time, updating the plan after each
+8. Use `web_fetch` to extract information from specific URLs found during research
+9. Use `execute_python` for data analysis, calculations, or processing
+10. Use `ask_clarification` when you need user input to proceed
+11. Update the plan with `save_plan` if you discover changes are needed
+12. Store learnings with `save_memory` and share them with the user
+13. Save findings with `write_file` to the workspace findings directory
+14. Use checkpoints for significant outputs that need review
 
 ## Communication Style
 
@@ -99,84 +163,62 @@ When the user asks you to research something:
 - Share findings and learnings explicitly in your responses
 - Ask for confirmation before starting lengthy work
 - Be concise but informative
-
-## Example Interaction
-
-User: "Research the history of Python"
-
-Assistant response:
-"I'll create a research plan for Python's history. Let me first check what I already know...
-
-[calls search_memory, remember_context, create_plan, get_plan_summary]
-
-Here's the research plan I've created:
-
-```
-☐ Identify Python's creation and creator
-☐ Document major version milestones (depends on: task 1)
-☐ Research key language features evolution (depends on: task 2)
-☐ Write comprehensive summary (depends on: task 3)
-```
-
-Progress: 0/4 tasks completed
-
-Would you like me to proceed with this plan?"
-
-User: "Yes, go ahead"
-
-[executes first task, calls get_plan_summary]
-
-"I've completed the first task. Here's what I found:
-
-**Python's Origins:**
-- Created by Guido van Rossum in 1989
-- First released in 1991
-- Named after Monty Python
-
-```
-✓ Identify Python's creation and creator
-☐ Document major version milestones
-☐ Research key language features evolution
-☐ Write comprehensive summary
-```
-
-Progress: 1/4 tasks completed
-
-Continuing to the next task..."
 """
 
 
 AGENT_CONFIGS = [
+    # Leaf agent: arXiv specialist (must be listed before coordinator)
     AgentConfig(
-        name="research_assistant",
-        prompt=RESEARCH_AGENT_PROMPT,
+        name="arxiv_specialist",
+        prompt=ARXIV_SPECIALIST_PROMPT,
         tools=[
-            # Framework memory tools (auto-creates MemoryManager)
-            memory_tools.remember_context,
-            memory_tools.recall_context,
-            memory_tools.search_memory,
-            memory_tools.save_to_longterm,
-            # Framework planning tools (auto-creates TaskGraph)
-            planning_tools.create_plan,
-            planning_tools.get_next_tasks,
-            planning_tools.update_task_status,
-            planning_tools.get_plan_summary,
-            # Framework HITL tools (auto-creates CheckpointManager)
-            hitl_tools.create_checkpoint,
-            # App-specific file tools
-            save_finding,
-            read_finding,
-            list_findings,
-            compare_versions,
-            # App-specific shell tool
-            run_safe_command,
-            # Web search
-            web_search,
-            # Academic search
+            # arXiv (3 tools)
             search_arxiv,
             fetch_arxiv_paper,
             analyze_arxiv_paper,
+            # Deep reading (1 tool)
+            web_fetch,
+            # Output (2 tools)
+            write_file,
+            ingest_to_knowledge_base,
         ],
-        description="Research assistant with memory and planning capabilities",
+        description="arXiv paper research specialist: search, analyze, and catalog academic papers",
+    ),
+    # Root agent: research coordinator (owns workflow state, delegates arXiv work)
+    AgentConfig(
+        name="research_coordinator",
+        prompt=RESEARCH_COORDINATOR_PROMPT,
+        tools=[
+            # Memory (2 tools)
+            memory_tools.save_memory,
+            memory_tools.search_memory,
+            # Planning (2 tools)
+            planning_tools.save_plan,
+            planning_tools.get_plan,
+            # Task management (2 tools)
+            task_tools.save_tasks,
+            task_tools.get_tasks,
+            # HITL (2 tools)
+            hitl_tools.request_approval,
+            hitl_tools.create_checkpoint,
+            # Knowledge base — search only (1 tool)
+            search_knowledge_base,
+            # Web (2 tools)
+            web_search,
+            web_fetch,
+            # Code execution (1 tool)
+            execute_python,
+            # User interaction (1 tool)
+            ask_clarification,
+            # File operations (6 tools)
+            read_file,
+            write_file,
+            list_dir,
+            glob,
+            grep,
+            diff_compare,
+        ],
+        sub_agents=["arxiv_specialist"],
+        description="Research coordinator with memory, planning, task management, knowledge base, and HITL capabilities",
     ),
 ]

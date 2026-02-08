@@ -17,12 +17,12 @@ from agentic_cli.workflow.settings import WorkflowSettingsMixin
 from agentic_cli.workflow.context import (
     # Getters for tools
     get_context_memory_manager,
-    get_context_task_graph,
+    get_context_plan_store,
     get_context_approval_manager,
     get_context_checkpoint_manager,
     # Setters for workflow managers
     set_context_memory_manager,
-    set_context_task_graph,
+    set_context_plan_store,
     set_context_approval_manager,
     set_context_checkpoint_manager,
 )
@@ -81,12 +81,12 @@ __all__ = [
     "add_messages",
     # Context getters (for tools)
     "get_context_memory_manager",
-    "get_context_task_graph",
+    "get_context_plan_store",
     "get_context_approval_manager",
     "get_context_checkpoint_manager",
     # Context setters (for workflow managers)
     "set_context_memory_manager",
-    "set_context_task_graph",
+    "set_context_plan_store",
     "set_context_approval_manager",
     "set_context_checkpoint_manager",
 ]

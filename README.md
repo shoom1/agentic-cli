@@ -533,21 +533,23 @@ async for event in manager.process(message, user_id="user1"):
 
 ### Task Progress Display
 
-When using a task graph for planning, the CLI thinking box dynamically shows task progress:
+When using plan checkboxes or task tools, the CLI thinking box dynamically shows task progress:
 
 ```
-Calling: search_web
-─── Tasks: 2/5 ───
-◐ Researching topic
-☐ Analyzing results
-☐ Writing summary
+Calling: web_search
+--- Tasks: 1/3 ---
+Research:
+  [x] Gather data
+  [ ] Analyze results
+Writing:
+  [ ] Draft report
 ```
 
-Status icons:
-- `◐` In progress
-- `☐` Pending
-- `✓` Completed
-- `✗` Failed
+Status icons (task tools):
+- `[x]` Completed
+- `[>]` In progress
+- `[ ]` Pending
+- `[-]` Cancelled
 
 ## Examples
 
@@ -609,20 +611,27 @@ agentic-cli/
 ├── src/agentic_cli/
 │   ├── __init__.py           # Package exports
 │   ├── config.py             # BaseSettings, SettingsContext
+│   ├── constants.py          # Shared constants (truncation, limits)
+│   ├── logging.py            # Structlog configuration
 │   ├── cli/
 │   │   ├── app.py            # BaseCLIApp
 │   │   ├── commands.py       # Command, CommandRegistry
+│   │   ├── builtin_commands.py
 │   │   ├── workflow_controller.py  # Workflow orchestration
 │   │   └── message_processor.py    # Event stream processing
 │   ├── workflow/
+│   │   ├── base_manager.py   # BaseWorkflowManager (abstract)
 │   │   ├── events.py         # WorkflowEvent, EventType
 │   │   ├── config.py         # AgentConfig
+│   │   ├── context.py        # Context variables for tools
+│   │   ├── thinking.py       # ThinkingDetector
 │   │   ├── adk_manager.py    # GoogleADKWorkflowManager
 │   │   └── langgraph/        # LangGraph submodule
 │   │       ├── manager.py    # LangGraphWorkflowManager
 │   │       ├── state.py      # AgentState, CheckpointData
 │   │       └── persistence/  # Checkpointers and stores
 │   ├── tools/
+│   │   ├── registry.py       # ToolRegistry, ToolCategory, PermissionLevel
 │   │   ├── executor.py       # SafePythonExecutor
 │   │   ├── file_read.py      # read_file, diff_compare
 │   │   ├── file_write.py     # write_file, edit_file
@@ -630,14 +639,31 @@ agentic-cli/
 │   │   ├── glob_tool.py      # glob, list_dir (file discovery)
 │   │   ├── search.py         # Web search (Tavily, Brave)
 │   │   ├── webfetch_tool.py  # Web content fetching
+│   │   ├── memory_tools.py   # MemoryStore, save/search_memory
+│   │   ├── planning_tools.py # PlanStore, save/get_plan
+│   │   ├── task_tools.py     # TaskStore, save/get_tasks
+│   │   ├── hitl_tools.py     # request_approval, create_checkpoint
+│   │   ├── standard.py       # ArXiv tools, ask_clarification
 │   │   └── shell/            # Shell executor with security
 │   │       ├── executor.py   # Main entry point (disabled by default)
 │   │       ├── tokenizer.py  # Command parsing
 │   │       ├── classifier.py # Risk classification
 │   │       ├── sandbox.py    # Execution sandboxing
 │   │       └── audit.py      # Security logging
-│   └── knowledge_base/
-│       └── manager.py        # KnowledgeBaseManager
+│   ├── knowledge_base/
+│   │   ├── manager.py        # KnowledgeBaseManager
+│   │   ├── models.py         # Document, SearchResult
+│   │   ├── embeddings.py     # EmbeddingService
+│   │   ├── vector_store.py   # VectorStore
+│   │   └── sources.py        # ArxivSearchSource, SearchSourceRegistry
+│   ├── persistence/
+│   │   ├── session.py        # SessionPersistence
+│   │   ├── artifacts.py      # ArtifactManager
+│   │   └── _utils.py         # Atomic write utilities
+│   └── hitl/
+│       ├── approval.py       # ApprovalManager
+│       ├── checkpoints.py    # CheckpointManager
+│       └── config.py         # HITLConfig
 ├── examples/
 │   ├── hello_agent.py        # Basic ADK example
 │   ├── hello_langgraph.py    # Basic LangGraph example
