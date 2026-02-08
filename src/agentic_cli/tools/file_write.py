@@ -12,6 +12,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from agentic_cli.persistence._utils import atomic_write_text
 from agentic_cli.tools.registry import (
     ToolCategory,
     PermissionLevel,
@@ -61,7 +62,7 @@ def write_file(
         }
 
     try:
-        file_path.write_text(content)
+        atomic_write_text(file_path, content)
         size = file_path.stat().st_size
 
         return {
@@ -181,7 +182,7 @@ def edit_file(
 
     # Write the modified content
     try:
-        file_path.write_text(new_content)
+        atomic_write_text(file_path, new_content)
         size = file_path.stat().st_size
 
         return {

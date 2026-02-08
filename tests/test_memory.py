@@ -181,11 +181,11 @@ class TestMemoryToolFunctions:
         from agentic_cli.tools.memory_tools import MemoryStore
         from agentic_cli.tools.memory_tools import save_memory, search_memory
         from agentic_cli.workflow.context import (
-            set_context_memory_manager,
+            set_context_memory_store,
         )
 
         store = MemoryStore(mock_context.settings)
-        token = set_context_memory_manager(store)
+        token = set_context_memory_store(store)
         try:
             # Save
             result = save_memory(content="Important learning", tags=["test"])
@@ -204,10 +204,10 @@ class TestMemoryToolFunctions:
     def test_save_memory_with_tags(self, mock_context):
         from agentic_cli.tools.memory_tools import MemoryStore
         from agentic_cli.tools.memory_tools import save_memory, search_memory
-        from agentic_cli.workflow.context import set_context_memory_manager
+        from agentic_cli.workflow.context import set_context_memory_store
 
         store = MemoryStore(mock_context.settings)
-        token = set_context_memory_manager(store)
+        token = set_context_memory_store(store)
         try:
             result = save_memory(content="Tagged item", tags=["a", "b"])
             assert result["success"] is True
@@ -220,10 +220,10 @@ class TestMemoryToolFunctions:
     def test_search_memory_with_limit(self, mock_context):
         from agentic_cli.tools.memory_tools import MemoryStore
         from agentic_cli.tools.memory_tools import save_memory, search_memory
-        from agentic_cli.workflow.context import set_context_memory_manager
+        from agentic_cli.workflow.context import set_context_memory_store
 
         store = MemoryStore(mock_context.settings)
-        token = set_context_memory_manager(store)
+        token = set_context_memory_store(store)
         try:
             for i in range(5):
                 save_memory(content=f"Item {i}")

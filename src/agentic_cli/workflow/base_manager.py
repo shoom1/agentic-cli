@@ -22,7 +22,7 @@ from agentic_cli.workflow.events import WorkflowEvent, UserInputRequest
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.config import set_context_settings, set_context_workflow
 from agentic_cli.workflow.context import (
-    set_context_memory_manager,
+    set_context_memory_store,
     set_context_plan_store,
     set_context_task_store,
     set_context_approval_manager,
@@ -228,7 +228,7 @@ class BaseWorkflowManager(ABC):
         tokens = [
             set_context_settings(self._settings),
             set_context_workflow(self),
-            set_context_memory_manager(self._memory_manager),
+            set_context_memory_store(self._memory_manager),
             set_context_plan_store(self._plan_store),
             set_context_task_store(self._task_store),
             set_context_approval_manager(self._approval_manager),
