@@ -10,6 +10,7 @@ For alternative orchestration backends (e.g., LangGraph), see the base_manager m
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import AsyncGenerator, Any, Callable
 
@@ -34,6 +35,10 @@ from agentic_cli.constants import truncate, TOOL_SUMMARY_MAX_LENGTH
 from agentic_cli.logging import Loggers, bind_context
 
 logger = Loggers.workflow()
+
+# Suppress Google GenAI SDK warning about non-text parts (function_call) in
+# mixed responses. We already handle all part types individually in _process_part.
+logging.getLogger("google_genai.types").setLevel(logging.ERROR)
 
 
 def _is_rate_limit_error(error: Exception) -> bool:
