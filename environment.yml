@@ -8,5 +8,6 @@ dependencies:
   - html2text
   - pip:
     - pypdf>=4.0.0
+    - sympy>=1.13
     - -e .
     - -e .[dev]
