@@ -123,11 +123,40 @@ def _search_arxiv(r: dict) -> str:
 
 def _fetch_arxiv_paper(r: dict) -> str:
     title = r["paper"]["title"]
+    if "pdf_text" in r:
+        size = format_size(r.get("pdf_size_bytes", 0))
+        return f"{truncate(title, 70)} (PDF: {size})"
+    if "download_error" in r:
+        return f"{truncate(title, 70)} (PDF failed: {r['download_error']})"
     return truncate(title, TOOL_SUMMARY_MAX_LENGTH)
 
 
 def _analyze_arxiv_paper(r: dict) -> str:
-    return "Analysis complete"
+    analysis = r.get("analysis", "")
+    if analysis:
+        return truncate(analysis, TOOL_SUMMARY_MAX_LENGTH)
+    return "Analysis complete (no content)"
+
+
+def _save_paper(r: dict) -> str:
+    title = truncate(r.get("title", ""), 60)
+    size = format_size(r.get("file_size_bytes", 0))
+    return f"Saved: {title} ({size})"
+
+
+def _list_papers(r: dict) -> str:
+    count = r["count"]
+    return f"{count} paper{'s' if count != 1 else ''}"
+
+
+def _get_paper_info(r: dict) -> str:
+    title = r["paper"]["title"]
+    return truncate(title, TOOL_SUMMARY_MAX_LENGTH)
+
+
+def _open_paper(r: dict) -> str:
+    title = r.get("title", "")
+    return f"Opened: {truncate(title, 80)}"
 
 
 def _ingest_to_knowledge_base(r: dict) -> str:
@@ -166,6 +195,10 @@ _TOOL_FORMATTERS: dict[str, Callable[[dict[str, Any]], str]] = {
     "search_arxiv": _search_arxiv,
     "fetch_arxiv_paper": _fetch_arxiv_paper,
     "analyze_arxiv_paper": _analyze_arxiv_paper,
+    "save_paper": _save_paper,
+    "list_papers": _list_papers,
+    "get_paper_info": _get_paper_info,
+    "open_paper": _open_paper,
     "ingest_to_knowledge_base": _ingest_to_knowledge_base,
     "request_approval": _request_approval,
     "create_checkpoint": _create_checkpoint,

@@ -247,6 +247,12 @@ class ArxivSearchSource(SearchSource):
         self.cache_ttl_seconds = cache_ttl_seconds
         self.max_cache_size = max_cache_size
         self._cache: dict[str, CachedSearchResult] = {}
+        self._last_error: str | None = None
+
+    @property
+    def last_error(self) -> str | None:
+        """Last error message from search(), or None if last search succeeded."""
+        return self._last_error
 
     @property
     def name(self) -> str:
@@ -340,6 +346,7 @@ class ArxivSearchSource(SearchSource):
         try:
             import feedparser
         except ImportError:
+            self._last_error = "feedparser not installed"
             return []
 
         # Enforce rate limiting
@@ -360,7 +367,10 @@ class ArxivSearchSource(SearchSource):
             to_date = date_to.replace("-", "") if date_to else "*"
             query_parts.append(f"submittedDate:[{from_date} TO {to_date}]")
 
-        search_query = "search_query=" + " AND ".join(f"({p})" if " " in p else p for p in query_parts)
+        from urllib.parse import quote
+
+        raw_query = " AND ".join(f"({p})" if " " in p else p for p in query_parts)
+        search_query = "search_query=" + quote(raw_query, safe="")
 
         # Build URL with sort parameters
         url = f"{base_url}{search_query}&start=0&max_results={max_results}"
@@ -368,15 +378,18 @@ class ArxivSearchSource(SearchSource):
 
         try:
             feed = feedparser.parse(url)
-        except Exception:
+        except Exception as e:
+            self._last_error = f"Failed to parse ArXiv feed: {e}"
             return []
 
         # Detect ArXiv rate limiting / HTTP errors
         status = getattr(feed, "status", 200)
         if status in (403, 429):
+            self._last_error = f"ArXiv rate limited (HTTP {status})"
             logger.warning("arxiv_rate_limited", status=status)
             return []
         if feed.bozo and not feed.entries:
+            self._last_error = f"ArXiv feed error: {feed.bozo_exception}"
             logger.warning("arxiv_feed_error", error=str(feed.bozo_exception))
             return []
 
@@ -400,6 +413,9 @@ class ArxivSearchSource(SearchSource):
                     },
                 )
             )
+
+        # Clear error on successful parse
+        self._last_error = None
 
         # Only cache non-error results (avoid caching empty results from rate limiting)
         if results or (status == 200 and not feed.bozo):

@@ -343,6 +343,7 @@ class BaseCLIApp:
             ClearCommand,
             ExitCommand,
             StatusCommand,
+            PapersCommand,
         )
         from agentic_cli.cli.settings_command import SettingsCommand
 
@@ -351,6 +352,7 @@ class BaseCLIApp:
         self.command_registry.register(ExitCommand())
         self.command_registry.register(StatusCommand())
         self.command_registry.register(SettingsCommand())
+        self.command_registry.register(PapersCommand())
 
     async def process_input(self, user_input: str) -> None:
         """Process user input.

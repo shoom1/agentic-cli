@@ -11,6 +11,10 @@ from agentic_cli.tools.registry import (
     PermissionLevel,
 )
 
+# Max chars of extracted PDF text to return in tool results.
+# ~7.5K tokens — enough for key content without blowing up the context window.
+PDF_TEXT_MAX_CHARS = 30_000
+
 
 # Module-level ArxivSearchSource instance for rate limiting and caching
 _arxiv_source = None
@@ -105,6 +109,14 @@ def search_arxiv(
         date_to=date_to,
     )
 
+    # Check for errors (rate limiting, parse failures, etc.)
+    if source.last_error is not None:
+        return {
+            "success": False,
+            "error": source.last_error,
+            "query": query,
+        }
+
     # Convert SearchSourceResult to paper dict format
     papers = []
     for result in results:
@@ -120,6 +132,7 @@ def search_arxiv(
         papers.append(paper)
 
     return {
+        "success": True,
         "papers": papers,
         "total_found": len(papers),
         "query": query,
@@ -129,17 +142,23 @@ def search_arxiv(
 @register_tool(
     category=ToolCategory.KNOWLEDGE,
     permission_level=PermissionLevel.SAFE,
-    description="Fetch metadata for a specific arXiv paper by ID or URL (title, authors, abstract, categories). Use this when you have a paper ID and need details.",
+    description="Fetch metadata for a specific arXiv paper by ID or URL. Optionally download the PDF and extract text with download='pdf'.",
 )
-def fetch_arxiv_paper(arxiv_id: str) -> dict[str, Any]:
+async def fetch_arxiv_paper(
+    arxiv_id: str,
+    download: str = "",
+) -> dict[str, Any]:
     """Fetch detailed information about a specific arXiv paper.
 
     Args:
         arxiv_id: The arXiv paper ID, e.g. '1706.03762' or '1706.03762v2'.
                   Also accepts full arXiv URLs.
+        download: Set to 'pdf' to download the PDF and extract text.
+                  Empty string (default) returns metadata only.
 
     Returns:
-        Dictionary with paper details or error information
+        Dictionary with paper details or error information.
+        When download='pdf', also includes 'pdf_text' (truncated to PDF_TEXT_MAX_CHARS).
     """
     try:
         import feedparser
@@ -180,7 +199,87 @@ def fetch_arxiv_paper(arxiv_id: str) -> dict[str, Any]:
         "primary_category": entry.get("arxiv_primary_category", {}).get("term", ""),
     }
 
-    return {"success": True, "paper": paper}
+    result = {"success": True, "paper": paper}
+
+    # Optionally download PDF and extract text
+    if download == "pdf":
+        pdf_result = await _download_arxiv_pdf(arxiv_id, source)
+        if pdf_result.get("error"):
+            result["download_error"] = pdf_result["error"]
+        else:
+            pdf_text = pdf_result["pdf_text"]
+            truncated = len(pdf_text) > PDF_TEXT_MAX_CHARS
+            if truncated:
+                pdf_text = pdf_text[:PDF_TEXT_MAX_CHARS]
+            result["pdf_text"] = pdf_text
+            result["pdf_text_truncated"] = truncated
+            result["pdf_size_bytes"] = pdf_result["pdf_size_bytes"]
+
+    return result
+
+
+async def _download_arxiv_pdf(
+    arxiv_id: str,
+    source,
+) -> dict[str, Any]:
+    """Download a PDF from ArXiv and extract text.
+
+    Args:
+        arxiv_id: Cleaned arXiv paper ID.
+        source: ArxivSearchSource instance for rate limiting.
+
+    Returns:
+        Dict with pdf_text, pdf_bytes (base64), pdf_size_bytes, or error.
+    """
+    try:
+        import httpx
+    except ImportError:
+        return {"error": "httpx not installed, cannot download PDFs"}
+
+    pdf_url = f"https://arxiv.org/pdf/{arxiv_id}.pdf"
+
+    # Rate limit the PDF download
+    source.wait_for_rate_limit()
+
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=60.0) as client:
+            response = await client.get(pdf_url)
+            response.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        return {"error": f"HTTP {e.response.status_code} downloading PDF"}
+    except httpx.RequestError as e:
+        return {"error": f"Failed to download PDF: {e}"}
+
+    pdf_bytes = response.content
+    pdf_size = len(pdf_bytes)
+
+    # Extract text from PDF
+    pdf_text = ""
+    try:
+        import pypdf
+        import io
+
+        reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
+        pages = []
+        for page in reader.pages:
+            text = page.extract_text()
+            if text:
+                pages.append(text)
+        pdf_text = "\n\n".join(pages)
+    except ImportError:
+        return {"error": "pypdf not installed, cannot extract PDF text"}
+    except Exception as e:
+        return {"error": f"Failed to extract PDF text: {e}"}
+
+    # Base64-encode the PDF bytes for transport
+    import base64
+    pdf_b64 = base64.b64encode(pdf_bytes).decode("ascii")
+
+    return {
+        "pdf_text": pdf_text,
+        "pdf_bytes": pdf_b64,
+        "pdf_size_bytes": pdf_size,
+    }
 
 
 @register_tool(

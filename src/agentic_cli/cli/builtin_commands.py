@@ -113,3 +113,79 @@ class StatusCommand(Command):
 
         panel = Panel(table, title="[bold]Session Status[/bold]", border_style="cyan")
         app.session.add_rich(panel)
+
+
+class PapersCommand(Command):
+    """List saved research papers."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            name="papers",
+            description="List saved research papers",
+            aliases=[],
+            usage="/papers [query] [--source=arxiv|web|local]",
+            examples=["/papers", "/papers transformer", "/papers --source=arxiv"],
+            category=CommandCategory.SEARCH,
+        )
+
+    async def execute(self, args: str, app: Any) -> None:
+        """Display saved papers in a table."""
+        from agentic_cli.tools.paper_tools import PaperStore
+
+        parsed = self.parse_args(args)
+        query = parsed.positional or None
+        source_filter = parsed.get_option("source", "", str) or None
+
+        # Get paper store from workflow manager or create temporary one
+        store = None
+        try:
+            workflow = app.workflow
+            if workflow and hasattr(workflow, "paper_store") and workflow.paper_store:
+                store = workflow.paper_store
+        except (RuntimeError, AttributeError):
+            pass
+
+        if store is None:
+            store = PaperStore(app.settings)
+
+        papers = store.list_papers(query=query, source_type=source_filter)
+
+        if not papers:
+            app.session.add_message("system", "No saved papers found.")
+            return
+
+        table = Table(title="Saved Papers", show_lines=False, padding=(0, 1))
+        table.add_column("ID", style="dim", no_wrap=True, max_width=8)
+        table.add_column("Title", style="bold", max_width=50)
+        table.add_column("Authors", max_width=30)
+        table.add_column("Source", style="cyan", no_wrap=True)
+        table.add_column("Added", style="dim", no_wrap=True)
+        table.add_column("Size", style="dim", no_wrap=True, justify="right")
+
+        for p in papers:
+            # Format authors (truncate if too many)
+            authors = ", ".join(p.authors[:3])
+            if len(p.authors) > 3:
+                authors += f" +{len(p.authors) - 3}"
+
+            # Format date
+            added = p.added_at[:10] if p.added_at else ""
+
+            # Format size
+            if p.file_size_bytes >= 1048576:
+                size = f"{p.file_size_bytes / 1048576:.1f} MB"
+            elif p.file_size_bytes >= 1024:
+                size = f"{p.file_size_bytes / 1024:.0f} KB"
+            else:
+                size = f"{p.file_size_bytes} B"
+
+            table.add_row(
+                p.id[:8],
+                p.title[:50],
+                authors,
+                p.source_type,
+                added,
+                size,
+            )
+
+        app.session.add_rich(table)

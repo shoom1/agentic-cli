@@ -711,8 +711,9 @@ class TestArxivSearchSource:
         source = ArxivSearchSource()
         source.search("test", categories=["cs.AI", "cs.LG"])
 
-        # Check the URL includes category filter
-        call_url = mock_parse.call_args[0][0]
+        # Check the URL includes category filter (URL-encoded)
+        from urllib.parse import unquote
+        call_url = unquote(mock_parse.call_args[0][0])
         assert "cat:cs.AI" in call_url
         assert "cat:cs.LG" in call_url
 

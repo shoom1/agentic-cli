@@ -26,7 +26,7 @@ from typing import Any, Callable, Literal, TypeVar
 
 # Type for manager requirements
 ManagerRequirement = Literal[
-    "memory_manager", "plan_store", "task_store", "approval_manager", "checkpoint_manager", "llm_summarizer"
+    "memory_manager", "plan_store", "task_store", "paper_store", "approval_manager", "checkpoint_manager", "llm_summarizer"
 ]
 
 F = TypeVar("F", bound=Callable)
@@ -183,6 +183,7 @@ __all__ = [
     "planning_tools",
     "task_tools",
     "hitl_tools",
+    "paper_tools",
 ]
 
 
@@ -192,6 +193,7 @@ _lazy_tool_modules = {
     "planning_tools": "agentic_cli.tools.planning_tools",
     "task_tools": "agentic_cli.tools.task_tools",
     "hitl_tools": "agentic_cli.tools.hitl_tools",
+    "paper_tools": "agentic_cli.tools.paper_tools",
 }
 
 
