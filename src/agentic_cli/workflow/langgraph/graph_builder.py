@@ -80,6 +80,8 @@ class LangGraphBuilder:
         graph.set_entry_point(root_agent)
 
         # Add tool execution nodes for agents that have tools
+        from langgraph.prebuilt import ToolNode
+
         agents_with_tools = {
             config.name for config in agent_configs if config.tools
         }
@@ -87,10 +89,11 @@ class LangGraphBuilder:
         for config in agent_configs:
             if config.tools:
                 tool_node_name = f"{config.name}_tools"
-                tool_fn_map = {fn.__name__: fn for fn in config.tools}
                 tool_map[config.name] = tool_node_name
-                tool_node_fn = self._create_tool_node(tool_fn_map, config.name)
-                graph.add_node(tool_node_name, tool_node_fn)
+                tool_node = ToolNode(
+                    config.tools, name=tool_node_name, handle_tool_errors=True,
+                )
+                graph.add_node(tool_node_name, tool_node)
                 # After tool execution, loop back to the agent
                 graph.add_edge(tool_node_name, config.name)
 
@@ -279,9 +282,7 @@ class LangGraphBuilder:
 
         async def agent_node(state: dict) -> dict:
             """Process state through this agent."""
-            from langchain_core.messages import (
-                HumanMessage, AIMessage, SystemMessage, ToolMessage,
-            )
+            from langchain_core.messages import SystemMessage
 
             # Get LLM for this agent (use config model or default)
             model_name = config.model or default_model
@@ -291,10 +292,11 @@ class LangGraphBuilder:
             if config.tools:
                 llm = llm.bind_tools(config.tools)
 
-            # Build messages
+            # Build messages: system prompt + conversation history
+            # State messages are already LangChain objects (add_messages reducer
+            # auto-converts dicts), so we can use them directly.
             messages = []
 
-            # Add system prompt
             system_prompt = config.get_prompt()
             if system_prompt:
                 if self._settings.prompt_caching_enabled and model_name.startswith("claude-"):
@@ -310,63 +312,15 @@ class LangGraphBuilder:
                 else:
                     messages.append(SystemMessage(content=system_prompt))
 
-            # Add conversation history
-            for msg in state.get("messages", []):
-                role = msg.get("role")
-                if role == "user":
-                    messages.append(HumanMessage(content=msg["content"]))
-                elif role == "assistant":
-                    # Reconstruct AIMessage with tool_calls if present
-                    ai_kwargs: dict[str, Any] = {"content": msg["content"]}
-                    if msg.get("tool_calls"):
-                        ai_kwargs["tool_calls"] = msg["tool_calls"]
-                    messages.append(AIMessage(**ai_kwargs))
-                elif role == "tool":
-                    messages.append(ToolMessage(
-                        content=msg["content"],
-                        tool_call_id=msg.get("tool_call_id", ""),
-                        name=msg.get("name", ""),
-                    ))
-                elif role == "system":
-                    messages.append(SystemMessage(content=msg["content"]))
+            messages.extend(state.get("messages", []))
 
             # Invoke LLM
             try:
                 response = await llm.ainvoke(messages)
 
-                # Extract and normalize content
-                raw_content = (
-                    response.content
-                    if hasattr(response, "content")
-                    else str(response)
-                )
-                content = self._normalize_content(raw_content)
-
-                # Handle tool calls if present
-                tool_calls = []
-                if hasattr(response, "tool_calls") and response.tool_calls:
-                    for tc in response.tool_calls:
-                        tool_calls.append(
-                            {
-                                "id": tc.get("id", ""),
-                                "name": tc.get("name", ""),
-                                "args": tc.get("args", {}),
-                            }
-                        )
-
-                # Build assistant message — include tool_calls so they're
-                # available when reconstructing LangChain messages on re-entry
-                assistant_msg: dict[str, Any] = {
-                    "role": "assistant",
-                    "content": content,
-                }
-                if tool_calls:
-                    assistant_msg["tool_calls"] = tool_calls
-
                 return {
-                    "messages": [assistant_msg],
+                    "messages": [response],
                     "current_agent": config.name,
-                    "pending_tool_calls": tool_calls,
                 }
 
             except Exception as e:
@@ -387,67 +341,6 @@ class LangGraphBuilder:
 
         return agent_node
 
-    def _create_tool_node(
-        self, tool_fn_map: dict[str, Callable], agent_name: str
-    ) -> Callable:
-        """Create a node that executes pending tool calls.
-
-        Args:
-            tool_fn_map: Mapping of tool name → callable.
-            agent_name: Name of the owning agent (for logging).
-
-        Returns:
-            Async function that executes tools and returns results in state.
-        """
-
-        async def tool_node(state: dict) -> dict:
-            """Execute pending tool calls and return results."""
-            import asyncio
-
-            pending = state.get("pending_tool_calls", [])
-            results = []
-            tool_messages = []
-
-            for tc in pending:
-                name = tc.get("name", "")
-                args = tc.get("args", {})
-                tool_call_id = tc.get("id", "")
-                fn = tool_fn_map.get(name)
-
-                if fn is None:
-                    result_str = f"Error: tool '{name}' not found"
-                    logger.warning("tool_not_found", tool=name, agent=agent_name)
-                else:
-                    try:
-                        if asyncio.iscoroutinefunction(fn):
-                            result = await fn(**args)
-                        else:
-                            result = fn(**args)
-                        result_str = str(result)
-                    except Exception as e:
-                        result_str = f"Error calling {name}: {e}"
-                        logger.error("tool_execution_error", tool=name, error=str(e))
-
-                results.append({
-                    "tool_call_id": tool_call_id,
-                    "name": name,
-                    "result": result_str,
-                })
-                tool_messages.append({
-                    "role": "tool",
-                    "content": result_str,
-                    "name": name,
-                    "tool_call_id": tool_call_id,
-                })
-
-            return {
-                "messages": tool_messages,
-                "pending_tool_calls": [],
-                "tool_results": results,
-            }
-
-        return tool_node
-
     def _create_agent_router(
         self, config: AgentConfig, tool_node_name: str | None
     ) -> Callable:
@@ -465,13 +358,18 @@ class LangGraphBuilder:
         """
 
         def router(state: dict) -> str:
-            """Route based on pending tool calls and sub-agent delegation."""
-            pending_tools = state.get("pending_tool_calls", [])
+            """Route based on tool calls on last message and sub-agent delegation."""
+            messages = state.get("messages", [])
+            if not messages:
+                return "__end__"
 
-            if pending_tools:
+            last_msg = messages[-1]
+            tool_calls = getattr(last_msg, "tool_calls", [])
+
+            if tool_calls:
                 # Check if any tool call maps to a sub-agent
-                for tool_call in pending_tools:
-                    name = tool_call.get("name", "")
+                for tool_call in tool_calls:
+                    name = tool_call.get("name", "") if isinstance(tool_call, dict) else getattr(tool_call, "name", "")
                     if config.sub_agents and name in config.sub_agents:
                         return name
 
@@ -481,12 +379,11 @@ class LangGraphBuilder:
 
             # Check last message for delegation hints (sub-agents only)
             if config.sub_agents:
-                messages = state.get("messages", [])
-                if messages:
-                    last_msg = messages[-1]
-                    content = last_msg.get("content", "").lower()
+                content = getattr(last_msg, "content", "")
+                if isinstance(content, str):
+                    content_lower = content.lower()
                     for sub_agent in config.sub_agents:
-                        if sub_agent.lower() in content:
+                        if sub_agent.lower() in content_lower:
                             return sub_agent
 
             return "__end__"

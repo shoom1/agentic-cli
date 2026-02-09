@@ -304,8 +304,6 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
             initial_state = {
                 "messages": [{"role": "user", "content": message}],
                 "current_agent": None,
-                "pending_tool_calls": [],
-                "tool_results": [],
                 "session_id": current_session_id,
                 "user_id": user_id,
                 "metadata": {},
@@ -378,12 +376,16 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
                     )
 
                 elif event_kind == "on_tool_end":
-                    # Tool result
+                    # Tool result — ToolNode returns ToolMessage objects
                     output = event_data.get("output", "")
+                    if hasattr(output, "content"):
+                        result_str = str(output.content)
+                    else:
+                        result_str = str(output)
                     yield self._maybe_transform(
                         WorkflowEvent.tool_result(
                             tool_name=event_name,
-                            result=str(output),
+                            result=result_str,
                             success=True,
                         )
                     )

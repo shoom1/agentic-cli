@@ -45,9 +45,10 @@ class TestLangGraphState:
         new = [{"role": "assistant", "content": "Hi there"}]
         result = add_messages(existing, new)
 
+        # LangGraph's add_messages auto-converts dicts to LangChain message objects
         assert len(result) == 2
-        assert result[0]["content"] == "Hello"
-        assert result[1]["content"] == "Hi there"
+        assert result[0].content == "Hello"
+        assert result[1].content == "Hi there"
 
     def test_add_messages_with_single(self):
         """Test add_messages reducer with single message."""
@@ -56,7 +57,7 @@ class TestLangGraphState:
         result = add_messages(existing, new)
 
         assert len(result) == 2
-        assert result[1]["content"] == "Hi there"
+        assert result[1].content == "Hi there"
 
     def test_checkpoint_data_to_dict(self):
         """Test CheckpointData serialization."""

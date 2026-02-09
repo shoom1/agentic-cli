@@ -9,17 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Annotated, Any, Literal, TypedDict
-import operator
 
-
-def add_messages(existing: list, new: list | Any) -> list:
-    """Reducer function for combining message lists.
-
-    Handles both list and single message additions.
-    """
-    if isinstance(new, list):
-        return existing + new
-    return existing + [new]
+from langgraph.graph.message import add_messages
 
 
 class Message(TypedDict, total=False):
@@ -61,17 +52,13 @@ class AgentState(TypedDict, total=False):
     Fields:
         messages: Conversation history (uses add_messages reducer)
         current_agent: Name of the currently active agent
-        pending_tool_calls: Tool calls waiting to be executed
-        tool_results: Results from executed tool calls
         session_id: Session identifier
         user_id: User identifier
         metadata: Arbitrary metadata
     """
 
-    messages: Annotated[list[Message], add_messages]
+    messages: Annotated[list, add_messages]
     current_agent: str | None
-    pending_tool_calls: list[ToolCall]
-    tool_results: list[ToolResult]
     session_id: str
     user_id: str
     metadata: dict[str, Any]
