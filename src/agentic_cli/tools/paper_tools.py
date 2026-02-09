@@ -333,24 +333,36 @@ async def save_paper(
     # Generate paper ID
     paper_id = str(uuid.uuid4())[:8]
 
-    # For ArXiv: auto-populate metadata if not provided
+    # For ArXiv: fetch metadata separately, download PDF bytes directly
     arxiv_id = ""
     pdf_url = url_or_path
+    arxiv_pdf_bytes: bytes | None = None
     if detected_type == PaperSourceType.ARXIV:
         arxiv_id = _extract_arxiv_id(url_or_path)
         pdf_url = _ensure_arxiv_pdf_url(url_or_path)
 
-        if not title and arxiv_id:
+        if arxiv_id:
+            # Fetch metadata only (no download)
             try:
                 from agentic_cli.tools.arxiv_tools import fetch_arxiv_paper
-                result = fetch_arxiv_paper(arxiv_id)
-                if result.get("success") and "paper" in result:
-                    paper = result["paper"]
-                    title = title or paper.get("title", "")
-                    authors = authors or paper.get("authors", [])
-                    abstract = abstract or paper.get("abstract", "")
+                metadata_result = await fetch_arxiv_paper(arxiv_id)
+                if metadata_result.get("success") and "paper" in metadata_result:
+                    paper_info = metadata_result["paper"]
+                    title = title or paper_info.get("title", "")
+                    authors = authors or paper_info.get("authors", [])
+                    abstract = abstract or paper_info.get("abstract", "")
             except Exception as e:
                 logger.warning("arxiv_metadata_fetch_failed", arxiv_id=arxiv_id, error=str(e))
+
+            # Download raw PDF bytes directly (bypasses LLM context)
+            try:
+                from agentic_cli.tools.arxiv_tools import _download_arxiv_pdf, _get_arxiv_source
+                pdf_result = await _download_arxiv_pdf(arxiv_id, _get_arxiv_source())
+                if not pdf_result.get("error"):
+                    import base64
+                    arxiv_pdf_bytes = base64.b64decode(pdf_result["pdf_bytes"])
+            except Exception as e:
+                logger.warning("arxiv_pdf_download_failed", arxiv_id=arxiv_id, error=str(e))
 
     # Ensure PDFs directory exists
     store.pdfs_dir.mkdir(parents=True, exist_ok=True)
@@ -370,8 +382,17 @@ async def save_paper(
             shutil.copy2(str(source_path), str(dest_path))
         except OSError as e:
             return {"success": False, "error": f"Failed to copy file: {e}"}
+    elif detected_type == PaperSourceType.ARXIV and arxiv_pdf_bytes is not None:
+        # Use PDF bytes from direct _download_arxiv_pdf call
+        max_bytes = getattr(store._settings, "webfetch_max_pdf_bytes", 5242880)
+        if len(arxiv_pdf_bytes) > max_bytes:
+            return {
+                "success": False,
+                "error": f"PDF too large ({len(arxiv_pdf_bytes)} bytes, max {max_bytes})",
+            }
+        dest_path.write_bytes(arxiv_pdf_bytes)
     else:
-        # Download from URL
+        # Download from URL (non-ArXiv, or ArXiv PDF download failed)
         try:
             import httpx
         except ImportError:

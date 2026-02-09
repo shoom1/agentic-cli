@@ -1215,7 +1215,8 @@ class TestDiffCompare:
 class TestStandardTools:
     """Tests for standard tool functions."""
 
-    def test_fetch_arxiv_paper_returns_paper_details(self):
+    @pytest.mark.asyncio
+    async def test_fetch_arxiv_paper_returns_paper_details(self):
         """Test fetch_arxiv_paper returns paper details for valid ID."""
         from unittest.mock import patch, MagicMock
         from agentic_cli.tools.arxiv_tools import fetch_arxiv_paper
@@ -1237,7 +1238,7 @@ class TestStandardTools:
                 ]
             )
 
-            result = fetch_arxiv_paper("1706.03762")
+            result = await fetch_arxiv_paper("1706.03762")
 
             assert result["success"] is True
             assert result["paper"]["title"] == "Attention Is All You Need"
@@ -1246,7 +1247,8 @@ class TestStandardTools:
             assert "cs.CL" in result["paper"]["categories"]
             assert result["paper"]["pdf_url"] == "https://arxiv.org/pdf/1706.03762.pdf"
 
-    def test_fetch_arxiv_paper_not_found(self):
+    @pytest.mark.asyncio
+    async def test_fetch_arxiv_paper_not_found(self):
         """Test fetch_arxiv_paper handles missing paper."""
         from unittest.mock import patch, MagicMock
         from agentic_cli.tools.arxiv_tools import fetch_arxiv_paper
@@ -1254,29 +1256,30 @@ class TestStandardTools:
         with patch("feedparser.parse") as mock_parse:
             mock_parse.return_value = MagicMock(entries=[])
 
-            result = fetch_arxiv_paper("9999.99999")
+            result = await fetch_arxiv_paper("9999.99999")
 
             assert result["success"] is False
             assert "not found" in result["error"].lower()
 
-    def test_fetch_arxiv_paper_cleans_id(self):
+    @pytest.mark.asyncio
+    async def test_fetch_arxiv_paper_cleans_id(self):
         """Test fetch_arxiv_paper handles various ID formats."""
         from unittest.mock import patch, MagicMock
         from agentic_cli.tools.arxiv_tools import fetch_arxiv_paper
 
         with patch("feedparser.parse") as mock_parse:
             mock_parse.return_value = MagicMock(
-                entries=[{"title": "Test", "link": "", "summary": "", "authors": [], 
+                entries=[{"title": "Test", "link": "", "summary": "", "authors": [],
                          "published": "", "tags": [], "id": "http://arxiv.org/abs/1234.5678v1"}]
             )
 
             # Test with full URL
-            fetch_arxiv_paper("https://arxiv.org/abs/1234.5678")
+            await fetch_arxiv_paper("https://arxiv.org/abs/1234.5678")
             call_url = mock_parse.call_args[0][0]
             assert "id_list=1234.5678" in call_url
 
             # Test with version suffix
-            fetch_arxiv_paper("1234.5678v2")
+            await fetch_arxiv_paper("1234.5678v2")
             call_url = mock_parse.call_args[0][0]
             assert "id_list=1234.5678" in call_url
 
@@ -1410,7 +1413,8 @@ class TestArxivHelpers:
 class TestFetchArxivPaperRateLimiting:
     """Tests for fetch_arxiv_paper rate limiting."""
 
-    def test_fetch_arxiv_paper_respects_rate_limit(self):
+    @pytest.mark.asyncio
+    async def test_fetch_arxiv_paper_respects_rate_limit(self):
         """Test fetch_arxiv_paper respects rate limiting."""
         from unittest.mock import patch, MagicMock
         from agentic_cli.tools.arxiv_tools import fetch_arxiv_paper
@@ -1430,9 +1434,9 @@ class TestFetchArxivPaperRateLimiting:
                 )
 
                 # First call
-                fetch_arxiv_paper("1234.5678")
+                await fetch_arxiv_paper("1234.5678")
                 # Second call immediately - should trigger rate limiting
-                fetch_arxiv_paper("5678.1234")
+                await fetch_arxiv_paper("5678.1234")
 
                 # Verify sleep was called for rate limiting
                 assert mock_time.sleep.call_count >= 1
