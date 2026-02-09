@@ -209,6 +209,10 @@ async def analyze_arxiv_paper(arxiv_id: str, prompt: str) -> dict[str, Any]:
     # Build the abstract URL
     url = f"https://arxiv.org/abs/{arxiv_id}"
 
+    # Enforce rate limiting using shared ArxivSearchSource
+    source = _get_arxiv_source()
+    source.wait_for_rate_limit()
+
     # Use web_fetch to get LLM analysis
     result = await web_fetch(url, prompt)
 

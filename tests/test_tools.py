@@ -1336,6 +1336,38 @@ class TestStandardTools:
             assert result["success"] is False
             assert "error" in result
 
+    @pytest.mark.asyncio
+    async def test_analyze_arxiv_paper_calls_rate_limiter(self):
+        """Test analyze_arxiv_paper calls wait_for_rate_limit before web_fetch."""
+        from unittest.mock import patch, AsyncMock, MagicMock, call
+        from agentic_cli.tools.arxiv_tools import analyze_arxiv_paper
+        import agentic_cli.tools.arxiv_tools as arxiv_module
+
+        # Reset the source to ensure clean state
+        arxiv_module._arxiv_source = None
+
+        mock_web_fetch = AsyncMock(return_value={
+            "success": True,
+            "summary": "Analysis result",
+        })
+
+        # Track call order
+        call_order = []
+        mock_source = MagicMock()
+        mock_source.wait_for_rate_limit.side_effect = lambda: call_order.append("rate_limit")
+
+        original_web_fetch = mock_web_fetch.side_effect
+        async def tracking_web_fetch(*args, **kwargs):
+            call_order.append("web_fetch")
+            return {"success": True, "summary": "Analysis result"}
+        mock_web_fetch.side_effect = tracking_web_fetch
+
+        with patch("agentic_cli.tools.arxiv_tools._get_arxiv_source", return_value=mock_source):
+            with patch("agentic_cli.tools.webfetch_tool.web_fetch", mock_web_fetch):
+                await analyze_arxiv_paper("1706.03762", "What is the contribution?")
+
+        mock_source.wait_for_rate_limit.assert_called_once()
+        assert call_order == ["rate_limit", "web_fetch"]
 
 
 class TestArxivHelpers:

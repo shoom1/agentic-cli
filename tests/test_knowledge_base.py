@@ -706,7 +706,7 @@ class TestArxivSearchSource:
     @patch("feedparser.parse")
     def test_search_with_categories(self, mock_parse):
         """Test search with category filter."""
-        mock_parse.return_value = MagicMock(entries=[])
+        mock_parse.return_value = MagicMock(entries=[], bozo=False, status=200)
 
         source = ArxivSearchSource()
         source.search("test", categories=["cs.AI", "cs.LG"])
@@ -730,7 +730,7 @@ class TestArxivSearchSource:
     @patch("agentic_cli.knowledge_base.sources.time")
     def test_rate_limiting_enforced(self, mock_time_module, mock_parse):
         """Test rate limiting is enforced between requests."""
-        mock_parse.return_value = MagicMock(entries=[])
+        mock_parse.return_value = MagicMock(entries=[], bozo=False, status=200)
 
         # First call: time()=1.0 for check, time()=1.0 to record
         # Second call: time()=1.0 for check (elapsed=0, needs sleep), time()=1.0 to record
@@ -755,7 +755,7 @@ class TestArxivSearchSource:
     @patch("agentic_cli.knowledge_base.sources.time")
     def test_rate_limiting_respects_elapsed_time(self, mock_time_module, mock_parse):
         """Test rate limiting accounts for time already elapsed."""
-        mock_parse.return_value = MagicMock(entries=[])
+        mock_parse.return_value = MagicMock(entries=[], bozo=False, status=200)
 
         # First call (3 time() calls): cache check, rate limit check, cache store
         # Second call (3 time() calls): cache check, rate limit check (elapsed=1s), cache store
@@ -829,7 +829,7 @@ class TestArxivSearchSource:
         mock_time_module.time.return_value = 100.0
         mock_time_module.sleep = MagicMock()
 
-        mock_parse.return_value = MagicMock(entries=[])
+        mock_parse.return_value = MagicMock(entries=[], bozo=False, status=200)
 
         source = ArxivSearchSource()
 
@@ -871,7 +871,7 @@ class TestArxivSearchSource:
             return float(time_counter[0])
         mock_time_module.time.side_effect = get_time
 
-        mock_parse.return_value = MagicMock(entries=[])
+        mock_parse.return_value = MagicMock(entries=[], bozo=False, status=200)
 
         source = ArxivSearchSource(max_cache_size=3)
 
@@ -911,7 +911,7 @@ class TestArxivSearchSource:
         """Test search with sort_by parameter."""
         mock_time_module.time.return_value = 100.0
         mock_time_module.sleep = MagicMock()
-        mock_parse.return_value = MagicMock(entries=[])
+        mock_parse.return_value = MagicMock(entries=[], bozo=False, status=200)
 
         source = ArxivSearchSource()
         source.search("test", sort_by="lastUpdatedDate")
@@ -925,7 +925,7 @@ class TestArxivSearchSource:
         """Test search with sort_order parameter."""
         mock_time_module.time.return_value = 100.0
         mock_time_module.sleep = MagicMock()
-        mock_parse.return_value = MagicMock(entries=[])
+        mock_parse.return_value = MagicMock(entries=[], bozo=False, status=200)
 
         source = ArxivSearchSource()
         source.search("test", sort_by="submittedDate", sort_order="ascending")
@@ -940,7 +940,7 @@ class TestArxivSearchSource:
         """Test search with date range filter."""
         mock_time_module.time.return_value = 100.0
         mock_time_module.sleep = MagicMock()
-        mock_parse.return_value = MagicMock(entries=[])
+        mock_parse.return_value = MagicMock(entries=[], bozo=False, status=200)
 
         source = ArxivSearchSource()
         source.search("test", date_from="2024-01-01", date_to="2024-12-31")
@@ -957,7 +957,7 @@ class TestArxivSearchSource:
         """Test that sort and date params are included in cache key."""
         mock_time_module.time.return_value = 100.0
         mock_time_module.sleep = MagicMock()
-        mock_parse.return_value = MagicMock(entries=[])
+        mock_parse.return_value = MagicMock(entries=[], bozo=False, status=200)
 
         source = ArxivSearchSource()
 
@@ -973,6 +973,83 @@ class TestArxivSearchSource:
         # Default is relevance (ArXiv default)
         cache_key = source._make_cache_key("test", 10, None, "relevance", "descending", None, None)
         assert "relevance" in cache_key
+
+    @patch("feedparser.parse")
+    @patch("agentic_cli.knowledge_base.sources.time")
+    def test_http_403_returns_empty_and_not_cached(self, mock_time_module, mock_parse):
+        """Test that HTTP 403 (rate limited) returns empty and is NOT cached."""
+        mock_time_module.time.return_value = 100.0
+        mock_time_module.sleep = MagicMock()
+
+        mock_feed = MagicMock()
+        mock_feed.status = 403
+        mock_feed.entries = []
+        mock_feed.bozo = False
+        mock_parse.return_value = mock_feed
+
+        source = ArxivSearchSource()
+        results = source.search("test query")
+
+        assert results == []
+        assert len(source._cache) == 0  # Should NOT be cached
+
+    @patch("feedparser.parse")
+    @patch("agentic_cli.knowledge_base.sources.time")
+    def test_http_429_returns_empty_and_not_cached(self, mock_time_module, mock_parse):
+        """Test that HTTP 429 (too many requests) returns empty and is NOT cached."""
+        mock_time_module.time.return_value = 100.0
+        mock_time_module.sleep = MagicMock()
+
+        mock_feed = MagicMock()
+        mock_feed.status = 429
+        mock_feed.entries = []
+        mock_feed.bozo = False
+        mock_parse.return_value = mock_feed
+
+        source = ArxivSearchSource()
+        results = source.search("test query")
+
+        assert results == []
+        assert len(source._cache) == 0  # Should NOT be cached
+
+    @patch("feedparser.parse")
+    @patch("agentic_cli.knowledge_base.sources.time")
+    def test_bozo_feed_error_returns_empty_and_not_cached(self, mock_time_module, mock_parse):
+        """Test that bozo feed errors with no entries return empty and are NOT cached."""
+        mock_time_module.time.return_value = 100.0
+        mock_time_module.sleep = MagicMock()
+
+        mock_feed = MagicMock()
+        mock_feed.status = 200
+        mock_feed.bozo = True
+        mock_feed.bozo_exception = Exception("XML parsing error")
+        mock_feed.entries = []
+        mock_parse.return_value = mock_feed
+
+        source = ArxivSearchSource()
+        results = source.search("test query")
+
+        assert results == []
+        assert len(source._cache) == 0  # Should NOT be cached
+
+    @patch("feedparser.parse")
+    @patch("agentic_cli.knowledge_base.sources.time")
+    def test_successful_empty_results_are_cached(self, mock_time_module, mock_parse):
+        """Test that legitimate empty results (HTTP 200, no bozo) ARE cached."""
+        mock_time_module.time.return_value = 100.0
+        mock_time_module.sleep = MagicMock()
+
+        mock_feed = MagicMock()
+        mock_feed.status = 200
+        mock_feed.bozo = False
+        mock_feed.entries = []
+        mock_parse.return_value = mock_feed
+
+        source = ArxivSearchSource()
+        results = source.search("test query")
+
+        assert results == []
+        assert len(source._cache) == 1  # SHOULD be cached (legitimate empty result)
 
 
 class TestDefaultRegistry:

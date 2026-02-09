@@ -9,6 +9,10 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from agentic_cli.logging import Loggers
+
+logger = Loggers.knowledge_base()
+
 
 @dataclass
 class SearchSourceResult:
@@ -367,6 +371,15 @@ class ArxivSearchSource(SearchSource):
         except Exception:
             return []
 
+        # Detect ArXiv rate limiting / HTTP errors
+        status = getattr(feed, "status", 200)
+        if status in (403, 429):
+            logger.warning("arxiv_rate_limited", status=status)
+            return []
+        if feed.bozo and not feed.entries:
+            logger.warning("arxiv_feed_error", error=str(feed.bozo_exception))
+            return []
+
         results = []
         for entry in feed.entries:
             results.append(
@@ -388,12 +401,13 @@ class ArxivSearchSource(SearchSource):
                 )
             )
 
-        # Cache results (evict oldest if at max size)
-        self._evict_oldest_if_full()
-        self._cache[cache_key] = CachedSearchResult(
-            results=results,
-            timestamp=time.time(),
-        )
+        # Only cache non-error results (avoid caching empty results from rate limiting)
+        if results or (status == 200 and not feed.bozo):
+            self._evict_oldest_if_full()
+            self._cache[cache_key] = CachedSearchResult(
+                results=results,
+                timestamp=time.time(),
+            )
 
         return results
 
