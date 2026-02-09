@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.2] - 2026-02-08
+
+### Added
+- **Claude Model Support**: Auto-switch to LangGraph orchestrator for Anthropic models
+- **Tool Result Summaries**: Meaningful one-liners for 18 tools instead of generic "Returned N fields"
+
+### Changed
+- **LangGraph Native ToolNode**: Replaced custom tool node with LangChain's native ToolNode
+- **Workflow Manager Decomposition**: Extracted cohesive collaborators from workflow managers
+- **Message Processor Dispatch**: Extracted event handlers into dispatch table
+- **Tool Module Split**: Split monolithic standard.py into domain-specific tool modules
+- **Code Cleanup**: Deleted re-export shim, moved adk_manager into adk/, renamed context accessors
+- **Atomic File Writes**: write_file and edit_file now use atomic writes
+
+### Fixed
+- `diff_compare` tool producing ugly dict repr for summary field
+
 ## [0.4.1] - 2026-02-08
 
 ### Changed
