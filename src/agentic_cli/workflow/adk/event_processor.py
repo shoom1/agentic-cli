@@ -183,12 +183,11 @@ class ADKEventProcessor:
                     success = response["success"]
                 result_data = response
 
-            summary = self.generate_tool_summary(tool_name, result_data, success)
             logger.debug("tool_result", tool_name=tool_name, success=success)
 
             return WorkflowEvent.tool_result(
                 tool_name=tool_name,
-                result=summary,
+                result=result_data,
                 success=success,
             )
 

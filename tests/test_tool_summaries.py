@@ -221,10 +221,78 @@ class TestSearchMemory:
         assert format_tool_summary("search_memory", result) == "1 memories found"
 
 
+class TestWebSearch:
+    def test_multiline_results(self):
+        result = {
+            "query": "python async",
+            "results": [
+                {"title": "Async IO in Python", "url": "..."},
+                {"title": "Python Concurrency Guide", "url": "..."},
+                {"title": "Asyncio Docs", "url": "..."},
+            ],
+        }
+        summary = format_tool_summary("web_search", result)
+        lines = summary.split("\n")
+        assert lines[0] == '"python async" — Found 3 results'
+        assert "├─ Async IO in Python" in lines[1]
+        assert "├─ Python Concurrency Guide" in lines[2]
+        assert "└─ Asyncio Docs" in lines[3]
+
+    def test_empty_results(self):
+        result = {"query": "nothing here", "results": []}
+        summary = format_tool_summary("web_search", result)
+        assert summary == '"nothing here" — Found 0 results'
+        assert "\n" not in summary
+
+    def test_single_result(self):
+        result = {"query": "test", "results": [{"title": "Only One", "url": "..."}]}
+        summary = format_tool_summary("web_search", result)
+        lines = summary.split("\n")
+        assert len(lines) == 2
+        assert "└─ Only One" in lines[1]
+
+    def test_more_than_five_results_truncated(self):
+        result = {
+            "query": "many results",
+            "results": [{"title": f"Result {i}", "url": "..."} for i in range(8)],
+        }
+        summary = format_tool_summary("web_search", result)
+        lines = summary.split("\n")
+        assert lines[0] == '"many results" — Found 8 results'
+        # 1 header + 5 results = 6 lines
+        assert len(lines) == 6
+        assert "└─ Result 4" in lines[5]
+
+    def test_empty_dict_returns_summary(self):
+        summary = format_tool_summary("web_search", {})
+        assert summary == '"" — Found 0 results'
+
+
 class TestSearchArxiv:
-    def test_basic(self):
-        result = {"papers": [{"title": "Paper 1"}], "total_found": 10, "query": "attention"}
-        assert format_tool_summary("search_arxiv", result) == "Found 10 papers"
+    def test_multiline_results(self):
+        result = {
+            "papers": [{"title": "Paper 1"}, {"title": "Paper 2"}],
+            "total_found": 10,
+            "query": "attention",
+        }
+        summary = format_tool_summary("search_arxiv", result)
+        lines = summary.split("\n")
+        assert lines[0] == '"attention" — Found 10 papers'
+        assert "├─ Paper 1" in lines[1]
+        assert "└─ Paper 2" in lines[2]
+
+    def test_no_papers(self):
+        result = {"papers": [], "total_found": 0, "query": "nothing"}
+        summary = format_tool_summary("search_arxiv", result)
+        assert summary == '"nothing" — Found 0 papers'
+        assert "\n" not in summary
+
+    def test_missing_query(self):
+        result = {"papers": [{"title": "Paper"}], "total_found": 1}
+        summary = format_tool_summary("search_arxiv", result)
+        lines = summary.split("\n")
+        assert lines[0] == '"" — Found 1 papers'
+        assert "└─ Paper" in lines[1]
 
 
 class TestFetchArxivPaper:
@@ -290,7 +358,8 @@ class TestFallback:
             "read_file", "diff_compare", "glob", "grep",
             "write_file", "edit_file", "execute_python",
             "get_tasks", "get_plan", "search_memory",
-            "search_arxiv", "fetch_arxiv_paper", "ingest_to_knowledge_base",
+            "web_search", "search_arxiv", "fetch_arxiv_paper",
+            "ingest_to_knowledge_base",
             "request_approval", "create_checkpoint",
         ]:
             result = format_tool_summary(tool_name, {})
@@ -334,6 +403,46 @@ class TestADKSummaryDictBugFix:
 # ---------------------------------------------------------------------------
 # events.py: _format_result_content uses tool-specific formatters
 # ---------------------------------------------------------------------------
+
+
+class TestADKPassesRawDicts:
+    """Verify ADK now passes raw result dicts, not pre-formatted strings."""
+
+    def test_dict_result_formatted_by_event(self):
+        from agentic_cli.workflow.events import WorkflowEvent
+
+        result = {
+            "success": True,
+            "diff": "...",
+            "summary": {"added": 3, "removed": 1, "changed": 2},
+            "similarity": 0.85,
+        }
+        # Simulate what ADK now does: pass raw dict
+        event = WorkflowEvent.tool_result(
+            tool_name="diff_compare",
+            result=result,
+            success=True,
+        )
+        assert "+3 -1 ~2, 85% similar" == event.content
+
+    def test_multiline_result_in_event(self):
+        from agentic_cli.workflow.events import WorkflowEvent
+
+        result = {
+            "query": "python",
+            "results": [
+                {"title": "Python Docs", "url": "..."},
+                {"title": "Python Tutorial", "url": "..."},
+            ],
+        }
+        event = WorkflowEvent.tool_result(
+            tool_name="web_search",
+            result=result,
+            success=True,
+        )
+        lines = event.content.split("\n")
+        assert '"python" — Found 2 results' == lines[0]
+        assert "└─ Python Tutorial" in lines[2]
 
 
 class TestEventsFormatResultContent:
