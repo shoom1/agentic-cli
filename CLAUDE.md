@@ -32,21 +32,28 @@ agentic-cli/
 │   │   └── settings*.py      # Settings UI (introspection, dialog)
 │   ├── workflow/
 │   │   ├── base_manager.py   # BaseWorkflowManager (abstract)
-│   │   ├── adk_manager.py    # GoogleADKWorkflowManager
+│   │   ├── task_progress.py  # build_task_progress_event(), parse_plan_progress()
 │   │   ├── events.py         # WorkflowEvent, EventType
 │   │   ├── thinking.py       # ThinkingDetector
 │   │   ├── config.py         # AgentConfig
 │   │   ├── context.py        # ContextVars for tool access (get_context_*())
-│   │   ├── adk/              # ADK-specific (llm_event_logger)
+│   │   ├── adk/              # ADK orchestrator
+│   │   │   ├── manager.py    # GoogleADKWorkflowManager
+│   │   │   ├── event_processor.py  # ADKEventProcessor
+│   │   │   └── llm_event_logger.py # LLM traffic logging
 │   │   └── langgraph/        # LangGraph orchestrator
 │   │       ├── manager.py    # LangGraphWorkflowManager
+│   │       ├── graph_builder.py # LangGraphBuilder (graph + LLM factory)
 │   │       ├── state.py
 │   │       ├── persistence/  # Checkpointers, stores
 │   │       └── tools/        # LangChain-compatible wrappers
 │   ├── tools/
 │   │   ├── registry.py       # ToolRegistry, @register_tool, ToolCategory, PermissionLevel
 │   │   ├── executor.py       # SafePythonExecutor
-│   │   ├── standard.py       # search_knowledge_base, execute_python, ask_clarification
+│   │   ├── knowledge_tools.py # search_knowledge_base, ingest_to_knowledge_base
+│   │   ├── arxiv_tools.py    # search_arxiv, fetch_arxiv_paper, analyze_arxiv_paper
+│   │   ├── execution_tools.py # execute_python
+│   │   ├── interaction_tools.py # ask_clarification
 │   │   ├── file_read.py      # read_file, diff_compare
 │   │   ├── file_write.py     # write_file, edit_file
 │   │   ├── glob_tool.py      # glob
