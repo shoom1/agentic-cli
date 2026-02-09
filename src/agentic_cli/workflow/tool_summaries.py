@@ -1,0 +1,164 @@
+"""Tool-specific result summary formatters.
+
+Provides meaningful one-line summaries for tool results instead of
+generic "Returned N fields" messages. Used by both ADK and LangGraph
+event processing paths.
+"""
+
+from __future__ import annotations
+
+import os
+from typing import Any, Callable
+
+from agentic_cli.constants import format_size, truncate, TOOL_SUMMARY_MAX_LENGTH
+
+
+def _read_file(r: dict) -> str:
+    name = os.path.basename(r["path"])
+    if "offset" in r:
+        end = r["offset"] + r["lines_read"]
+        return f"Read {name} (lines {r['offset']}-{end} of {r['total_lines']})"
+    return f"Read {name} ({format_size(r['size'])})"
+
+
+def _diff_compare(r: dict) -> str:
+    s = r["summary"]
+    sim = round(r["similarity"] * 100)
+    if isinstance(s, dict):
+        return f"+{s.get('added', 0)} -{s.get('removed', 0)} ~{s.get('changed', 0)}, {sim}% similar"
+    return f"{s}, {sim}% similar"
+
+
+def _glob(r: dict) -> str:
+    return f"{r['count']} files matched"
+
+
+def _list_dir(r: dict) -> str:
+    d = len(r.get("directories", []))
+    f = len(r.get("files", []))
+    return f"{d} dirs, {f} files"
+
+
+def _grep(r: dict) -> str:
+    matches = r["total_matches"]
+    files = len(r["matches"]) if isinstance(r.get("matches"), list) else 0
+    return f"{matches} matches in {files} files"
+
+
+def _write_file(r: dict) -> str:
+    name = os.path.basename(r["path"])
+    verb = "Created" if r.get("created") else "Wrote"
+    return f"{verb} {name} ({format_size(r['size'])})"
+
+
+def _edit_file(r: dict) -> str:
+    name = os.path.basename(r["path"])
+    n = r["replacements"]
+    return f"{n} replacement{'s' if n != 1 else ''} in {name}"
+
+
+def _execute_python(r: dict) -> str:
+    output = r.get("output", "")
+    if output and output.strip():
+        first_line = output.strip().splitlines()[0]
+        return truncate(first_line, TOOL_SUMMARY_MAX_LENGTH)
+    dur = r.get("execution_time_ms", 0)
+    return f"No output ({dur:.0f}ms)"
+
+
+def _shell_executor(r: dict) -> str:
+    stdout = r.get("stdout", "")
+    if stdout and stdout.strip():
+        first_line = stdout.strip().splitlines()[0]
+        return truncate(first_line, TOOL_SUMMARY_MAX_LENGTH)
+    code = r.get("return_code", 0)
+    dur = r.get("duration", 0)
+    return f"Exit {code} ({dur:.1f}s)"
+
+
+def _get_tasks(r: dict) -> str:
+    return f"{r['count']} tasks"
+
+
+def _get_plan(r: dict) -> str:
+    if r.get("content"):
+        return "Plan retrieved"
+    return r.get("message", "No plan")
+
+
+def _search_memory(r: dict) -> str:
+    return f"{r['count']} memories found"
+
+
+def _search_arxiv(r: dict) -> str:
+    return f"Found {r['total_found']} papers"
+
+
+def _fetch_arxiv_paper(r: dict) -> str:
+    title = r["paper"]["title"]
+    return truncate(title, TOOL_SUMMARY_MAX_LENGTH)
+
+
+def _analyze_arxiv_paper(r: dict) -> str:
+    return "Analysis complete"
+
+
+def _ingest_to_knowledge_base(r: dict) -> str:
+    title = r["title"]
+    chunks = r["chunks_created"]
+    return f"Ingested '{truncate(title, 40)}' ({chunks} chunks)"
+
+
+def _request_approval(r: dict) -> str:
+    if r.get("approved"):
+        return "Approved"
+    reason = r.get("reason", "")
+    if reason:
+        return f"Rejected: {truncate(reason, TOOL_SUMMARY_MAX_LENGTH - 10)}"
+    return "Rejected"
+
+
+def _create_checkpoint(r: dict) -> str:
+    return f"User: {r['action']}"
+
+
+_TOOL_FORMATTERS: dict[str, Callable[[dict[str, Any]], str]] = {
+    "read_file": _read_file,
+    "diff_compare": _diff_compare,
+    "glob": _glob,
+    "list_dir": _list_dir,
+    "grep": _grep,
+    "write_file": _write_file,
+    "edit_file": _edit_file,
+    "execute_python": _execute_python,
+    "shell_executor": _shell_executor,
+    "get_tasks": _get_tasks,
+    "get_plan": _get_plan,
+    "search_memory": _search_memory,
+    "search_arxiv": _search_arxiv,
+    "fetch_arxiv_paper": _fetch_arxiv_paper,
+    "analyze_arxiv_paper": _analyze_arxiv_paper,
+    "ingest_to_knowledge_base": _ingest_to_knowledge_base,
+    "request_approval": _request_approval,
+    "create_checkpoint": _create_checkpoint,
+}
+
+
+def format_tool_summary(tool_name: str, result: dict[str, Any]) -> str | None:
+    """Format a tool-specific summary from a result dict.
+
+    Args:
+        tool_name: Name of the tool that produced the result.
+        result: The tool's return dict.
+
+    Returns:
+        Human-readable summary string, or None if no formatter exists
+        or the formatter fails (missing keys, wrong types, etc.).
+    """
+    formatter = _TOOL_FORMATTERS.get(tool_name)
+    if formatter:
+        try:
+            return formatter(result)
+        except (KeyError, TypeError, IndexError, ValueError, AttributeError):
+            return None
+    return None

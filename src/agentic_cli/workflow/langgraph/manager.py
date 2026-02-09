@@ -378,15 +378,38 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
                 elif event_kind == "on_tool_end":
                     # Tool result — ToolNode returns ToolMessage objects
                     output = event_data.get("output", "")
+                    result_data: Any = None
+                    success = True
+
                     if hasattr(output, "content"):
-                        result_str = str(output.content)
+                        raw = output.content
                     else:
-                        result_str = str(output)
+                        raw = output
+
+                    # Preserve structured dict results for summary formatting
+                    if isinstance(raw, dict):
+                        result_data = raw
+                        success = raw.get("success", True)
+                    elif isinstance(raw, str):
+                        import json as _json
+
+                        try:
+                            parsed = _json.loads(raw)
+                            if isinstance(parsed, dict):
+                                result_data = parsed
+                                success = parsed.get("success", True)
+                            else:
+                                result_data = raw
+                        except (ValueError, TypeError):
+                            result_data = raw
+                    else:
+                        result_data = raw
+
                     yield self._maybe_transform(
                         WorkflowEvent.tool_result(
                             tool_name=event_name,
-                            result=result_str,
-                            success=True,
+                            result=result_data,
+                            success=success,
                         )
                     )
 
