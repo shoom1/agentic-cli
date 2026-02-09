@@ -68,7 +68,7 @@ class TestLiveTextResponse:
     @pytest.mark.llm
     async def test_real_text_response(self, live_settings, live_simple_agent_config):
         """Real LLM: ask a simple question, verify we get text back."""
-        from agentic_cli.workflow.adk_manager import GoogleADKWorkflowManager
+        from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager
 
         manager = GoogleADKWorkflowManager(
             agent_configs=live_simple_agent_config,
@@ -93,7 +93,7 @@ class TestLiveMultiTurn:
     @pytest.mark.llm
     async def test_multi_turn_conversation(self, live_settings, live_simple_agent_config):
         """Real LLM: send two messages in sequence, verify coherent responses."""
-        from agentic_cli.workflow.adk_manager import GoogleADKWorkflowManager
+        from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager
 
         manager = GoogleADKWorkflowManager(
             agent_configs=live_simple_agent_config,

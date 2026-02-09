@@ -34,7 +34,7 @@ from agentic_cli.workflow.context import (
 # Heavy imports - lazy loaded on first access
 _lazy_imports = {
     # ADK manager
-    "GoogleADKWorkflowManager": "agentic_cli.workflow.adk_manager",
+    "GoogleADKWorkflowManager": "agentic_cli.workflow.adk.manager",
     # LangGraph manager (both old and new paths)
     "LangGraphWorkflowManager": "agentic_cli.workflow.langgraph.manager",
     "LangGraphManager": "agentic_cli.workflow.langgraph.manager",

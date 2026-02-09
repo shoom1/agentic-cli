@@ -45,7 +45,7 @@ from agentic_cli.cli.settings import CLISettingsMixin
 
 # Heavy imports - lazy loaded on first access
 _lazy_imports = {
-    "GoogleADKWorkflowManager": "agentic_cli.workflow.adk_manager",
+    "GoogleADKWorkflowManager": "agentic_cli.workflow.adk.manager",
     "BaseWorkflowManager": "agentic_cli.workflow.base_manager",
     "LangGraphWorkflowManager": "agentic_cli.workflow.langgraph.manager",
 }

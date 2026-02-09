@@ -432,7 +432,7 @@ class TestCreateWorkflowManagerFromSettings:
         manager = create_workflow_manager_from_settings(configs, settings)
 
         # Should be GoogleADKWorkflowManager (ADK)
-        from agentic_cli.workflow.adk_manager import GoogleADKWorkflowManager
+        from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager
 
         assert isinstance(manager, GoogleADKWorkflowManager)
 

@@ -83,7 +83,7 @@ def create_workflow_manager_from_settings(
             ) from e
 
     else:  # Default to ADK
-        from agentic_cli.workflow.adk_manager import GoogleADKWorkflowManager
+        from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager
 
         return GoogleADKWorkflowManager(
             agent_configs=agent_configs,
