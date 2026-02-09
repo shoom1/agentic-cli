@@ -17,8 +17,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from agentic_cli.workflow.adk_manager import (
-    GoogleADKWorkflowManager,
+from agentic_cli.workflow.adk_manager import GoogleADKWorkflowManager
+from agentic_cli.workflow.adk.event_processor import (
     _is_rate_limit_error,
     _parse_retry_delay,
 )

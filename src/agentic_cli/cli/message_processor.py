@@ -261,7 +261,7 @@ class MessageProcessor:
                         state.thinking_started = False
 
                     # Check for 429 rate limit errors — prompt user to wait and retry
-                    from agentic_cli.workflow.adk_manager import (
+                    from agentic_cli.workflow.adk.event_processor import (
                         _is_rate_limit_error,
                         _parse_retry_delay,
                     )

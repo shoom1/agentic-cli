@@ -63,15 +63,8 @@ class TestClaudeCacheControl:
             model="claude-sonnet-4",
         )
 
-        # Call _create_agent_node to get the node function, then inspect
-        # what SystemMessage it would build. We test the logic by calling
-        # the inner function with a mock LLM.
-        node_fn = manager._create_agent_node(agent_config)
-
-        # We need to intercept the SystemMessage creation.
-        # The simplest way: patch _get_llm_for_model to capture messages.
+        # Intercept the SystemMessage creation by patching the builder's get_llm.
         captured_messages = []
-        original_get_llm = manager._get_llm_for_model
 
         def mock_get_llm(model_name):
             mock_llm = MagicMock()
@@ -87,7 +80,8 @@ class TestClaudeCacheControl:
             mock_llm.ainvoke = mock_ainvoke
             return mock_llm
 
-        manager._get_llm_for_model = mock_get_llm
+        manager._builder.get_llm = mock_get_llm
+        node_fn = manager._builder._create_agent_node(agent_config, manager.model)
 
         # Run the node
         import asyncio
@@ -136,13 +130,13 @@ class TestClaudeCacheControl:
             mock_llm.ainvoke = mock_ainvoke
             return mock_llm
 
-        manager._get_llm_for_model = mock_get_llm
+        manager._builder.get_llm = mock_get_llm
 
         import asyncio
 
         state = {"messages": [{"role": "user", "content": "hello"}]}
         asyncio.get_event_loop().run_until_complete(
-            manager._create_agent_node(agent_config)(state)
+            manager._builder._create_agent_node(agent_config, manager.model)(state)
         )
 
         sys_msgs = [m for m in captured_messages if isinstance(m, SystemMessage)]
@@ -180,13 +174,13 @@ class TestClaudeCacheControl:
             mock_llm.ainvoke = mock_ainvoke
             return mock_llm
 
-        manager._get_llm_for_model = mock_get_llm
+        manager._builder.get_llm = mock_get_llm
 
         import asyncio
 
         state = {"messages": [{"role": "user", "content": "hello"}]}
         asyncio.get_event_loop().run_until_complete(
-            manager._create_agent_node(agent_config)(state)
+            manager._builder._create_agent_node(agent_config, manager.model)(state)
         )
 
         sys_msgs = [m for m in captured_messages if isinstance(m, SystemMessage)]
