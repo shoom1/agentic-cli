@@ -10,3 +10,12 @@ def truncate(text: str, max_length: int = CONTENT_PREVIEW_LENGTH) -> str:
     if len(text) > max_length:
         return text[:max_length] + "..."
     return text
+
+
+def format_size(size_bytes: int) -> str:
+    """Format byte count as human-readable string (B, KB, MB)."""
+    if size_bytes < 1024:
+        return f"{size_bytes}B"
+    elif size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.1f}KB"
+    return f"{size_bytes / (1024 * 1024):.1f}MB"

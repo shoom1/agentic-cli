@@ -224,10 +224,18 @@ class ADKEventProcessor:
                 return f"Failed: {result['error']}"
             return f"Failed: {result}"
 
-        # Check for explicit summary in result
+        # Try tool-specific formatter first
         if isinstance(result, dict):
-            if "summary" in result:
-                return str(result["summary"])
+            from agentic_cli.workflow.tool_summaries import format_tool_summary
+
+            specific = format_tool_summary(tool_name, result)
+            if specific:
+                return specific
+
+        # Check for explicit summary in result (only strings, not dicts)
+        if isinstance(result, dict):
+            if "summary" in result and isinstance(result["summary"], str):
+                return result["summary"]
             if "message" in result:
                 return str(result["message"])
             # Handle results with a "results" list (e.g., web_search)
