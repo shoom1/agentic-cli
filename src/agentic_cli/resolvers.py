@@ -205,6 +205,11 @@ class PathResolver:
         return self._workspace_dir / "reports"
 
     @property
+    def papers_dir(self) -> Path:
+        """Directory for saved papers and PDFs."""
+        return self._workspace_dir / "papers"
+
+    @property
     def knowledge_base_dir(self) -> Path:
         """Directory for knowledge base storage."""
         return self._workspace_dir / "knowledge_base"
@@ -230,6 +235,7 @@ class PathResolver:
             self.artifacts_dir,
             self.templates_dir,
             self.reports_dir,
+            self.papers_dir,
             self.knowledge_base_dir,
             self.knowledge_base_documents_dir,
             self.knowledge_base_embeddings_dir,
