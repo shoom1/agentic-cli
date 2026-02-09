@@ -90,8 +90,35 @@ def _search_memory(r: dict) -> str:
     return f"{r['count']} memories found"
 
 
+def _web_search(r: dict) -> str:
+    results = r.get("results", [])
+    query = truncate(r.get("query", ""), 60)
+    first_line = f'"{query}" — Found {len(results)} results'
+    if not results:
+        return first_line
+    lines = [first_line]
+    show = results[:5]
+    for i, res in enumerate(show):
+        title = truncate(res["title"], 60)
+        prefix = "└─" if i == len(show) - 1 else "├─"
+        lines.append(f"  {prefix} {title}")
+    return "\n".join(lines)
+
+
 def _search_arxiv(r: dict) -> str:
-    return f"Found {r['total_found']} papers"
+    total = r["total_found"]
+    query = truncate(r.get("query", ""), 60)
+    first_line = f'"{query}" — Found {total} papers'
+    papers = r.get("papers", [])
+    if not papers:
+        return first_line
+    lines = [first_line]
+    show = papers[:5]
+    for i, p in enumerate(show):
+        title = truncate(p["title"], 60)
+        prefix = "└─" if i == len(show) - 1 else "├─"
+        lines.append(f"  {prefix} {title}")
+    return "\n".join(lines)
 
 
 def _fetch_arxiv_paper(r: dict) -> str:
@@ -135,6 +162,7 @@ _TOOL_FORMATTERS: dict[str, Callable[[dict[str, Any]], str]] = {
     "get_tasks": _get_tasks,
     "get_plan": _get_plan,
     "search_memory": _search_memory,
+    "web_search": _web_search,
     "search_arxiv": _search_arxiv,
     "fetch_arxiv_paper": _fetch_arxiv_paper,
     "analyze_arxiv_paper": _analyze_arxiv_paper,

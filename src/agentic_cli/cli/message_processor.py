@@ -390,11 +390,14 @@ class MessageProcessor:
         duration = event.metadata.get("duration_ms")
         icon = "+" if success else "x"
         duration_str = f" ({duration}ms)" if duration else ""
-        state.status_line = f"{icon} {tool_name}: {event.content}{duration_str}"
+        lines = event.content.split("\n")
+        first_line = lines[0]
+        state.status_line = f"{icon} {tool_name}: {first_line}{duration_str}"
         style = "green" if success else "red"
-        ui.add_rich(
-            f"[{style}]{icon}[/{style}] {tool_name}: {event.content}{duration_str}"
-        )
+        display = f"[{style}]{icon}[/{style}] {tool_name}: {first_line}{duration_str}"
+        if len(lines) > 1:
+            display += "\n" + "\n".join(lines[1:])
+        ui.add_rich(display)
 
     async def _handle_user_input_required(
         self,

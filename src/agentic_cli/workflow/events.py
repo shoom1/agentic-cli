@@ -169,12 +169,16 @@ class WorkflowEvent:
     @staticmethod
     def _format_result_content(result: Any, tool_name: str | None = None) -> str:
         """Format result for display, truncating large values."""
-        if isinstance(result, dict) and tool_name:
-            from agentic_cli.workflow.tool_summaries import format_tool_summary
+        if isinstance(result, dict):
+            # Handle error dicts (success=False with error message)
+            if result.get("error") and not result.get("success", True):
+                return f"Failed: {result['error']}"
+            if tool_name:
+                from agentic_cli.workflow.tool_summaries import format_tool_summary
 
-            specific = format_tool_summary(tool_name, result)
-            if specific:
-                return specific
+                specific = format_tool_summary(tool_name, result)
+                if specific:
+                    return specific
         if isinstance(result, str):
             return truncate(result)
         if isinstance(result, (dict, list)):
