@@ -94,7 +94,7 @@ def _create_langgraph_manager(settings, agent_configs):
 # ---------------------------------------------------------------------------
 
 class TestLangGraphSimpleTextResponse:
-    """Mock astream_events yields text chunk → assert TEXT event."""
+    """Mock astream_events yields text chunk + end → assert TEXT event."""
 
     async def test_simple_text_response(self, mock_settings, simple_agent_config):
         manager = _create_langgraph_manager(mock_settings, simple_agent_config)
@@ -104,6 +104,11 @@ class TestLangGraphSimpleTextResponse:
                 "on_chat_model_stream",
                 name="assistant",
                 data={"chunk": _make_chunk("Hello from LangGraph!")},
+            ),
+            _make_stream_event(
+                "on_chat_model_end",
+                name="assistant",
+                data={"output": _make_output("Hello from LangGraph!")},
             ),
         ]
 
@@ -150,6 +155,11 @@ class TestLangGraphToolCallFlow:
                 "on_chat_model_stream",
                 name="assistant",
                 data={"chunk": _make_chunk("Plan saved successfully.")},
+            ),
+            _make_stream_event(
+                "on_chat_model_end",
+                name="assistant",
+                data={"output": _make_output("Plan saved successfully.")},
             ),
         ]
 
@@ -215,6 +225,11 @@ class TestLangGraphMultiTurnWithTools:
                 name="assistant",
                 data={"chunk": _make_chunk("Here's the plan I saved and retrieved.")},
             ),
+            _make_stream_event(
+                "on_chat_model_end",
+                name="assistant",
+                data={"output": _make_output("Here's the plan I saved and retrieved.")},
+            ),
         ]
 
         async def mock_astream_events(state, config, version):
@@ -255,6 +270,11 @@ class TestLangGraphThinkingBlocks:
                 "on_chat_model_stream",
                 name="assistant",
                 data={"chunk": _make_chunk(thinking_content)},
+            ),
+            _make_stream_event(
+                "on_chat_model_end",
+                name="assistant",
+                data={"output": _make_output(thinking_content)},
             ),
         ]
 

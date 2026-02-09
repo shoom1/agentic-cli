@@ -1,118 +1,15 @@
-"""Standard tools for agentic workflows.
+"""ArXiv tools for agentic workflows.
 
-These tools can be used directly by agents without additional configuration.
-They use the context settings to get API keys and configuration.
-
-Design Note:
-    Tools accept an optional `settings` parameter for explicit dependency injection.
-    When not provided, they fall back to get_settings() for backward compatibility
-    and to work seamlessly within workflow manager's settings context.
+Provides tools for searching, fetching, and analyzing arXiv papers.
 """
 
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-from agentic_cli.config import get_settings
 from agentic_cli.tools.registry import (
     register_tool,
     ToolCategory,
     PermissionLevel,
 )
-
-if TYPE_CHECKING:
-    from agentic_cli.knowledge_base import KnowledgeBaseManager
-
-
-def _get_knowledge_base_manager() -> "KnowledgeBaseManager":
-    """Factory function to create a KnowledgeBaseManager instance.
-
-    Eliminates duplication of KB manager instantiation across tools.
-    Uses context settings via get_settings().
-
-    Returns:
-        Configured KnowledgeBaseManager instance
-    """
-    from agentic_cli.knowledge_base import KnowledgeBaseManager
-
-    settings = get_settings()
-    return KnowledgeBaseManager(
-        settings=settings,
-        use_mock=settings.knowledge_base_use_mock,
-    )
-
-
-@register_tool(
-    category=ToolCategory.KNOWLEDGE,
-    permission_level=PermissionLevel.SAFE,
-    description="Search the local knowledge base for relevant documents using semantic similarity. Use this when you need to find previously ingested papers, notes, or documents.",
-)
-def search_knowledge_base(
-    query: str,
-    filters: str = "",
-    top_k: int = 10,
-) -> dict[str, Any]:
-    """Search the knowledge base for relevant information.
-
-    Args:
-        query: Natural language search query
-        filters: Optional JSON string with filters (e.g. '{"source_type": "arxiv", "date_from": "2024-01-01"}')
-        top_k: Maximum number of results
-
-    Returns:
-        Dictionary with search results and timing information
-    """
-    import json as _json
-
-    parsed_filters = None
-    if filters:
-        try:
-            parsed_filters = _json.loads(filters)
-        except _json.JSONDecodeError:
-            return {"success": False, "error": f"Invalid JSON in filters: {filters}"}
-
-    kb = _get_knowledge_base_manager()
-    return kb.search(query, filters=parsed_filters, top_k=top_k)
-
-
-@register_tool(
-    category=ToolCategory.KNOWLEDGE,
-    permission_level=PermissionLevel.CAUTION,
-    description="Ingest a document into the knowledge base for later semantic search. Use this to store papers, articles, or notes for future reference.",
-)
-def ingest_to_knowledge_base(
-    content: str,
-    title: str,
-    source_type: str = "user",
-    source_url: str | None = None,
-) -> dict[str, Any]:
-    """Ingest a document into the knowledge base.
-
-    Args:
-        content: Document content to ingest
-        title: Document title
-        source_type: Type of source (arxiv, web, user, internal)
-        source_url: Optional URL of the source
-
-    Returns:
-        Dictionary with ingestion result
-    """
-    from agentic_cli.knowledge_base import SourceType
-
-    kb = _get_knowledge_base_manager()
-
-    source = SourceType(source_type)
-    doc = kb.ingest_document(
-        content=content,
-        title=title,
-        source_type=source,
-        source_url=source_url,
-    )
-
-    return {
-        "success": True,
-        "document_id": doc.id,
-        "title": doc.title,
-        "chunks_created": len(doc.chunks),
-    }
 
 
 # Module-level ArxivSearchSource instance for rate limiting and caching
@@ -238,8 +135,8 @@ def fetch_arxiv_paper(arxiv_id: str) -> dict[str, Any]:
     """Fetch detailed information about a specific arXiv paper.
 
     Args:
-        arxiv_id: The arXiv paper ID (e.g., '1706.03762', '1706.03762v2',
-                  or full URL 'https://arxiv.org/abs/1706.03762')
+        arxiv_id: The arXiv paper ID, e.g. '1706.03762' or '1706.03762v2'.
+                  Also accepts full arXiv URLs.
 
     Returns:
         Dictionary with paper details or error information
@@ -328,101 +225,4 @@ async def analyze_arxiv_paper(arxiv_id: str, prompt: str) -> dict[str, Any]:
         "url": url,
         "prompt": prompt,
         "analysis": result.get("summary", ""),
-    }
-
-
-@register_tool(
-    category=ToolCategory.EXECUTION,
-    permission_level=PermissionLevel.DANGEROUS,
-    description="Execute Python code in a sandboxed subprocess with restricted imports. Use this for calculations, data processing, or prototyping. Only whitelisted modules (math, numpy, pandas, json, etc.) are available.",
-)
-def execute_python(
-    code: str,
-    context: str = "",
-    timeout_seconds: int = 30,
-) -> dict[str, Any]:
-    """Execute Python code safely.
-
-    Args:
-        code: Python code to execute
-        context: Optional JSON string of variables to inject (e.g. '{"x": 5, "name": "test"}')
-        timeout_seconds: Maximum execution time in seconds
-
-    Returns:
-        Dictionary with execution results
-    """
-    import json as _json
-    from agentic_cli.tools.executor import SafePythonExecutor
-
-    parsed_context = None
-    if context:
-        try:
-            parsed_context = _json.loads(context)
-        except _json.JSONDecodeError:
-            return {"success": False, "error": f"Invalid JSON in context: {context}"}
-
-    settings = get_settings()
-    executor = SafePythonExecutor(
-        default_timeout=settings.python_executor_timeout,
-        max_memory_mb=settings.python_executor_max_memory_mb,
-    )
-    return executor.execute(code, context=parsed_context, timeout_seconds=timeout_seconds)
-
-
-@register_tool(
-    category=ToolCategory.INTERACTION,
-    permission_level=PermissionLevel.SAFE,
-    description="Ask the user a clarifying question and wait for their response. Use this when requirements are ambiguous or you need user input to proceed.",
-)
-async def ask_clarification(
-    question: str,
-    options: list[str] | None = None,
-) -> dict[str, Any]:
-    """Ask the user for clarification.
-
-    This tool pauses execution and requests input from the user via
-    the CLI. It uses the workflow context to emit a USER_INPUT_REQUIRED
-    event that the CLI will handle.
-
-    Args:
-        question: The question to ask
-        options: Optional list of suggested answers (shown as choices)
-
-    Returns:
-        Dictionary with the user's response
-    """
-    import uuid
-    from agentic_cli.config import get_context_workflow
-    from agentic_cli.workflow.events import UserInputRequest
-
-    workflow = get_context_workflow()
-
-    if workflow is None:
-        # Fallback for when not running within a workflow context
-        return {
-            "question": question,
-            "options": options or [],
-            "error": "No workflow context available for user interaction",
-            "response": None,
-        }
-
-    from agentic_cli.workflow.events import InputType
-
-    # Create user input request
-    request = UserInputRequest(
-        request_id=str(uuid.uuid4()),
-        tool_name="ask_clarification",
-        prompt=question,
-        input_type=InputType.CHOICE if options else InputType.TEXT,
-        choices=options,
-    )
-
-    # Request user input (this will block until CLI provides response)
-    response = await workflow.request_user_input(request)
-
-    return {
-        "question": question,
-        "options": options or [],
-        "response": response,
-        "summary": f"User responded: {response[:50]}{'...' if len(response) > 50 else ''}",
     }

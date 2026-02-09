@@ -45,9 +45,10 @@ class TestLangGraphState:
         new = [{"role": "assistant", "content": "Hi there"}]
         result = add_messages(existing, new)
 
+        # LangGraph's add_messages auto-converts dicts to LangChain message objects
         assert len(result) == 2
-        assert result[0]["content"] == "Hello"
-        assert result[1]["content"] == "Hi there"
+        assert result[0].content == "Hello"
+        assert result[1].content == "Hi there"
 
     def test_add_messages_with_single(self):
         """Test add_messages reducer with single message."""
@@ -56,7 +57,7 @@ class TestLangGraphState:
         result = add_messages(existing, new)
 
         assert len(result) == 2
-        assert result[1]["content"] == "Hi there"
+        assert result[1].content == "Hi there"
 
     def test_checkpoint_data_to_dict(self):
         """Test CheckpointData serialization."""
@@ -321,7 +322,7 @@ class TestLangGraphThinkingConfig:
             settings=settings,
         )
 
-        config = manager._get_thinking_config("claude-sonnet-4")
+        config = manager._builder.get_thinking_config("claude-sonnet-4")
         assert config is None
 
     def test_thinking_config_unsupported_model(self, agent_configs):
@@ -336,7 +337,7 @@ class TestLangGraphThinkingConfig:
         )
 
         # GPT models don't support thinking effort
-        config = manager._get_thinking_config("gpt-4o")
+        config = manager._builder.get_thinking_config("gpt-4o")
         assert config is None
 
     def test_thinking_config_anthropic_model(self, agent_configs):
@@ -350,7 +351,7 @@ class TestLangGraphThinkingConfig:
             settings=settings,
         )
 
-        config = manager._get_thinking_config("claude-sonnet-4")
+        config = manager._builder.get_thinking_config("claude-sonnet-4")
         assert config is not None
         assert config["provider"] == "anthropic"
         assert config["thinking"]["type"] == "enabled"
@@ -367,7 +368,7 @@ class TestLangGraphThinkingConfig:
             settings=settings,
         )
 
-        config = manager._get_thinking_config("claude-opus-4")
+        config = manager._builder.get_thinking_config("claude-opus-4")
         assert config["thinking"]["budget_tokens"] == 10000
 
     def test_thinking_config_anthropic_low(self, agent_configs):
@@ -381,7 +382,7 @@ class TestLangGraphThinkingConfig:
             settings=settings,
         )
 
-        config = manager._get_thinking_config("claude-sonnet-4-5")
+        config = manager._builder.get_thinking_config("claude-sonnet-4-5")
         assert config["thinking"]["budget_tokens"] == 4096
 
     def test_thinking_config_google_model(self, agent_configs):
@@ -395,7 +396,7 @@ class TestLangGraphThinkingConfig:
             settings=settings,
         )
 
-        config = manager._get_thinking_config("gemini-2.5-pro")
+        config = manager._builder.get_thinking_config("gemini-2.5-pro")
         assert config is not None
         assert config["provider"] == "google"
         assert config["include_thoughts"] is True
@@ -412,7 +413,7 @@ class TestLangGraphThinkingConfig:
             settings=settings,
         )
 
-        config = manager._get_thinking_config("gemini-3-flash-preview")
+        config = manager._builder.get_thinking_config("gemini-3-flash-preview")
         assert config["thinking_level"] == "medium"
 
 
@@ -432,7 +433,7 @@ class TestCreateWorkflowManagerFromSettings:
         manager = create_workflow_manager_from_settings(configs, settings)
 
         # Should be GoogleADKWorkflowManager (ADK)
-        from agentic_cli.workflow.adk_manager import GoogleADKWorkflowManager
+        from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager
 
         assert isinstance(manager, GoogleADKWorkflowManager)
 

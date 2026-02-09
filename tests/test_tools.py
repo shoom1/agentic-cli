@@ -1218,7 +1218,7 @@ class TestStandardTools:
     def test_fetch_arxiv_paper_returns_paper_details(self):
         """Test fetch_arxiv_paper returns paper details for valid ID."""
         from unittest.mock import patch, MagicMock
-        from agentic_cli.tools.standard import fetch_arxiv_paper
+        from agentic_cli.tools.arxiv_tools import fetch_arxiv_paper
 
         with patch("feedparser.parse") as mock_parse:
             mock_parse.return_value = MagicMock(
@@ -1249,7 +1249,7 @@ class TestStandardTools:
     def test_fetch_arxiv_paper_not_found(self):
         """Test fetch_arxiv_paper handles missing paper."""
         from unittest.mock import patch, MagicMock
-        from agentic_cli.tools.standard import fetch_arxiv_paper
+        from agentic_cli.tools.arxiv_tools import fetch_arxiv_paper
 
         with patch("feedparser.parse") as mock_parse:
             mock_parse.return_value = MagicMock(entries=[])
@@ -1262,7 +1262,7 @@ class TestStandardTools:
     def test_fetch_arxiv_paper_cleans_id(self):
         """Test fetch_arxiv_paper handles various ID formats."""
         from unittest.mock import patch, MagicMock
-        from agentic_cli.tools.standard import fetch_arxiv_paper
+        from agentic_cli.tools.arxiv_tools import fetch_arxiv_paper
 
         with patch("feedparser.parse") as mock_parse:
             mock_parse.return_value = MagicMock(
@@ -1286,7 +1286,7 @@ class TestStandardTools:
     async def test_analyze_arxiv_paper_success(self):
         """Test analyze_arxiv_paper returns LLM analysis."""
         from unittest.mock import patch, MagicMock, AsyncMock
-        from agentic_cli.tools.standard import analyze_arxiv_paper
+        from agentic_cli.tools.arxiv_tools import analyze_arxiv_paper
 
         mock_web_fetch = AsyncMock(return_value={
             "success": True,
@@ -1308,7 +1308,7 @@ class TestStandardTools:
     async def test_analyze_arxiv_paper_passes_prompt(self):
         """Test analyze_arxiv_paper passes user prompt to web_fetch."""
         from unittest.mock import patch, AsyncMock
-        from agentic_cli.tools.standard import analyze_arxiv_paper
+        from agentic_cli.tools.arxiv_tools import analyze_arxiv_paper
 
         mock_web_fetch = AsyncMock(return_value={"success": True, "summary": "Analysis"})
 
@@ -1323,7 +1323,7 @@ class TestStandardTools:
     async def test_analyze_arxiv_paper_handles_failure(self):
         """Test analyze_arxiv_paper handles web_fetch failure."""
         from unittest.mock import patch, AsyncMock
-        from agentic_cli.tools.standard import analyze_arxiv_paper
+        from agentic_cli.tools.arxiv_tools import analyze_arxiv_paper
 
         mock_web_fetch = AsyncMock(return_value={
             "success": False,
@@ -1343,33 +1343,33 @@ class TestArxivHelpers:
 
     def test_clean_arxiv_id_plain_id(self):
         """Test cleaning plain arxiv ID."""
-        from agentic_cli.tools.standard import _clean_arxiv_id
+        from agentic_cli.tools.arxiv_tools import _clean_arxiv_id
 
         assert _clean_arxiv_id("1706.03762") == "1706.03762"
 
     def test_clean_arxiv_id_with_version(self):
         """Test cleaning arxiv ID with version suffix."""
-        from agentic_cli.tools.standard import _clean_arxiv_id
+        from agentic_cli.tools.arxiv_tools import _clean_arxiv_id
 
         assert _clean_arxiv_id("1706.03762v1") == "1706.03762"
         assert _clean_arxiv_id("1706.03762v5") == "1706.03762"
 
     def test_clean_arxiv_id_from_url(self):
         """Test extracting arxiv ID from URL."""
-        from agentic_cli.tools.standard import _clean_arxiv_id
+        from agentic_cli.tools.arxiv_tools import _clean_arxiv_id
 
         assert _clean_arxiv_id("https://arxiv.org/abs/1706.03762") == "1706.03762"
         assert _clean_arxiv_id("http://arxiv.org/abs/1706.03762v2") == "1706.03762"
 
     def test_clean_arxiv_id_from_pdf_url(self):
         """Test extracting arxiv ID from PDF URL."""
-        from agentic_cli.tools.standard import _clean_arxiv_id
+        from agentic_cli.tools.arxiv_tools import _clean_arxiv_id
 
         assert _clean_arxiv_id("https://arxiv.org/pdf/1706.03762.pdf") == "1706.03762"
 
     def test_clean_arxiv_id_five_digit(self):
         """Test cleaning 5-digit arxiv IDs (newer format)."""
-        from agentic_cli.tools.standard import _clean_arxiv_id
+        from agentic_cli.tools.arxiv_tools import _clean_arxiv_id
 
         assert _clean_arxiv_id("2301.07041") == "2301.07041"
         assert _clean_arxiv_id("2301.07041v3") == "2301.07041"
@@ -1381,11 +1381,11 @@ class TestFetchArxivPaperRateLimiting:
     def test_fetch_arxiv_paper_respects_rate_limit(self):
         """Test fetch_arxiv_paper respects rate limiting."""
         from unittest.mock import patch, MagicMock
-        from agentic_cli.tools.standard import fetch_arxiv_paper
+        from agentic_cli.tools.arxiv_tools import fetch_arxiv_paper
 
         # Reset the source to ensure clean state
-        import agentic_cli.tools.standard as standard_module
-        standard_module._arxiv_source = None
+        import agentic_cli.tools.arxiv_tools as arxiv_module
+        arxiv_module._arxiv_source = None
 
         with patch("agentic_cli.knowledge_base.sources.time") as mock_time:
             mock_time.time.return_value = 100.0
@@ -1411,7 +1411,7 @@ class TestArxivSortValidation:
 
     def test_search_arxiv_invalid_sort_by_raises_error(self):
         """Test search_arxiv raises ValueError for invalid sort_by."""
-        from agentic_cli.tools.standard import search_arxiv
+        from agentic_cli.tools.arxiv_tools import search_arxiv
         import pytest
 
         with pytest.raises(ValueError, match="sort_by must be one of"):
@@ -1419,7 +1419,7 @@ class TestArxivSortValidation:
 
     def test_search_arxiv_invalid_sort_order_raises_error(self):
         """Test search_arxiv raises ValueError for invalid sort_order."""
-        from agentic_cli.tools.standard import search_arxiv
+        from agentic_cli.tools.arxiv_tools import search_arxiv
         import pytest
 
         with pytest.raises(ValueError, match="sort_order must be one of"):
@@ -1428,11 +1428,11 @@ class TestArxivSortValidation:
     def test_search_arxiv_valid_sort_options(self):
         """Test search_arxiv accepts valid sort options."""
         from unittest.mock import patch, MagicMock
-        from agentic_cli.tools.standard import search_arxiv
-        import agentic_cli.tools.standard as standard_module
+        from agentic_cli.tools.arxiv_tools import search_arxiv
+        import agentic_cli.tools.arxiv_tools as arxiv_module
 
         # Reset the source to ensure clean state
-        standard_module._arxiv_source = None
+        arxiv_module._arxiv_source = None
 
         # Mock feedparser to avoid real API calls
         with patch("feedparser.parse") as mock_parse:
@@ -1481,7 +1481,10 @@ class TestToolRegistryConsistency:
         import agentic_cli.tools.grep_tool  # noqa: F401
         import agentic_cli.tools.glob_tool  # noqa: F401
         import agentic_cli.tools.search  # noqa: F401
-        import agentic_cli.tools.standard  # noqa: F401
+        import agentic_cli.tools.knowledge_tools  # noqa: F401
+        import agentic_cli.tools.arxiv_tools  # noqa: F401
+        import agentic_cli.tools.execution_tools  # noqa: F401
+        import agentic_cli.tools.interaction_tools  # noqa: F401
         import agentic_cli.tools.webfetch_tool  # noqa: F401
         import agentic_cli.tools.memory_tools  # noqa: F401
         import agentic_cli.tools.planning_tools  # noqa: F401
@@ -1601,7 +1604,10 @@ class TestToolRegistryConsistency:
         import agentic_cli.tools.grep_tool  # noqa: F401
         import agentic_cli.tools.glob_tool  # noqa: F401
         import agentic_cli.tools.search  # noqa: F401
-        import agentic_cli.tools.standard  # noqa: F401
+        import agentic_cli.tools.knowledge_tools  # noqa: F401
+        import agentic_cli.tools.arxiv_tools  # noqa: F401
+        import agentic_cli.tools.execution_tools  # noqa: F401
+        import agentic_cli.tools.interaction_tools  # noqa: F401
         import agentic_cli.tools.webfetch_tool  # noqa: F401
         import agentic_cli.tools.memory_tools  # noqa: F401
         import agentic_cli.tools.planning_tools  # noqa: F401
@@ -1655,7 +1661,10 @@ class TestToolRegistryConsistency:
         import agentic_cli.tools.grep_tool  # noqa: F401
         import agentic_cli.tools.glob_tool  # noqa: F401
         import agentic_cli.tools.search  # noqa: F401
-        import agentic_cli.tools.standard  # noqa: F401
+        import agentic_cli.tools.knowledge_tools  # noqa: F401
+        import agentic_cli.tools.arxiv_tools  # noqa: F401
+        import agentic_cli.tools.execution_tools  # noqa: F401
+        import agentic_cli.tools.interaction_tools  # noqa: F401
         import agentic_cli.tools.webfetch_tool  # noqa: F401
         import agentic_cli.tools.memory_tools  # noqa: F401
         import agentic_cli.tools.planning_tools  # noqa: F401

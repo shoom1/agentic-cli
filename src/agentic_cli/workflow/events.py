@@ -148,7 +148,7 @@ class WorkflowEvent:
             duration_ms: How long the tool took to execute (milliseconds)
             error: Error message if success is False
         """
-        content = cls._format_result_content(result)
+        content = cls._format_result_content(result, tool_name)
 
         metadata: dict[str, Any] = {
             "tool_name": tool_name,
@@ -167,8 +167,14 @@ class WorkflowEvent:
         )
 
     @staticmethod
-    def _format_result_content(result: Any) -> str:
+    def _format_result_content(result: Any, tool_name: str | None = None) -> str:
         """Format result for display, truncating large values."""
+        if isinstance(result, dict) and tool_name:
+            from agentic_cli.workflow.tool_summaries import format_tool_summary
+
+            specific = format_tool_summary(tool_name, result)
+            if specific:
+                return specific
         if isinstance(result, str):
             return truncate(result)
         if isinstance(result, (dict, list)):

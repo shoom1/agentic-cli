@@ -16,21 +16,25 @@ from agentic_cli.workflow.thinking import ThinkingDetector, ThinkingResult
 from agentic_cli.workflow.settings import WorkflowSettingsMixin
 from agentic_cli.workflow.context import (
     # Getters for tools
-    get_context_memory_manager,
+    get_context_memory_store,
     get_context_plan_store,
     get_context_approval_manager,
     get_context_checkpoint_manager,
+    get_context_task_store,
+    get_context_llm_summarizer,
     # Setters for workflow managers
-    set_context_memory_manager,
+    set_context_memory_store,
     set_context_plan_store,
     set_context_approval_manager,
     set_context_checkpoint_manager,
+    set_context_task_store,
+    set_context_llm_summarizer,
 )
 
 # Heavy imports - lazy loaded on first access
 _lazy_imports = {
     # ADK manager
-    "GoogleADKWorkflowManager": "agentic_cli.workflow.adk_manager",
+    "GoogleADKWorkflowManager": "agentic_cli.workflow.adk.manager",
     # LangGraph manager (both old and new paths)
     "LangGraphWorkflowManager": "agentic_cli.workflow.langgraph.manager",
     "LangGraphManager": "agentic_cli.workflow.langgraph.manager",
@@ -80,13 +84,17 @@ __all__ = [
     "CheckpointData",
     "add_messages",
     # Context getters (for tools)
-    "get_context_memory_manager",
+    "get_context_memory_store",
     "get_context_plan_store",
     "get_context_approval_manager",
     "get_context_checkpoint_manager",
+    "get_context_task_store",
+    "get_context_llm_summarizer",
     # Context setters (for workflow managers)
-    "set_context_memory_manager",
+    "set_context_memory_store",
     "set_context_plan_store",
     "set_context_approval_manager",
     "set_context_checkpoint_manager",
+    "set_context_task_store",
+    "set_context_llm_summarizer",
 ]

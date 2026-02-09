@@ -22,7 +22,7 @@ from agentic_cli.workflow.events import WorkflowEvent, UserInputRequest
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.config import set_context_settings, set_context_workflow
 from agentic_cli.workflow.context import (
-    set_context_memory_manager,
+    set_context_memory_store,
     set_context_plan_store,
     set_context_task_store,
     set_context_approval_manager,
@@ -228,7 +228,7 @@ class BaseWorkflowManager(ABC):
         tokens = [
             set_context_settings(self._settings),
             set_context_workflow(self),
-            set_context_memory_manager(self._memory_manager),
+            set_context_memory_store(self._memory_manager),
             set_context_plan_store(self._plan_store),
             set_context_task_store(self._task_store),
             set_context_approval_manager(self._approval_manager),
@@ -444,126 +444,9 @@ class BaseWorkflowManager(ABC):
     def _emit_task_progress_event(self) -> WorkflowEvent | None:
         """Build a TASK_PROGRESS event from TaskStore or PlanStore.
 
-        Priority:
-        1. If TaskStore has tasks → use TaskStore (auto-clear when all done)
-        2. Else if PlanStore has checkboxes → parse plan for progress
-        3. Else → return None
-
-        Returns:
-            A WorkflowEvent.task_progress() if progress is available, else None.
+        Delegates to :func:`~agentic_cli.workflow.task_progress.build_task_progress_event`.
         """
-        # Path 1: TaskStore has tasks
-        store = self._task_store
-        if store is not None and not store.is_empty():
-            # Auto-clear when all tasks are done — emit final snapshot first
-            if store.all_done():
-                progress = store.get_progress()
-                display = store.to_compact_display()
-                store.clear()
-                return WorkflowEvent.task_progress(
-                    display=display,
-                    progress=progress,
-                    current_task_id=None,
-                    current_task_description=None,
-                )
+        from agentic_cli.workflow.task_progress import build_task_progress_event
 
-            progress = store.get_progress()
-            display = store.to_compact_display()
-            current = store.get_current_task()
-
-            return WorkflowEvent.task_progress(
-                display=display,
-                progress=progress,
-                current_task_id=current.id if current else None,
-                current_task_description=current.description if current else None,
-            )
-
-        # Path 2: Fall back to PlanStore checkboxes
-        plan_result = self._parse_plan_progress()
-        if plan_result is None:
-            return None
-
-        display, progress = plan_result
-
-        # All checkboxes done → return None (display clears)
-        if progress["total"] > 0 and progress["completed"] == progress["total"]:
-            return None
-
-        return WorkflowEvent.task_progress(
-            display=display,
-            progress=progress,
-            current_task_id=None,
-            current_task_description=None,
-        )
-
-    def _parse_plan_progress(self) -> tuple[str, dict[str, int]] | None:
-        """Parse PlanStore content for checkbox progress.
-
-        Scans plan markdown for ``- [ ]`` / ``- [x]`` checkboxes,
-        grouped under ``##`` or ``###`` section headers.
-
-        Returns:
-            (display_str, progress_dict) or None if no checkboxes found.
-        """
-        if self._plan_store is None or self._plan_store.is_empty():
-            return None
-
-        content = self._plan_store.get()
-        current_section: str | None = None
-        sections: list[tuple[str | None, list[tuple[bool, str]]]] = []
-        current_items: list[tuple[bool, str]] = []
-
-        for line in content.splitlines():
-            stripped = line.strip()
-
-            # Detect section headers (## or ###)
-            if stripped.startswith("##"):
-                # Save previous section if it has items
-                if current_items:
-                    sections.append((current_section, current_items))
-                    current_items = []
-                # Extract header text (strip leading #s and whitespace)
-                current_section = stripped.lstrip("#").strip()
-                continue
-
-            # Detect checkboxes
-            if stripped.startswith("- [x]") or stripped.startswith("- [X]"):
-                text = stripped[5:].strip()
-                current_items.append((True, text))
-            elif stripped.startswith("- [ ]"):
-                text = stripped[5:].strip()
-                current_items.append((False, text))
-
-        # Save last section
-        if current_items:
-            sections.append((current_section, current_items))
-
-        if not sections:
-            return None
-
-        # Build compact display and count progress
-        total = 0
-        completed = 0
-        display_lines: list[str] = []
-
-        for section_name, items in sections:
-            if section_name:
-                display_lines.append(f"{section_name}:")
-            for done, text in items:
-                total += 1
-                if done:
-                    completed += 1
-                    display_lines.append(f"  [x] {text}")
-                else:
-                    display_lines.append(f"  [ ] {text}")
-
-        progress = {
-            "total": total,
-            "completed": completed,
-            "pending": total - completed,
-            "in_progress": 0,
-            "cancelled": 0,
-        }
-
-        return "\n".join(display_lines), progress
+        return build_task_progress_event(self._task_store, self._plan_store)
 

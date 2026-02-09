@@ -11,7 +11,6 @@ For alternative orchestration backends (e.g., LangGraph), see the base_manager m
 from __future__ import annotations
 
 import logging
-import re
 from typing import AsyncGenerator, Any, Callable
 
 from google.genai import types
@@ -23,7 +22,7 @@ from google.adk.sessions import InMemorySessionService, BaseSessionService, Sess
 from agentic_cli.workflow.base_manager import BaseWorkflowManager
 from agentic_cli.workflow.events import WorkflowEvent, EventType
 from agentic_cli.workflow.config import AgentConfig
-from agentic_cli.workflow.thinking import ThinkingDetector
+from agentic_cli.workflow.adk.event_processor import ADKEventProcessor
 from agentic_cli.workflow.adk.llm_event_logger import LLMEventLogger
 from agentic_cli.config import (
     BaseSettings,
@@ -31,52 +30,13 @@ from agentic_cli.config import (
     validate_settings,
     SettingsValidationError,
 )
-from agentic_cli.constants import truncate, TOOL_SUMMARY_MAX_LENGTH
 from agentic_cli.logging import Loggers, bind_context
 
 logger = Loggers.workflow()
 
 # Suppress Google GenAI SDK warning about non-text parts (function_call) in
-# mixed responses. We already handle all part types individually in _process_part.
+# mixed responses. We already handle all part types individually in process_part.
 logging.getLogger("google_genai.types").setLevel(logging.ERROR)
-
-
-def _is_rate_limit_error(error: Exception) -> bool:
-    """Check if an exception is a 429 rate-limit / RESOURCE_EXHAUSTED error."""
-    if getattr(error, "code", None) == 429:
-        return True
-    if "RESOURCE_EXHAUSTED" in str(error):
-        return True
-    return False
-
-
-def _parse_retry_delay(error: Exception) -> float | None:
-    """Extract retry delay in seconds from a rate-limit error.
-
-    Looks for retryDelay in the structured error details first,
-    then falls back to regex on the error message string.
-
-    Returns:
-        Delay in seconds, or None if unparseable.
-    """
-    # Try structured details: error.details["error"]["details"][*]["retryDelay"]
-    details = getattr(error, "details", None)
-    if isinstance(details, dict):
-        inner_error = details.get("error", {})
-        for detail_entry in inner_error.get("details", []):
-            if isinstance(detail_entry, dict):
-                retry_delay = detail_entry.get("retryDelay")
-                if retry_delay:
-                    match = re.search(r"([\d.]+)\s*s", str(retry_delay))
-                    if match:
-                        return float(match.group(1))
-
-    # Fallback: regex on error message string
-    match = re.search(r"retry\s+in\s+([\d.]+)\s*s", str(error), re.IGNORECASE)
-    if match:
-        return float(match.group(1))
-
-    return None
 
 
 class ADKSummarizer:
@@ -174,6 +134,12 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         self._session_service: BaseSessionService | None = None
         self._root_agent: Agent | None = None
         self._runner: Runner | None = None
+
+        # Event processor (model set lazily via property)
+        self._event_processor = ADKEventProcessor(
+            model=model or "",
+            on_event=on_event,
+        )
 
         # LLM event logger (initialized lazily when raw_llm_logging is enabled)
         self._llm_event_logger: LLMEventLogger | None = None
@@ -609,170 +575,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         return session
 
     # -------------------------------------------------------------------------
-    # Event processing (inlined from EventProcessor)
-    # -------------------------------------------------------------------------
-
-    async def _process_adk_event(
-        self,
-        adk_event: Any,
-        session_id: str,
-    ) -> AsyncGenerator[WorkflowEvent, None]:
-        """Process a single ADK event and yield WorkflowEvents.
-
-        Args:
-            adk_event: ADK event containing content parts
-            session_id: Current session ID
-
-        Yields:
-            WorkflowEvent objects for each processed part
-        """
-        # Extract usage_metadata if available (Option B - workflow event integration)
-        if hasattr(adk_event, "usage_metadata") and adk_event.usage_metadata:
-            usage = adk_event.usage_metadata
-            invocation_id = getattr(adk_event, "invocation_id", None)
-
-            usage_event = WorkflowEvent.llm_usage(
-                model=self.model,
-                prompt_tokens=getattr(usage, "prompt_token_count", None),
-                completion_tokens=getattr(usage, "candidates_token_count", None),
-                total_tokens=getattr(usage, "total_token_count", None),
-                thinking_tokens=getattr(usage, "thoughts_token_count", None),
-                cached_tokens=getattr(usage, "cached_content_token_count", None),
-                invocation_id=invocation_id,
-            )
-            # Apply optional event hook
-            if self._on_event:
-                usage_event = self._on_event(usage_event)
-            if usage_event:
-                yield usage_event
-
-        if not adk_event.content or not adk_event.content.parts:
-            return
-
-        for part in adk_event.content.parts:
-            workflow_event = self._process_part(part, session_id)
-            if workflow_event:
-                # Apply optional event hook
-                if self._on_event:
-                    workflow_event = self._on_event(workflow_event)
-                if workflow_event:
-                    yield workflow_event
-
-                    # Emit task progress after tool results
-                    if workflow_event.type == EventType.TOOL_RESULT:
-                        progress_event = self._emit_task_progress_event()
-                        if progress_event:
-                            if self._on_event:
-                                progress_event = self._on_event(progress_event)
-                            if progress_event:
-                                yield progress_event
-
-
-    def _process_part(self, part: Any, session_id: str) -> WorkflowEvent | None:
-        """Process a single part from the agent response.
-
-        Args:
-            part: ADK response part
-            session_id: Current session ID
-
-        Returns:
-            WorkflowEvent if the part produces one, None otherwise
-        """
-        if part.text:
-            result = ThinkingDetector.detect_from_part(part)
-            if result.is_thinking:
-                return WorkflowEvent.thinking(result.content, session_id)
-            return WorkflowEvent.text(result.content, session_id)
-
-        if part.function_call:
-            logger.debug("tool_call", tool_name=part.function_call.name)
-            return WorkflowEvent.tool_call(
-                tool_name=part.function_call.name,
-                tool_args=dict(part.function_call.args) if part.function_call.args else None,
-            )
-
-        # Handle function response (tool result)
-        if hasattr(part, "function_response") and part.function_response:
-            tool_name = part.function_response.name
-            response = part.function_response.response
-
-            # Determine success and extract result
-            success = True
-            result_data = response
-
-            if isinstance(response, dict):
-                # Check for error value, not just key presence
-                if response.get("error"):
-                    success = False
-                # Also respect explicit "success" field if present
-                if "success" in response:
-                    success = response["success"]
-                result_data = response
-
-            summary = self._generate_tool_summary(tool_name, result_data, success)
-            logger.debug("tool_result", tool_name=tool_name, success=success)
-
-            return WorkflowEvent.tool_result(
-                tool_name=tool_name,
-                result=summary,
-                success=success,
-            )
-
-        if part.code_execution_result:
-            return WorkflowEvent.code_execution(str(part.code_execution_result.outcome))
-
-        if part.executable_code:
-            return WorkflowEvent.executable_code(
-                part.executable_code.code,
-                str(part.executable_code.language),
-            )
-
-        if part.file_data:
-            return WorkflowEvent.file_data(part.file_data.display_name or "unknown")
-
-        return None
-
-    def _generate_tool_summary(
-        self, tool_name: str, result: Any, success: bool
-    ) -> str:
-        """Generate human-readable summary for tool result.
-
-        Args:
-            tool_name: Name of the tool
-            result: Tool result data
-            success: Whether the tool succeeded
-
-        Returns:
-            Summary string for display
-        """
-        if not success:
-            if isinstance(result, dict) and "error" in result:
-                return f"Failed: {result['error']}"
-            return f"Failed: {result}"
-
-        # Check for explicit summary in result
-        if isinstance(result, dict):
-            if "summary" in result:
-                return str(result["summary"])
-            if "message" in result:
-                return str(result["message"])
-            # Handle results with a "results" list (e.g., web_search)
-            if "results" in result and isinstance(result["results"], list):
-                return f"Found {len(result['results'])} results"
-
-        # Auto-generate based on result type
-        if result is None:
-            return "Completed"
-        if isinstance(result, list):
-            return f"Returned {len(result)} items"
-        if isinstance(result, dict):
-            return f"Returned {len(result)} fields"
-
-        # Truncate string results
-        text = str(result)
-        return truncate(text, TOOL_SUMMARY_MAX_LENGTH)
-
-    # -------------------------------------------------------------------------
     # Main processing
     # -------------------------------------------------------------------------
 
@@ -803,6 +605,9 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
 
         logger.info("processing_message", message_length=len(message))
 
+        # Sync event processor model (may have been lazily resolved)
+        self._event_processor.model = self.model
+
         # Context setup
         with self._workflow_context():
             # Session handling
@@ -830,12 +635,22 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                             yield llm_event
 
                 # Process ADK event into workflow events
-                async for workflow_event in self._process_adk_event(
+                async for workflow_event in self._event_processor.process_event(
                     adk_event,
                     current_session_id,
                 ):
                     event_count += 1
                     yield workflow_event
+
+                    # Emit task progress after tool results
+                    if workflow_event.type == EventType.TOOL_RESULT:
+                        progress_event = self._emit_task_progress_event()
+                        if progress_event:
+                            if self._on_event:
+                                progress_event = self._on_event(progress_event)
+                            if progress_event:
+                                event_count += 1
+                                yield progress_event
 
             # Drain any remaining LLM events after processing completes
             if self._llm_event_logger:

@@ -33,7 +33,7 @@ from agentic_cli.tools.registry import (
     ToolCategory,
     PermissionLevel,
 )
-from agentic_cli.workflow.context import get_context_memory_manager
+from agentic_cli.workflow.context import get_context_memory_store
 
 
 # ---------------------------------------------------------------------------
@@ -167,7 +167,7 @@ class MemoryStore:
     description="Save information to persistent memory that survives across sessions. Use this to remember user preferences, important facts, or learnings for future conversations.",
 )
 @requires("memory_manager")
-@require_context("Memory store", get_context_memory_manager)
+@require_context("Memory store", get_context_memory_store)
 def save_memory(
     content: str,
     tags: list[str] | None = None,
@@ -184,7 +184,7 @@ def save_memory(
     Returns:
         A dict with the stored item ID.
     """
-    store = get_context_memory_manager()
+    store = get_context_memory_store()
     item_id = store.store(content, tags=tags)
     return {
         "success": True,
@@ -199,7 +199,7 @@ def save_memory(
     description="Search persistent memory by keyword/substring. Use this to recall previously saved facts, preferences, or learnings.",
 )
 @requires("memory_manager")
-@require_context("Memory store", get_context_memory_manager)
+@require_context("Memory store", get_context_memory_store)
 def search_memory(
     query: str,
     limit: int = 10,
@@ -213,7 +213,7 @@ def search_memory(
     Returns:
         A dict with matching memory items.
     """
-    store = get_context_memory_manager()
+    store = get_context_memory_store()
     results = store.search(query, limit=limit)
     items = [
         {
