@@ -41,11 +41,8 @@ def glob(
 
     Args:
         pattern: Glob pattern to match (default "*" lists all files).
-            Common patterns:
-            - "*": All files in directory
-            - "*.py": All Python files
-            - "**/*.py": All Python files recursively
-            - "src/**/*.{js,ts}": JS/TS files under src/
+            E.g. "*" (all files), "*.py" (Python files),
+            "**/*.py" (recursive), "src/**/*.{js,ts}" (multiple extensions).
         path: Directory to search in (default "." = current directory).
         include_hidden: Include hidden files (starting with .) (default False).
         include_dirs: Include directories in results (default True).

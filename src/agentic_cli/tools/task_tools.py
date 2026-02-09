@@ -254,12 +254,10 @@ def save_tasks(
     list with that task's status changed.
 
     Args:
-        tasks: Complete list of tasks. Each task is a dict with:
-            - description (str, required): Task description.
-            - status (str): One of pending, in_progress, completed, cancelled.
-              Default: pending.
-            - id (str, optional): Task ID. Auto-assigned if omitted.
-            - priority (str, optional): low, medium, high. Default: medium.
+        tasks: Complete list of tasks. Each task dict has keys
+            "description" (required), "status" (pending/in_progress/
+            completed/cancelled, default pending), "id" (auto-assigned
+            if omitted), and "priority" (low/medium/high, default medium).
 
     Returns:
         A dict with the operation result.

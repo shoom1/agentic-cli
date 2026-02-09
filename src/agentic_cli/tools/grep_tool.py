@@ -50,10 +50,9 @@ def grep(
         context_lines: Lines of context around matches (default 0).
         max_results: Maximum number of matches to return (default 100).
         use_regex: Treat pattern as regex (default True).
-        output_mode: Output format:
-            - "content": Show matching lines with context (default)
-            - "files": Only list files with matches
-            - "count": Show match counts per file
+        output_mode: Output format — "content" (matching lines with context,
+            default), "files" (only file paths), or "count" (match counts
+            per file).
 
     Returns:
         dict with:

@@ -28,6 +28,20 @@ logger = Loggers.cli()
 _init_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="workflow-init")
 
 
+def _is_claude_model(model: str | None) -> bool:
+    """Check if a model string refers to a Claude (Anthropic) model."""
+    return model is not None and model.startswith("claude-")
+
+
+def _resolve_effective_model(
+    model: str | None, settings: "BaseSettings"
+) -> str | None:
+    """Resolve the effective model from explicit override or settings."""
+    if model:
+        return model
+    return getattr(settings, "default_model", None)
+
+
 def create_workflow_manager_from_settings(
     agent_configs: list["AgentConfig"],
     settings: "BaseSettings",
@@ -38,7 +52,9 @@ def create_workflow_manager_from_settings(
     """Factory function to create the appropriate workflow manager based on settings.
 
     Creates either a GoogleADKWorkflowManager or LangGraphWorkflowManager
-    based on the settings.orchestrator configuration.
+    based on the settings.orchestrator configuration. Claude models are
+    automatically routed to LangGraph because ADK's LiteLLM adapter has
+    critical issues with tool calling, thinking, and streaming.
 
     Args:
         agent_configs: List of agent configurations.
@@ -61,8 +77,19 @@ def create_workflow_manager_from_settings(
     from agentic_cli.workflow.settings import OrchestratorType
 
     orchestrator = getattr(settings, "orchestrator", OrchestratorType.ADK)
+    effective_model = _resolve_effective_model(model, settings)
+    use_langgraph = orchestrator == OrchestratorType.LANGGRAPH or _is_claude_model(
+        effective_model
+    )
 
-    if orchestrator == OrchestratorType.LANGGRAPH:
+    if use_langgraph and _is_claude_model(effective_model) and orchestrator != OrchestratorType.LANGGRAPH:
+        logger.info(
+            "auto_switching_to_langgraph",
+            model=effective_model,
+            reason="Claude models require LangGraph orchestrator (ADK LiteLLM adapter has critical issues)",
+        )
+
+    if use_langgraph:
         try:
             from agentic_cli.workflow.langgraph import LangGraphWorkflowManager
 
@@ -77,7 +104,7 @@ def create_workflow_manager_from_settings(
             )
         except ImportError as e:
             raise ImportError(
-                f"LangGraph orchestrator selected but dependencies not installed. "
+                f"LangGraph orchestrator required but dependencies not installed. "
                 f"Install with: pip install agentic-cli[langgraph]\n"
                 f"Original error: {e}"
             ) from e
@@ -129,15 +156,15 @@ class WorkflowController:
             settings: Application settings instance
         """
         self._settings = settings
+        self._agent_configs = agent_configs
+        self._app_name = settings.app_name
 
         # Closure captures agent_configs for lazy creation (used by _background_init)
-        app_name = settings.app_name
-
         def _create_workflow() -> "BaseWorkflowManager":
             return create_workflow_manager_from_settings(
                 agent_configs=agent_configs,
                 settings=settings,
-                app_name=app_name,
+                app_name=self._app_name,
             )
 
         self._create_fn = _create_workflow
@@ -250,8 +277,34 @@ class WorkflowController:
 
         return self._workflow is not None
 
+    def _needs_orchestrator_swap(self, new_model: str | None) -> bool:
+        """Check if switching to new_model requires a different orchestrator.
+
+        Returns True when the model family changes (e.g. Gemini → Claude or
+        Claude → Gemini) and the current manager type doesn't match what the
+        factory would create for the new model.
+        """
+        if new_model is None or self._workflow is None:
+            return False
+
+        from agentic_cli.workflow.settings import OrchestratorType
+
+        orchestrator = getattr(self._settings, "orchestrator", OrchestratorType.ADK)
+        new_needs_langgraph = orchestrator == OrchestratorType.LANGGRAPH or _is_claude_model(new_model)
+
+        # Check current manager type by class name to avoid isinstance issues
+        # when the class may not be importable (LangGraph not installed)
+        current_cls_name = type(self._workflow).__name__
+        current_is_langgraph = current_cls_name == "LangGraphWorkflowManager"
+
+        return new_needs_langgraph != current_is_langgraph
+
     async def reinitialize(self, model: str | None = None) -> None:
         """Reinitialize the workflow with optional new model.
+
+        If the new model requires a different orchestrator (e.g. switching from
+        Gemini on ADK to Claude on LangGraph), the entire workflow manager is
+        replaced. Otherwise, the existing manager is reinitalized in place.
 
         Args:
             model: Optional new model to use
@@ -263,7 +316,21 @@ class WorkflowController:
         if self._workflow is None:
             raise RuntimeError("Cannot reinitialize - workflow not initialized")
 
-        await self._workflow.reinitialize(model=model, preserve_sessions=True)
+        if self._needs_orchestrator_swap(model):
+            logger.info(
+                "orchestrator_swap",
+                old_model=self._workflow.model,
+                new_model=model,
+            )
+            self._workflow = create_workflow_manager_from_settings(
+                agent_configs=self._agent_configs,
+                settings=self._settings,
+                app_name=self._app_name,
+                model=model,
+            )
+            await self._workflow.initialize_services()
+        else:
+            await self._workflow.reinitialize(model=model, preserve_sessions=True)
 
     async def cancel_init(self) -> None:
         """Cancel pending initialization task if still running."""
