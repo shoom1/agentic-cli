@@ -327,42 +327,23 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
                 event_data = event.get("data", {})
 
                 # Convert LangGraph events to WorkflowEvents
-                if event_kind == "on_chat_model_start":
-                    # Agent starting
-                    yield self._maybe_transform(
-                        WorkflowEvent(
-                            type=EventType.TOOL_CALL,
-                            content=f"Agent: {event_name}",
-                            metadata={"agent": event_name},
-                        )
-                    )
-
-                elif event_kind == "on_chat_model_stream":
-                    # Streaming response
+                if event_kind == "on_chat_model_stream":
+                    # Accumulate streaming tokens — yielded as complete
+                    # response in on_chat_model_end to avoid fragmented output.
                     chunk = event_data.get("chunk")
                     if chunk and hasattr(chunk, "content") and chunk.content:
-                        # Extract content blocks with type info
                         blocks = self._extract_content_blocks(chunk.content)
                         for block_type, text in blocks:
                             if text:
                                 full_response_parts.append(text)
-                                if block_type == "thinking":
-                                    yield self._maybe_transform(
-                                        WorkflowEvent.thinking(text, current_session_id)
-                                    )
-                                else:
-                                    yield self._maybe_transform(
-                                        WorkflowEvent.text(text, current_session_id)
-                                    )
 
                 elif event_kind == "on_chat_model_end":
-                    # Agent finished
+                    # Yield the complete accumulated response
                     output = event_data.get("output")
                     if output and hasattr(output, "content") and output.content:
                         blocks = self._extract_content_blocks(output.content)
                         for block_type, text in blocks:
-                            if text and text not in "".join(full_response_parts):
-                                full_response_parts.append(text)
+                            if text:
                                 if block_type == "thinking":
                                     yield self._maybe_transform(
                                         WorkflowEvent.thinking(text, current_session_id)

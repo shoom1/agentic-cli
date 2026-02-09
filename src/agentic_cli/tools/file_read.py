@@ -124,10 +124,8 @@ def diff_compare(
     Args:
         source_a: First text or file path to compare.
         source_b: Second text or file path to compare.
-        mode: Diff output mode. One of:
-            - "unified": Standard unified diff format (default)
-            - "side_by_side": Side-by-side comparison
-            - "summary": Only summary statistics
+        mode: Diff output mode — "unified" (standard diff, default),
+            "side_by_side" (parallel comparison), or "summary" (stats only).
         context_lines: Number of context lines around changes (default 3).
 
     Returns:

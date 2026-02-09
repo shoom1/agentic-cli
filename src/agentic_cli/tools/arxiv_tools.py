@@ -135,8 +135,8 @@ def fetch_arxiv_paper(arxiv_id: str) -> dict[str, Any]:
     """Fetch detailed information about a specific arXiv paper.
 
     Args:
-        arxiv_id: The arXiv paper ID (e.g., '1706.03762', '1706.03762v2',
-                  or full URL 'https://arxiv.org/abs/1706.03762')
+        arxiv_id: The arXiv paper ID, e.g. '1706.03762' or '1706.03762v2'.
+                  Also accepts full arXiv URLs.
 
     Returns:
         Dictionary with paper details or error information
