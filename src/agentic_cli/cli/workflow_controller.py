@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, AsyncIterator
 from agentic_cli.logging import Loggers
 
 if TYPE_CHECKING:
+    from agentic_cli.cli.usage_tracker import UsageTracker
     from agentic_cli.config import BaseSettings
     from agentic_cli.workflow.base_manager import BaseWorkflowManager
     from agentic_cli.workflow.config import AgentConfig
@@ -173,6 +174,7 @@ class WorkflowController:
         self._workflow: "BaseWorkflowManager | None" = None
         self._init_task: asyncio.Task[None] | None = None
         self._init_error: Exception | None = None
+        self.usage_tracker: "UsageTracker | None" = None
 
     @property
     def workflow(self) -> "BaseWorkflowManager":
@@ -348,10 +350,15 @@ class WorkflowController:
             ui: UI session to update
         """
         if self._init_error:
-            ui.status_text = "Init failed - check API keys"
+            ui.set_status("Init failed - check API keys")
         elif self._workflow is not None:
-            model = self._workflow.model
-            ui.status_text = f"{model} | Ctrl+C: cancel | /help: commands"
+            parts = [self._workflow.model]
+            if self.usage_tracker:
+                token_summary = self.usage_tracker.format_status_bar()
+                if token_summary:
+                    parts.append(token_summary)
+            parts.extend(["Ctrl+C: cancel", "/help: commands"])
+            ui.set_status(" | ".join(parts))
         # If still initializing, leave status bar unchanged
 
     @asynccontextmanager
