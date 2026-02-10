@@ -57,7 +57,7 @@ def search_knowledge_base(
 @register_tool(
     category=ToolCategory.KNOWLEDGE,
     permission_level=PermissionLevel.CAUTION,
-    description="Ingest a document into the knowledge base for later semantic search. Use this to store papers, articles, or notes for future reference.",
+    description="Ingest a document into the knowledge base for later semantic search. Use this to store papers, articles, or notes for future reference. Valid source_type values: arxiv, ssrn, web, internal, user.",
 )
 @requires("kb_manager")
 @require_context("KB manager", get_context_kb_manager)
@@ -72,7 +72,7 @@ def ingest_to_knowledge_base(
     Args:
         content: Document content to ingest
         title: Document title
-        source_type: Type of source (arxiv, web, user, internal)
+        source_type: Type of source (arxiv, ssrn, web, internal, user)
         source_url: Optional URL of the source
 
     Returns:

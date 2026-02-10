@@ -19,9 +19,6 @@ from agentic_cli.knowledge_base.sources import (
     SearchSource,
     SearchSourceResult,
     SearchSourceRegistry,
-    ArxivSearchSource,
-    get_search_registry,
-    register_search_source,
 )
 
 __all__ = [
@@ -43,7 +40,4 @@ __all__ = [
     "SearchSource",
     "SearchSourceResult",
     "SearchSourceRegistry",
-    "ArxivSearchSource",
-    "get_search_registry",
-    "register_search_source",
 ]

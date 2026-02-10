@@ -24,7 +24,7 @@ def _get_arxiv_source():
     """Get or create the ArxivSearchSource instance."""
     global _arxiv_source
     if _arxiv_source is None:
-        from agentic_cli.knowledge_base.sources import ArxivSearchSource
+        from agentic_cli.tools.arxiv_source import ArxivSearchSource
         _arxiv_source = ArxivSearchSource()
     return _arxiv_source
 

@@ -392,11 +392,8 @@ from agentic_cli.knowledge_base.sources import (
     SearchSource,
     SearchSourceResult,
     SearchSourceRegistry,
-    ArxivSearchSource,
-    CachedSearchResult,
-    get_search_registry,
-    register_search_source,
 )
+from agentic_cli.tools.arxiv_source import ArxivSearchSource, CachedSearchResult
 from unittest.mock import patch, MagicMock
 
 
@@ -668,8 +665,8 @@ class TestArxivSearchSource:
         with patch.dict("sys.modules", {"feedparser": None}):
             # Force reimport to trigger ImportError path
             import importlib
-            import agentic_cli.knowledge_base.sources as sources_module
-            importlib.reload(sources_module)
+            import agentic_cli.tools.arxiv_source as arxiv_source_module
+            importlib.reload(arxiv_source_module)
 
         # Even if feedparser exists, we can test the return type
         # by checking it returns a list
@@ -728,7 +725,7 @@ class TestArxivSearchSource:
         assert results == []
 
     @patch("feedparser.parse")
-    @patch("agentic_cli.knowledge_base.sources.time")
+    @patch("agentic_cli.tools.arxiv_source.time")
     def test_rate_limiting_enforced(self, mock_time_module, mock_parse):
         """Test rate limiting is enforced between requests."""
         mock_parse.return_value = MagicMock(entries=[], bozo=False, status=200)
@@ -753,7 +750,7 @@ class TestArxivSearchSource:
         assert 0 < sleep_time <= source.rate_limit
 
     @patch("feedparser.parse")
-    @patch("agentic_cli.knowledge_base.sources.time")
+    @patch("agentic_cli.tools.arxiv_source.time")
     def test_rate_limiting_respects_elapsed_time(self, mock_time_module, mock_parse):
         """Test rate limiting accounts for time already elapsed."""
         mock_parse.return_value = MagicMock(entries=[], bozo=False, status=200)
@@ -774,7 +771,7 @@ class TestArxivSearchSource:
         assert 1.9 <= sleep_time <= 2.1  # Allow small tolerance
 
     @patch("feedparser.parse")
-    @patch("agentic_cli.knowledge_base.sources.time")
+    @patch("agentic_cli.tools.arxiv_source.time")
     def test_caching_returns_cached_results(self, mock_time_module, mock_parse):
         """Test that repeated queries return cached results without API call."""
         mock_time_module.time.return_value = 100.0
@@ -799,7 +796,7 @@ class TestArxivSearchSource:
         assert results1[0].title == results2[0].title
 
     @patch("feedparser.parse")
-    @patch("agentic_cli.knowledge_base.sources.time")
+    @patch("agentic_cli.tools.arxiv_source.time")
     def test_cache_expires_after_ttl(self, mock_time_module, mock_parse):
         """Test that cache expires after TTL."""
         # First call at t=100
@@ -824,7 +821,7 @@ class TestArxivSearchSource:
         assert mock_parse.call_count == 2
 
     @patch("feedparser.parse")
-    @patch("agentic_cli.knowledge_base.sources.time")
+    @patch("agentic_cli.tools.arxiv_source.time")
     def test_different_queries_not_cached(self, mock_time_module, mock_parse):
         """Test that different queries are not served from cache."""
         mock_time_module.time.return_value = 100.0
@@ -861,7 +858,7 @@ class TestArxivSearchSource:
         assert source.max_cache_size == 50
 
     @patch("feedparser.parse")
-    @patch("agentic_cli.knowledge_base.sources.time")
+    @patch("agentic_cli.tools.arxiv_source.time")
     def test_cache_evicts_oldest_when_full(self, mock_time_module, mock_parse):
         """Test that oldest cache entries are evicted when max size is reached."""
         mock_time_module.sleep = MagicMock()
@@ -907,7 +904,7 @@ class TestArxivSearchSource:
         assert len(source._cache) == 0
 
     @patch("feedparser.parse")
-    @patch("agentic_cli.knowledge_base.sources.time")
+    @patch("agentic_cli.tools.arxiv_source.time")
     def test_search_with_sort_by(self, mock_time_module, mock_parse):
         """Test search with sort_by parameter."""
         mock_time_module.time.return_value = 100.0
@@ -921,7 +918,7 @@ class TestArxivSearchSource:
         assert "sortBy=lastUpdatedDate" in call_url
 
     @patch("feedparser.parse")
-    @patch("agentic_cli.knowledge_base.sources.time")
+    @patch("agentic_cli.tools.arxiv_source.time")
     def test_search_with_sort_order(self, mock_time_module, mock_parse):
         """Test search with sort_order parameter."""
         mock_time_module.time.return_value = 100.0
@@ -936,7 +933,7 @@ class TestArxivSearchSource:
         assert "sortOrder=ascending" in call_url
 
     @patch("feedparser.parse")
-    @patch("agentic_cli.knowledge_base.sources.time")
+    @patch("agentic_cli.tools.arxiv_source.time")
     def test_search_with_date_range(self, mock_time_module, mock_parse):
         """Test search with date range filter."""
         mock_time_module.time.return_value = 100.0
@@ -953,7 +950,7 @@ class TestArxivSearchSource:
         assert "20241231" in call_url
 
     @patch("feedparser.parse")
-    @patch("agentic_cli.knowledge_base.sources.time")
+    @patch("agentic_cli.tools.arxiv_source.time")
     def test_search_sort_and_date_in_cache_key(self, mock_time_module, mock_parse):
         """Test that sort and date params are included in cache key."""
         mock_time_module.time.return_value = 100.0
@@ -976,7 +973,7 @@ class TestArxivSearchSource:
         assert "relevance" in cache_key
 
     @patch("feedparser.parse")
-    @patch("agentic_cli.knowledge_base.sources.time")
+    @patch("agentic_cli.tools.arxiv_source.time")
     def test_http_403_returns_empty_and_not_cached(self, mock_time_module, mock_parse):
         """Test that HTTP 403 (rate limited) returns empty and is NOT cached."""
         mock_time_module.time.return_value = 100.0
@@ -995,7 +992,7 @@ class TestArxivSearchSource:
         assert len(source._cache) == 0  # Should NOT be cached
 
     @patch("feedparser.parse")
-    @patch("agentic_cli.knowledge_base.sources.time")
+    @patch("agentic_cli.tools.arxiv_source.time")
     def test_http_429_returns_empty_and_not_cached(self, mock_time_module, mock_parse):
         """Test that HTTP 429 (too many requests) returns empty and is NOT cached."""
         mock_time_module.time.return_value = 100.0
@@ -1014,7 +1011,7 @@ class TestArxivSearchSource:
         assert len(source._cache) == 0  # Should NOT be cached
 
     @patch("feedparser.parse")
-    @patch("agentic_cli.knowledge_base.sources.time")
+    @patch("agentic_cli.tools.arxiv_source.time")
     def test_bozo_feed_error_returns_empty_and_not_cached(self, mock_time_module, mock_parse):
         """Test that bozo feed errors with no entries return empty and are NOT cached."""
         mock_time_module.time.return_value = 100.0
@@ -1034,7 +1031,7 @@ class TestArxivSearchSource:
         assert len(source._cache) == 0  # Should NOT be cached
 
     @patch("feedparser.parse")
-    @patch("agentic_cli.knowledge_base.sources.time")
+    @patch("agentic_cli.tools.arxiv_source.time")
     def test_successful_empty_results_are_cached(self, mock_time_module, mock_parse):
         """Test that legitimate empty results (HTTP 200, no bozo) ARE cached."""
         mock_time_module.time.return_value = 100.0
@@ -1053,32 +1050,3 @@ class TestArxivSearchSource:
         assert len(source._cache) == 1  # SHOULD be cached (legitimate empty result)
 
 
-class TestDefaultRegistry:
-    """Tests for default registry functions."""
-
-    def test_get_search_registry(self):
-        """Test getting default registry."""
-        registry = get_search_registry()
-
-        # Check registry has expected methods (duck typing)
-        assert hasattr(registry, "register")
-        assert hasattr(registry, "get")
-        assert hasattr(registry, "search")
-        # Default registry should have built-in sources
-        assert registry.get("arxiv") is not None
-
-    def test_register_search_source(self):
-        """Test registering to default registry."""
-        registry = get_search_registry()
-
-        # Create a custom source
-        custom = ConcreteSearchSource()
-
-        # Register it
-        register_search_source(custom)
-
-        # It should be in the default registry
-        assert registry.get("test_source") is custom
-
-        # Clean up
-        registry.unregister("test_source")

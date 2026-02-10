@@ -1423,7 +1423,7 @@ class TestFetchArxivPaperRateLimiting:
         import agentic_cli.tools.arxiv_tools as arxiv_module
         arxiv_module._arxiv_source = None
 
-        with patch("agentic_cli.knowledge_base.sources.time") as mock_time:
+        with patch("agentic_cli.tools.arxiv_source.time") as mock_time:
             mock_time.time.return_value = 100.0
             mock_time.sleep = MagicMock()
 
