@@ -2,6 +2,14 @@
 
 Main interface for knowledge base operations including document ingestion,
 search, and management.
+
+Persistence format (v2):
+    metadata.json    - Document headers and chunk metadata (no content)
+    documents/{id}.json - Per-document content and chunk texts
+    embeddings/      - FAISS index and mappings
+
+Legacy format (v1): All content stored in metadata.json.
+Auto-migrated to v2 on first load.
 """
 
 from __future__ import annotations
@@ -28,6 +36,9 @@ if TYPE_CHECKING:
     from agentic_cli.config import BaseSettings
 
 logger = Loggers.knowledge_base()
+
+# Current persistence format version
+_FORMAT_VERSION = 2
 
 
 def matches_document_filters(doc: Document, filters: dict[str, Any]) -> bool:
@@ -156,18 +167,92 @@ class KnowledgeBaseManager:
         )
         return emb, vs
 
+    # ------------------------------------------------------------------
+    # Persistence — v2 format (content in per-document files)
+    # ------------------------------------------------------------------
+
+    def _document_content_path(self, doc_id: str) -> Path:
+        """Get the path for a document's content file."""
+        return self.documents_dir / f"{doc_id}.json"
+
+    def _save_document_content(self, doc: Document) -> None:
+        """Save document content to its individual file."""
+        chunk_contents = {c.id: c.content for c in doc.chunks}
+        data = {
+            "content": doc.content,
+            "chunks": chunk_contents,
+        }
+        atomic_write_json(self._document_content_path(doc.id), data)
+
+    def _load_document_content(self, doc_id: str) -> dict[str, Any] | None:
+        """Load document content from its individual file.
+
+        Returns:
+            Dict with 'content' and 'chunks' keys, or None if not found.
+        """
+        path = self._document_content_path(doc_id)
+        if not path.exists():
+            return None
+        try:
+            return json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning(
+                "failed_to_load_document_content",
+                doc_id=doc_id,
+                error=str(e),
+            )
+            return None
+
+    def _delete_document_content(self, doc_id: str) -> None:
+        """Delete a document's content file."""
+        path = self._document_content_path(doc_id)
+        if path.exists():
+            path.unlink()
+
     def _load_metadata(self) -> None:
-        """Load document metadata from disk."""
+        """Load document metadata from disk.
+
+        Handles both v1 (content in metadata.json) and v2 (content in
+        per-document files) formats. Auto-migrates v1 to v2.
+        """
         if not self.metadata_path.exists():
             return
 
         try:
             data = json.loads(self.metadata_path.read_text())
+            version = data.get("version", 1)
+
             for doc_data in data.get("documents", []):
-                doc = Document.from_dict(doc_data)
+                if version >= 2:
+                    # v2: Load header from index, content from per-doc file
+                    doc = Document.from_dict(doc_data)
+                    content_data = self._load_document_content(doc.id)
+                    if content_data:
+                        doc.content = content_data["content"]
+                        chunk_contents = content_data.get("chunks", {})
+                        for chunk in doc.chunks:
+                            if chunk.id in chunk_contents:
+                                chunk.content = chunk_contents[chunk.id]
+                else:
+                    # v1: Everything is in metadata.json
+                    doc = Document.from_dict(doc_data)
+
                 self._documents[doc.id] = doc
                 for chunk in doc.chunks:
                     self._chunks[chunk.id] = chunk
+
+            # Migrate v1 → v2
+            if version < 2 and self._documents:
+                logger.info(
+                    "migrating_metadata_format",
+                    from_version=version,
+                    to_version=_FORMAT_VERSION,
+                    document_count=len(self._documents),
+                )
+                for doc in self._documents.values():
+                    self._save_document_content(doc)
+                self._save_metadata()
+
         except (json.JSONDecodeError, KeyError) as e:
             # Log error but continue with empty state
             logger.warning(
@@ -177,9 +262,19 @@ class KnowledgeBaseManager:
             )
 
     def _save_metadata(self) -> None:
-        """Save document metadata to disk."""
+        """Save document metadata index to disk (without content)."""
+        doc_headers = []
+        for doc in self._documents.values():
+            header = doc.to_dict()
+            # Strip content from index — stored in per-document files
+            header.pop("content", None)
+            for chunk_header in header.get("chunks", []):
+                chunk_header.pop("content", None)
+            doc_headers.append(header)
+
         data = {
-            "documents": [doc.to_dict() for doc in self._documents.values()],
+            "version": _FORMAT_VERSION,
+            "documents": doc_headers,
             "updated_at": datetime.now().isoformat(),
         }
         atomic_write_json(self.metadata_path, data)
@@ -249,7 +344,8 @@ class KnowledgeBaseManager:
         # Store document
         self._documents[doc.id] = doc
 
-        # Persist
+        # Persist (content in per-doc file, headers in metadata index)
+        self._save_document_content(doc)
         self._save_metadata()
         self._vector_store.save()
 
@@ -385,6 +481,7 @@ class KnowledgeBaseManager:
         del self._documents[doc_id]
 
         # Persist
+        self._delete_document_content(doc_id)
         self._save_metadata()
         self._vector_store.save()
 
@@ -416,6 +513,10 @@ class KnowledgeBaseManager:
 
     def clear(self) -> None:
         """Clear all documents from the knowledge base."""
+        # Delete per-document content files
+        for doc_id in list(self._documents):
+            self._delete_document_content(doc_id)
+
         self._documents = {}
         self._chunks = {}
         self._vector_store.clear()

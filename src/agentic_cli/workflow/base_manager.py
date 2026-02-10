@@ -26,6 +26,7 @@ from agentic_cli.workflow.context import (
     set_context_plan_store,
     set_context_task_store,
     set_context_paper_store,
+    set_context_kb_manager,
     set_context_approval_manager,
     set_context_checkpoint_manager,
     set_context_llm_summarizer,
@@ -38,6 +39,7 @@ if TYPE_CHECKING:
     from agentic_cli.tools.planning_tools import PlanStore
     from agentic_cli.tools.task_tools import TaskStore
     from agentic_cli.tools.paper_tools import PaperStore
+    from agentic_cli.knowledge_base import KnowledgeBaseManager
     from agentic_cli.hitl import ApprovalManager, CheckpointManager
 
 logger = Loggers.workflow()
@@ -105,6 +107,7 @@ class BaseWorkflowManager(ABC):
         self._plan_store: "PlanStore | None" = None
         self._task_store: "TaskStore | None" = None
         self._paper_store: "PaperStore | None" = None
+        self._kb_manager: "KnowledgeBaseManager | None" = None
         self._approval_manager: "ApprovalManager | None" = None
         self._checkpoint_manager: "CheckpointManager | None" = None
         self._llm_summarizer: Any | None = None
@@ -153,6 +156,11 @@ class BaseWorkflowManager(ABC):
     def paper_store(self) -> "PaperStore | None":
         """Get the paper store (if required by tools)."""
         return self._paper_store
+
+    @property
+    def kb_manager(self) -> "KnowledgeBaseManager | None":
+        """Get the knowledge base manager (if required by tools)."""
+        return self._kb_manager
 
     @property
     def approval_manager(self) -> "ApprovalManager | None":
@@ -207,6 +215,13 @@ class BaseWorkflowManager(ABC):
             from agentic_cli.tools.paper_tools import PaperStore
             self._paper_store = PaperStore(self._settings)
 
+        if "kb_manager" in self._required_managers and self._kb_manager is None:
+            from agentic_cli.knowledge_base import KnowledgeBaseManager
+            self._kb_manager = KnowledgeBaseManager(
+                settings=self._settings,
+                use_mock=self._settings.knowledge_base_use_mock,
+            )
+
         if "approval_manager" in self._required_managers and self._approval_manager is None:
             from agentic_cli.hitl import ApprovalManager
             self._approval_manager = ApprovalManager()
@@ -244,6 +259,7 @@ class BaseWorkflowManager(ABC):
             set_context_plan_store(self._plan_store),
             set_context_task_store(self._task_store),
             set_context_paper_store(self._paper_store),
+            set_context_kb_manager(self._kb_manager),
             set_context_approval_manager(self._approval_manager),
             set_context_checkpoint_manager(self._checkpoint_manager),
             set_context_llm_summarizer(self._llm_summarizer),

@@ -23,10 +23,10 @@ import sys
 import time
 
 from agentic_cli.knowledge_base.sources import (
-    ArxivSearchSource,
+    SearchSourceRegistry,
     SearchSourceResult,
-    get_search_registry,
 )
+from agentic_cli.tools.arxiv_source import ArxivSearchSource
 
 
 # =============================================================================
@@ -240,7 +240,8 @@ def demo_registry_integration():
     print("Registry Integration Demo")
     print("=" * 60)
 
-    registry = get_search_registry()
+    registry = SearchSourceRegistry()
+    registry.register(ArxivSearchSource())
 
     # List registered sources
     sources = registry.list_sources()

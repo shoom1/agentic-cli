@@ -21,13 +21,13 @@ class TestArxivSearchSourceLastError:
 
     def test_last_error_initially_none(self):
         """last_error is None before any search."""
-        from agentic_cli.knowledge_base.sources import ArxivSearchSource
+        from agentic_cli.tools.arxiv_source import ArxivSearchSource
 
         source = ArxivSearchSource()
         assert source.last_error is None
 
     @patch("feedparser.parse")
-    @patch("agentic_cli.knowledge_base.sources.time")
+    @patch("agentic_cli.tools.arxiv_source.time")
     def test_last_error_set_on_http_403(self, mock_time, mock_parse):
         """last_error is set when ArXiv returns HTTP 403."""
         mock_time.time.return_value = 100.0
@@ -39,7 +39,7 @@ class TestArxivSearchSourceLastError:
         mock_feed.bozo = False
         mock_parse.return_value = mock_feed
 
-        from agentic_cli.knowledge_base.sources import ArxivSearchSource
+        from agentic_cli.tools.arxiv_source import ArxivSearchSource
 
         source = ArxivSearchSource()
         source.search("test")
@@ -48,7 +48,7 @@ class TestArxivSearchSourceLastError:
         assert "403" in source.last_error
 
     @patch("feedparser.parse")
-    @patch("agentic_cli.knowledge_base.sources.time")
+    @patch("agentic_cli.tools.arxiv_source.time")
     def test_last_error_set_on_http_429(self, mock_time, mock_parse):
         """last_error is set when ArXiv returns HTTP 429."""
         mock_time.time.return_value = 100.0
@@ -60,7 +60,7 @@ class TestArxivSearchSourceLastError:
         mock_feed.bozo = False
         mock_parse.return_value = mock_feed
 
-        from agentic_cli.knowledge_base.sources import ArxivSearchSource
+        from agentic_cli.tools.arxiv_source import ArxivSearchSource
 
         source = ArxivSearchSource()
         source.search("test")
@@ -69,7 +69,7 @@ class TestArxivSearchSourceLastError:
         assert "429" in source.last_error
 
     @patch("feedparser.parse")
-    @patch("agentic_cli.knowledge_base.sources.time")
+    @patch("agentic_cli.tools.arxiv_source.time")
     def test_last_error_set_on_bozo(self, mock_time, mock_parse):
         """last_error is set on feed bozo error with no entries."""
         mock_time.time.return_value = 100.0
@@ -82,7 +82,7 @@ class TestArxivSearchSourceLastError:
         mock_feed.entries = []
         mock_parse.return_value = mock_feed
 
-        from agentic_cli.knowledge_base.sources import ArxivSearchSource
+        from agentic_cli.tools.arxiv_source import ArxivSearchSource
 
         source = ArxivSearchSource()
         source.search("test")
@@ -91,14 +91,14 @@ class TestArxivSearchSourceLastError:
         assert "feed error" in source.last_error.lower()
 
     @patch("feedparser.parse")
-    @patch("agentic_cli.knowledge_base.sources.time")
+    @patch("agentic_cli.tools.arxiv_source.time")
     def test_last_error_set_on_parse_exception(self, mock_time, mock_parse):
         """last_error is set when feedparser.parse() raises."""
         mock_time.time.return_value = 100.0
         mock_time.sleep = MagicMock()
         mock_parse.side_effect = Exception("Connection timeout")
 
-        from agentic_cli.knowledge_base.sources import ArxivSearchSource
+        from agentic_cli.tools.arxiv_source import ArxivSearchSource
 
         source = ArxivSearchSource()
         source.search("test")
@@ -107,13 +107,13 @@ class TestArxivSearchSourceLastError:
         assert "Connection timeout" in source.last_error
 
     @patch("feedparser.parse")
-    @patch("agentic_cli.knowledge_base.sources.time")
+    @patch("agentic_cli.tools.arxiv_source.time")
     def test_last_error_cleared_on_success(self, mock_time, mock_parse):
         """last_error is cleared after a successful search."""
         mock_time.time.return_value = 100.0
         mock_time.sleep = MagicMock()
 
-        from agentic_cli.knowledge_base.sources import ArxivSearchSource
+        from agentic_cli.tools.arxiv_source import ArxivSearchSource
 
         source = ArxivSearchSource()
 
@@ -137,7 +137,7 @@ class TestArxivSearchSourceLastError:
 
     def test_last_error_set_when_feedparser_missing(self):
         """last_error is set when feedparser is not installed."""
-        from agentic_cli.knowledge_base.sources import ArxivSearchSource
+        from agentic_cli.tools.arxiv_source import ArxivSearchSource
 
         source = ArxivSearchSource()
 
@@ -166,7 +166,7 @@ class TestSearchArxivErrorReporting:
     """Tests for search_arxiv error propagation."""
 
     @patch("feedparser.parse")
-    @patch("agentic_cli.knowledge_base.sources.time")
+    @patch("agentic_cli.tools.arxiv_source.time")
     def test_search_arxiv_returns_success_true_on_results(self, mock_time, mock_parse):
         """search_arxiv includes success=True when results are found."""
         mock_time.time.return_value = 100.0
@@ -199,7 +199,7 @@ class TestSearchArxivErrorReporting:
         assert len(result["papers"]) == 1
 
     @patch("feedparser.parse")
-    @patch("agentic_cli.knowledge_base.sources.time")
+    @patch("agentic_cli.tools.arxiv_source.time")
     def test_search_arxiv_returns_success_true_on_empty(self, mock_time, mock_parse):
         """search_arxiv returns success=True for genuine empty results."""
         mock_time.time.return_value = 100.0
@@ -224,7 +224,7 @@ class TestSearchArxivErrorReporting:
         assert result["papers"] == []
 
     @patch("feedparser.parse")
-    @patch("agentic_cli.knowledge_base.sources.time")
+    @patch("agentic_cli.tools.arxiv_source.time")
     def test_search_arxiv_returns_error_on_rate_limit(self, mock_time, mock_parse):
         """search_arxiv returns success=False on rate limiting."""
         mock_time.time.return_value = 100.0
@@ -252,7 +252,7 @@ class TestSearchArxivErrorReporting:
         assert "papers" not in result
 
     @patch("feedparser.parse")
-    @patch("agentic_cli.knowledge_base.sources.time")
+    @patch("agentic_cli.tools.arxiv_source.time")
     def test_search_arxiv_returns_error_on_feed_error(self, mock_time, mock_parse):
         """search_arxiv returns success=False on feed parse error."""
         mock_time.time.return_value = 100.0

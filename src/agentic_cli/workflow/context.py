@@ -31,3 +31,4 @@ set_context_checkpoint_manager, get_context_checkpoint_manager = _make_context_a
 set_context_task_store, get_context_task_store = _make_context_accessors("task_store")
 set_context_llm_summarizer, get_context_llm_summarizer = _make_context_accessors("llm_summarizer")
 set_context_paper_store, get_context_paper_store = _make_context_accessors("paper_store")
+set_context_kb_manager, get_context_kb_manager = _make_context_accessors("kb_manager")

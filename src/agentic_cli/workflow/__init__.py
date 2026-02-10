@@ -22,6 +22,7 @@ from agentic_cli.workflow.context import (
     get_context_checkpoint_manager,
     get_context_task_store,
     get_context_llm_summarizer,
+    get_context_kb_manager,
     # Setters for workflow managers
     set_context_memory_store,
     set_context_plan_store,
@@ -29,6 +30,7 @@ from agentic_cli.workflow.context import (
     set_context_checkpoint_manager,
     set_context_task_store,
     set_context_llm_summarizer,
+    set_context_kb_manager,
 )
 
 # Heavy imports - lazy loaded on first access
@@ -90,6 +92,7 @@ __all__ = [
     "get_context_checkpoint_manager",
     "get_context_task_store",
     "get_context_llm_summarizer",
+    "get_context_kb_manager",
     # Context setters (for workflow managers)
     "set_context_memory_store",
     "set_context_plan_store",
@@ -97,4 +100,5 @@ __all__ = [
     "set_context_checkpoint_manager",
     "set_context_task_store",
     "set_context_llm_summarizer",
+    "set_context_kb_manager",
 ]
