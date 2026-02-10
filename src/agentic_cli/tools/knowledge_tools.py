@@ -4,35 +4,15 @@ Provides tools for searching and ingesting documents into the local
 knowledge base using semantic similarity.
 """
 
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-from agentic_cli.config import get_settings
+from agentic_cli.tools import requires, require_context
 from agentic_cli.tools.registry import (
     register_tool,
     ToolCategory,
     PermissionLevel,
 )
-
-if TYPE_CHECKING:
-    from agentic_cli.knowledge_base import KnowledgeBaseManager
-
-
-def _get_knowledge_base_manager() -> "KnowledgeBaseManager":
-    """Factory function to create a KnowledgeBaseManager instance.
-
-    Eliminates duplication of KB manager instantiation across tools.
-    Uses context settings via get_settings().
-
-    Returns:
-        Configured KnowledgeBaseManager instance
-    """
-    from agentic_cli.knowledge_base import KnowledgeBaseManager
-
-    settings = get_settings()
-    return KnowledgeBaseManager(
-        settings=settings,
-        use_mock=settings.knowledge_base_use_mock,
-    )
+from agentic_cli.workflow.context import get_context_kb_manager
 
 
 @register_tool(
@@ -40,6 +20,8 @@ def _get_knowledge_base_manager() -> "KnowledgeBaseManager":
     permission_level=PermissionLevel.SAFE,
     description="Search the local knowledge base for relevant documents using semantic similarity. Use this when you need to find previously ingested papers, notes, or documents.",
 )
+@requires("kb_manager")
+@require_context("KB manager", get_context_kb_manager)
 def search_knowledge_base(
     query: str,
     filters: str = "",
@@ -64,8 +46,12 @@ def search_knowledge_base(
         except _json.JSONDecodeError:
             return {"success": False, "error": f"Invalid JSON in filters: {filters}"}
 
-    kb = _get_knowledge_base_manager()
-    return kb.search(query, filters=parsed_filters, top_k=top_k)
+    try:
+        kb = get_context_kb_manager()
+        result = kb.search(query, filters=parsed_filters, top_k=top_k)
+        return {"success": True, **result}
+    except Exception as e:
+        return {"success": False, "error": f"Search failed: {e}"}
 
 
 @register_tool(
@@ -73,6 +59,8 @@ def search_knowledge_base(
     permission_level=PermissionLevel.CAUTION,
     description="Ingest a document into the knowledge base for later semantic search. Use this to store papers, articles, or notes for future reference.",
 )
+@requires("kb_manager")
+@require_context("KB manager", get_context_kb_manager)
 def ingest_to_knowledge_base(
     content: str,
     title: str,
@@ -92,15 +80,22 @@ def ingest_to_knowledge_base(
     """
     from agentic_cli.knowledge_base import SourceType
 
-    kb = _get_knowledge_base_manager()
+    try:
+        source = SourceType(source_type)
+    except ValueError:
+        valid = ", ".join(t.value for t in SourceType)
+        return {"success": False, "error": f"Invalid source_type: {source_type!r}. Valid: {valid}"}
 
-    source = SourceType(source_type)
-    doc = kb.ingest_document(
-        content=content,
-        title=title,
-        source_type=source,
-        source_url=source_url,
-    )
+    try:
+        kb = get_context_kb_manager()
+        doc = kb.ingest_document(
+            content=content,
+            title=title,
+            source_type=source,
+            source_url=source_url,
+        )
+    except Exception as e:
+        return {"success": False, "error": f"Ingestion failed: {e}"}
 
     return {
         "success": True,

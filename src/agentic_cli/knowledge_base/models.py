@@ -69,11 +69,14 @@ class DocumentChunk:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> DocumentChunk:
-        """Create from dictionary."""
+        """Create from dictionary.
+
+        Content may be absent in v2 metadata index (stored separately).
+        """
         return cls(
             id=data["id"],
             document_id=data["document_id"],
-            content=data["content"],
+            content=data.get("content", ""),
             chunk_index=data["chunk_index"],
             embedding=None,
             metadata=data.get("metadata", {}),
@@ -140,11 +143,14 @@ class Document:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Document:
-        """Create from dictionary."""
+        """Create from dictionary.
+
+        Content may be absent in v2 metadata index (stored separately).
+        """
         return cls(
             id=data["id"],
             title=data["title"],
-            content=data["content"],
+            content=data.get("content", ""),
             source_type=SourceType(data["source_type"]),
             source_url=data.get("source_url"),
             file_path=Path(data["file_path"]) if data.get("file_path") else None,

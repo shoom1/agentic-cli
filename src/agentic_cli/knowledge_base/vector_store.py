@@ -11,6 +11,8 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from agentic_cli.persistence._utils import atomic_write_json
+
 if TYPE_CHECKING:
     import faiss
 
@@ -207,14 +209,14 @@ class VectorStore:
         # Save FAISS index
         faiss.write_index(self._index, str(self.index_path))
 
-        # Save ID mappings
+        # Save ID mappings (atomic to prevent corruption on crash)
         mappings_path = self.index_path.with_suffix(".mappings.json")
         mappings = {
             "id_map": {str(k): v for k, v in self._id_map.items()},
             "chunk_to_faiss": self._chunk_to_faiss,
             "next_id": self._next_id,
         }
-        mappings_path.write_text(json.dumps(mappings, indent=2))
+        atomic_write_json(mappings_path, mappings)
 
     def load(self) -> None:
         """Load index and mappings from disk."""
@@ -317,13 +319,13 @@ class MockVectorStore:
         """No-op for mock store (vectors are removed directly)."""
 
     def save(self) -> None:
-        """Save to disk."""
+        """Save to disk (atomic to prevent corruption on crash)."""
         self.index_path.parent.mkdir(parents=True, exist_ok=True)
         data = {
             "vectors": self._vectors,
             "embedding_dim": self.embedding_dim,
         }
-        self.index_path.write_text(json.dumps(data))
+        atomic_write_json(self.index_path, data)
 
     def load(self) -> None:
         """Load from disk."""
