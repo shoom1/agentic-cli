@@ -19,6 +19,7 @@ from thinking_prompt.styles import ThinkingPromptStyles
 
 from agentic_cli.cli.commands import Command, CommandRegistry
 from agentic_cli.cli.message_processor import MessageProcessor, MessageHistory, MessageType
+from agentic_cli.cli.usage_tracker import UsageTracker
 from agentic_cli.cli.workflow_controller import WorkflowController
 from agentic_cli.config import BaseSettings
 from agentic_cli.logging import Loggers, configure_logging
@@ -131,10 +132,12 @@ class BaseCLIApp:
         self.register_commands()  # Domain-specific commands
 
         # === Components ===
+        self._usage_tracker = UsageTracker()
         self._workflow_controller = WorkflowController(
             agent_configs=agent_configs,
             settings=settings,
         )
+        self._workflow_controller.usage_tracker = self._usage_tracker
         self._message_processor = MessageProcessor()
 
         # === UI: ThinkingPromptSession ===
@@ -268,6 +271,11 @@ class BaseCLIApp:
     def message_history(self) -> MessageHistory:
         """Get the message history (for persistence)."""
         return self._message_processor.history
+
+    @property
+    def usage_tracker(self) -> UsageTracker:
+        """Get the usage tracker."""
+        return self._usage_tracker
 
     @property
     def settings(self) -> BaseSettings:
@@ -415,6 +423,7 @@ class BaseCLIApp:
             workflow_controller=self._workflow_controller,
             ui=self.session,
             settings=self._settings,
+            usage_tracker=self._usage_tracker,
         )
 
     async def _save_activity_log(self) -> None:

@@ -111,6 +111,26 @@ class StatusCommand(Command):
         # Message history stats
         table.add_row("Messages", str(len(app.message_history)))
 
+        # Token usage breakdown
+        tracker = getattr(app, "usage_tracker", None)
+        if tracker is not None and tracker.invocation_count > 0:
+            from agentic_cli.cli.usage_tracker import format_tokens
+
+            table.add_row("", "")  # Spacer
+            table.add_row("LLM Invocations", str(tracker.invocation_count))
+            table.add_row("Input Tokens", format_tokens(tracker.prompt_tokens))
+            table.add_row("Output Tokens", format_tokens(tracker.completion_tokens))
+            table.add_row("Total Tokens", format_tokens(tracker.total_tokens))
+            if tracker.cached_tokens > 0:
+                table.add_row("Cached Tokens", format_tokens(tracker.cached_tokens))
+            if tracker.cache_creation_tokens > 0:
+                table.add_row("Cache Creation", format_tokens(tracker.cache_creation_tokens))
+            if tracker.thinking_tokens > 0:
+                table.add_row("Thinking Tokens", format_tokens(tracker.thinking_tokens))
+            if tracker.total_latency_ms > 0:
+                avg_ms = tracker.total_latency_ms / tracker.invocation_count
+                table.add_row("Avg Latency", f"{avg_ms:.0f}ms")
+
         panel = Panel(table, title="[bold]Session Status[/bold]", border_style="cyan")
         app.session.add_rich(panel)
 

@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, ClassVar
 from agentic_cli.logging import Loggers, bind_context
 
 if TYPE_CHECKING:
+    from agentic_cli.cli.usage_tracker import UsageTracker
     from agentic_cli.config import BaseSettings
     from agentic_cli.cli.workflow_controller import WorkflowController
     from agentic_cli.workflow import WorkflowEvent
@@ -104,6 +105,9 @@ class _EventProcessingState:
     thinking_started: bool = False
     thinking_content: list[str] = field(default_factory=list)
     response_content: list[str] = field(default_factory=list)
+    # Set by process() so LLM_USAGE handler can update tracker and status bar
+    _usage_tracker: "UsageTracker | None" = field(default=None, repr=False)
+    _workflow_controller: "WorkflowController | None" = field(default=None, repr=False)
 
     def get_status(self) -> str:
         """Build status display with current action and task progress."""
@@ -167,6 +171,7 @@ class MessageProcessor:
         workflow_controller: "WorkflowController",
         ui: "ThinkingPromptSession",
         settings: "BaseSettings",
+        usage_tracker: "UsageTracker | None" = None,
     ) -> None:
         """Process a user message through the workflow.
 
@@ -175,6 +180,7 @@ class MessageProcessor:
             workflow_controller: Controller managing workflow lifecycle
             ui: UI session for output
             settings: Application settings
+            usage_tracker: Optional tracker for accumulating LLM token usage
         """
         # Wait for initialization if needed
         if not await workflow_controller.ensure_initialized(ui):
@@ -195,6 +201,8 @@ class MessageProcessor:
             self._message_history.add(message, MessageType.USER)
 
         state = _EventProcessingState()
+        state._usage_tracker = usage_tracker
+        state._workflow_controller = workflow_controller
         workflow = workflow_controller.workflow
         dispatch = self._get_event_dispatch()
 
@@ -238,6 +246,9 @@ class MessageProcessor:
                     # Finish thinking box (don't add status to history)
                     if state.thinking_started:
                         ui.finish_thinking(add_to_history=False)
+
+                    # Ensure final token counts are reflected in status bar
+                    workflow_controller.update_status_bar(ui)
 
                     # Add accumulated content to message history (if logging enabled)
                     if settings.log_activity:
@@ -482,6 +493,20 @@ class MessageProcessor:
         if current_task:
             state.status_line = f"Working on: {current_task}"
 
+    async def _handle_llm_usage(
+        self,
+        event: "WorkflowEvent",
+        state: _EventProcessingState,
+        ui: "ThinkingPromptSession",
+        settings: "BaseSettings",
+        workflow: object,
+    ) -> None:
+        """Handle LLM_USAGE events — accumulate token counts and refresh status bar."""
+        if state._usage_tracker is not None:
+            state._usage_tracker.record(event.metadata)
+        if state._workflow_controller is not None:
+            state._workflow_controller.update_status_bar(ui)
+
     # === Dispatch table ===
 
     _EVENT_DISPATCH: ClassVar[dict | None] = None
@@ -502,5 +527,6 @@ class MessageProcessor:
                 EventType.EXECUTABLE_CODE: cls._handle_executable_code,
                 EventType.FILE_DATA: cls._handle_file_data,
                 EventType.TASK_PROGRESS: cls._handle_task_progress,
+                EventType.LLM_USAGE: cls._handle_llm_usage,
             }
         return cls._EVENT_DISPATCH
