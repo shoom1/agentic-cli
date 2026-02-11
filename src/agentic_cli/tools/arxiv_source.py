@@ -1,7 +1,7 @@
 """ArXiv search source implementation.
 
 Provides ArxivSearchSource with rate limiting and caching for use by
-arxiv_tools and paper_tools. Relocated from knowledge_base/sources.py
+arxiv_tools and knowledge_tools. Relocated from knowledge_base/sources.py
 because the KB manager never uses it directly.
 """
 

@@ -1,6 +1,6 @@
 """ArXiv tools for agentic workflows.
 
-Provides tools for searching, fetching, and analyzing arXiv papers.
+Provides tools for searching and fetching arXiv paper metadata.
 """
 
 from typing import Any
@@ -10,10 +10,6 @@ from agentic_cli.tools.registry import (
     ToolCategory,
     PermissionLevel,
 )
-
-# Max chars of extracted PDF text to return in tool results.
-# ~7.5K tokens — enough for key content without blowing up the context window.
-PDF_TEXT_MAX_CHARS = 30_000
 
 
 # Module-level ArxivSearchSource instance for rate limiting and caching
@@ -142,23 +138,19 @@ def search_arxiv(
 @register_tool(
     category=ToolCategory.KNOWLEDGE,
     permission_level=PermissionLevel.SAFE,
-    description="Fetch metadata for a specific arXiv paper by ID or URL. Optionally download the PDF and extract text with download='pdf'.",
+    description="Fetch metadata for a specific arXiv paper by ID or URL. Returns title, authors, abstract, categories, and PDF URL.",
 )
 async def fetch_arxiv_paper(
     arxiv_id: str,
-    download: str = "",
 ) -> dict[str, Any]:
     """Fetch detailed information about a specific arXiv paper.
 
     Args:
         arxiv_id: The arXiv paper ID, e.g. '1706.03762' or '1706.03762v2'.
                   Also accepts full arXiv URLs.
-        download: Set to 'pdf' to download the PDF and extract text.
-                  Empty string (default) returns metadata only.
 
     Returns:
-        Dictionary with paper details or error information.
-        When download='pdf', also includes 'pdf_text' (truncated to PDF_TEXT_MAX_CHARS).
+        Dictionary with paper metadata or error information.
     """
     try:
         import feedparser
@@ -199,133 +191,4 @@ async def fetch_arxiv_paper(
         "primary_category": entry.get("arxiv_primary_category", {}).get("term", ""),
     }
 
-    result = {"success": True, "paper": paper}
-
-    # Optionally download PDF and extract text
-    if download == "pdf":
-        pdf_result = await _download_arxiv_pdf(arxiv_id, source)
-        if pdf_result.get("error"):
-            result["download_error"] = pdf_result["error"]
-        else:
-            pdf_text = pdf_result["pdf_text"]
-            truncated = len(pdf_text) > PDF_TEXT_MAX_CHARS
-            if truncated:
-                pdf_text = pdf_text[:PDF_TEXT_MAX_CHARS]
-            result["pdf_text"] = pdf_text
-            result["pdf_text_truncated"] = truncated
-            result["pdf_size_bytes"] = pdf_result["pdf_size_bytes"]
-
-    return result
-
-
-async def _download_arxiv_pdf(
-    arxiv_id: str,
-    source,
-) -> dict[str, Any]:
-    """Download a PDF from ArXiv and extract text.
-
-    Args:
-        arxiv_id: Cleaned arXiv paper ID.
-        source: ArxivSearchSource instance for rate limiting.
-
-    Returns:
-        Dict with pdf_text, pdf_bytes (base64), pdf_size_bytes, or error.
-    """
-    try:
-        import httpx
-    except ImportError:
-        return {"error": "httpx not installed, cannot download PDFs"}
-
-    pdf_url = f"https://arxiv.org/pdf/{arxiv_id}.pdf"
-
-    # Rate limit the PDF download
-    source.wait_for_rate_limit()
-
-    try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=60.0) as client:
-            response = await client.get(pdf_url)
-            response.raise_for_status()
-    except httpx.HTTPStatusError as e:
-        return {"error": f"HTTP {e.response.status_code} downloading PDF"}
-    except httpx.RequestError as e:
-        return {"error": f"Failed to download PDF: {e}"}
-
-    pdf_bytes = response.content
-    pdf_size = len(pdf_bytes)
-
-    # Extract text from PDF
-    pdf_text = ""
-    try:
-        import pypdf
-        import io
-
-        reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
-        pages = []
-        for page in reader.pages:
-            text = page.extract_text()
-            if text:
-                pages.append(text)
-        pdf_text = "\n\n".join(pages)
-    except ImportError:
-        return {"error": "pypdf not installed, cannot extract PDF text"}
-    except Exception as e:
-        return {"error": f"Failed to extract PDF text: {e}"}
-
-    # Base64-encode the PDF bytes for transport
-    import base64
-    pdf_b64 = base64.b64encode(pdf_bytes).decode("ascii")
-
-    return {
-        "pdf_text": pdf_text,
-        "pdf_bytes": pdf_b64,
-        "pdf_size_bytes": pdf_size,
-    }
-
-
-@register_tool(
-    category=ToolCategory.KNOWLEDGE,
-    permission_level=PermissionLevel.SAFE,
-    description="Analyze an arXiv paper's abstract page using LLM-powered content extraction. Use this when you need deeper analysis beyond metadata (e.g., key contributions, methodology).",
-)
-async def analyze_arxiv_paper(arxiv_id: str, prompt: str) -> dict[str, Any]:
-    """Analyze an arXiv paper using LLM-powered content extraction.
-
-    Fetches the arXiv abstract page and uses an LLM to analyze it
-    based on the provided prompt.
-
-    Args:
-        arxiv_id: The arXiv paper ID (e.g., '1706.03762')
-        prompt: The analysis prompt (e.g., 'What is the main contribution?')
-
-    Returns:
-        Dictionary with analysis results or error information
-    """
-    from agentic_cli.tools.webfetch_tool import web_fetch
-
-    # Clean the arxiv_id
-    arxiv_id = _clean_arxiv_id(arxiv_id)
-
-    # Build the abstract URL
-    url = f"https://arxiv.org/abs/{arxiv_id}"
-
-    # Enforce rate limiting using shared ArxivSearchSource
-    source = _get_arxiv_source()
-    source.wait_for_rate_limit()
-
-    # Use web_fetch to get LLM analysis
-    result = await web_fetch(url, prompt)
-
-    if not result.get("success"):
-        return {
-            "success": False,
-            "arxiv_id": arxiv_id,
-            "error": result.get("error", "Failed to analyze paper"),
-        }
-
-    return {
-        "success": True,
-        "arxiv_id": arxiv_id,
-        "url": url,
-        "prompt": prompt,
-        "analysis": result.get("summary", ""),
-    }
+    return {"success": True, "paper": paper}

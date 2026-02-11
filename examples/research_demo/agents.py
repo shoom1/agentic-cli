@@ -14,14 +14,15 @@ from agentic_cli.tools import (
     planning_tools,
     task_tools,
     hitl_tools,
-    paper_tools,
     web_search,
     web_fetch,
     search_arxiv,
     fetch_arxiv_paper,
-    analyze_arxiv_paper,
     search_knowledge_base,
-    ingest_to_knowledge_base,
+    ingest_document,
+    read_document,
+    list_documents,
+    open_document,
     execute_python,
     ask_clarification,
     read_file,
@@ -41,31 +42,29 @@ ARXIV_SPECIALIST_PROMPT = """You are an arXiv paper research specialist. You fin
 
 ## Your Capabilities
 
-**arXiv Search & Analysis**
+**arXiv Search & Metadata**
 - `search_arxiv(query, max_results, categories, sort_by, sort_order, date_from, date_to)` - Search arXiv for papers. Returns `success: false` with an error message on rate limiting or API errors — do NOT retry blindly.
-- `fetch_arxiv_paper(arxiv_id, download)` - Get metadata for a specific paper. Set `download="pdf"` to also download the PDF and extract text (returns `pdf_text` field). Default is metadata only.
-- `analyze_arxiv_paper(arxiv_id, prompt)` - Analyze a paper's abstract with LLM
+- `fetch_arxiv_paper(arxiv_id)` - Get metadata for a specific paper (title, authors, abstract, categories).
 
-**Paper Library**
-- `save_paper(url_or_path, title, authors, abstract, tags)` - Download and save a paper PDF locally (metadata auto-fetched for arXiv)
-- `list_papers(query, source_type)` - List saved papers
+**Document Store**
+- `ingest_document(content, url_or_path, title, source_type, authors, abstract, tags)` - Ingest a paper into the knowledge base. Pass an arXiv URL to auto-fetch metadata, download PDF, extract text, and embed — all in one call.
+- `list_documents(query, source_type, limit)` - List ingested documents with summaries.
+- `read_document(doc_id_or_title, max_chars)` - Read full text of an ingested document.
 
 **Deep Reading**
 - `web_fetch(url, prompt, timeout)` - Fetch and analyze full paper PDFs from arXiv
 
 **Output**
 - `write_file(path, content)` - Save per-paper analyses and summaries
-- `ingest_to_knowledge_base(content, source, metadata)` - Catalog findings into the knowledge base
 
 ## Workflow
 
 When asked to research papers on a topic:
 1. Use `search_arxiv` to find relevant papers. Check the `success` field — if false, report the error instead of retrying with simpler queries.
-2. Use `fetch_arxiv_paper(arxiv_id, download="pdf")` to get metadata AND full paper text in one call
-3. Use `save_paper` to download and persist important papers to the local library
-4. Use `analyze_arxiv_paper` for LLM-assisted analysis of specific papers
-5. Use `write_file` to save detailed per-paper analyses
-6. Use `ingest_to_knowledge_base` to catalog key findings for future retrieval
+2. Use `fetch_arxiv_paper(arxiv_id)` to get metadata for papers of interest.
+3. Use `ingest_document(url_or_path="https://arxiv.org/pdf/<id>.pdf")` to download, extract text, and store papers in the knowledge base.
+4. Use `read_document` to read the full text of ingested papers for analysis.
+5. Use `write_file` to save detailed per-paper analyses.
 
 ## Communication Style
 
@@ -98,13 +97,11 @@ For arXiv paper research, delegate to the **arxiv_specialist** sub-agent.
 - `save_tasks(operation, description, task_id, status, priority, tags)` - Create, update, or delete tasks
 - `get_tasks(status, priority, tag)` - List tasks with optional filters
 
-**Paper Library**
-- `list_papers(query, source_type)` - List saved papers
-- `get_paper_info(paper_id_or_title)` - Get detailed metadata for a saved paper
-- `open_paper(paper_id_or_title)` - Open a saved paper's PDF in the system viewer
-
 **Knowledge Base**
 - `search_knowledge_base(query, limit)` - Search ingested documents for relevant info
+- `list_documents(query, source_type, limit)` - List documents with summaries
+- `read_document(doc_id_or_title, max_chars)` - Read full text of a stored document
+- `open_document(doc_id_or_title)` - Open a document's file in the system viewer
 
 **Web & Research**
 - `web_search(query, max_results)` - Search the web for current information
@@ -182,18 +179,17 @@ AGENT_CONFIGS = [
         name="arxiv_specialist",
         prompt=ARXIV_SPECIALIST_PROMPT,
         tools=[
-            # arXiv (3 tools)
+            # arXiv (2 tools)
             search_arxiv,
             fetch_arxiv_paper,
-            analyze_arxiv_paper,
-            # Paper library (2 tools)
-            paper_tools.save_paper,
-            paper_tools.list_papers,
+            # Document store (3 tools)
+            ingest_document,
+            list_documents,
+            read_document,
             # Deep reading (1 tool)
             web_fetch,
-            # Output (2 tools)
+            # Output (1 tool)
             write_file,
-            ingest_to_knowledge_base,
         ],
         description="arXiv paper research specialist: search, analyze, save, and catalog academic papers",
     ),
@@ -214,12 +210,11 @@ AGENT_CONFIGS = [
             # HITL (2 tools)
             hitl_tools.request_approval,
             hitl_tools.create_checkpoint,
-            # Paper library — read-only (3 tools)
-            paper_tools.list_papers,
-            paper_tools.get_paper_info,
-            paper_tools.open_paper,
-            # Knowledge base — search only (1 tool)
+            # Knowledge base (4 tools)
             search_knowledge_base,
+            list_documents,
+            read_document,
+            open_document,
             # Web (2 tools)
             web_search,
             web_fetch,

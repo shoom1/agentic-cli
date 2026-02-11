@@ -38,7 +38,7 @@ if TYPE_CHECKING:
 logger = Loggers.knowledge_base()
 
 # Current persistence format version
-_FORMAT_VERSION = 2
+_FORMAT_VERSION = 3
 
 
 def matches_document_filters(doc: Document, filters: dict[str, Any]) -> bool:
@@ -119,11 +119,13 @@ class KnowledgeBaseManager:
             batch_size = 32
 
         self.metadata_path = self.kb_dir / "metadata.json"
+        self.files_dir = self.kb_dir / "files"
 
         # Ensure directories exist
         self.kb_dir.mkdir(parents=True, exist_ok=True)
         self.documents_dir.mkdir(parents=True, exist_ok=True)
         self.embeddings_dir.mkdir(parents=True, exist_ok=True)
+        self.files_dir.mkdir(parents=True, exist_ok=True)
 
         # Initialize services (fall back to mock if real deps unavailable)
         self._embedding_service, self._vector_store = self._create_services(
@@ -134,6 +136,7 @@ class KnowledgeBaseManager:
         self._documents: dict[str, Document] = {}
         self._chunks: dict[str, DocumentChunk] = {}
         self._load_metadata()
+
 
     def _create_services(
         self, embedding_model: str, batch_size: int
@@ -168,7 +171,7 @@ class KnowledgeBaseManager:
         return emb, vs
 
     # ------------------------------------------------------------------
-    # Persistence — v2 format (content in per-document files)
+    # Persistence — v2/v3 format (content in per-document files)
     # ------------------------------------------------------------------
 
     def _document_content_path(self, doc_id: str) -> Path:
@@ -212,8 +215,9 @@ class KnowledgeBaseManager:
     def _load_metadata(self) -> None:
         """Load document metadata from disk.
 
-        Handles both v1 (content in metadata.json) and v2 (content in
-        per-document files) formats. Auto-migrates v1 to v2.
+        Handles v1 (content in metadata.json), v2 (content in per-document
+        files, no summary), and v3 (content in per-document files, with
+        summary) formats. Auto-migrates older formats to v3.
         """
         if not self.metadata_path.exists():
             return
@@ -224,7 +228,7 @@ class KnowledgeBaseManager:
 
             for doc_data in data.get("documents", []):
                 if version >= 2:
-                    # v2: Load header from index, content from per-doc file
+                    # v2/v3: Load header from index, content from per-doc file
                     doc = Document.from_dict(doc_data)
                     content_data = self._load_document_content(doc.id)
                     if content_data:
@@ -241,16 +245,17 @@ class KnowledgeBaseManager:
                 for chunk in doc.chunks:
                     self._chunks[chunk.id] = chunk
 
-            # Migrate v1 → v2
-            if version < 2 and self._documents:
+            # Migrate older formats → v3
+            if version < _FORMAT_VERSION and self._documents:
                 logger.info(
                     "migrating_metadata_format",
                     from_version=version,
                     to_version=_FORMAT_VERSION,
                     document_count=len(self._documents),
                 )
-                for doc in self._documents.values():
-                    self._save_document_content(doc)
+                if version < 2:
+                    for doc in self._documents.values():
+                        self._save_document_content(doc)
                 self._save_metadata()
 
         except (json.JSONDecodeError, KeyError) as e:
@@ -279,6 +284,98 @@ class KnowledgeBaseManager:
         }
         atomic_write_json(self.metadata_path, data)
 
+    # ------------------------------------------------------------------
+    # File storage
+    # ------------------------------------------------------------------
+
+    def store_file(self, doc_id: str, file_bytes: bytes, extension: str) -> Path:
+        """Store a binary file (e.g. PDF) for a document.
+
+        Args:
+            doc_id: Document ID.
+            file_bytes: Raw file bytes.
+            extension: File extension including dot (e.g. ".pdf").
+
+        Returns:
+            Relative path within files_dir.
+        """
+        self.files_dir.mkdir(parents=True, exist_ok=True)
+        filename = f"{doc_id}{extension}"
+        dest = self.files_dir / filename
+        dest.write_bytes(file_bytes)
+        return Path(filename)
+
+    def get_file_path(self, doc_id: str) -> Path | None:
+        """Get the absolute file path for a document's stored file.
+
+        Args:
+            doc_id: Document ID.
+
+        Returns:
+            Absolute Path if file exists, None otherwise.
+        """
+        doc = self._documents.get(doc_id)
+        if doc and doc.file_path:
+            abs_path = self.files_dir / doc.file_path
+            if abs_path.exists():
+                return abs_path
+        return None
+
+    @staticmethod
+    def extract_text_from_pdf(file_path: Path) -> str:
+        """Extract text from a PDF file.
+
+        Args:
+            file_path: Path to the PDF file.
+
+        Returns:
+            Extracted text, or empty string on failure.
+        """
+        try:
+            import pypdf
+            reader = pypdf.PdfReader(str(file_path))
+            pages = []
+            for page in reader.pages:
+                text = page.extract_text()
+                if text:
+                    pages.append(text)
+            return "\n\n".join(pages)
+        except ImportError:
+            logger.warning("pypdf_not_installed")
+            return ""
+        except Exception as e:
+            logger.warning("pdf_text_extraction_failed", error=str(e))
+            return ""
+
+    def _generate_summary(self, content: str) -> str:
+        """Generate a summary for document content.
+
+        Uses the LLM summarizer from workflow context if available,
+        otherwise falls back to the first ~500 chars of content.
+
+        Args:
+            content: Full document text.
+
+        Returns:
+            Summary string (~500 chars).
+        """
+        try:
+            from agentic_cli.workflow.context import get_context_llm_summarizer
+            summarizer = get_context_llm_summarizer()
+            if summarizer is not None:
+                summary = summarizer.summarize(content, max_length=500)
+                if summary:
+                    return summary
+        except Exception:
+            pass
+
+        # Fallback: first ~500 chars
+        return truncate(content, 500)
+
+    # ------------------------------------------------------------------
+    # Document ingestion
+    # ------------------------------------------------------------------
+
     def ingest_document(
         self,
         content: str,
@@ -286,6 +383,8 @@ class KnowledgeBaseManager:
         source_type: SourceType,
         source_url: str | None = None,
         metadata: dict[str, Any] | None = None,
+        file_bytes: bytes | None = None,
+        file_extension: str = ".pdf",
         chunk_size: int = 512,
         chunk_overlap: int = 50,
     ) -> Document:
@@ -297,20 +396,31 @@ class KnowledgeBaseManager:
             source_type: Type of source (ARXIV, SSRN, WEB, etc.).
             source_url: Optional URL of the source.
             metadata: Optional additional metadata.
+            file_bytes: Optional raw file bytes to store.
+            file_extension: Extension for stored file (default ".pdf").
             chunk_size: Size of chunks for embedding.
             chunk_overlap: Overlap between chunks.
 
         Returns:
             The created Document object.
         """
+        # Generate summary
+        summary = self._generate_summary(content) if content else ""
+
         # Create document
         doc = Document.create(
             title=title,
             content=content,
             source_type=source_type,
+            summary=summary,
             source_url=source_url,
             metadata=metadata,
         )
+
+        # Store file if provided
+        if file_bytes is not None:
+            rel_path = self.store_file(doc.id, file_bytes, file_extension)
+            doc.file_path = rel_path
 
         # Chunk the document
         chunk_texts = self._embedding_service.chunk_document(
