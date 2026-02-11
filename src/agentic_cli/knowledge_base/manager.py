@@ -93,18 +93,35 @@ class KnowledgeBaseManager:
         self,
         settings: "BaseSettings | None" = None,
         use_mock: bool = False,
+        base_dir: Path | None = None,
     ) -> None:
         """Initialize the knowledge base manager.
 
         Args:
             settings: Application settings. Required for paths configuration.
             use_mock: If True, use mock services (for testing without ML models).
+            base_dir: Optional override for all KB paths. When provided, all
+                paths (kb_dir, documents_dir, embeddings_dir, files_dir) are
+                derived from this directory instead of from settings. Embedding
+                model and batch size still come from settings for consistency.
         """
         self._settings = settings
         self._use_mock = use_mock
 
-        # Get paths from settings or use defaults
-        if settings:
+        if base_dir is not None:
+            # Override: derive all paths from base_dir
+            self.kb_dir = base_dir
+            self.documents_dir = base_dir / "documents"
+            self.embeddings_dir = base_dir / "embeddings"
+            # Embedding config still from settings
+            if settings:
+                embedding_model = settings.embedding_model
+                batch_size = settings.embedding_batch_size
+            else:
+                embedding_model = "all-MiniLM-L6-v2"
+                batch_size = 32
+        elif settings:
+            # Get paths from settings
             self.kb_dir = settings.knowledge_base_dir
             self.documents_dir = settings.knowledge_base_documents_dir
             self.embeddings_dir = settings.knowledge_base_embeddings_dir
@@ -543,6 +560,38 @@ class KnowledgeBaseManager:
             Document if found, None otherwise.
         """
         return self._documents.get(doc_id)
+
+    def find_document(self, id_or_title: str) -> Document | None:
+        """Find a document by exact ID, ID prefix, or title substring.
+
+        Lookup order:
+        1. Exact ID match
+        2. ID prefix match
+        3. Case-insensitive title substring match
+
+        Args:
+            id_or_title: Document ID (or prefix) or title substring.
+
+        Returns:
+            Document if found, None otherwise.
+        """
+        # Exact ID
+        doc = self._documents.get(id_or_title)
+        if doc:
+            return doc
+
+        # ID prefix
+        for doc_id, d in self._documents.items():
+            if doc_id.startswith(id_or_title):
+                return d
+
+        # Title substring (case-insensitive)
+        query_lower = id_or_title.lower()
+        for d in self._documents.values():
+            if query_lower in d.title.lower():
+                return d
+
+        return None
 
     def list_documents(
         self,

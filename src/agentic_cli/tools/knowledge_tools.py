@@ -22,7 +22,7 @@ from agentic_cli.tools.registry import (
     ToolCategory,
     PermissionLevel,
 )
-from agentic_cli.workflow.context import get_context_kb_manager
+from agentic_cli.workflow.context import get_context_kb_manager, get_context_user_kb_manager
 
 
 # Max chars of extracted text to return via read_document.
@@ -63,6 +63,30 @@ def search_knowledge_base(
     try:
         kb = get_context_kb_manager()
         result = kb.search(query, filters=parsed_filters, top_k=top_k)
+
+        # Tag project results with scope
+        for r in result.get("results", []):
+            r["scope"] = "project"
+
+        # Merge user KB results (non-fatal if unavailable)
+        user_kb = get_context_user_kb_manager()
+        if user_kb is not None and user_kb is not kb:
+            try:
+                user_result = user_kb.search(query, filters=parsed_filters, top_k=top_k)
+                # Deduplicate by document_id (project wins)
+                seen_doc_ids = {r["document_id"] for r in result.get("results", [])}
+                for r in user_result.get("results", []):
+                    if r["document_id"] not in seen_doc_ids:
+                        r["scope"] = "user"
+                        result["results"].append(r)
+                        seen_doc_ids.add(r["document_id"])
+                # Re-sort by score descending and trim to top_k
+                result["results"].sort(key=lambda r: r.get("score", 0), reverse=True)
+                result["results"] = result["results"][:top_k]
+                result["total_matches"] = len(result["results"])
+            except Exception:
+                pass  # User KB failure is non-fatal
+
         return {"success": True, **result}
     except Exception as e:
         return {"success": False, "error": f"Search failed: {e}"}
@@ -376,7 +400,15 @@ def read_document(
         Dictionary with document text and metadata.
     """
     kb = get_context_kb_manager()
-    doc = _find_document(kb, doc_id_or_title)
+    doc = kb.find_document(doc_id_or_title)
+    source_kb = kb
+
+    # Fall back to user KB
+    if doc is None:
+        user_kb = get_context_user_kb_manager()
+        if user_kb is not None and user_kb is not kb:
+            doc = user_kb.find_document(doc_id_or_title)
+            source_kb = user_kb
 
     if doc is None:
         return {"success": False, "error": f"Document not found: {doc_id_or_title}"}
@@ -385,7 +417,7 @@ def read_document(
 
     # If no content, try extracting from stored file
     if not content and doc.file_path:
-        file_path = kb.get_file_path(doc.id)
+        file_path = source_kb.get_file_path(doc.id)
         if file_path and str(file_path).endswith(".pdf"):
             from agentic_cli.knowledge_base.manager import KnowledgeBaseManager
             content = KnowledgeBaseManager.extract_text_from_pdf(file_path)
@@ -450,6 +482,7 @@ def list_documents(
         ]
 
     items = []
+    seen_ids: set[str] = set()
     for d in docs:
         item: dict[str, Any] = {
             "id": d.id,
@@ -458,6 +491,7 @@ def list_documents(
             "source_type": d.source_type.value,
             "created_at": d.created_at.isoformat(),
             "chunks": len(d.chunks),
+            "scope": "project",
         }
         if d.metadata.get("authors"):
             item["authors"] = d.metadata["authors"]
@@ -468,6 +502,44 @@ def list_documents(
         if d.file_path:
             item["has_file"] = True
         items.append(item)
+        seen_ids.add(d.id)
+
+    # Merge user KB documents
+    user_kb = get_context_user_kb_manager()
+    if user_kb is not None and user_kb is not kb:
+        try:
+            user_docs = user_kb.list_documents(source_type=st_filter, limit=limit)
+            if query:
+                query_lower = query.lower()
+                user_docs = [
+                    d for d in user_docs
+                    if query_lower in d.title.lower()
+                    or any(query_lower in a.lower() for a in d.metadata.get("authors", []))
+                ]
+            for d in user_docs:
+                if d.id in seen_ids:
+                    continue
+                item = {
+                    "id": d.id,
+                    "title": d.title,
+                    "summary": d.summary,
+                    "source_type": d.source_type.value,
+                    "created_at": d.created_at.isoformat(),
+                    "chunks": len(d.chunks),
+                    "scope": "user",
+                }
+                if d.metadata.get("authors"):
+                    item["authors"] = d.metadata["authors"]
+                if d.metadata.get("arxiv_id"):
+                    item["arxiv_id"] = d.metadata["arxiv_id"]
+                if d.metadata.get("tags"):
+                    item["tags"] = d.metadata["tags"]
+                if d.file_path:
+                    item["has_file"] = True
+                items.append(item)
+                seen_ids.add(d.id)
+        except Exception:
+            pass  # User KB failure is non-fatal
 
     return {
         "success": True,
@@ -495,12 +567,20 @@ def open_document(
         Dictionary with result.
     """
     kb = get_context_kb_manager()
-    doc = _find_document(kb, doc_id_or_title)
+    doc = kb.find_document(doc_id_or_title)
+    source_kb = kb
+
+    # Fall back to user KB
+    if doc is None:
+        user_kb = get_context_user_kb_manager()
+        if user_kb is not None and user_kb is not kb:
+            doc = user_kb.find_document(doc_id_or_title)
+            source_kb = user_kb
 
     if doc is None:
         return {"success": False, "error": f"Document not found: {doc_id_or_title}"}
 
-    file_path = kb.get_file_path(doc.id)
+    file_path = source_kb.get_file_path(doc.id)
     if file_path is None:
         return {"success": False, "error": f"No file stored for document: {doc.title}"}
 
@@ -525,30 +605,3 @@ def open_document(
     }
 
 
-def _find_document(kb, id_or_title: str):
-    """Find a document by ID or title substring.
-
-    Args:
-        kb: KnowledgeBaseManager instance.
-        id_or_title: Document ID (or prefix) or title substring.
-
-    Returns:
-        Document or None.
-    """
-    # Try exact ID match
-    doc = kb.get_document(id_or_title)
-    if doc:
-        return doc
-
-    # Try ID prefix match
-    for doc_id, d in kb._documents.items():
-        if doc_id.startswith(id_or_title):
-            return d
-
-    # Try title substring match (case-insensitive)
-    query_lower = id_or_title.lower()
-    for d in kb._documents.values():
-        if query_lower in d.title.lower():
-            return d
-
-    return None
