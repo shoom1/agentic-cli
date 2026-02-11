@@ -26,7 +26,7 @@ from typing import Any, Callable, Literal, TypeVar
 
 # Type for manager requirements
 ManagerRequirement = Literal[
-    "memory_manager", "plan_store", "task_store", "paper_store", "kb_manager", "approval_manager", "checkpoint_manager", "llm_summarizer"
+    "memory_manager", "plan_store", "task_store", "kb_manager", "approval_manager", "checkpoint_manager", "llm_summarizer"
 ]
 
 F = TypeVar("F", bound=Callable)
@@ -105,12 +105,14 @@ from agentic_cli.tools.file_write import write_file, edit_file
 
 from agentic_cli.tools.knowledge_tools import (
     search_knowledge_base,
-    ingest_to_knowledge_base,
+    ingest_document,
+    read_document,
+    list_documents,
+    open_document,
 )
 from agentic_cli.tools.arxiv_tools import (
     search_arxiv,
     fetch_arxiv_paper,
-    analyze_arxiv_paper,
 )
 from agentic_cli.tools.execution_tools import execute_python
 from agentic_cli.tools.interaction_tools import ask_clarification
@@ -172,10 +174,12 @@ __all__ = [
     "google_search_tool",
     # Standard tool functions (ready to use with agents)
     "search_knowledge_base",
-    "ingest_to_knowledge_base",
+    "ingest_document",
+    "read_document",
+    "list_documents",
+    "open_document",
     "search_arxiv",
     "fetch_arxiv_paper",
-    "analyze_arxiv_paper",
     "execute_python",
     "ask_clarification",
     # Framework tool modules (lazy loaded)
@@ -183,7 +187,6 @@ __all__ = [
     "planning_tools",
     "task_tools",
     "hitl_tools",
-    "paper_tools",
 ]
 
 
@@ -193,7 +196,6 @@ _lazy_tool_modules = {
     "planning_tools": "agentic_cli.tools.planning_tools",
     "task_tools": "agentic_cli.tools.task_tools",
     "hitl_tools": "agentic_cli.tools.hitl_tools",
-    "paper_tools": "agentic_cli.tools.paper_tools",
 }
 
 

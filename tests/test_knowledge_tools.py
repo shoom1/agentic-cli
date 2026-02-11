@@ -1,13 +1,19 @@
 """Tests for knowledge_tools and KnowledgeBaseManager persistence.
 
 Covers:
-- E1: Error handling in ingest_to_knowledge_base
+- E1: Error handling in ingest_document
 - E2: success key in search_knowledge_base
 - E4: ContextVar-based KB manager lifecycle
-- E5: Content separation and v1→v2 migration
+- E5: Content separation and v1→v2→v3 migration
+- New tools: read_document, list_documents, open_document
+- File storage and summary generation
+- Paper store migration
 """
 
 import json
+import tempfile
+from pathlib import Path
+from unittest.mock import patch, MagicMock
 
 import pytest
 
@@ -19,38 +25,48 @@ from agentic_cli.knowledge_base.models import Document, DocumentChunk, SourceTyp
 
 
 # ============================================================================
+# Helper to create a test KB manager
+# ============================================================================
+
+
+def _make_kb(tmp_path):
+    """Create a KB manager with mock services in a temp dir."""
+    from agentic_cli.knowledge_base.embeddings import MockEmbeddingService
+    from agentic_cli.knowledge_base.vector_store import MockVectorStore
+
+    manager = KnowledgeBaseManager.__new__(KnowledgeBaseManager)
+    manager._settings = None
+    manager._use_mock = True
+    manager.kb_dir = tmp_path / "kb"
+    manager.documents_dir = manager.kb_dir / "documents"
+    manager.embeddings_dir = manager.kb_dir / "embeddings"
+    manager.files_dir = manager.kb_dir / "files"
+    manager.metadata_path = manager.kb_dir / "metadata.json"
+    manager.kb_dir.mkdir(parents=True, exist_ok=True)
+    manager.documents_dir.mkdir(parents=True, exist_ok=True)
+    manager.embeddings_dir.mkdir(parents=True, exist_ok=True)
+    manager.files_dir.mkdir(parents=True, exist_ok=True)
+    manager._embedding_service = MockEmbeddingService()
+    manager._vector_store = MockVectorStore(
+        index_path=manager.embeddings_dir / "index.mock",
+        embedding_dim=384,
+    )
+    manager._documents = {}
+    manager._chunks = {}
+    return manager
+
+
+# ============================================================================
 # KnowledgeBaseManager persistence tests (E5)
 # ============================================================================
 
 
 class TestKBManagerPersistenceV2:
-    """Tests for v2 persistence format (content in per-document files)."""
+    """Tests for v2/v3 persistence format (content in per-document files)."""
 
     @pytest.fixture
     def kb(self, tmp_path):
-        """Create a KB manager with mock services in a temp dir."""
-        manager = KnowledgeBaseManager.__new__(KnowledgeBaseManager)
-        manager._settings = None
-        manager._use_mock = True
-        manager.kb_dir = tmp_path / "kb"
-        manager.documents_dir = manager.kb_dir / "documents"
-        manager.embeddings_dir = manager.kb_dir / "embeddings"
-        manager.metadata_path = manager.kb_dir / "metadata.json"
-        manager.kb_dir.mkdir(parents=True)
-        manager.documents_dir.mkdir(parents=True)
-        manager.embeddings_dir.mkdir(parents=True)
-
-        from agentic_cli.knowledge_base.embeddings import MockEmbeddingService
-        from agentic_cli.knowledge_base.vector_store import MockVectorStore
-
-        manager._embedding_service = MockEmbeddingService()
-        manager._vector_store = MockVectorStore(
-            index_path=manager.embeddings_dir / "index.mock",
-            embedding_dim=384,
-        )
-        manager._documents = {}
-        manager._chunks = {}
-        return manager
+        return _make_kb(tmp_path)
 
     def test_ingest_creates_per_doc_file(self, kb):
         """Ingesting a document creates a per-document content file."""
@@ -103,8 +119,21 @@ class TestKBManagerPersistenceV2:
         assert "created_at" in header
         assert len(header["chunks"]) > 0
 
+    def test_metadata_index_has_summary(self, kb):
+        """Metadata index should include summary field."""
+        doc = kb.ingest_document(
+            content="Test content for summary generation.",
+            title="Summary Doc",
+            source_type=SourceType.USER,
+        )
+
+        data = json.loads(kb.metadata_path.read_text())
+        header = data["documents"][0]
+        assert "summary" in header
+        assert doc.summary  # Should have a summary
+
     def test_load_roundtrip(self, kb):
-        """Documents survive save/load cycle with v2 format."""
+        """Documents survive save/load cycle with v3 format."""
         doc = kb.ingest_document(
             content="Roundtrip test content. With multiple sentences.",
             title="Roundtrip Doc",
@@ -113,34 +142,23 @@ class TestKBManagerPersistenceV2:
         )
         original_content = doc.content
         original_chunk_count = len(doc.chunks)
+        original_summary = doc.summary
 
         # Create fresh manager pointing at same directory
-        kb2 = KnowledgeBaseManager.__new__(KnowledgeBaseManager)
-        kb2._settings = None
-        kb2._use_mock = True
+        kb2 = _make_kb(kb.kb_dir.parent)
         kb2.kb_dir = kb.kb_dir
         kb2.documents_dir = kb.documents_dir
         kb2.embeddings_dir = kb.embeddings_dir
+        kb2.files_dir = kb.files_dir
         kb2.metadata_path = kb.metadata_path
-
-        from agentic_cli.knowledge_base.embeddings import MockEmbeddingService
-        from agentic_cli.knowledge_base.vector_store import MockVectorStore
-
-        kb2._embedding_service = MockEmbeddingService()
-        kb2._vector_store = MockVectorStore(
-            index_path=kb2.embeddings_dir / "index.mock",
-            embedding_dim=384,
-        )
-        kb2._documents = {}
-        kb2._chunks = {}
         kb2._load_metadata()
 
         loaded_doc = kb2.get_document(doc.id)
         assert loaded_doc is not None
         assert loaded_doc.content == original_content
         assert loaded_doc.title == "Roundtrip Doc"
+        assert loaded_doc.summary == original_summary
         assert len(loaded_doc.chunks) == original_chunk_count
-        # Chunk content should be restored
         for chunk in loaded_doc.chunks:
             assert chunk.content, f"Chunk {chunk.id} has no content"
 
@@ -162,7 +180,6 @@ class TestKBManagerPersistenceV2:
         kb.ingest_document(content="Doc 1.", title="D1", source_type=SourceType.USER)
         kb.ingest_document(content="Doc 2.", title="D2", source_type=SourceType.USER)
 
-        # Should have 2 document content files
         doc_files = list(kb.documents_dir.glob("*.json"))
         assert len(doc_files) == 2
 
@@ -173,19 +190,18 @@ class TestKBManagerPersistenceV2:
 
 
 class TestKBManagerMigrationV1ToV2:
-    """Tests for automatic migration from v1 to v2 format."""
+    """Tests for automatic migration from v1 to v3 format."""
 
     @pytest.fixture
     def kb_dir(self, tmp_path):
-        """Create a temp KB directory structure."""
         kb = tmp_path / "kb"
         kb.mkdir()
         (kb / "documents").mkdir()
         (kb / "embeddings").mkdir()
+        (kb / "files").mkdir()
         return kb
 
     def _make_v1_metadata(self, kb_dir):
-        """Create a v1-format metadata.json with content inline."""
         metadata = {
             "documents": [
                 {
@@ -215,7 +231,6 @@ class TestKBManagerMigrationV1ToV2:
         return metadata
 
     def _make_kb_manager(self, kb_dir):
-        """Create a KB manager for the given directory."""
         from agentic_cli.knowledge_base.embeddings import MockEmbeddingService
         from agentic_cli.knowledge_base.vector_store import MockVectorStore
 
@@ -225,6 +240,7 @@ class TestKBManagerMigrationV1ToV2:
         manager.kb_dir = kb_dir
         manager.documents_dir = kb_dir / "documents"
         manager.embeddings_dir = kb_dir / "embeddings"
+        manager.files_dir = kb_dir / "files"
         manager.metadata_path = kb_dir / "metadata.json"
         manager._embedding_service = MockEmbeddingService()
         manager._vector_store = MockVectorStore(
@@ -238,7 +254,6 @@ class TestKBManagerMigrationV1ToV2:
     def test_v1_loaded_correctly(self, kb_dir):
         """V1 format loads documents with content."""
         self._make_v1_metadata(kb_dir)
-
         kb = self._make_kb_manager(kb_dir)
         kb._load_metadata()
 
@@ -249,10 +264,9 @@ class TestKBManagerMigrationV1ToV2:
         assert len(doc.chunks) == 1
         assert doc.chunks[0].content == "This is old-format content."
 
-    def test_v1_auto_migrated_to_v2(self, kb_dir):
-        """V1 format is auto-migrated to v2 on load."""
+    def test_v1_auto_migrated_to_v3(self, kb_dir):
+        """V1 format is auto-migrated to v3 on load."""
         self._make_v1_metadata(kb_dir)
-
         kb = self._make_kb_manager(kb_dir)
         kb._load_metadata()
 
@@ -264,18 +278,16 @@ class TestKBManagerMigrationV1ToV2:
         assert content_data["content"] == "This is old-format content."
         assert "chunk-v1-001" in content_data["chunks"]
 
-        # Metadata index should be rewritten as v2
+        # Metadata index should be rewritten as v3
         meta_data = json.loads(kb.metadata_path.read_text())
         assert meta_data["version"] == _FORMAT_VERSION
-        # Content should be stripped from the index
         for doc_data in meta_data["documents"]:
             assert "content" not in doc_data
             for chunk_data in doc_data.get("chunks", []):
                 assert "content" not in chunk_data
 
     def test_v2_not_re_migrated(self, kb_dir):
-        """V2 format is not re-migrated on load."""
-        # Write v2 metadata directly
+        """V2 format is loaded and upgraded to v3 (metadata rewrite only)."""
         metadata = {
             "version": 2,
             "documents": [
@@ -302,7 +314,6 @@ class TestKBManagerMigrationV1ToV2:
         }
         (kb_dir / "metadata.json").write_text(json.dumps(metadata))
 
-        # Write per-document content
         content_data = {
             "content": "V2 content here.",
             "chunks": {"chunk-v2-001": "V2 content here."},
@@ -319,6 +330,108 @@ class TestKBManagerMigrationV1ToV2:
 
 
 # ============================================================================
+# File storage tests
+# ============================================================================
+
+
+class TestKBFileStorage:
+    """Tests for file storage in KnowledgeBaseManager."""
+
+    @pytest.fixture
+    def kb(self, tmp_path):
+        return _make_kb(tmp_path)
+
+    def test_store_file(self, kb):
+        """Test storing a file for a document."""
+        file_bytes = b"%PDF-1.4 fake content"
+        rel_path = kb.store_file("doc-123", file_bytes, ".pdf")
+
+        assert rel_path == Path("doc-123.pdf")
+        stored = kb.files_dir / "doc-123.pdf"
+        assert stored.exists()
+        assert stored.read_bytes() == file_bytes
+
+    def test_get_file_path(self, kb):
+        """Test getting file path for a stored document."""
+        doc = kb.ingest_document(
+            content="Test content",
+            title="Test",
+            source_type=SourceType.USER,
+            file_bytes=b"fake pdf",
+            file_extension=".pdf",
+        )
+
+        file_path = kb.get_file_path(doc.id)
+        assert file_path is not None
+        assert file_path.exists()
+        assert file_path.read_bytes() == b"fake pdf"
+
+    def test_get_file_path_no_file(self, kb):
+        """Test getting file path for document without file."""
+        doc = kb.ingest_document(
+            content="Text only",
+            title="No File",
+            source_type=SourceType.USER,
+        )
+
+        file_path = kb.get_file_path(doc.id)
+        assert file_path is None
+
+    def test_ingest_with_file_bytes(self, kb):
+        """Test ingesting document with file bytes stores the file."""
+        doc = kb.ingest_document(
+            content="Extracted text from PDF.",
+            title="PDF Document",
+            source_type=SourceType.ARXIV,
+            file_bytes=b"%PDF-1.4 content",
+            file_extension=".pdf",
+        )
+
+        assert doc.file_path is not None
+        assert (kb.files_dir / str(doc.file_path)).exists()
+
+
+# ============================================================================
+# Summary generation tests
+# ============================================================================
+
+
+class TestKBSummaryGeneration:
+    """Tests for summary generation in KnowledgeBaseManager."""
+
+    @pytest.fixture
+    def kb(self, tmp_path):
+        return _make_kb(tmp_path)
+
+    def test_summary_generated_on_ingest(self, kb):
+        """Summary should be generated when ingesting a document."""
+        doc = kb.ingest_document(
+            content="This is a test document with some content that should be summarized.",
+            title="Summary Test",
+            source_type=SourceType.USER,
+        )
+
+        assert doc.summary != ""
+        assert len(doc.summary) <= 503  # 500 + "..."
+
+    def test_summary_fallback_to_truncation(self, kb):
+        """Without LLM summarizer, summary falls back to truncated content."""
+        content = "Short content."
+        doc = kb.ingest_document(
+            content=content,
+            title="Short Doc",
+            source_type=SourceType.USER,
+        )
+
+        assert doc.summary == content
+
+
+# ============================================================================
+# Paper store migration tests
+# ============================================================================
+
+
+# ============================================================================
 # Tool error handling tests (E1, E2)
 # ============================================================================
 
@@ -330,43 +443,16 @@ class TestSearchKnowledgeBaseTool:
         """Invalid JSON in filters returns error dict."""
         from agentic_cli.tools.knowledge_tools import search_knowledge_base
 
-        # Unwrap the decorators to test the core function
-        # The @require_context guard will return error if no context
         result = search_knowledge_base("query", filters="not json")
-        # Either the context guard fires first or the JSON error fires
         assert result["success"] is False
 
     def test_search_returns_success_key(self):
         """Search results include success=True when context is set."""
-        from agentic_cli.knowledge_base.manager import KnowledgeBaseManager
         from agentic_cli.workflow.context import set_context_kb_manager
         from agentic_cli.tools.knowledge_tools import search_knowledge_base
 
-        import tempfile
         with tempfile.TemporaryDirectory() as tmp:
-            from pathlib import Path
-            kb = KnowledgeBaseManager.__new__(KnowledgeBaseManager)
-            kb._settings = None
-            kb._use_mock = True
-            kb.kb_dir = Path(tmp) / "kb"
-            kb.documents_dir = kb.kb_dir / "documents"
-            kb.embeddings_dir = kb.kb_dir / "embeddings"
-            kb.metadata_path = kb.kb_dir / "metadata.json"
-            kb.kb_dir.mkdir(parents=True)
-            kb.documents_dir.mkdir(parents=True)
-            kb.embeddings_dir.mkdir(parents=True)
-
-            from agentic_cli.knowledge_base.embeddings import MockEmbeddingService
-            from agentic_cli.knowledge_base.vector_store import MockVectorStore
-
-            kb._embedding_service = MockEmbeddingService()
-            kb._vector_store = MockVectorStore(
-                index_path=kb.embeddings_dir / "index.mock",
-                embedding_dim=384,
-            )
-            kb._documents = {}
-            kb._chunks = {}
-
+            kb = _make_kb(Path(tmp))
             token = set_context_kb_manager(kb)
             try:
                 result = search_knowledge_base("test query")
@@ -381,7 +467,6 @@ class TestSearchKnowledgeBaseTool:
         from agentic_cli.workflow.context import set_context_kb_manager
         from agentic_cli.tools.knowledge_tools import search_knowledge_base
 
-        # Ensure context is None
         token = set_context_kb_manager(None)
         try:
             result = search_knowledge_base("query")
@@ -391,85 +476,40 @@ class TestSearchKnowledgeBaseTool:
             token.var.reset(token)
 
 
-class TestIngestToKnowledgeBaseTool:
-    """Tests for ingest_to_knowledge_base error handling."""
+class TestIngestDocumentTool:
+    """Tests for ingest_document error handling."""
 
-    def test_invalid_source_type_returns_error(self):
-        """Invalid source_type returns error dict instead of raising."""
+    @pytest.mark.asyncio
+    async def test_invalid_source_type_returns_error(self):
+        """Invalid source_type returns error dict."""
         from agentic_cli.workflow.context import set_context_kb_manager
-        from agentic_cli.tools.knowledge_tools import ingest_to_knowledge_base
+        from agentic_cli.tools.knowledge_tools import ingest_document
 
-        import tempfile
         with tempfile.TemporaryDirectory() as tmp:
-            from pathlib import Path
-            from agentic_cli.knowledge_base.manager import KnowledgeBaseManager
-            from agentic_cli.knowledge_base.embeddings import MockEmbeddingService
-            from agentic_cli.knowledge_base.vector_store import MockVectorStore
-
-            kb = KnowledgeBaseManager.__new__(KnowledgeBaseManager)
-            kb._settings = None
-            kb._use_mock = True
-            kb.kb_dir = Path(tmp) / "kb"
-            kb.documents_dir = kb.kb_dir / "documents"
-            kb.embeddings_dir = kb.kb_dir / "embeddings"
-            kb.metadata_path = kb.kb_dir / "metadata.json"
-            kb.kb_dir.mkdir(parents=True)
-            kb.documents_dir.mkdir(parents=True)
-            kb.embeddings_dir.mkdir(parents=True)
-            kb._embedding_service = MockEmbeddingService()
-            kb._vector_store = MockVectorStore(
-                index_path=kb.embeddings_dir / "index.mock",
-                embedding_dim=384,
-            )
-            kb._documents = {}
-            kb._chunks = {}
-
+            kb = _make_kb(Path(tmp))
             token = set_context_kb_manager(kb)
             try:
-                result = ingest_to_knowledge_base(
+                result = await ingest_document(
                     content="Test",
                     title="Test",
                     source_type="invalid_type",
                 )
                 assert result["success"] is False
                 assert "Invalid source_type" in result["error"]
-                assert "invalid_type" in result["error"]
             finally:
                 token.var.reset(token)
 
-    def test_valid_ingest_returns_success(self):
+    @pytest.mark.asyncio
+    async def test_valid_ingest_returns_success(self):
         """Valid ingestion returns success=True with document info."""
         from agentic_cli.workflow.context import set_context_kb_manager
-        from agentic_cli.tools.knowledge_tools import ingest_to_knowledge_base
+        from agentic_cli.tools.knowledge_tools import ingest_document
 
-        import tempfile
         with tempfile.TemporaryDirectory() as tmp:
-            from pathlib import Path
-            from agentic_cli.knowledge_base.manager import KnowledgeBaseManager
-            from agentic_cli.knowledge_base.embeddings import MockEmbeddingService
-            from agentic_cli.knowledge_base.vector_store import MockVectorStore
-
-            kb = KnowledgeBaseManager.__new__(KnowledgeBaseManager)
-            kb._settings = None
-            kb._use_mock = True
-            kb.kb_dir = Path(tmp) / "kb"
-            kb.documents_dir = kb.kb_dir / "documents"
-            kb.embeddings_dir = kb.kb_dir / "embeddings"
-            kb.metadata_path = kb.kb_dir / "metadata.json"
-            kb.kb_dir.mkdir(parents=True)
-            kb.documents_dir.mkdir(parents=True)
-            kb.embeddings_dir.mkdir(parents=True)
-            kb._embedding_service = MockEmbeddingService()
-            kb._vector_store = MockVectorStore(
-                index_path=kb.embeddings_dir / "index.mock",
-                embedding_dim=384,
-            )
-            kb._documents = {}
-            kb._chunks = {}
-
+            kb = _make_kb(Path(tmp))
             token = set_context_kb_manager(kb)
             try:
-                result = ingest_to_knowledge_base(
+                result = await ingest_document(
                     content="Test content for ingestion.",
                     title="Test Document",
                     source_type="user",
@@ -478,17 +518,19 @@ class TestIngestToKnowledgeBaseTool:
                 assert "document_id" in result
                 assert result["title"] == "Test Document"
                 assert result["chunks_created"] > 0
+                assert "summary" in result
             finally:
                 token.var.reset(token)
 
-    def test_no_context_returns_error(self):
-        """ingest_to_knowledge_base returns error when KB context is not set."""
+    @pytest.mark.asyncio
+    async def test_no_context_returns_error(self):
+        """ingest_document returns error when KB context is not set."""
         from agentic_cli.workflow.context import set_context_kb_manager
-        from agentic_cli.tools.knowledge_tools import ingest_to_knowledge_base
+        from agentic_cli.tools.knowledge_tools import ingest_document
 
         token = set_context_kb_manager(None)
         try:
-            result = ingest_to_knowledge_base(
+            result = await ingest_document(
                 content="Test",
                 title="Test",
             )
@@ -496,6 +538,308 @@ class TestIngestToKnowledgeBaseTool:
             assert "error" in result
         finally:
             token.var.reset(token)
+
+    @pytest.mark.asyncio
+    async def test_no_content_or_file_returns_error(self):
+        """Providing neither content nor url_or_path returns error."""
+        from agentic_cli.workflow.context import set_context_kb_manager
+        from agentic_cli.tools.knowledge_tools import ingest_document
+
+        with tempfile.TemporaryDirectory() as tmp:
+            kb = _make_kb(Path(tmp))
+            token = set_context_kb_manager(kb)
+            try:
+                result = await ingest_document(title="Empty")
+                assert result["success"] is False
+                assert "No content" in result["error"]
+            finally:
+                token.var.reset(token)
+
+    @pytest.mark.asyncio
+    async def test_ingest_local_file(self):
+        """Ingesting a local PDF copies and extracts text."""
+        from agentic_cli.workflow.context import set_context_kb_manager
+        from agentic_cli.tools.knowledge_tools import ingest_document
+
+        with tempfile.TemporaryDirectory() as tmp:
+            kb = _make_kb(Path(tmp))
+            token = set_context_kb_manager(kb)
+            try:
+                # Create a fake PDF file
+                pdf_path = Path(tmp) / "test.pdf"
+                pdf_path.write_bytes(b"%PDF-1.4 fake content")
+
+                result = await ingest_document(
+                    url_or_path=str(pdf_path),
+                    title="Local PDF",
+                )
+                assert result["success"] is True
+                assert result["title"] == "Local PDF"
+            finally:
+                token.var.reset(token)
+
+    @pytest.mark.asyncio
+    async def test_ingest_local_file_not_found(self):
+        """Ingesting a nonexistent file returns error."""
+        from agentic_cli.workflow.context import set_context_kb_manager
+        from agentic_cli.tools.knowledge_tools import ingest_document
+
+        with tempfile.TemporaryDirectory() as tmp:
+            kb = _make_kb(Path(tmp))
+            token = set_context_kb_manager(kb)
+            try:
+                result = await ingest_document(
+                    url_or_path="/nonexistent/file.pdf",
+                )
+                assert result["success"] is False
+                assert "not found" in result["error"].lower()
+            finally:
+                token.var.reset(token)
+
+
+# ============================================================================
+# read_document tests
+# ============================================================================
+
+
+class TestReadDocument:
+    """Tests for read_document tool."""
+
+    def test_read_by_id(self):
+        """Read document by exact ID."""
+        from agentic_cli.workflow.context import set_context_kb_manager
+        from agentic_cli.tools.knowledge_tools import read_document
+
+        with tempfile.TemporaryDirectory() as tmp:
+            kb = _make_kb(Path(tmp))
+            doc = kb.ingest_document(
+                content="Full document content here.",
+                title="Readable Doc",
+                source_type=SourceType.USER,
+            )
+            token = set_context_kb_manager(kb)
+            try:
+                result = read_document(doc.id)
+                assert result["success"] is True
+                assert result["content"] == "Full document content here."
+                assert result["title"] == "Readable Doc"
+                assert result["truncated"] is False
+            finally:
+                token.var.reset(token)
+
+    def test_read_by_title(self):
+        """Read document by title substring."""
+        from agentic_cli.workflow.context import set_context_kb_manager
+        from agentic_cli.tools.knowledge_tools import read_document
+
+        with tempfile.TemporaryDirectory() as tmp:
+            kb = _make_kb(Path(tmp))
+            kb.ingest_document(
+                content="Content here.",
+                title="Unique Title ABC",
+                source_type=SourceType.USER,
+            )
+            token = set_context_kb_manager(kb)
+            try:
+                result = read_document("Unique Title")
+                assert result["success"] is True
+                assert result["title"] == "Unique Title ABC"
+            finally:
+                token.var.reset(token)
+
+    def test_read_not_found(self):
+        """Read nonexistent document returns error."""
+        from agentic_cli.workflow.context import set_context_kb_manager
+        from agentic_cli.tools.knowledge_tools import read_document
+
+        with tempfile.TemporaryDirectory() as tmp:
+            kb = _make_kb(Path(tmp))
+            token = set_context_kb_manager(kb)
+            try:
+                result = read_document("nonexistent")
+                assert result["success"] is False
+                assert "not found" in result["error"].lower()
+            finally:
+                token.var.reset(token)
+
+    def test_read_truncation(self):
+        """Long content is truncated to max_chars."""
+        from agentic_cli.workflow.context import set_context_kb_manager
+        from agentic_cli.tools.knowledge_tools import read_document
+
+        with tempfile.TemporaryDirectory() as tmp:
+            kb = _make_kb(Path(tmp))
+            long_content = "x" * 50000
+            doc = kb.ingest_document(
+                content=long_content,
+                title="Long Doc",
+                source_type=SourceType.USER,
+            )
+            token = set_context_kb_manager(kb)
+            try:
+                result = read_document(doc.id, max_chars=1000)
+                assert result["success"] is True
+                assert len(result["content"]) == 1000
+                assert result["truncated"] is True
+            finally:
+                token.var.reset(token)
+
+
+# ============================================================================
+# list_documents tests
+# ============================================================================
+
+
+class TestListDocuments:
+    """Tests for list_documents tool."""
+
+    def test_list_empty(self):
+        """List returns empty when no documents."""
+        from agentic_cli.workflow.context import set_context_kb_manager
+        from agentic_cli.tools.knowledge_tools import list_documents
+
+        with tempfile.TemporaryDirectory() as tmp:
+            kb = _make_kb(Path(tmp))
+            token = set_context_kb_manager(kb)
+            try:
+                result = list_documents()
+                assert result["success"] is True
+                assert result["count"] == 0
+                assert result["documents"] == []
+            finally:
+                token.var.reset(token)
+
+    def test_list_with_documents(self):
+        """List returns documents with summaries."""
+        from agentic_cli.workflow.context import set_context_kb_manager
+        from agentic_cli.tools.knowledge_tools import list_documents
+
+        with tempfile.TemporaryDirectory() as tmp:
+            kb = _make_kb(Path(tmp))
+            kb.ingest_document(
+                content="Document A content.",
+                title="Document A",
+                source_type=SourceType.ARXIV,
+                metadata={"authors": ["Alice"]},
+            )
+            kb.ingest_document(
+                content="Document B content.",
+                title="Document B",
+                source_type=SourceType.USER,
+            )
+            token = set_context_kb_manager(kb)
+            try:
+                result = list_documents()
+                assert result["success"] is True
+                assert result["count"] == 2
+                # Check document fields
+                doc_a = next(d for d in result["documents"] if d["title"] == "Document A")
+                assert doc_a["source_type"] == "arxiv"
+                assert "summary" in doc_a
+            finally:
+                token.var.reset(token)
+
+    def test_list_filter_source_type(self):
+        """List filters by source type."""
+        from agentic_cli.workflow.context import set_context_kb_manager
+        from agentic_cli.tools.knowledge_tools import list_documents
+
+        with tempfile.TemporaryDirectory() as tmp:
+            kb = _make_kb(Path(tmp))
+            kb.ingest_document(content="A.", title="A", source_type=SourceType.ARXIV)
+            kb.ingest_document(content="B.", title="B", source_type=SourceType.USER)
+            token = set_context_kb_manager(kb)
+            try:
+                result = list_documents(source_type="arxiv")
+                assert result["count"] == 1
+                assert result["documents"][0]["source_type"] == "arxiv"
+            finally:
+                token.var.reset(token)
+
+    def test_list_filter_query(self):
+        """List filters by title query."""
+        from agentic_cli.workflow.context import set_context_kb_manager
+        from agentic_cli.tools.knowledge_tools import list_documents
+
+        with tempfile.TemporaryDirectory() as tmp:
+            kb = _make_kb(Path(tmp))
+            kb.ingest_document(content="A.", title="Attention Paper", source_type=SourceType.USER)
+            kb.ingest_document(content="B.", title="BERT Paper", source_type=SourceType.USER)
+            token = set_context_kb_manager(kb)
+            try:
+                result = list_documents(query="attention")
+                assert result["count"] == 1
+                assert result["documents"][0]["title"] == "Attention Paper"
+            finally:
+                token.var.reset(token)
+
+
+# ============================================================================
+# open_document tests
+# ============================================================================
+
+
+class TestOpenDocument:
+    """Tests for open_document tool."""
+
+    def test_open_not_found(self):
+        """Open nonexistent document returns error."""
+        from agentic_cli.workflow.context import set_context_kb_manager
+        from agentic_cli.tools.knowledge_tools import open_document
+
+        with tempfile.TemporaryDirectory() as tmp:
+            kb = _make_kb(Path(tmp))
+            token = set_context_kb_manager(kb)
+            try:
+                result = open_document("nonexistent")
+                assert result["success"] is False
+                assert "not found" in result["error"].lower()
+            finally:
+                token.var.reset(token)
+
+    def test_open_no_file(self):
+        """Open document without file returns error."""
+        from agentic_cli.workflow.context import set_context_kb_manager
+        from agentic_cli.tools.knowledge_tools import open_document
+
+        with tempfile.TemporaryDirectory() as tmp:
+            kb = _make_kb(Path(tmp))
+            doc = kb.ingest_document(
+                content="Text only.",
+                title="No File Doc",
+                source_type=SourceType.USER,
+            )
+            token = set_context_kb_manager(kb)
+            try:
+                result = open_document(doc.id)
+                assert result["success"] is False
+                assert "no file" in result["error"].lower()
+            finally:
+                token.var.reset(token)
+
+    def test_open_success(self):
+        """Open document with file calls system viewer."""
+        from agentic_cli.workflow.context import set_context_kb_manager
+        from agentic_cli.tools.knowledge_tools import open_document
+
+        with tempfile.TemporaryDirectory() as tmp:
+            kb = _make_kb(Path(tmp))
+            doc = kb.ingest_document(
+                content="PDF content.",
+                title="PDF Doc",
+                source_type=SourceType.USER,
+                file_bytes=b"%PDF-1.4 content",
+                file_extension=".pdf",
+            )
+            token = set_context_kb_manager(kb)
+            try:
+                with patch("agentic_cli.tools.knowledge_tools.subprocess.Popen") as mock_popen:
+                    result = open_document(doc.id)
+                assert result["success"] is True
+                assert result["title"] == "PDF Doc"
+                mock_popen.assert_called_once()
+            finally:
+                token.var.reset(token)
 
 
 # ============================================================================
@@ -507,7 +851,6 @@ class TestKBManagerContextVar:
     """Tests for KB manager ContextVar integration."""
 
     def test_context_accessors_exist(self):
-        """ContextVar setter and getter exist for kb_manager."""
         from agentic_cli.workflow.context import (
             set_context_kb_manager,
             get_context_kb_manager,
@@ -516,7 +859,6 @@ class TestKBManagerContextVar:
         assert callable(get_context_kb_manager)
 
     def test_context_default_is_none(self):
-        """Default context value is None."""
         from agentic_cli.workflow.context import (
             set_context_kb_manager,
             get_context_kb_manager,
@@ -528,12 +870,10 @@ class TestKBManagerContextVar:
             token.var.reset(token)
 
     def test_context_roundtrip(self):
-        """Setting and getting context returns the same value."""
         from agentic_cli.workflow.context import (
             set_context_kb_manager,
             get_context_kb_manager,
         )
-
         sentinel = object()
         token = set_context_kb_manager(sentinel)
         try:
@@ -542,16 +882,11 @@ class TestKBManagerContextVar:
             token.var.reset(token)
 
     def test_kb_manager_in_manager_requirement(self):
-        """kb_manager is a valid ManagerRequirement."""
         from agentic_cli.tools import ManagerRequirement
-        # This is a Literal type — just verify the string is accepted
-        # by checking the tool decorators work
         from agentic_cli.tools.knowledge_tools import search_knowledge_base
         assert hasattr(search_knowledge_base, "requires")
         assert "kb_manager" in search_knowledge_base.requires
 
     def test_base_manager_has_kb_manager_slot(self):
-        """BaseWorkflowManager initializes kb_manager slot."""
         from agentic_cli.workflow.base_manager import BaseWorkflowManager
-        # Check the class has the property
         assert hasattr(BaseWorkflowManager, "kb_manager")

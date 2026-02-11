@@ -1285,92 +1285,6 @@ class TestStandardTools:
 
 
 
-    @pytest.mark.asyncio
-    async def test_analyze_arxiv_paper_success(self):
-        """Test analyze_arxiv_paper returns LLM analysis."""
-        from unittest.mock import patch, MagicMock, AsyncMock
-        from agentic_cli.tools.arxiv_tools import analyze_arxiv_paper
-
-        mock_web_fetch = AsyncMock(return_value={
-            "success": True,
-            "summary": "This paper introduces the Transformer architecture...",
-            "url": "https://arxiv.org/abs/1706.03762",
-        })
-
-        with patch("agentic_cli.tools.webfetch_tool.web_fetch", mock_web_fetch):
-            result = await analyze_arxiv_paper("1706.03762", "What is the main contribution?")
-
-            assert result["success"] is True
-            assert "analysis" in result
-            mock_web_fetch.assert_called_once()
-            # Verify the URL used
-            call_args = mock_web_fetch.call_args
-            assert "arxiv.org/abs/1706.03762" in call_args[0][0]
-
-    @pytest.mark.asyncio
-    async def test_analyze_arxiv_paper_passes_prompt(self):
-        """Test analyze_arxiv_paper passes user prompt to web_fetch."""
-        from unittest.mock import patch, AsyncMock
-        from agentic_cli.tools.arxiv_tools import analyze_arxiv_paper
-
-        mock_web_fetch = AsyncMock(return_value={"success": True, "summary": "Analysis"})
-
-        with patch("agentic_cli.tools.webfetch_tool.web_fetch", mock_web_fetch):
-            await analyze_arxiv_paper("1234.5678", "Summarize the methodology")
-
-            call_args = mock_web_fetch.call_args
-            # Second positional arg is the prompt
-            assert "methodology" in call_args[0][1].lower()
-
-    @pytest.mark.asyncio
-    async def test_analyze_arxiv_paper_handles_failure(self):
-        """Test analyze_arxiv_paper handles web_fetch failure."""
-        from unittest.mock import patch, AsyncMock
-        from agentic_cli.tools.arxiv_tools import analyze_arxiv_paper
-
-        mock_web_fetch = AsyncMock(return_value={
-            "success": False,
-            "error": "No LLM summarizer available",
-        })
-
-        with patch("agentic_cli.tools.webfetch_tool.web_fetch", mock_web_fetch):
-            result = await analyze_arxiv_paper("1234.5678", "Analyze this")
-
-            assert result["success"] is False
-            assert "error" in result
-
-    @pytest.mark.asyncio
-    async def test_analyze_arxiv_paper_calls_rate_limiter(self):
-        """Test analyze_arxiv_paper calls wait_for_rate_limit before web_fetch."""
-        from unittest.mock import patch, AsyncMock, MagicMock, call
-        from agentic_cli.tools.arxiv_tools import analyze_arxiv_paper
-        import agentic_cli.tools.arxiv_tools as arxiv_module
-
-        # Reset the source to ensure clean state
-        arxiv_module._arxiv_source = None
-
-        mock_web_fetch = AsyncMock(return_value={
-            "success": True,
-            "summary": "Analysis result",
-        })
-
-        # Track call order
-        call_order = []
-        mock_source = MagicMock()
-        mock_source.wait_for_rate_limit.side_effect = lambda: call_order.append("rate_limit")
-
-        original_web_fetch = mock_web_fetch.side_effect
-        async def tracking_web_fetch(*args, **kwargs):
-            call_order.append("web_fetch")
-            return {"success": True, "summary": "Analysis result"}
-        mock_web_fetch.side_effect = tracking_web_fetch
-
-        with patch("agentic_cli.tools.arxiv_tools._get_arxiv_source", return_value=mock_source):
-            with patch("agentic_cli.tools.webfetch_tool.web_fetch", mock_web_fetch):
-                await analyze_arxiv_paper("1706.03762", "What is the contribution?")
-
-        mock_source.wait_for_rate_limit.assert_called_once()
-        assert call_order == ["rate_limit", "web_fetch"]
 
 
 class TestArxivHelpers:
@@ -1530,7 +1444,7 @@ class TestToolRegistryConsistency:
 
         registry = get_registry()
 
-        # Expected tool names from the unification plan
+        # Expected tool names from the unified document store
         expected_tools = [
             # File operations - READ (7 from file_read and glob_tool)
             "read_file",
@@ -1544,13 +1458,15 @@ class TestToolRegistryConsistency:
             # Web/Network
             "web_search",
             "web_fetch",
-            # Knowledge base
+            # Knowledge base (unified document store)
             "search_knowledge_base",
-            "ingest_to_knowledge_base",
-            # ArXiv
+            "ingest_document",
+            "read_document",
+            "list_documents",
+            "open_document",
+            # ArXiv (metadata only)
             "search_arxiv",
             "fetch_arxiv_paper",
-            "analyze_arxiv_paper",
             # Execution
             "execute_python",
             "shell_executor",
@@ -1598,7 +1514,7 @@ class TestToolRegistryConsistency:
 
         registry = get_registry()
 
-        caution_tools = ["write_file", "edit_file", "ingest_to_knowledge_base"]
+        caution_tools = ["write_file", "edit_file", "ingest_document", "open_document"]
 
         for tool_name in caution_tools:
             tool = registry.get(tool_name)
@@ -1616,7 +1532,8 @@ class TestToolRegistryConsistency:
         safe_tools = [
             "read_file", "diff_compare", "grep", "glob", "list_dir",
             "web_search", "web_fetch", "search_knowledge_base",
-            "search_arxiv", "fetch_arxiv_paper", "analyze_arxiv_paper",
+            "read_document", "list_documents",
+            "search_arxiv", "fetch_arxiv_paper",
             "ask_clarification",
             "save_memory", "search_memory",
             "save_plan", "get_plan",
@@ -1711,15 +1628,15 @@ class TestToolRegistryConsistency:
         registry = get_registry()
         tool_count = len(registry.list_tools())
 
-        # We expect at least 24 tools after simplification
+        # We expect at least 26 tools after unified document store
         # File ops: 7 (read_file, diff_compare, grep, glob, list_dir, write_file, edit_file)
         # Web/Network: 2 (web_search, web_fetch)
-        # Knowledge: 5 (search_kb, ingest_kb, search_arxiv, fetch_arxiv, analyze_arxiv)
+        # Knowledge: 7 (search_kb, ingest_document, read_document, list_documents, open_document, search_arxiv, fetch_arxiv)
         # Execution: 2 (execute_python, shell_executor)
         # Interaction: 1 (ask_clarification)
         # Memory: 2 (save_memory, search_memory)
         # Planning: 2 (save_plan, get_plan)
         # Tasks: 2 (save_tasks, get_tasks)
         # HITL: 2 (request_approval, create_checkpoint)
-        # Total: ~25 tools
-        assert tool_count >= 24, f"Expected at least 24 registered tools, got {tool_count}"
+        # Total: ~27 tools
+        assert tool_count >= 26, f"Expected at least 26 registered tools, got {tool_count}"

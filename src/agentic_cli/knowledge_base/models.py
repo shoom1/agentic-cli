@@ -21,6 +21,7 @@ class SourceType(Enum):
     WEB = "web"
     INTERNAL = "internal"
     USER = "user"
+    LOCAL = "local"
 
 
 @dataclass
@@ -94,6 +95,7 @@ class Document:
     title: str
     content: str
     source_type: SourceType
+    summary: str = ""
     source_url: str | None = None
     file_path: Path | None = None
     created_at: datetime = field(default_factory=datetime.now)
@@ -107,6 +109,7 @@ class Document:
         title: str,
         content: str,
         source_type: SourceType,
+        summary: str = "",
         source_url: str | None = None,
         file_path: Path | None = None,
         metadata: dict[str, Any] | None = None,
@@ -118,6 +121,7 @@ class Document:
             title=title,
             content=content,
             source_type=source_type,
+            summary=summary,
             source_url=source_url,
             file_path=file_path,
             created_at=now,
@@ -132,6 +136,7 @@ class Document:
             "id": self.id,
             "title": self.title,
             "content": self.content,
+            "summary": self.summary,
             "source_type": self.source_type.value,
             "source_url": self.source_url,
             "file_path": str(self.file_path) if self.file_path else None,
@@ -145,13 +150,14 @@ class Document:
     def from_dict(cls, data: dict[str, Any]) -> Document:
         """Create from dictionary.
 
-        Content may be absent in v2 metadata index (stored separately).
+        Content may be absent in v2/v3 metadata index (stored separately).
         """
         return cls(
             id=data["id"],
             title=data["title"],
             content=data.get("content", ""),
             source_type=SourceType(data["source_type"]),
+            summary=data.get("summary", ""),
             source_url=data.get("source_url"),
             file_path=Path(data["file_path"]) if data.get("file_path") else None,
             created_at=datetime.fromisoformat(data["created_at"]),

@@ -1,8 +1,8 @@
-"""Tests for ArXiv tools — error reporting, PDF download, and save_paper integration.
+"""Tests for ArXiv tools — error reporting and metadata fetching.
 
 Covers:
 - search_arxiv error propagation from ArxivSearchSource.last_error
-- fetch_arxiv_paper with download="pdf"
+- fetch_arxiv_paper (metadata only)
 - ArxivSearchSource.last_error lifecycle
 """
 
@@ -142,7 +142,6 @@ class TestArxivSearchSourceLastError:
         source = ArxivSearchSource()
 
         with patch.dict("sys.modules", {"feedparser": None}):
-            # Need to force the import to fail inside .search()
             original_import = __builtins__.__import__ if hasattr(__builtins__, '__import__') else __import__
 
             def mock_import(name, *args, **kwargs):
@@ -248,7 +247,6 @@ class TestSearchArxivErrorReporting:
         assert "error" in result
         assert "403" in result["error"]
         assert result["query"] == "test query"
-        # No papers key in error response
         assert "papers" not in result
 
     @patch("feedparser.parse")
@@ -278,16 +276,16 @@ class TestSearchArxivErrorReporting:
 
 
 # ---------------------------------------------------------------------------
-# fetch_arxiv_paper download="pdf" tests
+# fetch_arxiv_paper metadata-only tests
 # ---------------------------------------------------------------------------
 
 
-class TestFetchArxivPaperDownloadPdf:
-    """Tests for fetch_arxiv_paper with download='pdf'."""
+class TestFetchArxivPaperMetadata:
+    """Tests for fetch_arxiv_paper (metadata only)."""
 
     @pytest.mark.asyncio
-    async def test_download_pdf_returns_text_without_bytes(self):
-        """download='pdf' returns pdf_text but NOT pdf_bytes (context window fix)."""
+    async def test_fetch_returns_metadata(self):
+        """fetch_arxiv_paper returns paper metadata."""
         from agentic_cli.tools.arxiv_tools import fetch_arxiv_paper
 
         mock_entry = {
@@ -302,84 +300,34 @@ class TestFetchArxivPaperDownloadPdf:
             "arxiv_primary_category": {"term": "cs.AI"},
         }
 
-        import base64
-
-        fake_pdf_bytes = b"%PDF-1.4 fake content"
-        fake_pdf_b64 = base64.b64encode(fake_pdf_bytes).decode("ascii")
-
-        mock_download_result = {
-            "pdf_text": "Extracted text from PDF",
-            "pdf_bytes": fake_pdf_b64,
-            "pdf_size_bytes": len(fake_pdf_bytes),
-        }
-
         with patch("feedparser.parse") as mock_parse:
             mock_parse.return_value = MagicMock(entries=[mock_entry])
-
-            with patch(
-                "agentic_cli.tools.arxiv_tools._download_arxiv_pdf",
-                new_callable=AsyncMock,
-                return_value=mock_download_result,
-            ):
-                result = await fetch_arxiv_paper("1234.5678", download="pdf")
+            result = await fetch_arxiv_paper("1234.5678")
 
         assert result["success"] is True
         assert result["paper"]["title"] == "Test Paper"
-        assert result["pdf_text"] == "Extracted text from PDF"
-        assert result["pdf_text_truncated"] is False
-        assert "pdf_bytes" not in result  # Must NOT leak into LLM context
-        assert result["pdf_size_bytes"] == len(fake_pdf_bytes)
+        assert result["paper"]["arxiv_id"] == "1234.5678"
+        assert result["paper"]["pdf_url"] == "https://arxiv.org/pdf/1234.5678.pdf"
 
     @pytest.mark.asyncio
-    async def test_download_pdf_text_truncated(self):
-        """Long pdf_text is truncated to PDF_TEXT_MAX_CHARS."""
-        from agentic_cli.tools.arxiv_tools import fetch_arxiv_paper, PDF_TEXT_MAX_CHARS
-
-        mock_entry = {
-            "title": "Long Paper",
-            "link": "https://arxiv.org/abs/1234.5678",
-            "summary": "Abstract",
-            "authors": [],
-            "published": "",
-            "updated": "",
-            "tags": [],
-            "id": "http://arxiv.org/abs/1234.5678v1",
-            "arxiv_primary_category": {"term": "cs.AI"},
-        }
-
-        import base64
-
-        fake_pdf_bytes = b"%PDF-1.4 content"
-        fake_pdf_b64 = base64.b64encode(fake_pdf_bytes).decode("ascii")
-        long_text = "x" * (PDF_TEXT_MAX_CHARS + 5000)
-
-        mock_download_result = {
-            "pdf_text": long_text,
-            "pdf_bytes": fake_pdf_b64,
-            "pdf_size_bytes": len(fake_pdf_bytes),
-        }
+    async def test_fetch_not_found(self):
+        """fetch_arxiv_paper handles missing paper."""
+        from agentic_cli.tools.arxiv_tools import fetch_arxiv_paper
 
         with patch("feedparser.parse") as mock_parse:
-            mock_parse.return_value = MagicMock(entries=[mock_entry])
+            mock_parse.return_value = MagicMock(entries=[])
+            result = await fetch_arxiv_paper("9999.99999")
 
-            with patch(
-                "agentic_cli.tools.arxiv_tools._download_arxiv_pdf",
-                new_callable=AsyncMock,
-                return_value=mock_download_result,
-            ):
-                result = await fetch_arxiv_paper("1234.5678", download="pdf")
-
-        assert result["success"] is True
-        assert len(result["pdf_text"]) == PDF_TEXT_MAX_CHARS
-        assert result["pdf_text_truncated"] is True
+        assert result["success"] is False
+        assert "not found" in result["error"].lower()
 
     @pytest.mark.asyncio
-    async def test_download_pdf_error_non_fatal(self):
-        """PDF download error is non-fatal — metadata still returned."""
+    async def test_fetch_cleans_id(self):
+        """fetch_arxiv_paper handles various ID formats."""
         from agentic_cli.tools.arxiv_tools import fetch_arxiv_paper
 
         mock_entry = {
-            "title": "Test Paper",
+            "title": "Test",
             "link": "https://arxiv.org/abs/1234.5678",
             "summary": "Abstract",
             "authors": [],
@@ -393,148 +341,13 @@ class TestFetchArxivPaperDownloadPdf:
         with patch("feedparser.parse") as mock_parse:
             mock_parse.return_value = MagicMock(entries=[mock_entry])
 
-            with patch(
-                "agentic_cli.tools.arxiv_tools._download_arxiv_pdf",
-                new_callable=AsyncMock,
-                return_value={"error": "pypdf not installed"},
-            ):
-                result = await fetch_arxiv_paper("1234.5678", download="pdf")
+            # Test with URL format
+            await fetch_arxiv_paper("https://arxiv.org/abs/1234.5678")
+            call_url = mock_parse.call_args[0][0]
+            assert "1234.5678" in call_url
 
-        assert result["success"] is True
-        assert result["paper"]["title"] == "Test Paper"
-        assert result["download_error"] == "pypdf not installed"
-        assert "pdf_text" not in result
-
-    @pytest.mark.asyncio
-    async def test_no_download_by_default(self):
-        """Without download param, no PDF download occurs."""
-        from agentic_cli.tools.arxiv_tools import fetch_arxiv_paper
-
-        mock_entry = {
-            "title": "Test Paper",
-            "link": "https://arxiv.org/abs/1234.5678",
-            "summary": "Abstract",
-            "authors": [],
-            "published": "",
-            "updated": "",
-            "tags": [],
-            "id": "http://arxiv.org/abs/1234.5678v1",
-            "arxiv_primary_category": {"term": "cs.AI"},
-        }
-
-        with patch("feedparser.parse") as mock_parse:
-            mock_parse.return_value = MagicMock(entries=[mock_entry])
-
-            with patch(
-                "agentic_cli.tools.arxiv_tools._download_arxiv_pdf",
-                new_callable=AsyncMock,
-            ) as mock_download:
-                result = await fetch_arxiv_paper("1234.5678")
-
-        assert result["success"] is True
-        mock_download.assert_not_called()
-        assert "pdf_text" not in result
-        assert "download_error" not in result
-
-
-# ---------------------------------------------------------------------------
-# _download_arxiv_pdf unit tests
-# ---------------------------------------------------------------------------
-
-
-class TestDownloadArxivPdf:
-    """Tests for the _download_arxiv_pdf helper."""
-
-    @pytest.mark.asyncio
-    async def test_successful_download(self):
-        """Test successful PDF download and text extraction."""
-        from agentic_cli.tools.arxiv_tools import _download_arxiv_pdf
-
-        fake_pdf_bytes = b"%PDF-1.4 fake content"
-
-        mock_response = MagicMock()
-        mock_response.content = fake_pdf_bytes
-        mock_response.raise_for_status = MagicMock()
-
-        mock_client = AsyncMock()
-        mock_client.get = AsyncMock(return_value=mock_response)
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-
-        mock_source = MagicMock()
-        mock_source.wait_for_rate_limit = MagicMock()
-
-        mock_reader = MagicMock()
-        mock_page = MagicMock()
-        mock_page.extract_text.return_value = "Page 1 text"
-        mock_reader.pages = [mock_page]
-
-        with patch("httpx.AsyncClient", return_value=mock_client):
-            with patch("pypdf.PdfReader", return_value=mock_reader):
-                result = await _download_arxiv_pdf("1234.5678", mock_source)
-
-        assert "error" not in result
-        assert result["pdf_text"] == "Page 1 text"
-        assert result["pdf_size_bytes"] == len(fake_pdf_bytes)
-        assert result["pdf_bytes"]  # base64 string
-        mock_source.wait_for_rate_limit.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_http_error(self):
-        """Test HTTP error during download."""
-        import httpx
-
-        from agentic_cli.tools.arxiv_tools import _download_arxiv_pdf
-
-        mock_response = MagicMock()
-        mock_response.status_code = 404
-        mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
-            "Not Found", request=MagicMock(), response=mock_response
-        )
-
-        mock_client = AsyncMock()
-        mock_client.get = AsyncMock(return_value=mock_response)
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-
-        mock_source = MagicMock()
-        mock_source.wait_for_rate_limit = MagicMock()
-
-        with patch("httpx.AsyncClient", return_value=mock_client):
-            result = await _download_arxiv_pdf("9999.99999", mock_source)
-
-        assert "error" in result
-        assert "404" in result["error"]
-
-    @pytest.mark.asyncio
-    async def test_pypdf_not_installed(self):
-        """Test error when pypdf is not installed."""
-        from agentic_cli.tools.arxiv_tools import _download_arxiv_pdf
-
-        mock_response = MagicMock()
-        mock_response.content = b"%PDF-1.4 content"
-        mock_response.raise_for_status = MagicMock()
-
-        mock_client = AsyncMock()
-        mock_client.get = AsyncMock(return_value=mock_response)
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-
-        mock_source = MagicMock()
-        mock_source.wait_for_rate_limit = MagicMock()
-
-        with patch("httpx.AsyncClient", return_value=mock_client):
-            with patch.dict("sys.modules", {"pypdf": None}):
-                # Force ImportError for pypdf
-                original_import = __import__
-
-                def mock_import(name, *args, **kwargs):
-                    if name == "pypdf":
-                        raise ImportError("No module named 'pypdf'")
-                    return original_import(name, *args, **kwargs)
-
-                with patch("builtins.__import__", side_effect=mock_import):
-                    result = await _download_arxiv_pdf("1234.5678", mock_source)
-
-        assert "error" in result
-        assert "pypdf" in result["error"].lower()
+            # Test with version suffix
+            await fetch_arxiv_paper("1234.5678v2")
+            call_url = mock_parse.call_args[0][0]
+            assert "1234.5678" in call_url
+            assert "v2" not in call_url

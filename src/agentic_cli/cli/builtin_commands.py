@@ -136,76 +136,80 @@ class StatusCommand(Command):
 
 
 class PapersCommand(Command):
-    """List saved research papers."""
+    """List documents in the knowledge base."""
 
     def __init__(self) -> None:
         super().__init__(
             name="papers",
-            description="List saved research papers",
-            aliases=[],
-            usage="/papers [query] [--source=arxiv|web|local]",
+            description="List documents in the knowledge base",
+            aliases=["docs"],
+            usage="/papers [query] [--source=arxiv|web|local|user]",
             examples=["/papers", "/papers transformer", "/papers --source=arxiv"],
             category=CommandCategory.SEARCH,
         )
 
     async def execute(self, args: str, app: Any) -> None:
-        """Display saved papers in a table."""
-        from agentic_cli.tools.paper_tools import PaperStore
+        """Display knowledge base documents in a table."""
+        from agentic_cli.knowledge_base import KnowledgeBaseManager
+        from agentic_cli.knowledge_base.models import SourceType
+        from agentic_cli.constants import format_size
 
         parsed = self.parse_args(args)
-        query = parsed.positional or None
-        source_filter = parsed.get_option("source", "", str) or None
+        query = parsed.positional or ""
+        source_filter = parsed.get_option("source", "", str) or ""
 
-        # Get paper store from workflow manager or create temporary one
-        store = None
+        # Get KB manager from workflow or create temporary one
+        kb = None
         try:
             workflow = app.workflow
-            if workflow and hasattr(workflow, "paper_store") and workflow.paper_store:
-                store = workflow.paper_store
+            if workflow and hasattr(workflow, "kb_manager") and workflow.kb_manager:
+                kb = workflow.kb_manager
         except (RuntimeError, AttributeError):
             pass
 
-        if store is None:
-            store = PaperStore(app.settings)
+        if kb is None:
+            kb = KnowledgeBaseManager(
+                settings=app.settings,
+                use_mock=getattr(app.settings, "knowledge_base_use_mock", True),
+            )
 
-        papers = store.list_papers(query=query, source_type=source_filter)
+        # Parse source type filter
+        st_filter = None
+        if source_filter:
+            try:
+                st_filter = SourceType(source_filter)
+            except ValueError:
+                pass
 
-        if not papers:
-            app.session.add_message("system", "No saved papers found.")
+        docs = kb.list_documents(source_type=st_filter, limit=50)
+
+        # Apply query filter
+        if query:
+            query_lower = query.lower()
+            docs = [
+                d for d in docs
+                if query_lower in d.title.lower()
+                or any(query_lower in a.lower() for a in d.metadata.get("authors", []))
+            ]
+
+        if not docs:
+            app.session.add_message("system", "No documents found.")
             return
 
-        table = Table(title="Saved Papers", show_lines=False, padding=(0, 1))
+        table = Table(title="Knowledge Base Documents", show_lines=False, padding=(0, 1))
         table.add_column("ID", style="dim", no_wrap=True, max_width=8)
         table.add_column("Title", style="bold", max_width=50)
-        table.add_column("Authors", max_width=30)
         table.add_column("Source", style="cyan", no_wrap=True)
-        table.add_column("Added", style="dim", no_wrap=True)
-        table.add_column("Size", style="dim", no_wrap=True, justify="right")
+        table.add_column("Chunks", style="dim", no_wrap=True, justify="right")
+        table.add_column("Created", style="dim", no_wrap=True)
 
-        for p in papers:
-            # Format authors (truncate if too many)
-            authors = ", ".join(p.authors[:3])
-            if len(p.authors) > 3:
-                authors += f" +{len(p.authors) - 3}"
-
-            # Format date
-            added = p.added_at[:10] if p.added_at else ""
-
-            # Format size
-            if p.file_size_bytes >= 1048576:
-                size = f"{p.file_size_bytes / 1048576:.1f} MB"
-            elif p.file_size_bytes >= 1024:
-                size = f"{p.file_size_bytes / 1024:.0f} KB"
-            else:
-                size = f"{p.file_size_bytes} B"
-
+        for d in docs:
             table.add_row(
-                p.id[:8],
-                p.title[:50],
-                authors,
-                p.source_type,
-                added,
-                size,
+                d.id[:8],
+                d.title[:50],
+                d.source_type.value,
+                str(len(d.chunks)),
+                d.created_at.strftime("%Y-%m-%d"),
             )
 
         app.session.add_rich(table)

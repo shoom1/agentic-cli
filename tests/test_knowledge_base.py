@@ -25,6 +25,7 @@ class TestSourceType:
         assert SourceType.WEB.value == "web"
         assert SourceType.INTERNAL.value == "internal"
         assert SourceType.USER.value == "user"
+        assert SourceType.LOCAL.value == "local"
 
 
 class TestDocumentChunk:
@@ -139,6 +140,17 @@ class TestDocument:
         assert doc.updated_at
         assert doc.chunks == []
 
+    def test_create_document_with_summary(self):
+        """Test creating document with summary field."""
+        doc = Document.create(
+            title="Summarized Doc",
+            content="Full content here",
+            source_type=SourceType.USER,
+            summary="A brief summary",
+        )
+
+        assert doc.summary == "A brief summary"
+
     def test_create_document_minimal(self):
         """Test creating document with minimal arguments."""
         doc = Document.create(
@@ -150,6 +162,7 @@ class TestDocument:
         assert doc.source_url is None
         assert doc.file_path is None
         assert doc.metadata == {}
+        assert doc.summary == ""
 
     def test_document_with_file_path(self):
         """Test document with file path."""
@@ -169,6 +182,7 @@ class TestDocument:
             title="Test",
             content="Content",
             source_type=SourceType.WEB,
+            summary="A summary",
             source_url="https://example.com",
             file_path=Path("/test.txt"),
             created_at=datetime(2024, 1, 1, 12, 0, 0),
@@ -181,6 +195,7 @@ class TestDocument:
 
         assert data["id"] == "doc-1"
         assert data["title"] == "Test"
+        assert data["summary"] == "A summary"
         assert data["source_type"] == "web"
         assert data["source_url"] == "https://example.com"
         assert data["file_path"] == "/test.txt"

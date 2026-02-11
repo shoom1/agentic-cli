@@ -224,6 +224,11 @@ class PathResolver:
         """Directory for knowledge base embeddings."""
         return self.knowledge_base_dir / "embeddings"
 
+    @property
+    def knowledge_base_files_dir(self) -> Path:
+        """Directory for knowledge base file storage (PDFs, etc.)."""
+        return self.knowledge_base_dir / "files"
+
     def ensure_workspace_exists(self) -> None:
         """Create workspace directory if it doesn't exist."""
         self._workspace_dir.mkdir(parents=True, exist_ok=True)
@@ -239,5 +244,6 @@ class PathResolver:
             self.knowledge_base_dir,
             self.knowledge_base_documents_dir,
             self.knowledge_base_embeddings_dir,
+            self.knowledge_base_files_dir,
         ]:
             dir_path.mkdir(parents=True, exist_ok=True)

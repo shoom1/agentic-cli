@@ -306,84 +306,40 @@ class TestFetchArxivPaper:
         summary = format_tool_summary("fetch_arxiv_paper", result)
         assert len(summary) <= 103  # 100 + "..."
 
-    def test_with_pdf_text(self):
-        result = {
-            "success": True,
-            "paper": {"title": "Attention Is All You Need"},
-            "pdf_text": "...",
-            "pdf_size_bytes": 2 * 1024 * 1024,
-        }
-        summary = format_tool_summary("fetch_arxiv_paper", result)
-        assert "Attention Is All You Need" in summary
-        assert "PDF: 2.0MB" in summary
-
-    def test_with_download_error(self):
-        result = {
-            "success": True,
-            "paper": {"title": "Test Paper"},
-            "download_error": "pypdf not installed",
-        }
-        summary = format_tool_summary("fetch_arxiv_paper", result)
-        assert "Test Paper" in summary
-        assert "PDF failed: pypdf not installed" in summary
-
-
-class TestAnalyzeArxivPaper:
-    def test_with_analysis(self):
-        result = {"success": True, "arxiv_id": "123", "url": "http://...", "analysis": "Key contribution is X"}
-        summary = format_tool_summary("analyze_arxiv_paper", result)
-        assert summary == "Key contribution is X"
-
-    def test_long_analysis_truncated(self):
-        result = {"success": True, "arxiv_id": "123", "analysis": "A" * 200}
-        summary = format_tool_summary("analyze_arxiv_paper", result)
-        assert len(summary) <= 103  # 100 + "..."
-
-    def test_empty_analysis(self):
-        result = {"success": True, "arxiv_id": "123", "analysis": ""}
-        assert format_tool_summary("analyze_arxiv_paper", result) == "Analysis complete (no content)"
-
-
-class TestSavePaper:
-    def test_basic(self):
-        result = {"success": True, "paper_id": "abc", "title": "Attention Is All You Need", "file_size_bytes": 2048}
-        assert format_tool_summary("save_paper", result) == "Saved: Attention Is All You Need (2.0KB)"
-
-    def test_large_file(self):
-        result = {"success": True, "paper_id": "abc", "title": "Paper", "file_size_bytes": 3 * 1024 * 1024}
-        assert format_tool_summary("save_paper", result) == "Saved: Paper (3.0MB)"
-
-
-class TestListPapers:
-    def test_multiple(self):
-        result = {"success": True, "papers": [{}, {}], "count": 2}
-        assert format_tool_summary("list_papers", result) == "2 papers"
-
-    def test_single(self):
-        result = {"success": True, "papers": [{}], "count": 1}
-        assert format_tool_summary("list_papers", result) == "1 paper"
-
-    def test_zero(self):
-        result = {"success": True, "papers": [], "count": 0}
-        assert format_tool_summary("list_papers", result) == "0 papers"
-
-
-class TestGetPaperInfo:
-    def test_basic(self):
-        result = {"success": True, "paper": {"title": "My Paper", "id": "abc"}}
-        assert format_tool_summary("get_paper_info", result) == "My Paper"
-
-
-class TestOpenPaper:
-    def test_basic(self):
-        result = {"success": True, "title": "My Paper", "pdf_path": "/tmp/abc.pdf"}
-        assert format_tool_summary("open_paper", result) == "Opened: My Paper"
-
-
-class TestIngestToKnowledgeBase:
+class TestIngestDocument:
     def test_basic(self):
         result = {"success": True, "document_id": "abc", "title": "Paper", "chunks_created": 5}
-        assert format_tool_summary("ingest_to_knowledge_base", result) == "Ingested 'Paper' (5 chunks)"
+        assert format_tool_summary("ingest_document", result) == "Ingested 'Paper' (5 chunks)"
+
+
+class TestReadDocument:
+    def test_basic(self):
+        result = {"success": True, "title": "My Paper", "content": "..."}
+        assert format_tool_summary("read_document", result) == "My Paper"
+
+    def test_truncated(self):
+        result = {"success": True, "title": "My Paper", "content": "...", "truncated": True}
+        assert format_tool_summary("read_document", result) == "My Paper (truncated)"
+
+
+class TestListDocuments:
+    def test_multiple(self):
+        result = {"success": True, "documents": [{}, {}], "count": 2}
+        assert format_tool_summary("list_documents", result) == "2 documents"
+
+    def test_single(self):
+        result = {"success": True, "documents": [{}], "count": 1}
+        assert format_tool_summary("list_documents", result) == "1 document"
+
+    def test_zero(self):
+        result = {"success": True, "documents": [], "count": 0}
+        assert format_tool_summary("list_documents", result) == "0 documents"
+
+
+class TestOpenDocument:
+    def test_basic(self):
+        result = {"success": True, "title": "My Paper", "file_path": "/tmp/abc.pdf"}
+        assert format_tool_summary("open_document", result) == "Opened: My Paper"
 
 
 class TestRequestApproval:
