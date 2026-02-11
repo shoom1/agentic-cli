@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from agentic_cli.knowledge_base.manager import KnowledgeBaseManager
 from agentic_cli.knowledge_base.models import (
     Document,
     DocumentChunk,
@@ -1063,5 +1064,99 @@ class TestArxivSearchSource:
 
         assert results == []
         assert len(source._cache) == 1  # SHOULD be cached (legitimate empty result)
+
+
+# ============================================================================
+# KnowledgeBaseManager base_dir and find_document tests
+# ============================================================================
+
+
+class TestBaseDirOverride:
+    """Tests for the base_dir parameter in KnowledgeBaseManager.__init__."""
+
+    def test_base_dir_overrides_settings(self, tmp_path):
+        """When base_dir is provided, all paths derive from it."""
+        custom_dir = tmp_path / "custom_kb"
+        kb = KnowledgeBaseManager(use_mock=True, base_dir=custom_dir)
+
+        assert kb.kb_dir == custom_dir
+        assert kb.documents_dir == custom_dir / "documents"
+        assert kb.embeddings_dir == custom_dir / "embeddings"
+        assert kb.files_dir == custom_dir / "files"
+        assert kb.metadata_path == custom_dir / "metadata.json"
+
+    def test_base_dir_creates_directories(self, tmp_path):
+        """base_dir creates all subdirectories on init."""
+        custom_dir = tmp_path / "new_kb"
+        KnowledgeBaseManager(use_mock=True, base_dir=custom_dir)
+
+        assert custom_dir.is_dir()
+        assert (custom_dir / "documents").is_dir()
+        assert (custom_dir / "embeddings").is_dir()
+        assert (custom_dir / "files").is_dir()
+
+    def test_base_dir_with_settings(self, tmp_path):
+        """base_dir overrides settings paths but uses settings embedding config."""
+        custom_dir = tmp_path / "override_kb"
+        mock_settings = MagicMock()
+        mock_settings.knowledge_base_dir = tmp_path / "settings_kb"
+        mock_settings.knowledge_base_documents_dir = tmp_path / "settings_kb" / "documents"
+        mock_settings.knowledge_base_embeddings_dir = tmp_path / "settings_kb" / "embeddings"
+        mock_settings.embedding_model = "test-model"
+        mock_settings.embedding_batch_size = 16
+        mock_settings.knowledge_base_use_mock = True
+
+        kb = KnowledgeBaseManager(
+            settings=mock_settings,
+            use_mock=True,
+            base_dir=custom_dir,
+        )
+
+        # Paths come from base_dir, not settings
+        assert kb.kb_dir == custom_dir
+        assert kb.documents_dir == custom_dir / "documents"
+        # Settings KB dir was NOT used
+        assert not (tmp_path / "settings_kb").exists()
+
+
+class TestFindDocument:
+    """Tests for KnowledgeBaseManager.find_document()."""
+
+    @pytest.fixture
+    def kb(self, tmp_path):
+        """Create a KB with a test document."""
+        kb = KnowledgeBaseManager(use_mock=True, base_dir=tmp_path / "kb")
+        kb.ingest_document(
+            content="Test document content.",
+            title="Neural Network Fundamentals",
+            source_type=SourceType.USER,
+        )
+        return kb
+
+    def test_find_document_by_exact_id(self, kb):
+        """Find document by exact ID."""
+        doc = list(kb._documents.values())[0]
+        found = kb.find_document(doc.id)
+        assert found is not None
+        assert found.id == doc.id
+
+    def test_find_document_by_id_prefix(self, kb):
+        """Find document by ID prefix."""
+        doc = list(kb._documents.values())[0]
+        prefix = doc.id[:8]
+        found = kb.find_document(prefix)
+        assert found is not None
+        assert found.id == doc.id
+
+    def test_find_document_by_title(self, kb):
+        """Find document by title substring (case-insensitive)."""
+        found = kb.find_document("neural network")
+        assert found is not None
+        assert found.title == "Neural Network Fundamentals"
+
+    def test_find_document_not_found(self, kb):
+        """Return None when document not found."""
+        found = kb.find_document("nonexistent-xyz-123")
+        assert found is None
 
 

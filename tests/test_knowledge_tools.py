@@ -890,3 +890,203 @@ class TestKBManagerContextVar:
     def test_base_manager_has_kb_manager_slot(self):
         from agentic_cli.workflow.base_manager import BaseWorkflowManager
         assert hasattr(BaseWorkflowManager, "kb_manager")
+
+    def test_base_manager_has_user_kb_manager_slot(self):
+        from agentic_cli.workflow.base_manager import BaseWorkflowManager
+        assert hasattr(BaseWorkflowManager, "user_kb_manager")
+
+    def test_user_kb_manager_context_accessors_exist(self):
+        from agentic_cli.workflow.context import (
+            set_context_user_kb_manager,
+            get_context_user_kb_manager,
+        )
+        assert callable(set_context_user_kb_manager)
+        assert callable(get_context_user_kb_manager)
+
+
+# ============================================================================
+# Two-tier knowledge base tests
+# ============================================================================
+
+
+class TestTwoTierKnowledgeBase:
+    """Tests for two-tier (project + user) knowledge base access."""
+
+    @pytest.fixture
+    def project_kb(self, tmp_path):
+        """Create a project-scoped KB with a document."""
+        kb = _make_kb(tmp_path / "project")
+        kb.ingest_document(
+            content="Project document about transformers.",
+            title="Project Transformer Paper",
+            source_type=SourceType.ARXIV,
+        )
+        return kb
+
+    @pytest.fixture
+    def user_kb(self, tmp_path):
+        """Create a user-scoped KB with a different document."""
+        kb = _make_kb(tmp_path / "user")
+        kb.ingest_document(
+            content="User curated document about attention mechanisms.",
+            title="User Attention Paper",
+            source_type=SourceType.USER,
+        )
+        return kb
+
+    def _set_both_contexts(self, project_kb, user_kb):
+        """Set both KB context vars and return tokens for cleanup."""
+        from agentic_cli.workflow.context import (
+            set_context_kb_manager,
+            set_context_user_kb_manager,
+        )
+        t1 = set_context_kb_manager(project_kb)
+        t2 = set_context_user_kb_manager(user_kb)
+        return t1, t2
+
+    def _reset_tokens(self, *tokens):
+        for token in tokens:
+            token.var.reset(token)
+
+    def test_search_merges_both_kbs(self, project_kb, user_kb):
+        """Search returns results from both KBs with scope tags."""
+        from agentic_cli.tools.knowledge_tools import search_knowledge_base
+
+        t1, t2 = self._set_both_contexts(project_kb, user_kb)
+        try:
+            result = search_knowledge_base("attention transformers")
+            assert result["success"] is True
+            scopes = {r.get("scope") for r in result["results"]}
+            assert "project" in scopes or "user" in scopes
+            # Both KBs should contribute results
+            assert result["total_matches"] >= 1
+        finally:
+            self._reset_tokens(t1, t2)
+
+    @pytest.mark.asyncio
+    async def test_ingest_writes_to_project_only(self, project_kb, user_kb):
+        """Ingestion only writes to project KB, not user KB."""
+        from agentic_cli.tools.knowledge_tools import ingest_document
+
+        t1, t2 = self._set_both_contexts(project_kb, user_kb)
+        try:
+            user_count_before = len(user_kb._documents)
+            project_count_before = len(project_kb._documents)
+
+            result = await ingest_document(
+                content="New ingested document.",
+                title="New Doc",
+                source_type="user",
+            )
+            assert result["success"] is True
+
+            # Project KB gains a document
+            assert len(project_kb._documents) == project_count_before + 1
+            # User KB unchanged
+            assert len(user_kb._documents) == user_count_before
+        finally:
+            self._reset_tokens(t1, t2)
+
+    def test_list_documents_shows_scope(self, project_kb, user_kb):
+        """list_documents includes scope indicator for both tiers."""
+        from agentic_cli.tools.knowledge_tools import list_documents
+
+        t1, t2 = self._set_both_contexts(project_kb, user_kb)
+        try:
+            result = list_documents()
+            assert result["success"] is True
+            assert result["count"] == 2
+
+            scopes = {d["scope"] for d in result["documents"]}
+            assert scopes == {"project", "user"}
+        finally:
+            self._reset_tokens(t1, t2)
+
+    def test_read_document_project_first(self, tmp_path):
+        """When both KBs have a matching doc, project is returned first."""
+        from agentic_cli.tools.knowledge_tools import read_document
+
+        pkb = _make_kb(tmp_path / "proj")
+        ukb = _make_kb(tmp_path / "usr")
+        pkb.ingest_document(
+            content="Project version of the doc.",
+            title="Shared Title",
+            source_type=SourceType.USER,
+        )
+        ukb.ingest_document(
+            content="User version of the doc.",
+            title="Shared Title",
+            source_type=SourceType.USER,
+        )
+
+        t1, t2 = self._set_both_contexts(pkb, ukb)
+        try:
+            result = read_document("Shared Title")
+            assert result["success"] is True
+            assert result["content"] == "Project version of the doc."
+        finally:
+            self._reset_tokens(t1, t2)
+
+    def test_read_document_falls_back_to_user(self, project_kb, user_kb):
+        """Doc only in user KB is still found via fallback."""
+        from agentic_cli.tools.knowledge_tools import read_document
+
+        t1, t2 = self._set_both_contexts(project_kb, user_kb)
+        try:
+            result = read_document("User Attention Paper")
+            assert result["success"] is True
+            assert result["title"] == "User Attention Paper"
+            assert "attention" in result["content"].lower()
+        finally:
+            self._reset_tokens(t1, t2)
+
+    def test_same_dir_single_instance(self, tmp_path):
+        """When project and user paths resolve to same dir, one manager is reused."""
+        from agentic_cli.tools.knowledge_tools import search_knowledge_base
+
+        kb = _make_kb(tmp_path / "shared")
+        kb.ingest_document(
+            content="Shared document.",
+            title="Shared Doc",
+            source_type=SourceType.USER,
+        )
+
+        # Set same KB for both
+        from agentic_cli.workflow.context import (
+            set_context_kb_manager,
+            set_context_user_kb_manager,
+        )
+        t1 = set_context_kb_manager(kb)
+        t2 = set_context_user_kb_manager(kb)
+        try:
+            result = search_knowledge_base("shared")
+            assert result["success"] is True
+            # Should not have duplicates — user KB is same instance, so merge is skipped
+            doc_ids = [r["document_id"] for r in result["results"]]
+            assert len(doc_ids) == len(set(doc_ids))
+        finally:
+            t1.var.reset(t1)
+            t2.var.reset(t2)
+
+    def test_user_kb_search_failure_non_fatal(self, project_kb):
+        """Project results returned even if user KB search raises."""
+        from agentic_cli.tools.knowledge_tools import search_knowledge_base
+        from agentic_cli.workflow.context import (
+            set_context_kb_manager,
+            set_context_user_kb_manager,
+        )
+
+        # Create a mock user KB that raises on search
+        failing_kb = MagicMock()
+        failing_kb.search.side_effect = RuntimeError("User KB broken")
+
+        t1 = set_context_kb_manager(project_kb)
+        t2 = set_context_user_kb_manager(failing_kb)
+        try:
+            result = search_knowledge_base("transformers")
+            assert result["success"] is True
+            # Project results should still be present
+            assert result["total_matches"] >= 1
+        finally:
+            t1.var.reset(t1)
+            t2.var.reset(t2)

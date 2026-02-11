@@ -26,6 +26,7 @@ from agentic_cli.workflow.context import (
     set_context_plan_store,
     set_context_task_store,
     set_context_kb_manager,
+    set_context_user_kb_manager,
     set_context_approval_manager,
     set_context_checkpoint_manager,
     set_context_llm_summarizer,
@@ -105,6 +106,7 @@ class BaseWorkflowManager(ABC):
         self._plan_store: "PlanStore | None" = None
         self._task_store: "TaskStore | None" = None
         self._kb_manager: "KnowledgeBaseManager | None" = None
+        self._user_kb_manager: "KnowledgeBaseManager | None" = None
         self._approval_manager: "ApprovalManager | None" = None
         self._checkpoint_manager: "CheckpointManager | None" = None
         self._llm_summarizer: Any | None = None
@@ -151,8 +153,13 @@ class BaseWorkflowManager(ABC):
 
     @property
     def kb_manager(self) -> "KnowledgeBaseManager | None":
-        """Get the knowledge base manager (if required by tools)."""
+        """Get the project-scoped knowledge base manager (if required by tools)."""
         return self._kb_manager
+
+    @property
+    def user_kb_manager(self) -> "KnowledgeBaseManager | None":
+        """Get the user-scoped knowledge base manager (if required by tools)."""
+        return self._user_kb_manager
 
     @property
     def approval_manager(self) -> "ApprovalManager | None":
@@ -204,11 +211,29 @@ class BaseWorkflowManager(ABC):
             self._task_store = TaskStore(self._settings)
 
         if "kb_manager" in self._required_managers and self._kb_manager is None:
+            from pathlib import Path
             from agentic_cli.knowledge_base import KnowledgeBaseManager
+
+            use_mock = self._settings.knowledge_base_use_mock
+            project_kb_dir = Path.cwd() / f".{self._settings.app_name}" / "knowledge_base"
+            user_kb_dir = self._settings.knowledge_base_dir
+
+            # Project KB (agent read-write)
             self._kb_manager = KnowledgeBaseManager(
                 settings=self._settings,
-                use_mock=self._settings.knowledge_base_use_mock,
+                use_mock=use_mock,
+                base_dir=project_kb_dir,
             )
+
+            # User KB (agent read-only) — reuse project instance if paths overlap
+            if project_kb_dir.resolve() != user_kb_dir.resolve():
+                self._user_kb_manager = KnowledgeBaseManager(
+                    settings=self._settings,
+                    use_mock=use_mock,
+                    base_dir=user_kb_dir,
+                )
+            else:
+                self._user_kb_manager = self._kb_manager
 
         if "approval_manager" in self._required_managers and self._approval_manager is None:
             from agentic_cli.hitl import ApprovalManager
@@ -247,6 +272,7 @@ class BaseWorkflowManager(ABC):
             set_context_plan_store(self._plan_store),
             set_context_task_store(self._task_store),
             set_context_kb_manager(self._kb_manager),
+            set_context_user_kb_manager(self._user_kb_manager),
             set_context_approval_manager(self._approval_manager),
             set_context_checkpoint_manager(self._checkpoint_manager),
             set_context_llm_summarizer(self._llm_summarizer),

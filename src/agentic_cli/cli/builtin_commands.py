@@ -143,13 +143,14 @@ class PapersCommand(Command):
             name="papers",
             description="List documents in the knowledge base",
             aliases=["docs"],
-            usage="/papers [query] [--source=arxiv|web|local|user]",
-            examples=["/papers", "/papers transformer", "/papers --source=arxiv"],
+            usage="/papers [query] [--source=arxiv|web|local|user] [--global]",
+            examples=["/papers", "/papers transformer", "/papers --source=arxiv", "/papers --global"],
             category=CommandCategory.SEARCH,
         )
 
     async def execute(self, args: str, app: Any) -> None:
         """Display knowledge base documents in a table."""
+        from pathlib import Path
         from agentic_cli.knowledge_base import KnowledgeBaseManager
         from agentic_cli.knowledge_base.models import SourceType
         from agentic_cli.constants import format_size
@@ -157,13 +158,25 @@ class PapersCommand(Command):
         parsed = self.parse_args(args)
         query = parsed.positional or ""
         source_filter = parsed.get_option("source", "", str) or ""
+        use_global = parsed.has_flag("global")
+
+        # Determine which KB dir to use
+        if use_global:
+            kb_dir = app.settings.knowledge_base_dir
+            scope_label = "User"
+        else:
+            kb_dir = Path.cwd() / f".{app.settings.app_name}" / "knowledge_base"
+            scope_label = "Project"
 
         # Get KB manager from workflow or create temporary one
         kb = None
         try:
             workflow = app.workflow
-            if workflow and hasattr(workflow, "kb_manager") and workflow.kb_manager:
-                kb = workflow.kb_manager
+            if workflow:
+                if use_global and hasattr(workflow, "user_kb_manager") and workflow.user_kb_manager:
+                    kb = workflow.user_kb_manager
+                elif not use_global and hasattr(workflow, "kb_manager") and workflow.kb_manager:
+                    kb = workflow.kb_manager
         except (RuntimeError, AttributeError):
             pass
 
@@ -171,6 +184,7 @@ class PapersCommand(Command):
             kb = KnowledgeBaseManager(
                 settings=app.settings,
                 use_mock=getattr(app.settings, "knowledge_base_use_mock", True),
+                base_dir=kb_dir,
             )
 
         # Parse source type filter
@@ -193,10 +207,10 @@ class PapersCommand(Command):
             ]
 
         if not docs:
-            app.session.add_message("system", "No documents found.")
+            app.session.add_message("system", f"No documents found in {scope_label.lower()} knowledge base.")
             return
 
-        table = Table(title="Knowledge Base Documents", show_lines=False, padding=(0, 1))
+        table = Table(title=f"{scope_label} Knowledge Base Documents", show_lines=False, padding=(0, 1))
         table.add_column("ID", style="dim", no_wrap=True, max_width=8)
         table.add_column("Title", style="bold", max_width=50)
         table.add_column("Source", style="cyan", no_wrap=True)
