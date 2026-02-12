@@ -35,8 +35,6 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Callable, TypeVar
-import importlib
-import inspect
 import re
 
 from agentic_cli.logging import Loggers
@@ -275,14 +273,11 @@ class Command(ABC):
 class CommandRegistry:
     """Registry for managing slash commands.
 
-    Handles command registration, lookup, and auto-discovery.
+    Handles command registration and lookup.
     """
 
     def __init__(self) -> None:
         self._commands: dict[str, Command] = {}
-        self._categories: dict[CommandCategory, list[Command]] = {
-            cat: [] for cat in CommandCategory
-        }
 
     def register(self, command: Command) -> None:
         """Register a command and its aliases.
@@ -293,27 +288,6 @@ class CommandRegistry:
         self._commands[command.name] = command
         for alias in command.aliases:
             self._commands[alias] = command
-
-        # Track by category (only add once per command)
-        if command not in self._categories[command.category]:
-            self._categories[command.category].append(command)
-
-    def unregister(self, name: str) -> None:
-        """Unregister a command by name.
-
-        Args:
-            name: Command name to unregister
-        """
-        cmd = self._commands.get(name)
-        if cmd:
-            # Remove from commands dict
-            del self._commands[cmd.name]
-            for alias in cmd.aliases:
-                self._commands.pop(alias, None)
-
-            # Remove from category
-            if cmd in self._categories[cmd.category]:
-                self._categories[cmd.category].remove(cmd)
 
     def get(self, name: str) -> Command | None:
         """Get a command by name or alias.
@@ -340,17 +314,6 @@ class CommandRegistry:
                 commands.append(cmd)
         return commands
 
-    def by_category(self, category: CommandCategory) -> list[Command]:
-        """Get commands in a specific category.
-
-        Args:
-            category: Category to filter by
-
-        Returns:
-            List of commands in the category
-        """
-        return self._categories.get(category, [])
-
     def get_completions(self) -> list[str]:
         """Get all command names and aliases for auto-completion.
 
@@ -359,102 +322,3 @@ class CommandRegistry:
         """
         return sorted(self._commands.keys())
 
-    def discover_commands(self, module_path: str) -> list[Command]:
-        """Discover and register Command subclasses from a module.
-
-        Args:
-            module_path: Full module path (e.g., "myapp.commands")
-
-        Returns:
-            List of discovered and registered commands
-        """
-        try:
-            module = importlib.import_module(module_path)
-        except ImportError as e:
-            logger.debug(
-                "command_module_import_failed",
-                module_path=module_path,
-                error=str(e),
-            )
-            return []
-
-        discovered = []
-        for name, obj in inspect.getmembers(module):
-            if (
-                inspect.isclass(obj)
-                and issubclass(obj, Command)
-                and obj is not Command
-                and not inspect.isabstract(obj)
-            ):
-                try:
-                    instance = obj()
-                    self.register(instance)
-                    discovered.append(instance)
-                except Exception as e:
-                    # Log but skip commands that fail to instantiate
-                    logger.debug(
-                        "command_instantiation_failed",
-                        command_class=name,
-                        module_path=module_path,
-                        error=str(e),
-                    )
-
-        return discovered
-
-
-def create_simple_command(
-    name: str,
-    description: str,
-    handler: Callable[[str, Any], Any],
-    aliases: list[str] | None = None,
-    usage: str | None = None,
-    examples: list[str] | None = None,
-    category: CommandCategory = CommandCategory.GENERAL,
-) -> Command:
-    """Create a simple command from a function.
-
-    Useful for quick command creation without subclassing.
-
-    Args:
-        name: Command name
-        description: Command description
-        handler: Function to call (async or sync). Takes (args, app).
-        aliases: Command aliases
-        usage: Usage string
-        examples: Example usages
-        category: Command category
-
-    Returns:
-        Command instance
-
-    Example:
-        async def my_handler(args: str, app: Any):
-            app.session.add_message("system", f"Hello {args}")
-
-        cmd = create_simple_command(
-            "greet",
-            "Greet someone",
-            my_handler,
-            usage="/greet <name>",
-        )
-        registry.register(cmd)
-    """
-
-    class SimpleCommand(Command):
-        def __init__(self):
-            super().__init__(
-                name=name,
-                description=description,
-                aliases=aliases,
-                usage=usage,
-                examples=examples,
-                category=category,
-            )
-            self._handler = handler
-
-        async def execute(self, args: str, app: Any) -> None:
-            result = self._handler(args, app)
-            if inspect.iscoroutine(result):
-                await result
-
-    return SimpleCommand()

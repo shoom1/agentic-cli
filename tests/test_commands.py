@@ -8,7 +8,6 @@ from agentic_cli.cli.commands import (
     CommandCategory,
     CommandRegistry,
     ParsedArgs,
-    create_simple_command,
 )
 
 
@@ -161,43 +160,6 @@ class TestCommandRegistry:
         # But both are in all_commands (they're different instances)
         all_cmds = registry.all_commands()
         assert len(all_cmds) == 1  # Same name, last one wins
-
-    def test_unregister_command(self):
-        """Test unregistering a command."""
-        registry = CommandRegistry()
-        cmd = MockCommand("test", "Test", aliases=["t"])
-
-        registry.register(cmd)
-        assert registry.get("test") is not None
-        assert registry.get("t") is not None
-
-        registry.unregister("test")
-
-        assert registry.get("test") is None
-        assert registry.get("t") is None
-
-    def test_by_category(self):
-        """Test getting commands by category."""
-        registry = CommandRegistry()
-        cmd1 = MockCommand("help", "Help", category=CommandCategory.GENERAL)
-        cmd2 = MockCommand("save", "Save", category=CommandCategory.SESSION)
-        cmd3 = MockCommand("settings", "Settings", category=CommandCategory.SETTINGS)
-
-        registry.register(cmd1)
-        registry.register(cmd2)
-        registry.register(cmd3)
-
-        general = registry.by_category(CommandCategory.GENERAL)
-        session = registry.by_category(CommandCategory.SESSION)
-        settings = registry.by_category(CommandCategory.SETTINGS)
-
-        assert cmd1 in general
-        assert cmd2 in session
-        assert cmd3 in settings
-        assert len(general) == 1
-        assert len(session) == 1
-        assert len(settings) == 1
-
 
 class TestParsedArgs:
     """Tests for ParsedArgs class."""
@@ -368,74 +330,3 @@ class TestCommandHelp:
         assert "/search world --max=5" in help_text
 
 
-class TestCreateSimpleCommand:
-    """Tests for create_simple_command factory."""
-
-    @pytest.mark.asyncio
-    async def test_sync_handler(self):
-        """Test simple command with sync handler."""
-        result = []
-
-        def handler(args, app):
-            result.append(args)
-
-        cmd = create_simple_command("test", "Test", handler)
-        await cmd.execute("hello", None)
-
-        assert result == ["hello"]
-
-    @pytest.mark.asyncio
-    async def test_async_handler(self):
-        """Test simple command with async handler."""
-        result = []
-
-        async def handler(args, app):
-            result.append(args)
-
-        cmd = create_simple_command("test", "Test", handler)
-        await cmd.execute("world", None)
-
-        assert result == ["world"]
-
-    def test_command_properties(self):
-        """Test simple command has correct properties."""
-        cmd = create_simple_command(
-            name="greet",
-            description="Greet someone",
-            handler=lambda a, b: None,
-            aliases=["g"],
-            usage="/greet <name>",
-            examples=["/greet Alice"],
-            category=CommandCategory.GENERAL,
-        )
-
-        assert cmd.name == "greet"
-        assert cmd.description == "Greet someone"
-        assert cmd.aliases == ["g"]
-        assert cmd.usage == "/greet <name>"
-        assert cmd.examples == ["/greet Alice"]
-        assert cmd.category == CommandCategory.GENERAL
-
-
-class TestCommandDiscovery:
-    """Tests for command auto-discovery."""
-
-    def test_discover_from_nonexistent_module(self):
-        """Test discovery handles missing module."""
-        registry = CommandRegistry()
-        discovered = registry.discover_commands("nonexistent.module")
-
-        assert discovered == []
-
-    def test_discover_from_module(self):
-        """Test discovery finds Command subclasses."""
-        # This tests the discover mechanism with the builtin_commands module
-        registry = CommandRegistry()
-        discovered = registry.discover_commands("agentic_cli.cli.builtin_commands")
-
-        # Should find several commands
-        assert len(discovered) > 0
-
-        # Should be able to get them from registry
-        assert registry.get("help") is not None
-        assert registry.get("exit") is not None

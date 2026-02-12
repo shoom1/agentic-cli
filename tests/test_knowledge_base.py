@@ -407,7 +407,6 @@ class TestWebResult:
 from agentic_cli.knowledge_base.sources import (
     SearchSource,
     SearchSourceResult,
-    SearchSourceRegistry,
 )
 from agentic_cli.tools.arxiv_source import ArxivSearchSource, CachedSearchResult
 from unittest.mock import patch, MagicMock
@@ -555,106 +554,6 @@ class TestSearchSourceWithApiKey:
         with patch("agentic_cli.config.get_settings") as mock_settings:
             mock_settings.return_value = MagicMock(serper_api_key="test-key")
             assert source.is_available() is True
-
-
-class TestSearchSourceRegistry:
-    """Tests for SearchSourceRegistry."""
-
-    def test_register_source(self):
-        """Test registering a source."""
-        registry = SearchSourceRegistry()
-        source = ConcreteSearchSource()
-
-        registry.register(source)
-
-        assert registry.get("test_source") is source
-
-    def test_unregister_source(self):
-        """Test unregistering a source."""
-        registry = SearchSourceRegistry()
-        source = ConcreteSearchSource()
-
-        registry.register(source)
-        registry.unregister("test_source")
-
-        assert registry.get("test_source") is None
-
-    def test_unregister_nonexistent(self):
-        """Test unregistering nonexistent source doesn't error."""
-        registry = SearchSourceRegistry()
-        registry.unregister("nonexistent")  # Should not raise
-
-    def test_list_sources(self):
-        """Test listing all sources."""
-        registry = SearchSourceRegistry()
-        source1 = ConcreteSearchSource()
-
-        registry.register(source1)
-        sources = registry.list_sources()
-
-        assert len(sources) == 1
-        assert source1 in sources
-
-    def test_list_available(self):
-        """Test listing available sources."""
-        registry = SearchSourceRegistry()
-        available_source = ConcreteSearchSource()
-        unavailable_source = SourceRequiringKey()
-
-        registry.register(available_source)
-        registry.register(unavailable_source)
-
-        with patch("agentic_cli.config.get_settings") as mock_settings:
-            mock_settings.return_value = MagicMock(serper_api_key=None)
-            available = registry.list_available()
-
-        assert len(available) == 1
-        assert available_source in available
-
-    def test_search_all_sources(self):
-        """Test searching all available sources."""
-        registry = SearchSourceRegistry()
-        source = ConcreteSearchSource()
-        registry.register(source)
-
-        results = registry.search("test query")
-
-        assert "test_source" in results
-        assert len(results["test_source"]) == 1
-        assert results["test_source"][0].title == "Result for: test query"
-
-    def test_search_specific_sources(self):
-        """Test searching specific sources only."""
-        registry = SearchSourceRegistry()
-        source1 = ConcreteSearchSource()
-        registry.register(source1)
-
-        results = registry.search("test query", sources=["test_source"])
-
-        assert "test_source" in results
-
-    def test_search_handles_errors(self):
-        """Test search handles source errors gracefully."""
-
-        class FailingSource(SearchSource):
-            @property
-            def name(self) -> str:
-                return "failing"
-
-            @property
-            def description(self) -> str:
-                return "Always fails"
-
-            def search(self, query: str, max_results: int = 10, **kwargs):
-                raise RuntimeError("Search failed")
-
-        registry = SearchSourceRegistry()
-        registry.register(FailingSource())
-
-        results = registry.search("test")
-
-        assert "failing" in results
-        assert results["failing"] == []
 
 
 class TestArxivSearchSource:

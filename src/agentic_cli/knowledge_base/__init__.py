@@ -18,7 +18,6 @@ from agentic_cli.knowledge_base.vector_store import MockVectorStore, VectorStore
 from agentic_cli.knowledge_base.sources import (
     SearchSource,
     SearchSourceResult,
-    SearchSourceRegistry,
 )
 
 __all__ = [
@@ -39,5 +38,4 @@ __all__ = [
     # Search Sources
     "SearchSource",
     "SearchSourceResult",
-    "SearchSourceRegistry",
 ]

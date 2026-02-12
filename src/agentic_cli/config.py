@@ -128,11 +128,6 @@ class BaseSettings(WorkflowSettingsMixin, CLISettingsMixin, PydanticBaseSettings
         description="Anthropic API key for Claude models",
         validation_alias="ANTHROPIC_API_KEY",
     )
-    serper_api_key: str | None = Field(
-        default=None,
-        description="Serper.dev API key for web search",
-        validation_alias="SERPER_API_KEY",
-    )
     tavily_api_key: str | None = Field(
         default=None,
         description="Tavily API key for web search",
