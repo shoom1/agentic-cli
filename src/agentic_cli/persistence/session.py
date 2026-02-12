@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from agentic_cli.logging import Loggers
-from agentic_cli.persistence._utils import atomic_write_json
+from agentic_cli.persistence._utils import atomic_write_json, sanitize_filename
 
 if TYPE_CHECKING:
     from agentic_cli.cli.app import MessageHistory
@@ -78,8 +78,7 @@ class SessionPersistence:
 
     def _get_session_path(self, session_id: str) -> Path:
         """Get path for a session file."""
-        # Sanitize session_id for filesystem
-        safe_id = "".join(c if c.isalnum() or c in "-_" else "_" for c in session_id)
+        safe_id = sanitize_filename(session_id)
         return self.sessions_path / f"{safe_id}.json"
 
     def _get_sessions_index_path(self) -> Path:
@@ -97,8 +96,8 @@ class SessionPersistence:
             try:
                 data = json.loads(index_path.read_text())
                 return data.get("sessions", {})
-            except (json.JSONDecodeError, KeyError):
-                pass
+            except (json.JSONDecodeError, KeyError) as exc:
+                logger.debug("sessions_index_load_failed", error=str(exc))
         return {}
 
     def _save_sessions_index(self, index: dict[str, dict]) -> None:
