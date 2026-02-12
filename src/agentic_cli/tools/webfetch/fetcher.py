@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import socket
 import time
 from dataclasses import dataclass
 from urllib.parse import urlparse
@@ -93,6 +94,20 @@ class ContentFetcher:
         try:
             async with httpx.AsyncClient(follow_redirects=True, max_redirects=5) as client:
                 response = await client.get(url, timeout=timeout)
+
+                # Post-fetch IP revalidation (mitigates DNS rebinding)
+                final_host = urlparse(str(response.url)).hostname
+                if final_host:
+                    try:
+                        post_ip = socket.gethostbyname(final_host)
+                        ip_check = self._validator.validate_ip(post_ip)
+                        if not ip_check.valid:
+                            return FetchResult(
+                                success=False,
+                                error=f"DNS rebinding detected: {ip_check.error}",
+                            )
+                    except socket.gaierror:
+                        pass  # If DNS fails post-fetch, the response is already received
 
                 # Check for cross-host redirect
                 redirect_info = self._check_cross_host_redirect(url, response)

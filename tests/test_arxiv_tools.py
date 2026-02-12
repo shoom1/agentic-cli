@@ -157,6 +157,33 @@ class TestArxivSearchSourceLastError:
 
 
 # ---------------------------------------------------------------------------
+# search_arxiv validation tests (C4: return error dict, not raise)
+# ---------------------------------------------------------------------------
+
+
+class TestSearchArxivValidation:
+    """Tests for search_arxiv input validation returning error dicts."""
+
+    def test_search_arxiv_invalid_sort_by_returns_error(self):
+        """Invalid sort_by returns {success: False} instead of raising."""
+        from agentic_cli.tools.arxiv_tools import search_arxiv
+
+        result = search_arxiv("test", sort_by="invalid")
+        assert result["success"] is False
+        assert "sort_by" in result["error"]
+        assert "invalid" in result["error"]
+
+    def test_search_arxiv_invalid_sort_order_returns_error(self):
+        """Invalid sort_order returns {success: False} instead of raising."""
+        from agentic_cli.tools.arxiv_tools import search_arxiv
+
+        result = search_arxiv("test", sort_order="invalid")
+        assert result["success"] is False
+        assert "sort_order" in result["error"]
+        assert "invalid" in result["error"]
+
+
+# ---------------------------------------------------------------------------
 # search_arxiv error reporting tests
 # ---------------------------------------------------------------------------
 

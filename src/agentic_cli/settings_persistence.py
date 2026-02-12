@@ -17,6 +17,8 @@ SECRET_FIELDS = frozenset({
     "google_api_key",
     "anthropic_api_key",
     "serper_api_key",
+    "tavily_api_key",
+    "brave_api_key",
 })
 
 
@@ -86,9 +88,9 @@ class SettingsPersistence:
         # Convert Path objects to strings for JSON serialization
         data = self._serialize_paths(data)
 
-        # Write to file
-        with open(target_path, "w") as f:
-            json.dump(data, f, indent=2, default=str)
+        # Write atomically
+        from agentic_cli.persistence._utils import atomic_write_text
+        atomic_write_text(target_path, json.dumps(data, indent=2, default=str))
 
         return target_path
 
