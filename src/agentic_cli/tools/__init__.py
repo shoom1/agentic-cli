@@ -12,7 +12,7 @@ Tool System:
 Framework Tools:
     - memory_tools: Working and long-term memory tools
     - planning_tools: Flat markdown plan tools (save_plan, get_plan)
-    - hitl_tools: Human-in-the-loop approval and checkpoint tools
+    - hitl_tools: Human-in-the-loop approval tools
     - web_search: Web search with pluggable backends (Tavily, Brave)
 
 For resilience patterns, use tenacity, pybreaker, aiolimiter directly.
@@ -25,7 +25,7 @@ from typing import Any, Callable, Literal, TypeVar
 # Type for manager requirements
 ManagerRequirement = Literal[
     "memory_manager", "plan_store", "task_store", "kb_manager", "user_kb_manager",
-    "approval_manager", "checkpoint_manager", "llm_summarizer",
+    "approval_manager", "llm_summarizer",
 ]
 
 F = TypeVar("F", bound=Callable)

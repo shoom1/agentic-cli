@@ -27,7 +27,6 @@ def _make_context_accessors(name: str) -> tuple[Callable[..., Token], Callable[.
 set_context_memory_store, get_context_memory_store = _make_context_accessors("memory_store")
 set_context_plan_store, get_context_plan_store = _make_context_accessors("plan_store")
 set_context_approval_manager, get_context_approval_manager = _make_context_accessors("approval_manager")
-set_context_checkpoint_manager, get_context_checkpoint_manager = _make_context_accessors("checkpoint_manager")
 set_context_task_store, get_context_task_store = _make_context_accessors("task_store")
 set_context_llm_summarizer, get_context_llm_summarizer = _make_context_accessors("llm_summarizer")
 set_context_kb_manager, get_context_kb_manager = _make_context_accessors("kb_manager")

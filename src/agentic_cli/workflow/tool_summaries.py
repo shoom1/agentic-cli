@@ -157,10 +157,6 @@ def _request_approval(r: dict) -> str:
     return "Rejected"
 
 
-def _create_checkpoint(r: dict) -> str:
-    return f"User: {r['action']}"
-
-
 _TOOL_FORMATTERS: dict[str, Callable[[dict[str, Any]], str]] = {
     "read_file": _read_file,
     "diff_compare": _diff_compare,
@@ -182,7 +178,6 @@ _TOOL_FORMATTERS: dict[str, Callable[[dict[str, Any]], str]] = {
     "list_documents": _list_documents,
     "open_document": _open_document,
     "request_approval": _request_approval,
-    "create_checkpoint": _create_checkpoint,
 }
 
 

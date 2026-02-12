@@ -4,9 +4,8 @@ Multi-agent research assistant showcasing framework features:
 - research_coordinator: Root agent with memory, planning, tasks, HITL, web, code, files
 - arxiv_specialist: Sub-agent for focused arXiv paper search, analysis, and cataloging
 
-Feature managers (MemoryStore, PlanStore, TaskStore, CheckpointManager,
-ApprovalManager) are auto-created by the workflow manager based on
-tool requirements.
+Feature managers (MemoryStore, PlanStore, TaskStore, ApprovalManager)
+are auto-created by the workflow manager based on tool requirements.
 """
 
 from rich.panel import Panel
@@ -40,7 +39,7 @@ def _create_app_info() -> AppInfo:
     text.append("  - Academic research (arXiv)\n", style="dim")
     text.append("  - Python code execution\n", style="dim")
     text.append("  - File operations (read, write, search)\n", style="dim")
-    text.append("  - Human-in-the-loop (approvals & checkpoints)\n", style="dim")
+    text.append("  - Human-in-the-loop (approvals)\n", style="dim")
     text.append("\n")
     text.append("Commands:\n", style="bold")
     text.append("  /memory     - Show saved memories\n", style="cyan")

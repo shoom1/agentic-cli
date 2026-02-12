@@ -418,7 +418,7 @@ def test_package_exports_new_modules():
     from agentic_cli.tools.planning_tools import PlanStore
 
     # HITL
-    from agentic_cli.hitl import HITLConfig, ApprovalManager, CheckpointManager
+    from agentic_cli.tools.hitl_tools import HITLConfig, ApprovalManager
 
     # Tools
     from agentic_cli.tools import shell_executor, read_file, write_file, diff_compare

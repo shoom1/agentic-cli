@@ -8,16 +8,15 @@ class TestHITLConfig:
 
     def test_default_config(self):
         """Test default HITL configuration."""
-        from agentic_cli.hitl import HITLConfig
+        from agentic_cli.tools.hitl_tools import HITLConfig
 
         config = HITLConfig()
 
-        assert config.checkpoint_enabled is True
         assert config.confidence_threshold == 0.75
 
     def test_config_with_approval_rules(self):
         """Test configuration with approval rules."""
-        from agentic_cli.hitl import HITLConfig, ApprovalRule
+        from agentic_cli.tools.hitl_tools import HITLConfig, ApprovalRule
 
         rules = [
             ApprovalRule(tool="shell_executor"),
@@ -34,14 +33,14 @@ class TestApprovalManager:
 
     def test_empty_history(self):
         """Test manager starts with empty history."""
-        from agentic_cli.hitl import ApprovalManager
+        from agentic_cli.tools.hitl_tools import ApprovalManager
 
         manager = ApprovalManager()
         assert manager.history == []
 
     def test_record_approval(self):
         """Test recording an approval."""
-        from agentic_cli.hitl import ApprovalManager
+        from agentic_cli.tools.hitl_tools import ApprovalManager
 
         manager = ApprovalManager()
         result = manager.record("req-1", approved=True)
@@ -53,7 +52,7 @@ class TestApprovalManager:
 
     def test_record_rejection(self):
         """Test recording a rejection with reason."""
-        from agentic_cli.hitl import ApprovalManager
+        from agentic_cli.tools.hitl_tools import ApprovalManager
 
         manager = ApprovalManager()
         result = manager.record("req-1", approved=False, reason="Too risky")
@@ -63,7 +62,7 @@ class TestApprovalManager:
 
     def test_history_accumulates(self):
         """Test that history accumulates multiple records."""
-        from agentic_cli.hitl import ApprovalManager
+        from agentic_cli.tools.hitl_tools import ApprovalManager
 
         manager = ApprovalManager()
         manager.record("req-1", approved=True)
@@ -73,81 +72,18 @@ class TestApprovalManager:
         assert len(manager.history) == 3
 
 
-class TestCheckpointManager:
-    """Tests for simplified CheckpointManager class."""
-
-    def test_empty_history(self):
-        """Test manager starts with empty history."""
-        from agentic_cli.hitl import CheckpointManager
-
-        manager = CheckpointManager()
-        assert manager.history == []
-
-    def test_record_continue(self):
-        """Test recording a continue action."""
-        from agentic_cli.hitl import CheckpointManager
-
-        manager = CheckpointManager()
-        result = manager.record("cp-1", action="continue")
-
-        assert result.checkpoint_id == "cp-1"
-        assert result.action == "continue"
-        assert result.edited_content is None
-        assert result.feedback is None
-
-    def test_record_edit(self):
-        """Test recording an edit action with content."""
-        from agentic_cli.hitl import CheckpointManager
-
-        manager = CheckpointManager()
-        result = manager.record(
-            "cp-1",
-            action="edit",
-            edited_content="Modified content",
-        )
-
-        assert result.action == "edit"
-        assert result.edited_content == "Modified content"
-
-    def test_record_abort(self):
-        """Test recording an abort action with feedback."""
-        from agentic_cli.hitl import CheckpointManager
-
-        manager = CheckpointManager()
-        result = manager.record(
-            "cp-1",
-            action="abort",
-            feedback="Wrong approach",
-        )
-
-        assert result.action == "abort"
-        assert result.feedback == "Wrong approach"
-
-    def test_history_accumulates(self):
-        """Test that history accumulates multiple records."""
-        from agentic_cli.hitl import CheckpointManager
-
-        manager = CheckpointManager()
-        manager.record("cp-1", action="continue")
-        manager.record("cp-2", action="edit", edited_content="new")
-        manager.record("cp-3", action="abort", feedback="stop")
-
-        assert len(manager.history) == 3
-
-
 class TestHITLImports:
-    """Tests for HITL module exports."""
+    """Tests for hitl_tools module exports."""
 
     def test_import_all(self):
         """Test all expected exports are available."""
-        from agentic_cli.hitl import (
+        from agentic_cli.tools.hitl_tools import (
             HITLConfig,
             ApprovalRule,
             ApprovalManager,
             ApprovalRequest,
             ApprovalResult,
-            CheckpointManager,
-            CheckpointResult,
+            request_approval,
         )
 
         assert HITLConfig is not None
@@ -155,5 +91,4 @@ class TestHITLImports:
         assert ApprovalManager is not None
         assert ApprovalRequest is not None
         assert ApprovalResult is not None
-        assert CheckpointManager is not None
-        assert CheckpointResult is not None
+        assert request_approval is not None

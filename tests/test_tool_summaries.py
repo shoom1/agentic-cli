@@ -356,16 +356,6 @@ class TestRequestApproval:
         assert format_tool_summary("request_approval", result) == "Rejected"
 
 
-class TestCreateCheckpoint:
-    def test_continue(self):
-        result = {"success": True, "action": "continue", "edited_content": None, "feedback": None}
-        assert format_tool_summary("create_checkpoint", result) == "User: continue"
-
-    def test_abort(self):
-        result = {"success": True, "action": "abort", "edited_content": None, "feedback": None}
-        assert format_tool_summary("create_checkpoint", result) == "User: abort"
-
-
 # ---------------------------------------------------------------------------
 # Fallback / defensive behaviour
 # ---------------------------------------------------------------------------
@@ -385,7 +375,7 @@ class TestFallback:
             "analyze_arxiv_paper",
             "save_paper", "list_papers", "get_paper_info", "open_paper",
             "ingest_to_knowledge_base",
-            "request_approval", "create_checkpoint",
+            "request_approval",
         ]:
             result = format_tool_summary(tool_name, {})
             # Should be None (formatter caught the KeyError) or a valid string
