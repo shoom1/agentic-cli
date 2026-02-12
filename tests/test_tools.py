@@ -31,14 +31,10 @@ from agentic_cli.tools.executor import (
     TimeoutError,
 )
 from agentic_cli.tools.registry import (
-    ErrorCode,
     ToolCategory,
     ToolDefinition,
-    ToolError,
     ToolRegistry,
-    ToolResult,
     register_tool,
-    with_result_wrapper,
 )
 
 
@@ -421,99 +417,6 @@ class TestSubprocessExecution:
         assert result["success"] is False
 
 
-class TestToolError:
-    """Tests for ToolError class."""
-
-    def test_tool_error_basic(self):
-        """Test basic ToolError creation."""
-        error = ToolError("Something went wrong")
-
-        assert error.message == "Something went wrong"
-        assert error.error_code == "TOOL_ERROR"
-        assert error.recoverable is False
-        assert error.details == {}
-        assert error.tool_name is None
-
-    def test_tool_error_full(self):
-        """Test ToolError with all attributes."""
-        error = ToolError(
-            message="API rate limit exceeded",
-            error_code=ErrorCode.RATE_LIMITED,
-            recoverable=True,
-            details={"retry_after": 60},
-            tool_name="web_search",
-        )
-
-        assert error.message == "API rate limit exceeded"
-        assert error.error_code == ErrorCode.RATE_LIMITED
-        assert error.recoverable is True
-        assert error.details == {"retry_after": 60}
-        assert error.tool_name == "web_search"
-
-    def test_tool_error_to_dict(self):
-        """Test ToolError serialization."""
-        error = ToolError(
-            message="Not found",
-            error_code=ErrorCode.NOT_FOUND,
-            recoverable=False,
-            tool_name="search",
-        )
-
-        data = error.to_dict()
-
-        assert data["success"] is False
-        assert data["error"]["message"] == "Not found"
-        assert data["error"]["code"] == ErrorCode.NOT_FOUND
-        assert data["error"]["recoverable"] is False
-        assert data["error"]["tool_name"] == "search"
-
-
-class TestToolResult:
-    """Tests for ToolResult class."""
-
-    def test_result_ok(self):
-        """Test successful result."""
-        result = ToolResult.ok({"items": [1, 2, 3]}, source="test")
-
-        assert result.success is True
-        assert result.data == {"items": [1, 2, 3]}
-        assert result.error is None
-        assert result.metadata == {"source": "test"}
-
-    def test_result_fail(self):
-        """Test failed result."""
-        error = ToolError("Failed", error_code=ErrorCode.API_ERROR)
-        result = ToolResult.fail(error, attempt=1)
-
-        assert result.success is False
-        assert result.data is None
-        assert result.error == error
-        assert result.metadata == {"attempt": 1}
-
-    def test_result_to_dict_success(self):
-        """Test successful result serialization."""
-        result = ToolResult.ok({"count": 5})
-        result.execution_time_ms = 10.123
-
-        data = result.to_dict()
-
-        assert data["success"] is True
-        assert data["data"] == {"count": 5}
-        assert data["execution_time_ms"] == 10.12
-        assert "error" not in data
-
-    def test_result_to_dict_failure(self):
-        """Test failed result serialization."""
-        error = ToolError("Timeout", error_code=ErrorCode.TIMEOUT)
-        result = ToolResult.fail(error)
-
-        data = result.to_dict()
-
-        assert data["success"] is False
-        assert "error" in data
-        assert data["error"]["code"] == ErrorCode.TIMEOUT
-
-
 class TestToolDefinition:
     """Tests for ToolDefinition class."""
 
@@ -665,52 +568,6 @@ class TestToolRegistry:
 
         exec_tools = registry.list_by_category(ToolCategory.EXECUTION)
         assert len(exec_tools) == 1
-
-
-class TestWithResultWrapper:
-    """Tests for with_result_wrapper decorator."""
-
-    def test_wrapper_success(self):
-        """Test wrapper with successful function."""
-
-        @with_result_wrapper
-        def add(a: int, b: int) -> int:
-            return a + b
-
-        result = add(2, 3)
-
-        assert result["success"] is True
-        assert result["data"] == 5
-        assert "execution_time_ms" in result
-
-    def test_wrapper_tool_error(self):
-        """Test wrapper with ToolError."""
-
-        @with_result_wrapper
-        def failing_tool():
-            raise ToolError(
-                "Intentional failure",
-                error_code=ErrorCode.VALIDATION_FAILED,
-            )
-
-        result = failing_tool()
-
-        assert result["success"] is False
-        assert result["error"]["code"] == ErrorCode.VALIDATION_FAILED
-        assert result["error"]["tool_name"] == "failing_tool"
-
-    def test_wrapper_unexpected_error(self):
-        """Test wrapper with unexpected exception."""
-
-        @with_result_wrapper
-        def buggy_tool():
-            raise ValueError("Unexpected bug")
-
-        result = buggy_tool()
-
-        assert result["success"] is False
-        assert result["error"]["code"] == ErrorCode.INTERNAL_ERROR
-        assert "Unexpected bug" in result["error"]["message"]
 
 
 @pytest.mark.xfail(reason="Shell tool disabled (_SHELL_TOOL_ENABLED=False) pending security review")
@@ -1084,6 +941,32 @@ class TestGrep:
         result = grep("pattern", str(tmp_path), output_mode="files")
         assert result["success"] is True
         assert len(result["matches"]) == 2
+
+    def test_grep_output_mode_count(self, tmp_path):
+        """Test grep with count output mode returns per-file counts."""
+        from agentic_cli.tools.grep_tool import grep
+
+        (tmp_path / "file1.txt").write_text("apple\nbanana\napple pie")
+        (tmp_path / "file2.txt").write_text("apple")
+        result = grep("apple", str(tmp_path), output_mode="count")
+        assert result["success"] is True
+        assert len(result["matches"]) == 2
+        # Build a lookup by file basename
+        counts = {m["file"].split("/")[-1]: m["count"] for m in result["matches"]}
+        assert counts["file1.txt"] == 2
+        assert counts["file2.txt"] == 1
+
+    def test_grep_output_mode_files_with_counts(self, tmp_path):
+        """Test grep files mode returns actual match_count per file."""
+        from agentic_cli.tools.grep_tool import grep
+
+        (tmp_path / "a.txt").write_text("foo\nfoo\nfoo")
+        (tmp_path / "b.txt").write_text("foo")
+        result = grep("foo", str(tmp_path), output_mode="files")
+        assert result["success"] is True
+        counts = {m["file"].split("/")[-1]: m["match_count"] for m in result["matches"]}
+        assert counts["a.txt"] == 3
+        assert counts["b.txt"] == 1
 
 
 class TestDiffCompare:

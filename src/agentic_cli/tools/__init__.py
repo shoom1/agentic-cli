@@ -5,8 +5,6 @@ Provides function tools for agents including Python execution and knowledge base
 Tool System:
     The module provides a standardized tool system with:
     - ToolDefinition: Metadata-rich tool definitions
-    - ToolError: Standard error class for consistent error handling
-    - ToolResult: Standard result wrapper
     - ToolRegistry: Registry for tool management and discovery
     - register_tool: Decorator for easy tool registration
     - requires: Decorator to declare tool's manager requirements
@@ -123,13 +121,9 @@ from agentic_cli.tools.registry import (
     ToolCategory,
     PermissionLevel,
     ToolDefinition,
-    ToolError,
-    ToolResult,
     ToolRegistry,
-    ErrorCode,
     get_registry,
     register_tool,
-    with_result_wrapper,
 )
 
 # Re-export google_search_tool from ADK for convenience
@@ -140,13 +134,9 @@ __all__ = [
     "ToolCategory",
     "PermissionLevel",
     "ToolDefinition",
-    "ToolError",
-    "ToolResult",
     "ToolRegistry",
-    "ErrorCode",
     "get_registry",
     "register_tool",
-    "with_result_wrapper",
     # Manager requirements decorator
     "requires",
     "require_context",
