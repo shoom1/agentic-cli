@@ -7,7 +7,6 @@ from agentic_cli.cli.commands import (
     CommandCategory,
     CommandRegistry,
     ParsedArgs,
-    create_simple_command,
 )
 from agentic_cli.cli.app import BaseCLIApp
 from agentic_cli.cli.message_processor import MessageProcessor, MessageHistory, MessageType
@@ -25,6 +24,5 @@ __all__ = [
     "MessageType",
     "ParsedArgs",
     "WorkflowController",
-    "create_simple_command",
     "CLISettingsMixin",
 ]

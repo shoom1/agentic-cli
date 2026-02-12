@@ -55,8 +55,6 @@ class TestBaseSettings:
         assert settings.sessions_dir == temp_workspace / "sessions"
         assert settings.artifacts_dir == temp_workspace / "workspace"
         assert settings.knowledge_base_dir == temp_workspace / "knowledge_base"
-        assert settings.templates_dir == temp_workspace / "templates"
-        assert settings.reports_dir == temp_workspace / "reports"
 
 
 class TestAPIKeyManagement:
@@ -107,13 +105,6 @@ class TestAPIKeyManagement:
             assert google_model in models
         for anthropic_model in ANTHROPIC_MODELS:
             assert anthropic_model in models
-
-    def test_api_key_status(self, settings_both_keys: BaseSettings):
-        """Test API key status report."""
-        status = settings_both_keys.get_api_key_status()
-
-        assert status == {"google": True, "anthropic": True}
-
 
 class TestModelConfiguration:
     """Tests for model configuration."""

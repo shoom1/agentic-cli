@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from agentic_cli.knowledge_base.vector_store import MockVectorStore
+from agentic_cli.knowledge_base._mocks import MockVectorStore
 
 
 class TestMockVectorStore:

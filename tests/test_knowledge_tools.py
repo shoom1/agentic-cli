@@ -31,8 +31,7 @@ from agentic_cli.knowledge_base.models import Document, DocumentChunk, SourceTyp
 
 def _make_kb(tmp_path):
     """Create a KB manager with mock services in a temp dir."""
-    from agentic_cli.knowledge_base.embeddings import MockEmbeddingService
-    from agentic_cli.knowledge_base.vector_store import MockVectorStore
+    from agentic_cli.knowledge_base._mocks import MockEmbeddingService, MockVectorStore
 
     manager = KnowledgeBaseManager.__new__(KnowledgeBaseManager)
     manager._settings = None
@@ -231,8 +230,7 @@ class TestKBManagerMigrationV1ToV2:
         return metadata
 
     def _make_kb_manager(self, kb_dir):
-        from agentic_cli.knowledge_base.embeddings import MockEmbeddingService
-        from agentic_cli.knowledge_base.vector_store import MockVectorStore
+        from agentic_cli.knowledge_base._mocks import MockEmbeddingService, MockVectorStore
 
         manager = KnowledgeBaseManager.__new__(KnowledgeBaseManager)
         manager._settings = None

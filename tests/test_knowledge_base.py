@@ -14,6 +14,19 @@ from agentic_cli.knowledge_base.models import (
     SourceType,
     WebResult,
 )
+from agentic_cli.knowledge_base._mocks import MockEmbeddingService, MockVectorStore
+
+
+def _make_mock_kb(base_dir: Path, **kwargs) -> KnowledgeBaseManager:
+    """Create a KnowledgeBaseManager with mock services injected."""
+    emb = MockEmbeddingService()
+    vs = MockVectorStore(index_path=base_dir / "embeddings" / "index.mock")
+    return KnowledgeBaseManager(
+        base_dir=base_dir,
+        embedding_service=emb,
+        vector_store=vs,
+        **kwargs,
+    )
 
 
 class TestSourceType:
@@ -407,7 +420,6 @@ class TestWebResult:
 from agentic_cli.knowledge_base.sources import (
     SearchSource,
     SearchSourceResult,
-    SearchSourceRegistry,
 )
 from agentic_cli.tools.arxiv_source import ArxivSearchSource, CachedSearchResult
 from unittest.mock import patch, MagicMock
@@ -555,106 +567,6 @@ class TestSearchSourceWithApiKey:
         with patch("agentic_cli.config.get_settings") as mock_settings:
             mock_settings.return_value = MagicMock(serper_api_key="test-key")
             assert source.is_available() is True
-
-
-class TestSearchSourceRegistry:
-    """Tests for SearchSourceRegistry."""
-
-    def test_register_source(self):
-        """Test registering a source."""
-        registry = SearchSourceRegistry()
-        source = ConcreteSearchSource()
-
-        registry.register(source)
-
-        assert registry.get("test_source") is source
-
-    def test_unregister_source(self):
-        """Test unregistering a source."""
-        registry = SearchSourceRegistry()
-        source = ConcreteSearchSource()
-
-        registry.register(source)
-        registry.unregister("test_source")
-
-        assert registry.get("test_source") is None
-
-    def test_unregister_nonexistent(self):
-        """Test unregistering nonexistent source doesn't error."""
-        registry = SearchSourceRegistry()
-        registry.unregister("nonexistent")  # Should not raise
-
-    def test_list_sources(self):
-        """Test listing all sources."""
-        registry = SearchSourceRegistry()
-        source1 = ConcreteSearchSource()
-
-        registry.register(source1)
-        sources = registry.list_sources()
-
-        assert len(sources) == 1
-        assert source1 in sources
-
-    def test_list_available(self):
-        """Test listing available sources."""
-        registry = SearchSourceRegistry()
-        available_source = ConcreteSearchSource()
-        unavailable_source = SourceRequiringKey()
-
-        registry.register(available_source)
-        registry.register(unavailable_source)
-
-        with patch("agentic_cli.config.get_settings") as mock_settings:
-            mock_settings.return_value = MagicMock(serper_api_key=None)
-            available = registry.list_available()
-
-        assert len(available) == 1
-        assert available_source in available
-
-    def test_search_all_sources(self):
-        """Test searching all available sources."""
-        registry = SearchSourceRegistry()
-        source = ConcreteSearchSource()
-        registry.register(source)
-
-        results = registry.search("test query")
-
-        assert "test_source" in results
-        assert len(results["test_source"]) == 1
-        assert results["test_source"][0].title == "Result for: test query"
-
-    def test_search_specific_sources(self):
-        """Test searching specific sources only."""
-        registry = SearchSourceRegistry()
-        source1 = ConcreteSearchSource()
-        registry.register(source1)
-
-        results = registry.search("test query", sources=["test_source"])
-
-        assert "test_source" in results
-
-    def test_search_handles_errors(self):
-        """Test search handles source errors gracefully."""
-
-        class FailingSource(SearchSource):
-            @property
-            def name(self) -> str:
-                return "failing"
-
-            @property
-            def description(self) -> str:
-                return "Always fails"
-
-            def search(self, query: str, max_results: int = 10, **kwargs):
-                raise RuntimeError("Search failed")
-
-        registry = SearchSourceRegistry()
-        registry.register(FailingSource())
-
-        results = registry.search("test")
-
-        assert "failing" in results
-        assert results["failing"] == []
 
 
 class TestArxivSearchSource:
@@ -1077,7 +989,7 @@ class TestBaseDirOverride:
     def test_base_dir_overrides_settings(self, tmp_path):
         """When base_dir is provided, all paths derive from it."""
         custom_dir = tmp_path / "custom_kb"
-        kb = KnowledgeBaseManager(use_mock=True, base_dir=custom_dir)
+        kb = _make_mock_kb(custom_dir)
 
         assert kb.kb_dir == custom_dir
         assert kb.documents_dir == custom_dir / "documents"
@@ -1088,7 +1000,7 @@ class TestBaseDirOverride:
     def test_base_dir_creates_directories(self, tmp_path):
         """base_dir creates all subdirectories on init."""
         custom_dir = tmp_path / "new_kb"
-        KnowledgeBaseManager(use_mock=True, base_dir=custom_dir)
+        _make_mock_kb(custom_dir)
 
         assert custom_dir.is_dir()
         assert (custom_dir / "documents").is_dir()
@@ -1106,11 +1018,7 @@ class TestBaseDirOverride:
         mock_settings.embedding_batch_size = 16
         mock_settings.knowledge_base_use_mock = True
 
-        kb = KnowledgeBaseManager(
-            settings=mock_settings,
-            use_mock=True,
-            base_dir=custom_dir,
-        )
+        kb = _make_mock_kb(custom_dir, settings=mock_settings)
 
         # Paths come from base_dir, not settings
         assert kb.kb_dir == custom_dir
@@ -1125,7 +1033,7 @@ class TestFindDocument:
     @pytest.fixture
     def kb(self, tmp_path):
         """Create a KB with a test document."""
-        kb = KnowledgeBaseManager(use_mock=True, base_dir=tmp_path / "kb")
+        kb = _make_mock_kb(tmp_path / "kb")
         kb.ingest_document(
             content="Test document content.",
             title="Neural Network Fundamentals",

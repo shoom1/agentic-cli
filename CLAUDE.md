@@ -20,7 +20,7 @@ agentic-cli/
 │   ├── __init__.py           # Package exports, lazy imports
 │   ├── config.py             # BaseSettings (pydantic-settings)
 │   ├── constants.py          # Shared constants, truncate()
-│   ├── resolvers.py          # ModelResolver, PathResolver
+│   ├── resolvers.py          # Model/path constants (GOOGLE_MODELS, etc.)
 │   ├── settings_persistence.py
 │   ├── logging.py
 │   ├── cli/
@@ -70,13 +70,14 @@ agentic-cli/
 │   │   ├── models.py         # Document, SearchResult
 │   │   ├── embeddings.py     # EmbeddingService
 │   │   ├── vector_store.py   # VectorStore (FAISS)
+│   │   ├── _mocks.py         # MockEmbeddingService, MockVectorStore
 │   │   └── manager.py        # KnowledgeBaseManager
 │   └── persistence/
 │       ├── session.py        # SessionPersistence
 │       ├── artifacts.py      # ArtifactManager
 │       └── _utils.py         # Atomic write utilities
 ├── tests/
-│   ├── conftest.py           # MockContext, MockVectorStore, MockEmbeddingService
+│   ├── conftest.py           # MockContext, shared fixtures
 │   ├── test_*.py             # Unit tests
 │   ├── tools/                # Tool-specific tests
 │   └── integration/          # ADK & LangGraph pipeline tests
@@ -149,6 +150,6 @@ Available session methods:
 
 - **Framework**: pytest with `asyncio_mode = "auto"`
 - **MockContext**: From `tests/conftest.py` — provides isolated settings and temp dirs for all tests
-- **MockVectorStore** and **MockEmbeddingService**: In-tree mocks for testing without ML dependencies
+- **MockVectorStore** and **MockEmbeddingService**: In `knowledge_base/_mocks.py` for testing without ML dependencies
 - **FAISS tests**: Guard with `pytest.importorskip("faiss")` since FAISS is not installed in dev env
 - **Integration tests**: `tests/integration/` covers ADK and LangGraph pipeline tests

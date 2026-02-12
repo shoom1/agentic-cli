@@ -17,7 +17,6 @@ class TestSecretFields:
         expected = {
             "google_api_key",
             "anthropic_api_key",
-            "serper_api_key",
             "tavily_api_key",
             "brave_api_key",
         }
@@ -30,7 +29,6 @@ class TestSecretFields:
         settings = BaseSettings(
             google_api_key="secret-google",
             anthropic_api_key="secret-anthropic",
-            serper_api_key="secret-serper",
             tavily_api_key="secret-tavily",
             brave_api_key="secret-brave",
             search_backend="tavily",  # non-secret, non-default

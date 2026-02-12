@@ -16,7 +16,6 @@ if TYPE_CHECKING:
 SECRET_FIELDS = frozenset({
     "google_api_key",
     "anthropic_api_key",
-    "serper_api_key",
     "tavily_api_key",
     "brave_api_key",
 })

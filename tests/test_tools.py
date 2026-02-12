@@ -452,8 +452,8 @@ class TestToolDefinition:
 
         assert definition.is_async is True
 
-    def test_definition_with_metadata(self):
-        """Test definition with full metadata."""
+    def test_definition_with_category(self):
+        """Test definition with category."""
 
         def search(query: str) -> dict:
             return {}
@@ -463,17 +463,9 @@ class TestToolDefinition:
             description="Search tool",
             func=search,
             category=ToolCategory.NETWORK,
-            requires_api_key="SERPER_API_KEY",
-            timeout_seconds=60,
-            rate_limit=100,
-            metadata={"version": "1.0"},
         )
 
         assert definition.category == ToolCategory.NETWORK
-        assert definition.requires_api_key == "SERPER_API_KEY"
-        assert definition.timeout_seconds == 60
-        assert definition.rate_limit == 100
-        assert definition.metadata == {"version": "1.0"}
 
 
 class TestToolRegistry:

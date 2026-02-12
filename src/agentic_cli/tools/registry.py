@@ -5,7 +5,7 @@ Provides:
 - ToolRegistry: Registry for tool discovery and management
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable
 import inspect
@@ -65,18 +65,12 @@ class PermissionLevel(Enum):
 class ToolDefinition:
     """Metadata-rich tool definition.
 
-    Provides comprehensive metadata for tools beyond what's inferred
-    from function signatures and docstrings.
-
     Attributes:
         name: Tool name (defaults to function name)
         description: Human-readable description
         category: Tool category for organization (READ, WRITE, NETWORK, etc.)
         permission_level: Safety classification (SAFE, CAUTION, DANGEROUS)
-        requires_api_key: API key type required (if any)
         is_async: Whether the tool is async
-        timeout_seconds: Suggested timeout for this tool
-        rate_limit: Maximum calls per minute (0 = unlimited)
         func: The actual tool function
     """
 
@@ -85,11 +79,7 @@ class ToolDefinition:
     func: Callable[..., Any]
     category: ToolCategory = ToolCategory.OTHER
     permission_level: PermissionLevel = PermissionLevel.SAFE
-    requires_api_key: str | None = None
     is_async: bool = False
-    timeout_seconds: int = 30
-    rate_limit: int = 0  # 0 = unlimited
-    metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
         """Infer is_async from function."""
@@ -117,10 +107,6 @@ class ToolRegistry:
         description: str | None = None,
         category: ToolCategory = ToolCategory.OTHER,
         permission_level: PermissionLevel = PermissionLevel.SAFE,
-        requires_api_key: str | None = None,
-        timeout_seconds: int = 30,
-        rate_limit: int = 0,
-        **metadata,
     ) -> Callable[..., Any]:
         """Register a tool function.
 
@@ -143,10 +129,6 @@ class ToolRegistry:
                 func=f,
                 category=category,
                 permission_level=permission_level,
-                requires_api_key=requires_api_key,
-                timeout_seconds=timeout_seconds,
-                rate_limit=rate_limit,
-                metadata=metadata,
             )
 
             self._tools[tool_name] = definition
@@ -160,11 +142,6 @@ class ToolRegistry:
         """Get a tool definition by name."""
         return self._tools.get(name)
 
-    def get_function(self, name: str) -> Callable[..., Any] | None:
-        """Get the tool function by name."""
-        definition = self._tools.get(name)
-        return definition.func if definition else None
-
     def list_tools(self) -> list[ToolDefinition]:
         """List all registered tools."""
         return list(self._tools.values())
@@ -176,24 +153,6 @@ class ToolRegistry:
     def get_functions(self) -> list[Callable[..., Any]]:
         """Get all tool functions (for passing to agents)."""
         return [t.func for t in self._tools.values()]
-
-    def get_functions_by_category(
-        self, category: ToolCategory
-    ) -> list[Callable[..., Any]]:
-        """Get tool functions by category."""
-        return [t.func for t in self._tools.values() if t.category == category]
-
-    def list_by_permission(self, permission: PermissionLevel) -> list[ToolDefinition]:
-        """List tools by permission level."""
-        return [t for t in self._tools.values() if t.permission_level == permission]
-
-    def get_safe_tools(self) -> list[ToolDefinition]:
-        """Get all tools with SAFE permission level."""
-        return self.list_by_permission(PermissionLevel.SAFE)
-
-    def get_dangerous_tools(self) -> list[ToolDefinition]:
-        """Get all tools with DANGEROUS permission level."""
-        return self.list_by_permission(PermissionLevel.DANGEROUS)
 
     def __len__(self) -> int:
         return len(self._tools)
@@ -218,10 +177,6 @@ def register_tool(
     description: str | None = None,
     category: ToolCategory = ToolCategory.OTHER,
     permission_level: PermissionLevel = PermissionLevel.SAFE,
-    requires_api_key: str | None = None,
-    timeout_seconds: int = 30,
-    rate_limit: int = 0,
-    **metadata,
 ) -> Callable[..., Any]:
     """Register a tool with the default registry.
 
@@ -237,10 +192,6 @@ def register_tool(
         description=description,
         category=category,
         permission_level=permission_level,
-        requires_api_key=requires_api_key,
-        timeout_seconds=timeout_seconds,
-        rate_limit=rate_limit,
-        **metadata,
     )
 
 
