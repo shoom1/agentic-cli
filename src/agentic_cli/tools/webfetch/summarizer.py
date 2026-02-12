@@ -41,8 +41,7 @@ SUMMARIZE_PROMPT_TEMPLATE = """Web page content:
 
 {prompt}
 
-Provide a concise response based only on the content above.
-Keep direct quotes under 125 characters."""
+Provide a thorough and detailed response based only on the content above."""
 
 
 def build_summarize_prompt(content: str, user_prompt: str) -> str:

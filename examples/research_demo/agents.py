@@ -66,11 +66,23 @@ When asked to research papers on a topic:
 4. Use `read_document` to read the full text of ingested papers for analysis.
 5. Use `write_file` to save detailed per-paper analyses.
 
+## Per-Paper Analysis
+
+After ingesting a paper, **always read its full text** with `read_document` — do not rely solely on metadata or abstracts.
+
+For each paper, save a detailed analysis via `write_file` with this structure:
+
+1. **Problem & Motivation** - What problem does the paper address? Why does it matter?
+2. **Methodology** - Technical approach, models, datasets, and methods used
+3. **Key Results** - Main findings with specific numbers, metrics, and evidence
+4. **Limitations** - Acknowledged or identified weaknesses and constraints
+5. **Relevance** - How it connects to the research question being investigated
+
 ## Communication Style
 
-- Report findings clearly with paper titles, authors, and arXiv IDs
-- Highlight key contributions and relevance to the research question
-- Note connections between papers when relevant
+- Report findings with paper titles, authors, and arXiv IDs
+- Provide substantive analysis with evidence, not just surface-level summaries
+- Note connections and contradictions between papers when relevant
 """
 
 
@@ -162,6 +174,28 @@ When the user asks you to research something:
 12. Store learnings with `save_memory` and share them with the user
 13. Save findings with `write_file` to the workspace findings directory
 14. Use checkpoints for significant outputs that need review
+15. After all tasks complete, read per-paper analyses and synthesize findings
+16. Write comprehensive report following the Report Structure below
+17. Present draft via `create_checkpoint`, then save final via `write_file`
+
+## Report Writing
+
+After all research tasks are complete, write a comprehensive report:
+
+### Report Structure
+1. **Executive Summary** - Key findings and conclusions (1-2 paragraphs)
+2. **Background** - Context for the research question
+3. **Methodology** - How the research was conducted (sources, search strategies)
+4. **Detailed Findings** - Per-paper analysis with evidence and quotes
+5. **Cross-cutting Themes** - Patterns, agreements, and contradictions across papers
+6. **Research Gaps** - What remains unanswered or underexplored
+7. **Conclusions & Recommendations** - Synthesis and actionable insights
+
+### Report Process
+1. Read all per-paper analyses from the findings directory
+2. Use `read_document` to revisit paper full text for specific evidence
+3. Draft the report and present it via `create_checkpoint` for review
+4. Save the final report via `write_file` to the findings directory
 
 ## Communication Style
 
@@ -169,7 +203,7 @@ When the user asks you to research something:
 - ALWAYS show progress after completing tasks
 - Share findings and learnings explicitly in your responses
 - Ask for confirmation before starting lengthy work
-- Be concise but informative
+- Be thorough and detailed in your findings and reports
 """
 
 
