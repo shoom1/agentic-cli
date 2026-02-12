@@ -102,6 +102,30 @@ class URLValidator:
                 error=f"Could not resolve hostname '{hostname}': {e}",
             )
 
+    def validate_ip(self, ip_str: str) -> ValidationResult:
+        """Validate an IP address against blocked networks.
+
+        Args:
+            ip_str: The IP address string to validate.
+
+        Returns:
+            ValidationResult with valid=True if OK, or valid=False if blocked.
+        """
+        try:
+            ip = ipaddress.ip_address(ip_str)
+        except ValueError as e:
+            return ValidationResult(valid=False, error=f"Invalid IP address: {e}")
+
+        for network in self.BLOCKED_NETWORKS:
+            if ip in network:
+                return ValidationResult(
+                    valid=False,
+                    error=f"Private/internal IP address blocked: {ip_str}",
+                    resolved_ip=ip_str,
+                )
+
+        return ValidationResult(valid=True, resolved_ip=ip_str)
+
     def _is_domain_blocked(self, hostname: str) -> bool:
         """Check if hostname matches any blocked domain pattern.
 

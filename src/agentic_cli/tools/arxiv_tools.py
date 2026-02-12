@@ -81,18 +81,15 @@ def search_arxiv(
 
     Returns:
         Dictionary with search results and metadata
-
-    Raises:
-        ValueError: If sort_by or sort_order has an invalid value
     """
     # Validate sort options
     valid_sort_by = ("relevance", "lastUpdatedDate", "submittedDate")
     valid_sort_order = ("ascending", "descending")
 
     if sort_by not in valid_sort_by:
-        raise ValueError(f"sort_by must be one of {valid_sort_by}, got '{sort_by}'")
+        return {"success": False, "error": f"sort_by must be one of {valid_sort_by}, got '{sort_by}'"}
     if sort_order not in valid_sort_order:
-        raise ValueError(f"sort_order must be one of {valid_sort_order}, got '{sort_order}'")
+        return {"success": False, "error": f"sort_order must be one of {valid_sort_order}, got '{sort_order}'"}
 
     source = _get_arxiv_source()
     results = source.search(

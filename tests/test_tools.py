@@ -1359,21 +1359,21 @@ class TestFetchArxivPaperRateLimiting:
 class TestArxivSortValidation:
     """Tests for arXiv sort option validation."""
 
-    def test_search_arxiv_invalid_sort_by_raises_error(self):
-        """Test search_arxiv raises ValueError for invalid sort_by."""
+    def test_search_arxiv_invalid_sort_by_returns_error(self):
+        """Test search_arxiv returns error dict for invalid sort_by."""
         from agentic_cli.tools.arxiv_tools import search_arxiv
-        import pytest
 
-        with pytest.raises(ValueError, match="sort_by must be one of"):
-            search_arxiv("test query", sort_by="invalid_sort")
+        result = search_arxiv("test query", sort_by="invalid_sort")
+        assert result["success"] is False
+        assert "sort_by" in result["error"]
 
-    def test_search_arxiv_invalid_sort_order_raises_error(self):
-        """Test search_arxiv raises ValueError for invalid sort_order."""
+    def test_search_arxiv_invalid_sort_order_returns_error(self):
+        """Test search_arxiv returns error dict for invalid sort_order."""
         from agentic_cli.tools.arxiv_tools import search_arxiv
-        import pytest
 
-        with pytest.raises(ValueError, match="sort_order must be one of"):
-            search_arxiv("test query", sort_order="invalid_order")
+        result = search_arxiv("test query", sort_order="invalid_order")
+        assert result["success"] is False
+        assert "sort_order" in result["error"]
 
     def test_search_arxiv_valid_sort_options(self):
         """Test search_arxiv accepts valid sort options."""
