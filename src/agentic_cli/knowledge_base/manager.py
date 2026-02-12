@@ -20,14 +20,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from agentic_cli.knowledge_base.embeddings import EmbeddingService, MockEmbeddingService
+from agentic_cli.knowledge_base.embeddings import EmbeddingService
 from agentic_cli.knowledge_base.models import (
     Document,
     DocumentChunk,
     SearchResult,
     SourceType,
 )
-from agentic_cli.knowledge_base.vector_store import MockVectorStore, VectorStore
+from agentic_cli.knowledge_base.vector_store import VectorStore
 from agentic_cli.constants import truncate
 from agentic_cli.logging import Loggers
 from agentic_cli.persistence._utils import atomic_write_json
@@ -94,6 +94,8 @@ class KnowledgeBaseManager:
         settings: "BaseSettings | None" = None,
         use_mock: bool = False,
         base_dir: Path | None = None,
+        embedding_service: Any = None,
+        vector_store: Any = None,
     ) -> None:
         """Initialize the knowledge base manager.
 
@@ -104,6 +106,8 @@ class KnowledgeBaseManager:
                 paths (kb_dir, documents_dir, embeddings_dir, files_dir) are
                 derived from this directory instead of from settings. Embedding
                 model and batch size still come from settings for consistency.
+            embedding_service: Optional pre-configured embedding service.
+            vector_store: Optional pre-configured vector store.
         """
         self._settings = settings
         self._use_mock = use_mock
@@ -144,10 +148,14 @@ class KnowledgeBaseManager:
         self.embeddings_dir.mkdir(parents=True, exist_ok=True)
         self.files_dir.mkdir(parents=True, exist_ok=True)
 
-        # Initialize services (fall back to mock if real deps unavailable)
-        self._embedding_service, self._vector_store = self._create_services(
-            embedding_model, batch_size
-        )
+        # Use injected services or create them
+        if embedding_service and vector_store:
+            self._embedding_service = embedding_service
+            self._vector_store = vector_store
+        else:
+            self._embedding_service, self._vector_store = self._create_services(
+                embedding_model, batch_size
+            )
 
         # Load document metadata
         self._documents: dict[str, Document] = {}
@@ -157,7 +165,7 @@ class KnowledgeBaseManager:
 
     def _create_services(
         self, embedding_model: str, batch_size: int
-    ) -> tuple["EmbeddingService | MockEmbeddingService", "VectorStore | MockVectorStore"]:
+    ) -> tuple[Any, Any]:
         """Create embedding service and vector store.
 
         Tries real implementations first; falls back to mocks if
@@ -176,6 +184,11 @@ class KnowledgeBaseManager:
                 return emb, vs
             except ImportError:
                 self._use_mock = True
+
+        from agentic_cli.knowledge_base._mocks import (
+            MockEmbeddingService,
+            MockVectorStore,
+        )
 
         emb = MockEmbeddingService(
             model_name=embedding_model,

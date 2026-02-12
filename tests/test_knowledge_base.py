@@ -14,6 +14,19 @@ from agentic_cli.knowledge_base.models import (
     SourceType,
     WebResult,
 )
+from agentic_cli.knowledge_base._mocks import MockEmbeddingService, MockVectorStore
+
+
+def _make_mock_kb(base_dir: Path, **kwargs) -> KnowledgeBaseManager:
+    """Create a KnowledgeBaseManager with mock services injected."""
+    emb = MockEmbeddingService()
+    vs = MockVectorStore(index_path=base_dir / "embeddings" / "index.mock")
+    return KnowledgeBaseManager(
+        base_dir=base_dir,
+        embedding_service=emb,
+        vector_store=vs,
+        **kwargs,
+    )
 
 
 class TestSourceType:
@@ -976,7 +989,7 @@ class TestBaseDirOverride:
     def test_base_dir_overrides_settings(self, tmp_path):
         """When base_dir is provided, all paths derive from it."""
         custom_dir = tmp_path / "custom_kb"
-        kb = KnowledgeBaseManager(use_mock=True, base_dir=custom_dir)
+        kb = _make_mock_kb(custom_dir)
 
         assert kb.kb_dir == custom_dir
         assert kb.documents_dir == custom_dir / "documents"
@@ -987,7 +1000,7 @@ class TestBaseDirOverride:
     def test_base_dir_creates_directories(self, tmp_path):
         """base_dir creates all subdirectories on init."""
         custom_dir = tmp_path / "new_kb"
-        KnowledgeBaseManager(use_mock=True, base_dir=custom_dir)
+        _make_mock_kb(custom_dir)
 
         assert custom_dir.is_dir()
         assert (custom_dir / "documents").is_dir()
@@ -1005,11 +1018,7 @@ class TestBaseDirOverride:
         mock_settings.embedding_batch_size = 16
         mock_settings.knowledge_base_use_mock = True
 
-        kb = KnowledgeBaseManager(
-            settings=mock_settings,
-            use_mock=True,
-            base_dir=custom_dir,
-        )
+        kb = _make_mock_kb(custom_dir, settings=mock_settings)
 
         # Paths come from base_dir, not settings
         assert kb.kb_dir == custom_dir
@@ -1024,7 +1033,7 @@ class TestFindDocument:
     @pytest.fixture
     def kb(self, tmp_path):
         """Create a KB with a test document."""
-        kb = KnowledgeBaseManager(use_mock=True, base_dir=tmp_path / "kb")
+        kb = _make_mock_kb(tmp_path / "kb")
         kb.ingest_document(
             content="Test document content.",
             title="Neural Network Fundamentals",
