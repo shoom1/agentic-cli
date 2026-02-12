@@ -15,6 +15,10 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+import structlog
+
+logger = structlog.get_logger(__name__)
+
 from agentic_cli.constants import truncate
 from agentic_cli.tools import requires, require_context
 from agentic_cli.tools.registry import (
@@ -85,7 +89,7 @@ def search_knowledge_base(
                 result["results"] = result["results"][:top_k]
                 result["total_matches"] = len(result["results"])
             except Exception:
-                pass  # User KB failure is non-fatal
+                logger.debug("user_kb_search_failed", query=query, exc_info=True)
 
         return {"success": True, **result}
     except Exception as e:
@@ -297,7 +301,7 @@ async def _ingest_arxiv(
             meta["pdf_url"] = paper_info.get("pdf_url", "")
             meta["categories"] = paper_info.get("categories", [])
     except Exception:
-        pass  # Continue even if metadata fetch fails
+        logger.warning("arxiv_metadata_fetch_failed", arxiv_id=arxiv_id, exc_info=True)
 
     if authors:
         meta["authors"] = authors
@@ -326,6 +330,7 @@ async def _ingest_arxiv(
         content = _extract_text_from_bytes(file_bytes)
         meta["file_size_bytes"] = len(file_bytes)
     except Exception:
+        logger.warning("arxiv_pdf_download_failed", arxiv_id=arxiv_id, exc_info=True)
         # Use abstract as fallback content if PDF download fails
         content = abstract or title
 
@@ -367,6 +372,7 @@ def _extract_text_from_bytes(pdf_bytes: bytes) -> str:
                 pages.append(text)
         return "\n\n".join(pages)
     except (ImportError, Exception):
+        logger.debug("pdf_text_extraction_failed", exc_info=True)
         return ""
 
 
@@ -539,7 +545,7 @@ def list_documents(
                 items.append(item)
                 seen_ids.add(d.id)
         except Exception:
-            pass  # User KB failure is non-fatal
+            logger.debug("user_kb_list_documents_failed", exc_info=True)
 
     return {
         "success": True,

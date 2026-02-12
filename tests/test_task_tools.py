@@ -55,6 +55,16 @@ class TestTaskItem:
         assert item.priority == "medium"
         assert item.tags == []
 
+    def test_from_dict_invalid_status_defaults_to_pending(self):
+        data = {"id": "x", "description": "Bad status", "status": "bogus"}
+        item = TaskItem.from_dict(data)
+        assert item.status == "pending"
+
+    def test_from_dict_invalid_priority_defaults_to_medium(self):
+        data = {"id": "x", "description": "Bad priority", "priority": "critical"}
+        item = TaskItem.from_dict(data)
+        assert item.priority == "medium"
+
     def test_roundtrip(self):
         item = TaskItem(
             id="rt1",
@@ -291,6 +301,39 @@ class TestTaskTools:
             assert result["success"] is False
             assert "index 1" in result["error"]
             assert "description" in result["error"].lower()
+        finally:
+            token.var.reset(token)
+
+    def test_save_tasks_invalid_status_returns_error(self, mock_context):
+        from agentic_cli.tools.task_tools import save_tasks
+        from agentic_cli.workflow.context import set_context_task_store
+
+        store = TaskStore(mock_context.settings)
+        token = set_context_task_store(store)
+        try:
+            result = save_tasks(tasks=[
+                {"description": "Valid task"},
+                {"description": "Bad status", "status": "bogus"},
+            ])
+            assert result["success"] is False
+            assert "index 1" in result["error"]
+            assert "bogus" in result["error"]
+        finally:
+            token.var.reset(token)
+
+    def test_save_tasks_invalid_priority_returns_error(self, mock_context):
+        from agentic_cli.tools.task_tools import save_tasks
+        from agentic_cli.workflow.context import set_context_task_store
+
+        store = TaskStore(mock_context.settings)
+        token = set_context_task_store(store)
+        try:
+            result = save_tasks(tasks=[
+                {"description": "Bad priority", "priority": "critical"},
+            ])
+            assert result["success"] is False
+            assert "index 0" in result["error"]
+            assert "critical" in result["error"]
         finally:
             token.var.reset(token)
 
