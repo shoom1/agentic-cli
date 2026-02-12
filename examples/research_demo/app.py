@@ -17,7 +17,7 @@ from agentic_cli.logging import Loggers
 
 from examples.research_demo.agents import AGENT_CONFIGS
 from examples.research_demo.commands import DEMO_COMMANDS
-from examples.research_demo.settings import ResearchDemoSettings, get_settings
+from examples.research_demo.settings import ResearchDemoSettings
 
 logger = Loggers.cli()
 
@@ -74,7 +74,7 @@ class ResearchDemoApp(BaseCLIApp):
         super().__init__(
             app_info=_create_app_info(),
             agent_configs=AGENT_CONFIGS,
-            settings=settings or get_settings(),
+            settings=settings or ResearchDemoSettings(),
         )
 
     def register_commands(self) -> None:

@@ -1,6 +1,5 @@
 """Settings for the Research Demo application."""
 
-from functools import lru_cache
 from pathlib import Path
 
 from pydantic import Field
@@ -35,9 +34,3 @@ class ResearchDemoSettings(BaseSettings):
         # Override verbose_thinking default to False (concise mode)
         kwargs.setdefault("verbose_thinking", False)
         super().__init__(**kwargs)
-
-
-@lru_cache
-def get_settings() -> ResearchDemoSettings:
-    """Get the cached settings instance."""
-    return ResearchDemoSettings()

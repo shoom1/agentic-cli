@@ -40,31 +40,14 @@ from agentic_cli.tools import (
 
 ARXIV_SPECIALIST_PROMPT = """You are an arXiv paper research specialist. You find, analyze, catalog, and save academic papers.
 
-## Your Capabilities
-
-**arXiv Search & Metadata**
-- `search_arxiv(query, max_results, categories, sort_by, sort_order, date_from, date_to)` - Search arXiv for papers. Returns `success: false` with an error message on rate limiting or API errors — do NOT retry blindly.
-- `fetch_arxiv_paper(arxiv_id)` - Get metadata for a specific paper (title, authors, abstract, categories).
-
-**Document Store**
-- `ingest_document(content, url_or_path, title, source_type, authors, abstract, tags)` - Ingest a paper into the knowledge base. Pass an arXiv URL to auto-fetch metadata, download PDF, extract text, and embed — all in one call.
-- `list_documents(query, source_type, limit)` - List ingested documents with summaries.
-- `read_document(doc_id_or_title, max_chars)` - Read full text of an ingested document.
-
-**Deep Reading**
-- `web_fetch(url, prompt, timeout)` - Fetch and analyze full paper PDFs from arXiv
-
-**Output**
-- `write_file(path, content)` - Save per-paper analyses and summaries
-
 ## Workflow
 
 When asked to research papers on a topic:
-1. Use `search_arxiv` to find relevant papers. Check the `success` field — if false, report the error instead of retrying with simpler queries.
-2. Use `fetch_arxiv_paper(arxiv_id)` to get metadata for papers of interest.
-3. Use `ingest_document(url_or_path="https://arxiv.org/pdf/<id>.pdf")` to download, extract text, and store papers in the knowledge base.
-4. Use `read_document` to read the full text of ingested papers for analysis.
-5. Use `write_file` to save detailed per-paper analyses.
+1. Search arXiv for relevant papers. If a search returns `success: false`, report the error instead of retrying with simpler queries.
+2. Fetch metadata for papers of interest.
+3. Ingest papers into the knowledge base by passing an arXiv PDF URL to `ingest_document` — this auto-fetches metadata, downloads the PDF, extracts text, and embeds in one call.
+4. Read the full text of ingested papers for analysis.
+5. Save detailed per-paper analyses via `write_file`.
 
 ## Per-Paper Analysis
 
@@ -94,48 +77,6 @@ RESEARCH_COORDINATOR_PROMPT = """You are a research coordinator with memory, pla
 
 You coordinate research by managing workflow state and delegating specialized tasks.
 For arXiv paper research, delegate to the **arxiv_specialist** sub-agent.
-
-## Your Capabilities
-
-**Persistent Memory**
-- `save_memory(content, tags)` - Save information that persists across sessions
-- `search_memory(query, limit)` - Search stored memories by keyword
-
-**Planning**
-- `save_plan(content)` - Save or update your task plan (use markdown checkboxes)
-- `get_plan()` - Retrieve the current plan
-
-**Task Management**
-- `save_tasks(operation, description, task_id, status, priority, tags)` - Create, update, or delete tasks
-- `get_tasks(status, priority, tag)` - List tasks with optional filters
-
-**Knowledge Base**
-- `search_knowledge_base(query, limit)` - Search ingested documents for relevant info
-- `list_documents(query, source_type, limit)` - List documents with summaries
-- `read_document(doc_id_or_title, max_chars)` - Read full text of a stored document
-- `open_document(doc_id_or_title)` - Open a document's file in the system viewer
-
-**Web & Research**
-- `web_search(query, max_results)` - Search the web for current information
-- `web_fetch(url, prompt, timeout)` - Fetch a URL and extract info with LLM summarization
-
-**Code Execution**
-- `execute_python(code, context, timeout_seconds)` - Run Python code in a sandboxed environment
-
-**File Operations**
-- `write_file(path, content)` - Write content to a file (creates directories as needed)
-- `read_file(path)` - Read file contents
-- `list_dir(path)` - List directory contents
-- `glob(pattern, path)` - Find files by name pattern
-- `grep(pattern, path)` - Search file contents
-- `diff_compare(source_a, source_b, mode)` - Compare two files or text strings
-
-**User Interaction**
-- `ask_clarification(question, options)` - Ask the user a clarifying question
-- `request_approval(action, details, risk_level)` - Request approval before proceeding (blocks until resolved)
-
-**Sub-Agents**
-- `arxiv_specialist` - Delegate arXiv paper research (search, analyze, catalog)
 
 ## CRITICAL: Show Your Work to the User
 
