@@ -7,7 +7,7 @@ Agentic CLI is a shared library providing the core infrastructure for building d
 ## Tech Stack
 
 - **Language**: Python 3.12+
-- **CLI UI**: `thinking_prompt` - enhanced CLI with thinking boxes and markdown
+- **CLI UI**: `thinking-prompt` - enhanced CLI with thinking boxes and markdown
 - **Workflow**: Google ADK + LangGraph - dual orchestration backends (selectable via settings)
 - **Config**: `pydantic-settings` - type-safe configuration
 - **Logging**: `structlog` - structured logging
@@ -107,10 +107,12 @@ conda run -n agenticcli python -c "from agentic_cli import BaseCLIApp; print(Bas
 - **main**: Stable branch, matches latest release. Only updated via merges from `develop` when releasing.
 - **develop**: Integration branch for ongoing work. Small fixes can be committed directly here.
 - **feature/\***: Feature branches for larger changes. Branch from `develop`, merge back to `develop`.
+- **fix/\***: Fix branches for fixing issues. Branch from `develop`, merge back to `develop`.
+- **refactor/\***: For larger refactoring changes. Branch from `develop`, merge back to `develop`.
 
 Workflow:
 1. For small fixes: commit directly to `develop`
-2. For features: create `feature/<name>` from `develop`, work there, merge back to `develop`
+2. For features: create `feature/<name>` (or `fix/<name>` or `refactor/<name>`) from `develop`, work there, merge back to `develop`
 3. When ready to release: merge `develop` → `main` and tag the release
 
 ## Development Principles
