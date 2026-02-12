@@ -1366,7 +1366,6 @@ class TestToolRegistryConsistency:
             "get_tasks",
             # HITL tools
             "request_approval",
-            "create_checkpoint",
         ]
 
         registered_names = {tool.name for tool in registry.list_tools()}
@@ -1420,7 +1419,7 @@ class TestToolRegistryConsistency:
             "ask_clarification",
             "save_memory", "search_memory",
             "save_plan", "get_plan",
-            "request_approval", "create_checkpoint",
+            "request_approval",
         ]
 
         for tool_name in safe_tools:
@@ -1520,6 +1519,6 @@ class TestToolRegistryConsistency:
         # Memory: 2 (save_memory, search_memory)
         # Planning: 2 (save_plan, get_plan)
         # Tasks: 2 (save_tasks, get_tasks)
-        # HITL: 2 (request_approval, create_checkpoint)
-        # Total: ~27 tools
-        assert tool_count >= 26, f"Expected at least 26 registered tools, got {tool_count}"
+        # HITL: 1 (request_approval)
+        # Total: ~26 tools
+        assert tool_count >= 25, f"Expected at least 25 registered tools, got {tool_count}"

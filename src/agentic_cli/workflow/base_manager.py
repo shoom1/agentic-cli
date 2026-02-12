@@ -28,7 +28,6 @@ from agentic_cli.workflow.context import (
     set_context_kb_manager,
     set_context_user_kb_manager,
     set_context_approval_manager,
-    set_context_checkpoint_manager,
     set_context_llm_summarizer,
 )
 from agentic_cli.logging import Loggers
@@ -39,7 +38,7 @@ if TYPE_CHECKING:
     from agentic_cli.tools.planning_tools import PlanStore
     from agentic_cli.tools.task_tools import TaskStore
     from agentic_cli.knowledge_base import KnowledgeBaseManager
-    from agentic_cli.hitl import ApprovalManager, CheckpointManager
+    from agentic_cli.tools.hitl_tools import ApprovalManager
 
 logger = Loggers.workflow()
 
@@ -108,7 +107,6 @@ class BaseWorkflowManager(ABC):
         self._kb_manager: "KnowledgeBaseManager | None" = None
         self._user_kb_manager: "KnowledgeBaseManager | None" = None
         self._approval_manager: "ApprovalManager | None" = None
-        self._checkpoint_manager: "CheckpointManager | None" = None
         self._llm_summarizer: Any | None = None
 
     @property
@@ -165,11 +163,6 @@ class BaseWorkflowManager(ABC):
     def approval_manager(self) -> "ApprovalManager | None":
         """Get the approval manager (if required by tools)."""
         return self._approval_manager
-
-    @property
-    def checkpoint_manager(self) -> "CheckpointManager | None":
-        """Get the checkpoint manager (if required by tools)."""
-        return self._checkpoint_manager
 
     @property
     def llm_summarizer(self) -> Any | None:
@@ -236,12 +229,8 @@ class BaseWorkflowManager(ABC):
                 self._user_kb_manager = self._kb_manager
 
         if "approval_manager" in self._required_managers and self._approval_manager is None:
-            from agentic_cli.hitl import ApprovalManager
+            from agentic_cli.tools.hitl_tools import ApprovalManager
             self._approval_manager = ApprovalManager()
-
-        if "checkpoint_manager" in self._required_managers and self._checkpoint_manager is None:
-            from agentic_cli.hitl import CheckpointManager
-            self._checkpoint_manager = CheckpointManager()
 
         if "llm_summarizer" in self._required_managers and self._llm_summarizer is None:
             self._llm_summarizer = self._create_summarizer()
@@ -274,7 +263,6 @@ class BaseWorkflowManager(ABC):
             set_context_kb_manager(self._kb_manager),
             set_context_user_kb_manager(self._user_kb_manager),
             set_context_approval_manager(self._approval_manager),
-            set_context_checkpoint_manager(self._checkpoint_manager),
             set_context_llm_summarizer(self._llm_summarizer),
         ]
         try:

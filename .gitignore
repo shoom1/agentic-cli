@@ -43,10 +43,11 @@ Thumbs.db
 
 #CLAUDE.md
 .claude/
+.research_demo/
 plans/
 docs/
 changes/
-.research_demo/
+findings/
 
 # Git worktrees
 .worktrees/
