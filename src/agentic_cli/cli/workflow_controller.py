@@ -242,7 +242,7 @@ class WorkflowController:
 
         except Exception as e:
             self._init_error = e
-            logger.error("background_init_failed", error=str(e))
+            logger.debug("background_init_failed", error=str(e))
 
     async def ensure_initialized(
         self,
