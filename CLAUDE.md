@@ -63,13 +63,9 @@ agentic-cli/
 │   │   ├── memory_tools.py   # save_memory, search_memory + MemoryStore
 │   │   ├── planning_tools.py # save_plan, get_plan + PlanStore
 │   │   ├── task_tools.py     # save_tasks, get_tasks + TaskStore
-│   │   ├── hitl_tools.py     # request_approval, create_checkpoint
+│   │   ├── hitl_tools.py     # request_approval + ApprovalManager, HITLConfig
 │   │   ├── shell/            # 8-layer shell security
 │   │   └── webfetch/         # Fetcher, converter, validator, robots
-│   ├── hitl/
-│   │   ├── config.py         # ApprovalRule, HITLConfig
-│   │   ├── approval.py       # ApprovalManager
-│   │   └── checkpoints.py    # CheckpointManager
 │   ├── knowledge_base/
 │   │   ├── models.py         # Document, SearchResult
 │   │   ├── embeddings.py     # EmbeddingService
@@ -133,7 +129,7 @@ Workflow:
 ### Key Design Patterns
 - **Tool error handling**: All tools return `{"success": bool, ...}` dicts. Never raise `ToolError`.
 - **Tool registration**: Use `@register_tool(category=..., permission_level=..., description=...)` decorator. Tools are auto-discovered via the global `ToolRegistry`.
-- **Store consolidation**: Stores (MemoryStore, PlanStore, TaskStore) live inside their tool files (e.g. `memory_tools.py`), not in separate packages.
+- **Store consolidation**: Stores and managers (MemoryStore, PlanStore, TaskStore, ApprovalManager) live inside their tool files (e.g. `memory_tools.py`, `hitl_tools.py`), not in separate packages.
 - **Context access**: Tools use `get_context_*()` functions from `workflow.context` to access managers and stores via ContextVars.
 - **Atomic writes**: Use `atomic_write_json`/`atomic_write_text` from `persistence/_utils.py` for file persistence.
 
