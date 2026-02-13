@@ -32,6 +32,18 @@ from agentic_cli.workflow.context import get_context_kb_manager, get_context_use
 # Max chars of extracted text to return via read_document.
 READ_DOCUMENT_MAX_CHARS = 30_000
 
+# Extensions considered safe to open in the system viewer.
+# Excluded: .html (JS execution), .doc/.xls/.ppt (VBA macros),
+# .odt/.ods/.odp (LibreOffice macros), .docm/.xlsm/.pptm (Office macros).
+SAFE_OPEN_EXTENSIONS: frozenset[str] = frozenset({
+    # Documents
+    ".pdf", ".txt", ".md", ".csv", ".json", ".xml", ".rtf", ".epub",
+    # Modern Office (macro-free by design)
+    ".docx", ".xlsx", ".pptx",
+    # Images
+    ".png", ".jpg", ".jpeg", ".gif", ".svg", ".bmp", ".tiff", ".webp",
+})
+
 
 @register_tool(
     category=ToolCategory.KNOWLEDGE,
@@ -556,7 +568,7 @@ def list_documents(
 
 @register_tool(
     category=ToolCategory.KNOWLEDGE,
-    permission_level=PermissionLevel.CAUTION,
+    permission_level=PermissionLevel.DANGEROUS,
     description="Open a document's stored file (e.g. PDF) in the system default viewer. Provide a document ID or title.",
 )
 @requires("kb_manager")
@@ -590,19 +602,58 @@ def open_document(
     if file_path is None:
         return {"success": False, "error": f"No file stored for document: {doc.title}"}
 
+    ext = file_path.suffix.lower()
+    if ext not in SAFE_OPEN_EXTENSIONS:
+        logger.warning(
+            "open_document_blocked_extension",
+            file_path=str(file_path),
+            title=doc.title,
+            extension=ext,
+        )
+        return {
+            "success": False,
+            "error": f"File type '{ext}' is not allowed. Supported: documents, images, and office files.",
+        }
+
     system = platform.system()
     try:
         if system == "Darwin":
-            subprocess.Popen(["open", str(file_path)])
+            cmd = ["open", str(file_path)]
         elif system == "Linux":
-            subprocess.Popen(["xdg-open", str(file_path)])
+            cmd = ["xdg-open", str(file_path)]
         elif system == "Windows":
-            subprocess.Popen(["start", "", str(file_path)], shell=True)
+            cmd = ["start", "", str(file_path)]
         else:
             return {"success": False, "error": f"Unsupported platform: {system}"}
+
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            shell=(system == "Windows"),
+        )
+        if result.returncode != 0:
+            stderr = result.stderr.strip()
+            logger.warning(
+                "open_document_failed",
+                file_path=str(file_path),
+                returncode=result.returncode,
+                stderr=stderr,
+            )
+            return {"success": False, "error": f"Failed to open file: {stderr or 'unknown error'}"}
+    except subprocess.TimeoutExpired:
+        # open/xdg-open may block if viewer takes time — treat as success
+        pass
     except OSError as e:
         return {"success": False, "error": f"Failed to open file: {e}"}
 
+    logger.info(
+        "open_document_success",
+        file_path=str(file_path),
+        title=doc.title,
+        extension=ext,
+    )
     return {
         "success": True,
         "title": doc.title,

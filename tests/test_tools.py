@@ -1374,7 +1374,7 @@ class TestToolRegistryConsistency:
 
         registry = get_registry()
 
-        dangerous_tools = ["shell_executor", "execute_python"]
+        dangerous_tools = ["shell_executor", "execute_python", "open_document"]
         for tool_name in dangerous_tools:
             tool = registry.get(tool_name)
             if tool:
@@ -1388,7 +1388,7 @@ class TestToolRegistryConsistency:
 
         registry = get_registry()
 
-        caution_tools = ["write_file", "edit_file", "ingest_document", "open_document"]
+        caution_tools = ["write_file", "edit_file", "ingest_document"]
 
         for tool_name in caution_tools:
             tool = registry.get(tool_name)
