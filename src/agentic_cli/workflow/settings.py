@@ -42,6 +42,26 @@ class WorkflowSettingsMixin:
         json_schema_extra={"ui_order": 20},
     )
 
+    # Context window management
+    context_window_enabled: bool = Field(
+        default=False,
+        title="Context Window Management",
+        description="Enable automatic context window management to prevent overflow",
+        json_schema_extra={"ui_order": 25},
+    )
+    context_window_trigger_tokens: int = Field(
+        default=100_000,
+        title="Context Trigger Tokens",
+        description="Start trimming when context exceeds this token count",
+        json_schema_extra={"ui_order": 26},
+    )
+    context_window_target_tokens: int = Field(
+        default=80_000,
+        title="Context Target Tokens",
+        description="Target token count after trimming",
+        json_schema_extra={"ui_order": 27},
+    )
+
     # Orchestrator selection
     orchestrator: OrchestratorType = Field(
         default=OrchestratorType.ADK,
