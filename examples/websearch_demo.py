@@ -17,6 +17,7 @@ Usage:
     BRAVE_API_KEY=your_key conda run -n agenticcli python examples/websearch_demo.py --backend brave
 """
 
+import asyncio
 import sys
 
 from agentic_cli.tools.search import (
@@ -109,14 +110,14 @@ def demo_search_result_format():
     print()
 
 
-def demo_mock_search():
+async def demo_mock_search():
     """Demo search with mock data (no API key needed)."""
     print("\n" + "=" * 60)
     print("Mock Search Demo (No API needed)")
     print("=" * 60)
 
     # Without an API key, web_search returns an error
-    result = web_search("Python programming", max_results=3)
+    result = await web_search("Python programming", max_results=3)
 
     print("  Query: 'Python programming'")
     print(f"  Success: {result['success']}")
@@ -131,7 +132,7 @@ def demo_mock_search():
     print()
 
 
-def demo_live_search(backend: str, query: str):
+async def demo_live_search(backend: str, query: str):
     """Demo live search with configured backend."""
     print("\n" + "=" * 60)
     print(f"Live Search Demo ({backend.title()} Backend)")
@@ -147,7 +148,7 @@ def demo_live_search(backend: str, query: str):
     settings.search_backend = backend
 
     try:
-        result = web_search(query, max_results=5)
+        result = await web_search(query, max_results=5)
 
         print(f"  Success: {result['success']}")
 
@@ -173,7 +174,7 @@ def demo_live_search(backend: str, query: str):
         settings.search_backend = original_backend
 
 
-def demo_error_handling():
+async def demo_error_handling():
     """Demo error handling scenarios."""
     print("\n" + "=" * 60)
     print("Error Handling Demo")
@@ -185,7 +186,7 @@ def demo_error_handling():
     original_backend = getattr(settings, 'search_backend', None)
     settings.search_backend = None
 
-    result = web_search("test query")
+    result = await web_search("test query")
     print("  Scenario: No backend configured")
     print(f"    Success: {result['success']}")
     print(f"    Error: {result['error'][:60]}...")
@@ -194,7 +195,7 @@ def demo_error_handling():
     # Test 2: Unknown backend
     settings.search_backend = "unknown_backend"
 
-    result = web_search("test query")
+    result = await web_search("test query")
     print("  Scenario: Unknown backend")
     print(f"    Success: {result['success']}")
     print(f"    Error: {result['error'][:60]}...")
@@ -204,7 +205,7 @@ def demo_error_handling():
     settings.search_backend = original_backend
 
 
-def main():
+async def main():
     """Run all demos."""
     print("\n" + "#" * 60)
     print("#  Web Search Tool Demo")
@@ -225,15 +226,15 @@ def main():
     demo_backend_info()
     available_backends = demo_configuration_check()
     demo_search_result_format()
-    demo_mock_search()
-    demo_error_handling()
+    await demo_mock_search()
+    await demo_error_handling()
 
     # Run live search if backend available
     if backend_arg and backend_arg in available_backends:
-        demo_live_search(backend_arg, query)
+        await demo_live_search(backend_arg, query)
     elif available_backends:
         # Use first available backend
-        demo_live_search(available_backends[0], query)
+        await demo_live_search(available_backends[0], query)
     else:
         print("\n" + "-" * 60)
         print("  Skipping live search demo (no API keys available)")
@@ -248,4 +249,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

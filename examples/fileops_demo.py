@@ -1,19 +1,22 @@
 #!/usr/bin/env python
-"""Standalone demo for file operations tools.
+"""Standalone demo for file operation tools.
 
-This demo tests the file operations tools:
-1. File manager (read, write, list, copy, move, delete)
-2. Diff compare (unified, side-by-side, summary)
+This demo tests the file operation tools:
+1. write_file (create and overwrite files)
+2. read_file (read with optional offset/limit)
+3. list_dir (directory listing with metadata)
+4. diff_compare (unified, summary, identical files)
 
 Usage:
     conda run -n agenticcli python examples/fileops_demo.py
 """
 
-import sys
 import tempfile
 from pathlib import Path
 
-from agentic_cli.tools.file_ops import file_manager, diff_compare
+from agentic_cli.tools.file_read import read_file, diff_compare
+from agentic_cli.tools.file_write import write_file
+from agentic_cli.tools.glob_tool import list_dir
 
 
 # =============================================================================
@@ -31,8 +34,7 @@ def demo_file_write(temp_dir: Path):
     test_file = temp_dir / "hello.txt"
     print(f"\n  Writing to: {test_file}")
 
-    result = file_manager(
-        operation="write",
+    result = write_file(
         path=str(test_file),
         content="Hello, World!\nThis is a test file.\nLine 3.",
     )
@@ -41,6 +43,7 @@ def demo_file_write(temp_dir: Path):
     if result['success']:
         print(f"    Path: {result.get('path', 'N/A')}")
         print(f"    Size: {result.get('size', 'N/A')} bytes")
+        print(f"    Created: {result.get('created', 'N/A')}")
     print()
 
     return test_file
@@ -54,14 +57,36 @@ def demo_file_read(test_file: Path):
 
     print(f"\n  Reading from: {test_file}")
 
-    result = file_manager(
-        operation="read",
-        path=str(test_file),
-    )
+    result = read_file(path=str(test_file))
 
     print(f"    Success: {result['success']}")
     if result['success']:
         print(f"    Content:")
+        for line in result['content'].split('\n'):
+            print(f"      {line}")
+    print()
+
+
+def demo_file_read_with_offset(temp_dir: Path):
+    """Demo reading file with offset and limit."""
+    print("\n" + "=" * 60)
+    print("File Read with Offset/Limit Demo")
+    print("=" * 60)
+
+    # Create a file with numbered lines
+    lines = "\n".join(f"Line {i}: content here" for i in range(1, 21))
+    target = temp_dir / "numbered.txt"
+    write_file(path=str(target), content=lines)
+
+    print(f"\n  File: {target.name} (20 lines)")
+
+    # Read lines 5-10
+    print("  Reading lines 5-10 (offset=4, limit=6):")
+    result = read_file(path=str(target), offset=4, limit=6)
+
+    if result['success']:
+        print(f"    Lines read: {result.get('lines_read', 'N/A')}")
+        print(f"    Total lines: {result.get('total_lines', 'N/A')}")
         for line in result['content'].split('\n'):
             print(f"      {line}")
     print()
@@ -81,96 +106,42 @@ def demo_file_list(temp_dir: Path):
 
     print(f"\n  Listing: {temp_dir}")
 
-    result = file_manager(
-        operation="list",
-        path=str(temp_dir),
-    )
+    result = list_dir(path=str(temp_dir))
 
     print(f"    Success: {result['success']}")
     if result['success']:
-        print(f"    Entries:")
-        for name, info in result['entries'].items():
-            entry_type = info.get('type', 'unknown')
-            type_icon = "D" if entry_type == 'directory' else "F"
-            size = info.get('size', 0) or 0
-            print(f"      [{type_icon}] {name:<15} ({size} bytes)")
+        print(f"    Total entries: {result['total']}")
+        print(f"    Directories:")
+        for d in result['directories']:
+            print(f"      [D] {d['name']}")
+        print(f"    Files:")
+        for f in result['files']:
+            size = f.get('size') or 0
+            print(f"      [F] {f['name']:<15} ({size} bytes)")
     print()
 
 
-def demo_file_copy(temp_dir: Path):
-    """Demo file copying."""
+def demo_file_overwrite(temp_dir: Path):
+    """Demo overwriting an existing file."""
     print("\n" + "=" * 60)
-    print("File Copy Demo")
+    print("File Overwrite Demo")
     print("=" * 60)
 
-    source = temp_dir / "original.txt"
-    dest = temp_dir / "copied.txt"
+    target = temp_dir / "overwrite_test.txt"
 
-    # Create source file
-    source.write_text("Original content to copy")
+    # Create initial file
+    result1 = write_file(path=str(target), content="Original content")
+    print(f"\n  Created: {target.name}")
+    print(f"    Created (new file): {result1.get('created')}")
 
-    print(f"\n  Source: {source.name}")
-    print(f"  Destination: {dest.name}")
+    # Overwrite
+    result2 = write_file(path=str(target), content="Updated content")
+    print(f"  Overwrote: {target.name}")
+    print(f"    Created (new file): {result2.get('created')}")
 
-    result = file_manager(
-        operation="copy",
-        path=str(source),
-        destination=str(dest),
-    )
-
-    print(f"    Success: {result['success']}")
-    print(f"    Destination exists: {dest.exists()}")
-    if dest.exists():
-        print(f"    Content matches: {source.read_text() == dest.read_text()}")
-    print()
-
-
-def demo_file_move(temp_dir: Path):
-    """Demo file moving/renaming."""
-    print("\n" + "=" * 60)
-    print("File Move Demo")
-    print("=" * 60)
-
-    source = temp_dir / "to_move.txt"
-    dest = temp_dir / "moved.txt"
-
-    # Create source file
-    source.write_text("Content to move")
-
-    print(f"\n  Source: {source.name}")
-    print(f"  Destination: {dest.name}")
-
-    result = file_manager(
-        operation="move",
-        path=str(source),
-        destination=str(dest),
-    )
-
-    print(f"    Success: {result['success']}")
-    print(f"    Source exists: {source.exists()}")
-    print(f"    Destination exists: {dest.exists()}")
-    print()
-
-
-def demo_file_delete(temp_dir: Path):
-    """Demo file deletion."""
-    print("\n" + "=" * 60)
-    print("File Delete Demo")
-    print("=" * 60)
-
-    file_to_delete = temp_dir / "deleteme.txt"
-    file_to_delete.write_text("This will be deleted")
-
-    print(f"\n  File to delete: {file_to_delete.name}")
-    print(f"  Exists before: {file_to_delete.exists()}")
-
-    result = file_manager(
-        operation="delete",
-        path=str(file_to_delete),
-    )
-
-    print(f"    Success: {result['success']}")
-    print(f"    Exists after: {file_to_delete.exists()}")
+    # Verify
+    result3 = read_file(path=str(target))
+    print(f"    Content after overwrite: {result3['content']}")
     print()
 
 
@@ -292,6 +263,22 @@ def demo_diff_identical(temp_dir: Path):
     print()
 
 
+def demo_diff_raw_text():
+    """Demo comparing raw text strings."""
+    print("\n" + "=" * 60)
+    print("Raw Text Diff Demo")
+    print("=" * 60)
+
+    print("\n  Comparing raw text strings:")
+    result = diff_compare(
+        source_a="Hello World",
+        source_b="Hello Universe",
+    )
+    print(f"    Success: {result['success']}")
+    print(f"    Similarity: {result.get('similarity', 0):.2%}")
+    print()
+
+
 def demo_error_handling(temp_dir: Path):
     """Demo error handling for file operations."""
     print("\n" + "=" * 60)
@@ -300,30 +287,9 @@ def demo_error_handling(temp_dir: Path):
 
     # Read non-existent file
     print("\n  Reading non-existent file:")
-    result = file_manager(
-        operation="read",
-        path=str(temp_dir / "nonexistent.txt"),
-    )
+    result = read_file(path=str(temp_dir / "nonexistent.txt"))
     print(f"    Success: {result['success']}")
     print(f"    Error: {result.get('error', 'N/A')}")
-
-    # Invalid operation
-    print("\n  Invalid operation:")
-    result = file_manager(
-        operation="invalid_op",
-        path=str(temp_dir / "file.txt"),
-    )
-    print(f"    Success: {result['success']}")
-    print(f"    Error: {result.get('error', 'N/A')}")
-
-    # Diff with non-existent file (treated as raw text)
-    print("\n  Comparing text with text:")
-    result = diff_compare(
-        source_a="Hello World",
-        source_b="Hello Universe",
-    )
-    print(f"    Success: {result['success']}")
-    print(f"    Similarity: {result.get('similarity', 0):.2%}")
     print()
 
 
@@ -341,13 +307,13 @@ def main():
         # Run demos
         test_file = demo_file_write(temp_path)
         demo_file_read(test_file)
+        demo_file_read_with_offset(temp_path)
         demo_file_list(temp_path)
-        demo_file_copy(temp_path)
-        demo_file_move(temp_path)
-        demo_file_delete(temp_path)
+        demo_file_overwrite(temp_path)
         demo_diff_unified(temp_path)
         demo_diff_summary(temp_path)
         demo_diff_identical(temp_path)
+        demo_diff_raw_text()
         demo_error_handling(temp_path)
 
     print("\n" + "#" * 60)
