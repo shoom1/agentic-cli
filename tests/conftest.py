@@ -4,11 +4,12 @@ Provides:
 - MockContext for isolating tests from global state
 - Temporary workspace fixtures
 - Settings fixtures with various configurations
+
+Mock services (MockEmbeddingService, MockVectorStore) are in tests/mocks.py.
 """
 
 import os
 import tempfile
-from contextlib import contextmanager
 from pathlib import Path
 from typing import Generator
 from unittest.mock import patch
@@ -128,30 +129,6 @@ def mock_context() -> Generator[MockContext, None, None]:
 
 
 @pytest.fixture
-def mock_context_with_google_key() -> Generator[MockContext, None, None]:
-    """Fixture providing context with Google API key."""
-    with MockContext(google_api_key="test-google-key") as ctx:
-        yield ctx
-
-
-@pytest.fixture
-def mock_context_with_anthropic_key() -> Generator[MockContext, None, None]:
-    """Fixture providing context with Anthropic API key."""
-    with MockContext(anthropic_api_key="test-anthropic-key") as ctx:
-        yield ctx
-
-
-@pytest.fixture
-def mock_context_with_both_keys() -> Generator[MockContext, None, None]:
-    """Fixture providing context with both API keys."""
-    with MockContext(
-        google_api_key="test-google-key",
-        anthropic_api_key="test-anthropic-key",
-    ) as ctx:
-        yield ctx
-
-
-@pytest.fixture
 def temp_workspace(tmp_path: Path) -> Path:
     """Fixture providing a temporary workspace directory."""
     workspace = tmp_path / "workspace"
@@ -162,7 +139,6 @@ def temp_workspace(tmp_path: Path) -> Path:
 @pytest.fixture
 def settings_no_keys(temp_workspace: Path) -> BaseSettings:
     """Fixture providing settings with no API keys."""
-    # Clear environment variables temporarily
     with patch.dict(os.environ, {}, clear=True):
         return BaseSettings(workspace_dir=temp_workspace)
 

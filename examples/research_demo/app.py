@@ -4,9 +4,8 @@ Multi-agent research assistant showcasing framework features:
 - research_coordinator: Root agent with memory, planning, tasks, HITL, web, code, files
 - arxiv_specialist: Sub-agent for focused arXiv paper search, analysis, and cataloging
 
-Feature managers (MemoryStore, PlanStore, TaskStore, CheckpointManager,
-ApprovalManager) are auto-created by the workflow manager based on
-tool requirements.
+Feature managers (MemoryStore, PlanStore, TaskStore, ApprovalManager)
+are auto-created by the workflow manager based on tool requirements.
 """
 
 from rich.panel import Panel
@@ -18,7 +17,7 @@ from agentic_cli.logging import Loggers
 
 from examples.research_demo.agents import AGENT_CONFIGS
 from examples.research_demo.commands import DEMO_COMMANDS
-from examples.research_demo.settings import ResearchDemoSettings, get_settings
+from examples.research_demo.settings import ResearchDemoSettings
 
 logger = Loggers.cli()
 
@@ -40,7 +39,7 @@ def _create_app_info() -> AppInfo:
     text.append("  - Academic research (arXiv)\n", style="dim")
     text.append("  - Python code execution\n", style="dim")
     text.append("  - File operations (read, write, search)\n", style="dim")
-    text.append("  - Human-in-the-loop (approvals & checkpoints)\n", style="dim")
+    text.append("  - Human-in-the-loop (approvals)\n", style="dim")
     text.append("\n")
     text.append("Commands:\n", style="bold")
     text.append("  /memory     - Show saved memories\n", style="cyan")
@@ -75,7 +74,7 @@ class ResearchDemoApp(BaseCLIApp):
         super().__init__(
             app_info=_create_app_info(),
             agent_configs=AGENT_CONFIGS,
-            settings=settings or get_settings(),
+            settings=settings or ResearchDemoSettings(),
         )
 
     def register_commands(self) -> None:

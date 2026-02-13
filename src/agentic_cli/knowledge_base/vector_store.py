@@ -11,6 +11,8 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from agentic_cli.persistence._utils import atomic_write_json
+
 if TYPE_CHECKING:
     import faiss
 
@@ -207,14 +209,14 @@ class VectorStore:
         # Save FAISS index
         faiss.write_index(self._index, str(self.index_path))
 
-        # Save ID mappings
+        # Save ID mappings (atomic to prevent corruption on crash)
         mappings_path = self.index_path.with_suffix(".mappings.json")
         mappings = {
             "id_map": {str(k): v for k, v in self._id_map.items()},
             "chunk_to_faiss": self._chunk_to_faiss,
             "next_id": self._next_id,
         }
-        mappings_path.write_text(json.dumps(mappings, indent=2))
+        atomic_write_json(mappings_path, mappings)
 
     def load(self) -> None:
         """Load index and mappings from disk."""
@@ -248,90 +250,3 @@ class VectorStore:
         import faiss
 
         return faiss
-
-
-class MockVectorStore:
-    """Mock vector store for testing without FAISS."""
-
-    def __init__(
-        self,
-        index_path: Path,
-        embedding_dim: int = 384,
-    ) -> None:
-        """Initialize mock store."""
-        self.index_path = index_path
-        self.embedding_dim = embedding_dim
-        self._vectors: dict[str, list[float]] = {}
-
-    @property
-    def size(self) -> int:
-        """Get the number of vectors."""
-        return len(self._vectors)
-
-    def add_embeddings(
-        self,
-        chunk_ids: list[str],
-        embeddings: list[list[float]],
-    ) -> None:
-        """Add embeddings."""
-        for chunk_id, embedding in zip(chunk_ids, embeddings):
-            self._vectors[chunk_id] = embedding
-
-    def search(
-        self,
-        query_embedding: list[float],
-        top_k: int = 10,
-    ) -> list[tuple[str, float]]:
-        """Search using cosine similarity."""
-        if not self._vectors:
-            return []
-
-        query = np.array(query_embedding)
-        query_norm = np.linalg.norm(query)
-        if query_norm == 0:
-            return []
-        query = query / query_norm
-
-        results: list[tuple[str, float]] = []
-        for chunk_id, embedding in self._vectors.items():
-            vec = np.array(embedding)
-            vec_norm = np.linalg.norm(vec)
-            if vec_norm > 0:
-                vec = vec / vec_norm
-                score = float(np.dot(query, vec))
-                results.append((chunk_id, score))
-
-        results.sort(key=lambda x: x[1], reverse=True)
-        return results[:top_k]
-
-    def remove_embeddings(self, chunk_ids: list[str]) -> int:
-        """Remove embeddings."""
-        removed = 0
-        for chunk_id in chunk_ids:
-            if chunk_id in self._vectors:
-                del self._vectors[chunk_id]
-                removed += 1
-        return removed
-
-    def rebuild(self) -> None:
-        """No-op for mock store (vectors are removed directly)."""
-
-    def save(self) -> None:
-        """Save to disk."""
-        self.index_path.parent.mkdir(parents=True, exist_ok=True)
-        data = {
-            "vectors": self._vectors,
-            "embedding_dim": self.embedding_dim,
-        }
-        self.index_path.write_text(json.dumps(data))
-
-    def load(self) -> None:
-        """Load from disk."""
-        if self.index_path.exists():
-            data = json.loads(self.index_path.read_text())
-            self._vectors = data["vectors"]
-            self.embedding_dim = data["embedding_dim"]
-
-    def clear(self) -> None:
-        """Clear all vectors."""
-        self._vectors = {}

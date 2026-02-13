@@ -137,11 +137,6 @@ def _grep_with_ripgrep(
     if file_pattern:
         cmd.extend(["--glob", file_pattern])
 
-    if output_mode == "files":
-        cmd.append("--files-with-matches")
-    elif output_mode == "count":
-        cmd.append("--count")
-
     cmd.extend(["--max-count", str(max_results * 10)])  # Get more, then trim
     cmd.append(pattern)
     cmd.append(str(path))
@@ -180,7 +175,8 @@ def _grep_with_ripgrep(
     import json
 
     matches = []
-    files_searched = set()
+    files_searched: set[str] = set()
+    file_counts: dict[str, int] = {}
     total_matches = 0
 
     for line in result.stdout.strip().split("\n"):
@@ -195,26 +191,24 @@ def _grep_with_ripgrep(
             match_data = data.get("data", {})
             file_path = match_data.get("path", {}).get("text", "")
             files_searched.add(file_path)
+            file_counts[file_path] = file_counts.get(file_path, 0) + 1
+            total_matches += 1
 
-            if len(matches) < max_results:
-                if output_mode == "content":
-                    matches.append({
-                        "file": file_path,
-                        "line_number": match_data.get("line_number", 0),
-                        "content": match_data.get("lines", {}).get("text", "").rstrip("\n"),
-                    })
-                total_matches += 1
+            if output_mode == "content" and len(matches) < max_results:
+                matches.append({
+                    "file": file_path,
+                    "line_number": match_data.get("line_number", 0),
+                    "content": match_data.get("lines", {}).get("text", "").rstrip("\n"),
+                })
 
         elif data.get("type") == "summary":
             stats = data.get("data", {}).get("stats", {})
             total_matches = stats.get("matches", total_matches)
 
-    # Handle files and count modes differently
     if output_mode == "files":
-        matches = [{"file": f, "match_count": 1} for f in sorted(files_searched)][:max_results]
+        matches = [{"file": f, "match_count": file_counts.get(f, 0)} for f in sorted(files_searched)][:max_results]
     elif output_mode == "count":
-        # Re-run with count flag if needed
-        pass
+        matches = [{"file": f, "count": c} for f, c in sorted(file_counts.items())][:max_results]
 
     return {
         "success": True,

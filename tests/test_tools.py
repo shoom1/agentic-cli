@@ -31,14 +31,10 @@ from agentic_cli.tools.executor import (
     TimeoutError,
 )
 from agentic_cli.tools.registry import (
-    ErrorCode,
     ToolCategory,
     ToolDefinition,
-    ToolError,
     ToolRegistry,
-    ToolResult,
     register_tool,
-    with_result_wrapper,
 )
 
 
@@ -421,99 +417,6 @@ class TestSubprocessExecution:
         assert result["success"] is False
 
 
-class TestToolError:
-    """Tests for ToolError class."""
-
-    def test_tool_error_basic(self):
-        """Test basic ToolError creation."""
-        error = ToolError("Something went wrong")
-
-        assert error.message == "Something went wrong"
-        assert error.error_code == "TOOL_ERROR"
-        assert error.recoverable is False
-        assert error.details == {}
-        assert error.tool_name is None
-
-    def test_tool_error_full(self):
-        """Test ToolError with all attributes."""
-        error = ToolError(
-            message="API rate limit exceeded",
-            error_code=ErrorCode.RATE_LIMITED,
-            recoverable=True,
-            details={"retry_after": 60},
-            tool_name="web_search",
-        )
-
-        assert error.message == "API rate limit exceeded"
-        assert error.error_code == ErrorCode.RATE_LIMITED
-        assert error.recoverable is True
-        assert error.details == {"retry_after": 60}
-        assert error.tool_name == "web_search"
-
-    def test_tool_error_to_dict(self):
-        """Test ToolError serialization."""
-        error = ToolError(
-            message="Not found",
-            error_code=ErrorCode.NOT_FOUND,
-            recoverable=False,
-            tool_name="search",
-        )
-
-        data = error.to_dict()
-
-        assert data["success"] is False
-        assert data["error"]["message"] == "Not found"
-        assert data["error"]["code"] == ErrorCode.NOT_FOUND
-        assert data["error"]["recoverable"] is False
-        assert data["error"]["tool_name"] == "search"
-
-
-class TestToolResult:
-    """Tests for ToolResult class."""
-
-    def test_result_ok(self):
-        """Test successful result."""
-        result = ToolResult.ok({"items": [1, 2, 3]}, source="test")
-
-        assert result.success is True
-        assert result.data == {"items": [1, 2, 3]}
-        assert result.error is None
-        assert result.metadata == {"source": "test"}
-
-    def test_result_fail(self):
-        """Test failed result."""
-        error = ToolError("Failed", error_code=ErrorCode.API_ERROR)
-        result = ToolResult.fail(error, attempt=1)
-
-        assert result.success is False
-        assert result.data is None
-        assert result.error == error
-        assert result.metadata == {"attempt": 1}
-
-    def test_result_to_dict_success(self):
-        """Test successful result serialization."""
-        result = ToolResult.ok({"count": 5})
-        result.execution_time_ms = 10.123
-
-        data = result.to_dict()
-
-        assert data["success"] is True
-        assert data["data"] == {"count": 5}
-        assert data["execution_time_ms"] == 10.12
-        assert "error" not in data
-
-    def test_result_to_dict_failure(self):
-        """Test failed result serialization."""
-        error = ToolError("Timeout", error_code=ErrorCode.TIMEOUT)
-        result = ToolResult.fail(error)
-
-        data = result.to_dict()
-
-        assert data["success"] is False
-        assert "error" in data
-        assert data["error"]["code"] == ErrorCode.TIMEOUT
-
-
 class TestToolDefinition:
     """Tests for ToolDefinition class."""
 
@@ -549,8 +452,8 @@ class TestToolDefinition:
 
         assert definition.is_async is True
 
-    def test_definition_with_metadata(self):
-        """Test definition with full metadata."""
+    def test_definition_with_category(self):
+        """Test definition with category."""
 
         def search(query: str) -> dict:
             return {}
@@ -560,17 +463,9 @@ class TestToolDefinition:
             description="Search tool",
             func=search,
             category=ToolCategory.NETWORK,
-            requires_api_key="SERPER_API_KEY",
-            timeout_seconds=60,
-            rate_limit=100,
-            metadata={"version": "1.0"},
         )
 
         assert definition.category == ToolCategory.NETWORK
-        assert definition.requires_api_key == "SERPER_API_KEY"
-        assert definition.timeout_seconds == 60
-        assert definition.rate_limit == 100
-        assert definition.metadata == {"version": "1.0"}
 
 
 class TestToolRegistry:
@@ -665,52 +560,6 @@ class TestToolRegistry:
 
         exec_tools = registry.list_by_category(ToolCategory.EXECUTION)
         assert len(exec_tools) == 1
-
-
-class TestWithResultWrapper:
-    """Tests for with_result_wrapper decorator."""
-
-    def test_wrapper_success(self):
-        """Test wrapper with successful function."""
-
-        @with_result_wrapper
-        def add(a: int, b: int) -> int:
-            return a + b
-
-        result = add(2, 3)
-
-        assert result["success"] is True
-        assert result["data"] == 5
-        assert "execution_time_ms" in result
-
-    def test_wrapper_tool_error(self):
-        """Test wrapper with ToolError."""
-
-        @with_result_wrapper
-        def failing_tool():
-            raise ToolError(
-                "Intentional failure",
-                error_code=ErrorCode.VALIDATION_FAILED,
-            )
-
-        result = failing_tool()
-
-        assert result["success"] is False
-        assert result["error"]["code"] == ErrorCode.VALIDATION_FAILED
-        assert result["error"]["tool_name"] == "failing_tool"
-
-    def test_wrapper_unexpected_error(self):
-        """Test wrapper with unexpected exception."""
-
-        @with_result_wrapper
-        def buggy_tool():
-            raise ValueError("Unexpected bug")
-
-        result = buggy_tool()
-
-        assert result["success"] is False
-        assert result["error"]["code"] == ErrorCode.INTERNAL_ERROR
-        assert "Unexpected bug" in result["error"]["message"]
 
 
 @pytest.mark.xfail(reason="Shell tool disabled (_SHELL_TOOL_ENABLED=False) pending security review")
@@ -1085,6 +934,32 @@ class TestGrep:
         assert result["success"] is True
         assert len(result["matches"]) == 2
 
+    def test_grep_output_mode_count(self, tmp_path):
+        """Test grep with count output mode returns per-file counts."""
+        from agentic_cli.tools.grep_tool import grep
+
+        (tmp_path / "file1.txt").write_text("apple\nbanana\napple pie")
+        (tmp_path / "file2.txt").write_text("apple")
+        result = grep("apple", str(tmp_path), output_mode="count")
+        assert result["success"] is True
+        assert len(result["matches"]) == 2
+        # Build a lookup by file basename
+        counts = {m["file"].split("/")[-1]: m["count"] for m in result["matches"]}
+        assert counts["file1.txt"] == 2
+        assert counts["file2.txt"] == 1
+
+    def test_grep_output_mode_files_with_counts(self, tmp_path):
+        """Test grep files mode returns actual match_count per file."""
+        from agentic_cli.tools.grep_tool import grep
+
+        (tmp_path / "a.txt").write_text("foo\nfoo\nfoo")
+        (tmp_path / "b.txt").write_text("foo")
+        result = grep("foo", str(tmp_path), output_mode="files")
+        assert result["success"] is True
+        counts = {m["file"].split("/")[-1]: m["match_count"] for m in result["matches"]}
+        assert counts["a.txt"] == 3
+        assert counts["b.txt"] == 1
+
 
 class TestDiffCompare:
     """Tests for diff_compare function."""
@@ -1215,7 +1090,8 @@ class TestDiffCompare:
 class TestStandardTools:
     """Tests for standard tool functions."""
 
-    def test_fetch_arxiv_paper_returns_paper_details(self):
+    @pytest.mark.asyncio
+    async def test_fetch_arxiv_paper_returns_paper_details(self):
         """Test fetch_arxiv_paper returns paper details for valid ID."""
         from unittest.mock import patch, MagicMock
         from agentic_cli.tools.arxiv_tools import fetch_arxiv_paper
@@ -1237,7 +1113,7 @@ class TestStandardTools:
                 ]
             )
 
-            result = fetch_arxiv_paper("1706.03762")
+            result = await fetch_arxiv_paper("1706.03762")
 
             assert result["success"] is True
             assert result["paper"]["title"] == "Attention Is All You Need"
@@ -1246,7 +1122,8 @@ class TestStandardTools:
             assert "cs.CL" in result["paper"]["categories"]
             assert result["paper"]["pdf_url"] == "https://arxiv.org/pdf/1706.03762.pdf"
 
-    def test_fetch_arxiv_paper_not_found(self):
+    @pytest.mark.asyncio
+    async def test_fetch_arxiv_paper_not_found(self):
         """Test fetch_arxiv_paper handles missing paper."""
         from unittest.mock import patch, MagicMock
         from agentic_cli.tools.arxiv_tools import fetch_arxiv_paper
@@ -1254,87 +1131,34 @@ class TestStandardTools:
         with patch("feedparser.parse") as mock_parse:
             mock_parse.return_value = MagicMock(entries=[])
 
-            result = fetch_arxiv_paper("9999.99999")
+            result = await fetch_arxiv_paper("9999.99999")
 
             assert result["success"] is False
             assert "not found" in result["error"].lower()
 
-    def test_fetch_arxiv_paper_cleans_id(self):
+    @pytest.mark.asyncio
+    async def test_fetch_arxiv_paper_cleans_id(self):
         """Test fetch_arxiv_paper handles various ID formats."""
         from unittest.mock import patch, MagicMock
         from agentic_cli.tools.arxiv_tools import fetch_arxiv_paper
 
         with patch("feedparser.parse") as mock_parse:
             mock_parse.return_value = MagicMock(
-                entries=[{"title": "Test", "link": "", "summary": "", "authors": [], 
+                entries=[{"title": "Test", "link": "", "summary": "", "authors": [],
                          "published": "", "tags": [], "id": "http://arxiv.org/abs/1234.5678v1"}]
             )
 
             # Test with full URL
-            fetch_arxiv_paper("https://arxiv.org/abs/1234.5678")
+            await fetch_arxiv_paper("https://arxiv.org/abs/1234.5678")
             call_url = mock_parse.call_args[0][0]
             assert "id_list=1234.5678" in call_url
 
             # Test with version suffix
-            fetch_arxiv_paper("1234.5678v2")
+            await fetch_arxiv_paper("1234.5678v2")
             call_url = mock_parse.call_args[0][0]
             assert "id_list=1234.5678" in call_url
 
 
-
-    @pytest.mark.asyncio
-    async def test_analyze_arxiv_paper_success(self):
-        """Test analyze_arxiv_paper returns LLM analysis."""
-        from unittest.mock import patch, MagicMock, AsyncMock
-        from agentic_cli.tools.arxiv_tools import analyze_arxiv_paper
-
-        mock_web_fetch = AsyncMock(return_value={
-            "success": True,
-            "summary": "This paper introduces the Transformer architecture...",
-            "url": "https://arxiv.org/abs/1706.03762",
-        })
-
-        with patch("agentic_cli.tools.webfetch_tool.web_fetch", mock_web_fetch):
-            result = await analyze_arxiv_paper("1706.03762", "What is the main contribution?")
-
-            assert result["success"] is True
-            assert "analysis" in result
-            mock_web_fetch.assert_called_once()
-            # Verify the URL used
-            call_args = mock_web_fetch.call_args
-            assert "arxiv.org/abs/1706.03762" in call_args[0][0]
-
-    @pytest.mark.asyncio
-    async def test_analyze_arxiv_paper_passes_prompt(self):
-        """Test analyze_arxiv_paper passes user prompt to web_fetch."""
-        from unittest.mock import patch, AsyncMock
-        from agentic_cli.tools.arxiv_tools import analyze_arxiv_paper
-
-        mock_web_fetch = AsyncMock(return_value={"success": True, "summary": "Analysis"})
-
-        with patch("agentic_cli.tools.webfetch_tool.web_fetch", mock_web_fetch):
-            await analyze_arxiv_paper("1234.5678", "Summarize the methodology")
-
-            call_args = mock_web_fetch.call_args
-            # Second positional arg is the prompt
-            assert "methodology" in call_args[0][1].lower()
-
-    @pytest.mark.asyncio
-    async def test_analyze_arxiv_paper_handles_failure(self):
-        """Test analyze_arxiv_paper handles web_fetch failure."""
-        from unittest.mock import patch, AsyncMock
-        from agentic_cli.tools.arxiv_tools import analyze_arxiv_paper
-
-        mock_web_fetch = AsyncMock(return_value={
-            "success": False,
-            "error": "No LLM summarizer available",
-        })
-
-        with patch("agentic_cli.tools.webfetch_tool.web_fetch", mock_web_fetch):
-            result = await analyze_arxiv_paper("1234.5678", "Analyze this")
-
-            assert result["success"] is False
-            assert "error" in result
 
 
 
@@ -1378,7 +1202,8 @@ class TestArxivHelpers:
 class TestFetchArxivPaperRateLimiting:
     """Tests for fetch_arxiv_paper rate limiting."""
 
-    def test_fetch_arxiv_paper_respects_rate_limit(self):
+    @pytest.mark.asyncio
+    async def test_fetch_arxiv_paper_respects_rate_limit(self):
         """Test fetch_arxiv_paper respects rate limiting."""
         from unittest.mock import patch, MagicMock
         from agentic_cli.tools.arxiv_tools import fetch_arxiv_paper
@@ -1387,7 +1212,7 @@ class TestFetchArxivPaperRateLimiting:
         import agentic_cli.tools.arxiv_tools as arxiv_module
         arxiv_module._arxiv_source = None
 
-        with patch("agentic_cli.knowledge_base.sources.time") as mock_time:
+        with patch("agentic_cli.tools.arxiv_source.time") as mock_time:
             mock_time.time.return_value = 100.0
             mock_time.sleep = MagicMock()
 
@@ -1398,9 +1223,9 @@ class TestFetchArxivPaperRateLimiting:
                 )
 
                 # First call
-                fetch_arxiv_paper("1234.5678")
+                await fetch_arxiv_paper("1234.5678")
                 # Second call immediately - should trigger rate limiting
-                fetch_arxiv_paper("5678.1234")
+                await fetch_arxiv_paper("5678.1234")
 
                 # Verify sleep was called for rate limiting
                 assert mock_time.sleep.call_count >= 1
@@ -1409,21 +1234,21 @@ class TestFetchArxivPaperRateLimiting:
 class TestArxivSortValidation:
     """Tests for arXiv sort option validation."""
 
-    def test_search_arxiv_invalid_sort_by_raises_error(self):
-        """Test search_arxiv raises ValueError for invalid sort_by."""
+    def test_search_arxiv_invalid_sort_by_returns_error(self):
+        """Test search_arxiv returns error dict for invalid sort_by."""
         from agentic_cli.tools.arxiv_tools import search_arxiv
-        import pytest
 
-        with pytest.raises(ValueError, match="sort_by must be one of"):
-            search_arxiv("test query", sort_by="invalid_sort")
+        result = search_arxiv("test query", sort_by="invalid_sort")
+        assert result["success"] is False
+        assert "sort_by" in result["error"]
 
-    def test_search_arxiv_invalid_sort_order_raises_error(self):
-        """Test search_arxiv raises ValueError for invalid sort_order."""
+    def test_search_arxiv_invalid_sort_order_returns_error(self):
+        """Test search_arxiv returns error dict for invalid sort_order."""
         from agentic_cli.tools.arxiv_tools import search_arxiv
-        import pytest
 
-        with pytest.raises(ValueError, match="sort_order must be one of"):
-            search_arxiv("test query", sort_order="invalid_order")
+        result = search_arxiv("test query", sort_order="invalid_order")
+        assert result["success"] is False
+        assert "sort_order" in result["error"]
 
     def test_search_arxiv_valid_sort_options(self):
         """Test search_arxiv accepts valid sort options."""
@@ -1494,7 +1319,7 @@ class TestToolRegistryConsistency:
 
         registry = get_registry()
 
-        # Expected tool names from the unification plan
+        # Expected tool names from the unified document store
         expected_tools = [
             # File operations - READ (7 from file_read and glob_tool)
             "read_file",
@@ -1508,13 +1333,15 @@ class TestToolRegistryConsistency:
             # Web/Network
             "web_search",
             "web_fetch",
-            # Knowledge base
+            # Knowledge base (unified document store)
             "search_knowledge_base",
-            "ingest_to_knowledge_base",
-            # ArXiv
+            "ingest_document",
+            "read_document",
+            "list_documents",
+            "open_document",
+            # ArXiv (metadata only)
             "search_arxiv",
             "fetch_arxiv_paper",
-            "analyze_arxiv_paper",
             # Execution
             "execute_python",
             "shell_executor",
@@ -1531,7 +1358,6 @@ class TestToolRegistryConsistency:
             "get_tasks",
             # HITL tools
             "request_approval",
-            "create_checkpoint",
         ]
 
         registered_names = {tool.name for tool in registry.list_tools()}
@@ -1562,7 +1388,7 @@ class TestToolRegistryConsistency:
 
         registry = get_registry()
 
-        caution_tools = ["write_file", "edit_file", "ingest_to_knowledge_base"]
+        caution_tools = ["write_file", "edit_file", "ingest_document", "open_document"]
 
         for tool_name in caution_tools:
             tool = registry.get(tool_name)
@@ -1580,11 +1406,12 @@ class TestToolRegistryConsistency:
         safe_tools = [
             "read_file", "diff_compare", "grep", "glob", "list_dir",
             "web_search", "web_fetch", "search_knowledge_base",
-            "search_arxiv", "fetch_arxiv_paper", "analyze_arxiv_paper",
+            "read_document", "list_documents",
+            "search_arxiv", "fetch_arxiv_paper",
             "ask_clarification",
             "save_memory", "search_memory",
             "save_plan", "get_plan",
-            "request_approval", "create_checkpoint",
+            "request_approval",
         ]
 
         for tool_name in safe_tools:
@@ -1675,15 +1502,15 @@ class TestToolRegistryConsistency:
         registry = get_registry()
         tool_count = len(registry.list_tools())
 
-        # We expect at least 24 tools after simplification
+        # We expect at least 26 tools after unified document store
         # File ops: 7 (read_file, diff_compare, grep, glob, list_dir, write_file, edit_file)
         # Web/Network: 2 (web_search, web_fetch)
-        # Knowledge: 5 (search_kb, ingest_kb, search_arxiv, fetch_arxiv, analyze_arxiv)
+        # Knowledge: 7 (search_kb, ingest_document, read_document, list_documents, open_document, search_arxiv, fetch_arxiv)
         # Execution: 2 (execute_python, shell_executor)
         # Interaction: 1 (ask_clarification)
         # Memory: 2 (save_memory, search_memory)
         # Planning: 2 (save_plan, get_plan)
         # Tasks: 2 (save_tasks, get_tasks)
-        # HITL: 2 (request_approval, create_checkpoint)
-        # Total: ~25 tools
-        assert tool_count >= 24, f"Expected at least 24 registered tools, got {tool_count}"
+        # HITL: 1 (request_approval)
+        # Total: ~26 tools
+        assert tool_count >= 25, f"Expected at least 25 registered tools, got {tool_count}"

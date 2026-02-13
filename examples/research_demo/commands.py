@@ -1,6 +1,6 @@
 """Status commands for the Research Demo application.
 
-Provides commands for inspecting memory, plan, files, approvals, and checkpoints.
+Provides commands for inspecting memory, plan, files, and approvals.
 Managers are accessed via app.workflow which auto-creates them based on tool requirements.
 """
 
@@ -112,46 +112,6 @@ class ApprovalsCommand(Command):
                 result.request_id,
                 "Yes" if result.approved else "No",
                 result.reason or "",
-            )
-
-        app.session.add_rich(table)
-
-
-class CheckpointsCommand(Command):
-    """Show checkpoint history."""
-
-    def __init__(self) -> None:
-        super().__init__(
-            name="checkpoints",
-            description="Show checkpoint review history",
-            aliases=[],
-            usage="/checkpoints",
-            category=CommandCategory.GENERAL,
-        )
-
-    async def execute(self, args: str, app: "ResearchDemoApp") -> None:
-        checkpoint_manager = app.workflow.checkpoint_manager if app.workflow else None
-
-        if checkpoint_manager is None:
-            app.session.add_message("system", "Checkpoint manager not initialized")
-            return
-
-        history = checkpoint_manager.history
-
-        if not history:
-            app.session.add_message("system", "No checkpoint history")
-            return
-
-        table = Table(title="Checkpoint History", show_header=True)
-        table.add_column("ID", style="dim")
-        table.add_column("Action", style="cyan")
-        table.add_column("Feedback", style="white")
-
-        for result in history:
-            table.add_row(
-                result.checkpoint_id,
-                result.action,
-                result.feedback or "",
             )
 
         app.session.add_rich(table)
@@ -304,7 +264,6 @@ DEMO_COMMANDS = [
     PlanCommand,
     TasksCommand,
     ApprovalsCommand,
-    CheckpointsCommand,
     FilesCommand,
     ClearPlanCommand,
 ]

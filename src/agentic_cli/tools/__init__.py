@@ -5,8 +5,6 @@ Provides function tools for agents including Python execution and knowledge base
 Tool System:
     The module provides a standardized tool system with:
     - ToolDefinition: Metadata-rich tool definitions
-    - ToolError: Standard error class for consistent error handling
-    - ToolResult: Standard result wrapper
     - ToolRegistry: Registry for tool management and discovery
     - register_tool: Decorator for easy tool registration
     - requires: Decorator to declare tool's manager requirements
@@ -14,7 +12,7 @@ Tool System:
 Framework Tools:
     - memory_tools: Working and long-term memory tools
     - planning_tools: Flat markdown plan tools (save_plan, get_plan)
-    - hitl_tools: Human-in-the-loop approval and checkpoint tools
+    - hitl_tools: Human-in-the-loop approval tools
     - web_search: Web search with pluggable backends (Tavily, Brave)
 
 For resilience patterns, use tenacity, pybreaker, aiolimiter directly.
@@ -26,7 +24,8 @@ from typing import Any, Callable, Literal, TypeVar
 
 # Type for manager requirements
 ManagerRequirement = Literal[
-    "memory_manager", "plan_store", "task_store", "approval_manager", "checkpoint_manager", "llm_summarizer"
+    "memory_manager", "plan_store", "task_store", "kb_manager", "user_kb_manager",
+    "approval_manager", "llm_summarizer",
 ]
 
 F = TypeVar("F", bound=Callable)
@@ -105,12 +104,14 @@ from agentic_cli.tools.file_write import write_file, edit_file
 
 from agentic_cli.tools.knowledge_tools import (
     search_knowledge_base,
-    ingest_to_knowledge_base,
+    ingest_document,
+    read_document,
+    list_documents,
+    open_document,
 )
 from agentic_cli.tools.arxiv_tools import (
     search_arxiv,
     fetch_arxiv_paper,
-    analyze_arxiv_paper,
 )
 from agentic_cli.tools.execution_tools import execute_python
 from agentic_cli.tools.interaction_tools import ask_clarification
@@ -120,13 +121,9 @@ from agentic_cli.tools.registry import (
     ToolCategory,
     PermissionLevel,
     ToolDefinition,
-    ToolError,
-    ToolResult,
     ToolRegistry,
-    ErrorCode,
     get_registry,
     register_tool,
-    with_result_wrapper,
 )
 
 # Re-export google_search_tool from ADK for convenience
@@ -137,13 +134,9 @@ __all__ = [
     "ToolCategory",
     "PermissionLevel",
     "ToolDefinition",
-    "ToolError",
-    "ToolResult",
     "ToolRegistry",
-    "ErrorCode",
     "get_registry",
     "register_tool",
-    "with_result_wrapper",
     # Manager requirements decorator
     "requires",
     "require_context",
@@ -172,10 +165,12 @@ __all__ = [
     "google_search_tool",
     # Standard tool functions (ready to use with agents)
     "search_knowledge_base",
-    "ingest_to_knowledge_base",
+    "ingest_document",
+    "read_document",
+    "list_documents",
+    "open_document",
     "search_arxiv",
     "fetch_arxiv_paper",
-    "analyze_arxiv_paper",
     "execute_python",
     "ask_clarification",
     # Framework tool modules (lazy loaded)

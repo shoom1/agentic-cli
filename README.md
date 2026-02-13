@@ -344,7 +344,7 @@ agent = AgentConfig(
 )
 
 # Or call directly
-results = web_search("Python async programming", max_results=5)
+results = await web_search("Python async programming", max_results=5)
 # Returns: {"results": [{"title": "...", "url": "...", "snippet": "..."}], ...}
 ```
 
@@ -357,7 +357,7 @@ Fetch web content and summarize with LLM:
 ```python
 from agentic_cli.tools import web_fetch
 
-result = web_fetch(
+result = await web_fetch(
     url="https://example.com/article",
     prompt="Extract the main points from this article",
 )
@@ -371,16 +371,13 @@ Features: URL validation, robots.txt compliance, SSRF protection, content cachin
 Search and analyze academic papers:
 
 ```python
-from agentic_cli.tools import search_arxiv, fetch_arxiv_paper, analyze_arxiv_paper
+from agentic_cli.tools import search_arxiv, fetch_arxiv_paper
 
 # Search papers
 results = search_arxiv("transformer attention", max_results=10, categories=["cs.CL"])
 
 # Fetch paper details
 paper = fetch_arxiv_paper("1706.03762")  # "Attention Is All You Need"
-
-# Analyze with LLM
-analysis = await analyze_arxiv_paper("1706.03762", "Summarize the key contributions")
 ```
 
 #### File Operations
@@ -409,8 +406,8 @@ result = list_dir("src/", include_hidden=False)
 # Returns: {"success": True, "entries": [...]}
 
 # Compare files or text
-result = diff_compare(source1="old.txt", source2="new.txt")
-# Returns: {"success": True, "diff": "...", "has_changes": True}
+result = diff_compare(source_a="old.txt", source_b="new.txt")
+# Returns: {"success": True, "diff": "...", "similarity": 0.85}
 ```
 
 **WRITE Tools (Caution)**
@@ -498,8 +495,9 @@ class MyCommand(Command):
 
 # In your app
 class MyApp(BaseCLIApp):
-    def get_custom_commands(self) -> list[Command]:
-        return [MyCommand()]
+    def register_commands(self) -> None:
+        super().register_commands()
+        self.command_registry.register(MyCommand())
 ```
 
 ## Events
@@ -562,7 +560,7 @@ See the `examples/` directory for complete working examples:
 **Feature Demos**
 - **arxiv_demo.py** - ArXiv paper search and analysis
 - **fileops_demo.py** - File operation tools (read, write, grep, glob)
-- **memory_demo.py** - Working and long-term memory management
+- **memory_demo.py** - Memory persistence system
 - **planning_demo.py** - Task graph and planning tools
 - **shell_demo.py** - Shell security pattern detection
 - **webfetch_demo.py** - Web fetching and summarization
@@ -612,27 +610,43 @@ agentic-cli/
 │   ├── __init__.py           # Package exports
 │   ├── config.py             # BaseSettings, SettingsContext
 │   ├── constants.py          # Shared constants (truncation, limits)
+│   ├── resolvers.py          # Model/path constants (GOOGLE_MODELS, etc.)
+│   ├── settings_persistence.py
 │   ├── logging.py            # Structlog configuration
 │   ├── cli/
 │   │   ├── app.py            # BaseCLIApp
 │   │   ├── commands.py       # Command, CommandRegistry
 │   │   ├── builtin_commands.py
 │   │   ├── workflow_controller.py  # Workflow orchestration
-│   │   └── message_processor.py    # Event stream processing
+│   │   ├── message_processor.py    # Event stream processing
+│   │   └── settings*.py      # Settings UI (introspection, dialog)
 │   ├── workflow/
 │   │   ├── base_manager.py   # BaseWorkflowManager (abstract)
 │   │   ├── events.py         # WorkflowEvent, EventType
 │   │   ├── config.py         # AgentConfig
 │   │   ├── context.py        # Context variables for tools
 │   │   ├── thinking.py       # ThinkingDetector
-│   │   ├── adk_manager.py    # GoogleADKWorkflowManager
+│   │   ├── task_progress.py  # Task progress events
+│   │   ├── tool_summaries.py # Tool result summaries
+│   │   ├── settings.py       # WorkflowSettingsMixin
+│   │   ├── adk/              # ADK orchestrator
+│   │   │   ├── manager.py    # GoogleADKWorkflowManager
+│   │   │   ├── event_processor.py  # ADK event processing
+│   │   │   └── llm_event_logger.py # LLM traffic logging
 │   │   └── langgraph/        # LangGraph submodule
 │   │       ├── manager.py    # LangGraphWorkflowManager
-│   │       ├── state.py      # AgentState, CheckpointData
-│   │       └── persistence/  # Checkpointers and stores
+│   │       ├── graph_builder.py # Graph + LLM factory
+│   │       ├── state.py      # AgentState
+│   │       ├── persistence/  # Checkpointers and stores
+│   │       └── tools/        # LangChain-compatible wrappers
 │   ├── tools/
 │   │   ├── registry.py       # ToolRegistry, ToolCategory, PermissionLevel
 │   │   ├── executor.py       # SafePythonExecutor
+│   │   ├── arxiv_tools.py    # search_arxiv, fetch_arxiv_paper
+│   │   ├── arxiv_source.py   # ArxivSearchSource
+│   │   ├── execution_tools.py # execute_python
+│   │   ├── interaction_tools.py # ask_clarification
+│   │   ├── knowledge_tools.py # search/ingest_to_knowledge_base
 │   │   ├── file_read.py      # read_file, diff_compare
 │   │   ├── file_write.py     # write_file, edit_file
 │   │   ├── grep_tool.py      # grep (pattern search)
@@ -642,8 +656,7 @@ agentic-cli/
 │   │   ├── memory_tools.py   # MemoryStore, save/search_memory
 │   │   ├── planning_tools.py # PlanStore, save/get_plan
 │   │   ├── task_tools.py     # TaskStore, save/get_tasks
-│   │   ├── hitl_tools.py     # request_approval, create_checkpoint
-│   │   ├── standard.py       # ArXiv tools, ask_clarification
+│   │   ├── hitl_tools.py     # request_approval, ApprovalManager
 │   │   └── shell/            # Shell executor with security
 │   │       ├── executor.py   # Main entry point (disabled by default)
 │   │       ├── tokenizer.py  # Command parsing
@@ -655,15 +668,12 @@ agentic-cli/
 │   │   ├── models.py         # Document, SearchResult
 │   │   ├── embeddings.py     # EmbeddingService
 │   │   ├── vector_store.py   # VectorStore
-│   │   └── sources.py        # ArxivSearchSource, SearchSourceRegistry
-│   ├── persistence/
-│   │   ├── session.py        # SessionPersistence
-│   │   ├── artifacts.py      # ArtifactManager
-│   │   └── _utils.py         # Atomic write utilities
-│   └── hitl/
-│       ├── approval.py       # ApprovalManager
-│       ├── checkpoints.py    # CheckpointManager
-│       └── config.py         # HITLConfig
+│   │   ├── _mocks.py         # MockEmbeddingService, MockVectorStore
+│   │   └── sources.py        # ArxivSearchSource
+│   └── persistence/
+│       ├── session.py        # SessionPersistence
+│       ├── artifacts.py      # ArtifactManager
+│       └── _utils.py         # Atomic write utilities
 ├── examples/
 │   ├── hello_agent.py        # Basic ADK example
 │   ├── hello_langgraph.py    # Basic LangGraph example

@@ -4,8 +4,6 @@ from agentic_cli.persistence.artifacts import ArtifactManager, Artifact, Artifac
 from agentic_cli.persistence.session import (
     SessionPersistence,
     SessionSnapshot,
-    StateSnapshot,
-    ToolCallRecord,
 )
 
 __all__ = [
@@ -14,6 +12,4 @@ __all__ = [
     "ArtifactType",
     "SessionPersistence",
     "SessionSnapshot",
-    "StateSnapshot",
-    "ToolCallRecord",
 ]

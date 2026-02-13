@@ -10,7 +10,14 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from agentic_cli.persistence._utils import atomic_write_json, atomic_write_text
+from agentic_cli.logging import Loggers
+from agentic_cli.persistence._utils import (
+    atomic_write_json,
+    atomic_write_text,
+    sanitize_filename,
+)
+
+logger = Loggers.persistence()
 
 if TYPE_CHECKING:
     from agentic_cli.config import BaseSettings
@@ -112,10 +119,7 @@ class ArtifactManager:
         """Get the file path for an artifact."""
         subdir = self.SUBDIRS[artifact.artifact_type]
         extension = self.EXTENSIONS[artifact.artifact_type]
-        # Sanitize name for filesystem
-        safe_name = "".join(
-            c if c.isalnum() or c in "-_" else "_" for c in artifact.name
-        )
+        safe_name = sanitize_filename(artifact.name)
         return self.workspace_path / subdir / f"{safe_name}{extension}"
 
     def _get_index_path(self) -> Path:
@@ -135,16 +139,19 @@ class ArtifactManager:
         """
         index_path = self._get_index_path()
         if index_path.exists():
-            with open(index_path, "r") as f:
-                data = json.load(f)
-            # Migrate from legacy list format if needed
-            if isinstance(data.get("artifacts"), list):
-                migrated: dict[str, dict] = {}
-                for entry in data["artifacts"]:
-                    key = self._make_key(entry["name"], entry["artifact_type"])
-                    migrated[key] = entry
-                return {"artifacts": migrated}
-            return data
+            try:
+                with open(index_path, "r") as f:
+                    data = json.load(f)
+                # Migrate from legacy list format if needed
+                if isinstance(data.get("artifacts"), list):
+                    migrated: dict[str, dict] = {}
+                    for entry in data["artifacts"]:
+                        key = self._make_key(entry["name"], entry["artifact_type"])
+                        migrated[key] = entry
+                    return {"artifacts": migrated}
+                return data
+            except (json.JSONDecodeError, KeyError) as exc:
+                logger.debug("artifact_index_load_failed", error=str(exc))
         return {"artifacts": {}}
 
     def _save_index(self, index: dict) -> None:

@@ -22,11 +22,8 @@ Usage:
 import sys
 import time
 
-from agentic_cli.knowledge_base.sources import (
-    ArxivSearchSource,
-    SearchSourceResult,
-    get_search_registry,
-)
+from agentic_cli.knowledge_base.sources import SearchSourceResult
+from agentic_cli.tools.arxiv_source import ArxivSearchSource
 
 
 # =============================================================================
@@ -234,34 +231,6 @@ def demo_rate_limiting():
         print()
 
 
-def demo_registry_integration():
-    """Demo integration with search source registry."""
-    print("\n" + "=" * 60)
-    print("Registry Integration Demo")
-    print("=" * 60)
-
-    registry = get_search_registry()
-
-    # List registered sources
-    sources = registry.list_sources()
-    print(f"  Registered sources: {[s.name for s in sources]}")
-
-    # Get arXiv source from registry
-    arxiv = registry.get("arxiv")
-    if arxiv:
-        print(f"  arXiv source available: {arxiv.is_available()}")
-
-    # Search through registry
-    print("\n  Searching via registry...")
-    results = registry.search("reinforcement learning", sources=["arxiv"], max_results=2)
-
-    arxiv_results = results.get("arxiv", [])
-    print(f"  Results from arXiv: {len(arxiv_results)}")
-    for r in arxiv_results:
-        print(f"    - {r.title[:50]}...")
-    print()
-
-
 def main():
     """Run all demos."""
     print("\n" + "#" * 60)
@@ -292,7 +261,6 @@ def main():
     demo_sort_options()
     demo_caching()
     demo_rate_limiting()
-    demo_registry_integration()
 
     print("\n" + "#" * 60)
     print("#  Demo Complete!")

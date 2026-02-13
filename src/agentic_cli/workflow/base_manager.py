@@ -25,8 +25,9 @@ from agentic_cli.workflow.context import (
     set_context_memory_store,
     set_context_plan_store,
     set_context_task_store,
+    set_context_kb_manager,
+    set_context_user_kb_manager,
     set_context_approval_manager,
-    set_context_checkpoint_manager,
     set_context_llm_summarizer,
 )
 from agentic_cli.logging import Loggers
@@ -36,7 +37,8 @@ if TYPE_CHECKING:
     from agentic_cli.tools.memory_tools import MemoryStore
     from agentic_cli.tools.planning_tools import PlanStore
     from agentic_cli.tools.task_tools import TaskStore
-    from agentic_cli.hitl import ApprovalManager, CheckpointManager
+    from agentic_cli.knowledge_base import KnowledgeBaseManager
+    from agentic_cli.tools.hitl_tools import ApprovalManager
 
 logger = Loggers.workflow()
 
@@ -102,8 +104,9 @@ class BaseWorkflowManager(ABC):
         self._memory_manager: "MemoryStore | None" = None
         self._plan_store: "PlanStore | None" = None
         self._task_store: "TaskStore | None" = None
+        self._kb_manager: "KnowledgeBaseManager | None" = None
+        self._user_kb_manager: "KnowledgeBaseManager | None" = None
         self._approval_manager: "ApprovalManager | None" = None
-        self._checkpoint_manager: "CheckpointManager | None" = None
         self._llm_summarizer: Any | None = None
 
     @property
@@ -147,14 +150,19 @@ class BaseWorkflowManager(ABC):
         return self._task_store
 
     @property
+    def kb_manager(self) -> "KnowledgeBaseManager | None":
+        """Get the project-scoped knowledge base manager (if required by tools)."""
+        return self._kb_manager
+
+    @property
+    def user_kb_manager(self) -> "KnowledgeBaseManager | None":
+        """Get the user-scoped knowledge base manager (if required by tools)."""
+        return self._user_kb_manager
+
+    @property
     def approval_manager(self) -> "ApprovalManager | None":
         """Get the approval manager (if required by tools)."""
         return self._approval_manager
-
-    @property
-    def checkpoint_manager(self) -> "CheckpointManager | None":
-        """Get the checkpoint manager (if required by tools)."""
-        return self._checkpoint_manager
 
     @property
     def llm_summarizer(self) -> Any | None:
@@ -195,13 +203,34 @@ class BaseWorkflowManager(ABC):
             from agentic_cli.tools.task_tools import TaskStore
             self._task_store = TaskStore(self._settings)
 
-        if "approval_manager" in self._required_managers and self._approval_manager is None:
-            from agentic_cli.hitl import ApprovalManager
-            self._approval_manager = ApprovalManager()
+        if "kb_manager" in self._required_managers and self._kb_manager is None:
+            from pathlib import Path
+            from agentic_cli.knowledge_base import KnowledgeBaseManager
 
-        if "checkpoint_manager" in self._required_managers and self._checkpoint_manager is None:
-            from agentic_cli.hitl import CheckpointManager
-            self._checkpoint_manager = CheckpointManager()
+            use_mock = self._settings.knowledge_base_use_mock
+            project_kb_dir = Path.cwd() / f".{self._settings.app_name}" / "knowledge_base"
+            user_kb_dir = self._settings.knowledge_base_dir
+
+            # Project KB (agent read-write)
+            self._kb_manager = KnowledgeBaseManager(
+                settings=self._settings,
+                use_mock=use_mock,
+                base_dir=project_kb_dir,
+            )
+
+            # User KB (agent read-only) — reuse project instance if paths overlap
+            if project_kb_dir.resolve() != user_kb_dir.resolve():
+                self._user_kb_manager = KnowledgeBaseManager(
+                    settings=self._settings,
+                    use_mock=use_mock,
+                    base_dir=user_kb_dir,
+                )
+            else:
+                self._user_kb_manager = self._kb_manager
+
+        if "approval_manager" in self._required_managers and self._approval_manager is None:
+            from agentic_cli.tools.hitl_tools import ApprovalManager
+            self._approval_manager = ApprovalManager()
 
         if "llm_summarizer" in self._required_managers and self._llm_summarizer is None:
             self._llm_summarizer = self._create_summarizer()
@@ -231,8 +260,9 @@ class BaseWorkflowManager(ABC):
             set_context_memory_store(self._memory_manager),
             set_context_plan_store(self._plan_store),
             set_context_task_store(self._task_store),
+            set_context_kb_manager(self._kb_manager),
+            set_context_user_kb_manager(self._user_kb_manager),
             set_context_approval_manager(self._approval_manager),
-            set_context_checkpoint_manager(self._checkpoint_manager),
             set_context_llm_summarizer(self._llm_summarizer),
         ]
         try:

@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.3] - 2026-02-12
+
+### Changed
+- **Overengineering Cleanup**: Removed ~550 lines of dead code — StateSnapshot, SearchSourceRegistry, unused settings/tool fields, dead ToolRegistry methods, dead command APIs
+- **Inlined Resolvers**: ModelResolver and PathResolver inlined into BaseSettings (`resolvers.py` now contains only constants)
+- **HITL Consolidation**: Merged `hitl/` package into single `tools/hitl_tools.py`; removed `create_checkpoint` tool
+- **Persistence Hardening**: Extracted `sanitize_filename` utility, hardened atomic writes in `persistence/_utils.py`
+- **Test Mocks Relocated**: MockEmbeddingService and MockVectorStore moved to `knowledge_base/_mocks.py`
+
+### Fixed
+- Broken example demos: updated stale imports in arxiv_demo, fileops_demo, shell_demo, websearch_demo
+- Disruptive `logger.error` in background init bypassing CLI UI
+- Research demo: removed stale README, trimmed prompt bloat
+
+### Removed
+- `create_checkpoint` tool (HITL simplified to `request_approval` only)
+- `SearchSourceRegistry` class (unused abstraction)
+- `StateSnapshot`, `ToolCallRecord` data classes (unused)
+- 3 unused conftest test fixtures
+
 ## [0.4.2] - 2026-02-08
 
 ### Added

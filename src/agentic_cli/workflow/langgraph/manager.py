@@ -57,7 +57,7 @@ class LangGraphSummarizer:
             Summarized text response.
         """
         # Use the manager's generate_simple method
-        return await self._manager.generate_simple(prompt, max_tokens=1000)
+        return await self._manager.generate_simple(prompt, max_tokens=2000)
 
 
 class LangGraphWorkflowManager(BaseWorkflowManager):

@@ -12,10 +12,9 @@ Usage:
 """
 
 from examples.research_demo.app import ResearchDemoApp
-from examples.research_demo.settings import ResearchDemoSettings, get_settings
+from examples.research_demo.settings import ResearchDemoSettings
 
 __all__ = [
     "ResearchDemoApp",
     "ResearchDemoSettings",
-    "get_settings",
 ]

@@ -7,7 +7,7 @@ Agentic CLI is a shared library providing the core infrastructure for building d
 ## Tech Stack
 
 - **Language**: Python 3.12+
-- **CLI UI**: `thinking_prompt` - enhanced CLI with thinking boxes and markdown
+- **CLI UI**: `thinking-prompt` - enhanced CLI with thinking boxes and markdown
 - **Workflow**: Google ADK + LangGraph - dual orchestration backends (selectable via settings)
 - **Config**: `pydantic-settings` - type-safe configuration
 - **Logging**: `structlog` - structured logging
@@ -20,7 +20,7 @@ agentic-cli/
 │   ├── __init__.py           # Package exports, lazy imports
 │   ├── config.py             # BaseSettings (pydantic-settings)
 │   ├── constants.py          # Shared constants, truncate()
-│   ├── resolvers.py          # ModelResolver, PathResolver
+│   ├── resolvers.py          # Model/path constants (GOOGLE_MODELS, etc.)
 │   ├── settings_persistence.py
 │   ├── logging.py
 │   ├── cli/
@@ -63,24 +63,21 @@ agentic-cli/
 │   │   ├── memory_tools.py   # save_memory, search_memory + MemoryStore
 │   │   ├── planning_tools.py # save_plan, get_plan + PlanStore
 │   │   ├── task_tools.py     # save_tasks, get_tasks + TaskStore
-│   │   ├── hitl_tools.py     # request_approval, create_checkpoint
+│   │   ├── hitl_tools.py     # request_approval + ApprovalManager, HITLConfig
 │   │   ├── shell/            # 8-layer shell security
 │   │   └── webfetch/         # Fetcher, converter, validator, robots
-│   ├── hitl/
-│   │   ├── config.py         # ApprovalRule, HITLConfig
-│   │   ├── approval.py       # ApprovalManager
-│   │   └── checkpoints.py    # CheckpointManager
 │   ├── knowledge_base/
 │   │   ├── models.py         # Document, SearchResult
 │   │   ├── embeddings.py     # EmbeddingService
 │   │   ├── vector_store.py   # VectorStore (FAISS)
+│   │   ├── _mocks.py         # MockEmbeddingService, MockVectorStore
 │   │   └── manager.py        # KnowledgeBaseManager
 │   └── persistence/
 │       ├── session.py        # SessionPersistence
 │       ├── artifacts.py      # ArtifactManager
 │       └── _utils.py         # Atomic write utilities
 ├── tests/
-│   ├── conftest.py           # MockContext, MockVectorStore, MockEmbeddingService
+│   ├── conftest.py           # MockContext, shared fixtures
 │   ├── test_*.py             # Unit tests
 │   ├── tools/                # Tool-specific tests
 │   └── integration/          # ADK & LangGraph pipeline tests
@@ -110,10 +107,12 @@ conda run -n agenticcli python -c "from agentic_cli import BaseCLIApp; print(Bas
 - **main**: Stable branch, matches latest release. Only updated via merges from `develop` when releasing.
 - **develop**: Integration branch for ongoing work. Small fixes can be committed directly here.
 - **feature/\***: Feature branches for larger changes. Branch from `develop`, merge back to `develop`.
+- **fix/\***: Fix branches for fixing issues. Branch from `develop`, merge back to `develop`.
+- **refactor/\***: For larger refactoring changes. Branch from `develop`, merge back to `develop`.
 
 Workflow:
 1. For small fixes: commit directly to `develop`
-2. For features: create `feature/<name>` from `develop`, work there, merge back to `develop`
+2. For features: create `feature/<name>` (or `fix/<name>` or `refactor/<name>`) from `develop`, work there, merge back to `develop`
 3. When ready to release: merge `develop` → `main` and tag the release
 
 ## Development Principles
@@ -133,7 +132,7 @@ Workflow:
 ### Key Design Patterns
 - **Tool error handling**: All tools return `{"success": bool, ...}` dicts. Never raise `ToolError`.
 - **Tool registration**: Use `@register_tool(category=..., permission_level=..., description=...)` decorator. Tools are auto-discovered via the global `ToolRegistry`.
-- **Store consolidation**: Stores (MemoryStore, PlanStore, TaskStore) live inside their tool files (e.g. `memory_tools.py`), not in separate packages.
+- **Store consolidation**: Stores and managers (MemoryStore, PlanStore, TaskStore, ApprovalManager) live inside their tool files (e.g. `memory_tools.py`, `hitl_tools.py`), not in separate packages.
 - **Context access**: Tools use `get_context_*()` functions from `workflow.context` to access managers and stores via ContextVars.
 - **Atomic writes**: Use `atomic_write_json`/`atomic_write_text` from `persistence/_utils.py` for file persistence.
 
@@ -153,6 +152,6 @@ Available session methods:
 
 - **Framework**: pytest with `asyncio_mode = "auto"`
 - **MockContext**: From `tests/conftest.py` — provides isolated settings and temp dirs for all tests
-- **MockVectorStore** and **MockEmbeddingService**: In-tree mocks for testing without ML dependencies
+- **MockVectorStore** and **MockEmbeddingService**: In `knowledge_base/_mocks.py` for testing without ML dependencies
 - **FAISS tests**: Guard with `pytest.importorskip("faiss")` since FAISS is not installed in dev env
 - **Integration tests**: `tests/integration/` covers ADK and LangGraph pipeline tests

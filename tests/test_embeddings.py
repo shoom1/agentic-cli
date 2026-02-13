@@ -2,7 +2,8 @@
 
 import pytest
 
-from agentic_cli.knowledge_base.embeddings import EmbeddingService, MockEmbeddingService
+from agentic_cli.knowledge_base.embeddings import EmbeddingService
+from agentic_cli.knowledge_base._mocks import MockEmbeddingService
 
 
 class TestMockEmbeddingService:

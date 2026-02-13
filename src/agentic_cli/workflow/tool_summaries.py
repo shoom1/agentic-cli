@@ -90,8 +90,35 @@ def _search_memory(r: dict) -> str:
     return f"{r['count']} memories found"
 
 
+def _web_search(r: dict) -> str:
+    results = r.get("results", [])
+    query = truncate(r.get("query", ""), 60)
+    first_line = f'"{query}" — Found {len(results)} results'
+    if not results:
+        return first_line
+    lines = [first_line]
+    show = results[:5]
+    for i, res in enumerate(show):
+        title = truncate(res["title"], 60)
+        prefix = "└─" if i == len(show) - 1 else "├─"
+        lines.append(f"  {prefix} {title}")
+    return "\n".join(lines)
+
+
 def _search_arxiv(r: dict) -> str:
-    return f"Found {r['total_found']} papers"
+    total = r["total_found"]
+    query = truncate(r.get("query", ""), 60)
+    first_line = f'"{query}" — Found {total} papers'
+    papers = r.get("papers", [])
+    if not papers:
+        return first_line
+    lines = [first_line]
+    show = papers[:5]
+    for i, p in enumerate(show):
+        title = truncate(p["title"], 60)
+        prefix = "└─" if i == len(show) - 1 else "├─"
+        lines.append(f"  {prefix} {title}")
+    return "\n".join(lines)
 
 
 def _fetch_arxiv_paper(r: dict) -> str:
@@ -99,14 +126,26 @@ def _fetch_arxiv_paper(r: dict) -> str:
     return truncate(title, TOOL_SUMMARY_MAX_LENGTH)
 
 
-def _analyze_arxiv_paper(r: dict) -> str:
-    return "Analysis complete"
-
-
-def _ingest_to_knowledge_base(r: dict) -> str:
+def _ingest_document(r: dict) -> str:
     title = r["title"]
     chunks = r["chunks_created"]
     return f"Ingested '{truncate(title, 40)}' ({chunks} chunks)"
+
+
+def _read_document(r: dict) -> str:
+    title = r["title"]
+    trunc = " (truncated)" if r.get("truncated") else ""
+    return f"{truncate(title, 70)}{trunc}"
+
+
+def _list_documents(r: dict) -> str:
+    count = r["count"]
+    return f"{count} document{'s' if count != 1 else ''}"
+
+
+def _open_document(r: dict) -> str:
+    title = r.get("title", "")
+    return f"Opened: {truncate(title, 80)}"
 
 
 def _request_approval(r: dict) -> str:
@@ -116,10 +155,6 @@ def _request_approval(r: dict) -> str:
     if reason:
         return f"Rejected: {truncate(reason, TOOL_SUMMARY_MAX_LENGTH - 10)}"
     return "Rejected"
-
-
-def _create_checkpoint(r: dict) -> str:
-    return f"User: {r['action']}"
 
 
 _TOOL_FORMATTERS: dict[str, Callable[[dict[str, Any]], str]] = {
@@ -135,12 +170,14 @@ _TOOL_FORMATTERS: dict[str, Callable[[dict[str, Any]], str]] = {
     "get_tasks": _get_tasks,
     "get_plan": _get_plan,
     "search_memory": _search_memory,
+    "web_search": _web_search,
     "search_arxiv": _search_arxiv,
     "fetch_arxiv_paper": _fetch_arxiv_paper,
-    "analyze_arxiv_paper": _analyze_arxiv_paper,
-    "ingest_to_knowledge_base": _ingest_to_knowledge_base,
+    "ingest_document": _ingest_document,
+    "read_document": _read_document,
+    "list_documents": _list_documents,
+    "open_document": _open_document,
     "request_approval": _request_approval,
-    "create_checkpoint": _create_checkpoint,
 }
 
 

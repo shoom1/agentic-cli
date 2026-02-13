@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from agentic_cli.knowledge_base.manager import KnowledgeBaseManager
 from agentic_cli.knowledge_base.models import (
     Document,
     DocumentChunk,
@@ -13,6 +14,19 @@ from agentic_cli.knowledge_base.models import (
     SourceType,
     WebResult,
 )
+from agentic_cli.knowledge_base._mocks import MockEmbeddingService, MockVectorStore
+
+
+def _make_mock_kb(base_dir: Path, **kwargs) -> KnowledgeBaseManager:
+    """Create a KnowledgeBaseManager with mock services injected."""
+    emb = MockEmbeddingService()
+    vs = MockVectorStore(index_path=base_dir / "embeddings" / "index.mock")
+    return KnowledgeBaseManager(
+        base_dir=base_dir,
+        embedding_service=emb,
+        vector_store=vs,
+        **kwargs,
+    )
 
 
 class TestSourceType:
@@ -25,6 +39,7 @@ class TestSourceType:
         assert SourceType.WEB.value == "web"
         assert SourceType.INTERNAL.value == "internal"
         assert SourceType.USER.value == "user"
+        assert SourceType.LOCAL.value == "local"
 
 
 class TestDocumentChunk:
@@ -139,6 +154,17 @@ class TestDocument:
         assert doc.updated_at
         assert doc.chunks == []
 
+    def test_create_document_with_summary(self):
+        """Test creating document with summary field."""
+        doc = Document.create(
+            title="Summarized Doc",
+            content="Full content here",
+            source_type=SourceType.USER,
+            summary="A brief summary",
+        )
+
+        assert doc.summary == "A brief summary"
+
     def test_create_document_minimal(self):
         """Test creating document with minimal arguments."""
         doc = Document.create(
@@ -150,6 +176,7 @@ class TestDocument:
         assert doc.source_url is None
         assert doc.file_path is None
         assert doc.metadata == {}
+        assert doc.summary == ""
 
     def test_document_with_file_path(self):
         """Test document with file path."""
@@ -169,6 +196,7 @@ class TestDocument:
             title="Test",
             content="Content",
             source_type=SourceType.WEB,
+            summary="A summary",
             source_url="https://example.com",
             file_path=Path("/test.txt"),
             created_at=datetime(2024, 1, 1, 12, 0, 0),
@@ -181,6 +209,7 @@ class TestDocument:
 
         assert data["id"] == "doc-1"
         assert data["title"] == "Test"
+        assert data["summary"] == "A summary"
         assert data["source_type"] == "web"
         assert data["source_url"] == "https://example.com"
         assert data["file_path"] == "/test.txt"
@@ -391,12 +420,8 @@ class TestWebResult:
 from agentic_cli.knowledge_base.sources import (
     SearchSource,
     SearchSourceResult,
-    SearchSourceRegistry,
-    ArxivSearchSource,
-    CachedSearchResult,
-    get_search_registry,
-    register_search_source,
 )
+from agentic_cli.tools.arxiv_source import ArxivSearchSource, CachedSearchResult
 from unittest.mock import patch, MagicMock
 
 
@@ -544,106 +569,6 @@ class TestSearchSourceWithApiKey:
             assert source.is_available() is True
 
 
-class TestSearchSourceRegistry:
-    """Tests for SearchSourceRegistry."""
-
-    def test_register_source(self):
-        """Test registering a source."""
-        registry = SearchSourceRegistry()
-        source = ConcreteSearchSource()
-
-        registry.register(source)
-
-        assert registry.get("test_source") is source
-
-    def test_unregister_source(self):
-        """Test unregistering a source."""
-        registry = SearchSourceRegistry()
-        source = ConcreteSearchSource()
-
-        registry.register(source)
-        registry.unregister("test_source")
-
-        assert registry.get("test_source") is None
-
-    def test_unregister_nonexistent(self):
-        """Test unregistering nonexistent source doesn't error."""
-        registry = SearchSourceRegistry()
-        registry.unregister("nonexistent")  # Should not raise
-
-    def test_list_sources(self):
-        """Test listing all sources."""
-        registry = SearchSourceRegistry()
-        source1 = ConcreteSearchSource()
-
-        registry.register(source1)
-        sources = registry.list_sources()
-
-        assert len(sources) == 1
-        assert source1 in sources
-
-    def test_list_available(self):
-        """Test listing available sources."""
-        registry = SearchSourceRegistry()
-        available_source = ConcreteSearchSource()
-        unavailable_source = SourceRequiringKey()
-
-        registry.register(available_source)
-        registry.register(unavailable_source)
-
-        with patch("agentic_cli.config.get_settings") as mock_settings:
-            mock_settings.return_value = MagicMock(serper_api_key=None)
-            available = registry.list_available()
-
-        assert len(available) == 1
-        assert available_source in available
-
-    def test_search_all_sources(self):
-        """Test searching all available sources."""
-        registry = SearchSourceRegistry()
-        source = ConcreteSearchSource()
-        registry.register(source)
-
-        results = registry.search("test query")
-
-        assert "test_source" in results
-        assert len(results["test_source"]) == 1
-        assert results["test_source"][0].title == "Result for: test query"
-
-    def test_search_specific_sources(self):
-        """Test searching specific sources only."""
-        registry = SearchSourceRegistry()
-        source1 = ConcreteSearchSource()
-        registry.register(source1)
-
-        results = registry.search("test query", sources=["test_source"])
-
-        assert "test_source" in results
-
-    def test_search_handles_errors(self):
-        """Test search handles source errors gracefully."""
-
-        class FailingSource(SearchSource):
-            @property
-            def name(self) -> str:
-                return "failing"
-
-            @property
-            def description(self) -> str:
-                return "Always fails"
-
-            def search(self, query: str, max_results: int = 10, **kwargs):
-                raise RuntimeError("Search failed")
-
-        registry = SearchSourceRegistry()
-        registry.register(FailingSource())
-
-        results = registry.search("test")
-
-        assert "failing" in results
-        assert results["failing"] == []
-
-
 class TestArxivSearchSource:
     """Tests for ArxivSearchSource."""
 
@@ -668,8 +593,8 @@ class TestArxivSearchSource:
         with patch.dict("sys.modules", {"feedparser": None}):
             # Force reimport to trigger ImportError path
             import importlib
-            import agentic_cli.knowledge_base.sources as sources_module
-            importlib.reload(sources_module)
+            import agentic_cli.tools.arxiv_source as arxiv_source_module
+            importlib.reload(arxiv_source_module)
 
         # Even if feedparser exists, we can test the return type
         # by checking it returns a list
@@ -706,13 +631,14 @@ class TestArxivSearchSource:
     @patch("feedparser.parse")
     def test_search_with_categories(self, mock_parse):
         """Test search with category filter."""
-        mock_parse.return_value = MagicMock(entries=[])
+        mock_parse.return_value = MagicMock(entries=[], bozo=False, status=200)
 
         source = ArxivSearchSource()
         source.search("test", categories=["cs.AI", "cs.LG"])
 
-        # Check the URL includes category filter
-        call_url = mock_parse.call_args[0][0]
+        # Check the URL includes category filter (URL-encoded)
+        from urllib.parse import unquote
+        call_url = unquote(mock_parse.call_args[0][0])
         assert "cat:cs.AI" in call_url
         assert "cat:cs.LG" in call_url
 
@@ -727,10 +653,10 @@ class TestArxivSearchSource:
         assert results == []
 
     @patch("feedparser.parse")
-    @patch("agentic_cli.knowledge_base.sources.time")
+    @patch("agentic_cli.tools.arxiv_source.time")
     def test_rate_limiting_enforced(self, mock_time_module, mock_parse):
         """Test rate limiting is enforced between requests."""
-        mock_parse.return_value = MagicMock(entries=[])
+        mock_parse.return_value = MagicMock(entries=[], bozo=False, status=200)
 
         # First call: time()=1.0 for check, time()=1.0 to record
         # Second call: time()=1.0 for check (elapsed=0, needs sleep), time()=1.0 to record
@@ -752,10 +678,10 @@ class TestArxivSearchSource:
         assert 0 < sleep_time <= source.rate_limit
 
     @patch("feedparser.parse")
-    @patch("agentic_cli.knowledge_base.sources.time")
+    @patch("agentic_cli.tools.arxiv_source.time")
     def test_rate_limiting_respects_elapsed_time(self, mock_time_module, mock_parse):
         """Test rate limiting accounts for time already elapsed."""
-        mock_parse.return_value = MagicMock(entries=[])
+        mock_parse.return_value = MagicMock(entries=[], bozo=False, status=200)
 
         # First call (3 time() calls): cache check, rate limit check, cache store
         # Second call (3 time() calls): cache check, rate limit check (elapsed=1s), cache store
@@ -773,7 +699,7 @@ class TestArxivSearchSource:
         assert 1.9 <= sleep_time <= 2.1  # Allow small tolerance
 
     @patch("feedparser.parse")
-    @patch("agentic_cli.knowledge_base.sources.time")
+    @patch("agentic_cli.tools.arxiv_source.time")
     def test_caching_returns_cached_results(self, mock_time_module, mock_parse):
         """Test that repeated queries return cached results without API call."""
         mock_time_module.time.return_value = 100.0
@@ -798,7 +724,7 @@ class TestArxivSearchSource:
         assert results1[0].title == results2[0].title
 
     @patch("feedparser.parse")
-    @patch("agentic_cli.knowledge_base.sources.time")
+    @patch("agentic_cli.tools.arxiv_source.time")
     def test_cache_expires_after_ttl(self, mock_time_module, mock_parse):
         """Test that cache expires after TTL."""
         # First call at t=100
@@ -823,13 +749,13 @@ class TestArxivSearchSource:
         assert mock_parse.call_count == 2
 
     @patch("feedparser.parse")
-    @patch("agentic_cli.knowledge_base.sources.time")
+    @patch("agentic_cli.tools.arxiv_source.time")
     def test_different_queries_not_cached(self, mock_time_module, mock_parse):
         """Test that different queries are not served from cache."""
         mock_time_module.time.return_value = 100.0
         mock_time_module.sleep = MagicMock()
 
-        mock_parse.return_value = MagicMock(entries=[])
+        mock_parse.return_value = MagicMock(entries=[], bozo=False, status=200)
 
         source = ArxivSearchSource()
 
@@ -860,7 +786,7 @@ class TestArxivSearchSource:
         assert source.max_cache_size == 50
 
     @patch("feedparser.parse")
-    @patch("agentic_cli.knowledge_base.sources.time")
+    @patch("agentic_cli.tools.arxiv_source.time")
     def test_cache_evicts_oldest_when_full(self, mock_time_module, mock_parse):
         """Test that oldest cache entries are evicted when max size is reached."""
         mock_time_module.sleep = MagicMock()
@@ -871,7 +797,7 @@ class TestArxivSearchSource:
             return float(time_counter[0])
         mock_time_module.time.side_effect = get_time
 
-        mock_parse.return_value = MagicMock(entries=[])
+        mock_parse.return_value = MagicMock(entries=[], bozo=False, status=200)
 
         source = ArxivSearchSource(max_cache_size=3)
 
@@ -906,12 +832,12 @@ class TestArxivSearchSource:
         assert len(source._cache) == 0
 
     @patch("feedparser.parse")
-    @patch("agentic_cli.knowledge_base.sources.time")
+    @patch("agentic_cli.tools.arxiv_source.time")
     def test_search_with_sort_by(self, mock_time_module, mock_parse):
         """Test search with sort_by parameter."""
         mock_time_module.time.return_value = 100.0
         mock_time_module.sleep = MagicMock()
-        mock_parse.return_value = MagicMock(entries=[])
+        mock_parse.return_value = MagicMock(entries=[], bozo=False, status=200)
 
         source = ArxivSearchSource()
         source.search("test", sort_by="lastUpdatedDate")
@@ -920,12 +846,12 @@ class TestArxivSearchSource:
         assert "sortBy=lastUpdatedDate" in call_url
 
     @patch("feedparser.parse")
-    @patch("agentic_cli.knowledge_base.sources.time")
+    @patch("agentic_cli.tools.arxiv_source.time")
     def test_search_with_sort_order(self, mock_time_module, mock_parse):
         """Test search with sort_order parameter."""
         mock_time_module.time.return_value = 100.0
         mock_time_module.sleep = MagicMock()
-        mock_parse.return_value = MagicMock(entries=[])
+        mock_parse.return_value = MagicMock(entries=[], bozo=False, status=200)
 
         source = ArxivSearchSource()
         source.search("test", sort_by="submittedDate", sort_order="ascending")
@@ -935,12 +861,12 @@ class TestArxivSearchSource:
         assert "sortOrder=ascending" in call_url
 
     @patch("feedparser.parse")
-    @patch("agentic_cli.knowledge_base.sources.time")
+    @patch("agentic_cli.tools.arxiv_source.time")
     def test_search_with_date_range(self, mock_time_module, mock_parse):
         """Test search with date range filter."""
         mock_time_module.time.return_value = 100.0
         mock_time_module.sleep = MagicMock()
-        mock_parse.return_value = MagicMock(entries=[])
+        mock_parse.return_value = MagicMock(entries=[], bozo=False, status=200)
 
         source = ArxivSearchSource()
         source.search("test", date_from="2024-01-01", date_to="2024-12-31")
@@ -952,12 +878,12 @@ class TestArxivSearchSource:
         assert "20241231" in call_url
 
     @patch("feedparser.parse")
-    @patch("agentic_cli.knowledge_base.sources.time")
+    @patch("agentic_cli.tools.arxiv_source.time")
     def test_search_sort_and_date_in_cache_key(self, mock_time_module, mock_parse):
         """Test that sort and date params are included in cache key."""
         mock_time_module.time.return_value = 100.0
         mock_time_module.sleep = MagicMock()
-        mock_parse.return_value = MagicMock(entries=[])
+        mock_parse.return_value = MagicMock(entries=[], bozo=False, status=200)
 
         source = ArxivSearchSource()
 
@@ -974,33 +900,171 @@ class TestArxivSearchSource:
         cache_key = source._make_cache_key("test", 10, None, "relevance", "descending", None, None)
         assert "relevance" in cache_key
 
+    @patch("feedparser.parse")
+    @patch("agentic_cli.tools.arxiv_source.time")
+    def test_http_403_returns_empty_and_not_cached(self, mock_time_module, mock_parse):
+        """Test that HTTP 403 (rate limited) returns empty and is NOT cached."""
+        mock_time_module.time.return_value = 100.0
+        mock_time_module.sleep = MagicMock()
 
-class TestDefaultRegistry:
-    """Tests for default registry functions."""
+        mock_feed = MagicMock()
+        mock_feed.status = 403
+        mock_feed.entries = []
+        mock_feed.bozo = False
+        mock_parse.return_value = mock_feed
 
-    def test_get_search_registry(self):
-        """Test getting default registry."""
-        registry = get_search_registry()
+        source = ArxivSearchSource()
+        results = source.search("test query")
 
-        # Check registry has expected methods (duck typing)
-        assert hasattr(registry, "register")
-        assert hasattr(registry, "get")
-        assert hasattr(registry, "search")
-        # Default registry should have built-in sources
-        assert registry.get("arxiv") is not None
+        assert results == []
+        assert len(source._cache) == 0  # Should NOT be cached
 
-    def test_register_search_source(self):
-        """Test registering to default registry."""
-        registry = get_search_registry()
+    @patch("feedparser.parse")
+    @patch("agentic_cli.tools.arxiv_source.time")
+    def test_http_429_returns_empty_and_not_cached(self, mock_time_module, mock_parse):
+        """Test that HTTP 429 (too many requests) returns empty and is NOT cached."""
+        mock_time_module.time.return_value = 100.0
+        mock_time_module.sleep = MagicMock()
 
-        # Create a custom source
-        custom = ConcreteSearchSource()
+        mock_feed = MagicMock()
+        mock_feed.status = 429
+        mock_feed.entries = []
+        mock_feed.bozo = False
+        mock_parse.return_value = mock_feed
 
-        # Register it
-        register_search_source(custom)
+        source = ArxivSearchSource()
+        results = source.search("test query")
 
-        # It should be in the default registry
-        assert registry.get("test_source") is custom
+        assert results == []
+        assert len(source._cache) == 0  # Should NOT be cached
 
-        # Clean up
-        registry.unregister("test_source")
+    @patch("feedparser.parse")
+    @patch("agentic_cli.tools.arxiv_source.time")
+    def test_bozo_feed_error_returns_empty_and_not_cached(self, mock_time_module, mock_parse):
+        """Test that bozo feed errors with no entries return empty and are NOT cached."""
+        mock_time_module.time.return_value = 100.0
+        mock_time_module.sleep = MagicMock()
+
+        mock_feed = MagicMock()
+        mock_feed.status = 200
+        mock_feed.bozo = True
+        mock_feed.bozo_exception = Exception("XML parsing error")
+        mock_feed.entries = []
+        mock_parse.return_value = mock_feed
+
+        source = ArxivSearchSource()
+        results = source.search("test query")
+
+        assert results == []
+        assert len(source._cache) == 0  # Should NOT be cached
+
+    @patch("feedparser.parse")
+    @patch("agentic_cli.tools.arxiv_source.time")
+    def test_successful_empty_results_are_cached(self, mock_time_module, mock_parse):
+        """Test that legitimate empty results (HTTP 200, no bozo) ARE cached."""
+        mock_time_module.time.return_value = 100.0
+        mock_time_module.sleep = MagicMock()
+
+        mock_feed = MagicMock()
+        mock_feed.status = 200
+        mock_feed.bozo = False
+        mock_feed.entries = []
+        mock_parse.return_value = mock_feed
+
+        source = ArxivSearchSource()
+        results = source.search("test query")
+
+        assert results == []
+        assert len(source._cache) == 1  # SHOULD be cached (legitimate empty result)
+
+
+# ============================================================================
+# KnowledgeBaseManager base_dir and find_document tests
+# ============================================================================
+
+
+class TestBaseDirOverride:
+    """Tests for the base_dir parameter in KnowledgeBaseManager.__init__."""
+
+    def test_base_dir_overrides_settings(self, tmp_path):
+        """When base_dir is provided, all paths derive from it."""
+        custom_dir = tmp_path / "custom_kb"
+        kb = _make_mock_kb(custom_dir)
+
+        assert kb.kb_dir == custom_dir
+        assert kb.documents_dir == custom_dir / "documents"
+        assert kb.embeddings_dir == custom_dir / "embeddings"
+        assert kb.files_dir == custom_dir / "files"
+        assert kb.metadata_path == custom_dir / "metadata.json"
+
+    def test_base_dir_creates_directories(self, tmp_path):
+        """base_dir creates all subdirectories on init."""
+        custom_dir = tmp_path / "new_kb"
+        _make_mock_kb(custom_dir)
+
+        assert custom_dir.is_dir()
+        assert (custom_dir / "documents").is_dir()
+        assert (custom_dir / "embeddings").is_dir()
+        assert (custom_dir / "files").is_dir()
+
+    def test_base_dir_with_settings(self, tmp_path):
+        """base_dir overrides settings paths but uses settings embedding config."""
+        custom_dir = tmp_path / "override_kb"
+        mock_settings = MagicMock()
+        mock_settings.knowledge_base_dir = tmp_path / "settings_kb"
+        mock_settings.knowledge_base_documents_dir = tmp_path / "settings_kb" / "documents"
+        mock_settings.knowledge_base_embeddings_dir = tmp_path / "settings_kb" / "embeddings"
+        mock_settings.embedding_model = "test-model"
+        mock_settings.embedding_batch_size = 16
+        mock_settings.knowledge_base_use_mock = True
+
+        kb = _make_mock_kb(custom_dir, settings=mock_settings)
+
+        # Paths come from base_dir, not settings
+        assert kb.kb_dir == custom_dir
+        assert kb.documents_dir == custom_dir / "documents"
+        # Settings KB dir was NOT used
+        assert not (tmp_path / "settings_kb").exists()
+
+
+class TestFindDocument:
+    """Tests for KnowledgeBaseManager.find_document()."""
+
+    @pytest.fixture
+    def kb(self, tmp_path):
+        """Create a KB with a test document."""
+        kb = _make_mock_kb(tmp_path / "kb")
+        kb.ingest_document(
+            content="Test document content.",
+            title="Neural Network Fundamentals",
+            source_type=SourceType.USER,
+        )
+        return kb
+
+    def test_find_document_by_exact_id(self, kb):
+        """Find document by exact ID."""
+        doc = list(kb._documents.values())[0]
+        found = kb.find_document(doc.id)
+        assert found is not None
+        assert found.id == doc.id
+
+    def test_find_document_by_id_prefix(self, kb):
+        """Find document by ID prefix."""
+        doc = list(kb._documents.values())[0]
+        prefix = doc.id[:8]
+        found = kb.find_document(prefix)
+        assert found is not None
+        assert found.id == doc.id
+
+    def test_find_document_by_title(self, kb):
+        """Find document by title substring (case-insensitive)."""
+        found = kb.find_document("neural network")
+        assert found is not None
+        assert found.title == "Neural Network Fundamentals"
+
+    def test_find_document_not_found(self, kb):
+        """Return None when document not found."""
+        found = kb.find_document("nonexistent-xyz-123")
+        assert found is None
+
+

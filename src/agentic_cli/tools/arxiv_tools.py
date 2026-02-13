@@ -1,6 +1,6 @@
 """ArXiv tools for agentic workflows.
 
-Provides tools for searching, fetching, and analyzing arXiv papers.
+Provides tools for searching and fetching arXiv paper metadata.
 """
 
 from typing import Any
@@ -20,7 +20,7 @@ def _get_arxiv_source():
     """Get or create the ArxivSearchSource instance."""
     global _arxiv_source
     if _arxiv_source is None:
-        from agentic_cli.knowledge_base.sources import ArxivSearchSource
+        from agentic_cli.tools.arxiv_source import ArxivSearchSource
         _arxiv_source = ArxivSearchSource()
     return _arxiv_source
 
@@ -81,18 +81,15 @@ def search_arxiv(
 
     Returns:
         Dictionary with search results and metadata
-
-    Raises:
-        ValueError: If sort_by or sort_order has an invalid value
     """
     # Validate sort options
     valid_sort_by = ("relevance", "lastUpdatedDate", "submittedDate")
     valid_sort_order = ("ascending", "descending")
 
     if sort_by not in valid_sort_by:
-        raise ValueError(f"sort_by must be one of {valid_sort_by}, got '{sort_by}'")
+        return {"success": False, "error": f"sort_by must be one of {valid_sort_by}, got '{sort_by}'"}
     if sort_order not in valid_sort_order:
-        raise ValueError(f"sort_order must be one of {valid_sort_order}, got '{sort_order}'")
+        return {"success": False, "error": f"sort_order must be one of {valid_sort_order}, got '{sort_order}'"}
 
     source = _get_arxiv_source()
     results = source.search(
@@ -104,6 +101,14 @@ def search_arxiv(
         date_from=date_from,
         date_to=date_to,
     )
+
+    # Check for errors (rate limiting, parse failures, etc.)
+    if source.last_error is not None:
+        return {
+            "success": False,
+            "error": source.last_error,
+            "query": query,
+        }
 
     # Convert SearchSourceResult to paper dict format
     papers = []
@@ -120,6 +125,7 @@ def search_arxiv(
         papers.append(paper)
 
     return {
+        "success": True,
         "papers": papers,
         "total_found": len(papers),
         "query": query,
@@ -129,9 +135,11 @@ def search_arxiv(
 @register_tool(
     category=ToolCategory.KNOWLEDGE,
     permission_level=PermissionLevel.SAFE,
-    description="Fetch metadata for a specific arXiv paper by ID or URL (title, authors, abstract, categories). Use this when you have a paper ID and need details.",
+    description="Fetch metadata for a specific arXiv paper by ID or URL. Returns title, authors, abstract, categories, and PDF URL.",
 )
-def fetch_arxiv_paper(arxiv_id: str) -> dict[str, Any]:
+async def fetch_arxiv_paper(
+    arxiv_id: str,
+) -> dict[str, Any]:
     """Fetch detailed information about a specific arXiv paper.
 
     Args:
@@ -139,7 +147,7 @@ def fetch_arxiv_paper(arxiv_id: str) -> dict[str, Any]:
                   Also accepts full arXiv URLs.
 
     Returns:
-        Dictionary with paper details or error information
+        Dictionary with paper metadata or error information.
     """
     try:
         import feedparser
@@ -181,48 +189,3 @@ def fetch_arxiv_paper(arxiv_id: str) -> dict[str, Any]:
     }
 
     return {"success": True, "paper": paper}
-
-
-@register_tool(
-    category=ToolCategory.KNOWLEDGE,
-    permission_level=PermissionLevel.SAFE,
-    description="Analyze an arXiv paper's abstract page using LLM-powered content extraction. Use this when you need deeper analysis beyond metadata (e.g., key contributions, methodology).",
-)
-async def analyze_arxiv_paper(arxiv_id: str, prompt: str) -> dict[str, Any]:
-    """Analyze an arXiv paper using LLM-powered content extraction.
-
-    Fetches the arXiv abstract page and uses an LLM to analyze it
-    based on the provided prompt.
-
-    Args:
-        arxiv_id: The arXiv paper ID (e.g., '1706.03762')
-        prompt: The analysis prompt (e.g., 'What is the main contribution?')
-
-    Returns:
-        Dictionary with analysis results or error information
-    """
-    from agentic_cli.tools.webfetch_tool import web_fetch
-
-    # Clean the arxiv_id
-    arxiv_id = _clean_arxiv_id(arxiv_id)
-
-    # Build the abstract URL
-    url = f"https://arxiv.org/abs/{arxiv_id}"
-
-    # Use web_fetch to get LLM analysis
-    result = await web_fetch(url, prompt)
-
-    if not result.get("success"):
-        return {
-            "success": False,
-            "arxiv_id": arxiv_id,
-            "error": result.get("error", "Failed to analyze paper"),
-        }
-
-    return {
-        "success": True,
-        "arxiv_id": arxiv_id,
-        "url": url,
-        "prompt": prompt,
-        "analysis": result.get("summary", ""),
-    }

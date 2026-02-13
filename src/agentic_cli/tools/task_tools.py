@@ -51,6 +51,14 @@ class TaskPriority(str, Enum):
     HIGH = "high"
 
 
+def _safe_enum(enum_cls, value, default):
+    """Convert value to enum, returning default if invalid."""
+    try:
+        return enum_cls(value)
+    except ValueError:
+        return default
+
+
 # ---------------------------------------------------------------------------
 # TaskItem / TaskStore – in-memory task tracking
 # ---------------------------------------------------------------------------
@@ -84,8 +92,8 @@ class TaskItem:
         return cls(
             id=data["id"],
             description=data["description"],
-            status=TaskStatus(data.get("status", "pending")),
-            priority=TaskPriority(data.get("priority", "medium")),
+            status=_safe_enum(TaskStatus, data.get("status", "pending"), TaskStatus.PENDING),
+            priority=_safe_enum(TaskPriority, data.get("priority", "medium"), TaskPriority.MEDIUM),
             tags=data.get("tags", []),
             created_at=data.get("created_at", ""),
             completed_at=data.get("completed_at", ""),
@@ -129,7 +137,7 @@ class TaskStore:
         ids: list[str] = []
         for task_data in tasks:
             task_id = task_data.get("id") or str(uuid.uuid4())[:8]
-            status = TaskStatus(task_data.get("status", "pending"))
+            status = _safe_enum(TaskStatus, task_data.get("status", "pending"), TaskStatus.PENDING)
             completed_at = task_data.get("completed_at", "")
             if status == TaskStatus.COMPLETED and not completed_at:
                 completed_at = now
@@ -137,7 +145,7 @@ class TaskStore:
                 id=task_id,
                 description=task_data["description"],
                 status=status,
-                priority=TaskPriority(task_data.get("priority", "medium")),
+                priority=_safe_enum(TaskPriority, task_data.get("priority", "medium"), TaskPriority.MEDIUM),
                 tags=task_data.get("tags", []),
                 created_at=task_data.get("created_at", now),
                 completed_at=completed_at,
@@ -267,12 +275,26 @@ def save_tasks(
         store.replace_all([])
         return {"success": True, "task_ids": [], "count": 0, "message": "Tasks cleared"}
 
-    # Validate all tasks have descriptions
+    # Validate all tasks have descriptions and valid enum values
+    valid_statuses = {s.value for s in TaskStatus}
+    valid_priorities = {p.value for p in TaskPriority}
     for i, task in enumerate(tasks):
         if not task.get("description"):
             return {
                 "success": False,
                 "error": f"Task at index {i} is missing 'description'",
+            }
+        status = task.get("status", "pending")
+        if status not in valid_statuses:
+            return {
+                "success": False,
+                "error": f"Task at index {i} has invalid status '{status}'. Valid: {', '.join(sorted(valid_statuses))}",
+            }
+        priority = task.get("priority", "medium")
+        if priority not in valid_priorities:
+            return {
+                "success": False,
+                "error": f"Task at index {i} has invalid priority '{priority}'. Valid: {', '.join(sorted(valid_priorities))}",
             }
 
     task_ids = store.replace_all(tasks)

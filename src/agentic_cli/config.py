@@ -36,12 +36,12 @@ from pydantic_settings import (
 )
 
 from agentic_cli.resolvers import (
-    ModelResolver,
-    PathResolver,
     GOOGLE_MODELS,
     ANTHROPIC_MODELS,
     ALL_MODELS,
     THINKING_EFFORT_LEVELS,
+    DEFAULT_GOOGLE_MODEL,
+    DEFAULT_ANTHROPIC_MODEL,
 )
 from agentic_cli.workflow.settings import WorkflowSettingsMixin
 from agentic_cli.cli.settings import CLISettingsMixin
@@ -127,11 +127,6 @@ class BaseSettings(WorkflowSettingsMixin, CLISettingsMixin, PydanticBaseSettings
         default=None,
         description="Anthropic API key for Claude models",
         validation_alias="ANTHROPIC_API_KEY",
-    )
-    serper_api_key: str | None = Field(
-        default=None,
-        description="Serper.dev API key for web search",
-        validation_alias="SERPER_API_KEY",
     )
     tavily_api_key: str | None = Field(
         default=None,
@@ -281,65 +276,40 @@ class BaseSettings(WorkflowSettingsMixin, CLISettingsMixin, PydanticBaseSettings
             return Path(v).expanduser()
         return v
 
-    # Lazy-initialized resolvers
-    _model_resolver: ModelResolver | None = None
-    _path_resolver: PathResolver | None = None
-
-    @property
-    def model_resolver(self) -> ModelResolver:
-        """Get the model resolver instance (lazy-initialized)."""
-        if self._model_resolver is None:
-            object.__setattr__(
-                self,
-                "_model_resolver",
-                ModelResolver(
-                    google_api_key=self.google_api_key,
-                    anthropic_api_key=self.anthropic_api_key,
-                    default_model=self.default_model,
-                ),
-            )
-        return self._model_resolver
-
-    @property
-    def path_resolver(self) -> PathResolver:
-        """Get the path resolver instance (lazy-initialized)."""
-        if self._path_resolver is None:
-            object.__setattr__(
-                self,
-                "_path_resolver",
-                PathResolver(workspace_dir=self.workspace_dir),
-            )
-        return self._path_resolver
-
-    # === Model-related properties (delegated to ModelResolver) ===
+    # === Model-related properties ===
 
     @property
     def has_google_key(self) -> bool:
         """Check if Google API key is available."""
-        return self.model_resolver.has_google_key
+        return bool(self.google_api_key)
 
     @property
     def has_anthropic_key(self) -> bool:
         """Check if Anthropic API key is available."""
-        return self.model_resolver.has_anthropic_key
+        return bool(self.anthropic_api_key)
 
     @property
     def has_any_api_key(self) -> bool:
         """Check if any API key is available."""
-        return self.model_resolver.has_any_api_key
+        return self.has_google_key or self.has_anthropic_key
 
     @property
     def default_model_google(self) -> str:
         """Default Google model."""
-        return ModelResolver.DEFAULT_GOOGLE_MODEL
+        return DEFAULT_GOOGLE_MODEL
 
     @property
     def default_model_anthropic(self) -> str:
         """Default Anthropic model."""
-        return ModelResolver.DEFAULT_ANTHROPIC_MODEL
+        return DEFAULT_ANTHROPIC_MODEL
 
     def get_model(self) -> str:
         """Get the model to use based on configuration and available keys.
+
+        Resolution order:
+        1. Explicitly configured default_model
+        2. Google model (if Google API key available)
+        3. Anthropic model (if Anthropic API key available)
 
         Returns:
             Model name string
@@ -347,30 +317,55 @@ class BaseSettings(WorkflowSettingsMixin, CLISettingsMixin, PydanticBaseSettings
         Raises:
             RuntimeError: If no API keys are available
         """
-        return self.model_resolver.get_model()
+        if self.default_model:
+            return self.default_model
+
+        if self.has_google_key:
+            return DEFAULT_GOOGLE_MODEL
+        if self.has_anthropic_key:
+            return DEFAULT_ANTHROPIC_MODEL
+
+        raise RuntimeError(
+            "No API keys found. Please set GOOGLE_API_KEY or ANTHROPIC_API_KEY."
+        )
 
     def get_available_models(self) -> list[str]:
         """Get list of models available based on configured API keys."""
-        return self.model_resolver.get_available_models()
+        models = []
+        if self.has_google_key:
+            models.extend(GOOGLE_MODELS)
+        if self.has_anthropic_key:
+            models.extend(ANTHROPIC_MODELS)
+        return models
 
     def is_google_model(self, model: str | None = None) -> bool:
         """Check if the given model (or current model) is a Google model."""
-        return self.model_resolver.is_google_model(model)
+        model = model or self.get_model()
+        return model in GOOGLE_MODELS or model.startswith("gemini")
 
     def is_anthropic_model(self, model: str | None = None) -> bool:
         """Check if the given model (or current model) is an Anthropic model."""
-        return self.model_resolver.is_anthropic_model(model)
+        model = model or self.get_model()
+        return model in ANTHROPIC_MODELS or model.startswith("claude")
 
     def supports_thinking_effort(self, model: str | None = None) -> bool:
         """Check if the model supports thinking effort configuration."""
-        return self.model_resolver.supports_thinking_effort(model)
+        model = model or self.get_model()
+        return (
+            self.is_anthropic_model(model)
+            or "gemini-2.5" in model
+            or "gemini-3" in model
+        )
 
     def set_model(self, model: str) -> None:
         """Set the default model."""
-        self.model_resolver.validate_model(model)
+        available = self.get_available_models()
+        if model not in available:
+            raise ValueError(
+                f"Model '{model}' is not available. "
+                f"Available models: {', '.join(available)}"
+            )
         object.__setattr__(self, "default_model", model)
-        # Invalidate resolver cache to pick up new model
-        object.__setattr__(self, "_model_resolver", None)
 
     def set_thinking_effort(self, effort: str) -> None:
         """Set the thinking effort level."""
@@ -380,10 +375,6 @@ class BaseSettings(WorkflowSettingsMixin, CLISettingsMixin, PydanticBaseSettings
                 f"Valid levels: {', '.join(THINKING_EFFORT_LEVELS)}"
             )
         object.__setattr__(self, "thinking_effort", effort)
-
-    def get_api_key_status(self) -> dict[str, bool]:
-        """Get status of all API keys."""
-        return self.model_resolver.get_api_key_status()
 
     def export_api_keys_to_env(self) -> None:
         """Export API keys to environment variables."""
@@ -395,46 +386,36 @@ class BaseSettings(WorkflowSettingsMixin, CLISettingsMixin, PydanticBaseSettings
         if self.anthropic_api_key and not os.environ.get("ANTHROPIC_API_KEY"):
             os.environ["ANTHROPIC_API_KEY"] = self.anthropic_api_key
 
-    # === Path-related properties (delegated to PathResolver) ===
+    # === Path-related properties ===
 
     def ensure_workspace_exists(self) -> None:
         """Create workspace directory if it doesn't exist."""
-        self.path_resolver.ensure_workspace_exists()
+        self.workspace_dir.mkdir(parents=True, exist_ok=True)
 
     @property
     def sessions_dir(self) -> Path:
         """Directory for session storage."""
-        return self.path_resolver.sessions_dir
+        return self.workspace_dir / "sessions"
 
     @property
     def artifacts_dir(self) -> Path:
         """Directory for artifact storage."""
-        return self.path_resolver.artifacts_dir
-
-    @property
-    def templates_dir(self) -> Path:
-        """Directory for report templates."""
-        return self.path_resolver.templates_dir
-
-    @property
-    def reports_dir(self) -> Path:
-        """Directory for generated reports."""
-        return self.path_resolver.reports_dir
+        return self.workspace_dir / "workspace"
 
     @property
     def knowledge_base_dir(self) -> Path:
         """Directory for knowledge base storage."""
-        return self.path_resolver.knowledge_base_dir
+        return self.workspace_dir / "knowledge_base"
 
     @property
     def knowledge_base_documents_dir(self) -> Path:
         """Directory for knowledge base documents."""
-        return self.path_resolver.knowledge_base_documents_dir
+        return self.knowledge_base_dir / "documents"
 
     @property
     def knowledge_base_embeddings_dir(self) -> Path:
         """Directory for knowledge base embeddings."""
-        return self.path_resolver.knowledge_base_embeddings_dir
+        return self.knowledge_base_dir / "embeddings"
 
 
 # Context variable for settings (takes precedence over global singleton)

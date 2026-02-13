@@ -4,7 +4,7 @@
 This demo tests the shell executor with safety controls:
 1. Command execution with output capture
 2. Timeout handling
-3. Dangerous command blocking
+3. Dangerous command detection via security analysis
 4. Working directory handling
 5. Error handling
 
@@ -12,11 +12,11 @@ Usage:
     conda run -n agenticcli python examples/shell_demo.py
 """
 
-import sys
 import tempfile
 from pathlib import Path
 
-from agentic_cli.tools.shell import shell_executor, DANGEROUS_PATTERNS
+from agentic_cli.tools.shell import shell_executor, analyze_command
+from agentic_cli.tools.shell.classifier import BLOCKED_PATTERNS
 
 
 # =============================================================================
@@ -24,17 +24,16 @@ from agentic_cli.tools.shell import shell_executor, DANGEROUS_PATTERNS
 # =============================================================================
 
 
-def demo_dangerous_patterns():
-    """Demo the dangerous command patterns."""
+def demo_blocked_patterns():
+    """Demo the blocked command patterns."""
     print("\n" + "=" * 60)
-    print("Dangerous Command Patterns")
+    print("Blocked Command Patterns")
     print("=" * 60)
 
-    print("\n  Blocked patterns (regex):")
-    for i, pattern in enumerate(DANGEROUS_PATTERNS, 1):
-        # Show simplified version of pattern
-        simplified = pattern.replace("\\s+", " ").replace("\\s*", "")
-        print(f"    {i}. {simplified}")
+    print("\n  Patterns that trigger BLOCKED classification:")
+    for i, (pattern, description) in enumerate(BLOCKED_PATTERNS, 1):
+        print(f"    {i:2}. {description}")
+        print(f"        Pattern: {pattern}")
     print()
 
 
@@ -129,24 +128,16 @@ def demo_timeout_handling():
     print()
 
 
-def demo_dangerous_command_blocking():
-    """Demo dangerous command pattern detection (NO commands are executed)."""
+def demo_security_analysis():
+    """Demo command security analysis (NO dangerous commands are executed)."""
     print("\n" + "=" * 60)
-    print("Dangerous Command Pattern Detection Demo")
+    print("Security Analysis Demo")
     print("=" * 60)
 
-    from agentic_cli.tools.shell import is_dangerous_command
-
-    # These commands are ONLY checked against patterns, NEVER executed
-    # Tuple format: (command, expected_to_be_dangerous)
+    # These commands are ONLY analyzed, NEVER executed
     test_commands = [
         ("rm -rf /", True),
         ("rm -rf ~/*", True),
-        ("rm -rf ~/", True),
-        ("rm -rf /etc", True),
-        ("rm -rf /Users/someone", True),
-        ("rm -rf /home/someone", True),
-        ("rm -rf $HOME", True),
         (":(){:|:&};:", True),  # Fork bomb
         ("mkfs.ext4 /dev/sda", True),
         ("dd if=/dev/zero of=/dev/sda", True),
@@ -158,14 +149,15 @@ def demo_dangerous_command_blocking():
         ("python --version", False),  # Safe command
     ]
 
-    print("\n  Testing pattern detection (NO commands are executed):")
-    for cmd, expected_dangerous in test_commands:
-        detected = is_dangerous_command(cmd)
-        status = "DETECTED" if detected else "NOT DETECTED"
-        expected = "dangerous" if expected_dangerous else "safe"
-        match = "✓" if detected == expected_dangerous else "✗ GAP"
+    print("\n  Analyzing commands through security layers (NO execution):")
+    for cmd, expected_blocked in test_commands:
+        analysis = analyze_command(cmd)
+        is_blocked = analysis.is_blocked
+        status = "BLOCKED" if is_blocked else "ALLOWED"
+        expected = "should block" if expected_blocked else "should allow"
+        match = "OK" if is_blocked == expected_blocked else "MISMATCH"
         display_cmd = cmd[:45] + "..." if len(cmd) > 45 else cmd
-        print(f"    [{status:12}] {display_cmd:<48} ({expected}) {match}")
+        print(f"    [{status:7}] {display_cmd:<48} ({expected}) {match}")
     print()
 
 
@@ -242,11 +234,11 @@ def main():
     print("#" * 60)
 
     # Run demos
-    demo_dangerous_patterns()
+    demo_blocked_patterns()
     demo_basic_commands()
     demo_working_directory()
     demo_timeout_handling()
-    demo_dangerous_command_blocking()
+    demo_security_analysis()
     demo_error_handling()
     demo_pipe_and_redirect()
 

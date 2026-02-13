@@ -38,7 +38,6 @@ from agentic_cli.config import (
     validate_settings,
     reload_settings,
 )
-from agentic_cli.resolvers import ModelResolver, PathResolver
 from agentic_cli.settings_persistence import SettingsPersistence
 from agentic_cli.workflow.settings import WorkflowSettingsMixin
 from agentic_cli.cli.settings import CLISettingsMixin
@@ -90,9 +89,6 @@ __all__ = [
     # Settings Mixins (organized settings by domain)
     "WorkflowSettingsMixin",
     "CLISettingsMixin",
-    # Resolvers (SRP-compliant model/path resolution)
-    "ModelResolver",
-    "PathResolver",
 ]
 
-__version__ = "0.4.2"
+__version__ = "0.4.3"

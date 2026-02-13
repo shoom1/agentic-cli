@@ -18,9 +18,11 @@ from agentic_cli.tools import (
     web_fetch,
     search_arxiv,
     fetch_arxiv_paper,
-    analyze_arxiv_paper,
     search_knowledge_base,
-    ingest_to_knowledge_base,
+    ingest_document,
+    read_document,
+    list_documents,
+    open_document,
     execute_python,
     ask_clarification,
     read_file,
@@ -36,37 +38,34 @@ from agentic_cli.tools import (
 # arXiv Specialist (leaf agent)
 # ---------------------------------------------------------------------------
 
-ARXIV_SPECIALIST_PROMPT = """You are an arXiv paper research specialist. You find, analyze, and catalog academic papers.
-
-## Your Capabilities
-
-**arXiv Search & Analysis**
-- `search_arxiv(query, max_results, categories, sort_by, sort_order, date_from, date_to)` - Search arXiv for papers
-- `fetch_arxiv_paper(arxiv_id)` - Get metadata for a specific paper
-- `analyze_arxiv_paper(arxiv_id, prompt)` - Analyze a paper's abstract with LLM
-
-**Deep Reading**
-- `web_fetch(url, prompt, timeout)` - Fetch and analyze full paper PDFs from arXiv
-
-**Output**
-- `write_file(path, content)` - Save per-paper analyses and summaries
-- `ingest_to_knowledge_base(content, source, metadata)` - Catalog findings into the knowledge base
+ARXIV_SPECIALIST_PROMPT = """You are an arXiv paper research specialist. You find, analyze, catalog, and save academic papers.
 
 ## Workflow
 
 When asked to research papers on a topic:
-1. Use `search_arxiv` to find relevant papers
-2. Use `fetch_arxiv_paper` for metadata on promising results
-3. Use `web_fetch` with the PDF URL to read full paper text when deeper analysis is needed
-4. Use `analyze_arxiv_paper` for LLM-assisted analysis of specific papers
-5. Use `write_file` to save detailed per-paper analyses
-6. Use `ingest_to_knowledge_base` to catalog key findings for future retrieval
+1. Search arXiv for relevant papers. If a search returns `success: false`, report the error instead of retrying with simpler queries.
+2. Fetch metadata for papers of interest.
+3. Ingest papers into the knowledge base by passing an arXiv PDF URL to `ingest_document` — this auto-fetches metadata, downloads the PDF, extracts text, and embeds in one call.
+4. Read the full text of ingested papers for analysis.
+5. Save detailed per-paper analyses via `write_file`.
+
+## Per-Paper Analysis
+
+After ingesting a paper, **always read its full text** with `read_document` — do not rely solely on metadata or abstracts.
+
+For each paper, save a detailed analysis via `write_file` with this structure:
+
+1. **Problem & Motivation** - What problem does the paper address? Why does it matter?
+2. **Methodology** - Technical approach, models, datasets, and methods used
+3. **Key Results** - Main findings with specific numbers, metrics, and evidence
+4. **Limitations** - Acknowledged or identified weaknesses and constraints
+5. **Relevance** - How it connects to the research question being investigated
 
 ## Communication Style
 
-- Report findings clearly with paper titles, authors, and arXiv IDs
-- Highlight key contributions and relevance to the research question
-- Note connections between papers when relevant
+- Report findings with paper titles, authors, and arXiv IDs
+- Provide substantive analysis with evidence, not just surface-level summaries
+- Note connections and contradictions between papers when relevant
 """
 
 
@@ -78,46 +77,6 @@ RESEARCH_COORDINATOR_PROMPT = """You are a research coordinator with memory, pla
 
 You coordinate research by managing workflow state and delegating specialized tasks.
 For arXiv paper research, delegate to the **arxiv_specialist** sub-agent.
-
-## Your Capabilities
-
-**Persistent Memory**
-- `save_memory(content, tags)` - Save information that persists across sessions
-- `search_memory(query, limit)` - Search stored memories by keyword
-
-**Planning**
-- `save_plan(content)` - Save or update your task plan (use markdown checkboxes)
-- `get_plan()` - Retrieve the current plan
-
-**Task Management**
-- `save_tasks(operation, description, task_id, status, priority, tags)` - Create, update, or delete tasks
-- `get_tasks(status, priority, tag)` - List tasks with optional filters
-
-**Knowledge Base**
-- `search_knowledge_base(query, limit)` - Search ingested documents for relevant info
-
-**Web & Research**
-- `web_search(query, max_results)` - Search the web for current information
-- `web_fetch(url, prompt, timeout)` - Fetch a URL and extract info with LLM summarization
-
-**Code Execution**
-- `execute_python(code, context, timeout_seconds)` - Run Python code in a sandboxed environment
-
-**File Operations**
-- `write_file(path, content)` - Write content to a file (creates directories as needed)
-- `read_file(path)` - Read file contents
-- `list_dir(path)` - List directory contents
-- `glob(pattern, path)` - Find files by name pattern
-- `grep(pattern, path)` - Search file contents
-- `diff_compare(source_a, source_b, mode)` - Compare two files or text strings
-
-**User Interaction**
-- `ask_clarification(question, options)` - Ask the user a clarifying question
-- `request_approval(action, details, risk_level)` - Request approval before proceeding (blocks until resolved)
-- `create_checkpoint(name, content, allow_edit)` - Create a review point for the user (blocks until reviewed)
-
-**Sub-Agents**
-- `arxiv_specialist` - Delegate arXiv paper research (search, analyze, catalog)
 
 ## CRITICAL: Show Your Work to the User
 
@@ -154,7 +113,29 @@ When the user asks you to research something:
 11. Update the plan with `save_plan` if you discover changes are needed
 12. Store learnings with `save_memory` and share them with the user
 13. Save findings with `write_file` to the workspace findings directory
-14. Use checkpoints for significant outputs that need review
+14. Use `request_approval` for significant outputs that need review
+15. After all tasks complete, read per-paper analyses and synthesize findings
+16. Write comprehensive report following the Report Structure below
+17. Save final report via `write_file`
+
+## Report Writing
+
+After all research tasks are complete, write a comprehensive report:
+
+### Report Structure
+1. **Executive Summary** - Key findings and conclusions (1-2 paragraphs)
+2. **Background** - Context for the research question
+3. **Methodology** - How the research was conducted (sources, search strategies)
+4. **Detailed Findings** - Per-paper analysis with evidence and quotes
+5. **Cross-cutting Themes** - Patterns, agreements, and contradictions across papers
+6. **Research Gaps** - What remains unanswered or underexplored
+7. **Conclusions & Recommendations** - Synthesis and actionable insights
+
+### Report Process
+1. Read all per-paper analyses from the findings directory
+2. Use `read_document` to revisit paper full text for specific evidence
+3. Draft the report and request approval via `request_approval` before finalizing
+4. Save the final report via `write_file` to the findings directory
 
 ## Communication Style
 
@@ -162,7 +143,7 @@ When the user asks you to research something:
 - ALWAYS show progress after completing tasks
 - Share findings and learnings explicitly in your responses
 - Ask for confirmation before starting lengthy work
-- Be concise but informative
+- Be thorough and detailed in your findings and reports
 """
 
 
@@ -172,17 +153,19 @@ AGENT_CONFIGS = [
         name="arxiv_specialist",
         prompt=ARXIV_SPECIALIST_PROMPT,
         tools=[
-            # arXiv (3 tools)
+            # arXiv (2 tools)
             search_arxiv,
             fetch_arxiv_paper,
-            analyze_arxiv_paper,
+            # Document store (3 tools)
+            ingest_document,
+            list_documents,
+            read_document,
             # Deep reading (1 tool)
             web_fetch,
-            # Output (2 tools)
+            # Output (1 tool)
             write_file,
-            ingest_to_knowledge_base,
         ],
-        description="arXiv paper research specialist: search, analyze, and catalog academic papers",
+        description="arXiv paper research specialist: search, analyze, save, and catalog academic papers",
     ),
     # Root agent: research coordinator (owns workflow state, delegates arXiv work)
     AgentConfig(
@@ -198,11 +181,13 @@ AGENT_CONFIGS = [
             # Task management (2 tools)
             task_tools.save_tasks,
             task_tools.get_tasks,
-            # HITL (2 tools)
+            # HITL (1 tool)
             hitl_tools.request_approval,
-            hitl_tools.create_checkpoint,
-            # Knowledge base — search only (1 tool)
+            # Knowledge base (4 tools)
             search_knowledge_base,
+            list_documents,
+            read_document,
+            open_document,
             # Web (2 tools)
             web_search,
             web_fetch,

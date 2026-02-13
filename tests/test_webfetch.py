@@ -120,6 +120,75 @@ class TestURLValidator:
         assert result.valid is False
 
 
+class TestValidateIP:
+    """Tests for URLValidator.validate_ip() (C3: extracted IP check)."""
+
+    @pytest.fixture
+    def validator(self):
+        from agentic_cli.tools.webfetch.validator import URLValidator
+        return URLValidator(blocked_domains=[])
+
+    def test_validate_ip_blocks_private(self, validator):
+        """Private IPs are blocked."""
+        for ip in ("127.0.0.1", "10.0.0.1", "192.168.1.1", "172.16.0.1"):
+            result = validator.validate_ip(ip)
+            assert result.valid is False, f"{ip} should be blocked"
+            assert "blocked" in result.error.lower()
+
+    def test_validate_ip_allows_public(self, validator):
+        """Public IPs pass validation."""
+        result = validator.validate_ip("8.8.8.8")
+        assert result.valid is True
+        assert result.resolved_ip == "8.8.8.8"
+
+    def test_validate_ip_invalid_string(self, validator):
+        """Invalid IP string returns error."""
+        result = validator.validate_ip("not-an-ip")
+        assert result.valid is False
+        assert "invalid" in result.error.lower()
+
+
+class TestPostFetchRevalidation:
+    """Tests for DNS rebinding protection in ContentFetcher (C3)."""
+
+    @pytest.mark.asyncio
+    async def test_post_fetch_revalidation_blocks_rebind(self):
+        """If DNS resolves to private IP post-fetch, the response is rejected."""
+        from agentic_cli.tools.webfetch.fetcher import ContentFetcher
+        from agentic_cli.tools.webfetch.validator import URLValidator, ValidationResult
+        from agentic_cli.tools.webfetch.robots import RobotsTxtChecker
+        from unittest.mock import AsyncMock, patch, MagicMock
+
+        fetcher = ContentFetcher(
+            validator=URLValidator(blocked_domains=[]),
+            robots_checker=RobotsTxtChecker(),
+        )
+
+        # Mock validator.validate to allow pre-fetch (public IP)
+        with patch.object(fetcher._validator, "validate") as mock_validate:
+            mock_validate.return_value = ValidationResult(valid=True, resolved_ip="1.2.3.4")
+
+            with patch.object(fetcher._robots, "can_fetch", new_callable=AsyncMock) as mock_robots:
+                mock_robots.return_value = True
+
+                with patch("httpx.AsyncClient.get", new_callable=AsyncMock) as mock_get:
+                    mock_response = AsyncMock()
+                    mock_response.status_code = 200
+                    mock_response.text = "evil content"
+                    mock_response.headers = {"content-type": "text/html"}
+                    mock_response.history = []
+                    mock_response.url = "https://example.com/page"
+                    mock_get.return_value = mock_response
+
+                    # Post-fetch DNS resolves to private IP (rebinding attack)
+                    with patch("agentic_cli.tools.webfetch.fetcher.socket.gethostbyname") as mock_dns:
+                        mock_dns.return_value = "127.0.0.1"
+                        result = await fetcher.fetch("https://example.com/page")
+
+        assert result.success is False
+        assert "rebinding" in result.error.lower()
+
+
 from unittest.mock import AsyncMock, patch
 
 
