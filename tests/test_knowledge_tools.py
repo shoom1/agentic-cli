@@ -831,13 +831,148 @@ class TestOpenDocument:
             )
             token = set_context_kb_manager(kb)
             try:
-                with patch("agentic_cli.tools.knowledge_tools.subprocess.Popen") as mock_popen:
+                mock_result = MagicMock(returncode=0, stderr="")
+                with patch("agentic_cli.tools.knowledge_tools.subprocess.run", return_value=mock_result) as mock_run:
                     result = open_document(doc.id)
                 assert result["success"] is True
                 assert result["title"] == "PDF Doc"
-                mock_popen.assert_called_once()
+                mock_run.assert_called_once()
             finally:
                 token.var.reset(token)
+
+    def test_open_subprocess_failure(self):
+        """Open document surfaces subprocess failure."""
+        from agentic_cli.workflow.context import set_context_kb_manager
+        from agentic_cli.tools.knowledge_tools import open_document
+
+        with tempfile.TemporaryDirectory() as tmp:
+            kb = _make_kb(Path(tmp))
+            doc = kb.ingest_document(
+                content="PDF content.",
+                title="Bad PDF",
+                source_type=SourceType.USER,
+                file_bytes=b"%PDF-1.4 content",
+                file_extension=".pdf",
+            )
+            token = set_context_kb_manager(kb)
+            try:
+                mock_result = MagicMock(returncode=1, stderr="The file has no associated application.")
+                with patch("agentic_cli.tools.knowledge_tools.subprocess.run", return_value=mock_result):
+                    result = open_document(doc.id)
+                assert result["success"] is False
+                assert "no associated application" in result["error"].lower()
+            finally:
+                token.var.reset(token)
+
+    def test_open_subprocess_timeout(self):
+        """Open document treats timeout as success (viewer may block)."""
+        import subprocess as _subprocess
+
+        from agentic_cli.workflow.context import set_context_kb_manager
+        from agentic_cli.tools.knowledge_tools import open_document
+
+        with tempfile.TemporaryDirectory() as tmp:
+            kb = _make_kb(Path(tmp))
+            doc = kb.ingest_document(
+                content="PDF content.",
+                title="Slow PDF",
+                source_type=SourceType.USER,
+                file_bytes=b"%PDF-1.4 content",
+                file_extension=".pdf",
+            )
+            token = set_context_kb_manager(kb)
+            try:
+                with patch(
+                    "agentic_cli.tools.knowledge_tools.subprocess.run",
+                    side_effect=_subprocess.TimeoutExpired(cmd=["open"], timeout=10),
+                ):
+                    result = open_document(doc.id)
+                assert result["success"] is True
+                assert result["title"] == "Slow PDF"
+            finally:
+                token.var.reset(token)
+
+    def test_open_blocked_extension(self):
+        """Blocked extension returns error and subprocess is never called."""
+        from agentic_cli.workflow.context import set_context_kb_manager
+        from agentic_cli.tools.knowledge_tools import open_document
+
+        with tempfile.TemporaryDirectory() as tmp:
+            kb = _make_kb(Path(tmp))
+            doc = kb.ingest_document(
+                content="Executable content.",
+                title="Bad File",
+                source_type=SourceType.USER,
+                file_bytes=b"MZ\x90\x00",
+                file_extension=".exe",
+            )
+            token = set_context_kb_manager(kb)
+            try:
+                with patch("agentic_cli.tools.knowledge_tools.subprocess.run") as mock_run:
+                    result = open_document(doc.id)
+                assert result["success"] is False
+                assert "not allowed" in result["error"]
+                mock_run.assert_not_called()
+            finally:
+                token.var.reset(token)
+
+    def test_open_blocked_extension_logging(self):
+        """Blocked extension triggers warning log."""
+        from agentic_cli.workflow.context import set_context_kb_manager
+        from agentic_cli.tools.knowledge_tools import open_document
+
+        with tempfile.TemporaryDirectory() as tmp:
+            kb = _make_kb(Path(tmp))
+            doc = kb.ingest_document(
+                content="Shell script.",
+                title="Script File",
+                source_type=SourceType.USER,
+                file_bytes=b"#!/bin/bash\necho pwned",
+                file_extension=".sh",
+            )
+            token = set_context_kb_manager(kb)
+            try:
+                with patch("agentic_cli.tools.knowledge_tools.logger") as mock_logger:
+                    result = open_document(doc.id)
+                assert result["success"] is False
+                mock_logger.warning.assert_called_once()
+                assert mock_logger.warning.call_args[0][0] == "open_document_blocked_extension"
+            finally:
+                token.var.reset(token)
+
+    def test_open_success_logging(self):
+        """Successful open triggers info log."""
+        from agentic_cli.workflow.context import set_context_kb_manager
+        from agentic_cli.tools.knowledge_tools import open_document
+
+        with tempfile.TemporaryDirectory() as tmp:
+            kb = _make_kb(Path(tmp))
+            doc = kb.ingest_document(
+                content="PDF content.",
+                title="Good PDF",
+                source_type=SourceType.USER,
+                file_bytes=b"%PDF-1.4 content",
+                file_extension=".pdf",
+            )
+            token = set_context_kb_manager(kb)
+            try:
+                mock_result = MagicMock(returncode=0, stderr="")
+                with patch("agentic_cli.tools.knowledge_tools.subprocess.run", return_value=mock_result), \
+                     patch("agentic_cli.tools.knowledge_tools.logger") as mock_logger:
+                    result = open_document(doc.id)
+                assert result["success"] is True
+                mock_logger.info.assert_called_once()
+                assert mock_logger.info.call_args[0][0] == "open_document_success"
+            finally:
+                token.var.reset(token)
+
+    def test_open_permission_level_is_dangerous(self):
+        """open_document is registered with DANGEROUS permission level."""
+        from agentic_cli.tools.registry import get_registry, PermissionLevel
+
+        registry = get_registry()
+        tool_def = registry._tools["open_document"]
+        assert tool_def.permission_level == PermissionLevel.DANGEROUS
 
 
 # ============================================================================
