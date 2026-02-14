@@ -119,12 +119,12 @@ class TestUsageTracker:
     def test_format_status_bar_populated(self):
         tracker = UsageTracker()
         tracker.record({"prompt_tokens": 12500, "completion_tokens": 3200})
-        assert tracker.format_status_bar() == "Tokens: 12.5k in / 3.2k out"
+        assert tracker.format_status_bar() == "Tokens: 12.5k in / 3.2k out | ctx: 12.5k"
 
     def test_format_status_bar_small_values(self):
         tracker = UsageTracker()
         tracker.record({"prompt_tokens": 42, "completion_tokens": 10})
-        assert tracker.format_status_bar() == "Tokens: 42 in / 10 out"
+        assert tracker.format_status_bar() == "Tokens: 42 in / 10 out | ctx: 42"
 
     def test_reset(self):
         tracker = UsageTracker()
@@ -144,4 +144,85 @@ class TestUsageTracker:
         assert tracker.cache_creation_tokens == 0
         assert tracker.invocation_count == 0
         assert tracker.total_latency_ms == 0.0
+        assert tracker.last_prompt_tokens == 0
+        assert tracker.prev_prompt_tokens == 0
+        assert tracker.context_trimmed_count == 0
         assert tracker.format_status_bar() == ""
+
+
+# === Context window tracking tests ===
+
+
+class TestContextWindowTracking:
+    def test_last_prompt_tokens_tracked(self):
+        tracker = UsageTracker()
+        tracker.record({"prompt_tokens": 5000, "completion_tokens": 200})
+        assert tracker.last_prompt_tokens == 5000
+
+    def test_last_prompt_tokens_updates(self):
+        tracker = UsageTracker()
+        tracker.record({"prompt_tokens": 5000, "completion_tokens": 200})
+        tracker.record({"prompt_tokens": 6000, "completion_tokens": 300})
+        assert tracker.last_prompt_tokens == 6000
+        assert tracker.prev_prompt_tokens == 5000
+
+    def test_trim_detected_on_drop(self):
+        tracker = UsageTracker()
+        tracker.record({"prompt_tokens": 10000})
+        tracker.record({"prompt_tokens": 5000})  # Drop = trimming
+        assert tracker.context_trimmed_count == 1
+
+    def test_no_false_positive_on_increase(self):
+        tracker = UsageTracker()
+        tracker.record({"prompt_tokens": 5000})
+        tracker.record({"prompt_tokens": 8000})  # Increase = no trimming
+        assert tracker.context_trimmed_count == 0
+
+    def test_no_trim_on_first_invocation(self):
+        tracker = UsageTracker()
+        tracker.record({"prompt_tokens": 5000})
+        assert tracker.context_trimmed_count == 0
+
+    def test_no_trim_on_equal_tokens(self):
+        tracker = UsageTracker()
+        tracker.record({"prompt_tokens": 5000})
+        tracker.record({"prompt_tokens": 5000})
+        assert tracker.context_trimmed_count == 0
+
+    def test_multiple_trims_counted(self):
+        tracker = UsageTracker()
+        tracker.record({"prompt_tokens": 10000})
+        tracker.record({"prompt_tokens": 5000})  # Trim 1
+        tracker.record({"prompt_tokens": 8000})
+        tracker.record({"prompt_tokens": 4000})  # Trim 2
+        assert tracker.context_trimmed_count == 2
+
+    def test_status_bar_includes_context(self):
+        tracker = UsageTracker()
+        tracker.record({"prompt_tokens": 5000, "completion_tokens": 200})
+        bar = tracker.format_status_bar()
+        assert "ctx: 5k" in bar
+
+    def test_status_bar_shows_trimmed(self):
+        tracker = UsageTracker()
+        tracker.record({"prompt_tokens": 10000, "completion_tokens": 200})
+        tracker.record({"prompt_tokens": 5000, "completion_tokens": 300})
+        bar = tracker.format_status_bar()
+        assert "ctx: 5k" in bar
+        assert "(trimmed)" in bar
+
+    def test_status_bar_no_trimmed_without_trim(self):
+        tracker = UsageTracker()
+        tracker.record({"prompt_tokens": 5000, "completion_tokens": 200})
+        tracker.record({"prompt_tokens": 8000, "completion_tokens": 300})
+        bar = tracker.format_status_bar()
+        assert "(trimmed)" not in bar
+
+    def test_reset_clears_context_fields(self):
+        tracker = UsageTracker()
+        tracker.record({"prompt_tokens": 10000})
+        tracker.record({"prompt_tokens": 5000})
+        tracker.reset()
+        assert tracker.last_prompt_tokens == 0
+        assert tracker.prev_prompt_tokens == 0
+        assert tracker.context_trimmed_count == 0
