@@ -156,7 +156,8 @@ AGENT_CONFIGS = [
             # arXiv (2 tools)
             search_arxiv,
             fetch_arxiv_paper,
-            # Document store (3 tools)
+            # Document store (4 tools)
+            search_knowledge_base,
             ingest_document,
             list_documents,
             read_document,

@@ -220,19 +220,29 @@ class TaskStore:
         """Format tasks as a compact checklist for the thinking box.
 
         Returns:
-            Multi-line string with status icons: [x] Done, [>] Active,
-            [ ] Pending, [-] Cancelled.
+            Multi-line string with status icons: [✓] Done, [▸] Active,
+            [ ] Pending, [-] Cancelled.  Sorted by status priority
+            (in-progress first, completed last).
         """
         if not self._items:
             return ""
         icons = {
-            TaskStatus.COMPLETED: "[x]",
-            TaskStatus.IN_PROGRESS: "[>]",
+            TaskStatus.COMPLETED: "[✓]",
+            TaskStatus.IN_PROGRESS: "[▸]",
             TaskStatus.PENDING: "[ ]",
             TaskStatus.CANCELLED: "[-]",
         }
+        status_order = {
+            TaskStatus.IN_PROGRESS: 0,
+            TaskStatus.PENDING: 1,
+            TaskStatus.CANCELLED: 2,
+            TaskStatus.COMPLETED: 3,
+        }
+        sorted_items = sorted(
+            self._items.values(), key=lambda t: status_order.get(t.status, 1)
+        )
         lines = []
-        for item in self._items.values():
+        for item in sorted_items:
             icon = icons.get(item.status, "[ ]")
             lines.append(f"{icon} {item.description}")
         return "\n".join(lines)

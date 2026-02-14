@@ -489,8 +489,8 @@ class TestTaskProgressAutoClean:
         event = mgr._emit_task_progress_event()
         assert event is not None
         assert event.type == EventType.TASK_PROGRESS
-        assert "[x] Task 1" in event.content
-        assert "[x] Task 2" in event.content
+        assert "[✓] Task 1" in event.content
+        assert "[✓] Task 2" in event.content
         assert event.metadata["progress"]["completed"] == 2
         assert store.is_empty()
 
@@ -536,7 +536,7 @@ class TestTaskProgressAutoClean:
         assert event is not None
         assert event.type == EventType.TASK_PROGRESS
         assert "Setup:" in event.content
-        assert "[x] Install deps" in event.content
+        assert "[✓] Install deps" in event.content
         assert "[ ] Configure env" in event.content
         assert "Build:" in event.content
         assert "[ ] Compile" in event.content
