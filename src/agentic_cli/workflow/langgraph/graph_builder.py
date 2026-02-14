@@ -318,6 +318,7 @@ class LangGraphBuilder:
             if self._settings.context_window_enabled:
                 from langchain_core.messages import trim_messages
 
+                pre_trim_count = len(conversation)
                 conversation = trim_messages(
                     conversation,
                     max_tokens=self._settings.context_window_target_tokens,
@@ -326,6 +327,15 @@ class LangGraphBuilder:
                     start_on="human",
                     include_system=False,  # System message added separately above
                 )
+                post_trim_count = len(conversation)
+                if post_trim_count < pre_trim_count:
+                    logger.debug(
+                        "context_window_trimmed",
+                        agent=config.name,
+                        messages_before=pre_trim_count,
+                        messages_after=post_trim_count,
+                        messages_removed=pre_trim_count - post_trim_count,
+                    )
 
             messages.extend(conversation)
 

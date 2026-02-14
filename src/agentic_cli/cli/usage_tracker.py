@@ -42,15 +42,31 @@ class UsageTracker:
     invocation_count: int = 0
     total_latency_ms: float = 0.0
 
+    # Context window tracking
+    last_prompt_tokens: int = 0
+    prev_prompt_tokens: int = 0
+    context_trimmed_count: int = 0
+
     def record(self, metadata: dict) -> None:
         """Accumulate values from an LLM_USAGE event's metadata dict.
 
         Handles None values and missing keys gracefully.
+        Also tracks context window size via prompt_tokens: if the current
+        invocation's prompt_tokens drops below the previous one, trimming
+        or compression occurred.
 
         Args:
             metadata: Metadata dict from a WorkflowEvent (LLM_USAGE type)
         """
-        self.prompt_tokens += metadata.get("prompt_tokens") or 0
+        current_prompt = metadata.get("prompt_tokens") or 0
+
+        # Detect context trimming: prompt_tokens drop means trimming happened
+        self.prev_prompt_tokens = self.last_prompt_tokens
+        self.last_prompt_tokens = current_prompt
+        if self.prev_prompt_tokens > 0 and current_prompt < self.prev_prompt_tokens:
+            self.context_trimmed_count += 1
+
+        self.prompt_tokens += current_prompt
         self.completion_tokens += metadata.get("completion_tokens") or 0
         self.thinking_tokens += metadata.get("thinking_tokens") or 0
         self.cached_tokens += metadata.get("cached_tokens") or 0
@@ -67,14 +83,21 @@ class UsageTracker:
         """Format token counts for status bar display.
 
         Returns:
-            "Tokens: 12.5k in / 3.2k out" or "" if no usage yet
+            "Tokens: 12.5k in / 3.2k out | ctx: 5k" or "" if no usage yet.
+            Appends "(trimmed)" if context trimming was detected.
         """
         if self.invocation_count == 0:
             return ""
-        return (
+        parts = [
             f"Tokens: {format_tokens(self.prompt_tokens)} in"
             f" / {format_tokens(self.completion_tokens)} out"
-        )
+        ]
+        if self.last_prompt_tokens > 0:
+            ctx = f"ctx: {format_tokens(self.last_prompt_tokens)}"
+            if self.context_trimmed_count > 0:
+                ctx += " (trimmed)"
+            parts.append(ctx)
+        return " | ".join(parts)
 
     def reset(self) -> None:
         """Zero all counters."""
@@ -85,3 +108,6 @@ class UsageTracker:
         self.cache_creation_tokens = 0
         self.invocation_count = 0
         self.total_latency_ms = 0.0
+        self.last_prompt_tokens = 0
+        self.prev_prompt_tokens = 0
+        self.context_trimmed_count = 0

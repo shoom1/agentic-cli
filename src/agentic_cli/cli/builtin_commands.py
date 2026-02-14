@@ -130,6 +130,15 @@ class StatusCommand(Command):
             if tracker.total_latency_ms > 0:
                 avg_ms = tracker.total_latency_ms / tracker.invocation_count
                 table.add_row("Avg Latency", f"{avg_ms:.0f}ms")
+            if tracker.last_prompt_tokens > 0:
+                table.add_row(
+                    "Context Window", format_tokens(tracker.last_prompt_tokens)
+                )
+            if tracker.context_trimmed_count > 0:
+                table.add_row(
+                    "Context Trimmed",
+                    f"{tracker.context_trimmed_count} time(s)",
+                )
 
         panel = Panel(table, title="[bold]Session Status[/bold]", border_style="cyan")
         app.session.add_rich(panel)

@@ -503,7 +503,18 @@ class MessageProcessor:
     ) -> None:
         """Handle LLM_USAGE events — accumulate token counts and refresh status bar."""
         if state._usage_tracker is not None:
+            prev_trimmed = state._usage_tracker.context_trimmed_count
             state._usage_tracker.record(event.metadata)
+            # Notify user when context trimming is detected
+            if state._usage_tracker.context_trimmed_count > prev_trimmed:
+                from agentic_cli.cli.usage_tracker import format_tokens
+
+                prev = state._usage_tracker.prev_prompt_tokens
+                curr = state._usage_tracker.last_prompt_tokens
+                ui.add_warning(
+                    f"Context window trimmed: {format_tokens(prev)}"
+                    f" → {format_tokens(curr)} tokens"
+                )
         if state._workflow_controller is not None:
             state._workflow_controller.update_status_bar(ui)
 
