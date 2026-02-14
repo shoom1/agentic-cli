@@ -108,6 +108,8 @@ class _EventProcessingState:
     # Set by process() so LLM_USAGE handler can update tracker and status bar
     _usage_tracker: "UsageTracker | None" = field(default=None, repr=False)
     _workflow_controller: "WorkflowController | None" = field(default=None, repr=False)
+    # Prevents double-counting when LangGraph emits both CONTEXT_TRIMMED and LLM_USAGE
+    _context_trimmed_this_invocation: bool = False
 
     def get_status(self) -> str:
         """Build status display with current action and task progress."""
@@ -493,6 +495,28 @@ class MessageProcessor:
         if current_task:
             state.status_line = f"Working on: {current_task}"
 
+    async def _handle_context_trimmed(
+        self,
+        event: "WorkflowEvent",
+        state: _EventProcessingState,
+        ui: "ThinkingPromptSession",
+        settings: "BaseSettings",
+        workflow: object,
+    ) -> None:
+        """Handle CONTEXT_TRIMMED events — increment counter and warn user."""
+        if state._usage_tracker is not None:
+            state._usage_tracker.context_trimmed_count += 1
+        state._context_trimmed_this_invocation = True
+
+        removed = event.metadata.get("messages_removed")
+        source = event.metadata.get("source", "unknown")
+        if removed is not None:
+            ui.add_warning(
+                f"Context trimmed: {removed} messages removed ({source})"
+            )
+        else:
+            ui.add_warning(f"Context window trimmed ({source})")
+
     async def _handle_llm_usage(
         self,
         event: "WorkflowEvent",
@@ -503,18 +527,30 @@ class MessageProcessor:
     ) -> None:
         """Handle LLM_USAGE events — accumulate token counts and refresh status bar."""
         if state._usage_tracker is not None:
-            prev_trimmed = state._usage_tracker.context_trimmed_count
-            state._usage_tracker.record(event.metadata)
-            # Notify user when context trimming is detected
-            if state._usage_tracker.context_trimmed_count > prev_trimmed:
+            tracker = state._usage_tracker
+            prev_prompt = tracker.last_prompt_tokens
+            tracker.record(event.metadata)
+
+            # ADK heuristic fallback: if prompt_tokens dropped and no
+            # CONTEXT_TRIMMED event was already received this invocation,
+            # treat it as an ADK-detected trim
+            if (
+                not state._context_trimmed_this_invocation
+                and prev_prompt > 0
+                and tracker.last_prompt_tokens < prev_prompt
+            ):
+                tracker.context_trimmed_count += 1
                 from agentic_cli.cli.usage_tracker import format_tokens
 
-                prev = state._usage_tracker.prev_prompt_tokens
-                curr = state._usage_tracker.last_prompt_tokens
                 ui.add_warning(
-                    f"Context window trimmed: {format_tokens(prev)}"
-                    f" → {format_tokens(curr)} tokens"
+                    f"Context window trimmed: {format_tokens(prev_prompt)}"
+                    f" → {format_tokens(tracker.last_prompt_tokens)} tokens"
+                    " (adk_token_heuristic)"
                 )
+
+            # Reset per-invocation flag for next LLM call
+            state._context_trimmed_this_invocation = False
+
         if state._workflow_controller is not None:
             state._workflow_controller.update_status_bar(ui)
 
@@ -538,6 +574,7 @@ class MessageProcessor:
                 EventType.EXECUTABLE_CODE: cls._handle_executable_code,
                 EventType.FILE_DATA: cls._handle_file_data,
                 EventType.TASK_PROGRESS: cls._handle_task_progress,
+                EventType.CONTEXT_TRIMMED: cls._handle_context_trimmed,
                 EventType.LLM_USAGE: cls._handle_llm_usage,
             }
         return cls._EVENT_DISPATCH

@@ -166,16 +166,17 @@ class TestContextWindowTracking:
         assert tracker.last_prompt_tokens == 6000
         assert tracker.prev_prompt_tokens == 5000
 
-    def test_trim_detected_on_drop(self):
+    def test_record_does_not_increment_trimmed_count(self):
+        """record() no longer auto-detects trims; count is externally managed."""
         tracker = UsageTracker()
         tracker.record({"prompt_tokens": 10000})
-        tracker.record({"prompt_tokens": 5000})  # Drop = trimming
-        assert tracker.context_trimmed_count == 1
+        tracker.record({"prompt_tokens": 5000})  # Drop — but no auto-increment
+        assert tracker.context_trimmed_count == 0
 
-    def test_no_false_positive_on_increase(self):
+    def test_no_trim_on_increase(self):
         tracker = UsageTracker()
         tracker.record({"prompt_tokens": 5000})
-        tracker.record({"prompt_tokens": 8000})  # Increase = no trimming
+        tracker.record({"prompt_tokens": 8000})
         assert tracker.context_trimmed_count == 0
 
     def test_no_trim_on_first_invocation(self):
@@ -183,18 +184,11 @@ class TestContextWindowTracking:
         tracker.record({"prompt_tokens": 5000})
         assert tracker.context_trimmed_count == 0
 
-    def test_no_trim_on_equal_tokens(self):
+    def test_external_increment_works(self):
+        """context_trimmed_count can be incremented by external event handlers."""
         tracker = UsageTracker()
-        tracker.record({"prompt_tokens": 5000})
-        tracker.record({"prompt_tokens": 5000})
-        assert tracker.context_trimmed_count == 0
-
-    def test_multiple_trims_counted(self):
-        tracker = UsageTracker()
-        tracker.record({"prompt_tokens": 10000})
-        tracker.record({"prompt_tokens": 5000})  # Trim 1
-        tracker.record({"prompt_tokens": 8000})
-        tracker.record({"prompt_tokens": 4000})  # Trim 2
+        tracker.context_trimmed_count += 1
+        tracker.context_trimmed_count += 1
         assert tracker.context_trimmed_count == 2
 
     def test_status_bar_includes_context(self):
@@ -203,10 +197,11 @@ class TestContextWindowTracking:
         bar = tracker.format_status_bar()
         assert "ctx: 5k" in bar
 
-    def test_status_bar_shows_trimmed(self):
+    def test_status_bar_shows_trimmed_when_set_externally(self):
+        """Status bar shows (trimmed) regardless of how count was set."""
         tracker = UsageTracker()
-        tracker.record({"prompt_tokens": 10000, "completion_tokens": 200})
-        tracker.record({"prompt_tokens": 5000, "completion_tokens": 300})
+        tracker.record({"prompt_tokens": 5000, "completion_tokens": 200})
+        tracker.context_trimmed_count = 1
         bar = tracker.format_status_bar()
         assert "ctx: 5k" in bar
         assert "(trimmed)" in bar
@@ -221,7 +216,7 @@ class TestContextWindowTracking:
     def test_reset_clears_context_fields(self):
         tracker = UsageTracker()
         tracker.record({"prompt_tokens": 10000})
-        tracker.record({"prompt_tokens": 5000})
+        tracker.context_trimmed_count = 3
         tracker.reset()
         assert tracker.last_prompt_tokens == 0
         assert tracker.prev_prompt_tokens == 0

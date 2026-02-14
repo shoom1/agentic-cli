@@ -45,6 +45,9 @@ class EventType(Enum):
     USER_INPUT_REQUIRED = "user_input_required"
     TASK_PROGRESS = "task_progress"
 
+    # Context management events
+    CONTEXT_TRIMMED = "context_trimmed"
+
     # LLM debugging events (raw traffic logging)
     LLM_REQUEST = "llm_request"
     LLM_RESPONSE = "llm_response"
@@ -314,6 +317,45 @@ class WorkflowEvent:
         return cls(
             type=EventType.TASK_PROGRESS,
             content=display,
+            metadata=metadata,
+        )
+
+    # -------------------------------------------------------------------------
+    # Context management events
+    # -------------------------------------------------------------------------
+
+    @classmethod
+    def context_trimmed(
+        cls,
+        messages_before: int,
+        messages_after: int,
+        source: str,
+        agent: str | None = None,
+    ) -> "WorkflowEvent":
+        """Create a context trimmed event.
+
+        Signals that context window trimming occurred, either detected
+        directly (LangGraph) or via token heuristic (ADK).
+
+        Args:
+            messages_before: Message count before trimming
+            messages_after: Message count after trimming
+            source: Detection source ("langgraph" or "adk_token_heuristic")
+            agent: Agent name where trimming occurred (if known)
+        """
+        messages_removed = messages_before - messages_after
+        metadata: dict[str, Any] = {
+            "messages_before": messages_before,
+            "messages_after": messages_after,
+            "messages_removed": messages_removed,
+            "source": source,
+        }
+        if agent is not None:
+            metadata["agent"] = agent
+
+        return cls(
+            type=EventType.CONTEXT_TRIMMED,
+            content=f"Context trimmed: {messages_removed} messages removed ({source})",
             metadata=metadata,
         )
 
