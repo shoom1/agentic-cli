@@ -618,11 +618,27 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
 
             event_count = 0
 
+            # Build run_config with context window compression if enabled
+            run_config = None
+            if self._settings.context_window_enabled:
+                from google.genai.types import ContextWindowCompressionConfig, SlidingWindow
+                from google.adk.agents import RunConfig
+
+                run_config = RunConfig(
+                    context_window_compression=ContextWindowCompressionConfig(
+                        trigger_tokens=self._settings.context_window_trigger_tokens,
+                        sliding_window=SlidingWindow(
+                            target_tokens=self._settings.context_window_target_tokens,
+                        ),
+                    )
+                )
+
             # Process ADK events directly - retry is handled by HttpRetryOptions
             async for adk_event in self._runner.run_async(
                 session_id=current_session_id,
                 user_id=user_id,
                 new_message=new_message,
+                run_config=run_config,
             ):
                 # Yield LLM events from logger first (Option A - raw capture)
                 if self._llm_event_logger:

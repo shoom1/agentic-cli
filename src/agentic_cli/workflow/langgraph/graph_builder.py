@@ -312,7 +312,22 @@ class LangGraphBuilder:
                 else:
                     messages.append(SystemMessage(content=system_prompt))
 
-            messages.extend(state.get("messages", []))
+            conversation = state.get("messages", [])
+
+            # Apply context window trimming if enabled
+            if self._settings.context_window_enabled:
+                from langchain_core.messages import trim_messages
+
+                conversation = trim_messages(
+                    conversation,
+                    max_tokens=self._settings.context_window_target_tokens,
+                    strategy="last",
+                    token_counter="approximate",
+                    start_on="human",
+                    include_system=False,  # System message added separately above
+                )
+
+            messages.extend(conversation)
 
             # Invoke LLM
             try:
