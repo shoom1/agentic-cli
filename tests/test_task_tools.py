@@ -442,8 +442,8 @@ class TestTaskStoreProgress:
             {"description": "Write report", "status": "pending"},
         ])
         display = store.to_compact_display()
-        assert "[x] Gather data" in display
-        assert "[>] Analyze results" in display
+        assert "[✓] Gather data" in display
+        assert "[▸] Analyze results" in display
         assert "[ ] Write report" in display
 
     def test_to_compact_display_cancelled(self, mock_context):
@@ -453,6 +453,36 @@ class TestTaskStoreProgress:
         ])
         display = store.to_compact_display()
         assert "[-] Dropped task" in display
+
+    def test_to_compact_display_sorted_order(self, mock_context):
+        """In-progress tasks appear first, then pending, cancelled, completed."""
+        store = TaskStore(mock_context.settings)
+        store.replace_all([
+            {"description": "Done task", "status": "completed"},
+            {"description": "Waiting task", "status": "pending"},
+            {"description": "Active task", "status": "in_progress"},
+            {"description": "Dropped task", "status": "cancelled"},
+        ])
+        display = store.to_compact_display()
+        lines = display.strip().splitlines()
+        assert lines[0] == "[▸] Active task"
+        assert lines[1] == "[ ] Waiting task"
+        assert lines[2] == "[-] Dropped task"
+        assert lines[3] == "[✓] Done task"
+
+    def test_to_compact_display_preserves_order_within_status(self, mock_context):
+        """Tasks with the same status preserve insertion order."""
+        store = TaskStore(mock_context.settings)
+        store.replace_all([
+            {"description": "First pending"},
+            {"description": "Second pending"},
+            {"description": "Third pending"},
+        ])
+        display = store.to_compact_display()
+        lines = display.strip().splitlines()
+        assert lines[0] == "[ ] First pending"
+        assert lines[1] == "[ ] Second pending"
+        assert lines[2] == "[ ] Third pending"
 
     def test_get_current_task_none(self, mock_context):
         store = TaskStore(mock_context.settings)
@@ -571,7 +601,7 @@ class TestEmitTaskProgressEvent:
         event = mgr._emit_task_progress_event()
         assert event is not None
         assert event.type == EventType.TASK_PROGRESS
-        assert "[>] Research topic" in event.content
+        assert "[▸] Research topic" in event.content
         assert "[ ] Write summary" in event.content
         assert event.metadata["progress"]["total"] == 2
         assert event.metadata["progress"]["in_progress"] == 1
@@ -610,7 +640,7 @@ class TestEmitTaskProgressEvent:
         assert event is not None
         assert event.type == EventType.TASK_PROGRESS
         assert "Research:" in event.content
-        assert "[x] Gather data" in event.content
+        assert "[✓] Gather data" in event.content
         assert "[ ] Analyze results" in event.content
         assert "Writing:" in event.content
         assert "[ ] Draft report" in event.content
@@ -699,6 +729,6 @@ class TestEmitTaskProgressEvent:
         assert event is not None
         assert "Phase 1:" in event.content
         assert "Phase 2:" in event.content
-        assert "[x] Setup" in event.content
+        assert "[✓] Setup" in event.content
         assert "[ ] Configure" in event.content
         assert "[ ] Build" in event.content

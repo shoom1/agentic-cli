@@ -139,7 +139,7 @@ def parse_plan_progress(
             total += 1
             if done:
                 completed += 1
-                display_lines.append(f"  [x] {text}")
+                display_lines.append(f"  [✓] {text}")
             else:
                 display_lines.append(f"  [ ] {text}")
 

@@ -195,6 +195,16 @@ class TestShellExecutor:
         assert format_tool_summary("shell_executor", result) == "Exit 127 (0.1s)"
 
 
+class TestSaveTasks:
+    def test_with_message(self):
+        result = {"success": True, "count": 3, "message": "Saved 3 tasks"}
+        assert format_tool_summary("save_tasks", result) == "Saved 3 tasks"
+
+    def test_fallback_without_message(self):
+        result = {"success": True, "count": 4}
+        assert format_tool_summary("save_tasks", result) == "4 tasks saved"
+
+
 class TestGetTasks:
     def test_basic(self):
         result = {"success": True, "tasks": [{"id": "1"}, {"id": "2"}], "count": 2}

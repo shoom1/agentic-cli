@@ -102,6 +102,7 @@ class _EventProcessingState:
 
     status_line: str = "Processing..."
     task_progress_display: str | None = None
+    _last_task_display_content: str | None = None
     thinking_started: bool = False
     thinking_content: list[str] = field(default_factory=list)
     response_content: list[str] = field(default_factory=list)
@@ -122,6 +123,7 @@ class _EventProcessingState:
         """Reset state for retry after rate limit."""
         self.status_line = "Processing..."
         self.task_progress_display = None
+        self._last_task_display_content = None
         self.thinking_content.clear()
         self.response_content.clear()
 
@@ -483,6 +485,11 @@ class MessageProcessor:
         workflow: object,
     ) -> None:
         """Handle TASK_PROGRESS events — update progress display."""
+        # Deduplicate: skip if content unchanged from last event
+        if event.content and event.content == state._last_task_display_content:
+            return
+        state._last_task_display_content = event.content
+
         progress = event.metadata.get("progress", {})
         if progress.get("total", 0) > 0:
             completed = progress.get("completed", 0)
