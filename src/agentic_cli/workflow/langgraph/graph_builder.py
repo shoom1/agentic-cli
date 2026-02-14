@@ -32,6 +32,8 @@ class LangGraphBuilder:
 
     def __init__(self, settings: "BaseSettings") -> None:
         self._settings = settings
+        # Side-channel for trim events: agent_node appends here, manager drains
+        self._trim_events: list[dict[str, Any]] = []
 
     def build(self, agent_configs: list[AgentConfig], default_model: str):
         """Build the LangGraph workflow from agent configs.
@@ -336,6 +338,11 @@ class LangGraphBuilder:
                         messages_after=post_trim_count,
                         messages_removed=pre_trim_count - post_trim_count,
                     )
+                    self._trim_events.append({
+                        "messages_before": pre_trim_count,
+                        "messages_after": post_trim_count,
+                        "agent": config.name,
+                    })
 
             messages.extend(conversation)
 

@@ -351,6 +351,18 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
                                         WorkflowEvent.text(text, current_session_id)
                                     )
 
+                    # Emit context trimming events (side-channel from agent_node)
+                    while self._builder._trim_events:
+                        info = self._builder._trim_events.pop(0)
+                        yield self._maybe_transform(
+                            WorkflowEvent.context_trimmed(
+                                messages_before=info["messages_before"],
+                                messages_after=info["messages_after"],
+                                source="langgraph",
+                                agent=info.get("agent"),
+                            )
+                        )
+
                     # Extract usage metadata
                     if output and hasattr(output, "usage_metadata") and output.usage_metadata:
                         usage = output.usage_metadata

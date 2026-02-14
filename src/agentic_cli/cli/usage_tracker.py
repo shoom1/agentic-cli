@@ -51,20 +51,16 @@ class UsageTracker:
         """Accumulate values from an LLM_USAGE event's metadata dict.
 
         Handles None values and missing keys gracefully.
-        Also tracks context window size via prompt_tokens: if the current
-        invocation's prompt_tokens drops below the previous one, trimming
-        or compression occurred.
+        Tracks prompt_tokens history for display and ADK heuristic detection
+        (context_trimmed_count is managed externally by event handlers).
 
         Args:
             metadata: Metadata dict from a WorkflowEvent (LLM_USAGE type)
         """
         current_prompt = metadata.get("prompt_tokens") or 0
 
-        # Detect context trimming: prompt_tokens drop means trimming happened
         self.prev_prompt_tokens = self.last_prompt_tokens
         self.last_prompt_tokens = current_prompt
-        if self.prev_prompt_tokens > 0 and current_prompt < self.prev_prompt_tokens:
-            self.context_trimmed_count += 1
 
         self.prompt_tokens += current_prompt
         self.completion_tokens += metadata.get("completion_tokens") or 0
