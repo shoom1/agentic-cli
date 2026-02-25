@@ -276,13 +276,13 @@ class MessageProcessor:
                         state.thinking_started = False
 
                     # Check for 429 rate limit errors — prompt user to wait and retry
-                    from agentic_cli.workflow.adk.event_processor import (
-                        _is_rate_limit_error,
-                        _parse_retry_delay,
+                    from agentic_cli.workflow.retry import (
+                        is_rate_limit_error,
+                        parse_retry_delay,
                     )
 
-                    if _is_rate_limit_error(e):
-                        delay = _parse_retry_delay(e) or 60.0
+                    if is_rate_limit_error(e):
+                        delay = parse_retry_delay(e) or 60.0
                         retry = await ui.yes_no_dialog(
                             title="Rate Limited",
                             text=f"API rate limit reached. Retry in {delay:.0f}s?",

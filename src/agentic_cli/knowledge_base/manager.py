@@ -361,21 +361,9 @@ class KnowledgeBaseManager:
         Returns:
             Extracted text, or empty string on failure.
         """
-        try:
-            import pypdf
-            reader = pypdf.PdfReader(str(file_path))
-            pages = []
-            for page in reader.pages:
-                text = page.extract_text()
-                if text:
-                    pages.append(text)
-            return "\n\n".join(pages)
-        except ImportError:
-            logger.warning("pypdf_not_installed")
-            return ""
-        except Exception as e:
-            logger.warning("pdf_text_extraction_failed", error=str(e))
-            return ""
+        from agentic_cli.tools.pdf_utils import extract_pdf_text
+
+        return extract_pdf_text(file_path)
 
     def _generate_summary(self, content: str) -> str:
         """Generate a summary for document content.

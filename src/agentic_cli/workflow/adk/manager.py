@@ -27,8 +27,6 @@ from agentic_cli.workflow.adk.llm_event_logger import LLMEventLogger
 from agentic_cli.config import (
     BaseSettings,
     get_settings,
-    validate_settings,
-    SettingsValidationError,
 )
 from agentic_cli.logging import Loggers, bind_context
 
@@ -214,10 +212,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             self._llm_event_logger = None
 
         # Cancel any pending input requests
-        for request_id, (request, future) in self._pending_input.items():
-            if not future.done():
-                future.cancel()
-        self._pending_input.clear()
+        self._cancel_pending_inputs()
 
         logger.info("workflow_manager_cleaned_up")
 
@@ -248,14 +243,8 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         # Clean up current state
         await self.cleanup()
 
-        # Update model if provided
-        if model is not None:
-            self._model = model
-            self._model_resolved = True
-        else:
-            # Re-resolve model from settings
-            self._model = None
-            self._model_resolved = False
+        # Update model
+        self._reset_model(model)
 
         # Reinitialize services
         await self.initialize_services()
@@ -457,28 +446,9 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         logger.info("agents_created", root=root_agent.name, total=len(agent_map))
         return root_agent
 
-    async def initialize_services(self, validate: bool = True) -> None:
-        """Initialize ADK services asynchronously.
-
-        Args:
-            validate: If True, validate settings before initialization.
-                     Set to False to skip validation (e.g., for testing).
-
-        Raises:
-            SettingsValidationError: If settings validation fails
-        """
-        if self._initialized:
-            logger.debug("services_already_initialized")
-            return
-
+    async def _do_initialize(self) -> None:
+        """ADK-specific initialization: session service, agents, runner."""
         logger.info("initializing_services", app_name=self.app_name)
-
-        # Validate settings early to provide clear error messages
-        if validate:
-            validate_settings(self._settings)
-
-        # Export API keys to environment
-        self._settings.export_api_keys_to_env()
 
         # Create session service
         if self.session_service_uri:
@@ -497,10 +467,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             session_service=self._session_service,
         )
 
-        # Initialize feature managers based on tool requirements
-        self._ensure_managers_initialized()
-
-        self._initialized = True
         logger.info(
             "services_initialized",
             model=self.model,
