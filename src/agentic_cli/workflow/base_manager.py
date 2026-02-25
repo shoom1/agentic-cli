@@ -20,8 +20,9 @@ from typing import Any, AsyncGenerator, Awaitable, Callable, Iterator, TYPE_CHEC
 
 from agentic_cli.workflow.events import WorkflowEvent, UserInputRequest
 from agentic_cli.workflow.config import AgentConfig
-from agentic_cli.config import set_context_settings, set_context_workflow
+from agentic_cli.config import set_context_settings
 from agentic_cli.workflow.context import (
+    set_context_workflow,
     set_context_memory_store,
     set_context_plan_store,
     set_context_task_store,
@@ -284,12 +285,12 @@ class BaseWorkflowManager(ABC):
             logger.info("model_resolved", model=self._model)
         return self._model  # type: ignore[return-value]
 
-    @abstractmethod
     async def initialize_services(self, validate: bool = True) -> None:
         """Initialize backend services asynchronously.
 
-        This method should set up all necessary services for the workflow
-        backend (session services, runners, agents, etc.).
+        Template method that handles shared scaffolding (guard, validation,
+        key export, manager init, flag) and delegates backend-specific work
+        to :meth:`_do_initialize`.
 
         Args:
             validate: If True, validate settings before initialization.
@@ -297,7 +298,42 @@ class BaseWorkflowManager(ABC):
         Raises:
             SettingsValidationError: If settings validation fails.
         """
-        pass
+        if self._initialized:
+            return
+
+        from agentic_cli.config import validate_settings
+
+        if validate:
+            validate_settings(self._settings)
+
+        self._settings.export_api_keys_to_env()
+        await self._do_initialize()
+        self._ensure_managers_initialized()
+        self._initialized = True
+
+    @abstractmethod
+    async def _do_initialize(self) -> None:
+        """Backend-specific initialization (create agents/graph).
+
+        Subclasses implement this instead of ``initialize_services()``.
+        """
+        ...
+
+    def _cancel_pending_inputs(self) -> None:
+        """Cancel all pending user input requests."""
+        for request_id, (request, future) in self._pending_input.items():
+            if not future.done():
+                future.cancel()
+        self._pending_input.clear()
+
+    def _reset_model(self, model: str | None) -> None:
+        """Reset model state for reinitialisation."""
+        if model is not None:
+            self._model = model
+            self._model_resolved = True
+        else:
+            self._model = None
+            self._model_resolved = False
 
     @abstractmethod
     async def process(

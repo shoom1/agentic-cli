@@ -18,9 +18,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager
-from agentic_cli.workflow.adk.event_processor import (
-    _is_rate_limit_error,
-    _parse_retry_delay,
+from agentic_cli.workflow.retry import (
+    is_rate_limit_error,
+    parse_retry_delay,
 )
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.events import EventType, WorkflowEvent
@@ -406,33 +406,33 @@ class TestADKUsageMetadata:
 
 
 class TestIsRateLimitError:
-    """Tests for _is_rate_limit_error helper."""
+    """Tests for is_rate_limit_error helper."""
 
     def test_rate_limit_error_by_code(self):
         """ClientError with code=429 is detected."""
         error = Exception("Too many requests")
         error.code = 429
-        assert _is_rate_limit_error(error) is True
+        assert is_rate_limit_error(error) is True
 
     def test_rate_limit_error_by_status_string(self):
         """Error containing RESOURCE_EXHAUSTED is detected."""
         error = Exception("RESOURCE_EXHAUSTED: quota exceeded")
-        assert _is_rate_limit_error(error) is True
+        assert is_rate_limit_error(error) is True
 
     def test_non_rate_limit_error_500(self):
         """Server error (500) is not a rate limit error."""
         error = Exception("Internal server error")
         error.code = 500
-        assert _is_rate_limit_error(error) is False
+        assert is_rate_limit_error(error) is False
 
     def test_non_rate_limit_generic(self):
         """Generic exception is not a rate limit error."""
         error = ValueError("something went wrong")
-        assert _is_rate_limit_error(error) is False
+        assert is_rate_limit_error(error) is False
 
 
 class TestParseRetryDelay:
-    """Tests for _parse_retry_delay helper."""
+    """Tests for parse_retry_delay helper."""
 
     def test_parse_delay_from_details(self):
         """Extracts delay from structured error.details."""
@@ -444,17 +444,17 @@ class TestParseRetryDelay:
                 ]
             }
         }
-        assert _parse_retry_delay(error) == 41.0
+        assert parse_retry_delay(error) == 41.0
 
     def test_parse_delay_from_message(self):
         """Extracts delay from error message string."""
         error = Exception("Please retry in 2.5s")
-        assert _parse_retry_delay(error) == 2.5
+        assert parse_retry_delay(error) == 2.5
 
     def test_parse_delay_none_for_generic(self):
         """Returns None for generic exception without delay info."""
         error = Exception("something failed")
-        assert _parse_retry_delay(error) is None
+        assert parse_retry_delay(error) is None
 
     def test_parse_delay_from_details_float(self):
         """Handles float seconds in retryDelay field."""
@@ -466,7 +466,7 @@ class TestParseRetryDelay:
                 ]
             }
         }
-        assert _parse_retry_delay(error) == 10.5
+        assert parse_retry_delay(error) == 10.5
 
 
 class TestTaskProgressAutoClean:

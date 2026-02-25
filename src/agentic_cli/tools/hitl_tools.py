@@ -24,7 +24,7 @@ from agentic_cli.tools.registry import (
     ToolCategory,
     PermissionLevel,
 )
-from agentic_cli.config import get_context_workflow
+from agentic_cli.workflow.context import get_context_workflow
 from agentic_cli.workflow.events import UserInputRequest, InputType
 
 

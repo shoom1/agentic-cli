@@ -558,7 +558,7 @@ class TestTaskStoreProgress:
 class _MinimalWorkflowManager(BaseWorkflowManager):
     """Minimal concrete subclass for testing base class methods."""
 
-    async def initialize_services(self, validate: bool = True) -> None:
+    async def _do_initialize(self) -> None:
         pass
 
     async def process(

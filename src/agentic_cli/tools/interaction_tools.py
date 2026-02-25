@@ -35,7 +35,7 @@ async def ask_clarification(
         Dictionary with the user's response
     """
     import uuid
-    from agentic_cli.config import get_context_workflow
+    from agentic_cli.workflow.context import get_context_workflow
     from agentic_cli.workflow.events import UserInputRequest
 
     workflow = get_context_workflow()
@@ -43,6 +43,7 @@ async def ask_clarification(
     if workflow is None:
         # Fallback for when not running within a workflow context
         return {
+            "success": False,
             "question": question,
             "options": options or [],
             "error": "No workflow context available for user interaction",
@@ -64,6 +65,7 @@ async def ask_clarification(
     response = await workflow.request_user_input(request)
 
     return {
+        "success": True,
         "question": question,
         "options": options or [],
         "response": response,

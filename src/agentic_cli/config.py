@@ -498,37 +498,9 @@ def get_context_settings() -> BaseSettings | None:
     return _settings_context.get()
 
 
-# Context variable for workflow manager (allows tools to request user input)
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from agentic_cli.workflow.base_manager import BaseWorkflowManager
-
-_workflow_context: ContextVar[Any] = ContextVar("workflow_context", default=None)
-
-
-def set_context_workflow(workflow: "BaseWorkflowManager | None") -> Token:
-    """Set the workflow manager for the current context.
-
-    This allows tools to access the workflow manager for operations
-    like requesting user input.
-
-    Args:
-        workflow: BaseWorkflowManager instance, or None to clear
-
-    Returns:
-        Token that can be used to reset the context variable.
-    """
-    return _workflow_context.set(workflow)
-
-
-def get_context_workflow() -> "BaseWorkflowManager | None":
-    """Get the workflow manager from the current context.
-
-    Returns:
-        BaseWorkflowManager instance, or None if not in a workflow context
-    """
-    return _workflow_context.get()
+# Workflow context — canonical implementation lives in workflow.context;
+# re-exported here for backward compatibility.
+from agentic_cli.workflow.context import set_context_workflow, get_context_workflow
 
 
 @contextmanager
@@ -557,9 +529,7 @@ def SettingsContext(settings: BaseSettings) -> Generator[BaseSettings, None, Non
 
 
 def reload_settings() -> BaseSettings:
-    """Reload settings (clears global singleton cache).
-
-    Note: This does not affect context-based settings.
+    """Reload settings (clears global singleton and context cache).
 
     Returns:
         Fresh BaseSettings instance

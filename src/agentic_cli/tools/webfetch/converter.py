@@ -69,24 +69,12 @@ class HTMLToMarkdown:
         Returns:
             Extracted text with page markers, or fallback message.
         """
-        try:
-            import pypdf
-        except ImportError:
-            return "[PDF extraction unavailable: pypdf not installed]"
+        from agentic_cli.tools.pdf_utils import extract_pdf_text
 
-        try:
-            import io
-            reader = pypdf.PdfReader(io.BytesIO(content))
-            pages = []
-            for i, page in enumerate(reader.pages, 1):
-                text = page.extract_text() or ""
-                if text.strip():
-                    pages.append(f"--- Page {i} ---\n{text.strip()}")
-            if not pages:
-                return "[PDF contained no extractable text]"
-            return "\n\n".join(pages)
-        except Exception as e:
-            return f"[PDF extraction failed: {e}]"
+        text = extract_pdf_text(content, page_markers=True)
+        if not text:
+            return "[PDF contained no extractable text]"
+        return text
 
     def _convert_html(self, html: str) -> str:
         """Convert HTML to markdown.

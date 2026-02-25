@@ -373,19 +373,9 @@ async def _ingest_arxiv(
 
 def _extract_text_from_bytes(pdf_bytes: bytes) -> str:
     """Extract text from PDF bytes."""
-    try:
-        import pypdf
-        import io
-        reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
-        pages = []
-        for page in reader.pages:
-            text = page.extract_text()
-            if text:
-                pages.append(text)
-        return "\n\n".join(pages)
-    except (ImportError, Exception):
-        logger.debug("pdf_text_extraction_failed", exc_info=True)
-        return ""
+    from agentic_cli.tools.pdf_utils import extract_pdf_text
+
+    return extract_pdf_text(pdf_bytes)
 
 
 def _detect_extension(url: str) -> str:
