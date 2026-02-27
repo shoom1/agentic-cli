@@ -1,58 +1,8 @@
-"""CLI settings mixin.
+"""CLI settings mixin — backward compatibility re-export.
 
-Provides settings for CLI/UI configuration.
-These settings control logging, user identity, and activity tracking.
+The canonical location is now ``agentic_cli.settings_mixins``.
 """
 
-from typing import Literal
+from agentic_cli.settings_mixins import CLISettingsMixin  # noqa: F401
 
-from pydantic import Field
-
-
-class CLISettingsMixin:
-    """Settings for CLI/UI configuration.
-
-    Mixin class that provides CLI-specific settings.
-    Should be composed with BaseSettings via multiple inheritance.
-
-    Note: This is a mixin, not a BaseSettings subclass, to avoid
-    MRO issues when composed with other settings classes.
-    """
-
-    # Logging configuration
-    log_level: Literal["debug", "info", "warning", "error"] = Field(
-        default="warning",
-        title="Log Level",
-        description="Logging verbosity level",
-        json_schema_extra={"ui_order": 50},
-    )
-    log_format: Literal["console", "json"] = Field(
-        default="console",
-        title="Log Format",
-        description="Log output format (console for dev, json for production)",
-        json_schema_extra={"ui_order": 51},
-    )
-
-    # Activity logging
-    log_activity: bool = Field(
-        default=False,
-        title="Log Activity",
-        description="Save conversation to file for audit purposes",
-        json_schema_extra={"ui_order": 30},
-    )
-
-    # Thinking output control
-    verbose_thinking: bool = Field(
-        default=True,
-        title="Verbose Thinking",
-        description="Show detailed thinking/reasoning output in the UI",
-        json_schema_extra={"ui_order": 35},
-    )
-
-    # User identity
-    default_user: str = Field(
-        default="default_user",
-        title="Default User",
-        description="Default user identifier for sessions",
-        json_schema_extra={"ui_order": 60},
-    )
+__all__ = ["CLISettingsMixin"]

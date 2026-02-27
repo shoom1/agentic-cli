@@ -58,8 +58,6 @@ from agentic_cli.tools.shell.preprocessor import InputPreprocessor
 from agentic_cli.tools.shell.risk_assessor import RiskAssessor
 from agentic_cli.tools.shell.sandbox import ExecutionSandbox
 from agentic_cli.tools.shell.tokenizer import CommandTokenizer
-from agentic_cli.workflow.context import get_context_approval_manager
-
 # Module-level audit logger (lazy initialization)
 _audit_logger: AuditLogger | None = None
 
@@ -373,68 +371,8 @@ def shell_executor(
 
         return result
 
-    # APPROVAL REQUIRED: Use existing ApprovalManager
-    approval_manager = get_context_approval_manager()
-
-    if approval_manager is not None:
-        # Check if approval is configured and required
-        if approval_manager.requires_approval(
-            "shell_executor", "execute", {"command": command}
-        ):
-            # Create approval request
-            request = approval_manager.request_approval(
-                tool="shell_executor",
-                operation="execute",
-                description=f"Execute shell command: {command[:100]}{'...' if len(command) > 100 else ''}",
-                details={
-                    "command": command,
-                    "working_dir": str(working_dir_path),
-                    "risk_level": risk.overall_risk.value,
-                    "risk_factors": risk.risk_factors,
-                    "paths_affected": [
-                        p.original for p in analysis.path_analysis.paths
-                    ],
-                    "operation_type": _get_operation_type(analysis),
-                    "classifications": [
-                        {"command": c.command, "category": c.category.value, "reason": c.reason}
-                        for c in analysis.classifications
-                    ],
-                },
-                risk_level=risk.overall_risk.value,
-            )
-
-            pending_result = {
-                "success": False,
-                "stdout": "",
-                "stderr": "",
-                "return_code": -1,
-                "duration": 0.0,
-                "pending_approval": True,
-                "approval_request_id": request.id,
-                "command": command,
-                "risk_level": risk.overall_risk.value,
-                "risk_factors": risk.risk_factors,
-                "message": "Awaiting user approval",
-                "error": None,
-            }
-
-            # Audit log the pending approval
-            if audit_logger:
-                audit_logger.log_command(
-                    command=command,
-                    risk_level=risk.overall_risk,
-                    approval_type=risk.approval_required,
-                    executed=False,
-                    working_dir=working_dir_path,
-                    risk_factors=risk.risk_factors,
-                    paths=[p.original for p in analysis.path_analysis.paths],
-                    encoding_detected=encoding_detected,
-                )
-
-            return pending_result
-
-    # No approval manager configured or auto-approved by pattern
-    # In strict mode without approval manager, we should still check risk
+    # APPROVAL REQUIRED: Risky command without auto-approve
+    # Return pending state so the caller can handle approval in their own way
     if risk.overall_risk in (RiskLevel.HIGH, RiskLevel.MEDIUM):
         # No approval manager but risky command - return pending state
         # This allows the caller to handle approval in their own way
