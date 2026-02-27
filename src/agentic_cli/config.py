@@ -44,7 +44,7 @@ from agentic_cli.resolvers import (
     DEFAULT_ANTHROPIC_MODEL,
 )
 from agentic_cli.workflow.settings import WorkflowSettingsMixin
-from agentic_cli.cli.settings import CLISettingsMixin
+from agentic_cli.settings_mixins import CLISettingsMixin
 
 # Re-export for backward compatibility
 __all__ = [
@@ -55,8 +55,6 @@ __all__ = [
     "set_settings",
     "set_context_settings",
     "get_context_settings",
-    "get_context_workflow",
-    "set_context_workflow",
     "validate_settings",
     "reload_settings",
     "GOOGLE_MODELS",
@@ -496,11 +494,6 @@ def get_context_settings() -> BaseSettings | None:
         Settings from current context, or None if not set
     """
     return _settings_context.get()
-
-
-# Workflow context — canonical implementation lives in workflow.context;
-# re-exported here for backward compatibility.
-from agentic_cli.workflow.context import set_context_workflow, get_context_workflow
 
 
 @contextmanager

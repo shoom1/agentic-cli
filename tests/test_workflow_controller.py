@@ -8,8 +8,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from agentic_cli.cli.workflow_controller import (
-    WorkflowController,
+from agentic_cli.cli.workflow_controller import WorkflowController
+from agentic_cli.workflow.factory import (
     _is_claude_model,
     _resolve_effective_model,
     create_workflow_manager_from_settings,

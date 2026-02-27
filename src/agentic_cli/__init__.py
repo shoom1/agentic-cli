@@ -23,7 +23,7 @@ Note: GoogleADKWorkflowManager and LangGraphWorkflowManager are lazy-loaded to a
 """
 
 from agentic_cli.cli.app import BaseCLIApp
-from agentic_cli.cli.workflow_controller import create_workflow_manager_from_settings
+from agentic_cli.workflow.factory import create_workflow_manager_from_settings
 from agentic_cli.cli.commands import Command, CommandRegistry
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.events import WorkflowEvent, EventType
@@ -40,7 +40,7 @@ from agentic_cli.config import (
 )
 from agentic_cli.settings_persistence import SettingsPersistence
 from agentic_cli.workflow.settings import WorkflowSettingsMixin
-from agentic_cli.cli.settings import CLISettingsMixin
+from agentic_cli.settings_mixins import CLISettingsMixin
 
 # Heavy imports - lazy loaded on first access
 _lazy_imports = {
