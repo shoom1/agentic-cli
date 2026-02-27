@@ -40,7 +40,7 @@ from agentic_cli.config import (
 )
 from agentic_cli.settings_persistence import SettingsPersistence
 from agentic_cli.workflow.settings import WorkflowSettingsMixin
-from agentic_cli.settings_mixins import CLISettingsMixin
+from agentic_cli.settings_mixins import AppSettingsMixin, CLISettingsMixin
 
 # Heavy imports - lazy loaded on first access
 _lazy_imports = {
@@ -88,6 +88,7 @@ __all__ = [
     "reload_settings",
     # Settings Mixins (organized settings by domain)
     "WorkflowSettingsMixin",
+    "AppSettingsMixin",
     "CLISettingsMixin",
 ]
 
