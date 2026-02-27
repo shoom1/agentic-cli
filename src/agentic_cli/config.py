@@ -25,10 +25,9 @@ Settings Loading Priority (highest to lowest):
 
 from contextvars import ContextVar, Token
 from pathlib import Path
-from typing import Literal, Generator, Any, Tuple, Type
+from typing import Generator, Any, Tuple, Type
 from contextlib import contextmanager
 
-from pydantic import Field, field_validator
 from pydantic_settings import (
     BaseSettings as PydanticBaseSettings,
     SettingsConfigDict,
@@ -40,11 +39,9 @@ from agentic_cli.resolvers import (
     ANTHROPIC_MODELS,
     ALL_MODELS,
     THINKING_EFFORT_LEVELS,
-    DEFAULT_GOOGLE_MODEL,
-    DEFAULT_ANTHROPIC_MODEL,
 )
 from agentic_cli.workflow.settings import WorkflowSettingsMixin
-from agentic_cli.settings_mixins import CLISettingsMixin
+from agentic_cli.settings_mixins import AppSettingsMixin, CLISettingsMixin
 
 # Re-export for backward compatibility
 __all__ = [
@@ -88,7 +85,7 @@ def _get_json_config_source(
         return None
 
 
-class BaseSettings(WorkflowSettingsMixin, CLISettingsMixin, PydanticBaseSettings):
+class BaseSettings(WorkflowSettingsMixin, AppSettingsMixin, CLISettingsMixin, PydanticBaseSettings):
     """Base settings for agentic CLI applications.
 
     Domain-specific applications extend this class and override:
@@ -104,8 +101,9 @@ class BaseSettings(WorkflowSettingsMixin, CLISettingsMixin, PydanticBaseSettings
     5. Default values
 
     Mixins provide organized settings:
-    - WorkflowSettingsMixin: Model, orchestrator, retry settings
-    - CLISettingsMixin: Logging, activity, user settings
+    - WorkflowSettingsMixin: Model, orchestrator, API keys, tool config
+    - AppSettingsMixin: Application identity and disk layout
+    - CLISettingsMixin: Logging and display settings
     """
 
     model_config = SettingsConfigDict(
@@ -113,104 +111,6 @@ class BaseSettings(WorkflowSettingsMixin, CLISettingsMixin, PydanticBaseSettings
         env_file_encoding="utf-8",
         env_nested_delimiter="__",
         extra="ignore",
-    )
-
-    # API Keys (common across all domains, never saved to JSON)
-    google_api_key: str | None = Field(
-        default=None,
-        description="Google API key for Gemini models",
-        validation_alias="GOOGLE_API_KEY",
-    )
-    anthropic_api_key: str | None = Field(
-        default=None,
-        description="Anthropic API key for Claude models",
-        validation_alias="ANTHROPIC_API_KEY",
-    )
-    tavily_api_key: str | None = Field(
-        default=None,
-        description="Tavily API key for web search",
-        validation_alias="TAVILY_API_KEY",
-    )
-    brave_api_key: str | None = Field(
-        default=None,
-        description="Brave Search API key for web search",
-        validation_alias="BRAVE_API_KEY",
-    )
-
-    # Web search configuration
-    search_backend: Literal["tavily", "brave"] | None = Field(
-        default=None,
-        title="Search Backend",
-        description="Web search provider to use (tavily or brave)",
-        json_schema_extra={"ui_order": 55},
-    )
-
-    # Web fetch configuration
-    webfetch_model: str | None = Field(
-        default=None,
-        title="WebFetch Model",
-        description="Model for summarizing fetched content (None = auto-detect)",
-        json_schema_extra={"ui_order": 56},
-    )
-    webfetch_blocked_domains: list[str] = Field(
-        default_factory=list,
-        title="WebFetch Blocked Domains",
-        description="Domains to block from fetching (supports wildcards like *.example.com)",
-        json_schema_extra={"ui_order": 57},
-    )
-    webfetch_cache_ttl_seconds: int = Field(
-        default=900,
-        title="WebFetch Cache TTL",
-        description="Cache TTL in seconds for fetched pages (default: 15 minutes)",
-        json_schema_extra={"ui_order": 58},
-    )
-    webfetch_max_content_bytes: int = Field(
-        default=102400,
-        title="WebFetch Max Content",
-        description="Maximum content size in bytes (default: 100KB)",
-        json_schema_extra={"ui_order": 59},
-    )
-    webfetch_max_pdf_bytes: int = Field(
-        default=5242880,
-        title="WebFetch Max PDF Size",
-        description="Maximum PDF size in bytes (default: 5MB). Separate from HTML limit because PDFs are larger but extracted text is compact.",
-        json_schema_extra={"ui_order": 60},
-    )
-
-    # Application identity (domain projects should override)
-    app_name: str = Field(
-        default="agentic_cli",
-        title="App Name",
-        description="Application name for agent services",
-        json_schema_extra={"ui_order": 200},  # Not typically shown in UI
-    )
-
-    # Paths (domain projects should override workspace_dir default)
-    workspace_dir: Path = Field(
-        default_factory=lambda: Path.home() / ".agentic",
-        title="Workspace Directory",
-        description="Directory for storing artifacts and sessions",
-        json_schema_extra={"ui_order": 201},
-    )
-
-    # Knowledge Base & Exploration (optional feature settings)
-    embedding_model: str = Field(
-        default="all-MiniLM-L6-v2",
-        title="Embedding Model",
-        description="Sentence transformer model for embeddings",
-        json_schema_extra={"ui_order": 150},
-    )
-    embedding_batch_size: int = Field(
-        default=32,
-        title="Embedding Batch Size",
-        description="Batch size for embedding generation",
-        json_schema_extra={"ui_order": 151},
-    )
-    knowledge_base_use_mock: bool = Field(
-        default=False,
-        title="Use Mock Knowledge Base",
-        description="Use mock knowledge base (no ML dependencies required)",
-        json_schema_extra={"ui_order": 152},
     )
 
     @classmethod
@@ -265,155 +165,6 @@ class BaseSettings(WorkflowSettingsMixin, CLISettingsMixin, PydanticBaseSettings
         sources.append(dotenv_settings)
 
         return tuple(sources)
-
-    @field_validator("workspace_dir", mode="before")
-    @classmethod
-    def expand_path(cls, v: str | Path) -> Path:
-        """Expand ~ and environment variables in paths."""
-        if isinstance(v, str):
-            return Path(v).expanduser()
-        return v
-
-    # === Model-related properties ===
-
-    @property
-    def has_google_key(self) -> bool:
-        """Check if Google API key is available."""
-        return bool(self.google_api_key)
-
-    @property
-    def has_anthropic_key(self) -> bool:
-        """Check if Anthropic API key is available."""
-        return bool(self.anthropic_api_key)
-
-    @property
-    def has_any_api_key(self) -> bool:
-        """Check if any API key is available."""
-        return self.has_google_key or self.has_anthropic_key
-
-    @property
-    def default_model_google(self) -> str:
-        """Default Google model."""
-        return DEFAULT_GOOGLE_MODEL
-
-    @property
-    def default_model_anthropic(self) -> str:
-        """Default Anthropic model."""
-        return DEFAULT_ANTHROPIC_MODEL
-
-    def get_model(self) -> str:
-        """Get the model to use based on configuration and available keys.
-
-        Resolution order:
-        1. Explicitly configured default_model
-        2. Google model (if Google API key available)
-        3. Anthropic model (if Anthropic API key available)
-
-        Returns:
-            Model name string
-
-        Raises:
-            RuntimeError: If no API keys are available
-        """
-        if self.default_model:
-            return self.default_model
-
-        if self.has_google_key:
-            return DEFAULT_GOOGLE_MODEL
-        if self.has_anthropic_key:
-            return DEFAULT_ANTHROPIC_MODEL
-
-        raise RuntimeError(
-            "No API keys found. Please set GOOGLE_API_KEY or ANTHROPIC_API_KEY."
-        )
-
-    def get_available_models(self) -> list[str]:
-        """Get list of models available based on configured API keys."""
-        models = []
-        if self.has_google_key:
-            models.extend(GOOGLE_MODELS)
-        if self.has_anthropic_key:
-            models.extend(ANTHROPIC_MODELS)
-        return models
-
-    def is_google_model(self, model: str | None = None) -> bool:
-        """Check if the given model (or current model) is a Google model."""
-        model = model or self.get_model()
-        return model in GOOGLE_MODELS or model.startswith("gemini")
-
-    def is_anthropic_model(self, model: str | None = None) -> bool:
-        """Check if the given model (or current model) is an Anthropic model."""
-        model = model or self.get_model()
-        return model in ANTHROPIC_MODELS or model.startswith("claude")
-
-    def supports_thinking_effort(self, model: str | None = None) -> bool:
-        """Check if the model supports thinking effort configuration."""
-        model = model or self.get_model()
-        return (
-            self.is_anthropic_model(model)
-            or "gemini-2.5" in model
-            or "gemini-3" in model
-        )
-
-    def set_model(self, model: str) -> None:
-        """Set the default model."""
-        available = self.get_available_models()
-        if model not in available:
-            raise ValueError(
-                f"Model '{model}' is not available. "
-                f"Available models: {', '.join(available)}"
-            )
-        object.__setattr__(self, "default_model", model)
-
-    def set_thinking_effort(self, effort: str) -> None:
-        """Set the thinking effort level."""
-        if effort not in THINKING_EFFORT_LEVELS:
-            raise ValueError(
-                f"Invalid thinking effort '{effort}'. "
-                f"Valid levels: {', '.join(THINKING_EFFORT_LEVELS)}"
-            )
-        object.__setattr__(self, "thinking_effort", effort)
-
-    def export_api_keys_to_env(self) -> None:
-        """Export API keys to environment variables."""
-        import os
-
-        if self.google_api_key and not os.environ.get("GOOGLE_API_KEY"):
-            os.environ["GOOGLE_API_KEY"] = self.google_api_key
-
-        if self.anthropic_api_key and not os.environ.get("ANTHROPIC_API_KEY"):
-            os.environ["ANTHROPIC_API_KEY"] = self.anthropic_api_key
-
-    # === Path-related properties ===
-
-    def ensure_workspace_exists(self) -> None:
-        """Create workspace directory if it doesn't exist."""
-        self.workspace_dir.mkdir(parents=True, exist_ok=True)
-
-    @property
-    def sessions_dir(self) -> Path:
-        """Directory for session storage."""
-        return self.workspace_dir / "sessions"
-
-    @property
-    def artifacts_dir(self) -> Path:
-        """Directory for artifact storage."""
-        return self.workspace_dir / "workspace"
-
-    @property
-    def knowledge_base_dir(self) -> Path:
-        """Directory for knowledge base storage."""
-        return self.workspace_dir / "knowledge_base"
-
-    @property
-    def knowledge_base_documents_dir(self) -> Path:
-        """Directory for knowledge base documents."""
-        return self.knowledge_base_dir / "documents"
-
-    @property
-    def knowledge_base_embeddings_dir(self) -> Path:
-        """Directory for knowledge base embeddings."""
-        return self.knowledge_base_dir / "embeddings"
 
 
 # Context variable for settings (takes precedence over global singleton)
