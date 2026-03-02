@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from agentic_cli.logging import Loggers
-from agentic_cli.persistence._utils import atomic_write_json, sanitize_filename
+from agentic_cli.persistence._utils import atomic_write_json, file_lock, sanitize_filename
 
 if TYPE_CHECKING:
     from agentic_cli.cli.app import MessageHistory
@@ -167,15 +167,16 @@ class SessionPersistence:
         session_path = self._get_session_path(session_id)
         atomic_write_json(session_path, snapshot.to_dict())
 
-        # Update sessions index
-        sessions_index = self._load_sessions_index()
-        sessions_index[session_id] = {
-            "session_id": session_id,
-            "created_at": snapshot.created_at.isoformat(),
-            "saved_at": snapshot.saved_at.isoformat(),
-            "message_count": len(messages),
-        }
-        self._save_sessions_index(sessions_index)
+        # Update sessions index (lock to prevent TOCTOU race)
+        with file_lock(self._get_sessions_index_path()):
+            sessions_index = self._load_sessions_index()
+            sessions_index[session_id] = {
+                "session_id": session_id,
+                "created_at": snapshot.created_at.isoformat(),
+                "saved_at": snapshot.saved_at.isoformat(),
+                "message_count": len(messages),
+            }
+            self._save_sessions_index(sessions_index)
 
         logger.info(
             "session_saved",
@@ -267,10 +268,11 @@ class SessionPersistence:
         if session_path.exists():
             session_path.unlink()
 
-            # Update sessions index
-            sessions_index = self._load_sessions_index()
-            sessions_index.pop(session_id, None)
-            self._save_sessions_index(sessions_index)
+            # Update sessions index (lock to prevent TOCTOU race)
+            with file_lock(self._get_sessions_index_path()):
+                sessions_index = self._load_sessions_index()
+                sessions_index.pop(session_id, None)
+                self._save_sessions_index(sessions_index)
 
             return True
         return False

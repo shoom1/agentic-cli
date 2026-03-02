@@ -1,8 +1,28 @@
 """Shared persistence utilities."""
 
+import fcntl
 import json
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Generator
+
+
+@contextmanager
+def file_lock(path: Path) -> Generator[None, None, None]:
+    """Acquire an exclusive file lock for cross-process safety.
+
+    Uses a .lock file adjacent to the target path.
+    The lock is advisory (relies on all writers using this utility).
+    """
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = open(lock_path, "w")  # noqa: SIM115
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        fd.close()
 
 
 def sanitize_filename(name: str) -> str:

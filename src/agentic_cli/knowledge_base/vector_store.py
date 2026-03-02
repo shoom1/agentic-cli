@@ -6,6 +6,7 @@ Provides FAISS-based vector storage and similarity search.
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -37,6 +38,7 @@ class VectorStore:
         """
         self.index_path = index_path
         self.embedding_dim = embedding_dim
+        self._lock = threading.Lock()
         self._index: faiss.Index | None = None
         self._id_map: dict[int, str] = {}  # FAISS internal ID -> chunk_id
         self._chunk_to_faiss: dict[str, int] = {}  # chunk_id -> FAISS internal ID
@@ -89,14 +91,15 @@ class VectorStore:
         faiss_module = self._get_faiss()
         faiss_module.normalize_L2(vectors)
 
-        # Add to index
-        self.index.add(vectors)
+        with self._lock:
+            # Add to index
+            self.index.add(vectors)
 
-        # Update ID mappings
-        for chunk_id in chunk_ids:
-            self._id_map[self._next_id] = chunk_id
-            self._chunk_to_faiss[chunk_id] = self._next_id
-            self._next_id += 1
+            # Update ID mappings
+            for chunk_id in chunk_ids:
+                self._id_map[self._next_id] = chunk_id
+                self._chunk_to_faiss[chunk_id] = self._next_id
+                self._next_id += 1
 
     def search(
         self,
@@ -112,24 +115,25 @@ class VectorStore:
         Returns:
             List of (chunk_id, score) tuples, sorted by descending score.
         """
-        if self.size == 0:
-            return []
-
-        # Normalize query vector
+        # Normalize query vector outside the lock (CPU-bound, no shared state)
         query = np.array([query_embedding], dtype=np.float32)
         faiss_module = self._get_faiss()
         faiss_module.normalize_L2(query)
 
-        # Search
-        k = min(top_k, self.size)
-        scores, indices = self.index.search(query, k)
+        with self._lock:
+            if self.size == 0:
+                return []
 
-        # Convert to results
-        results: list[tuple[str, float]] = []
-        for score, idx in zip(scores[0], indices[0]):
-            if idx >= 0 and idx in self._id_map:  # -1 indicates no result
-                chunk_id = self._id_map[idx]
-                results.append((chunk_id, float(score)))
+            # Search
+            k = min(top_k, self.size)
+            scores, indices = self.index.search(query, k)
+
+            # Convert to results
+            results: list[tuple[str, float]] = []
+            for score, idx in zip(scores[0], indices[0]):
+                if idx >= 0 and idx in self._id_map:  # -1 indicates no result
+                    chunk_id = self._id_map[idx]
+                    results.append((chunk_id, float(score)))
 
         return results
 
@@ -145,14 +149,15 @@ class VectorStore:
         Returns:
             Number of embeddings removed.
         """
-        removed = 0
-        for chunk_id in chunk_ids:
-            if chunk_id in self._chunk_to_faiss:
-                faiss_id = self._chunk_to_faiss.pop(chunk_id)
-                self._id_map.pop(faiss_id, None)
-                removed += 1
-        if removed > 0:
-            self.rebuild()
+        with self._lock:
+            removed = 0
+            for chunk_id in chunk_ids:
+                if chunk_id in self._chunk_to_faiss:
+                    faiss_id = self._chunk_to_faiss.pop(chunk_id)
+                    self._id_map.pop(faiss_id, None)
+                    removed += 1
+            if removed > 0:
+                self._rebuild_unlocked()
         return removed
 
     def rebuild(self) -> None:
@@ -161,8 +166,13 @@ class VectorStore:
         This compacts the index by re-adding only vectors that still have
         valid ID mappings. Call after remove_embeddings() to free memory.
         """
+        with self._lock:
+            self._rebuild_unlocked()
+
+    def _rebuild_unlocked(self) -> None:
+        """Rebuild without acquiring the lock (caller must hold it)."""
         if self._index is None or not self._id_map:
-            self.clear()
+            self._clear_unlocked()
             return
 
         import faiss
@@ -170,7 +180,7 @@ class VectorStore:
         # Collect valid FAISS indices in order
         valid_ids = sorted(self._id_map.keys())
         if not valid_ids:
-            self.clear()
+            self._clear_unlocked()
             return
 
         # Extract valid vectors from the current index
@@ -198,25 +208,26 @@ class VectorStore:
 
     def save(self) -> None:
         """Persist index and mappings to disk."""
-        if self._index is None:
-            return
+        with self._lock:
+            if self._index is None:
+                return
 
-        import faiss
+            import faiss
 
-        # Ensure directory exists
-        self.index_path.parent.mkdir(parents=True, exist_ok=True)
+            # Ensure directory exists
+            self.index_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Save FAISS index
-        faiss.write_index(self._index, str(self.index_path))
+            # Save FAISS index
+            faiss.write_index(self._index, str(self.index_path))
 
-        # Save ID mappings (atomic to prevent corruption on crash)
-        mappings_path = self.index_path.with_suffix(".mappings.json")
-        mappings = {
-            "id_map": {str(k): v for k, v in self._id_map.items()},
-            "chunk_to_faiss": self._chunk_to_faiss,
-            "next_id": self._next_id,
-        }
-        atomic_write_json(mappings_path, mappings)
+            # Save ID mappings (atomic to prevent corruption on crash)
+            mappings_path = self.index_path.with_suffix(".mappings.json")
+            mappings = {
+                "id_map": {str(k): v for k, v in self._id_map.items()},
+                "chunk_to_faiss": self._chunk_to_faiss,
+                "next_id": self._next_id,
+            }
+            atomic_write_json(mappings_path, mappings)
 
     def load(self) -> None:
         """Load index and mappings from disk."""
@@ -225,19 +236,25 @@ class VectorStore:
 
         import faiss
 
-        # Load FAISS index
-        self._index = faiss.read_index(str(self.index_path))
+        with self._lock:
+            # Load FAISS index
+            self._index = faiss.read_index(str(self.index_path))
 
-        # Load ID mappings
-        mappings_path = self.index_path.with_suffix(".mappings.json")
-        if mappings_path.exists():
-            mappings = json.loads(mappings_path.read_text())
-            self._id_map = {int(k): v for k, v in mappings["id_map"].items()}
-            self._chunk_to_faiss = mappings["chunk_to_faiss"]
-            self._next_id = mappings["next_id"]
+            # Load ID mappings
+            mappings_path = self.index_path.with_suffix(".mappings.json")
+            if mappings_path.exists():
+                mappings = json.loads(mappings_path.read_text())
+                self._id_map = {int(k): v for k, v in mappings["id_map"].items()}
+                self._chunk_to_faiss = mappings["chunk_to_faiss"]
+                self._next_id = mappings["next_id"]
 
     def clear(self) -> None:
         """Clear all vectors from the index."""
+        with self._lock:
+            self._clear_unlocked()
+
+    def _clear_unlocked(self) -> None:
+        """Clear without acquiring the lock (caller must hold it)."""
         import faiss
 
         self._index = faiss.IndexFlatIP(self.embedding_dim)
