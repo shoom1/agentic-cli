@@ -97,7 +97,7 @@ class SessionPersistence:
                 data = json.loads(index_path.read_text())
                 return data.get("sessions", {})
             except (json.JSONDecodeError, KeyError) as exc:
-                logger.debug("sessions_index_load_failed", error=str(exc))
+                logger.warning("sessions_index_load_failed", error=str(exc))
         return {}
 
     def _save_sessions_index(self, index: dict[str, dict]) -> None:

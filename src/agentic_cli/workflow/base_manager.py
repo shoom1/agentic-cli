@@ -74,6 +74,7 @@ class BaseWorkflowManager(ABC):
         settings: "BaseSettings | None" = None,
         app_name: str | None = None,
         model: str | None = None,
+        on_event: Callable[[WorkflowEvent], WorkflowEvent | None] | None = None,
     ) -> None:
         """Initialize the workflow manager base.
 
@@ -82,6 +83,7 @@ class BaseWorkflowManager(ABC):
             settings: Application settings (resolved via get_settings() if None).
             app_name: Application name for services.
             model: Model override (auto-detected from API keys if not provided).
+            on_event: Optional hook to transform/filter events before yielding.
         """
         from agentic_cli.config import get_settings
 
@@ -89,6 +91,7 @@ class BaseWorkflowManager(ABC):
         self._settings = settings or get_settings()
         self._app_name = app_name or self._settings.app_name
         self._initialized = False
+        self._on_event = on_event
 
         # Model resolution (lazy)
         self._model: str | None = model
@@ -271,6 +274,21 @@ class BaseWorkflowManager(ABC):
         finally:
             for token in tokens:
                 token.var.reset(token)
+
+    @property
+    @abstractmethod
+    def backend_type(self) -> str:
+        """Return the backend type identifier (e.g. 'adk', 'langgraph')."""
+        ...
+
+    def _apply_event_hook(self, event: WorkflowEvent) -> WorkflowEvent | None:
+        """Apply the optional on_event transformation hook.
+
+        Returns the (possibly transformed) event, or None if suppressed.
+        """
+        if self._on_event:
+            return self._on_event(event)
+        return event
 
     @property
     def model(self) -> str:

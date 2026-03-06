@@ -558,6 +558,10 @@ class TestTaskStoreProgress:
 class _MinimalWorkflowManager(BaseWorkflowManager):
     """Minimal concrete subclass for testing base class methods."""
 
+    @property
+    def backend_type(self) -> str:
+        return "test"
+
     async def _do_initialize(self) -> None:
         pass
 

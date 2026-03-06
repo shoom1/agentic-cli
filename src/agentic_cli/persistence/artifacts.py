@@ -152,7 +152,7 @@ class ArtifactManager:
                     return {"artifacts": migrated}
                 return data
             except (json.JSONDecodeError, KeyError) as exc:
-                logger.debug("artifact_index_load_failed", error=str(exc))
+                logger.warning("artifact_index_load_failed", error=str(exc))
         return {"artifacts": {}}
 
     def _save_index(self, index: dict) -> None:

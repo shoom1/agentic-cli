@@ -769,6 +769,10 @@ class TestWorkflowManagerIntegration:
         # Create a minimal test subclass of BaseWorkflowManager
         class TestWorkflowManager(BaseWorkflowManager):
             @property
+            def backend_type(self) -> str:
+                return "test"
+
+            @property
             def model(self) -> str:
                 return "test-model"
 
@@ -811,6 +815,10 @@ class TestWorkflowManagerIntegration:
 
         # Create a minimal test subclass
         class TestWorkflowManager(BaseWorkflowManager):
+            @property
+            def backend_type(self) -> str:
+                return "test"
+
             @property
             def model(self) -> str:
                 return "test-model"
@@ -860,6 +868,10 @@ class TestWorkflowManagerIntegration:
         mock_summarizer = object()
 
         class TestWorkflowManager(BaseWorkflowManager):
+            @property
+            def backend_type(self) -> str:
+                return "test"
+
             @property
             def model(self) -> str:
                 return "test-model"

@@ -40,7 +40,9 @@ def _make_settings(orchestrator=OrchestratorType.ADK, default_model=None, **extr
 
 
 class _FakeADKWorkflow:
-    """Fake ADK workflow manager for testing (class name matters for swap detection)."""
+    """Fake ADK workflow manager for testing."""
+
+    backend_type = "adk"
 
     def __init__(self, model="gemini-2.5-pro"):
         self.model = model
@@ -49,17 +51,14 @@ class _FakeADKWorkflow:
 
 
 class _FakeLangGraphWorkflow:
-    """Fake LangGraph workflow manager (class name = LangGraphWorkflowManager)."""
+    """Fake LangGraph workflow manager."""
+
+    backend_type = "langgraph"
 
     def __init__(self, model="claude-sonnet-4-5"):
         self.model = model
         self.reinitialize = AsyncMock()
         self.initialize_services = AsyncMock()
-
-
-# Rename the class so type().__name__ matches what the code checks
-_FakeLangGraphWorkflow.__name__ = "LangGraphWorkflowManager"
-_FakeADKWorkflow.__name__ = "GoogleADKWorkflowManager"
 
 
 # --- Unit tests for helpers ---

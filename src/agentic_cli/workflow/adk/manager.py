@@ -122,9 +122,8 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             settings=settings,
             app_name=app_name,
             model=model,
+            on_event=on_event,
         )
-
-        self._on_event = on_event
         self.session_service_uri = session_service_uri
         self.session_id = "default_session"
 
@@ -148,6 +147,11 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             model_override=model,
             agent_count=len(agent_configs),
         )
+
+    @property
+    def backend_type(self) -> str:
+        """Return 'adk'."""
+        return "adk"
 
     @property
     def session_service(self) -> BaseSessionService | None:
@@ -609,9 +613,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                 # Yield LLM events from logger first (Option A - raw capture)
                 if self._llm_event_logger:
                     for llm_event in self._llm_event_logger.drain_events():
-                        # Apply optional event hook
-                        if self._on_event:
-                            llm_event = self._on_event(llm_event)
+                        llm_event = self._apply_event_hook(llm_event)
                         if llm_event:
                             event_count += 1
                             yield llm_event
@@ -628,8 +630,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     if workflow_event.type == EventType.TOOL_RESULT:
                         progress_event = self._emit_task_progress_event()
                         if progress_event:
-                            if self._on_event:
-                                progress_event = self._on_event(progress_event)
+                            progress_event = self._apply_event_hook(progress_event)
                             if progress_event:
                                 event_count += 1
                                 yield progress_event
@@ -637,8 +638,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             # Drain any remaining LLM events after processing completes
             if self._llm_event_logger:
                 for llm_event in self._llm_event_logger.drain_events():
-                    if self._on_event:
-                        llm_event = self._on_event(llm_event)
+                    llm_event = self._apply_event_hook(llm_event)
                     if llm_event:
                         event_count += 1
                         yield llm_event

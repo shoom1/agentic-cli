@@ -210,10 +210,7 @@ class WorkflowController:
         orchestrator = getattr(self._settings, "orchestrator", OrchestratorType.ADK)
         new_needs_langgraph = orchestrator == OrchestratorType.LANGGRAPH or _is_claude_model(new_model)
 
-        # Check current manager type by class name to avoid isinstance issues
-        # when the class may not be importable (LangGraph not installed)
-        current_cls_name = type(self._workflow).__name__
-        current_is_langgraph = current_cls_name == "LangGraphWorkflowManager"
+        current_is_langgraph = self._workflow.backend_type == "langgraph"
 
         return new_needs_langgraph != current_is_langgraph
 

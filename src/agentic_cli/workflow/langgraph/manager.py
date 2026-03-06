@@ -117,10 +117,10 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
             settings=settings,
             app_name=app_name,
             model=model,
+            on_event=on_event,
         )
 
         self._checkpointer_type = checkpointer
-        self._on_event = on_event
 
         # Graph builder (delegates graph construction + LLM factory)
         self._builder = LangGraphBuilder(self._settings)
@@ -142,6 +142,11 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
             agent_count=len(agent_configs),
             checkpointer=checkpointer,
         )
+
+    @property
+    def backend_type(self) -> str:
+        """Return 'langgraph'."""
+        return "langgraph"
 
     @property
     def graph(self):
@@ -317,13 +322,13 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
                         for block_type, text in blocks:
                             if text:
                                 if block_type == "thinking":
-                                    transformed = self._maybe_transform(
+                                    transformed = self._apply_event_hook(
                                         WorkflowEvent.thinking(text, current_session_id)
                                     )
                                     if transformed:
                                         yield transformed
                                 else:
-                                    transformed = self._maybe_transform(
+                                    transformed = self._apply_event_hook(
                                         WorkflowEvent.text(text, current_session_id)
                                     )
                                     if transformed:
@@ -332,7 +337,7 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
                     # Emit context trimming events (side-channel from agent_node)
                     while self._builder._trim_events:
                         info = self._builder._trim_events.pop(0)
-                        transformed = self._maybe_transform(
+                        transformed = self._apply_event_hook(
                             WorkflowEvent.context_trimmed(
                                 messages_before=info["messages_before"],
                                 messages_after=info["messages_after"],
@@ -356,13 +361,13 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
                             cached_tokens=cached_read,
                             cache_creation_tokens=cache_creation,
                         )
-                        transformed = self._maybe_transform(usage_event)
+                        transformed = self._apply_event_hook(usage_event)
                         if transformed:
                             yield transformed
 
                 elif event_kind == "on_tool_start":
                     # Tool invocation
-                    transformed = self._maybe_transform(
+                    transformed = self._apply_event_hook(
                         WorkflowEvent.tool_call(
                             tool_name=event_name,
                             tool_args=event_data.get("input", {}),
@@ -401,7 +406,7 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
                     else:
                         result_data = raw
 
-                    transformed = self._maybe_transform(
+                    transformed = self._apply_event_hook(
                         WorkflowEvent.tool_result(
                             tool_name=event_name,
                             result=result_data,
@@ -414,21 +419,12 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
                     # Emit task progress after tool results
                     progress_event = self._emit_task_progress_event()
                     if progress_event:
-                        transformed = self._maybe_transform(progress_event)
+                        transformed = self._apply_event_hook(progress_event)
                         if transformed:
                             yield transformed
 
 
             logger.info("message_processed_langgraph")
-
-    def _maybe_transform(self, event: WorkflowEvent) -> WorkflowEvent | None:
-        """Apply event transformation hook if configured.
-
-        Returns None when the hook suppresses the event (consistent with ADK).
-        """
-        if self._on_event:
-            return self._on_event(event)
-        return event
 
     def _extract_content_blocks(
         self, content: Any
