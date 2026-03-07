@@ -30,6 +30,7 @@ from agentic_cli.workflow.context import (
     set_context_user_kb_manager,
     set_context_approval_manager,
     set_context_llm_summarizer,
+    set_context_sandbox_manager,
 )
 from agentic_cli.logging import Loggers
 
@@ -40,6 +41,7 @@ if TYPE_CHECKING:
     from agentic_cli.tools.task_tools import TaskStore
     from agentic_cli.knowledge_base import KnowledgeBaseManager
     from agentic_cli.tools.hitl_tools import ApprovalManager
+    from agentic_cli.tools.sandbox.manager import SandboxManager
 
 logger = Loggers.workflow()
 
@@ -112,6 +114,7 @@ class BaseWorkflowManager(ABC):
         self._user_kb_manager: "KnowledgeBaseManager | None" = None
         self._approval_manager: "ApprovalManager | None" = None
         self._llm_summarizer: Any | None = None
+        self._sandbox_manager: "SandboxManager | None" = None
 
     @property
     def agent_configs(self) -> list[AgentConfig]:
@@ -172,6 +175,11 @@ class BaseWorkflowManager(ABC):
     def llm_summarizer(self) -> Any | None:
         """Get the LLM summarizer (if required by tools)."""
         return self._llm_summarizer
+
+    @property
+    def sandbox_manager(self) -> "SandboxManager | None":
+        """Get the sandbox manager (if required by tools)."""
+        return self._sandbox_manager
 
     def _detect_required_managers(self) -> set[str]:
         """Scan all agent tools for 'requires' metadata.
@@ -239,6 +247,10 @@ class BaseWorkflowManager(ABC):
         if "llm_summarizer" in self._required_managers and self._llm_summarizer is None:
             self._llm_summarizer = self._create_summarizer()
 
+        if "sandbox_manager" in self._required_managers and self._sandbox_manager is None:
+            from agentic_cli.tools.sandbox.manager import SandboxManager
+            self._sandbox_manager = SandboxManager(self._settings)
+
     def _create_summarizer(self) -> Any:
         """Create an LLM summarizer for webfetch.
 
@@ -268,12 +280,19 @@ class BaseWorkflowManager(ABC):
             set_context_user_kb_manager(self._user_kb_manager),
             set_context_approval_manager(self._approval_manager),
             set_context_llm_summarizer(self._llm_summarizer),
+            set_context_sandbox_manager(self._sandbox_manager),
         ]
         try:
             yield
         finally:
             for token in tokens:
                 token.var.reset(token)
+
+    def _cleanup_managers(self) -> None:
+        """Clean up manager resources (call from subclass cleanup)."""
+        if self._sandbox_manager is not None:
+            self._sandbox_manager.cleanup()
+            self._sandbox_manager = None
 
     @property
     @abstractmethod

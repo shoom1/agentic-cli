@@ -218,6 +218,9 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         # Cancel any pending input requests
         self._cancel_pending_inputs()
 
+        # Clean up managers (sandbox, etc.)
+        self._cleanup_managers()
+
         logger.info("workflow_manager_cleaned_up")
 
     async def reinitialize(

@@ -212,6 +212,9 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
         # Cancel pending input requests
         self._cancel_pending_inputs()
 
+        # Clean up managers (sandbox, etc.)
+        self._cleanup_managers()
+
         logger.info("langgraph_workflow_manager_cleaned_up")
 
     async def reinitialize(

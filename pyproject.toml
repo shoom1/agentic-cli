@@ -48,6 +48,10 @@ langgraph = [
     "langchain-anthropic>=0.2.0",
     "langchain-google-genai>=2.0.0",
 ]
+sandbox = [
+    "jupyter_client>=8.0.0",
+    "ipykernel>=6.0.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/shoom1/agentic-cli"
