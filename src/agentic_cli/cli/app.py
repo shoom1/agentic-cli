@@ -351,6 +351,7 @@ class BaseCLIApp:
             ClearCommand,
             ExitCommand,
             StatusCommand,
+            SandboxCommand,
             PapersCommand,
         )
         from agentic_cli.cli.settings_command import SettingsCommand
@@ -359,6 +360,7 @@ class BaseCLIApp:
         self.command_registry.register(ClearCommand())
         self.command_registry.register(ExitCommand())
         self.command_registry.register(StatusCommand())
+        self.command_registry.register(SandboxCommand())
         self.command_registry.register(SettingsCommand())
         self.command_registry.register(PapersCommand())
 

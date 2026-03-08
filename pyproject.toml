@@ -32,6 +32,8 @@ dependencies = [
     "numpy>=1.26.0",
     "feedparser>=6.0.0",
     "pypdf>=4.0.0",
+    "jupyter_client>=8.0.0",
+    "ipykernel>=6.0.0",
 ]
 
 [project.optional-dependencies]
@@ -47,10 +49,6 @@ langgraph = [
     "langchain-openai>=0.2.0",
     "langchain-anthropic>=0.2.0",
     "langchain-google-genai>=2.0.0",
-]
-sandbox = [
-    "jupyter_client>=8.0.0",
-    "ipykernel>=6.0.0",
 ]
 
 [project.urls]

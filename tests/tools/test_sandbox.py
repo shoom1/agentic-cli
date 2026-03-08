@@ -3,7 +3,8 @@
 Tests cover:
 - ExecutionResult model
 - SandboxManager with mock backend
-- sandbox_execute / sandbox_reset tool functions
+- sandbox_execute tool function
+- SandboxCommand CLI command
 - Manager auto-detection via @requires
 - JupyterLocalBackend integration (guarded by jupyter_client availability)
 """
@@ -234,53 +235,133 @@ class TestSandboxTools:
             finally:
                 token.var.reset(token)
 
-    def test_sandbox_reset_active(self, tmp_path):
+
+
+# ---------------------------------------------------------------------------
+# SandboxCommand
+# ---------------------------------------------------------------------------
+
+class TestSandboxCommand:
+    @pytest.fixture()
+    def mock_app(self, tmp_path):
+        """Create a mock app with session and workflow."""
+        app = MagicMock()
+        app.session = MagicMock()
+        return app
+
+    def _make_manager(self, ctx, sessions=None):
+        """Create a SandboxManager with optional pre-created sessions."""
+        backend = MockSandboxBackend()
+        mgr = SandboxManager(ctx.settings, backend=backend)
+        for sid in (sessions or []):
+            mgr.execute("1", session_id=sid)
+        return mgr
+
+    @pytest.mark.asyncio
+    async def test_list_sessions(self, mock_app):
         with MockContext() as ctx:
-            from agentic_cli.workflow.context import set_context_sandbox_manager
+            from agentic_cli.cli.builtin_commands import SandboxCommand
 
-            backend = MockSandboxBackend()
-            mgr = SandboxManager(ctx.settings, backend=backend)
-            mgr.execute("1", session_id="s1")
-            token = set_context_sandbox_manager(mgr)
+            mgr = self._make_manager(ctx, sessions=["s1", "s2"])
+            mock_app.workflow.sandbox_manager = mgr
+            cmd = SandboxCommand()
 
-            try:
-                from agentic_cli.tools.sandbox import sandbox_reset
-                result = sandbox_reset(session_id="s1")
-                assert result["success"] is True
-                assert "reset" in result["message"]
-            finally:
-                token.var.reset(token)
-                mgr.cleanup()
+            await cmd.execute("", mock_app)
+            mock_app.session.add_rich.assert_called_once()
+            mgr.cleanup()
 
-    def test_sandbox_reset_inactive(self, tmp_path):
+    @pytest.mark.asyncio
+    async def test_list_empty(self, mock_app):
         with MockContext() as ctx:
-            from agentic_cli.workflow.context import set_context_sandbox_manager
+            from agentic_cli.cli.builtin_commands import SandboxCommand
 
-            backend = MockSandboxBackend()
-            mgr = SandboxManager(ctx.settings, backend=backend)
-            token = set_context_sandbox_manager(mgr)
+            mgr = self._make_manager(ctx)
+            mock_app.workflow.sandbox_manager = mgr
+            cmd = SandboxCommand()
 
-            try:
-                from agentic_cli.tools.sandbox import sandbox_reset
-                result = sandbox_reset(session_id="nope")
-                assert result["success"] is True
-                assert "was not active" in result["message"]
-            finally:
-                token.var.reset(token)
-                mgr.cleanup()
+            await cmd.execute("", mock_app)
+            mock_app.session.add_message.assert_called_once_with(
+                "system", "No active sandbox sessions."
+            )
+            mgr.cleanup()
 
-    def test_sandbox_reset_no_manager(self, tmp_path):
-        with MockContext():
-            from agentic_cli.workflow.context import set_context_sandbox_manager
+    @pytest.mark.asyncio
+    async def test_reset_session(self, mock_app):
+        with MockContext() as ctx:
+            from agentic_cli.cli.builtin_commands import SandboxCommand
 
-            token = set_context_sandbox_manager(None)
-            try:
-                from agentic_cli.tools.sandbox import sandbox_reset
-                result = sandbox_reset()
-                assert result["success"] is False
-                assert "not available" in result["error"]
-            finally:
-                token.var.reset(token)
+            mgr = self._make_manager(ctx, sessions=["s1"])
+            mock_app.workflow.sandbox_manager = mgr
+            cmd = SandboxCommand()
+
+            await cmd.execute("reset s1", mock_app)
+            mock_app.session.add_success.assert_called_once()
+            assert len(mgr.list_sessions()) == 0
+            mgr.cleanup()
+
+    @pytest.mark.asyncio
+    async def test_reset_default_session(self, mock_app):
+        with MockContext() as ctx:
+            from agentic_cli.cli.builtin_commands import SandboxCommand
+
+            mgr = self._make_manager(ctx, sessions=["default"])
+            mock_app.workflow.sandbox_manager = mgr
+            cmd = SandboxCommand()
+
+            await cmd.execute("reset", mock_app)
+            mock_app.session.add_success.assert_called_once()
+            assert len(mgr.list_sessions()) == 0
+            mgr.cleanup()
+
+    @pytest.mark.asyncio
+    async def test_reset_inactive_session(self, mock_app):
+        with MockContext() as ctx:
+            from agentic_cli.cli.builtin_commands import SandboxCommand
+
+            mgr = self._make_manager(ctx)
+            mock_app.workflow.sandbox_manager = mgr
+            cmd = SandboxCommand()
+
+            await cmd.execute("reset nope", mock_app)
+            mock_app.session.add_warning.assert_called_once()
+            mgr.cleanup()
+
+    @pytest.mark.asyncio
+    async def test_reset_all(self, mock_app):
+        with MockContext() as ctx:
+            from agentic_cli.cli.builtin_commands import SandboxCommand
+
+            mgr = self._make_manager(ctx, sessions=["s1", "s2", "s3"])
+            mock_app.workflow.sandbox_manager = mgr
+            cmd = SandboxCommand()
+
+            await cmd.execute("reset --all", mock_app)
+            mock_app.session.add_success.assert_called_once()
+            assert "3" in mock_app.session.add_success.call_args[0][0]
+            assert len(mgr.list_sessions()) == 0
+            mgr.cleanup()
+
+    @pytest.mark.asyncio
+    async def test_no_sandbox_manager(self, mock_app):
+        from agentic_cli.cli.builtin_commands import SandboxCommand
+
+        mock_app.workflow.sandbox_manager = None
+        cmd = SandboxCommand()
+
+        await cmd.execute("", mock_app)
+        mock_app.session.add_warning.assert_called_once()
+        assert "not available" in mock_app.session.add_warning.call_args[0][0].lower()
+
+    @pytest.mark.asyncio
+    async def test_no_workflow(self, mock_app):
+        from agentic_cli.cli.builtin_commands import SandboxCommand
+
+        mock_app.workflow = property(lambda self: (_ for _ in ()).throw(RuntimeError))
+        type(mock_app).workflow = property(lambda self: (_ for _ in ()).throw(RuntimeError("not ready")))
+        cmd = SandboxCommand()
+
+        await cmd.execute("", mock_app)
+        mock_app.session.add_warning.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -321,18 +402,8 @@ class TestManagerAutoDetection:
 # JupyterLocalBackend integration tests
 # ---------------------------------------------------------------------------
 
-_has_jupyter = pytest.importorskip.__module__ is not None  # always True, placeholder
-
-try:
-    import jupyter_client as _jc
-    _has_jupyter = True
-except ImportError:
-    _has_jupyter = False
-
-
-@pytest.mark.skipif(not _has_jupyter, reason="jupyter_client not installed")
 class TestJupyterLocalBackend:
-    """Integration tests requiring jupyter_client + ipykernel."""
+    """Integration tests for JupyterLocalBackend."""
 
     def test_simple_execution(self, tmp_path):
         from agentic_cli.tools.sandbox.backends.jupyter_local import JupyterLocalBackend

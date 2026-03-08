@@ -2,9 +2,6 @@
 
 Uses jupyter_client.KernelManager + BlockingKernelClient for stateful
 Python execution with per-session kernels.
-
-Requires the 'sandbox' optional dependency:
-    pip install agentic-cli[sandbox]
 """
 
 from __future__ import annotations
@@ -15,17 +12,12 @@ import time
 from pathlib import Path
 from typing import Any
 
+from jupyter_client import KernelManager
+from jupyter_client.blocking import BlockingKernelClient
+
 from agentic_cli.logging import Loggers
 from agentic_cli.tools.sandbox.backends.base import SandboxBackend
 from agentic_cli.tools.sandbox.models import ExecutionResult
-
-try:
-    from jupyter_client import KernelManager
-    from jupyter_client.blocking import BlockingKernelClient
-
-    HAS_JUPYTER = True
-except ImportError:
-    HAS_JUPYTER = False
 
 logger = Loggers.tools()
 
@@ -41,16 +33,11 @@ class JupyterLocalBackend(SandboxBackend):
     """
 
     def __init__(self) -> None:
-        if not HAS_JUPYTER:
-            raise ImportError(
-                "jupyter_client is required for JupyterLocalBackend. "
-                "Install with: pip install agentic-cli[sandbox]"
-            )
         self._sessions: dict[str, tuple[KernelManager, BlockingKernelClient]] = {}
 
     def _get_or_create_session(
         self, session_id: str, working_dir: Path | None = None,
-    ) -> tuple["KernelManager", "BlockingKernelClient"]:
+    ) -> tuple[KernelManager, BlockingKernelClient]:
         """Get existing session or start a new kernel."""
         if session_id in self._sessions:
             return self._sessions[session_id]
