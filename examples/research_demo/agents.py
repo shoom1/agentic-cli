@@ -31,6 +31,7 @@ from agentic_cli.tools import (
     diff_compare,
     grep,
     glob,
+    sandbox_tools,
 )
 
 
@@ -108,7 +109,7 @@ When the user asks you to research something:
 6. For arXiv paper research, **delegate to arxiv_specialist**
 7. Execute ONE task at a time, updating the plan after each
 8. Use `web_fetch` to extract information from specific URLs found during research
-9. Use `execute_python` for data analysis, calculations, or processing
+9. Use `sandbox_execute` for data analysis and `execute_python` for quick calculations
 10. Use `ask_clarification` when you need user input to proceed
 11. Update the plan with `save_plan` if you discover changes are needed
 12. Store learnings with `save_memory` and share them with the user
@@ -192,8 +193,9 @@ AGENT_CONFIGS = [
             # Web (2 tools)
             web_search,
             web_fetch,
-            # Code execution (1 tool)
+            # Code execution (2 tools)
             execute_python,
+            sandbox_tools.sandbox_execute,
             # User interaction (1 tool)
             ask_clarification,
             # File operations (6 tools)

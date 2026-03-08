@@ -32,3 +32,4 @@ set_context_llm_summarizer, get_context_llm_summarizer = _make_context_accessors
 set_context_kb_manager, get_context_kb_manager = _make_context_accessors("kb_manager")
 set_context_user_kb_manager, get_context_user_kb_manager = _make_context_accessors("user_kb_manager")
 set_context_workflow, get_context_workflow = _make_context_accessors("workflow")
+set_context_sandbox_manager, get_context_sandbox_manager = _make_context_accessors("sandbox_manager")

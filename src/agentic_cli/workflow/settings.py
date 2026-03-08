@@ -214,6 +214,32 @@ class WorkflowSettingsMixin:
         json_schema_extra={"ui_order": 121},
     )
 
+    # Sandbox executor (stateful Jupyter-backed execution)
+    sandbox_backend: str = Field(
+        default="jupyter_local",
+        title="Sandbox Backend",
+        description="Backend for stateful sandbox execution",
+        json_schema_extra={"ui_order": 122},
+    )
+    sandbox_timeout: int = Field(
+        default=120,
+        title="Sandbox Timeout",
+        description="Default timeout for sandbox execution (seconds)",
+        json_schema_extra={"ui_order": 123},
+    )
+    sandbox_max_sessions: int = Field(
+        default=5,
+        title="Sandbox Max Sessions",
+        description="Maximum concurrent sandbox sessions",
+        json_schema_extra={"ui_order": 124},
+    )
+    sandbox_packages: list[str] = Field(
+        default_factory=list,
+        title="Sandbox Packages",
+        description="Additional pip packages to pre-install in sandbox sessions (informational for local backend, drives image build for Docker backend)",
+        json_schema_extra={"ui_order": 125},
+    )
+
     # HITL (Human-in-the-Loop) settings
     hitl_enabled: bool = Field(
         default=True,

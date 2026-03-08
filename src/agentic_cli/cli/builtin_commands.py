@@ -151,6 +151,78 @@ class StatusCommand(Command):
         app.session.add_rich(panel)
 
 
+class SandboxCommand(Command):
+    """Manage sandbox sessions."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            name="sandbox",
+            description="List and manage sandbox sessions",
+            aliases=["sb"],
+            usage="/sandbox [reset [session_id] [--all]]",
+            examples=["/sandbox", "/sandbox reset", "/sandbox reset my_session", "/sandbox reset --all"],
+            category=CommandCategory.WORKFLOW,
+        )
+
+    async def execute(self, args: str, app: Any) -> None:
+        """List or reset sandbox sessions."""
+        # Get sandbox manager from workflow
+        try:
+            workflow = app.workflow
+            manager = getattr(workflow, "sandbox_manager", None)
+        except (RuntimeError, AttributeError):
+            manager = None
+
+        if manager is None:
+            app.session.add_warning(
+                "Sandbox not available. Add sandbox tools to your agent config to enable it."
+            )
+            return
+
+        parsed = self.parse_args(args)
+        subcommand = parsed.positional.strip()
+
+        if subcommand.startswith("reset"):
+            # Parse session_id from after "reset"
+            rest = subcommand[len("reset"):].strip()
+            if parsed.has_flag("all"):
+                # Reset all sessions
+                sessions = manager.list_sessions()
+                if not sessions:
+                    app.session.add_message("system", "No active sandbox sessions.")
+                    return
+                for s in sessions:
+                    manager.reset_session(s["session_id"])
+                app.session.add_success(f"Reset {len(sessions)} sandbox session(s).")
+            else:
+                session_id = rest if rest else "default"
+                was_active = manager.reset_session(session_id)
+                if was_active:
+                    app.session.add_success(f"Sandbox session '{session_id}' reset.")
+                else:
+                    app.session.add_warning(f"Sandbox session '{session_id}' was not active.")
+        else:
+            # List sessions
+            sessions = manager.list_sessions()
+            if not sessions:
+                app.session.add_message("system", "No active sandbox sessions.")
+                return
+
+            table = Table(title="Sandbox Sessions", show_lines=False, padding=(0, 1))
+            table.add_column("Session ID", style="bold cyan", no_wrap=True)
+            table.add_column("Working Dir", style="dim")
+            table.add_column("Executions", style="dim", no_wrap=True, justify="right")
+
+            for s in sessions:
+                table.add_row(
+                    s["session_id"],
+                    s["working_dir"],
+                    str(s["execution_count"]),
+                )
+
+            app.session.add_rich(table)
+
+
 class PapersCommand(Command):
     """List documents in the knowledge base."""
 
