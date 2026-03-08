@@ -339,7 +339,7 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
 
                     # Emit context trimming events (side-channel from agent_node)
                     while self._builder._trim_events:
-                        info = self._builder._trim_events.pop(0)
+                        info = self._builder._trim_events.popleft()
                         transformed = self._apply_event_hook(
                             WorkflowEvent.context_trimmed(
                                 messages_before=info["messages_before"],
@@ -494,22 +494,26 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
     # Session save/resume hooks
     # -------------------------------------------------------------------------
 
-    async def _extract_session_messages(self, session_id: str) -> list[dict]:
-        """Extract normalized messages from LangGraph state."""
+    def _get_state_values(self, session_id: str) -> dict | None:
+        """Get state values from LangGraph, or None on failure."""
         if not self._compiled_graph:
-            return []
-
+            return None
         config = {"configurable": {"thread_id": session_id}}
-
         try:
             state = self._compiled_graph.get_state(config)
         except Exception:
-            return []
-
+            return None
         if not state or not state.values:
+            return None
+        return state.values
+
+    async def _extract_session_messages(self, session_id: str) -> list[dict]:
+        """Extract normalized messages from LangGraph state."""
+        values = self._get_state_values(session_id)
+        if not values:
             return []
 
-        raw_messages = state.values.get("messages", [])
+        raw_messages = values.get("messages", [])
         messages: list[dict] = []
 
         for msg in raw_messages:
@@ -544,20 +548,10 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
 
     async def _extract_current_agent(self, session_id: str) -> str | None:
         """Extract current agent from LangGraph state."""
-        if not self._compiled_graph:
+        values = self._get_state_values(session_id)
+        if not values:
             return None
-
-        config = {"configurable": {"thread_id": session_id}}
-
-        try:
-            state = self._compiled_graph.get_state(config)
-        except Exception:
-            return None
-
-        if not state or not state.values:
-            return None
-
-        return state.values.get("current_agent")
+        return values.get("current_agent")
 
     async def _inject_session_messages(
         self,

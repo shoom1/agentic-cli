@@ -34,6 +34,7 @@ def _make_kb(tmp_path):
     from agentic_cli.knowledge_base._mocks import MockEmbeddingService, MockVectorStore
 
     manager = KnowledgeBaseManager.__new__(KnowledgeBaseManager)
+    manager._lock = __import__("threading").Lock()
     manager._settings = None
     manager._use_mock = True
     manager.kb_dir = tmp_path / "kb"
@@ -233,6 +234,7 @@ class TestKBManagerMigrationV1ToV2:
         from agentic_cli.knowledge_base._mocks import MockEmbeddingService, MockVectorStore
 
         manager = KnowledgeBaseManager.__new__(KnowledgeBaseManager)
+        manager._lock = __import__("threading").Lock()
         manager._settings = None
         manager._use_mock = True
         manager.kb_dir = kb_dir

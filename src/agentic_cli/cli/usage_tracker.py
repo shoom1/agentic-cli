@@ -44,7 +44,6 @@ class UsageTracker:
 
     # Context window tracking
     last_prompt_tokens: int = 0
-    prev_prompt_tokens: int = 0
     context_trimmed_count: int = 0
 
     def record(self, metadata: dict) -> None:
@@ -58,8 +57,6 @@ class UsageTracker:
             metadata: Metadata dict from a WorkflowEvent (LLM_USAGE type)
         """
         current_prompt = metadata.get("prompt_tokens") or 0
-
-        self.prev_prompt_tokens = self.last_prompt_tokens
         self.last_prompt_tokens = current_prompt
 
         self.prompt_tokens += current_prompt
@@ -105,5 +102,4 @@ class UsageTracker:
         self.invocation_count = 0
         self.total_latency_ms = 0.0
         self.last_prompt_tokens = 0
-        self.prev_prompt_tokens = 0
         self.context_trimmed_count = 0

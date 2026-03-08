@@ -10,6 +10,7 @@ For alternative orchestration backends (e.g., LangGraph), see the base_manager m
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import AsyncGenerator, Any, Callable
 
@@ -652,18 +653,22 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
     # Session save/resume hooks
     # -------------------------------------------------------------------------
 
-    async def _extract_session_messages(self, session_id: str) -> list[dict]:
-        """Extract normalized messages from ADK session events."""
+    async def _extract_session_data(self, session_id: str) -> tuple[list[dict], str | None]:
+        """Extract normalized messages and current agent from ADK session.
+
+        Returns:
+            Tuple of (messages list, current agent name or None).
+        """
         if not self._session_service:
-            return []
+            return [], None
 
         session = await self._session_service.get_session(
             app_name=self.app_name,
-            user_id="default_user",
+            user_id=self._settings.default_user,
             session_id=session_id,
         )
         if session is None or not session.events:
-            return []
+            return [], None
 
         messages: list[dict] = []
         for event in session.events:
@@ -703,7 +708,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                 # Function response part
                 elif hasattr(part, "function_response") and part.function_response:
                     fr = part.function_response
-                    import json
                     response_content = json.dumps(fr.response) if isinstance(fr.response, dict) else str(fr.response)
                     messages.append({
                         "role": "tool",
@@ -712,23 +716,18 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                         "content": response_content,
                     })
 
+        current_agent = getattr(session.events[-1], "author", None)
+        return messages, current_agent
+
+    async def _extract_session_messages(self, session_id: str) -> list[dict]:
+        """Extract normalized messages from ADK session events."""
+        messages, _ = await self._extract_session_data(session_id)
         return messages
 
     async def _extract_current_agent(self, session_id: str) -> str | None:
         """Return the author of the last event in the ADK session."""
-        if not self._session_service:
-            return None
-
-        session = await self._session_service.get_session(
-            app_name=self.app_name,
-            user_id="default_user",
-            session_id=session_id,
-        )
-        if session is None or not session.events:
-            return None
-
-        last_event = session.events[-1]
-        return getattr(last_event, "author", None)
+        _, current_agent = await self._extract_session_data(session_id)
+        return current_agent
 
     async def _inject_session_messages(
         self,
@@ -743,7 +742,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         # Create a fresh session for the restored conversation
         session = await self._session_service.create_session(
             app_name=self.app_name,
-            user_id="default_user",
+            user_id=self._settings.default_user,
             session_id=session_id,
         )
 
@@ -774,7 +773,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                 )
 
             elif role == "tool":
-                import json
                 try:
                     response = json.loads(msg["content"])
                 except (json.JSONDecodeError, TypeError):

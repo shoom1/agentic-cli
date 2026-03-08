@@ -145,7 +145,6 @@ class TestUsageTracker:
         assert tracker.invocation_count == 0
         assert tracker.total_latency_ms == 0.0
         assert tracker.last_prompt_tokens == 0
-        assert tracker.prev_prompt_tokens == 0
         assert tracker.context_trimmed_count == 0
         assert tracker.format_status_bar() == ""
 
@@ -164,7 +163,6 @@ class TestContextWindowTracking:
         tracker.record({"prompt_tokens": 5000, "completion_tokens": 200})
         tracker.record({"prompt_tokens": 6000, "completion_tokens": 300})
         assert tracker.last_prompt_tokens == 6000
-        assert tracker.prev_prompt_tokens == 5000
 
     def test_record_does_not_increment_trimmed_count(self):
         """record() no longer auto-detects trims; count is externally managed."""
@@ -219,5 +217,4 @@ class TestContextWindowTracking:
         tracker.context_trimmed_count = 3
         tracker.reset()
         assert tracker.last_prompt_tokens == 0
-        assert tracker.prev_prompt_tokens == 0
         assert tracker.context_trimmed_count == 0

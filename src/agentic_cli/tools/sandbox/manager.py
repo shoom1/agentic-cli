@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
 from agentic_cli.logging import Loggers
+from agentic_cli.persistence._utils import sanitize_filename
 from agentic_cli.tools.sandbox.models import ExecutionResult
 
 if TYPE_CHECKING:
@@ -54,8 +55,7 @@ class SandboxManager:
     def _ensure_backend(self) -> "SandboxBackend":
         """Lazily create the backend if not injected."""
         if self._backend is None:
-            backend_name = getattr(self._settings, "sandbox_backend", "jupyter_local")
-            self._backend = self._create_backend(backend_name)
+            self._backend = self._create_backend(self._settings.sandbox_backend)
         return self._backend
 
     def _create_backend(self, backend_name: str) -> "SandboxBackend":
@@ -67,12 +67,9 @@ class SandboxManager:
 
     def _get_session_dir(self, session_id: str) -> Path:
         """Get or create the working directory for a session."""
-        workspace = getattr(self._settings, "workspace_dir", None)
-        if workspace:
-            base = Path(workspace)
-        else:
-            base = Path.cwd()
-        session_dir = base / "sandbox" / session_id
+        base = Path(self._settings.workspace_dir)
+        safe_id = sanitize_filename(session_id)
+        session_dir = base / "sandbox" / safe_id
         session_dir.mkdir(parents=True, exist_ok=True)
         return session_dir
 
@@ -92,7 +89,7 @@ class SandboxManager:
         Returns:
             ExecutionResult with output and metadata.
         """
-        max_sessions = getattr(self._settings, "sandbox_max_sessions", 5)
+        max_sessions = self._settings.sandbox_max_sessions
         if session_id not in self._sessions and len(self._sessions) >= max_sessions:
             return ExecutionResult(
                 success=False,
@@ -100,7 +97,7 @@ class SandboxManager:
             )
 
         if timeout_seconds is None:
-            timeout_seconds = getattr(self._settings, "sandbox_timeout", 120)
+            timeout_seconds = self._settings.sandbox_timeout
 
         # Get or create session metadata
         if session_id not in self._sessions:
@@ -163,6 +160,7 @@ class SandboxManager:
 
     def cleanup(self) -> None:
         """Clean up all sessions and the backend."""
+        atexit.unregister(self._atexit_cleanup)
         if self._backend is not None:
             self._backend.cleanup()
         self._sessions.clear()

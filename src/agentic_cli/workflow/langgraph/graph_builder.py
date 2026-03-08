@@ -6,6 +6,7 @@ and LLM factory logic from the runtime process loop.
 
 from __future__ import annotations
 
+from collections import deque
 from typing import Any, Callable, TYPE_CHECKING
 
 from agentic_cli.workflow.config import AgentConfig
@@ -33,7 +34,7 @@ class LangGraphBuilder:
     def __init__(self, settings: "BaseSettings") -> None:
         self._settings = settings
         # Side-channel for trim events: agent_node appends here, manager drains
-        self._trim_events: list[dict[str, Any]] = []
+        self._trim_events: deque[dict[str, Any]] = deque()
 
     def build(self, agent_configs: list[AgentConfig], default_model: str):
         """Build the LangGraph workflow from agent configs.

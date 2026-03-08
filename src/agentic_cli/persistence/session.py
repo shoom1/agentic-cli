@@ -104,6 +104,24 @@ class SessionPersistence:
         """Save sessions index to disk."""
         atomic_write_json(self._get_sessions_index_path(), {"sessions": index})
 
+    def _update_sessions_index(
+        self,
+        session_id: str,
+        created_at: str,
+        saved_at: str,
+        message_count: int,
+    ) -> None:
+        """Update sessions index with metadata for a single session."""
+        with file_lock(self._get_sessions_index_path()):
+            sessions_index = self._load_sessions_index()
+            sessions_index[session_id] = {
+                "session_id": session_id,
+                "created_at": created_at,
+                "saved_at": saved_at,
+                "message_count": message_count,
+            }
+            self._save_sessions_index(sessions_index)
+
     def _rebuild_sessions_index(self) -> dict[str, dict]:
         """Rebuild sessions index from individual session files (migration)."""
         index: dict[str, dict] = {}
@@ -140,15 +158,12 @@ class SessionPersistence:
         session_path = self._get_session_path(snapshot.session_id)
         atomic_write_json(session_path, snapshot.to_dict())
 
-        with file_lock(self._get_sessions_index_path()):
-            sessions_index = self._load_sessions_index()
-            sessions_index[snapshot.session_id] = {
-                "session_id": snapshot.session_id,
-                "created_at": snapshot.created_at.isoformat(),
-                "saved_at": snapshot.saved_at.isoformat(),
-                "message_count": len(snapshot.messages),
-            }
-            self._save_sessions_index(sessions_index)
+        self._update_sessions_index(
+            session_id=snapshot.session_id,
+            created_at=snapshot.created_at.isoformat(),
+            saved_at=snapshot.saved_at.isoformat(),
+            message_count=len(snapshot.messages),
+        )
 
         logger.info(
             "snapshot_saved",
@@ -200,16 +215,12 @@ class SessionPersistence:
         session_path = self._get_session_path(session_id)
         atomic_write_json(session_path, snapshot.to_dict())
 
-        # Update sessions index (lock to prevent TOCTOU race)
-        with file_lock(self._get_sessions_index_path()):
-            sessions_index = self._load_sessions_index()
-            sessions_index[session_id] = {
-                "session_id": session_id,
-                "created_at": snapshot.created_at.isoformat(),
-                "saved_at": snapshot.saved_at.isoformat(),
-                "message_count": len(messages),
-            }
-            self._save_sessions_index(sessions_index)
+        self._update_sessions_index(
+            session_id=session_id,
+            created_at=snapshot.created_at.isoformat(),
+            saved_at=snapshot.saved_at.isoformat(),
+            message_count=len(messages),
+        )
 
         logger.info(
             "session_saved",
@@ -298,14 +309,15 @@ class SessionPersistence:
             True if deleted, False if not found
         """
         session_path = self._get_session_path(session_id)
-        if session_path.exists():
+        try:
             session_path.unlink()
+        except FileNotFoundError:
+            return False
 
-            # Update sessions index (lock to prevent TOCTOU race)
-            with file_lock(self._get_sessions_index_path()):
-                sessions_index = self._load_sessions_index()
-                sessions_index.pop(session_id, None)
-                self._save_sessions_index(sessions_index)
+        # Update sessions index (lock to prevent TOCTOU race)
+        with file_lock(self._get_sessions_index_path()):
+            sessions_index = self._load_sessions_index()
+            sessions_index.pop(session_id, None)
+            self._save_sessions_index(sessions_index)
 
-            return True
-        return False
+        return True

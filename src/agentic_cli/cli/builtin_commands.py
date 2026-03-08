@@ -109,7 +109,7 @@ class StatusCommand(Command):
                 table.add_row("Error", f"[red]{init_error}[/red]")
 
         # Persistent session info
-        sid = getattr(app, "_session_id", None)
+        sid = app.session_id
         if sid:
             table.add_row("Session", f"{sid} (persistent)")
         else:
@@ -357,7 +357,7 @@ class SessionsCommand(Command):
         table.add_column("Last Saved", style="dim")
         table.add_column("Created", style="dim")
 
-        current_sid = getattr(app, "_session_id", None)
+        current_sid = app.session_id
 
         for s in sessions:
             sid = s["session_id"]

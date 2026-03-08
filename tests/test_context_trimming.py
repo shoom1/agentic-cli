@@ -65,7 +65,7 @@ class TestBuilderTrimEvents:
 
         settings = MagicMock()
         builder = LangGraphBuilder(settings)
-        assert builder._trim_events == []
+        assert len(builder._trim_events) == 0
 
     def test_trim_events_appendable(self):
         from agentic_cli.workflow.langgraph.graph_builder import LangGraphBuilder
@@ -91,10 +91,10 @@ class TestBuilderTrimEvents:
 
         drained = []
         while builder._trim_events:
-            drained.append(builder._trim_events.pop(0))
+            drained.append(builder._trim_events.popleft())
 
         assert len(drained) == 2
-        assert builder._trim_events == []
+        assert len(builder._trim_events) == 0
         assert drained[0]["agent"] == "a"
         assert drained[1]["agent"] == "b"
 

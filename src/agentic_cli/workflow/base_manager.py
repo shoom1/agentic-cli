@@ -289,10 +289,17 @@ class BaseWorkflowManager(ABC):
                 token.var.reset(token)
 
     def _cleanup_managers(self) -> None:
-        """Clean up manager resources (call from subclass cleanup)."""
+        """Clean up all manager resources (call from subclass cleanup)."""
         if self._sandbox_manager is not None:
             self._sandbox_manager.cleanup()
             self._sandbox_manager = None
+        self._memory_manager = None
+        self._plan_store = None
+        self._task_store = None
+        self._kb_manager = None
+        self._user_kb_manager = None
+        self._approval_manager = None
+        self._llm_summarizer = None
 
     @property
     @abstractmethod
@@ -577,10 +584,11 @@ class BaseWorkflowManager(ABC):
             if current_agent:
                 metadata["current_agent"] = current_agent
 
+            now = datetime.now()
             snapshot = SessionSnapshot(
                 session_id=sid,
-                created_at=datetime.now(),
-                saved_at=datetime.now(),
+                created_at=now,
+                saved_at=now,
                 messages=messages,
                 metadata=metadata,
             )

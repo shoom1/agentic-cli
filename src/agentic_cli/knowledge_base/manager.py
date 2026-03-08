@@ -90,15 +90,6 @@ class KnowledgeBaseManager:
     Provides document ingestion, semantic search, and document management.
     """
 
-    @property
-    def _lock(self) -> threading.Lock:
-        """Thread lock, lazily created to support __new__-based construction."""
-        try:
-            return self.__lock
-        except AttributeError:
-            self.__lock = threading.Lock()
-            return self.__lock
-
     def __init__(
         self,
         settings: "BaseSettings | None" = None,
@@ -119,6 +110,7 @@ class KnowledgeBaseManager:
             embedding_service: Optional pre-configured embedding service.
             vector_store: Optional pre-configured vector store.
         """
+        self._lock = threading.Lock()
         self._settings = settings
         self._use_mock = use_mock
 
