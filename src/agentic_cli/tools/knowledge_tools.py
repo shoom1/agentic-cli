@@ -112,8 +112,9 @@ def search_knowledge_base(
     category=ToolCategory.KNOWLEDGE,
     permission_level=PermissionLevel.CAUTION,
     description=(
-        "Ingest a document into the knowledge base. Accepts text content, a local file path, "
-        "or a URL (including ArXiv). ArXiv URLs auto-fetch metadata and PDF. "
+        "Ingest a document into the knowledge base. "
+        "REQUIRED: provide either 'content' (text) or 'url_or_path' (file path or URL). "
+        "ArXiv URLs auto-fetch metadata and PDF. "
         "Valid source_type values: arxiv, ssrn, web, internal, user, local."
     ),
 )
@@ -131,15 +132,15 @@ async def ingest_document(
 ) -> dict[str, Any]:
     """Ingest a document into the knowledge base.
 
-    Supports three modes:
+    You MUST provide at least one of `content` or `url_or_path`:
     1. Text content: provide `content` directly
     2. Local file: provide `url_or_path` pointing to a local file
     3. URL: provide `url_or_path` with an HTTP(S) URL
        - ArXiv URLs auto-fetch metadata and download PDF
 
     Args:
-        content: Document text content (for text-based ingestion)
-        url_or_path: URL or local file path (for file-based ingestion)
+        content: Document text content (REQUIRED if url_or_path not given)
+        url_or_path: URL or local file path (REQUIRED if content not given)
         title: Document title (auto-fetched for ArXiv if empty)
         source_type: Source type (arxiv, ssrn, web, internal, user, local)
         source_url: Optional URL of the source
@@ -233,7 +234,14 @@ async def ingest_document(
 
     # --- Validate ---
     if not content and not file_bytes:
-        return {"success": False, "error": "No content or file provided. Supply 'content' or 'url_or_path'."}
+        return {
+            "success": False,
+            "error": (
+                "No content or file provided. "
+                "You must supply either 'content' (text string) or 'url_or_path' (URL or file path). "
+                "For ArXiv papers, pass the ArXiv URL as url_or_path."
+            ),
+        }
 
     if not title:
         title = truncate(content, 80)
