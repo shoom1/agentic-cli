@@ -45,7 +45,7 @@ class SafePythonExecutor:
     - Output capture with sentinel protocol
     """
 
-    # Modules allowed for import
+    # Modules allowed for import (top-level package names)
     ALLOWED_MODULES = {
         # Core math/science
         "numpy",
@@ -55,6 +55,9 @@ class SafePythonExecutor:
         "math",
         "statistics",
         "cmath",
+        # ML / visualization
+        "sklearn",
+        "matplotlib",
         # Collections and utilities
         "collections",
         "itertools",
@@ -344,7 +347,8 @@ class SafePythonExecutor:
             BLOCKED_BUILTINS = {blocked_builtins_repr}
 
             def safe_import(name, globals_=None, locals_=None, fromlist=(), level=0):
-                if name not in ALLOWED_MODULES:
+                top_level = name.split(".")[0]
+                if top_level not in ALLOWED_MODULES:
                     raise ImportError(
                         f"Module '{{name}}' is not allowed. "
                         f"Allowed modules: {{', '.join(sorted(ALLOWED_MODULES))}}"
