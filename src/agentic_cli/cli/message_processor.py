@@ -27,6 +27,27 @@ if TYPE_CHECKING:
 logger = Loggers.cli()
 
 
+def _richify_task_display(plain: str) -> str:
+    """Convert plain task checklist to ANSI-colored icons for the thinking box."""
+    from thinking_prompt import rich_to_ansi
+
+    lines = []
+    for line in plain.splitlines():
+        stripped = line.lstrip()
+        indent = line[: len(line) - len(stripped)]
+        if stripped.startswith("[✓]"):
+            lines.append(f"{indent}[green]✓[/green] {stripped[4:]}")
+        elif stripped.startswith("[▸]"):
+            lines.append(f"{indent}[yellow]▸[/yellow] {stripped[4:]}")
+        elif stripped.startswith("[ ]"):
+            lines.append(f"{indent}[dim]○[/dim] {stripped[4:]}")
+        elif stripped.startswith("[-]"):
+            lines.append(f"{indent}[red dim]✗[/red dim] {stripped[4:]}")
+        else:
+            lines.append(line.replace("[", "\\["))
+    return rich_to_ansi("\n".join(lines))
+
+
 # === Message History for Persistence ===
 
 
@@ -159,6 +180,7 @@ class MessageProcessor:
     def __init__(self) -> None:
         """Initialize the message processor."""
         self._message_history = MessageHistory()
+        self._last_task_progress: str | None = None
 
     @property
     def history(self) -> MessageHistory:
@@ -168,6 +190,7 @@ class MessageProcessor:
     def clear_history(self) -> None:
         """Clear message history."""
         self._message_history.clear()
+        self._last_task_progress = None
 
     async def process(
         self,
@@ -207,6 +230,8 @@ class MessageProcessor:
         state = _EventProcessingState()
         state._usage_tracker = usage_tracker
         state._workflow_controller = workflow_controller
+        # Restore task progress from previous turn so it shows immediately
+        state.task_progress_display = self._last_task_progress
         workflow = workflow_controller.workflow
         dispatch = self._get_event_dispatch()
 
@@ -228,7 +253,7 @@ class MessageProcessor:
             )
             response = await self._prompt_user_input(wf_event, workflow, ui)
 
-            ui.start_thinking(state.get_status)
+            ui.start_thinking(state.get_status, content_format="ansi")
             state.thinking_started = True
             return response
 
@@ -236,7 +261,7 @@ class MessageProcessor:
         try:
             while True:
                 try:
-                    ui.start_thinking(state.get_status)
+                    ui.start_thinking(state.get_status, content_format="ansi")
                     state.thinking_started = True
 
                     async for event in workflow.process(
@@ -300,6 +325,8 @@ class MessageProcessor:
                     break
         finally:
             workflow._user_input_callback = None
+            # Persist task progress so it shows immediately on the next turn
+            self._last_task_progress = state.task_progress_display
 
     async def _prompt_user_input(
         self,
@@ -434,7 +461,7 @@ class MessageProcessor:
         )
 
         # Resume thinking box
-        ui.start_thinking(state.get_status)
+        ui.start_thinking(state.get_status, content_format="ansi")
         state.thinking_started = True
 
     async def _handle_code_execution(
@@ -494,9 +521,15 @@ class MessageProcessor:
         if progress.get("total", 0) > 0:
             completed = progress.get("completed", 0)
             total = progress["total"]
-            state.task_progress_display = f"--- Tasks: {completed}/{total} ---"
+            from thinking_prompt import rich_to_ansi
+
+            state.task_progress_display = rich_to_ansi(
+                f"[bold]--- Tasks: {completed}/{total} ---[/bold]"
+            )
             if event.content:
-                state.task_progress_display += f"\n{event.content}"
+                state.task_progress_display += f"\n{_richify_task_display(event.content)}"
+        else:
+            state.task_progress_display = None
 
         current_task = event.metadata.get("current_task_description")
         if current_task:

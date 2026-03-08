@@ -2,7 +2,6 @@
 
 from pathlib import Path
 
-from pydantic import Field
 from pydantic_settings import SettingsConfigDict
 
 from agentic_cli import BaseSettings
@@ -27,10 +26,8 @@ class ResearchDemoSettings(BaseSettings):
         extra="ignore",
     )
 
-    app_name: str = Field(default="research_demo")
-    workspace_dir: Path = Field(default=Path.home() / ".research_demo")
-
     def __init__(self, **kwargs):
-        # Override verbose_thinking default to False (concise mode)
+        kwargs.setdefault("app_name", "research_demo")
+        kwargs.setdefault("workspace_dir", Path.home() / ".research_demo")
         kwargs.setdefault("verbose_thinking", False)
         super().__init__(**kwargs)
