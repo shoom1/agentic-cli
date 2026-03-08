@@ -487,6 +487,111 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
 
         return response.content if hasattr(response, "content") else str(response)
 
+    # -------------------------------------------------------------------------
+    # Session save/resume hooks
+    # -------------------------------------------------------------------------
+
+    async def _extract_session_messages(self, session_id: str) -> list[dict]:
+        """Extract normalized messages from LangGraph state."""
+        if not self._compiled_graph:
+            return []
+
+        config = {"configurable": {"thread_id": session_id}}
+
+        try:
+            state = self._compiled_graph.get_state(config)
+        except Exception:
+            return []
+
+        if not state or not state.values:
+            return []
+
+        raw_messages = state.values.get("messages", [])
+        messages: list[dict] = []
+
+        for msg in raw_messages:
+            msg_type = getattr(msg, "type", "")
+
+            if msg_type == "human":
+                messages.append({"role": "user", "content": msg.content})
+
+            elif msg_type == "ai":
+                entry: dict = {"role": "assistant", "content": msg.content or ""}
+                tool_calls = getattr(msg, "tool_calls", None)
+                if tool_calls:
+                    entry["tool_calls"] = [
+                        {
+                            "id": tc.get("id", tc.get("name", "")),
+                            "name": tc["name"],
+                            "args": tc.get("args", {}),
+                        }
+                        for tc in tool_calls
+                    ]
+                messages.append(entry)
+
+            elif msg_type == "tool":
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": getattr(msg, "tool_call_id", ""),
+                    "name": getattr(msg, "name", "unknown"),
+                    "content": msg.content if isinstance(msg.content, str) else str(msg.content),
+                })
+
+        return messages
+
+    async def _extract_current_agent(self, session_id: str) -> str | None:
+        """Extract current agent from LangGraph state."""
+        if not self._compiled_graph:
+            return None
+
+        config = {"configurable": {"thread_id": session_id}}
+
+        try:
+            state = self._compiled_graph.get_state(config)
+        except Exception:
+            return None
+
+        if not state or not state.values:
+            return None
+
+        return state.values.get("current_agent")
+
+    async def _inject_session_messages(
+        self,
+        session_id: str,
+        messages: list[dict],
+        current_agent: str | None = None,
+    ) -> None:
+        """Inject normalized messages into LangGraph state."""
+        if not self._compiled_graph:
+            raise RuntimeError("LangGraph workflow not initialized")
+
+        from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
+
+        lc_messages = []
+        for msg in messages:
+            role = msg["role"]
+            if role == "user":
+                lc_messages.append(HumanMessage(content=msg["content"]))
+            elif role == "assistant":
+                kwargs: dict = {"content": msg.get("content", "")}
+                if msg.get("tool_calls"):
+                    kwargs["tool_calls"] = msg["tool_calls"]
+                lc_messages.append(AIMessage(**kwargs))
+            elif role == "tool":
+                lc_messages.append(ToolMessage(
+                    content=msg["content"],
+                    tool_call_id=msg.get("tool_call_id", ""),
+                    name=msg.get("name", "unknown"),
+                ))
+
+        config = {"configurable": {"thread_id": session_id}}
+        update = {"messages": lc_messages}
+        if current_agent is not None:
+            update["current_agent"] = current_agent
+
+        self._compiled_graph.update_state(config, update)
+
 
 # Alias for convenience
 LangGraphManager = LangGraphWorkflowManager

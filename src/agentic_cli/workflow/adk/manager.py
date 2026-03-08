@@ -644,3 +644,143 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                         yield llm_event
 
             logger.info("message_processed", event_count=event_count)
+
+    # -------------------------------------------------------------------------
+    # Session save/resume hooks
+    # -------------------------------------------------------------------------
+
+    async def _extract_session_messages(self, session_id: str) -> list[dict]:
+        """Extract normalized messages from ADK session events."""
+        if not self._session_service:
+            return []
+
+        session = await self._session_service.get_session(
+            app_name=self.app_name,
+            user_id="default_user",
+            session_id=session_id,
+        )
+        if session is None or not session.events:
+            return []
+
+        messages: list[dict] = []
+        for event in session.events:
+            content = getattr(event, "content", None)
+            if content is None:
+                continue
+
+            role = getattr(content, "role", None)
+            parts = getattr(content, "parts", None) or []
+
+            for part in parts:
+                # Text part
+                if hasattr(part, "text") and part.text:
+                    if role == "user":
+                        messages.append({"role": "user", "content": part.text})
+                    elif role == "model":
+                        messages.append({"role": "assistant", "content": part.text})
+
+                # Function call part
+                elif hasattr(part, "function_call") and part.function_call:
+                    fc = part.function_call
+                    tool_call = {
+                        "id": getattr(fc, "id", fc.name),
+                        "name": fc.name,
+                        "args": dict(fc.args) if fc.args else {},
+                    }
+                    # Attach to preceding assistant message or create one
+                    if messages and messages[-1]["role"] == "assistant":
+                        messages[-1].setdefault("tool_calls", []).append(tool_call)
+                    else:
+                        messages.append({
+                            "role": "assistant",
+                            "content": "",
+                            "tool_calls": [tool_call],
+                        })
+
+                # Function response part
+                elif hasattr(part, "function_response") and part.function_response:
+                    fr = part.function_response
+                    import json
+                    response_content = json.dumps(fr.response) if isinstance(fr.response, dict) else str(fr.response)
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": getattr(fr, "id", fr.name),
+                        "name": fr.name,
+                        "content": response_content,
+                    })
+
+        return messages
+
+    async def _extract_current_agent(self, session_id: str) -> str | None:
+        """Return the author of the last event in the ADK session."""
+        if not self._session_service:
+            return None
+
+        session = await self._session_service.get_session(
+            app_name=self.app_name,
+            user_id="default_user",
+            session_id=session_id,
+        )
+        if session is None or not session.events:
+            return None
+
+        last_event = session.events[-1]
+        return getattr(last_event, "author", None)
+
+    async def _inject_session_messages(
+        self,
+        session_id: str,
+        messages: list[dict],
+        current_agent: str | None = None,
+    ) -> None:
+        """Inject normalized messages into ADK session as events."""
+        if not self._session_service:
+            raise RuntimeError("Session service not initialized")
+
+        # Create a fresh session for the restored conversation
+        session = await self._session_service.create_session(
+            app_name=self.app_name,
+            user_id="default_user",
+            session_id=session_id,
+        )
+
+        for msg in messages:
+            role = msg["role"]
+
+            if role == "user":
+                content = types.Content(
+                    role="user",
+                    parts=[types.Part.from_text(text=msg["content"])],
+                )
+                session.events.append(
+                    type("Event", (), {"content": content, "author": current_agent or ""})()
+                )
+
+            elif role == "assistant":
+                parts = []
+                if msg.get("content"):
+                    parts.append(types.Part.from_text(text=msg["content"]))
+                for tc in msg.get("tool_calls", []):
+                    parts.append(types.Part.from_function_call(
+                        name=tc["name"],
+                        args=tc.get("args", {}),
+                    ))
+                content = types.Content(role="model", parts=parts)
+                session.events.append(
+                    type("Event", (), {"content": content, "author": current_agent or ""})()
+                )
+
+            elif role == "tool":
+                import json
+                try:
+                    response = json.loads(msg["content"])
+                except (json.JSONDecodeError, TypeError):
+                    response = {"result": msg["content"]}
+                parts = [types.Part.from_function_response(
+                    name=msg.get("name", "unknown"),
+                    response=response,
+                )]
+                content = types.Content(role="user", parts=parts)
+                session.events.append(
+                    type("Event", (), {"content": content, "author": current_agent or ""})()
+                )
