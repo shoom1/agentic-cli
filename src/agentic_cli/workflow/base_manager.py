@@ -525,6 +525,138 @@ class BaseWorkflowManager(ABC):
             f"{self.__class__.__name__} does not implement generate_simple"
         )
 
+    # -------------------------------------------------------------------------
+    # Session save/resume
+    # -------------------------------------------------------------------------
+
+    async def save_session(self, session_id: str | None = None) -> dict:
+        """Save current session state to disk.
+
+        Extracts messages and current agent from the backend via abstract
+        hooks, then persists via SessionPersistence.save_snapshot().
+
+        Args:
+            session_id: Session ID to save under. Uses backend session_id if None.
+
+        Returns:
+            Dict with success status and path.
+        """
+        from datetime import datetime
+        from agentic_cli.persistence.session import SessionPersistence, SessionSnapshot
+
+        sid = session_id or getattr(self, "session_id", "default_session")
+
+        try:
+            messages = await self._extract_session_messages(sid)
+            current_agent = await self._extract_current_agent(sid)
+
+            metadata: dict[str, Any] = {
+                "model": self.model,
+                "backend_type": self.backend_type,
+                "app_name": self._app_name,
+            }
+            if current_agent:
+                metadata["current_agent"] = current_agent
+
+            snapshot = SessionSnapshot(
+                session_id=sid,
+                created_at=datetime.now(),
+                saved_at=datetime.now(),
+                messages=messages,
+                metadata=metadata,
+            )
+
+            persistence = SessionPersistence(self._settings)
+            path = persistence.save_snapshot(snapshot)
+
+            logger.info("session_saved", session_id=sid, message_count=len(messages))
+            return {"success": True, "session_id": sid, "path": str(path), "message_count": len(messages)}
+
+        except Exception as exc:
+            logger.error("session_save_failed", session_id=sid, error=str(exc))
+            return {"success": False, "error": str(exc)}
+
+    async def load_session(self, session_id: str) -> bool:
+        """Load a saved session and inject it into the backend.
+
+        Args:
+            session_id: Session ID to load.
+
+        Returns:
+            True if session was loaded successfully, False otherwise.
+        """
+        from agentic_cli.persistence.session import SessionPersistence
+
+        persistence = SessionPersistence(self._settings)
+        snapshot = persistence.load_session(session_id)
+
+        if snapshot is None:
+            logger.debug("session_not_found_for_load", session_id=session_id)
+            return False
+
+        # Warn on backend mismatch (but still load — format is normalized)
+        saved_backend = snapshot.metadata.get("backend_type")
+        if saved_backend and saved_backend != self.backend_type:
+            logger.warning(
+                "session_backend_mismatch",
+                saved_backend=saved_backend,
+                current_backend=self.backend_type,
+                session_id=session_id,
+            )
+
+        current_agent = snapshot.metadata.get("current_agent")
+
+        try:
+            await self._inject_session_messages(session_id, snapshot.messages, current_agent)
+            if hasattr(self, "session_id"):
+                self.session_id = session_id
+            logger.info(
+                "session_loaded",
+                session_id=session_id,
+                message_count=len(snapshot.messages),
+            )
+            return True
+        except Exception as exc:
+            logger.error("session_load_failed", session_id=session_id, error=str(exc))
+            return False
+
+    def list_sessions(self) -> list[dict]:
+        """List all saved sessions.
+
+        Returns:
+            List of session summary dicts.
+        """
+        from agentic_cli.persistence.session import SessionPersistence
+
+        persistence = SessionPersistence(self._settings)
+        return persistence.list_sessions()
+
+    @abstractmethod
+    async def _extract_session_messages(self, session_id: str) -> list[dict]:
+        """Extract normalized messages from the backend session.
+
+        Returns list of dicts with structure:
+        - {"role": "user", "content": "..."}
+        - {"role": "assistant", "content": "...", "tool_calls": [...]}
+        - {"role": "tool", "tool_call_id": "...", "name": "...", "content": "..."}
+        """
+        ...
+
+    @abstractmethod
+    async def _extract_current_agent(self, session_id: str) -> str | None:
+        """Return the name of the currently active agent, or None."""
+        ...
+
+    @abstractmethod
+    async def _inject_session_messages(
+        self,
+        session_id: str,
+        messages: list[dict],
+        current_agent: str | None = None,
+    ) -> None:
+        """Inject normalized messages into the backend session."""
+        ...
+
     def _emit_task_progress_event(self) -> WorkflowEvent | None:
         """Build a TASK_PROGRESS event from TaskStore or PlanStore.
 

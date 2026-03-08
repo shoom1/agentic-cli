@@ -793,6 +793,15 @@ class TestWorkflowManagerIntegration:
             async def cleanup(self) -> None:
                 pass
 
+            async def _extract_session_messages(self, session_id: str) -> list[dict]:
+                return []
+
+            async def _extract_current_agent(self, session_id: str) -> str | None:
+                return None
+
+            async def _inject_session_messages(self, session_id: str, messages: list[dict], current_agent: str | None = None) -> None:
+                pass
+
         # Create an agent config that uses the web_fetch tool
         agent_config = AgentConfig(
             name="test_agent",
@@ -838,6 +847,15 @@ class TestWorkflowManagerIntegration:
                 pass
 
             async def cleanup(self) -> None:
+                pass
+
+            async def _extract_session_messages(self, session_id: str) -> list[dict]:
+                return []
+
+            async def _extract_current_agent(self, session_id: str) -> str | None:
+                return None
+
+            async def _inject_session_messages(self, session_id: str, messages: list[dict], current_agent: str | None = None) -> None:
                 pass
 
         # Create a simple agent config (no web_fetch)
@@ -891,6 +909,15 @@ class TestWorkflowManagerIntegration:
                 pass
 
             async def cleanup(self) -> None:
+                pass
+
+            async def _extract_session_messages(self, session_id: str) -> list[dict]:
+                return []
+
+            async def _extract_current_agent(self, session_id: str) -> str | None:
+                return None
+
+            async def _inject_session_messages(self, session_id: str, messages: list[dict], current_agent: str | None = None) -> None:
                 pass
 
             def _create_summarizer(self):

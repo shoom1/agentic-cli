@@ -125,6 +125,39 @@ class SessionPersistence:
         self._save_sessions_index(index)
         return index
 
+    def save_snapshot(self, snapshot: SessionSnapshot) -> Path:
+        """Save a pre-built SessionSnapshot directly.
+
+        Used by the workflow layer which has normalized message dicts
+        rather than MessageHistory objects.
+
+        Args:
+            snapshot: The session snapshot to persist.
+
+        Returns:
+            Path to saved session file.
+        """
+        session_path = self._get_session_path(snapshot.session_id)
+        atomic_write_json(session_path, snapshot.to_dict())
+
+        with file_lock(self._get_sessions_index_path()):
+            sessions_index = self._load_sessions_index()
+            sessions_index[snapshot.session_id] = {
+                "session_id": snapshot.session_id,
+                "created_at": snapshot.created_at.isoformat(),
+                "saved_at": snapshot.saved_at.isoformat(),
+                "message_count": len(snapshot.messages),
+            }
+            self._save_sessions_index(sessions_index)
+
+        logger.info(
+            "snapshot_saved",
+            session_id=snapshot.session_id,
+            message_count=len(snapshot.messages),
+            path=str(session_path),
+        )
+        return session_path
+
     def save_session(
         self,
         session_id: str,

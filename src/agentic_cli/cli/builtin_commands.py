@@ -108,6 +108,13 @@ class StatusCommand(Command):
             if init_error:
                 table.add_row("Error", f"[red]{init_error}[/red]")
 
+        # Persistent session info
+        sid = getattr(app, "_session_id", None)
+        if sid:
+            table.add_row("Session", f"{sid} (persistent)")
+        else:
+            table.add_row("Session", "ephemeral (not saved)")
+
         # Message history stats
         table.add_row("Messages", str(len(app.message_history)))
 
@@ -233,6 +240,63 @@ class PapersCommand(Command):
                 d.source_type.value,
                 str(len(d.chunks)),
                 d.created_at.strftime("%Y-%m-%d"),
+            )
+
+        app.session.add_rich(table)
+
+
+class SessionsCommand(Command):
+    """List and manage saved sessions."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            name="sessions",
+            description="List saved sessions",
+            aliases=["sess"],
+            usage="/sessions [--delete=<id>]",
+            examples=["/sessions", "/sessions --delete=my-research"],
+            category=CommandCategory.SESSION,
+        )
+
+    async def execute(self, args: str, app: Any) -> None:
+        """Display saved sessions or delete one."""
+        from agentic_cli.persistence.session import SessionPersistence
+
+        parsed = self.parse_args(args)
+        delete_id = parsed.get_option("delete", "", str) or ""
+
+        persistence = SessionPersistence(app.settings)
+
+        if delete_id:
+            if persistence.delete_session(delete_id):
+                app.session.add_success(f"Session '{delete_id}' deleted.")
+            else:
+                app.session.add_error(f"Session '{delete_id}' not found.")
+            return
+
+        sessions = persistence.list_sessions()
+        if not sessions:
+            app.session.add_message("system", "No saved sessions.")
+            return
+
+        table = Table(title="Saved Sessions", show_lines=False, padding=(0, 1))
+        table.add_column("Session ID", style="bold cyan")
+        table.add_column("Messages", style="dim", justify="right")
+        table.add_column("Last Saved", style="dim")
+        table.add_column("Created", style="dim")
+
+        current_sid = getattr(app, "_session_id", None)
+
+        for s in sessions:
+            sid = s["session_id"]
+            label = f"* {sid}" if sid == current_sid else sid
+            saved_at = s.get("saved_at", "")[:19].replace("T", " ")
+            created_at = s.get("created_at", "")[:10]
+            table.add_row(
+                label,
+                str(s.get("message_count", 0)),
+                saved_at,
+                created_at,
             )
 
         app.session.add_rich(table)
