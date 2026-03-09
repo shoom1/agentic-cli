@@ -1199,6 +1199,48 @@ class TestArxivHelpers:
         assert _clean_arxiv_id("2301.07041v3") == "2301.07041"
 
 
+    def test_clean_arxiv_id_old_format(self):
+        """Test cleaning old-format arXiv IDs (pre-2007, subject/NNNNNNN)."""
+        from agentic_cli.tools.arxiv_tools import _clean_arxiv_id
+
+        assert _clean_arxiv_id("math/0607733") == "math/0607733"
+        assert _clean_arxiv_id("hep-th/9901001") == "hep-th/9901001"
+        assert _clean_arxiv_id("math/0607733v1") == "math/0607733"
+
+    def test_clean_arxiv_id_old_format_from_url(self):
+        """Test extracting old-format arXiv ID from URL."""
+        from agentic_cli.tools.arxiv_tools import _clean_arxiv_id
+
+        assert _clean_arxiv_id("https://arxiv.org/abs/math/0607733") == "math/0607733"
+        assert _clean_arxiv_id("https://arxiv.org/pdf/math/0607733.pdf") == "math/0607733"
+        assert _clean_arxiv_id("https://arxiv.org/abs/hep-th/9901001") == "hep-th/9901001"
+
+
+class TestIngestArxivIdExtraction:
+    """Tests for arXiv ID extraction in ingest_document."""
+
+    def test_extract_new_format(self):
+        from agentic_cli.tools.knowledge_tools import _extract_arxiv_id
+
+        assert _extract_arxiv_id("1706.03762") == "1706.03762"
+        assert _extract_arxiv_id("2301.12345") == "2301.12345"
+        assert _extract_arxiv_id("https://arxiv.org/abs/1706.03762") == "1706.03762"
+
+    def test_extract_old_format(self):
+        from agentic_cli.tools.knowledge_tools import _extract_arxiv_id
+
+        assert _extract_arxiv_id("math/0607733") == "math/0607733"
+        assert _extract_arxiv_id("hep-th/9901001") == "hep-th/9901001"
+        assert _extract_arxiv_id("https://arxiv.org/abs/math/0607733") == "math/0607733"
+        assert _extract_arxiv_id("https://arxiv.org/pdf/math/0607733.pdf") == "math/0607733"
+
+    def test_extract_no_match(self):
+        from agentic_cli.tools.knowledge_tools import _extract_arxiv_id
+
+        assert _extract_arxiv_id("not-an-id") == ""
+        assert _extract_arxiv_id("") == ""
+
+
 class TestFetchArxivPaperRateLimiting:
     """Tests for fetch_arxiv_paper rate limiting."""
 

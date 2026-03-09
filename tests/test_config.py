@@ -21,6 +21,7 @@ from agentic_cli.config import (
     set_settings,
     validate_settings,
 )
+from agentic_cli.workflow.models import ModelRegistry
 
 
 class TestBaseSettings:
@@ -53,7 +54,7 @@ class TestBaseSettings:
             settings = BaseSettings(workspace_dir=temp_workspace)
 
         assert settings.sessions_dir == temp_workspace / "sessions"
-        assert settings.artifacts_dir == temp_workspace / "workspace"
+        assert settings.artifacts_dir == temp_workspace / "artifacts"
         assert settings.knowledge_base_dir == temp_workspace / "knowledge_base"
 
 
@@ -111,9 +112,9 @@ class TestModelConfiguration:
 
     def test_set_model_valid(self, settings_google_only: BaseSettings):
         """Test setting a valid model."""
-        settings_google_only.set_model("gemini-2.5-pro")
-        assert settings_google_only.default_model == "gemini-2.5-pro"
-        assert settings_google_only.get_model() == "gemini-2.5-pro"
+        settings_google_only.set_model("gemini-2.5-flash")
+        assert settings_google_only.default_model == "gemini-2.5-flash"
+        assert settings_google_only.get_model() == "gemini-2.5-flash"
 
     def test_set_model_invalid(self, settings_google_only: BaseSettings):
         """Test setting an invalid model raises error."""
@@ -261,6 +262,11 @@ class TestModelConstants:
             assert model in ALL_MODELS
         for model in ANTHROPIC_MODELS:
             assert model in ALL_MODELS
+
+    def test_constants_match_registry_fallbacks(self):
+        """Test backward-compat constants match ModelRegistry fallbacks."""
+        assert GOOGLE_MODELS == ModelRegistry.FALLBACK_GOOGLE
+        assert ANTHROPIC_MODELS == ModelRegistry.FALLBACK_ANTHROPIC
 
     def test_thinking_effort_levels(self):
         """Test thinking effort level constants."""
