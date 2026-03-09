@@ -24,6 +24,52 @@ logger = Loggers.tools()
 # Regex to strip ANSI escape codes from tracebacks
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
+# Blocked shell escape patterns
+_BLOCKED_MAGICS = frozenset({"pip", "system", "sx"})
+
+# Initialization code injected into new kernels to block network modules
+_SANDBOX_INIT_CODE = '''
+import sys as _sys
+
+_BLOCKED_MODULES = frozenset({
+    # Network
+    'requests', 'urllib', 'http', 'httpx', 'aiohttp',
+    'socket', 'ssl', 'ftplib', 'smtplib', 'poplib', 'imaplib',
+    'xmlrpc', 'socketserver',
+    # Package management
+    'pip', 'ensurepip', 'setuptools', 'distutils',
+    # Process execution
+    'subprocess', 'shlex',
+    # System-level
+    'ctypes',
+})
+
+import importlib.abc as _abc
+import importlib.machinery as _mach
+
+class _RestrictedImportFinder(_abc.MetaPathFinder):
+    """Meta-path finder that blocks restricted modules."""
+    def find_spec(self, fullname, path, target=None):
+        top = fullname.split('.')[0]
+        if top in _BLOCKED_MODULES:
+            raise ImportError(
+                f"Module \\'{fullname}\\' is not available in the sandbox. "
+                f"Use the appropriate tool instead (e.g., web_fetch for HTTP requests)."
+            )
+        return None
+
+_sys.meta_path.insert(0, _RestrictedImportFinder())
+
+# Remove pre-imported blocked modules from sys.modules so future
+# `import X` goes through the meta_path hook. Existing kernel internals
+# keep their references via their own module namespaces.
+for _mod_name in list(_sys.modules):
+    _top = _mod_name.split(".")[0]
+    if _top in _BLOCKED_MODULES:
+        del _sys.modules[_mod_name]
+del _mod_name, _top, _sys
+'''
+
 
 class JupyterLocalBackend(SandboxBackend):
     """Local Jupyter kernel backend for stateful code execution.
@@ -34,6 +80,19 @@ class JupyterLocalBackend(SandboxBackend):
 
     def __init__(self) -> None:
         self._sessions: dict[str, tuple[KernelManager, BlockingKernelClient]] = {}
+
+    @staticmethod
+    def _validate_code(code: str) -> tuple[bool, str]:
+        """Pre-scan code for blocked shell escapes and magics."""
+        for line in code.splitlines():
+            stripped = line.lstrip()
+            if stripped.startswith("!"):
+                return False, "Shell commands (!) are not allowed in the sandbox"
+            if stripped.startswith("%") and not stripped.startswith("%%"):
+                magic = stripped.lstrip("%").split()[0] if stripped.lstrip("%") else ""
+                if magic in _BLOCKED_MAGICS:
+                    return False, f"Magic command '%{magic}' is not allowed in the sandbox"
+        return True, ""
 
     def _get_or_create_session(
         self, session_id: str, working_dir: Path | None = None,
@@ -51,6 +110,19 @@ class JupyterLocalBackend(SandboxBackend):
         kc.start_channels()
         kc.wait_for_ready(timeout=30)
 
+        # Inject sandbox restrictions
+        init_msg_id = kc.execute(_SANDBOX_INIT_CODE)
+        while True:
+            try:
+                msg = kc.get_iopub_msg(timeout=10)
+                if (
+                    msg.get("parent_header", {}).get("msg_id") == init_msg_id
+                    and msg.get("content", {}).get("execution_state") == "idle"
+                ):
+                    break
+            except TimeoutError:
+                break
+
         self._sessions[session_id] = (km, kc)
         logger.debug("jupyter_session_started", session_id=session_id)
         return km, kc
@@ -63,6 +135,11 @@ class JupyterLocalBackend(SandboxBackend):
         working_dir: Path | None = None,
     ) -> ExecutionResult:
         """Execute code in a Jupyter kernel session."""
+        # Pre-scan for blocked patterns
+        valid, error = self._validate_code(code)
+        if not valid:
+            return ExecutionResult(success=False, error=error)
+
         start = time.monotonic()
         _, kc = self._get_or_create_session(session_id, working_dir)
 

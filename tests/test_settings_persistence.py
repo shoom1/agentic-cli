@@ -31,12 +31,12 @@ class TestSecretFields:
             anthropic_api_key="secret-anthropic",
             tavily_api_key="secret-tavily",
             brave_api_key="secret-brave",
-            search_backend="tavily",  # non-secret, non-default
+            search_backend="tavily",  # non-secret
         )
 
         persistence = SettingsPersistence(app_name="test")
         out = tmp_path / "settings.json"
-        persistence.save(settings, exclude_defaults=False, path=out)
+        persistence.save(settings, path=out)
 
         data = json.loads(out.read_text())
         for secret in SECRET_FIELDS:
@@ -50,10 +50,40 @@ class TestSecretFields:
 
         persistence = SettingsPersistence(app_name="test")
         out = tmp_path / "settings.json"
-        persistence.save(settings, exclude_defaults=True, path=out)
+        persistence.save(settings, path=out)
 
         data = json.loads(out.read_text())
         assert data["search_backend"] == "brave"
+
+    def test_save_excludes_identity_fields(self, tmp_path):
+        """Identity fields (app_name, workspace_dir) are excluded."""
+        from agentic_cli.config import BaseSettings
+        from agentic_cli.settings_persistence import IDENTITY_FIELDS
+
+        settings = BaseSettings(app_name="my_app", workspace_dir=tmp_path)
+
+        persistence = SettingsPersistence(app_name="my_app")
+        out = tmp_path / "settings.json"
+        persistence.save(settings, path=out)
+
+        data = json.loads(out.read_text())
+        for field in IDENTITY_FIELDS:
+            assert field not in data, f"{field} leaked into saved JSON"
+
+    def test_save_includes_default_values(self, tmp_path):
+        """All user-configurable settings are saved, even at defaults."""
+        from agentic_cli.config import BaseSettings
+
+        settings = BaseSettings()
+
+        persistence = SettingsPersistence(app_name="test")
+        out = tmp_path / "settings.json"
+        persistence.save(settings, path=out)
+
+        data = json.loads(out.read_text())
+        # verbose_thinking should be saved even at its default value
+        assert "verbose_thinking" in data
+        assert "thinking_effort" in data
 
 
 class TestAtomicWrite:
@@ -68,7 +98,7 @@ class TestAtomicWrite:
         out = tmp_path / "settings.json"
 
         with patch("agentic_cli.persistence._utils.atomic_write_text") as mock_aw:
-            persistence.save(settings, exclude_defaults=True, path=out)
+            persistence.save(settings, path=out)
             mock_aw.assert_called_once()
             call_path, call_content = mock_aw.call_args[0]
             assert call_path == out
@@ -84,7 +114,7 @@ class TestAtomicWrite:
         persistence = SettingsPersistence(app_name="test")
         nested = tmp_path / "a" / "b" / "settings.json"
 
-        persistence.save(settings, exclude_defaults=True, path=nested)
+        persistence.save(settings, path=nested)
 
         assert nested.parent.exists()
         data = json.loads(nested.read_text())

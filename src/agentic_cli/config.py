@@ -34,16 +34,15 @@ from pydantic_settings import (
     PydanticBaseSettingsSource,
 )
 
-from agentic_cli.resolvers import (
-    GOOGLE_MODELS,
-    ANTHROPIC_MODELS,
-    ALL_MODELS,
-    THINKING_EFFORT_LEVELS,
-)
-from agentic_cli.workflow.settings import WorkflowSettingsMixin
+from agentic_cli.workflow.settings import WorkflowSettingsMixin, THINKING_EFFORT_LEVELS
+from agentic_cli.workflow.models import ModelRegistry
 from agentic_cli.settings_mixins import AppSettingsMixin, CLISettingsMixin
 
-# Re-export for backward compatibility
+# Backward-compatible constants derived from ModelRegistry fallbacks
+GOOGLE_MODELS = ModelRegistry.FALLBACK_GOOGLE
+ANTHROPIC_MODELS = ModelRegistry.FALLBACK_ANTHROPIC
+ALL_MODELS = GOOGLE_MODELS + ANTHROPIC_MODELS
+
 __all__ = [
     "BaseSettings",
     "SettingsContext",
@@ -138,12 +137,18 @@ class BaseSettings(WorkflowSettingsMixin, AppSettingsMixin, CLISettingsMixin, Py
             env_settings,
         ]
 
-        # Get app_name from class default or model_fields
-        app_name = "agentic_cli"
-        if hasattr(cls, "model_fields") and "app_name" in cls.model_fields:
-            field_info = cls.model_fields["app_name"]
-            if field_info.default and field_info.default != ...:
-                app_name = field_info.default
+        # Get app_name from init kwargs (constructor), then class default
+        app_name = None
+        if hasattr(init_settings, "init_kwargs"):
+            app_name = init_settings.init_kwargs.get("app_name")
+
+        if not app_name:
+            if hasattr(cls, "model_fields") and "app_name" in cls.model_fields:
+                field_info = cls.model_fields["app_name"]
+                if field_info.default and field_info.default != ...:
+                    app_name = field_info.default
+
+        app_name = app_name or "agentic_cli"
 
         # Add project-level JSON config (./.app_name/settings.json)
         project_json = _get_json_config_source(

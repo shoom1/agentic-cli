@@ -20,6 +20,7 @@ from typing import Any, AsyncGenerator, Awaitable, Callable, Iterator, TYPE_CHEC
 
 from agentic_cli.workflow.events import WorkflowEvent, UserInputRequest
 from agentic_cli.workflow.config import AgentConfig
+from agentic_cli.workflow.models import ModelRegistry
 from agentic_cli.config import set_context_settings
 from agentic_cli.workflow.context import (
     set_context_workflow,
@@ -103,6 +104,9 @@ class BaseWorkflowManager(ABC):
         self._pending_input: dict[str, tuple[UserInputRequest, asyncio.Future[str]]] = {}
         self._user_input_callback: Callable[[UserInputRequest], Awaitable[str]] | None = None
 
+        # Model registry
+        self._model_registry = ModelRegistry()
+
         # Auto-detect required managers from tools
         self._required_managers = self._detect_required_managers()
 
@@ -135,6 +139,11 @@ class BaseWorkflowManager(ABC):
     def is_initialized(self) -> bool:
         """Check if services have been initialized."""
         return self._initialized
+
+    @property
+    def model_registry(self) -> ModelRegistry:
+        """Get the model registry."""
+        return self._model_registry
 
     @property
     def required_managers(self) -> set[str]:
@@ -351,6 +360,14 @@ class BaseWorkflowManager(ABC):
             validate_settings(self._settings)
 
         self._settings.export_api_keys_to_env()
+
+        # Refresh model registry from APIs
+        await self._model_registry.refresh(
+            google_api_key=self._settings.google_api_key,
+            anthropic_api_key=self._settings.anthropic_api_key,
+        )
+        self._settings.set_model_registry(self._model_registry)
+
         await self._do_initialize()
         self._ensure_managers_initialized()
         self._initialized = True

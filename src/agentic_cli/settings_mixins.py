@@ -61,7 +61,7 @@ class AppSettingsMixin:
     @property
     def artifacts_dir(self) -> Path:
         """Directory for artifact storage."""
-        return self.workspace_dir / "workspace"
+        return self.workspace_dir / "artifacts"
 
     @property
     def knowledge_base_dir(self) -> Path:

@@ -15,6 +15,7 @@ from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.factory import create_workflow_manager_from_settings
 from agentic_cli.workflow.thinking import ThinkingDetector, ThinkingResult
 from agentic_cli.workflow.settings import WorkflowSettingsMixin
+from agentic_cli.workflow.models import ModelFamily, ModelInfo, ModelRegistry
 from agentic_cli.workflow.context import (
     # Getters for tools
     get_context_memory_store,
@@ -75,6 +76,10 @@ __all__ = [
     "ThinkingResult",
     # Settings mixin
     "WorkflowSettingsMixin",
+    # Model registry
+    "ModelFamily",
+    "ModelInfo",
+    "ModelRegistry",
     # Managers (lazy)
     "GoogleADKWorkflowManager",
     "LangGraphWorkflowManager",

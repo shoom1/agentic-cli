@@ -73,7 +73,7 @@ class ArtifactManager:
     """Manages artifact persistence to disk.
 
     Artifacts are stored in a workspace directory with the following structure:
-        {workspace_dir}/workspace/
+        {workspace_dir}/artifacts/
         ├── plans/
         │   └── {plan_name}.md
         ├── code/

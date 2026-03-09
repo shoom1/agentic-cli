@@ -299,11 +299,9 @@ async def _ingest_arxiv(
     """
     from agentic_cli.knowledge_base.models import SourceType
 
-    # Extract arxiv ID
-    arxiv_id = ""
-    match = re.search(r"(\d{4}\.\d{4,5})", url_or_path)
-    if match:
-        arxiv_id = match.group(1)
+    # Extract arxiv ID — supports both new format (2301.12345) and
+    # old format (math/0607733, hep-th/9901001)
+    arxiv_id = _extract_arxiv_id(url_or_path)
 
     if not arxiv_id:
         return {"success": False, "error": f"Could not extract ArXiv ID from: {url_or_path}"}
@@ -384,6 +382,30 @@ def _extract_text_from_bytes(pdf_bytes: bytes) -> str:
     from agentic_cli.tools.pdf_utils import extract_pdf_text
 
     return extract_pdf_text(pdf_bytes)
+
+
+def _extract_arxiv_id(url_or_id: str) -> str:
+    """Extract arXiv paper ID from a URL or raw ID string.
+
+    Supports both formats:
+    - New (post-2007): 2301.12345, 1706.03762v2
+    - Old (pre-2007):  math/0607733, hep-th/9901001v1
+
+    Also handles full URLs like:
+    - https://arxiv.org/abs/math/0607733
+    - https://arxiv.org/pdf/2301.12345.pdf
+    """
+    # New format: YYMM.NNNNN (4-5 digit suffix)
+    match = re.search(r"(\d{4}\.\d{4,5})", url_or_id)
+    if match:
+        return match.group(1)
+
+    # Old format: subject-class/NNNNNNN (e.g., math/0607733, hep-th/9901001)
+    match = re.search(r"([a-zA-Z-]+/\d{7})", url_or_id)
+    if match:
+        return match.group(1)
+
+    return ""
 
 
 def _detect_extension(url: str) -> str:
