@@ -29,5 +29,16 @@ class ResearchDemoSettings(BaseSettings):
     def __init__(self, **kwargs):
         kwargs.setdefault("app_name", "research_demo")
         kwargs.setdefault("workspace_dir", Path.home() / ".research_demo")
-        kwargs.setdefault("verbose_thinking", False)
         super().__init__(**kwargs)
+
+    def model_post_init(self, __context):
+        """Override verbose_thinking default without blocking JSON persistence.
+
+        kwargs.setdefault would inject at init level (highest priority),
+        overriding saved JSON values. model_post_init runs after all sources
+        are resolved, and model_fields_set tracks which fields were explicitly
+        set by any source (env, JSON, init kwargs). We only apply our custom
+        default when no source provided a value.
+        """
+        if "verbose_thinking" not in self.model_fields_set:
+            object.__setattr__(self, "verbose_thinking", False)
