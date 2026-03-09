@@ -18,7 +18,7 @@ from agentic_cli.workflow.context import get_context_sandbox_manager
         "Execute Python code in a stateful sandbox session. "
         "State (variables, imports) persists across calls within the same session. "
         "The sandbox shares the workspace filesystem — code can read/write files directly. "
-        "Packages can be installed ad-hoc via !pip install. "
+        "Network access and package installation are blocked — use web_fetch/web_search for HTTP. "
         "Use for data analysis, prototyping, and producing work output. "
         "Use execute_python instead for quick stateless calculations."
     ),

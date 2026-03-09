@@ -406,6 +406,39 @@ class TestSettingsValidation:
         validate_settings(settings)
 
 
+class TestSettingsJsonLoading:
+    """Tests for JSON config loading with constructor app_name."""
+
+    def test_init_kwargs_app_name_used_for_json_path(self, tmp_path):
+        """Settings from JSON are loaded when app_name is passed via constructor."""
+        import json
+
+        # Create a project-level JSON config for a custom app
+        config_dir = tmp_path / ".my_app"
+        config_dir.mkdir()
+        config_file = config_dir / "settings.json"
+        config_file.write_text(json.dumps({
+            "thinking_effort": "high",
+            "log_level": "debug",
+        }))
+
+        # Create settings with constructor app_name, from the directory with the config
+        original_cwd = Path.cwd()
+        try:
+            os.chdir(tmp_path)
+            with patch.dict(os.environ, {}, clear=True):
+                settings = BaseSettings(
+                    app_name="my_app",
+                    workspace_dir=tmp_path / "workspace",
+                )
+        finally:
+            os.chdir(original_cwd)
+
+        # Values from JSON should be loaded
+        assert settings.thinking_effort == "high"
+        assert settings.log_level == "debug"
+
+
 def test_package_exports_new_modules():
     """Test that new modules are exported from package."""
     # Memory

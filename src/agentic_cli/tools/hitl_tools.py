@@ -146,6 +146,34 @@ class ApprovalManager:
         self._history.append(result)
         return result
 
+    def check_or_request(self, tool_name: str, description: str) -> bool:
+        """Check if a tool call should be allowed.
+
+        Checks auto-approve patterns first, then records the decision.
+        Returns True to allow, False to deny.
+
+        For now, always returns True (auto-approve) unless a matching
+        approval rule exists. Full interactive approval requires async
+        workflow integration handled by the request_approval tool.
+
+        Args:
+            tool_name: Name of the tool being called.
+            description: Human-readable description of the call.
+
+        Returns:
+            True if the call should proceed, False to block.
+        """
+        for rule in self._config.approval_rules:
+            if rule.matches_tool(tool_name):
+                self.record(
+                    request_id=f"auto_{tool_name}",
+                    approved=False,
+                    reason="DANGEROUS tool requires explicit approval via request_approval",
+                )
+                return False
+
+        return True
+
     @property
     def history(self) -> list[ApprovalResult]:
         """Get all recorded approval decisions."""

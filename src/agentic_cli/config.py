@@ -137,12 +137,18 @@ class BaseSettings(WorkflowSettingsMixin, AppSettingsMixin, CLISettingsMixin, Py
             env_settings,
         ]
 
-        # Get app_name from class default or model_fields
-        app_name = "agentic_cli"
-        if hasattr(cls, "model_fields") and "app_name" in cls.model_fields:
-            field_info = cls.model_fields["app_name"]
-            if field_info.default and field_info.default != ...:
-                app_name = field_info.default
+        # Get app_name from init kwargs (constructor), then class default
+        app_name = None
+        if hasattr(init_settings, "init_kwargs"):
+            app_name = init_settings.init_kwargs.get("app_name")
+
+        if not app_name:
+            if hasattr(cls, "model_fields") and "app_name" in cls.model_fields:
+                field_info = cls.model_fields["app_name"]
+                if field_info.default and field_info.default != ...:
+                    app_name = field_info.default
+
+        app_name = app_name or "agentic_cli"
 
         # Add project-level JSON config (./.app_name/settings.json)
         project_json = _get_json_config_source(

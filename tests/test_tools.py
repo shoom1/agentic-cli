@@ -1556,3 +1556,111 @@ class TestToolRegistryConsistency:
         # HITL: 1 (request_approval)
         # Total: ~26 tools
         assert tool_count >= 25, f"Expected at least 25 registered tools, got {tool_count}"
+
+
+class TestDangerousToolHITLEnforcement:
+    """Tests that DANGEROUS tools auto-gate behind HITL approval."""
+
+    def test_dangerous_tool_has_hitl_guard(self):
+        """DANGEROUS tool should be wrapped with HITL guard."""
+        from agentic_cli.tools.sandbox import sandbox_execute
+
+        assert getattr(sandbox_execute, "_hitl_guarded", False), \
+            "DANGEROUS tools should be wrapped with HITL guard"
+
+    def test_dangerous_tool_passes_with_approval(self):
+        """DANGEROUS tool executes when approval manager approves."""
+        from unittest.mock import MagicMock
+        from agentic_cli.tools.sandbox import sandbox_execute
+        from agentic_cli.workflow.context import (
+            set_context_sandbox_manager,
+            set_context_approval_manager,
+        )
+        from agentic_cli.tools.sandbox.models import ExecutionResult
+        from tests.conftest import MockContext
+        from tests.tools.test_sandbox import MockSandboxBackend
+
+        with MockContext() as ctx:
+            backend = MockSandboxBackend(
+                ExecutionResult(success=True, stdout="ok\n", result="1")
+            )
+            from agentic_cli.tools.sandbox.manager import SandboxManager
+            mgr = SandboxManager(ctx.settings, backend=backend)
+
+            # Create mock approval manager that auto-approves
+            approval_mgr = MagicMock()
+            approval_mgr.check_or_request.return_value = True
+
+            tok1 = set_context_sandbox_manager(mgr)
+            tok2 = set_context_approval_manager(approval_mgr)
+
+            try:
+                result = sandbox_execute("1 + 1")
+                assert result["success"] is True
+                approval_mgr.check_or_request.assert_called_once()
+            finally:
+                tok1.var.reset(tok1)
+                tok2.var.reset(tok2)
+                mgr.cleanup()
+
+    def test_dangerous_tool_denied(self):
+        """DANGEROUS tool returns error when approval manager denies."""
+        from unittest.mock import MagicMock
+        from agentic_cli.tools.sandbox import sandbox_execute
+        from agentic_cli.workflow.context import (
+            set_context_sandbox_manager,
+            set_context_approval_manager,
+        )
+        from tests.conftest import MockContext
+        from tests.tools.test_sandbox import MockSandboxBackend
+
+        with MockContext() as ctx:
+            backend = MockSandboxBackend()
+            from agentic_cli.tools.sandbox.manager import SandboxManager
+            mgr = SandboxManager(ctx.settings, backend=backend)
+
+            approval_mgr = MagicMock()
+            approval_mgr.check_or_request.return_value = False
+
+            tok1 = set_context_sandbox_manager(mgr)
+            tok2 = set_context_approval_manager(approval_mgr)
+
+            try:
+                result = sandbox_execute("1 + 1")
+                assert result["success"] is False
+                assert "denied" in result["error"].lower()
+                # Original function should NOT have been called
+                assert len(backend.execute_calls) == 0
+            finally:
+                tok1.var.reset(tok1)
+                tok2.var.reset(tok2)
+                mgr.cleanup()
+
+    def test_dangerous_tool_no_approval_manager_executes(self):
+        """DANGEROUS tool executes normally when no approval manager exists."""
+        from agentic_cli.tools.sandbox import sandbox_execute
+        from agentic_cli.workflow.context import (
+            set_context_sandbox_manager,
+            set_context_approval_manager,
+        )
+        from agentic_cli.tools.sandbox.models import ExecutionResult
+        from tests.conftest import MockContext
+        from tests.tools.test_sandbox import MockSandboxBackend
+
+        with MockContext() as ctx:
+            backend = MockSandboxBackend(
+                ExecutionResult(success=True, stdout="ok\n", result="1")
+            )
+            from agentic_cli.tools.sandbox.manager import SandboxManager
+            mgr = SandboxManager(ctx.settings, backend=backend)
+
+            tok1 = set_context_sandbox_manager(mgr)
+            tok2 = set_context_approval_manager(None)
+
+            try:
+                result = sandbox_execute("1 + 1")
+                assert result["success"] is True
+            finally:
+                tok1.var.reset(tok1)
+                tok2.var.reset(tok2)
+                mgr.cleanup()
