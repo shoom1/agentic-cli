@@ -20,7 +20,6 @@ agentic-cli/
 │   ├── __init__.py           # Package exports, lazy imports
 │   ├── config.py             # BaseSettings (pydantic-settings)
 │   ├── constants.py          # Shared constants, truncate()
-│   ├── resolvers.py          # Model/path constants (GOOGLE_MODELS, etc.)
 │   ├── settings_persistence.py
 │   ├── logging.py
 │   ├── cli/
