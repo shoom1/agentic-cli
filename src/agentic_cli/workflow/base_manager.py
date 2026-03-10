@@ -457,7 +457,7 @@ class BaseWorkflowManager(ABC):
         """Request user input from the CLI via callback.
 
         Called by tools that need user interaction. Requires
-        ``_user_input_callback`` to be set by the consumer (e.g.
+        ``set_input_callback()`` to be set by the consumer (e.g.
         MessageProcessor) before any tool invokes this method.
 
         Args:
@@ -478,7 +478,7 @@ class BaseWorkflowManager(ABC):
         if self._user_input_callback is None:
             raise RuntimeError(
                 "No user input callback registered. "
-                "Set _user_input_callback before invoking tools that require user input."
+                "Call set_input_callback() before invoking tools that require user input."
             )
 
         return await self._user_input_callback(request)
