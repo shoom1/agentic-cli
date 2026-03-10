@@ -465,12 +465,14 @@ class KnowledgeBaseManager:
 
         # Mutate shared state under lock
         with self._lock:
-            for chunk in doc.chunks:
-                self._chunks[chunk.id] = chunk
-
+            # Add embeddings first — if this fails, no state is modified
             if doc.chunks and embeddings:
                 chunk_ids = [c.id for c in doc.chunks]
                 self._vector_store.add_embeddings(chunk_ids, embeddings)
+
+            # Now safe to update in-memory state
+            for chunk in doc.chunks:
+                self._chunks[chunk.id] = chunk
 
             self._documents[doc.id] = doc
 
