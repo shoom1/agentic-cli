@@ -133,8 +133,7 @@ class TestHandleContextTrimmed:
         from agentic_cli.cli.usage_tracker import UsageTracker
 
         processor = MessageProcessor()
-        state = _EventProcessingState()
-        state._usage_tracker = UsageTracker()
+        state = _EventProcessingState(usage_tracker=UsageTracker())
         ui = MagicMock()
         settings = MagicMock()
         workflow = MagicMock()
@@ -146,7 +145,7 @@ class TestHandleContextTrimmed:
             messages_before=20, messages_after=10, source="langgraph"
         )
         await processor._handle_context_trimmed(event, state, ui, settings, workflow)
-        assert state._usage_tracker.context_trimmed_count == 1
+        assert state.usage_tracker.context_trimmed_count == 1
 
     async def test_sets_invocation_flag(self, setup):
         processor, state, ui, settings, workflow = setup
@@ -181,12 +180,13 @@ class TestADKHeuristicFallback:
         from agentic_cli.cli.usage_tracker import UsageTracker
 
         processor = MessageProcessor()
-        state = _EventProcessingState()
         tracker = UsageTracker()
         # Simulate a previous invocation
         tracker.record({"prompt_tokens": 10000, "completion_tokens": 100})
-        state._usage_tracker = tracker
-        state._workflow_controller = MagicMock()
+        state = _EventProcessingState(
+            usage_tracker=tracker,
+            workflow_controller=MagicMock(),
+        )
         ui = MagicMock()
         settings = MagicMock()
         workflow = MagicMock()
@@ -201,7 +201,7 @@ class TestADKHeuristicFallback:
             completion_tokens=200,
         )
         await processor._handle_llm_usage(event, state, ui, settings, workflow)
-        assert state._usage_tracker.context_trimmed_count == 1
+        assert state.usage_tracker.context_trimmed_count == 1
         ui.add_warning.assert_called_once()
         warning = ui.add_warning.call_args[0][0]
         assert "adk_token_heuristic" in warning
@@ -211,7 +211,7 @@ class TestADKHeuristicFallback:
         processor, state, ui, settings, workflow = setup
         # Simulate CONTEXT_TRIMMED already handled
         state._context_trimmed_this_invocation = True
-        state._usage_tracker.context_trimmed_count = 1
+        state.usage_tracker.context_trimmed_count = 1
 
         event = WorkflowEvent.llm_usage(
             model="gemini-2.5-pro",
@@ -220,7 +220,7 @@ class TestADKHeuristicFallback:
         )
         await processor._handle_llm_usage(event, state, ui, settings, workflow)
         # Count should still be 1, not incremented again
-        assert state._usage_tracker.context_trimmed_count == 1
+        assert state.usage_tracker.context_trimmed_count == 1
         ui.add_warning.assert_not_called()
 
     async def test_no_fallback_on_increase(self, setup):
@@ -232,7 +232,7 @@ class TestADKHeuristicFallback:
             completion_tokens=200,
         )
         await processor._handle_llm_usage(event, state, ui, settings, workflow)
-        assert state._usage_tracker.context_trimmed_count == 0
+        assert state.usage_tracker.context_trimmed_count == 0
         ui.add_warning.assert_not_called()
 
     async def test_flag_reset_after_llm_usage(self, setup):

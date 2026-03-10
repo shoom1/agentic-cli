@@ -102,10 +102,6 @@ class MessageHistory:
         """Get all messages."""
         return list(self._messages)
 
-    def get_by_type(self, message_type: MessageType) -> list[Message]:
-        """Get messages of a specific type."""
-        return [m for m in self._messages if m.message_type == message_type]
-
     def clear(self) -> None:
         """Clear all messages."""
         self._messages.clear()
@@ -121,15 +117,14 @@ class MessageHistory:
 class _EventProcessingState:
     """Mutable state shared across event handlers during process()."""
 
+    usage_tracker: "UsageTracker | None" = field(default=None, repr=False)
+    workflow_controller: "WorkflowController | None" = field(default=None, repr=False)
     status_line: str = "Processing..."
     task_progress_display: str | None = None
     _last_task_display_content: str | None = None
     thinking_started: bool = False
     thinking_content: list[str] = field(default_factory=list)
     response_content: list[str] = field(default_factory=list)
-    # Set by process() so LLM_USAGE handler can update tracker and status bar
-    _usage_tracker: "UsageTracker | None" = field(default=None, repr=False)
-    _workflow_controller: "WorkflowController | None" = field(default=None, repr=False)
     # Prevents double-counting when LangGraph emits both CONTEXT_TRIMMED and LLM_USAGE
     _context_trimmed_this_invocation: bool = False
 
@@ -227,9 +222,10 @@ class MessageProcessor:
         if settings.log_activity:
             self._message_history.add(message, MessageType.USER)
 
-        state = _EventProcessingState()
-        state._usage_tracker = usage_tracker
-        state._workflow_controller = workflow_controller
+        state = _EventProcessingState(
+            usage_tracker=usage_tracker,
+            workflow_controller=workflow_controller,
+        )
         # Restore task progress from previous turn so it shows immediately
         state.task_progress_display = self._last_task_progress
         workflow = workflow_controller.workflow
@@ -251,7 +247,7 @@ class MessageProcessor:
                 choices=request.choices,
                 default=request.default,
             )
-            response = await self._prompt_user_input(wf_event, workflow, ui)
+            response = await self._prompt_user_input(wf_event, ui)
 
             ui.start_thinking(state.get_status, content_format="ansi")
             state.thinking_started = True
@@ -331,14 +327,12 @@ class MessageProcessor:
     async def _prompt_user_input(
         self,
         event: "WorkflowEvent",
-        workflow: object,
         ui: "ThinkingPromptSession",
     ) -> str:
         """Prompt user for input requested by a tool.
 
         Args:
             event: USER_INPUT_REQUIRED event with prompt details
-            workflow: The workflow manager (unused but kept for potential future use)
             ui: UI session for prompting
 
         Returns:
@@ -454,7 +448,7 @@ class MessageProcessor:
             ui.finish_thinking(add_to_history=False)
             state.thinking_started = False
 
-        response = await self._prompt_user_input(event, workflow, ui)
+        response = await self._prompt_user_input(event, ui)
         workflow.provide_user_input(
             event.metadata["request_id"],
             response,
@@ -544,8 +538,8 @@ class MessageProcessor:
         workflow: object,
     ) -> None:
         """Handle CONTEXT_TRIMMED events — increment counter and warn user."""
-        if state._usage_tracker is not None:
-            state._usage_tracker.context_trimmed_count += 1
+        if state.usage_tracker is not None:
+            state.usage_tracker.context_trimmed_count += 1
         state._context_trimmed_this_invocation = True
 
         removed = event.metadata.get("messages_removed")
@@ -566,8 +560,8 @@ class MessageProcessor:
         workflow: object,
     ) -> None:
         """Handle LLM_USAGE events — accumulate token counts and refresh status bar."""
-        if state._usage_tracker is not None:
-            tracker = state._usage_tracker
+        if state.usage_tracker is not None:
+            tracker = state.usage_tracker
             prev_prompt = tracker.last_prompt_tokens
             tracker.record(event.metadata)
 
@@ -591,8 +585,8 @@ class MessageProcessor:
             # Reset per-invocation flag for next LLM call
             state._context_trimmed_this_invocation = False
 
-        if state._workflow_controller is not None:
-            state._workflow_controller.update_status_bar(ui)
+        if state.workflow_controller is not None:
+            state.workflow_controller.update_status_bar(ui)
 
     # === Dispatch table ===
 
