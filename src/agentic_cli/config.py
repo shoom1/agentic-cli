@@ -34,14 +34,9 @@ from pydantic_settings import (
     PydanticBaseSettingsSource,
 )
 
-from agentic_cli.workflow.settings import WorkflowSettingsMixin, THINKING_EFFORT_LEVELS
+from agentic_cli.workflow.settings import WorkflowSettingsMixin
 from agentic_cli.workflow.models import ModelRegistry
 from agentic_cli.settings_mixins import AppSettingsMixin, CLISettingsMixin
-
-# Backward-compatible constants derived from ModelRegistry fallbacks
-GOOGLE_MODELS = ModelRegistry.FALLBACK_GOOGLE
-ANTHROPIC_MODELS = ModelRegistry.FALLBACK_ANTHROPIC
-ALL_MODELS = GOOGLE_MODELS + ANTHROPIC_MODELS
 
 __all__ = [
     "BaseSettings",
@@ -53,10 +48,6 @@ __all__ = [
     "get_context_settings",
     "validate_settings",
     "reload_settings",
-    "GOOGLE_MODELS",
-    "ANTHROPIC_MODELS",
-    "ALL_MODELS",
-    "THINKING_EFFORT_LEVELS",
 ]
 
 
