@@ -11,7 +11,7 @@ from agentic_cli.cli.commands import (
 from agentic_cli.cli.app import BaseCLIApp
 from agentic_cli.cli.message_processor import MessageProcessor, MessageHistory, MessageType
 from agentic_cli.cli.workflow_controller import WorkflowController
-from agentic_cli.cli.settings import CLISettingsMixin
+from agentic_cli.settings_mixins import CLISettingsMixin
 
 __all__ = [
     "AppInfo",
