@@ -103,6 +103,23 @@ class BaseSettings(WorkflowSettingsMixin, AppSettingsMixin, CLISettingsMixin, Py
         extra="ignore",
     )
 
+    def update_setting(self, key: str, value: Any) -> None:
+        """Update a single setting, using dedicated setters where required.
+
+        Args:
+            key: Setting name.
+            value: New value.
+
+        Raises:
+            ValueError: If the value is invalid for the given setting.
+        """
+        if key == "model":
+            self.set_model(value)
+        elif key == "thinking_effort":
+            self.set_thinking_effort(value)
+        else:
+            object.__setattr__(self, key, value)
+
     @classmethod
     def settings_customise_sources(
         cls,
