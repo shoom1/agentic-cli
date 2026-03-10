@@ -103,20 +103,6 @@ def bind_context(**kwargs: object) -> None:
     structlog.contextvars.bind_contextvars(**kwargs)
 
 
-def clear_context() -> None:
-    """Clear all bound context variables."""
-    structlog.contextvars.clear_contextvars()
-
-
-def unbind_context(*keys: str) -> None:
-    """Remove specific keys from the logging context.
-
-    Args:
-        *keys: Keys to remove from context
-    """
-    structlog.contextvars.unbind_contextvars(*keys)
-
-
 # Pre-configured loggers for common components
 class Loggers:
     """Pre-configured logger instances for agentic CLI components."""
