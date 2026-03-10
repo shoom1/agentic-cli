@@ -232,22 +232,13 @@ class MessageProcessor:
         dispatch = self._get_event_dispatch()
 
         # Set up direct callback so HITL tools can prompt the user without
-        # deadlocking (the Future pattern blocks the ADK runner, preventing
-        # the USER_INPUT_REQUIRED event from ever being yielded).
+        # deadlocking the workflow runner.
         async def _handle_input(request: "UserInputRequest") -> str:
             if state.thinking_started:
                 ui.finish_thinking(add_to_history=False)
                 state.thinking_started = False
 
-            wf_event = WorkflowEvent.user_input_required(
-                request_id=request.request_id,
-                tool_name=request.tool_name,
-                prompt=request.prompt,
-                input_type=request.input_type,
-                choices=request.choices,
-                default=request.default,
-            )
-            response = await self._prompt_user_input(wf_event, ui)
+            response = await self._prompt_user_input(request, ui)
 
             ui.start_thinking(state.get_status, content_format="ansi")
             state.thinking_started = True
@@ -326,49 +317,43 @@ class MessageProcessor:
 
     async def _prompt_user_input(
         self,
-        event: "WorkflowEvent",
+        request: "UserInputRequest",
         ui: "ThinkingPromptSession",
     ) -> str:
         """Prompt user for input requested by a tool.
 
         Args:
-            event: USER_INPUT_REQUIRED event with prompt details
-            ui: UI session for prompting
+            request: The user input request from the tool.
+            ui: UI session for prompting.
 
         Returns:
-            User's response string
+            User's response string.
         """
         from agentic_cli.workflow.events import InputType
 
-        input_type = event.metadata.get("input_type", InputType.TEXT.value)
-        tool_name = event.metadata.get("tool_name", "Tool")
-        choices = event.metadata.get("choices")
-        default = event.metadata.get("default")
+        tool_name = request.tool_name or "Tool"
 
-        if input_type == InputType.CHOICE.value and choices:
-            # Use choice dialog for multiple options
+        if request.input_type == InputType.CHOICE and request.choices:
             result = await ui.dropdown_dialog(
                 title=f"{tool_name} - Input Required",
-                text=event.content,
-                options=choices,
-                default=default,
+                text=request.prompt,
+                options=request.choices,
+                default=request.default,
             )
-            return result or (default or "")
+            return result or (request.default or "")
 
-        elif input_type == InputType.CONFIRM.value:
-            # Use yes/no dialog for confirmation
+        elif request.input_type == InputType.CONFIRM:
             result = await ui.yes_no_dialog(
                 title=f"{tool_name} - Confirmation",
-                text=event.content,
+                text=request.prompt,
             )
             return "yes" if result else "no"
 
         else:
-            # Use text input dialog for free-form input
             result = await ui.input_dialog(
                 title=f"{tool_name} - Input Required",
-                text=event.content,
-                default=default or "",
+                text=request.prompt,
+                default=request.default or "",
             )
             return result or ""
 
@@ -434,29 +419,6 @@ class MessageProcessor:
         if len(lines) > 1:
             display += "\n" + "\n".join(lines[1:])
         ui.add_rich(display)
-
-    async def _handle_user_input_required(
-        self,
-        event: "WorkflowEvent",
-        state: _EventProcessingState,
-        ui: "ThinkingPromptSession",
-        settings: "BaseSettings",
-        workflow: object,
-    ) -> None:
-        """Handle USER_INPUT_REQUIRED events — legacy ADK event stream path."""
-        if state.thinking_started:
-            ui.finish_thinking(add_to_history=False)
-            state.thinking_started = False
-
-        response = await self._prompt_user_input(event, ui)
-        workflow.provide_user_input(
-            event.metadata["request_id"],
-            response,
-        )
-
-        # Resume thinking box
-        ui.start_thinking(state.get_status, content_format="ansi")
-        state.thinking_started = True
 
     async def _handle_code_execution(
         self,
@@ -603,7 +565,6 @@ class MessageProcessor:
                 EventType.THINKING: cls._handle_thinking,
                 EventType.TOOL_CALL: cls._handle_tool_call,
                 EventType.TOOL_RESULT: cls._handle_tool_result,
-                EventType.USER_INPUT_REQUIRED: cls._handle_user_input_required,
                 EventType.CODE_EXECUTION: cls._handle_code_execution,
                 EventType.EXECUTABLE_CODE: cls._handle_executable_code,
                 EventType.FILE_DATA: cls._handle_file_data,

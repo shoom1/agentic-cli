@@ -251,33 +251,6 @@ class TestLangGraphWorkflowManagerLifecycle:
                 mock_cleanup.assert_called_once()
 
 
-class TestLangGraphUserInput:
-    """Tests for user input handling in LangGraph manager."""
-
-    @pytest.fixture
-    def manager(self):
-        """Create test manager."""
-        settings = BaseSettings(google_api_key="test-key")
-        configs = [AgentConfig(name="test", prompt="test")]
-        return LangGraphWorkflowManager(
-            agent_configs=configs,
-            settings=settings,
-        )
-
-    def test_has_pending_input_empty(self, manager):
-        """Test has_pending_input when no requests."""
-        assert not manager.has_pending_input()
-
-    def test_get_pending_input_request_empty(self, manager):
-        """Test get_pending_input_request when no requests."""
-        assert manager.get_pending_input_request() is None
-
-    def test_provide_user_input_unknown(self, manager):
-        """Test provide_user_input with unknown request ID."""
-        result = manager.provide_user_input("unknown-id", "response")
-        assert result is False
-
-
 class TestOrchestratorSelection:
     """Tests for orchestrator selection via settings."""
 

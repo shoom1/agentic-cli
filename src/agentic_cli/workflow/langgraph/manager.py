@@ -209,9 +209,6 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
         self._llm = None
         self._initialized = False
 
-        # Cancel pending input requests
-        self._cancel_pending_inputs()
-
         # Clean up managers (sandbox, etc.)
         self._cleanup_managers()
 

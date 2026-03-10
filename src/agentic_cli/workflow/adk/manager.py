@@ -216,9 +216,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             self._llm_event_logger.clear()
             self._llm_event_logger = None
 
-        # Cancel any pending input requests
-        self._cancel_pending_inputs()
-
         # Clean up managers (sandbox, etc.)
         self._cleanup_managers()
 

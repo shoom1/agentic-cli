@@ -720,12 +720,9 @@ class TestUserInputCallback:
         assert result == "user answer"
         assert len(captured_requests) == 1
         assert captured_requests[0].request_id == "req-1"
-        # Future pattern should NOT have been used
-        assert len(manager._pending_input) == 0
 
-    async def test_future_pattern_without_callback(self, mock_settings, simple_agent_config):
-        """Without callback, request_user_input uses the Future pattern."""
-        import asyncio
+    async def test_request_user_input_without_callback_raises(self, mock_settings, simple_agent_config):
+        """Without callback, request_user_input raises RuntimeError."""
         from agentic_cli.workflow.events import UserInputRequest, InputType
 
         manager = _create_manager(mock_settings, simple_agent_config)
@@ -738,18 +735,5 @@ class TestUserInputCallback:
             input_type=InputType.TEXT,
         )
 
-        # Start request_user_input in background — it will block on the Future
-        task = asyncio.create_task(manager.request_user_input(request))
-
-        # Let the event loop tick so the Future is registered
-        await asyncio.sleep(0)
-
-        assert "req-2" in manager._pending_input
-
-        # Resolve via provide_user_input
-        resolved = manager.provide_user_input("req-2", "large")
-        assert resolved is True
-
-        result = await task
-        assert result == "large"
-        assert len(manager._pending_input) == 0
+        with pytest.raises(RuntimeError, match="No user input callback registered"):
+            await manager.request_user_input(request)

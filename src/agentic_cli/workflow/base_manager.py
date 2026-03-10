@@ -7,13 +7,12 @@ The base class provides auto-detection of required managers (memory, planning,
 HITL) based on tool requirements, creating them lazily when needed.
 
 It also provides shared implementations for:
-- User input handling (pending request dict + Future pattern)
+- User input handling (callback-based)
 - Model resolution (lazy resolution from settings)
 """
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
 from abc import ABC, abstractmethod
 from typing import Any, AsyncGenerator, Awaitable, Callable, Iterator, TYPE_CHECKING
@@ -100,8 +99,7 @@ class BaseWorkflowManager(ABC):
         self._model: str | None = model
         self._model_resolved: bool = model is not None
 
-        # User input handling
-        self._pending_input: dict[str, tuple[UserInputRequest, asyncio.Future[str]]] = {}
+        # User input handling (callback-only)
         self._user_input_callback: Callable[[UserInputRequest], Awaitable[str]] | None = None
 
         # Model registry
@@ -380,13 +378,6 @@ class BaseWorkflowManager(ABC):
         """
         ...
 
-    def _cancel_pending_inputs(self) -> None:
-        """Cancel all pending user input requests."""
-        for request_id, (request, future) in self._pending_input.items():
-            if not future.done():
-                future.cancel()
-        self._pending_input.clear()
-
     def _reset_model(self, model: str | None) -> None:
         """Reset model state for reinitialisation."""
         if model is not None:
@@ -450,37 +441,23 @@ class BaseWorkflowManager(ABC):
         """
         pass
 
-    # User input handling methods - concrete implementations
-
-    def has_pending_input(self) -> bool:
-        """Check if there are pending user input requests."""
-        return len(self._pending_input) > 0
-
-    def get_pending_input_request(self) -> UserInputRequest | None:
-        """Get the next pending input request without removing it."""
-        if self._pending_input:
-            request_id = next(iter(self._pending_input))
-            return self._pending_input[request_id][0]
-        return None
+    # User input handling — callback-only
 
     async def request_user_input(self, request: UserInputRequest) -> str:
-        """Request user input from the CLI.
+        """Request user input from the CLI via callback.
 
-        Called by tools that need user interaction.
-
-        When ``_user_input_callback`` is set, the callback is invoked
-        directly, which avoids the deadlock inherent in the Future
-        pattern (the Future can never be resolved while the ADK runner
-        is blocked awaiting it).
-
-        When no callback is set, falls back to the original Future
-        pattern for backward compatibility.
+        Called by tools that need user interaction. Requires
+        ``_user_input_callback`` to be set by the consumer (e.g.
+        MessageProcessor) before any tool invokes this method.
 
         Args:
             request: The user input request.
 
         Returns:
             User's response string.
+
+        Raises:
+            RuntimeError: If no callback is registered.
         """
         logger.debug(
             "user_input_requested",
@@ -488,40 +465,13 @@ class BaseWorkflowManager(ABC):
             tool_name=request.tool_name,
         )
 
-        if self._user_input_callback is not None:
-            return await self._user_input_callback(request)
+        if self._user_input_callback is None:
+            raise RuntimeError(
+                "No user input callback registered. "
+                "Set _user_input_callback before invoking tools that require user input."
+            )
 
-        # Fallback: Future pattern (for tests without callback)
-        loop = asyncio.get_event_loop()
-        future: asyncio.Future[str] = loop.create_future()
-        self._pending_input[request.request_id] = (request, future)
-        return await future
-
-    def provide_user_input(self, request_id: str, response: str) -> bool:
-        """Provide user input for a pending request.
-
-        Called by CLI when user responds to a USER_INPUT_REQUIRED event.
-
-        Args:
-            request_id: The request ID from the event metadata.
-            response: User's response.
-
-        Returns:
-            True if request was found and resolved, False otherwise.
-        """
-        if request_id not in self._pending_input:
-            logger.warning("unknown_input_request", request_id=request_id)
-            return False
-
-        request, future = self._pending_input.pop(request_id)
-        future.set_result(response)
-
-        logger.debug(
-            "user_input_provided",
-            request_id=request_id,
-            tool_name=request.tool_name,
-        )
-        return True
+        return await self._user_input_callback(request)
 
     # Async context manager support
 

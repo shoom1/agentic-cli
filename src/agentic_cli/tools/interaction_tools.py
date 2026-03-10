@@ -24,8 +24,8 @@ async def ask_clarification(
     """Ask the user for clarification.
 
     This tool pauses execution and requests input from the user via
-    the CLI. It uses the workflow context to emit a USER_INPUT_REQUIRED
-    event that the CLI will handle.
+    the CLI. It uses the workflow manager's callback to prompt the user
+    directly.
 
     Args:
         question: The question to ask
