@@ -7,10 +7,6 @@ from unittest.mock import patch
 import pytest
 
 from agentic_cli.config import (
-    ALL_MODELS,
-    ANTHROPIC_MODELS,
-    GOOGLE_MODELS,
-    THINKING_EFFORT_LEVELS,
     BaseSettings,
     SettingsContext,
     SettingsValidationError,
@@ -22,6 +18,7 @@ from agentic_cli.config import (
     validate_settings,
 )
 from agentic_cli.workflow.models import ModelRegistry
+from agentic_cli.workflow.settings import THINKING_EFFORT_LEVELS
 
 
 class TestBaseSettings:
@@ -102,9 +99,9 @@ class TestAPIKeyManagement:
         """Test getting available models based on API keys."""
         models = settings_both_keys.get_available_models()
 
-        for google_model in GOOGLE_MODELS:
+        for google_model in ModelRegistry.FALLBACK_GOOGLE:
             assert google_model in models
-        for anthropic_model in ANTHROPIC_MODELS:
+        for anthropic_model in ModelRegistry.FALLBACK_ANTHROPIC:
             assert anthropic_model in models
 
 class TestModelConfiguration:
@@ -251,29 +248,6 @@ class TestWorkspaceOperations:
                 os.environ["GOOGLE_API_KEY"] = original_value
             else:
                 os.environ.pop("GOOGLE_API_KEY", None)
-
-
-class TestModelConstants:
-    """Tests for model constant lists."""
-
-    def test_all_models_includes_all_providers(self):
-        """Test ALL_MODELS includes both providers."""
-        for model in GOOGLE_MODELS:
-            assert model in ALL_MODELS
-        for model in ANTHROPIC_MODELS:
-            assert model in ALL_MODELS
-
-    def test_constants_match_registry_fallbacks(self):
-        """Test backward-compat constants match ModelRegistry fallbacks."""
-        assert GOOGLE_MODELS == ModelRegistry.FALLBACK_GOOGLE
-        assert ANTHROPIC_MODELS == ModelRegistry.FALLBACK_ANTHROPIC
-
-    def test_thinking_effort_levels(self):
-        """Test thinking effort level constants."""
-        assert "none" in THINKING_EFFORT_LEVELS
-        assert "low" in THINKING_EFFORT_LEVELS
-        assert "medium" in THINKING_EFFORT_LEVELS
-        assert "high" in THINKING_EFFORT_LEVELS
 
 
 class TestSettingsContext:

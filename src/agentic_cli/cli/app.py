@@ -319,31 +319,17 @@ class BaseCLIApp:
         needs_reinit = False
         new_model = changes.get("model")
 
-        # Settings that require special handling
-        special_settings = {"model", "thinking_effort"}
+        reinit_settings = {"model", "thinking_effort"}
 
-        # Apply model change (requires dedicated setter + reinit)
-        if new_model:
-            try:
-                self._settings.set_model(new_model)
-                needs_reinit = True
-            except ValueError as e:
-                self.session.add_error(f"Failed to set model: {e}")
-                return
-
-        # Apply thinking effort change (requires dedicated setter + reinit)
-        if "thinking_effort" in changes:
-            try:
-                self._settings.set_thinking_effort(changes["thinking_effort"])
-                needs_reinit = True
-            except ValueError as e:
-                self.session.add_error(f"Failed to set thinking effort: {e}")
-                return
-
-        # Apply all other settings directly
         for key, value in changes.items():
-            if key not in special_settings:
-                object.__setattr__(self._settings, key, value)
+            try:
+                self._settings.update_setting(key, value)
+                if key in reinit_settings:
+                    needs_reinit = True
+            except ValueError as e:
+                label = key.replace("_", " ").title()
+                self.session.add_error(f"Failed to set {label}: {e}")
+                return
 
         # Reinitialize workflow if needed
         if needs_reinit and self._workflow_controller.is_ready:

@@ -118,6 +118,16 @@ class BaseWorkflowManager(ABC):
         self._llm_summarizer: Any | None = None
         self._sandbox_manager: "SandboxManager | None" = None
 
+    def set_input_callback(
+        self, callback: Callable[[UserInputRequest], Awaitable[str]]
+    ) -> None:
+        """Register a callback for handling user input requests from tools."""
+        self._user_input_callback = callback
+
+    def clear_input_callback(self) -> None:
+        """Remove the registered user input callback."""
+        self._user_input_callback = None
+
     @property
     def agent_configs(self) -> list[AgentConfig]:
         """Get the agent configurations."""
@@ -447,7 +457,7 @@ class BaseWorkflowManager(ABC):
         """Request user input from the CLI via callback.
 
         Called by tools that need user interaction. Requires
-        ``_user_input_callback`` to be set by the consumer (e.g.
+        ``set_input_callback()`` to be set by the consumer (e.g.
         MessageProcessor) before any tool invokes this method.
 
         Args:
@@ -468,7 +478,7 @@ class BaseWorkflowManager(ABC):
         if self._user_input_callback is None:
             raise RuntimeError(
                 "No user input callback registered. "
-                "Set _user_input_callback before invoking tools that require user input."
+                "Call set_input_callback() before invoking tools that require user input."
             )
 
         return await self._user_input_callback(request)

@@ -10,7 +10,6 @@ from typing import AsyncGenerator, Any, Callable
 
 from agentic_cli.workflow.events import WorkflowEvent, EventType
 from agentic_cli.workflow.thinking import ThinkingDetector
-from agentic_cli.constants import truncate, TOOL_SUMMARY_MAX_LENGTH
 from agentic_cli.logging import Loggers
 
 # Re-export for backward compatibility
@@ -159,54 +158,6 @@ class ADKEventProcessor:
             return WorkflowEvent.file_data(part.file_data.display_name or "unknown")
 
         return None
-
-    def generate_tool_summary(
-        self, tool_name: str, result: Any, success: bool
-    ) -> str:
-        """Generate human-readable summary for tool result.
-
-        Args:
-            tool_name: Name of the tool.
-            result: Tool result data.
-            success: Whether the tool succeeded.
-
-        Returns:
-            Summary string for display.
-        """
-        if not success:
-            if isinstance(result, dict) and "error" in result:
-                return f"Failed: {result['error']}"
-            return f"Failed: {result}"
-
-        # Try tool-specific formatter first
-        if isinstance(result, dict):
-            from agentic_cli.workflow.tool_summaries import format_tool_summary
-
-            specific = format_tool_summary(tool_name, result)
-            if specific:
-                return specific
-
-        # Check for explicit summary in result (only strings, not dicts)
-        if isinstance(result, dict):
-            if "summary" in result and isinstance(result["summary"], str):
-                return result["summary"]
-            if "message" in result:
-                return str(result["message"])
-            # Handle results with a "results" list (e.g., web_search)
-            if "results" in result and isinstance(result["results"], list):
-                return f"Found {len(result['results'])} results"
-
-        # Auto-generate based on result type
-        if result is None:
-            return "Completed"
-        if isinstance(result, list):
-            return f"Returned {len(result)} items"
-        if isinstance(result, dict):
-            return f"Returned {len(result)} fields"
-
-        # Truncate string results
-        text = str(result)
-        return truncate(text, TOOL_SUMMARY_MAX_LENGTH)
 
     def _apply_hook(self, event: WorkflowEvent) -> WorkflowEvent | None:
         """Apply optional event transformation hook."""

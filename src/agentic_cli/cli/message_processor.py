@@ -244,7 +244,7 @@ class MessageProcessor:
             state.thinking_started = True
             return response
 
-        workflow._user_input_callback = _handle_input
+        workflow.set_input_callback(_handle_input)
         try:
             while True:
                 try:
@@ -311,7 +311,7 @@ class MessageProcessor:
                         self._message_history.add(str(e), MessageType.ERROR)
                     break
         finally:
-            workflow._user_input_callback = None
+            workflow.clear_input_callback()
             # Persist task progress so it shows immediately on the next turn
             self._last_task_progress = state.task_progress_display
 

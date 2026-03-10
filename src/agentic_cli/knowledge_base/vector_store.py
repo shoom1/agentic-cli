@@ -217,10 +217,9 @@ class VectorStore:
             # Ensure directory exists
             self.index_path.parent.mkdir(parents=True, exist_ok=True)
 
-            # Save FAISS index
-            faiss.write_index(self._index, str(self.index_path))
-
-            # Save ID mappings (atomic to prevent corruption on crash)
+            # Save mappings first (atomic) — if we crash after this but
+            # before the index write, the mappings are still valid and
+            # the old index can be loaded safely.
             mappings_path = self.index_path.with_suffix(".mappings.json")
             mappings = {
                 "id_map": {str(k): v for k, v in self._id_map.items()},
@@ -228,6 +227,9 @@ class VectorStore:
                 "next_id": self._next_id,
             }
             atomic_write_json(mappings_path, mappings)
+
+            # Save FAISS index
+            faiss.write_index(self._index, str(self.index_path))
 
     def load(self) -> None:
         """Load index and mappings from disk."""

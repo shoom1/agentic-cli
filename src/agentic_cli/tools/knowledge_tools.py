@@ -417,6 +417,26 @@ def _detect_extension(url: str) -> str:
     return ".bin"
 
 
+def _find_document_in_kbs(doc_id_or_title: str) -> tuple:
+    """Find a document across main and user knowledge bases.
+
+    Returns:
+        (document, source_kb) tuple. document may be None if not found.
+    """
+    kb = get_context_kb_manager()
+    doc = kb.find_document(doc_id_or_title)
+    source_kb = kb
+
+    if doc is None:
+        user_kb = get_context_user_kb_manager()
+        if user_kb is not None and user_kb is not kb:
+            doc = user_kb.find_document(doc_id_or_title)
+            if doc is not None:
+                source_kb = user_kb
+
+    return doc, source_kb
+
+
 @register_tool(
     category=ToolCategory.KNOWLEDGE,
     permission_level=PermissionLevel.SAFE,
@@ -437,16 +457,7 @@ def read_document(
     Returns:
         Dictionary with document text and metadata.
     """
-    kb = get_context_kb_manager()
-    doc = kb.find_document(doc_id_or_title)
-    source_kb = kb
-
-    # Fall back to user KB
-    if doc is None:
-        user_kb = get_context_user_kb_manager()
-        if user_kb is not None and user_kb is not kb:
-            doc = user_kb.find_document(doc_id_or_title)
-            source_kb = user_kb
+    doc, source_kb = _find_document_in_kbs(doc_id_or_title)
 
     if doc is None:
         return {"success": False, "error": f"Document not found: {doc_id_or_title}"}
@@ -604,16 +615,7 @@ def open_document(
     Returns:
         Dictionary with result.
     """
-    kb = get_context_kb_manager()
-    doc = kb.find_document(doc_id_or_title)
-    source_kb = kb
-
-    # Fall back to user KB
-    if doc is None:
-        user_kb = get_context_user_kb_manager()
-        if user_kb is not None and user_kb is not kb:
-            doc = user_kb.find_document(doc_id_or_title)
-            source_kb = user_kb
+    doc, source_kb = _find_document_in_kbs(doc_id_or_title)
 
     if doc is None:
         return {"success": False, "error": f"Document not found: {doc_id_or_title}"}
