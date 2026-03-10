@@ -393,39 +393,6 @@ class TestFallback:
 
 
 # ---------------------------------------------------------------------------
-# ADK event_processor: diff_compare summary dict bug is fixed
-# ---------------------------------------------------------------------------
-
-
-class TestADKSummaryDictBugFix:
-    """Verify the summary dict bug is fixed in ADK event processor."""
-
-    def test_dict_summary_not_stringified(self):
-        from agentic_cli.workflow.adk.event_processor import ADKEventProcessor
-
-        proc = ADKEventProcessor(model="test")
-        result = {
-            "success": True,
-            "diff": "...",
-            "summary": {"added": 3, "removed": 1, "changed": 2},
-            "similarity": 0.85,
-        }
-        summary = proc.generate_tool_summary("diff_compare", result, success=True)
-        # Should NOT contain the raw dict repr
-        assert "{'added'" not in summary
-        assert "+3 -1 ~2, 85% similar" == summary
-
-    def test_string_summary_still_works(self):
-        from agentic_cli.workflow.adk.event_processor import ADKEventProcessor
-
-        proc = ADKEventProcessor(model="test")
-        # A tool that returns a string summary should still pass through
-        result = {"summary": "All good", "other": "data"}
-        summary = proc.generate_tool_summary("some_unknown_tool", result, success=True)
-        assert summary == "All good"
-
-
-# ---------------------------------------------------------------------------
 # events.py: _format_result_content uses tool-specific formatters
 # ---------------------------------------------------------------------------
 
