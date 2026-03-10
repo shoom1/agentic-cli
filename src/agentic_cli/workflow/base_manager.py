@@ -118,6 +118,16 @@ class BaseWorkflowManager(ABC):
         self._llm_summarizer: Any | None = None
         self._sandbox_manager: "SandboxManager | None" = None
 
+    def set_input_callback(
+        self, callback: Callable[[UserInputRequest], Awaitable[str]]
+    ) -> None:
+        """Register a callback for handling user input requests from tools."""
+        self._user_input_callback = callback
+
+    def clear_input_callback(self) -> None:
+        """Remove the registered user input callback."""
+        self._user_input_callback = None
+
     @property
     def agent_configs(self) -> list[AgentConfig]:
         """Get the agent configurations."""
