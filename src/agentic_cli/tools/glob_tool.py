@@ -74,14 +74,8 @@ def glob(
             "path": str(search_path),
         }
 
-    # Determine if recursive
-    is_recursive = "**" in pattern
-
     # Find matching files
-    if is_recursive:
-        matches = list(search_path.glob(pattern))
-    else:
-        matches = list(search_path.glob(pattern))
+    matches = list(search_path.glob(pattern))
 
     # Filter results
     filtered = []
