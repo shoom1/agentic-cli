@@ -468,13 +468,13 @@ class BaseWorkflowManager(ABC):
 
         Called by tools that need user interaction.
 
-        When ``_user_input_callback`` is set (by MessageProcessor), the
-        callback is invoked directly, which avoids the deadlock inherent
-        in the Future pattern (the Future can never be resolved while the
-        ADK runner is blocked awaiting it).
+        When ``_user_input_callback`` is set, the callback is invoked
+        directly, which avoids the deadlock inherent in the Future
+        pattern (the Future can never be resolved while the ADK runner
+        is blocked awaiting it).
 
-        When no callback is set (e.g. in tests), falls back to the
-        original Future pattern for backward compatibility.
+        When no callback is set, falls back to the original Future
+        pattern for backward compatibility.
 
         Args:
             request: The user input request.
