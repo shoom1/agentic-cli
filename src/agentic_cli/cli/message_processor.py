@@ -525,23 +525,18 @@ class MessageProcessor:
         if state.usage_tracker is not None:
             tracker = state.usage_tracker
             prev_prompt = tracker.last_prompt_tokens
-            tracker.record(event.metadata)
+            heuristic_trimmed = tracker.record(
+                event.metadata,
+                context_trimmed_already=state._context_trimmed_this_invocation,
+            )
 
-            # ADK heuristic fallback: if prompt_tokens dropped and no
-            # CONTEXT_TRIMMED event was already received this invocation,
-            # treat it as an ADK-detected trim
-            if (
-                not state._context_trimmed_this_invocation
-                and prev_prompt > 0
-                and tracker.last_prompt_tokens < prev_prompt
-            ):
-                tracker.context_trimmed_count += 1
+            if heuristic_trimmed:
                 from agentic_cli.cli.usage_tracker import format_tokens
 
                 ui.add_warning(
                     f"Context window trimmed: {format_tokens(prev_prompt)}"
                     f" → {format_tokens(tracker.last_prompt_tokens)} tokens"
-                    " (adk_token_heuristic)"
+                    " (token_drop_heuristic)"
                 )
 
             # Reset per-invocation flag for next LLM call

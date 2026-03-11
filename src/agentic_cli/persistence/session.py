@@ -181,6 +181,9 @@ class SessionPersistence:
     ) -> Path:
         """Save current session state.
 
+        Builds a SessionSnapshot from the MessageHistory and delegates
+        to save_snapshot for the actual persistence.
+
         Args:
             session_id: Unique session identifier
             message_history: MessageHistory instance with messages
@@ -202,7 +205,7 @@ class SessionPersistence:
                 }
             )
 
-        # Create snapshot
+        # Build snapshot and delegate to save_snapshot
         snapshot = SessionSnapshot(
             session_id=session_id,
             created_at=all_messages[0].timestamp if all_messages else datetime.now(),
@@ -211,24 +214,7 @@ class SessionPersistence:
             metadata=metadata or {},
         )
 
-        # Save to file
-        session_path = self._get_session_path(session_id)
-        atomic_write_json(session_path, snapshot.to_dict())
-
-        self._update_sessions_index(
-            session_id=session_id,
-            created_at=snapshot.created_at.isoformat(),
-            saved_at=snapshot.saved_at.isoformat(),
-            message_count=len(messages),
-        )
-
-        logger.info(
-            "session_saved",
-            session_id=session_id,
-            message_count=len(messages),
-            path=str(session_path),
-        )
-        return session_path
+        return self.save_snapshot(snapshot)
 
     def load_session(self, session_id: str) -> SessionSnapshot | None:
         """Load a saved session.

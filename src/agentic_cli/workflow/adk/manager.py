@@ -25,6 +25,21 @@ from agentic_cli.workflow.events import WorkflowEvent, EventType
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.adk.event_processor import ADKEventProcessor
 from agentic_cli.workflow.adk.llm_event_logger import LLMEventLogger
+
+
+class _SessionEvent:
+    """Lightweight shim for injecting normalized messages into ADK sessions.
+
+    ADK expects event objects with ``content`` and ``author`` attributes.
+    This named class replaces the fragile ``type("Event", (), {...})()``
+    pattern used previously.
+    """
+
+    __slots__ = ("content", "author")
+
+    def __init__(self, content, author: str = "") -> None:
+        self.content = content
+        self.author = author
 from agentic_cli.config import (
     BaseSettings,
     get_settings,
@@ -752,7 +767,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     parts=[types.Part.from_text(text=msg["content"])],
                 )
                 session.events.append(
-                    type("Event", (), {"content": content, "author": current_agent or ""})()
+                    _SessionEvent(content, current_agent or "")
                 )
 
             elif role == "assistant":
@@ -766,7 +781,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     ))
                 content = types.Content(role="model", parts=parts)
                 session.events.append(
-                    type("Event", (), {"content": content, "author": current_agent or ""})()
+                    _SessionEvent(content, current_agent or "")
                 )
 
             elif role == "tool":
@@ -780,5 +795,5 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                 )]
                 content = types.Content(role="user", parts=parts)
                 session.events.append(
-                    type("Event", (), {"content": content, "author": current_agent or ""})()
+                    _SessionEvent(content, current_agent or "")
                 )

@@ -44,7 +44,6 @@ _lazy_imports = {
     "AgentState": "agentic_cli.workflow.langgraph.state",
     "ResearchState": "agentic_cli.workflow.langgraph.state",
     "ApprovalState": "agentic_cli.workflow.langgraph.state",
-    "FinanceResearchState": "agentic_cli.workflow.langgraph.state",
     "CheckpointData": "agentic_cli.workflow.langgraph.state",
     "add_messages": "agentic_cli.workflow.langgraph.state",
 }
@@ -88,7 +87,6 @@ __all__ = [
     "AgentState",
     "ResearchState",
     "ApprovalState",
-    "FinanceResearchState",
     "CheckpointData",
     "add_messages",
     # Context getters (for tools)

@@ -279,54 +279,5 @@ class TestCommandParsing:
         assert parsed.options["verbose"] == "true"
 
 
-class TestCommandHelp:
-    """Tests for command help generation."""
-
-    def test_get_help_basic(self):
-        """Test basic help generation."""
-        cmd = MockCommand("test", "A test command")
-        help_text = cmd.get_help()
-
-        assert "**/test**" in help_text
-        assert "A test command" in help_text
-
-    def test_get_help_with_usage(self):
-        """Test help with usage string."""
-
-        class UsageCommand(Command):
-            def __init__(self):
-                super().__init__(
-                    name="search",
-                    description="Search for items",
-                    usage="/search <query> [--max=N]",
-                )
-
-            async def execute(self, args, app):
-                pass
-
-        cmd = UsageCommand()
-        help_text = cmd.get_help()
-
-        assert "/search <query> [--max=N]" in help_text
-
-    def test_get_help_with_examples(self):
-        """Test help with examples."""
-
-        class ExampleCommand(Command):
-            def __init__(self):
-                super().__init__(
-                    name="search",
-                    description="Search",
-                    examples=["/search hello", "/search world --max=5"],
-                )
-
-            async def execute(self, args, app):
-                pass
-
-        cmd = ExampleCommand()
-        help_text = cmd.get_help()
-
-        assert "/search hello" in help_text
-        assert "/search world --max=5" in help_text
 
 

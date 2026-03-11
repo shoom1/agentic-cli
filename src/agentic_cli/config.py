@@ -37,6 +37,7 @@ from pydantic_settings import (
 from agentic_cli.workflow.settings import WorkflowSettingsMixin
 from agentic_cli.workflow.models import ModelRegistry
 from agentic_cli.settings_mixins import AppSettingsMixin, CLISettingsMixin
+from agentic_cli.settings_persistence import get_project_config_path, get_user_config_path
 
 __all__ = [
     "BaseSettings",
@@ -161,7 +162,7 @@ class BaseSettings(WorkflowSettingsMixin, AppSettingsMixin, CLISettingsMixin, Py
         # Add project-level JSON config (./.app_name/settings.json)
         project_json = _get_json_config_source(
             settings_cls,
-            Path.cwd() / f".{app_name}" / "settings.json",
+            get_project_config_path(app_name),
         )
         if project_json:
             sources.append(project_json)
@@ -169,7 +170,7 @@ class BaseSettings(WorkflowSettingsMixin, AppSettingsMixin, CLISettingsMixin, Py
         # Add user-level JSON config (~/.app_name/settings.json)
         user_json = _get_json_config_source(
             settings_cls,
-            Path.home() / f".{app_name}" / "settings.json",
+            get_user_config_path(app_name),
         )
         if user_json:
             sources.append(user_json)

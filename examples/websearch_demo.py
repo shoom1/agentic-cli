@@ -22,7 +22,7 @@ import sys
 
 from agentic_cli.tools.search import (
     web_search,
-    SearchResult,
+    WebSearchResult,
     TavilyBackend,
     BraveBackend,
     SEARCH_BACKENDS,
@@ -89,20 +89,20 @@ def demo_configuration_check():
 
 
 def demo_search_result_format():
-    """Demo the SearchResult data structure."""
+    """Demo the WebSearchResult data structure."""
     print("\n" + "=" * 60)
-    print("SearchResult Data Structure")
+    print("WebSearchResult Data Structure")
     print("=" * 60)
 
     # Create sample result
-    sample = SearchResult(
+    sample = WebSearchResult(
         title="Example Search Result",
         url="https://example.com/article",
         snippet="This is a sample snippet showing what search results look like...",
         score=0.95,
     )
 
-    print("  SearchResult fields:")
+    print("  WebSearchResult fields:")
     print(f"    title:   {sample.title}")
     print(f"    url:     {sample.url}")
     print(f"    snippet: {sample.snippet[:50]}...")

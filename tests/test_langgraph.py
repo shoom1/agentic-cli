@@ -19,7 +19,6 @@ try:
         AgentState,
         ResearchState,
         ApprovalState,
-        FinanceResearchState,
         CheckpointData,
         add_messages,
     )

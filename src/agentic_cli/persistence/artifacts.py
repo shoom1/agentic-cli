@@ -200,6 +200,24 @@ class ArtifactManager:
             )
             return False
 
+    def _load_artifact_from_entry(self, entry: dict) -> Artifact | None:
+        """Load an artifact from an index entry, reading content from disk.
+
+        Args:
+            entry: Index entry dict with at least 'file_path'.
+
+        Returns:
+            Artifact with content loaded, or None if path is unsafe or missing.
+        """
+        file_path = Path(entry["file_path"])
+        if not self._is_safe_path(file_path):
+            return None
+        if not file_path.exists():
+            return None
+        artifact = Artifact.from_dict(entry)
+        artifact.content = file_path.read_text()
+        return artifact
+
     def load(self, name: str, artifact_type: ArtifactType) -> Artifact | None:
         """Load an artifact from disk.
 
@@ -214,14 +232,7 @@ class ArtifactManager:
         key = self._make_key(name, artifact_type.value)
         entry = index["artifacts"].get(key)
         if entry:
-            file_path = Path(entry["file_path"])
-            if not self._is_safe_path(file_path):
-                return None
-            if file_path.exists():
-                content = file_path.read_text()
-                artifact = Artifact.from_dict(entry)
-                artifact.content = content
-                return artifact
+            return self._load_artifact_from_entry(entry)
         return None
 
     def list_artifacts(
@@ -242,12 +253,8 @@ class ArtifactManager:
                 artifact_type is None
                 or entry["artifact_type"] == artifact_type.value
             ):
-                file_path = Path(entry["file_path"])
-                if not self._is_safe_path(file_path):
-                    continue
-                if file_path.exists():
-                    artifact = Artifact.from_dict(entry)
-                    artifact.content = file_path.read_text()
+                artifact = self._load_artifact_from_entry(entry)
+                if artifact is not None:
                     artifacts.append(artifact)
         return artifacts
 
