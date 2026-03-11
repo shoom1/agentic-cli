@@ -100,6 +100,42 @@ class TaskItem:
         )
 
 
+_STATUS_ICONS = {
+    TaskStatus.COMPLETED: "[✓]",
+    TaskStatus.IN_PROGRESS: "[▸]",
+    TaskStatus.PENDING: "[ ]",
+    TaskStatus.CANCELLED: "[-]",
+}
+
+_STATUS_ORDER = {
+    TaskStatus.IN_PROGRESS: 0,
+    TaskStatus.PENDING: 1,
+    TaskStatus.CANCELLED: 2,
+    TaskStatus.COMPLETED: 3,
+}
+
+
+def format_task_checklist(items: list[TaskItem]) -> str:
+    """Format tasks as a compact checklist for display.
+
+    Args:
+        items: List of TaskItem objects.
+
+    Returns:
+        Multi-line string with status icons: [✓] Done, [▸] Active,
+        [ ] Pending, [-] Cancelled.  Sorted by status priority
+        (in-progress first, completed last).
+    """
+    if not items:
+        return ""
+    sorted_items = sorted(items, key=lambda t: _STATUS_ORDER.get(t.status, 1))
+    lines = []
+    for item in sorted_items:
+        icon = _STATUS_ICONS.get(item.status, "[ ]")
+        lines.append(f"{icon} {item.description}")
+    return "\n".join(lines)
+
+
 class TaskStore:
     """In-memory task store using bulk replacement.
 
@@ -220,22 +256,9 @@ class TaskStore:
         """Format tasks as a compact checklist for the thinking box.
 
         Returns:
-            Multi-line string with status icons: [x] Done, [>] Active,
-            [ ] Pending, [-] Cancelled.
+            Multi-line string with status icons.
         """
-        if not self._items:
-            return ""
-        icons = {
-            TaskStatus.COMPLETED: "[x]",
-            TaskStatus.IN_PROGRESS: "[>]",
-            TaskStatus.PENDING: "[ ]",
-            TaskStatus.CANCELLED: "[-]",
-        }
-        lines = []
-        for item in self._items.values():
-            icon = icons.get(item.status, "[ ]")
-            lines.append(f"{icon} {item.description}")
-        return "\n".join(lines)
+        return format_task_checklist(list(self._items.values()))
 
     def get_current_task(self) -> TaskItem | None:
         """Return the first in-progress task, or None."""

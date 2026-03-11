@@ -6,63 +6,17 @@ logic that runs on every message in the hot path.
 
 from __future__ import annotations
 
-import re
 from typing import AsyncGenerator, Any, Callable
 
 from agentic_cli.workflow.events import WorkflowEvent, EventType
 from agentic_cli.workflow.thinking import ThinkingDetector
-from agentic_cli.constants import truncate, TOOL_SUMMARY_MAX_LENGTH
 from agentic_cli.logging import Loggers
 
+# Re-export for backward compatibility
+from agentic_cli.workflow.retry import is_rate_limit_error as _is_rate_limit_error  # noqa: F401
+from agentic_cli.workflow.retry import parse_retry_delay as _parse_retry_delay  # noqa: F401
+
 logger = Loggers.workflow()
-
-
-# ---------------------------------------------------------------------------
-# Rate-limit helpers (used by event processing and message_processor)
-# ---------------------------------------------------------------------------
-
-
-def _is_rate_limit_error(error: Exception) -> bool:
-    """Check if an exception is a 429 rate-limit / RESOURCE_EXHAUSTED error."""
-    if getattr(error, "code", None) == 429:
-        return True
-    if "RESOURCE_EXHAUSTED" in str(error):
-        return True
-    return False
-
-
-def _parse_retry_delay(error: Exception) -> float | None:
-    """Extract retry delay in seconds from a rate-limit error.
-
-    Looks for retryDelay in the structured error details first,
-    then falls back to regex on the error message string.
-
-    Returns:
-        Delay in seconds, or None if unparseable.
-    """
-    # Try structured details: error.details["error"]["details"][*]["retryDelay"]
-    details = getattr(error, "details", None)
-    if isinstance(details, dict):
-        inner_error = details.get("error", {})
-        for detail_entry in inner_error.get("details", []):
-            if isinstance(detail_entry, dict):
-                retry_delay = detail_entry.get("retryDelay")
-                if retry_delay:
-                    match = re.search(r"([\d.]+)\s*s", str(retry_delay))
-                    if match:
-                        return float(match.group(1))
-
-    # Fallback: regex on error message string
-    match = re.search(r"retry\s+in\s+([\d.]+)\s*s", str(error), re.IGNORECASE)
-    if match:
-        return float(match.group(1))
-
-    return None
-
-
-# ---------------------------------------------------------------------------
-# ADKEventProcessor
-# ---------------------------------------------------------------------------
 
 
 class ADKEventProcessor:
@@ -204,54 +158,6 @@ class ADKEventProcessor:
             return WorkflowEvent.file_data(part.file_data.display_name or "unknown")
 
         return None
-
-    def generate_tool_summary(
-        self, tool_name: str, result: Any, success: bool
-    ) -> str:
-        """Generate human-readable summary for tool result.
-
-        Args:
-            tool_name: Name of the tool.
-            result: Tool result data.
-            success: Whether the tool succeeded.
-
-        Returns:
-            Summary string for display.
-        """
-        if not success:
-            if isinstance(result, dict) and "error" in result:
-                return f"Failed: {result['error']}"
-            return f"Failed: {result}"
-
-        # Try tool-specific formatter first
-        if isinstance(result, dict):
-            from agentic_cli.workflow.tool_summaries import format_tool_summary
-
-            specific = format_tool_summary(tool_name, result)
-            if specific:
-                return specific
-
-        # Check for explicit summary in result (only strings, not dicts)
-        if isinstance(result, dict):
-            if "summary" in result and isinstance(result["summary"], str):
-                return result["summary"]
-            if "message" in result:
-                return str(result["message"])
-            # Handle results with a "results" list (e.g., web_search)
-            if "results" in result and isinstance(result["results"], list):
-                return f"Found {len(result['results'])} results"
-
-        # Auto-generate based on result type
-        if result is None:
-            return "Completed"
-        if isinstance(result, list):
-            return f"Returned {len(result)} items"
-        if isinstance(result, dict):
-            return f"Returned {len(result)} fields"
-
-        # Truncate string results
-        text = str(result)
-        return truncate(text, TOOL_SUMMARY_MAX_LENGTH)
 
     def _apply_hook(self, event: WorkflowEvent) -> WorkflowEvent | None:
         """Apply optional event transformation hook."""

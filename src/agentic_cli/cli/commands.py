@@ -245,31 +245,6 @@ class Command(ABC):
 
         return [strip_quotes(token) for token in tokens]
 
-    def get_help(self) -> str:
-        """Get detailed help text for this command.
-
-        Returns:
-            Formatted help string
-        """
-        lines = [
-            f"**/{self.name}**",
-            f"  {self.description}",
-            "",
-            f"**Usage:** `{self.usage}`",
-        ]
-
-        if self.aliases:
-            lines.append(f"**Aliases:** {', '.join(f'/{a}' for a in self.aliases)}")
-
-        if self.examples:
-            lines.append("")
-            lines.append("**Examples:**")
-            for example in self.examples:
-                lines.append(f"  `{example}`")
-
-        return "\n".join(lines)
-
-
 class CommandRegistry:
     """Registry for managing slash commands.
 

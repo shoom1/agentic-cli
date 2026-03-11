@@ -2,6 +2,19 @@
 
 import pytest
 
+from agentic_cli.tools.memory_tools import MemoryStore
+
+
+@pytest.fixture
+def memory_store_ctx(mock_context):
+    """Provide a MemoryStore with context set, auto-cleanup."""
+    from agentic_cli.workflow.context import set_context_memory_store
+
+    store = MemoryStore(mock_context.settings)
+    token = set_context_memory_store(store)
+    yield store
+    token.var.reset(token)
+
 
 class TestMemoryStore:
     """Tests for MemoryStore class."""
@@ -177,58 +190,35 @@ class TestMemoryToolFunctions:
         assert result["success"] is False
         assert "not available" in result["error"]
 
-    def test_save_and_search_with_context(self, mock_context):
-        from agentic_cli.tools.memory_tools import MemoryStore
+    def test_save_and_search_with_context(self, memory_store_ctx):
         from agentic_cli.tools.memory_tools import save_memory, search_memory
-        from agentic_cli.workflow.context import (
-            set_context_memory_store,
-        )
 
-        store = MemoryStore(mock_context.settings)
-        token = set_context_memory_store(store)
-        try:
-            # Save
-            result = save_memory(content="Important learning", tags=["test"])
-            assert result["success"] is True
-            assert "item_id" in result
+        # Save
+        result = save_memory(content="Important learning", tags=["test"])
+        assert result["success"] is True
+        assert "item_id" in result
 
-            # Search
-            result = search_memory(query="Important")
-            assert result["success"] is True
-            assert result["count"] == 1
-            assert result["items"][0]["content"] == "Important learning"
-            assert result["items"][0]["tags"] == ["test"]
-        finally:
-            token.var.reset(token)
+        # Search
+        result = search_memory(query="Important")
+        assert result["success"] is True
+        assert result["count"] == 1
+        assert result["items"][0]["content"] == "Important learning"
+        assert result["items"][0]["tags"] == ["test"]
 
-    def test_save_memory_with_tags(self, mock_context):
-        from agentic_cli.tools.memory_tools import MemoryStore
+    def test_save_memory_with_tags(self, memory_store_ctx):
         from agentic_cli.tools.memory_tools import save_memory, search_memory
-        from agentic_cli.workflow.context import set_context_memory_store
 
-        store = MemoryStore(mock_context.settings)
-        token = set_context_memory_store(store)
-        try:
-            result = save_memory(content="Tagged item", tags=["a", "b"])
-            assert result["success"] is True
+        result = save_memory(content="Tagged item", tags=["a", "b"])
+        assert result["success"] is True
 
-            search_result = search_memory(query="Tagged")
-            assert search_result["items"][0]["tags"] == ["a", "b"]
-        finally:
-            token.var.reset(token)
+        search_result = search_memory(query="Tagged")
+        assert search_result["items"][0]["tags"] == ["a", "b"]
 
-    def test_search_memory_with_limit(self, mock_context):
-        from agentic_cli.tools.memory_tools import MemoryStore
+    def test_search_memory_with_limit(self, memory_store_ctx):
         from agentic_cli.tools.memory_tools import save_memory, search_memory
-        from agentic_cli.workflow.context import set_context_memory_store
 
-        store = MemoryStore(mock_context.settings)
-        token = set_context_memory_store(store)
-        try:
-            for i in range(5):
-                save_memory(content=f"Item {i}")
+        for i in range(5):
+            save_memory(content=f"Item {i}")
 
-            result = search_memory(query="", limit=2)
-            assert result["count"] == 2
-        finally:
-            token.var.reset(token)
+        result = search_memory(query="", limit=2)
+        assert result["count"] == 2

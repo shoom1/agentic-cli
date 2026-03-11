@@ -769,12 +769,15 @@ class TestWorkflowManagerIntegration:
         # Create a minimal test subclass of BaseWorkflowManager
         class TestWorkflowManager(BaseWorkflowManager):
             @property
+            def backend_type(self) -> str:
+                return "test"
+
+            @property
             def model(self) -> str:
                 return "test-model"
 
-            async def initialize_services(self, validate: bool = True) -> None:
-                self._ensure_managers_initialized()
-                self._initialized = True
+            async def _do_initialize(self) -> None:
+                pass
 
             async def process(
                 self, message: str, user_id: str, session_id: str | None = None
@@ -790,17 +793,14 @@ class TestWorkflowManagerIntegration:
             async def cleanup(self) -> None:
                 pass
 
-            def has_pending_input(self) -> bool:
-                return False
+            async def _extract_session_messages(self, session_id: str) -> list[dict]:
+                return []
 
-            def get_pending_input_request(self) -> UserInputRequest | None:
+            async def _extract_current_agent(self, session_id: str) -> str | None:
                 return None
 
-            async def request_user_input(self, request: UserInputRequest) -> str:
-                return ""
-
-            def provide_user_input(self, request_id: str, response: str) -> bool:
-                return False
+            async def _inject_session_messages(self, session_id: str, messages: list[dict], current_agent: str | None = None) -> None:
+                pass
 
         # Create an agent config that uses the web_fetch tool
         agent_config = AgentConfig(
@@ -825,12 +825,15 @@ class TestWorkflowManagerIntegration:
         # Create a minimal test subclass
         class TestWorkflowManager(BaseWorkflowManager):
             @property
+            def backend_type(self) -> str:
+                return "test"
+
+            @property
             def model(self) -> str:
                 return "test-model"
 
-            async def initialize_services(self, validate: bool = True) -> None:
-                self._ensure_managers_initialized()
-                self._initialized = True
+            async def _do_initialize(self) -> None:
+                pass
 
             async def process(
                 self, message: str, user_id: str, session_id: str | None = None
@@ -846,17 +849,14 @@ class TestWorkflowManagerIntegration:
             async def cleanup(self) -> None:
                 pass
 
-            def has_pending_input(self) -> bool:
-                return False
+            async def _extract_session_messages(self, session_id: str) -> list[dict]:
+                return []
 
-            def get_pending_input_request(self) -> UserInputRequest | None:
+            async def _extract_current_agent(self, session_id: str) -> str | None:
                 return None
 
-            async def request_user_input(self, request: UserInputRequest) -> str:
-                return ""
-
-            def provide_user_input(self, request_id: str, response: str) -> bool:
-                return False
+            async def _inject_session_messages(self, session_id: str, messages: list[dict], current_agent: str | None = None) -> None:
+                pass
 
         # Create a simple agent config (no web_fetch)
         agent_config = AgentConfig(
@@ -887,12 +887,15 @@ class TestWorkflowManagerIntegration:
 
         class TestWorkflowManager(BaseWorkflowManager):
             @property
+            def backend_type(self) -> str:
+                return "test"
+
+            @property
             def model(self) -> str:
                 return "test-model"
 
-            async def initialize_services(self, validate: bool = True) -> None:
-                self._ensure_managers_initialized()
-                self._initialized = True
+            async def _do_initialize(self) -> None:
+                pass
 
             async def process(
                 self, message: str, user_id: str, session_id: str | None = None
@@ -908,17 +911,14 @@ class TestWorkflowManagerIntegration:
             async def cleanup(self) -> None:
                 pass
 
-            def has_pending_input(self) -> bool:
-                return False
+            async def _extract_session_messages(self, session_id: str) -> list[dict]:
+                return []
 
-            def get_pending_input_request(self) -> UserInputRequest | None:
+            async def _extract_current_agent(self, session_id: str) -> str | None:
                 return None
 
-            async def request_user_input(self, request: UserInputRequest) -> str:
-                return ""
-
-            def provide_user_input(self, request_id: str, response: str) -> bool:
-                return False
+            async def _inject_session_messages(self, session_id: str, messages: list[dict], current_agent: str | None = None) -> None:
+                pass
 
             def _create_summarizer(self):
                 nonlocal create_summarizer_called
@@ -937,8 +937,8 @@ class TestWorkflowManagerIntegration:
         # Before initialization, summarizer should be None
         assert manager.llm_summarizer is None
 
-        # Initialize to trigger manager creation
-        await manager.initialize_services()
+        # Initialize to trigger manager creation (skip validation — no API keys in test)
+        await manager.initialize_services(validate=False)
 
         # Now _create_summarizer should have been called
         assert create_summarizer_called

@@ -7,10 +7,6 @@ from unittest.mock import patch
 import pytest
 
 from agentic_cli.config import (
-    ALL_MODELS,
-    ANTHROPIC_MODELS,
-    GOOGLE_MODELS,
-    THINKING_EFFORT_LEVELS,
     BaseSettings,
     SettingsContext,
     SettingsValidationError,
@@ -21,6 +17,8 @@ from agentic_cli.config import (
     set_settings,
     validate_settings,
 )
+from agentic_cli.workflow.models import ModelRegistry
+from agentic_cli.workflow.settings import THINKING_EFFORT_LEVELS
 
 
 class TestBaseSettings:
@@ -53,7 +51,7 @@ class TestBaseSettings:
             settings = BaseSettings(workspace_dir=temp_workspace)
 
         assert settings.sessions_dir == temp_workspace / "sessions"
-        assert settings.artifacts_dir == temp_workspace / "workspace"
+        assert settings.artifacts_dir == temp_workspace / "artifacts"
         assert settings.knowledge_base_dir == temp_workspace / "knowledge_base"
 
 
@@ -101,9 +99,9 @@ class TestAPIKeyManagement:
         """Test getting available models based on API keys."""
         models = settings_both_keys.get_available_models()
 
-        for google_model in GOOGLE_MODELS:
+        for google_model in ModelRegistry.FALLBACK_GOOGLE:
             assert google_model in models
-        for anthropic_model in ANTHROPIC_MODELS:
+        for anthropic_model in ModelRegistry.FALLBACK_ANTHROPIC:
             assert anthropic_model in models
 
 class TestModelConfiguration:
@@ -111,9 +109,9 @@ class TestModelConfiguration:
 
     def test_set_model_valid(self, settings_google_only: BaseSettings):
         """Test setting a valid model."""
-        settings_google_only.set_model("gemini-2.5-pro")
-        assert settings_google_only.default_model == "gemini-2.5-pro"
-        assert settings_google_only.get_model() == "gemini-2.5-pro"
+        settings_google_only.set_model("gemini-2.5-flash")
+        assert settings_google_only.default_model == "gemini-2.5-flash"
+        assert settings_google_only.get_model() == "gemini-2.5-flash"
 
     def test_set_model_invalid(self, settings_google_only: BaseSettings):
         """Test setting an invalid model raises error."""
@@ -252,24 +250,6 @@ class TestWorkspaceOperations:
                 os.environ.pop("GOOGLE_API_KEY", None)
 
 
-class TestModelConstants:
-    """Tests for model constant lists."""
-
-    def test_all_models_includes_all_providers(self):
-        """Test ALL_MODELS includes both providers."""
-        for model in GOOGLE_MODELS:
-            assert model in ALL_MODELS
-        for model in ANTHROPIC_MODELS:
-            assert model in ALL_MODELS
-
-    def test_thinking_effort_levels(self):
-        """Test thinking effort level constants."""
-        assert "none" in THINKING_EFFORT_LEVELS
-        assert "low" in THINKING_EFFORT_LEVELS
-        assert "medium" in THINKING_EFFORT_LEVELS
-        assert "high" in THINKING_EFFORT_LEVELS
-
-
 class TestSettingsContext:
     """Tests for context-based settings management."""
 
@@ -398,6 +378,39 @@ class TestSettingsValidation:
 
         # Should not raise
         validate_settings(settings)
+
+
+class TestSettingsJsonLoading:
+    """Tests for JSON config loading with constructor app_name."""
+
+    def test_init_kwargs_app_name_used_for_json_path(self, tmp_path):
+        """Settings from JSON are loaded when app_name is passed via constructor."""
+        import json
+
+        # Create a project-level JSON config for a custom app
+        config_dir = tmp_path / ".my_app"
+        config_dir.mkdir()
+        config_file = config_dir / "settings.json"
+        config_file.write_text(json.dumps({
+            "thinking_effort": "high",
+            "log_level": "debug",
+        }))
+
+        # Create settings with constructor app_name, from the directory with the config
+        original_cwd = Path.cwd()
+        try:
+            os.chdir(tmp_path)
+            with patch.dict(os.environ, {}, clear=True):
+                settings = BaseSettings(
+                    app_name="my_app",
+                    workspace_dir=tmp_path / "workspace",
+                )
+        finally:
+            os.chdir(original_cwd)
+
+        # Values from JSON should be loaded
+        assert settings.thinking_effort == "high"
+        assert settings.log_level == "debug"
 
 
 def test_package_exports_new_modules():

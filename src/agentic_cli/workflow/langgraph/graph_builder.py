@@ -6,6 +6,7 @@ and LLM factory logic from the runtime process loop.
 
 from __future__ import annotations
 
+from collections import deque
 from typing import Any, Callable, TYPE_CHECKING
 
 from agentic_cli.workflow.config import AgentConfig
@@ -32,6 +33,18 @@ class LangGraphBuilder:
 
     def __init__(self, settings: "BaseSettings") -> None:
         self._settings = settings
+        # Side-channel for trim events: agent_node appends here, manager drains
+        self._trim_events: deque[dict[str, Any]] = deque()
+
+    def drain_trim_events(self) -> list[dict[str, Any]]:
+        """Drain and return all pending context-trim events.
+
+        Returns:
+            List of trim event info dicts (empties the internal deque).
+        """
+        events = list(self._trim_events)
+        self._trim_events.clear()
+        return events
 
     def build(self, agent_configs: list[AgentConfig], default_model: str):
         """Build the LangGraph workflow from agent configs.
@@ -312,7 +325,37 @@ class LangGraphBuilder:
                 else:
                     messages.append(SystemMessage(content=system_prompt))
 
-            messages.extend(state.get("messages", []))
+            conversation = state.get("messages", [])
+
+            # Apply context window trimming if enabled
+            if self._settings.context_window_enabled:
+                from langchain_core.messages import trim_messages
+
+                pre_trim_count = len(conversation)
+                conversation = trim_messages(
+                    conversation,
+                    max_tokens=self._settings.context_window_target_tokens,
+                    strategy="last",
+                    token_counter="approximate",
+                    start_on="human",
+                    include_system=False,  # System message added separately above
+                )
+                post_trim_count = len(conversation)
+                if post_trim_count < pre_trim_count:
+                    logger.debug(
+                        "context_window_trimmed",
+                        agent=config.name,
+                        messages_before=pre_trim_count,
+                        messages_after=post_trim_count,
+                        messages_removed=pre_trim_count - post_trim_count,
+                    )
+                    self._trim_events.append({
+                        "messages_before": pre_trim_count,
+                        "messages_after": post_trim_count,
+                        "agent": config.name,
+                    })
+
+            messages.extend(conversation)
 
             # Invoke LLM
             try:

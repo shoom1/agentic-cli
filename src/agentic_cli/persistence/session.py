@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from agentic_cli.logging import Loggers
-from agentic_cli.persistence._utils import atomic_write_json, sanitize_filename
+from agentic_cli.persistence._utils import atomic_write_json, file_lock, sanitize_filename
 
 if TYPE_CHECKING:
     from agentic_cli.cli.app import MessageHistory
@@ -97,12 +97,30 @@ class SessionPersistence:
                 data = json.loads(index_path.read_text())
                 return data.get("sessions", {})
             except (json.JSONDecodeError, KeyError) as exc:
-                logger.debug("sessions_index_load_failed", error=str(exc))
+                logger.warning("sessions_index_load_failed", error=str(exc))
         return {}
 
     def _save_sessions_index(self, index: dict[str, dict]) -> None:
         """Save sessions index to disk."""
         atomic_write_json(self._get_sessions_index_path(), {"sessions": index})
+
+    def _update_sessions_index(
+        self,
+        session_id: str,
+        created_at: str,
+        saved_at: str,
+        message_count: int,
+    ) -> None:
+        """Update sessions index with metadata for a single session."""
+        with file_lock(self._get_sessions_index_path()):
+            sessions_index = self._load_sessions_index()
+            sessions_index[session_id] = {
+                "session_id": session_id,
+                "created_at": created_at,
+                "saved_at": saved_at,
+                "message_count": message_count,
+            }
+            self._save_sessions_index(sessions_index)
 
     def _rebuild_sessions_index(self) -> dict[str, dict]:
         """Rebuild sessions index from individual session files (migration)."""
@@ -125,6 +143,36 @@ class SessionPersistence:
         self._save_sessions_index(index)
         return index
 
+    def save_snapshot(self, snapshot: SessionSnapshot) -> Path:
+        """Save a pre-built SessionSnapshot directly.
+
+        Used by the workflow layer which has normalized message dicts
+        rather than MessageHistory objects.
+
+        Args:
+            snapshot: The session snapshot to persist.
+
+        Returns:
+            Path to saved session file.
+        """
+        session_path = self._get_session_path(snapshot.session_id)
+        atomic_write_json(session_path, snapshot.to_dict())
+
+        self._update_sessions_index(
+            session_id=snapshot.session_id,
+            created_at=snapshot.created_at.isoformat(),
+            saved_at=snapshot.saved_at.isoformat(),
+            message_count=len(snapshot.messages),
+        )
+
+        logger.info(
+            "snapshot_saved",
+            session_id=snapshot.session_id,
+            message_count=len(snapshot.messages),
+            path=str(session_path),
+        )
+        return session_path
+
     def save_session(
         self,
         session_id: str,
@@ -132,6 +180,9 @@ class SessionPersistence:
         metadata: dict | None = None,
     ) -> Path:
         """Save current session state.
+
+        Builds a SessionSnapshot from the MessageHistory and delegates
+        to save_snapshot for the actual persistence.
 
         Args:
             session_id: Unique session identifier
@@ -154,7 +205,7 @@ class SessionPersistence:
                 }
             )
 
-        # Create snapshot
+        # Build snapshot and delegate to save_snapshot
         snapshot = SessionSnapshot(
             session_id=session_id,
             created_at=all_messages[0].timestamp if all_messages else datetime.now(),
@@ -163,27 +214,7 @@ class SessionPersistence:
             metadata=metadata or {},
         )
 
-        # Save to file
-        session_path = self._get_session_path(session_id)
-        atomic_write_json(session_path, snapshot.to_dict())
-
-        # Update sessions index
-        sessions_index = self._load_sessions_index()
-        sessions_index[session_id] = {
-            "session_id": session_id,
-            "created_at": snapshot.created_at.isoformat(),
-            "saved_at": snapshot.saved_at.isoformat(),
-            "message_count": len(messages),
-        }
-        self._save_sessions_index(sessions_index)
-
-        logger.info(
-            "session_saved",
-            session_id=session_id,
-            message_count=len(messages),
-            path=str(session_path),
-        )
-        return session_path
+        return self.save_snapshot(snapshot)
 
     def load_session(self, session_id: str) -> SessionSnapshot | None:
         """Load a saved session.
@@ -264,13 +295,15 @@ class SessionPersistence:
             True if deleted, False if not found
         """
         session_path = self._get_session_path(session_id)
-        if session_path.exists():
+        try:
             session_path.unlink()
+        except FileNotFoundError:
+            return False
 
-            # Update sessions index
+        # Update sessions index (lock to prevent TOCTOU race)
+        with file_lock(self._get_sessions_index_path()):
             sessions_index = self._load_sessions_index()
             sessions_index.pop(session_id, None)
             self._save_sessions_index(sessions_index)
 
-            return True
-        return False
+        return True

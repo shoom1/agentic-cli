@@ -111,6 +111,7 @@ class BaseCLIApp:
         app_info: AppInfo,
         agent_configs: list["AgentConfig"],
         settings: BaseSettings,
+        session_id: str | None = None,
     ) -> None:
         """Initialize the CLI application.
 
@@ -118,7 +119,10 @@ class BaseCLIApp:
             app_info: Application info (name, version, welcome message)
             agent_configs: List of agent configurations for the workflow
             settings: Application settings instance
+            session_id: Optional session ID for save/resume. If provided,
+                       the session will be loaded on startup and saved on exit.
         """
+        self._session_id = session_id
         # === Configuration ===
         self._app_info = app_info
         self._settings = settings
@@ -282,6 +286,16 @@ class BaseCLIApp:
         """Get the application settings."""
         return self._settings
 
+    @property
+    def session_id(self) -> str | None:
+        """Get the persistent session ID, if any."""
+        return self._session_id
+
+    @session_id.setter
+    def session_id(self, value: str | None) -> None:
+        """Set the persistent session ID."""
+        self._session_id = value
+
     def stop(self) -> None:
         """Stop the application."""
         self.should_exit = True
@@ -305,31 +319,17 @@ class BaseCLIApp:
         needs_reinit = False
         new_model = changes.get("model")
 
-        # Settings that require special handling
-        special_settings = {"model", "thinking_effort"}
+        reinit_settings = {"model", "thinking_effort"}
 
-        # Apply model change (requires dedicated setter + reinit)
-        if new_model:
-            try:
-                self._settings.set_model(new_model)
-                needs_reinit = True
-            except ValueError as e:
-                self.session.add_error(f"Failed to set model: {e}")
-                return
-
-        # Apply thinking effort change (requires dedicated setter + reinit)
-        if "thinking_effort" in changes:
-            try:
-                self._settings.set_thinking_effort(changes["thinking_effort"])
-                needs_reinit = True
-            except ValueError as e:
-                self.session.add_error(f"Failed to set thinking effort: {e}")
-                return
-
-        # Apply all other settings directly
         for key, value in changes.items():
-            if key not in special_settings:
-                object.__setattr__(self._settings, key, value)
+            try:
+                self._settings.update_setting(key, value)
+                if key in reinit_settings:
+                    needs_reinit = True
+            except ValueError as e:
+                label = key.replace("_", " ").title()
+                self.session.add_error(f"Failed to set {label}: {e}")
+                return
 
         # Reinitialize workflow if needed
         if needs_reinit and self._workflow_controller.is_ready:
@@ -351,7 +351,9 @@ class BaseCLIApp:
             ClearCommand,
             ExitCommand,
             StatusCommand,
+            SandboxCommand,
             PapersCommand,
+            SessionsCommand,
         )
         from agentic_cli.cli.settings_command import SettingsCommand
 
@@ -359,8 +361,10 @@ class BaseCLIApp:
         self.command_registry.register(ClearCommand())
         self.command_registry.register(ExitCommand())
         self.command_registry.register(StatusCommand())
+        self.command_registry.register(SandboxCommand())
         self.command_registry.register(SettingsCommand())
         self.command_registry.register(PapersCommand())
+        self.command_registry.register(SessionsCommand())
 
     async def process_input(self, user_input: str) -> None:
         """Process user input.
@@ -448,11 +452,45 @@ class BaseCLIApp:
         except Exception as e:
             logger.error("activity_log_save_failed", error=str(e))
 
+    async def _load_session_on_startup(self) -> None:
+        """Load a saved session after workflow initialization."""
+        if not self._session_id:
+            return
+
+        if not await self._workflow_controller.ensure_initialized(self.session):
+            self.session.add_warning("Cannot load session — workflow not initialized.")
+            return
+
+        workflow = self._workflow_controller.workflow
+        loaded = await workflow.load_session(self._session_id)
+        if loaded:
+            self.session.add_success(f"Session '{self._session_id}' resumed.")
+        else:
+            self.session.add_message("system", f"New session '{self._session_id}'.")
+
+    async def _save_session_on_exit(self) -> None:
+        """Save the current session on exit."""
+        if not self._session_id:
+            return
+
+        if not self._workflow_controller.is_ready:
+            return
+
+        workflow = self._workflow_controller.workflow
+        result = await workflow.save_session(self._session_id)
+        if result.get("success"):
+            logger.info("session_saved_on_exit", session_id=self._session_id)
+        else:
+            logger.error("session_save_on_exit_failed", error=result.get("error"))
+
     async def run(self) -> None:
         """Run the main application loop."""
         logger.info("repl_starting")
 
         async with self._workflow_controller.background_init(self.session):
+            if self._session_id:
+                await self._load_session_on_startup()
+
             # Register input handler
             @self.session.on_input
             async def handle_input(text: str) -> None:
@@ -462,6 +500,10 @@ class BaseCLIApp:
 
             # Run the session - user sees prompt immediately!
             await self.session.run_async()
+
+        # Save persistent session on exit
+        if self._session_id:
+            await self._save_session_on_exit()
 
         # Auto-save activity log if enabled
         if self._settings.log_activity and len(self.message_history) > 0:

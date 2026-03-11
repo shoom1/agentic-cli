@@ -1,4 +1,4 @@
-"""Shared constants for agentic-cli."""
+"""Shared constants and small utilities for agentic-cli."""
 
 # Content display truncation limits
 CONTENT_PREVIEW_LENGTH = 200

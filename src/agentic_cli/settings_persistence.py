@@ -20,6 +20,22 @@ SECRET_FIELDS = frozenset({
     "brave_api_key",
 })
 
+# Identity fields set by the application, not the user
+IDENTITY_FIELDS = frozenset({
+    "app_name",
+    "workspace_dir",
+})
+
+
+def get_project_config_path(app_name: str) -> Path:
+    """Get path to project config file (./.{app_name}/settings.json)."""
+    return Path.cwd() / f".{app_name}" / "settings.json"
+
+
+def get_user_config_path(app_name: str) -> Path:
+    """Get path to user config file (~/.{app_name}/settings.json)."""
+    return Path.home() / f".{app_name}" / "settings.json"
+
 
 class SettingsPersistence:
     """Manages loading and saving settings to JSON files.
@@ -48,27 +64,28 @@ class SettingsPersistence:
     @property
     def project_config_path(self) -> Path:
         """Get path to project config file (./.{app_name}/settings.json)."""
-        return Path.cwd() / f".{self.app_name}" / "settings.json"
+        return get_project_config_path(self.app_name)
 
     @property
     def user_config_path(self) -> Path:
         """Get path to user config file (~/.{app_name}/settings.json)."""
-        return Path.home() / f".{self.app_name}" / "settings.json"
+        return get_user_config_path(self.app_name)
 
     def save(
         self,
         settings: "BaseSettings",
-        exclude_defaults: bool = True,
         path: Path | None = None,
     ) -> Path:
         """Save settings to JSON config file.
 
         By default saves to project config (./.{app_name}/settings.json).
-        Secrets (API keys) are never saved.
+        Secrets (API keys) and identity fields are never saved.
+        All other user-configurable settings are saved regardless of
+        whether they match the schema default, because subclasses may
+        have different effective defaults.
 
         Args:
             settings: Settings instance to save
-            exclude_defaults: If True, only save non-default values
             path: Optional custom path (defaults to project_config_path)
 
         Returns:
@@ -77,10 +94,9 @@ class SettingsPersistence:
         target_path = path or self.project_config_path
         target_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Get settings as dict, excluding secrets
+        # Get settings as dict, excluding secrets and identity fields
         data = settings.model_dump(
-            exclude=SECRET_FIELDS,
-            exclude_defaults=exclude_defaults,
+            exclude=SECRET_FIELDS | IDENTITY_FIELDS,
             exclude_none=True,
         )
 

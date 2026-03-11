@@ -42,8 +42,10 @@ class EventType(Enum):
     EXECUTABLE_CODE = "executable_code"
     FILE_DATA = "file_data"
     ERROR = "error"
-    USER_INPUT_REQUIRED = "user_input_required"
     TASK_PROGRESS = "task_progress"
+
+    # Context management events
+    CONTEXT_TRIMMED = "context_trimmed"
 
     # LLM debugging events (raw traffic logging)
     LLM_REQUEST = "llm_request"
@@ -239,52 +241,6 @@ class WorkflowEvent:
         return cls(type=EventType.ERROR, content=message, metadata=metadata)
 
     @classmethod
-    def user_input_required(
-        cls,
-        request_id: str,
-        tool_name: str,
-        prompt: str,
-        input_type: InputType | str = InputType.TEXT,
-        choices: list[str] | None = None,
-        default: str | None = None,
-    ) -> "WorkflowEvent":
-        """Create a user input required event.
-
-        This event signals that a tool needs user input to proceed.
-        The CLI should prompt the user and call workflow.provide_user_input()
-        with the response.
-
-        Args:
-            request_id: Unique ID to correlate the response
-            tool_name: Name of the tool requesting input
-            prompt: Question/prompt to show the user
-            input_type: Type of input (TEXT, CHOICE, CONFIRM)
-            choices: Available choices for CHOICE input type
-            default: Default value if user provides no input
-        """
-        # Normalize input_type to enum value string for metadata
-        if isinstance(input_type, InputType):
-            input_type_value = input_type.value
-        else:
-            input_type_value = input_type
-
-        metadata: dict[str, Any] = {
-            "request_id": request_id,
-            "tool_name": tool_name,
-            "input_type": input_type_value,
-        }
-        if choices:
-            metadata["choices"] = choices
-        if default is not None:
-            metadata["default"] = default
-
-        return cls(
-            type=EventType.USER_INPUT_REQUIRED,
-            content=prompt,
-            metadata=metadata,
-        )
-
-    @classmethod
     def task_progress(
         cls,
         display: str,
@@ -314,6 +270,45 @@ class WorkflowEvent:
         return cls(
             type=EventType.TASK_PROGRESS,
             content=display,
+            metadata=metadata,
+        )
+
+    # -------------------------------------------------------------------------
+    # Context management events
+    # -------------------------------------------------------------------------
+
+    @classmethod
+    def context_trimmed(
+        cls,
+        messages_before: int,
+        messages_after: int,
+        source: str,
+        agent: str | None = None,
+    ) -> "WorkflowEvent":
+        """Create a context trimmed event.
+
+        Signals that context window trimming occurred, either detected
+        directly (LangGraph) or via token heuristic (ADK).
+
+        Args:
+            messages_before: Message count before trimming
+            messages_after: Message count after trimming
+            source: Detection source ("langgraph" or "adk_token_heuristic")
+            agent: Agent name where trimming occurred (if known)
+        """
+        messages_removed = messages_before - messages_after
+        metadata: dict[str, Any] = {
+            "messages_before": messages_before,
+            "messages_after": messages_after,
+            "messages_removed": messages_removed,
+            "source": source,
+        }
+        if agent is not None:
+            metadata["agent"] = agent
+
+        return cls(
+            type=EventType.CONTEXT_TRIMMED,
+            content=f"Context trimmed: {messages_removed} messages removed ({source})",
             metadata=metadata,
         )
 

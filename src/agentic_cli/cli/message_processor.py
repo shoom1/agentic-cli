@@ -27,6 +27,27 @@ if TYPE_CHECKING:
 logger = Loggers.cli()
 
 
+def _richify_task_display(plain: str) -> str:
+    """Convert plain task checklist to ANSI-colored icons for the thinking box."""
+    from thinking_prompt import rich_to_ansi
+
+    lines = []
+    for line in plain.splitlines():
+        stripped = line.lstrip()
+        indent = line[: len(line) - len(stripped)]
+        if stripped.startswith("[✓]"):
+            lines.append(f"{indent}[green]✓[/green] {stripped[4:]}")
+        elif stripped.startswith("[▸]"):
+            lines.append(f"{indent}[yellow]▸[/yellow] {stripped[4:]}")
+        elif stripped.startswith("[ ]"):
+            lines.append(f"{indent}[dim]○[/dim] {stripped[4:]}")
+        elif stripped.startswith("[-]"):
+            lines.append(f"{indent}[red dim]✗[/red dim] {stripped[4:]}")
+        else:
+            lines.append(line.replace("[", "\\["))
+    return rich_to_ansi("\n".join(lines))
+
+
 # === Message History for Persistence ===
 
 
@@ -81,10 +102,6 @@ class MessageHistory:
         """Get all messages."""
         return list(self._messages)
 
-    def get_by_type(self, message_type: MessageType) -> list[Message]:
-        """Get messages of a specific type."""
-        return [m for m in self._messages if m.message_type == message_type]
-
     def clear(self) -> None:
         """Clear all messages."""
         self._messages.clear()
@@ -100,14 +117,16 @@ class MessageHistory:
 class _EventProcessingState:
     """Mutable state shared across event handlers during process()."""
 
+    usage_tracker: "UsageTracker | None" = field(default=None, repr=False)
+    workflow_controller: "WorkflowController | None" = field(default=None, repr=False)
     status_line: str = "Processing..."
     task_progress_display: str | None = None
+    _last_task_display_content: str | None = None
     thinking_started: bool = False
     thinking_content: list[str] = field(default_factory=list)
     response_content: list[str] = field(default_factory=list)
-    # Set by process() so LLM_USAGE handler can update tracker and status bar
-    _usage_tracker: "UsageTracker | None" = field(default=None, repr=False)
-    _workflow_controller: "WorkflowController | None" = field(default=None, repr=False)
+    # Prevents double-counting when LangGraph emits both CONTEXT_TRIMMED and LLM_USAGE
+    _context_trimmed_this_invocation: bool = False
 
     def get_status(self) -> str:
         """Build status display with current action and task progress."""
@@ -120,6 +139,7 @@ class _EventProcessingState:
         """Reset state for retry after rate limit."""
         self.status_line = "Processing..."
         self.task_progress_display = None
+        self._last_task_display_content = None
         self.thinking_content.clear()
         self.response_content.clear()
 
@@ -155,6 +175,7 @@ class MessageProcessor:
     def __init__(self) -> None:
         """Initialize the message processor."""
         self._message_history = MessageHistory()
+        self._last_task_progress: str | None = None
 
     @property
     def history(self) -> MessageHistory:
@@ -164,6 +185,7 @@ class MessageProcessor:
     def clear_history(self) -> None:
         """Clear message history."""
         self._message_history.clear()
+        self._last_task_progress = None
 
     async def process(
         self,
@@ -200,39 +222,33 @@ class MessageProcessor:
         if settings.log_activity:
             self._message_history.add(message, MessageType.USER)
 
-        state = _EventProcessingState()
-        state._usage_tracker = usage_tracker
-        state._workflow_controller = workflow_controller
+        state = _EventProcessingState(
+            usage_tracker=usage_tracker,
+            workflow_controller=workflow_controller,
+        )
+        # Restore task progress from previous turn so it shows immediately
+        state.task_progress_display = self._last_task_progress
         workflow = workflow_controller.workflow
         dispatch = self._get_event_dispatch()
 
         # Set up direct callback so HITL tools can prompt the user without
-        # deadlocking (the Future pattern blocks the ADK runner, preventing
-        # the USER_INPUT_REQUIRED event from ever being yielded).
+        # deadlocking the workflow runner.
         async def _handle_input(request: "UserInputRequest") -> str:
             if state.thinking_started:
                 ui.finish_thinking(add_to_history=False)
                 state.thinking_started = False
 
-            wf_event = WorkflowEvent.user_input_required(
-                request_id=request.request_id,
-                tool_name=request.tool_name,
-                prompt=request.prompt,
-                input_type=request.input_type,
-                choices=request.choices,
-                default=request.default,
-            )
-            response = await self._prompt_user_input(wf_event, workflow, ui)
+            response = await self._prompt_user_input(request, ui)
 
-            ui.start_thinking(state.get_status)
+            ui.start_thinking(state.get_status, content_format="ansi")
             state.thinking_started = True
             return response
 
-        workflow._user_input_callback = _handle_input
+        workflow.set_input_callback(_handle_input)
         try:
             while True:
                 try:
-                    ui.start_thinking(state.get_status)
+                    ui.start_thinking(state.get_status, content_format="ansi")
                     state.thinking_started = True
 
                     async for event in workflow.process(
@@ -272,13 +288,13 @@ class MessageProcessor:
                         state.thinking_started = False
 
                     # Check for 429 rate limit errors — prompt user to wait and retry
-                    from agentic_cli.workflow.adk.event_processor import (
-                        _is_rate_limit_error,
-                        _parse_retry_delay,
+                    from agentic_cli.workflow.retry import (
+                        is_rate_limit_error,
+                        parse_retry_delay,
                     )
 
-                    if _is_rate_limit_error(e):
-                        delay = _parse_retry_delay(e) or 60.0
+                    if is_rate_limit_error(e):
+                        delay = parse_retry_delay(e) or 60.0
                         retry = await ui.yes_no_dialog(
                             title="Rate Limited",
                             text=f"API rate limit reached. Retry in {delay:.0f}s?",
@@ -295,55 +311,49 @@ class MessageProcessor:
                         self._message_history.add(str(e), MessageType.ERROR)
                     break
         finally:
-            workflow._user_input_callback = None
+            workflow.clear_input_callback()
+            # Persist task progress so it shows immediately on the next turn
+            self._last_task_progress = state.task_progress_display
 
     async def _prompt_user_input(
         self,
-        event: "WorkflowEvent",
-        workflow: object,
+        request: "UserInputRequest",
         ui: "ThinkingPromptSession",
     ) -> str:
         """Prompt user for input requested by a tool.
 
         Args:
-            event: USER_INPUT_REQUIRED event with prompt details
-            workflow: The workflow manager (unused but kept for potential future use)
-            ui: UI session for prompting
+            request: The user input request from the tool.
+            ui: UI session for prompting.
 
         Returns:
-            User's response string
+            User's response string.
         """
         from agentic_cli.workflow.events import InputType
 
-        input_type = event.metadata.get("input_type", InputType.TEXT.value)
-        tool_name = event.metadata.get("tool_name", "Tool")
-        choices = event.metadata.get("choices")
-        default = event.metadata.get("default")
+        tool_name = request.tool_name or "Tool"
 
-        if input_type == InputType.CHOICE.value and choices:
-            # Use choice dialog for multiple options
+        if request.input_type == InputType.CHOICE and request.choices:
             result = await ui.dropdown_dialog(
                 title=f"{tool_name} - Input Required",
-                text=event.content,
-                options=choices,
-                default=default,
+                text=request.prompt,
+                options=request.choices,
+                default=request.default,
             )
-            return result or (default or "")
+            return result or (request.default or "")
 
-        elif input_type == InputType.CONFIRM.value:
-            # Use yes/no dialog for confirmation
+        elif request.input_type == InputType.CONFIRM:
             result = await ui.yes_no_dialog(
                 title=f"{tool_name} - Confirmation",
-                text=event.content,
+                text=request.prompt,
             )
             return "yes" if result else "no"
 
         else:
-            # Use text input dialog for free-form input
             result = await ui.input_dialog(
                 title=f"{tool_name} - Input Required",
-                text=event.content,
-                default=default or "",
+                text=request.prompt,
+                default=request.default or "",
             )
             return result or ""
 
@@ -410,29 +420,6 @@ class MessageProcessor:
             display += "\n" + "\n".join(lines[1:])
         ui.add_rich(display)
 
-    async def _handle_user_input_required(
-        self,
-        event: "WorkflowEvent",
-        state: _EventProcessingState,
-        ui: "ThinkingPromptSession",
-        settings: "BaseSettings",
-        workflow: object,
-    ) -> None:
-        """Handle USER_INPUT_REQUIRED events — legacy ADK event stream path."""
-        if state.thinking_started:
-            ui.finish_thinking(add_to_history=False)
-            state.thinking_started = False
-
-        response = await self._prompt_user_input(event, workflow, ui)
-        workflow.provide_user_input(
-            event.metadata["request_id"],
-            response,
-        )
-
-        # Resume thinking box
-        ui.start_thinking(state.get_status)
-        state.thinking_started = True
-
     async def _handle_code_execution(
         self,
         event: "WorkflowEvent",
@@ -481,17 +468,50 @@ class MessageProcessor:
         workflow: object,
     ) -> None:
         """Handle TASK_PROGRESS events — update progress display."""
+        # Deduplicate: skip if content unchanged from last event
+        if event.content and event.content == state._last_task_display_content:
+            return
+        state._last_task_display_content = event.content
+
         progress = event.metadata.get("progress", {})
         if progress.get("total", 0) > 0:
             completed = progress.get("completed", 0)
             total = progress["total"]
-            state.task_progress_display = f"--- Tasks: {completed}/{total} ---"
+            from thinking_prompt import rich_to_ansi
+
+            state.task_progress_display = rich_to_ansi(
+                f"[bold]--- Tasks: {completed}/{total} ---[/bold]"
+            )
             if event.content:
-                state.task_progress_display += f"\n{event.content}"
+                state.task_progress_display += f"\n{_richify_task_display(event.content)}"
+        else:
+            state.task_progress_display = None
 
         current_task = event.metadata.get("current_task_description")
         if current_task:
             state.status_line = f"Working on: {current_task}"
+
+    async def _handle_context_trimmed(
+        self,
+        event: "WorkflowEvent",
+        state: _EventProcessingState,
+        ui: "ThinkingPromptSession",
+        settings: "BaseSettings",
+        workflow: object,
+    ) -> None:
+        """Handle CONTEXT_TRIMMED events — increment counter and warn user."""
+        if state.usage_tracker is not None:
+            state.usage_tracker.context_trimmed_count += 1
+        state._context_trimmed_this_invocation = True
+
+        removed = event.metadata.get("messages_removed")
+        source = event.metadata.get("source", "unknown")
+        if removed is not None:
+            ui.add_warning(
+                f"Context trimmed: {removed} messages removed ({source})"
+            )
+        else:
+            ui.add_warning(f"Context window trimmed ({source})")
 
     async def _handle_llm_usage(
         self,
@@ -502,10 +522,28 @@ class MessageProcessor:
         workflow: object,
     ) -> None:
         """Handle LLM_USAGE events — accumulate token counts and refresh status bar."""
-        if state._usage_tracker is not None:
-            state._usage_tracker.record(event.metadata)
-        if state._workflow_controller is not None:
-            state._workflow_controller.update_status_bar(ui)
+        if state.usage_tracker is not None:
+            tracker = state.usage_tracker
+            prev_prompt = tracker.last_prompt_tokens
+            heuristic_trimmed = tracker.record(
+                event.metadata,
+                context_trimmed_already=state._context_trimmed_this_invocation,
+            )
+
+            if heuristic_trimmed:
+                from agentic_cli.cli.usage_tracker import format_tokens
+
+                ui.add_warning(
+                    f"Context window trimmed: {format_tokens(prev_prompt)}"
+                    f" → {format_tokens(tracker.last_prompt_tokens)} tokens"
+                    " (token_drop_heuristic)"
+                )
+
+            # Reset per-invocation flag for next LLM call
+            state._context_trimmed_this_invocation = False
+
+        if state.workflow_controller is not None:
+            state.workflow_controller.update_status_bar(ui)
 
     # === Dispatch table ===
 
@@ -522,11 +560,11 @@ class MessageProcessor:
                 EventType.THINKING: cls._handle_thinking,
                 EventType.TOOL_CALL: cls._handle_tool_call,
                 EventType.TOOL_RESULT: cls._handle_tool_result,
-                EventType.USER_INPUT_REQUIRED: cls._handle_user_input_required,
                 EventType.CODE_EXECUTION: cls._handle_code_execution,
                 EventType.EXECUTABLE_CODE: cls._handle_executable_code,
                 EventType.FILE_DATA: cls._handle_file_data,
                 EventType.TASK_PROGRESS: cls._handle_task_progress,
+                EventType.CONTEXT_TRIMMED: cls._handle_context_trimmed,
                 EventType.LLM_USAGE: cls._handle_llm_usage,
             }
         return cls._EVENT_DISPATCH

@@ -10,6 +10,7 @@ For alternative orchestration backends (e.g., LangGraph), see the base_manager m
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import AsyncGenerator, Any, Callable
 
@@ -24,11 +25,24 @@ from agentic_cli.workflow.events import WorkflowEvent, EventType
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.adk.event_processor import ADKEventProcessor
 from agentic_cli.workflow.adk.llm_event_logger import LLMEventLogger
+
+
+class _SessionEvent:
+    """Lightweight shim for injecting normalized messages into ADK sessions.
+
+    ADK expects event objects with ``content`` and ``author`` attributes.
+    This named class replaces the fragile ``type("Event", (), {...})()``
+    pattern used previously.
+    """
+
+    __slots__ = ("content", "author")
+
+    def __init__(self, content, author: str = "") -> None:
+        self.content = content
+        self.author = author
 from agentic_cli.config import (
     BaseSettings,
     get_settings,
-    validate_settings,
-    SettingsValidationError,
 )
 from agentic_cli.logging import Loggers, bind_context
 
@@ -124,9 +138,8 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             settings=settings,
             app_name=app_name,
             model=model,
+            on_event=on_event,
         )
-
-        self._on_event = on_event
         self.session_service_uri = session_service_uri
         self.session_id = "default_session"
 
@@ -150,6 +163,11 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             model_override=model,
             agent_count=len(agent_configs),
         )
+
+    @property
+    def backend_type(self) -> str:
+        """Return 'adk'."""
+        return "adk"
 
     @property
     def session_service(self) -> BaseSessionService | None:
@@ -213,11 +231,8 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             self._llm_event_logger.clear()
             self._llm_event_logger = None
 
-        # Cancel any pending input requests
-        for request_id, (request, future) in self._pending_input.items():
-            if not future.done():
-                future.cancel()
-        self._pending_input.clear()
+        # Clean up managers (sandbox, etc.)
+        self._cleanup_managers()
 
         logger.info("workflow_manager_cleaned_up")
 
@@ -248,14 +263,8 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         # Clean up current state
         await self.cleanup()
 
-        # Update model if provided
-        if model is not None:
-            self._model = model
-            self._model_resolved = True
-        else:
-            # Re-resolve model from settings
-            self._model = None
-            self._model_resolved = False
+        # Update model
+        self._reset_model(model)
 
         # Reinitialize services
         await self.initialize_services()
@@ -457,28 +466,9 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         logger.info("agents_created", root=root_agent.name, total=len(agent_map))
         return root_agent
 
-    async def initialize_services(self, validate: bool = True) -> None:
-        """Initialize ADK services asynchronously.
-
-        Args:
-            validate: If True, validate settings before initialization.
-                     Set to False to skip validation (e.g., for testing).
-
-        Raises:
-            SettingsValidationError: If settings validation fails
-        """
-        if self._initialized:
-            logger.debug("services_already_initialized")
-            return
-
+    async def _do_initialize(self) -> None:
+        """ADK-specific initialization: session service, agents, runner."""
         logger.info("initializing_services", app_name=self.app_name)
-
-        # Validate settings early to provide clear error messages
-        if validate:
-            validate_settings(self._settings)
-
-        # Export API keys to environment
-        self._settings.export_api_keys_to_env()
 
         # Create session service
         if self.session_service_uri:
@@ -497,10 +487,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             session_service=self._session_service,
         )
 
-        # Initialize feature managers based on tool requirements
-        self._ensure_managers_initialized()
-
-        self._initialized = True
         logger.info(
             "services_initialized",
             model=self.model,
@@ -618,18 +604,32 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
 
             event_count = 0
 
+            # Build run_config with context window compression if enabled
+            run_config = None
+            if self._settings.context_window_enabled:
+                from google.genai.types import ContextWindowCompressionConfig, SlidingWindow
+                from google.adk.agents import RunConfig
+
+                run_config = RunConfig(
+                    context_window_compression=ContextWindowCompressionConfig(
+                        trigger_tokens=self._settings.context_window_trigger_tokens,
+                        sliding_window=SlidingWindow(
+                            target_tokens=self._settings.context_window_target_tokens,
+                        ),
+                    )
+                )
+
             # Process ADK events directly - retry is handled by HttpRetryOptions
             async for adk_event in self._runner.run_async(
                 session_id=current_session_id,
                 user_id=user_id,
                 new_message=new_message,
+                run_config=run_config,
             ):
                 # Yield LLM events from logger first (Option A - raw capture)
                 if self._llm_event_logger:
                     for llm_event in self._llm_event_logger.drain_events():
-                        # Apply optional event hook
-                        if self._on_event:
-                            llm_event = self._on_event(llm_event)
+                        llm_event = self._apply_event_hook(llm_event)
                         if llm_event:
                             event_count += 1
                             yield llm_event
@@ -646,8 +646,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     if workflow_event.type == EventType.TOOL_RESULT:
                         progress_event = self._emit_task_progress_event()
                         if progress_event:
-                            if self._on_event:
-                                progress_event = self._on_event(progress_event)
+                            progress_event = self._apply_event_hook(progress_event)
                             if progress_event:
                                 event_count += 1
                                 yield progress_event
@@ -655,10 +654,146 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             # Drain any remaining LLM events after processing completes
             if self._llm_event_logger:
                 for llm_event in self._llm_event_logger.drain_events():
-                    if self._on_event:
-                        llm_event = self._on_event(llm_event)
+                    llm_event = self._apply_event_hook(llm_event)
                     if llm_event:
                         event_count += 1
                         yield llm_event
 
             logger.info("message_processed", event_count=event_count)
+
+    # -------------------------------------------------------------------------
+    # Session save/resume hooks
+    # -------------------------------------------------------------------------
+
+    async def _extract_session_data(self, session_id: str) -> tuple[list[dict], str | None]:
+        """Extract normalized messages and current agent from ADK session.
+
+        Returns:
+            Tuple of (messages list, current agent name or None).
+        """
+        if not self._session_service:
+            return [], None
+
+        session = await self._session_service.get_session(
+            app_name=self.app_name,
+            user_id=self._settings.default_user,
+            session_id=session_id,
+        )
+        if session is None or not session.events:
+            return [], None
+
+        messages: list[dict] = []
+        for event in session.events:
+            content = getattr(event, "content", None)
+            if content is None:
+                continue
+
+            role = getattr(content, "role", None)
+            parts = getattr(content, "parts", None) or []
+
+            for part in parts:
+                # Text part
+                if hasattr(part, "text") and part.text:
+                    if role == "user":
+                        messages.append({"role": "user", "content": part.text})
+                    elif role == "model":
+                        messages.append({"role": "assistant", "content": part.text})
+
+                # Function call part
+                elif hasattr(part, "function_call") and part.function_call:
+                    fc = part.function_call
+                    tool_call = {
+                        "id": getattr(fc, "id", fc.name),
+                        "name": fc.name,
+                        "args": dict(fc.args) if fc.args else {},
+                    }
+                    # Attach to preceding assistant message or create one
+                    if messages and messages[-1]["role"] == "assistant":
+                        messages[-1].setdefault("tool_calls", []).append(tool_call)
+                    else:
+                        messages.append({
+                            "role": "assistant",
+                            "content": "",
+                            "tool_calls": [tool_call],
+                        })
+
+                # Function response part
+                elif hasattr(part, "function_response") and part.function_response:
+                    fr = part.function_response
+                    response_content = json.dumps(fr.response) if isinstance(fr.response, dict) else str(fr.response)
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": getattr(fr, "id", fr.name),
+                        "name": fr.name,
+                        "content": response_content,
+                    })
+
+        current_agent = getattr(session.events[-1], "author", None)
+        return messages, current_agent
+
+    async def _extract_session_messages(self, session_id: str) -> list[dict]:
+        """Extract normalized messages from ADK session events."""
+        messages, _ = await self._extract_session_data(session_id)
+        return messages
+
+    async def _extract_current_agent(self, session_id: str) -> str | None:
+        """Return the author of the last event in the ADK session."""
+        _, current_agent = await self._extract_session_data(session_id)
+        return current_agent
+
+    async def _inject_session_messages(
+        self,
+        session_id: str,
+        messages: list[dict],
+        current_agent: str | None = None,
+    ) -> None:
+        """Inject normalized messages into ADK session as events."""
+        if not self._session_service:
+            raise RuntimeError("Session service not initialized")
+
+        # Create a fresh session for the restored conversation
+        session = await self._session_service.create_session(
+            app_name=self.app_name,
+            user_id=self._settings.default_user,
+            session_id=session_id,
+        )
+
+        for msg in messages:
+            role = msg["role"]
+
+            if role == "user":
+                content = types.Content(
+                    role="user",
+                    parts=[types.Part.from_text(text=msg["content"])],
+                )
+                session.events.append(
+                    _SessionEvent(content, current_agent or "")
+                )
+
+            elif role == "assistant":
+                parts = []
+                if msg.get("content"):
+                    parts.append(types.Part.from_text(text=msg["content"]))
+                for tc in msg.get("tool_calls", []):
+                    parts.append(types.Part.from_function_call(
+                        name=tc["name"],
+                        args=tc.get("args", {}),
+                    ))
+                content = types.Content(role="model", parts=parts)
+                session.events.append(
+                    _SessionEvent(content, current_agent or "")
+                )
+
+            elif role == "tool":
+                try:
+                    response = json.loads(msg["content"])
+                except (json.JSONDecodeError, TypeError):
+                    response = {"result": msg["content"]}
+                parts = [types.Part.from_function_response(
+                    name=msg.get("name", "unknown"),
+                    response=response,
+                )]
+                content = types.Content(role="user", parts=parts)
+                session.events.append(
+                    _SessionEvent(content, current_agent or "")
+                )

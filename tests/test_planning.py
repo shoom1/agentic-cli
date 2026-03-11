@@ -2,6 +2,19 @@
 
 import pytest
 
+from agentic_cli.tools.planning_tools import PlanStore
+
+
+@pytest.fixture
+def plan_store_ctx():
+    """Provide a PlanStore with context set, auto-cleanup."""
+    from agentic_cli.workflow.context import set_context_plan_store
+
+    store = PlanStore()
+    token = set_context_plan_store(store)
+    yield store
+    token.var.reset(token)
+
 
 class TestPlanStore:
     """Tests for PlanStore class."""
@@ -117,33 +130,21 @@ class TestSummarizeCheckboxes:
 class TestSavePlanSummary:
     """Tests for save_plan returning checkbox stats."""
 
-    def test_save_plan_with_checkboxes_shows_stats(self):
-        from agentic_cli.tools.planning_tools import save_plan, PlanStore
-        from agentic_cli.workflow.context import set_context_plan_store
+    def test_save_plan_with_checkboxes_shows_stats(self, plan_store_ctx):
+        from agentic_cli.tools.planning_tools import save_plan
 
-        store = PlanStore()
-        token = set_context_plan_store(store)
-        try:
-            result = save_plan(content="- [x] A\n- [ ] B\n- [ ] C")
-            assert result["success"] is True
-            assert "3 tasks" in result["message"]
-            assert "1 done" in result["message"]
-            assert "2 pending" in result["message"]
-        finally:
-            token.var.reset(token)
+        result = save_plan(content="- [x] A\n- [ ] B\n- [ ] C")
+        assert result["success"] is True
+        assert "3 tasks" in result["message"]
+        assert "1 done" in result["message"]
+        assert "2 pending" in result["message"]
 
-    def test_save_plan_without_checkboxes(self):
-        from agentic_cli.tools.planning_tools import save_plan, PlanStore
-        from agentic_cli.workflow.context import set_context_plan_store
+    def test_save_plan_without_checkboxes(self, plan_store_ctx):
+        from agentic_cli.tools.planning_tools import save_plan
 
-        store = PlanStore()
-        token = set_context_plan_store(store)
-        try:
-            result = save_plan(content="## My Plan\nJust text, no checkboxes.")
-            assert result["success"] is True
-            assert result["message"] == "Plan saved"
-        finally:
-            token.var.reset(token)
+        result = save_plan(content="## My Plan\nJust text, no checkboxes.")
+        assert result["success"] is True
+        assert result["message"] == "Plan saved"
 
 
 class TestPlanStoreImport:

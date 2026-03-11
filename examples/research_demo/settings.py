@@ -2,7 +2,6 @@
 
 from pathlib import Path
 
-from pydantic import Field
 from pydantic_settings import SettingsConfigDict
 
 from agentic_cli import BaseSettings
@@ -27,10 +26,19 @@ class ResearchDemoSettings(BaseSettings):
         extra="ignore",
     )
 
-    app_name: str = Field(default="research_demo")
-    workspace_dir: Path = Field(default=Path.home() / ".research_demo")
-
     def __init__(self, **kwargs):
-        # Override verbose_thinking default to False (concise mode)
-        kwargs.setdefault("verbose_thinking", False)
+        kwargs.setdefault("app_name", "research_demo")
+        kwargs.setdefault("workspace_dir", Path.home() / ".research_demo")
         super().__init__(**kwargs)
+
+    def model_post_init(self, __context):
+        """Override verbose_thinking default without blocking JSON persistence.
+
+        kwargs.setdefault would inject at init level (highest priority),
+        overriding saved JSON values. model_post_init runs after all sources
+        are resolved, and model_fields_set tracks which fields were explicitly
+        set by any source (env, JSON, init kwargs). We only apply our custom
+        default when no source provided a value.
+        """
+        if "verbose_thinking" not in self.model_fields_set:
+            object.__setattr__(self, "verbose_thinking", False)

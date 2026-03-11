@@ -19,10 +19,7 @@ from agentic_cli.workflow.base_manager import BaseWorkflowManager
 from agentic_cli.workflow.events import WorkflowEvent, EventType
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.langgraph.graph_builder import LangGraphBuilder
-from agentic_cli.config import (
-    get_settings,
-    validate_settings,
-)
+from agentic_cli.config import get_settings
 from agentic_cli.logging import Loggers, bind_context
 
 if TYPE_CHECKING:
@@ -120,10 +117,10 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
             settings=settings,
             app_name=app_name,
             model=model,
+            on_event=on_event,
         )
 
         self._checkpointer_type = checkpointer
-        self._on_event = on_event
 
         # Graph builder (delegates graph construction + LLM factory)
         self._builder = LangGraphBuilder(self._settings)
@@ -147,6 +144,11 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
         )
 
     @property
+    def backend_type(self) -> str:
+        """Return 'langgraph'."""
+        return "langgraph"
+
+    @property
     def graph(self):
         """Get the compiled LangGraph graph."""
         return self._compiled_graph
@@ -159,20 +161,9 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
         """
         return LangGraphSummarizer(self)
 
-    async def initialize_services(self, validate: bool = True) -> None:
-        """Initialize LangGraph services asynchronously."""
-        if self._initialized:
-            logger.debug("services_already_initialized")
-            return
-
+    async def _do_initialize(self) -> None:
+        """LangGraph-specific initialization: checkpointer, graph, LLM."""
         logger.info("initializing_langgraph_services", app_name=self.app_name)
-
-        # Validate settings
-        if validate:
-            validate_settings(self._settings)
-
-        # Export API keys
-        self._settings.export_api_keys_to_env()
 
         # Create checkpointer and store
         from agentic_cli.workflow.langgraph.persistence import create_checkpointer, create_store
@@ -200,10 +191,6 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
         # Initialize default LLM
         self._llm = self._builder.get_llm(self.model)
 
-        # Initialize feature managers based on tool requirements
-        self._ensure_managers_initialized()
-
-        self._initialized = True
         logger.info(
             "langgraph_services_initialized",
             model=self.model,
@@ -222,11 +209,8 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
         self._llm = None
         self._initialized = False
 
-        # Cancel pending input requests
-        for request_id, (request, future) in self._pending_input.items():
-            if not future.done():
-                future.cancel()
-        self._pending_input.clear()
+        # Clean up managers (sandbox, etc.)
+        self._cleanup_managers()
 
         logger.info("langgraph_workflow_manager_cleaned_up")
 
@@ -248,12 +232,7 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
         await self.cleanup()
 
         # Update model
-        if model is not None:
-            self._model = model
-            self._model_resolved = True
-        else:
-            self._model = None
-            self._model_resolved = False
+        self._reset_model(model)
 
         await self.initialize_services()
 
@@ -343,13 +322,30 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
                         for block_type, text in blocks:
                             if text:
                                 if block_type == "thinking":
-                                    yield self._maybe_transform(
+                                    transformed = self._apply_event_hook(
                                         WorkflowEvent.thinking(text, current_session_id)
                                     )
+                                    if transformed:
+                                        yield transformed
                                 else:
-                                    yield self._maybe_transform(
+                                    transformed = self._apply_event_hook(
                                         WorkflowEvent.text(text, current_session_id)
                                     )
+                                    if transformed:
+                                        yield transformed
+
+                    # Emit context trimming events (side-channel from agent_node)
+                    for info in self._builder.drain_trim_events():
+                        transformed = self._apply_event_hook(
+                            WorkflowEvent.context_trimmed(
+                                messages_before=info["messages_before"],
+                                messages_after=info["messages_after"],
+                                source="langgraph",
+                                agent=info.get("agent"),
+                            )
+                        )
+                        if transformed:
+                            yield transformed
 
                     # Extract usage metadata
                     if output and hasattr(output, "usage_metadata") and output.usage_metadata:
@@ -364,16 +360,20 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
                             cached_tokens=cached_read,
                             cache_creation_tokens=cache_creation,
                         )
-                        yield self._maybe_transform(usage_event)
+                        transformed = self._apply_event_hook(usage_event)
+                        if transformed:
+                            yield transformed
 
                 elif event_kind == "on_tool_start":
                     # Tool invocation
-                    yield self._maybe_transform(
+                    transformed = self._apply_event_hook(
                         WorkflowEvent.tool_call(
                             tool_name=event_name,
                             tool_args=event_data.get("input", {}),
                         )
                     )
+                    if transformed:
+                        yield transformed
 
                 elif event_kind == "on_tool_end":
                     # Tool result — ToolNode returns ToolMessage objects
@@ -405,28 +405,25 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
                     else:
                         result_data = raw
 
-                    yield self._maybe_transform(
+                    transformed = self._apply_event_hook(
                         WorkflowEvent.tool_result(
                             tool_name=event_name,
                             result=result_data,
                             success=success,
                         )
                     )
+                    if transformed:
+                        yield transformed
 
                     # Emit task progress after tool results
                     progress_event = self._emit_task_progress_event()
                     if progress_event:
-                        yield self._maybe_transform(progress_event)
+                        transformed = self._apply_event_hook(progress_event)
+                        if transformed:
+                            yield transformed
 
 
             logger.info("message_processed_langgraph")
-
-    def _maybe_transform(self, event: WorkflowEvent) -> WorkflowEvent:
-        """Apply event transformation hook if configured."""
-        if self._on_event:
-            transformed = self._on_event(event)
-            return transformed if transformed is not None else event
-        return event
 
     def _extract_content_blocks(
         self, content: Any
@@ -488,6 +485,105 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
         )
 
         return response.content if hasattr(response, "content") else str(response)
+
+    # -------------------------------------------------------------------------
+    # Session save/resume hooks
+    # -------------------------------------------------------------------------
+
+    def _get_state_values(self, session_id: str) -> dict | None:
+        """Get state values from LangGraph, or None on failure."""
+        if not self._compiled_graph:
+            return None
+        config = {"configurable": {"thread_id": session_id}}
+        try:
+            state = self._compiled_graph.get_state(config)
+        except Exception:
+            return None
+        if not state or not state.values:
+            return None
+        return state.values
+
+    async def _extract_session_messages(self, session_id: str) -> list[dict]:
+        """Extract normalized messages from LangGraph state."""
+        values = self._get_state_values(session_id)
+        if not values:
+            return []
+
+        raw_messages = values.get("messages", [])
+        messages: list[dict] = []
+
+        for msg in raw_messages:
+            msg_type = getattr(msg, "type", "")
+
+            if msg_type == "human":
+                messages.append({"role": "user", "content": msg.content})
+
+            elif msg_type == "ai":
+                entry: dict = {"role": "assistant", "content": msg.content or ""}
+                tool_calls = getattr(msg, "tool_calls", None)
+                if tool_calls:
+                    entry["tool_calls"] = [
+                        {
+                            "id": tc.get("id", tc.get("name", "")),
+                            "name": tc["name"],
+                            "args": tc.get("args", {}),
+                        }
+                        for tc in tool_calls
+                    ]
+                messages.append(entry)
+
+            elif msg_type == "tool":
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": getattr(msg, "tool_call_id", ""),
+                    "name": getattr(msg, "name", "unknown"),
+                    "content": msg.content if isinstance(msg.content, str) else str(msg.content),
+                })
+
+        return messages
+
+    async def _extract_current_agent(self, session_id: str) -> str | None:
+        """Extract current agent from LangGraph state."""
+        values = self._get_state_values(session_id)
+        if not values:
+            return None
+        return values.get("current_agent")
+
+    async def _inject_session_messages(
+        self,
+        session_id: str,
+        messages: list[dict],
+        current_agent: str | None = None,
+    ) -> None:
+        """Inject normalized messages into LangGraph state."""
+        if not self._compiled_graph:
+            raise RuntimeError("LangGraph workflow not initialized")
+
+        from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
+
+        lc_messages = []
+        for msg in messages:
+            role = msg["role"]
+            if role == "user":
+                lc_messages.append(HumanMessage(content=msg["content"]))
+            elif role == "assistant":
+                kwargs: dict = {"content": msg.get("content", "")}
+                if msg.get("tool_calls"):
+                    kwargs["tool_calls"] = msg["tool_calls"]
+                lc_messages.append(AIMessage(**kwargs))
+            elif role == "tool":
+                lc_messages.append(ToolMessage(
+                    content=msg["content"],
+                    tool_call_id=msg.get("tool_call_id", ""),
+                    name=msg.get("name", "unknown"),
+                ))
+
+        config = {"configurable": {"thread_id": session_id}}
+        update = {"messages": lc_messages}
+        if current_agent is not None:
+            update["current_agent"] = current_agent
+
+        self._compiled_graph.update_state(config, update)
 
 
 # Alias for convenience

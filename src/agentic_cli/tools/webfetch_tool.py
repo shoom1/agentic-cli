@@ -21,12 +21,26 @@ from agentic_cli.tools.webfetch import (
 from agentic_cli.workflow.context import get_context_llm_summarizer
 
 
-# Module-level fetcher instance (lazy-created)
+# Module-level fetcher state (lazy-created, invalidated on settings change)
 _fetcher: ContentFetcher | None = None
+_fetcher_settings_snapshot: tuple | None = None
+
+
+def _settings_key(settings) -> tuple:
+    """Extract settings values relevant to the fetcher for change detection."""
+    return (
+        tuple(settings.webfetch_blocked_domains),
+        settings.webfetch_cache_ttl_seconds,
+        settings.webfetch_max_content_bytes,
+        settings.webfetch_max_pdf_bytes,
+    )
 
 
 def get_or_create_fetcher(settings=None) -> ContentFetcher:
     """Get or create the module-level ContentFetcher.
+
+    Re-creates the fetcher if relevant settings have changed since
+    the last call, preventing stale configuration.
 
     Args:
         settings: Optional settings instance. If not provided,
@@ -35,13 +49,15 @@ def get_or_create_fetcher(settings=None) -> ContentFetcher:
     Returns:
         ContentFetcher instance configured with current settings.
     """
-    global _fetcher
-
-    if _fetcher is not None:
-        return _fetcher
+    global _fetcher, _fetcher_settings_snapshot
 
     if settings is None:
         settings = get_settings()
+
+    current_key = _settings_key(settings)
+
+    if _fetcher is not None and _fetcher_settings_snapshot == current_key:
+        return _fetcher
 
     validator = URLValidator(blocked_domains=settings.webfetch_blocked_domains)
     robots_checker = RobotsTxtChecker()
@@ -53,6 +69,7 @@ def get_or_create_fetcher(settings=None) -> ContentFetcher:
         max_content_bytes=settings.webfetch_max_content_bytes,
         max_pdf_bytes=settings.webfetch_max_pdf_bytes,
     )
+    _fetcher_settings_snapshot = current_key
 
     return _fetcher
 

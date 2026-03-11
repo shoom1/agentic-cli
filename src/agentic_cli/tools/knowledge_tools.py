@@ -33,6 +33,48 @@ from agentic_cli.workflow.context import get_context_kb_manager, get_context_use
 READ_DOCUMENT_MAX_CHARS = 30_000
 
 
+def _build_document_item(d, scope: str) -> dict[str, Any]:
+    """Build a document summary dict from a Document object.
+
+    Args:
+        d: Document instance.
+        scope: "project" or "user".
+
+    Returns:
+        Dict with document metadata suitable for list_documents output.
+    """
+    item: dict[str, Any] = {
+        "id": d.id,
+        "title": d.title,
+        "summary": d.summary,
+        "source_type": d.source_type.value,
+        "created_at": d.created_at.isoformat(),
+        "chunks": len(d.chunks),
+        "scope": scope,
+    }
+    if d.metadata.get("authors"):
+        item["authors"] = d.metadata["authors"]
+    if d.metadata.get("arxiv_id"):
+        item["arxiv_id"] = d.metadata["arxiv_id"]
+    if d.metadata.get("tags"):
+        item["tags"] = d.metadata["tags"]
+    if d.file_path:
+        item["has_file"] = True
+    return item
+
+# Extensions considered safe to open in the system viewer.
+# Excluded: .html (JS execution), .doc/.xls/.ppt (VBA macros),
+# .odt/.ods/.odp (LibreOffice macros), .docm/.xlsm/.pptm (Office macros).
+SAFE_OPEN_EXTENSIONS: frozenset[str] = frozenset({
+    # Documents
+    ".pdf", ".txt", ".md", ".csv", ".json", ".xml", ".rtf", ".epub",
+    # Modern Office (macro-free by design)
+    ".docx", ".xlsx", ".pptx",
+    # Images
+    ".png", ".jpg", ".jpeg", ".gif", ".svg", ".bmp", ".tiff", ".webp",
+})
+
+
 @register_tool(
     category=ToolCategory.KNOWLEDGE,
     permission_level=PermissionLevel.SAFE,
@@ -100,8 +142,9 @@ def search_knowledge_base(
     category=ToolCategory.KNOWLEDGE,
     permission_level=PermissionLevel.CAUTION,
     description=(
-        "Ingest a document into the knowledge base. Accepts text content, a local file path, "
-        "or a URL (including ArXiv). ArXiv URLs auto-fetch metadata and PDF. "
+        "Ingest a document into the knowledge base. "
+        "REQUIRED: provide either 'content' (text) or 'url_or_path' (file path or URL). "
+        "ArXiv URLs auto-fetch metadata and PDF. "
         "Valid source_type values: arxiv, ssrn, web, internal, user, local."
     ),
 )
@@ -119,15 +162,15 @@ async def ingest_document(
 ) -> dict[str, Any]:
     """Ingest a document into the knowledge base.
 
-    Supports three modes:
+    You MUST provide at least one of `content` or `url_or_path`:
     1. Text content: provide `content` directly
     2. Local file: provide `url_or_path` pointing to a local file
     3. URL: provide `url_or_path` with an HTTP(S) URL
        - ArXiv URLs auto-fetch metadata and download PDF
 
     Args:
-        content: Document text content (for text-based ingestion)
-        url_or_path: URL or local file path (for file-based ingestion)
+        content: Document text content (REQUIRED if url_or_path not given)
+        url_or_path: URL or local file path (REQUIRED if content not given)
         title: Document title (auto-fetched for ArXiv if empty)
         source_type: Source type (arxiv, ssrn, web, internal, user, local)
         source_url: Optional URL of the source
@@ -221,7 +264,14 @@ async def ingest_document(
 
     # --- Validate ---
     if not content and not file_bytes:
-        return {"success": False, "error": "No content or file provided. Supply 'content' or 'url_or_path'."}
+        return {
+            "success": False,
+            "error": (
+                "No content or file provided. "
+                "You must supply either 'content' (text string) or 'url_or_path' (URL or file path). "
+                "For ArXiv papers, pass the ArXiv URL as url_or_path."
+            ),
+        }
 
     if not title:
         title = truncate(content, 80)
@@ -279,11 +329,9 @@ async def _ingest_arxiv(
     """
     from agentic_cli.knowledge_base.models import SourceType
 
-    # Extract arxiv ID
-    arxiv_id = ""
-    match = re.search(r"(\d{4}\.\d{4,5})", url_or_path)
-    if match:
-        arxiv_id = match.group(1)
+    # Extract arxiv ID — supports both new format (2301.12345) and
+    # old format (math/0607733, hep-th/9901001)
+    arxiv_id = _extract_arxiv_id(url_or_path)
 
     if not arxiv_id:
         return {"success": False, "error": f"Could not extract ArXiv ID from: {url_or_path}"}
@@ -361,19 +409,28 @@ async def _ingest_arxiv(
 
 def _extract_text_from_bytes(pdf_bytes: bytes) -> str:
     """Extract text from PDF bytes."""
-    try:
-        import pypdf
-        import io
-        reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
-        pages = []
-        for page in reader.pages:
-            text = page.extract_text()
-            if text:
-                pages.append(text)
-        return "\n\n".join(pages)
-    except (ImportError, Exception):
-        logger.debug("pdf_text_extraction_failed", exc_info=True)
-        return ""
+    from agentic_cli.tools.pdf_utils import extract_pdf_text
+
+    return extract_pdf_text(pdf_bytes)
+
+
+def _extract_arxiv_id(url_or_id: str) -> str:
+    """Extract arXiv paper ID from a URL or raw ID string.
+
+    Delegates to arxiv_tools._clean_arxiv_id for consistent parsing.
+    Returns empty string if the input doesn't look like an arXiv ID.
+    """
+    import re
+
+    from agentic_cli.tools.arxiv_tools import _clean_arxiv_id
+
+    cleaned = _clean_arxiv_id(url_or_id)
+    # Validate that the result is actually an arXiv ID pattern
+    if re.match(r"^\d{4}\.\d{4,5}(v\d+)?$", cleaned) or re.match(
+        r"^[a-zA-Z-]+/\d{7}(v\d+)?$", cleaned
+    ):
+        return cleaned
+    return ""
 
 
 def _detect_extension(url: str) -> str:
@@ -383,6 +440,26 @@ def _detect_extension(url: str) -> str:
     if path.endswith(".pdf"):
         return ".pdf"
     return ".bin"
+
+
+def _find_document_in_kbs(doc_id_or_title: str) -> tuple:
+    """Find a document across main and user knowledge bases.
+
+    Returns:
+        (document, source_kb) tuple. document may be None if not found.
+    """
+    kb = get_context_kb_manager()
+    doc = kb.find_document(doc_id_or_title)
+    source_kb = kb
+
+    if doc is None:
+        user_kb = get_context_user_kb_manager()
+        if user_kb is not None and user_kb is not kb:
+            doc = user_kb.find_document(doc_id_or_title)
+            if doc is not None:
+                source_kb = user_kb
+
+    return doc, source_kb
 
 
 @register_tool(
@@ -405,16 +482,7 @@ def read_document(
     Returns:
         Dictionary with document text and metadata.
     """
-    kb = get_context_kb_manager()
-    doc = kb.find_document(doc_id_or_title)
-    source_kb = kb
-
-    # Fall back to user KB
-    if doc is None:
-        user_kb = get_context_user_kb_manager()
-        if user_kb is not None and user_kb is not kb:
-            doc = user_kb.find_document(doc_id_or_title)
-            source_kb = user_kb
+    doc, source_kb = _find_document_in_kbs(doc_id_or_title)
 
     if doc is None:
         return {"success": False, "error": f"Document not found: {doc_id_or_title}"}
@@ -490,24 +558,7 @@ def list_documents(
     items = []
     seen_ids: set[str] = set()
     for d in docs:
-        item: dict[str, Any] = {
-            "id": d.id,
-            "title": d.title,
-            "summary": d.summary,
-            "source_type": d.source_type.value,
-            "created_at": d.created_at.isoformat(),
-            "chunks": len(d.chunks),
-            "scope": "project",
-        }
-        if d.metadata.get("authors"):
-            item["authors"] = d.metadata["authors"]
-        if d.metadata.get("arxiv_id"):
-            item["arxiv_id"] = d.metadata["arxiv_id"]
-        if d.metadata.get("tags"):
-            item["tags"] = d.metadata["tags"]
-        if d.file_path:
-            item["has_file"] = True
-        items.append(item)
+        items.append(_build_document_item(d, "project"))
         seen_ids.add(d.id)
 
     # Merge user KB documents
@@ -523,27 +574,9 @@ def list_documents(
                     or any(query_lower in a.lower() for a in d.metadata.get("authors", []))
                 ]
             for d in user_docs:
-                if d.id in seen_ids:
-                    continue
-                item = {
-                    "id": d.id,
-                    "title": d.title,
-                    "summary": d.summary,
-                    "source_type": d.source_type.value,
-                    "created_at": d.created_at.isoformat(),
-                    "chunks": len(d.chunks),
-                    "scope": "user",
-                }
-                if d.metadata.get("authors"):
-                    item["authors"] = d.metadata["authors"]
-                if d.metadata.get("arxiv_id"):
-                    item["arxiv_id"] = d.metadata["arxiv_id"]
-                if d.metadata.get("tags"):
-                    item["tags"] = d.metadata["tags"]
-                if d.file_path:
-                    item["has_file"] = True
-                items.append(item)
-                seen_ids.add(d.id)
+                if d.id not in seen_ids:
+                    items.append(_build_document_item(d, "user"))
+                    seen_ids.add(d.id)
         except Exception:
             logger.debug("user_kb_list_documents_failed", exc_info=True)
 
@@ -556,7 +589,7 @@ def list_documents(
 
 @register_tool(
     category=ToolCategory.KNOWLEDGE,
-    permission_level=PermissionLevel.CAUTION,
+    permission_level=PermissionLevel.DANGEROUS,
     description="Open a document's stored file (e.g. PDF) in the system default viewer. Provide a document ID or title.",
 )
 @requires("kb_manager")
@@ -572,16 +605,7 @@ def open_document(
     Returns:
         Dictionary with result.
     """
-    kb = get_context_kb_manager()
-    doc = kb.find_document(doc_id_or_title)
-    source_kb = kb
-
-    # Fall back to user KB
-    if doc is None:
-        user_kb = get_context_user_kb_manager()
-        if user_kb is not None and user_kb is not kb:
-            doc = user_kb.find_document(doc_id_or_title)
-            source_kb = user_kb
+    doc, source_kb = _find_document_in_kbs(doc_id_or_title)
 
     if doc is None:
         return {"success": False, "error": f"Document not found: {doc_id_or_title}"}
@@ -590,19 +614,58 @@ def open_document(
     if file_path is None:
         return {"success": False, "error": f"No file stored for document: {doc.title}"}
 
+    ext = file_path.suffix.lower()
+    if ext not in SAFE_OPEN_EXTENSIONS:
+        logger.warning(
+            "open_document_blocked_extension",
+            file_path=str(file_path),
+            title=doc.title,
+            extension=ext,
+        )
+        return {
+            "success": False,
+            "error": f"File type '{ext}' is not allowed. Supported: documents, images, and office files.",
+        }
+
     system = platform.system()
     try:
         if system == "Darwin":
-            subprocess.Popen(["open", str(file_path)])
+            cmd = ["open", str(file_path)]
         elif system == "Linux":
-            subprocess.Popen(["xdg-open", str(file_path)])
+            cmd = ["xdg-open", str(file_path)]
         elif system == "Windows":
-            subprocess.Popen(["start", "", str(file_path)], shell=True)
+            cmd = ["start", "", str(file_path)]
         else:
             return {"success": False, "error": f"Unsupported platform: {system}"}
+
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            shell=(system == "Windows"),
+        )
+        if result.returncode != 0:
+            stderr = result.stderr.strip()
+            logger.warning(
+                "open_document_failed",
+                file_path=str(file_path),
+                returncode=result.returncode,
+                stderr=stderr,
+            )
+            return {"success": False, "error": f"Failed to open file: {stderr or 'unknown error'}"}
+    except subprocess.TimeoutExpired:
+        # open/xdg-open may block if viewer takes time — treat as success
+        pass
     except OSError as e:
         return {"success": False, "error": f"Failed to open file: {e}"}
 
+    logger.info(
+        "open_document_success",
+        file_path=str(file_path),
+        title=doc.title,
+        extension=ext,
+    )
     return {
         "success": True,
         "title": doc.title,

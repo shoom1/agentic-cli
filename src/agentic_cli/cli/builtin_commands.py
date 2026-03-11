@@ -108,31 +108,96 @@ class StatusCommand(Command):
             if init_error:
                 table.add_row("Error", f"[red]{init_error}[/red]")
 
+        # Persistent session info
+        sid = app.session_id
+        if sid:
+            table.add_row("Session", f"{sid} (persistent)")
+        else:
+            table.add_row("Session", "ephemeral (not saved)")
+
         # Message history stats
         table.add_row("Messages", str(len(app.message_history)))
 
         # Token usage breakdown
         tracker = getattr(app, "usage_tracker", None)
-        if tracker is not None and tracker.invocation_count > 0:
-            from agentic_cli.cli.usage_tracker import format_tokens
-
-            table.add_row("", "")  # Spacer
-            table.add_row("LLM Invocations", str(tracker.invocation_count))
-            table.add_row("Input Tokens", format_tokens(tracker.prompt_tokens))
-            table.add_row("Output Tokens", format_tokens(tracker.completion_tokens))
-            table.add_row("Total Tokens", format_tokens(tracker.total_tokens))
-            if tracker.cached_tokens > 0:
-                table.add_row("Cached Tokens", format_tokens(tracker.cached_tokens))
-            if tracker.cache_creation_tokens > 0:
-                table.add_row("Cache Creation", format_tokens(tracker.cache_creation_tokens))
-            if tracker.thinking_tokens > 0:
-                table.add_row("Thinking Tokens", format_tokens(tracker.thinking_tokens))
-            if tracker.total_latency_ms > 0:
-                avg_ms = tracker.total_latency_ms / tracker.invocation_count
-                table.add_row("Avg Latency", f"{avg_ms:.0f}ms")
+        if tracker is not None:
+            for label, value in tracker.format_detail_rows():
+                table.add_row(label, value)
 
         panel = Panel(table, title="[bold]Session Status[/bold]", border_style="cyan")
         app.session.add_rich(panel)
+
+
+class SandboxCommand(Command):
+    """Manage sandbox sessions."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            name="sandbox",
+            description="List and manage sandbox sessions",
+            aliases=["sb"],
+            usage="/sandbox [reset [session_id] [--all]]",
+            examples=["/sandbox", "/sandbox reset", "/sandbox reset my_session", "/sandbox reset --all"],
+            category=CommandCategory.WORKFLOW,
+        )
+
+    async def execute(self, args: str, app: Any) -> None:
+        """List or reset sandbox sessions."""
+        # Get sandbox manager from workflow
+        try:
+            workflow = app.workflow
+            manager = getattr(workflow, "sandbox_manager", None)
+        except (RuntimeError, AttributeError):
+            manager = None
+
+        if manager is None:
+            app.session.add_warning(
+                "Sandbox not available. Add sandbox tools to your agent config to enable it."
+            )
+            return
+
+        parsed = self.parse_args(args)
+        subcommand = parsed.positional.strip()
+
+        if subcommand.startswith("reset"):
+            # Parse session_id from after "reset"
+            rest = subcommand[len("reset"):].strip()
+            if parsed.has_flag("all"):
+                # Reset all sessions
+                sessions = manager.list_sessions()
+                if not sessions:
+                    app.session.add_message("system", "No active sandbox sessions.")
+                    return
+                for s in sessions:
+                    manager.reset_session(s["session_id"])
+                app.session.add_success(f"Reset {len(sessions)} sandbox session(s).")
+            else:
+                session_id = rest if rest else "default"
+                was_active = manager.reset_session(session_id)
+                if was_active:
+                    app.session.add_success(f"Sandbox session '{session_id}' reset.")
+                else:
+                    app.session.add_warning(f"Sandbox session '{session_id}' was not active.")
+        else:
+            # List sessions
+            sessions = manager.list_sessions()
+            if not sessions:
+                app.session.add_message("system", "No active sandbox sessions.")
+                return
+
+            table = Table(title="Sandbox Sessions", show_lines=False, padding=(0, 1))
+            table.add_column("Session ID", style="bold cyan", no_wrap=True)
+            table.add_column("Working Dir", style="dim")
+            table.add_column("Executions", style="dim", no_wrap=True, justify="right")
+
+            for s in sessions:
+                table.add_row(
+                    s["session_id"],
+                    s["working_dir"],
+                    str(s["execution_count"]),
+                )
+
+            app.session.add_rich(table)
 
 
 class PapersCommand(Command):
@@ -224,6 +289,63 @@ class PapersCommand(Command):
                 d.source_type.value,
                 str(len(d.chunks)),
                 d.created_at.strftime("%Y-%m-%d"),
+            )
+
+        app.session.add_rich(table)
+
+
+class SessionsCommand(Command):
+    """List and manage saved sessions."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            name="sessions",
+            description="List saved sessions",
+            aliases=["sess"],
+            usage="/sessions [--delete=<id>]",
+            examples=["/sessions", "/sessions --delete=my-research"],
+            category=CommandCategory.SESSION,
+        )
+
+    async def execute(self, args: str, app: Any) -> None:
+        """Display saved sessions or delete one."""
+        from agentic_cli.persistence.session import SessionPersistence
+
+        parsed = self.parse_args(args)
+        delete_id = parsed.get_option("delete", "", str) or ""
+
+        persistence = SessionPersistence(app.settings)
+
+        if delete_id:
+            if persistence.delete_session(delete_id):
+                app.session.add_success(f"Session '{delete_id}' deleted.")
+            else:
+                app.session.add_error(f"Session '{delete_id}' not found.")
+            return
+
+        sessions = persistence.list_sessions()
+        if not sessions:
+            app.session.add_message("system", "No saved sessions.")
+            return
+
+        table = Table(title="Saved Sessions", show_lines=False, padding=(0, 1))
+        table.add_column("Session ID", style="bold cyan")
+        table.add_column("Messages", style="dim", justify="right")
+        table.add_column("Last Saved", style="dim")
+        table.add_column("Created", style="dim")
+
+        current_sid = app.session_id
+
+        for s in sessions:
+            sid = s["session_id"]
+            label = f"* {sid}" if sid == current_sid else sid
+            saved_at = s.get("saved_at", "")[:19].replace("T", " ")
+            created_at = s.get("created_at", "")[:10]
+            table.add_row(
+                label,
+                str(s.get("message_count", 0)),
+                saved_at,
+                created_at,
             )
 
         app.session.add_rich(table)

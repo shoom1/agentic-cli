@@ -16,7 +16,7 @@ from agentic_cli.tools.registry import (
 @register_tool(
     category=ToolCategory.EXECUTION,
     permission_level=PermissionLevel.DANGEROUS,
-    description="Execute Python code in a sandboxed subprocess with restricted imports. Use this for calculations, data processing, or prototyping. Only whitelisted modules (math, numpy, pandas, json, etc.) are available.",
+    description="Stateless Python scratchpad for quick calculations, formula checks, and mathematical reasoning. Each call starts fresh — no state persists. Only whitelisted modules (math, numpy, pandas, json, etc.) are available. Use sandbox_execute instead for stateful work.",
 )
 def execute_python(
     code: str,

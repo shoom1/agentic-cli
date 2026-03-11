@@ -8,8 +8,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from agentic_cli.cli.workflow_controller import (
-    WorkflowController,
+from agentic_cli.cli.workflow_controller import WorkflowController
+from agentic_cli.workflow.factory import (
     _is_claude_model,
     _resolve_effective_model,
     create_workflow_manager_from_settings,
@@ -39,27 +39,28 @@ def _make_settings(orchestrator=OrchestratorType.ADK, default_model=None, **extr
     return settings
 
 
-class _FakeADKWorkflow:
-    """Fake ADK workflow manager for testing (class name matters for swap detection)."""
+def _FakeADKWorkflow(model="gemini-2.5-pro"):
+    """Create a fake ADK workflow manager for testing."""
+    from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager
 
-    def __init__(self, model="gemini-2.5-pro"):
-        self.model = model
-        self.reinitialize = AsyncMock()
-        self.initialize_services = AsyncMock()
-
-
-class _FakeLangGraphWorkflow:
-    """Fake LangGraph workflow manager (class name = LangGraphWorkflowManager)."""
-
-    def __init__(self, model="claude-sonnet-4-5"):
-        self.model = model
-        self.reinitialize = AsyncMock()
-        self.initialize_services = AsyncMock()
+    wf = MagicMock(spec=GoogleADKWorkflowManager)
+    wf.model = model
+    wf.backend_type = "adk"
+    wf.reinitialize = AsyncMock()
+    wf.initialize_services = AsyncMock()
+    return wf
 
 
-# Rename the class so type().__name__ matches what the code checks
-_FakeLangGraphWorkflow.__name__ = "LangGraphWorkflowManager"
-_FakeADKWorkflow.__name__ = "GoogleADKWorkflowManager"
+def _FakeLangGraphWorkflow(model="claude-sonnet-4-5"):
+    """Create a fake LangGraph workflow manager for testing."""
+    from agentic_cli.workflow.langgraph.manager import LangGraphWorkflowManager
+
+    wf = MagicMock(spec=LangGraphWorkflowManager)
+    wf.model = model
+    wf.backend_type = "langgraph"
+    wf.reinitialize = AsyncMock()
+    wf.initialize_services = AsyncMock()
+    return wf
 
 
 # --- Unit tests for helpers ---

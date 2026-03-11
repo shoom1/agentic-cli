@@ -76,6 +76,10 @@ def _shell_executor(r: dict) -> str:
     return f"Exit {code} ({dur:.1f}s)"
 
 
+def _save_tasks(r: dict) -> str:
+    return r.get("message", f"{r['count']} tasks saved")
+
+
 def _get_tasks(r: dict) -> str:
     return f"{r['count']} tasks"
 
@@ -167,6 +171,7 @@ _TOOL_FORMATTERS: dict[str, Callable[[dict[str, Any]], str]] = {
     "edit_file": _edit_file,
     "execute_python": _execute_python,
     "shell_executor": _shell_executor,
+    "save_tasks": _save_tasks,
     "get_tasks": _get_tasks,
     "get_plan": _get_plan,
     "search_memory": _search_memory,

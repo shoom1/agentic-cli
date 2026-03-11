@@ -12,8 +12,10 @@ Submodules:
 # Light imports - always available (fast)
 from agentic_cli.workflow.events import WorkflowEvent, EventType, UserInputRequest
 from agentic_cli.workflow.config import AgentConfig
+from agentic_cli.workflow.factory import create_workflow_manager_from_settings
 from agentic_cli.workflow.thinking import ThinkingDetector, ThinkingResult
 from agentic_cli.workflow.settings import WorkflowSettingsMixin
+from agentic_cli.workflow.models import ModelFamily, ModelInfo, ModelRegistry
 from agentic_cli.workflow.context import (
     # Getters for tools
     get_context_memory_store,
@@ -42,7 +44,6 @@ _lazy_imports = {
     "AgentState": "agentic_cli.workflow.langgraph.state",
     "ResearchState": "agentic_cli.workflow.langgraph.state",
     "ApprovalState": "agentic_cli.workflow.langgraph.state",
-    "FinanceResearchState": "agentic_cli.workflow.langgraph.state",
     "CheckpointData": "agentic_cli.workflow.langgraph.state",
     "add_messages": "agentic_cli.workflow.langgraph.state",
 }
@@ -65,6 +66,8 @@ __all__ = [
     "WorkflowEvent",
     "EventType",
     "UserInputRequest",
+    # Factory
+    "create_workflow_manager_from_settings",
     # Config
     "AgentConfig",
     # Thinking
@@ -72,6 +75,10 @@ __all__ = [
     "ThinkingResult",
     # Settings mixin
     "WorkflowSettingsMixin",
+    # Model registry
+    "ModelFamily",
+    "ModelInfo",
+    "ModelRegistry",
     # Managers (lazy)
     "GoogleADKWorkflowManager",
     "LangGraphWorkflowManager",
@@ -80,7 +87,6 @@ __all__ = [
     "AgentState",
     "ResearchState",
     "ApprovalState",
-    "FinanceResearchState",
     "CheckpointData",
     "add_messages",
     # Context getters (for tools)

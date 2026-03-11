@@ -15,6 +15,7 @@ Auto-migrated to v2 on first load.
 from __future__ import annotations
 
 import json
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -109,6 +110,7 @@ class KnowledgeBaseManager:
             embedding_service: Optional pre-configured embedding service.
             vector_store: Optional pre-configured vector store.
         """
+        self._lock = threading.Lock()
         self._settings = settings
         self._use_mock = use_mock
 
@@ -361,21 +363,9 @@ class KnowledgeBaseManager:
         Returns:
             Extracted text, or empty string on failure.
         """
-        try:
-            import pypdf
-            reader = pypdf.PdfReader(str(file_path))
-            pages = []
-            for page in reader.pages:
-                text = page.extract_text()
-                if text:
-                    pages.append(text)
-            return "\n\n".join(pages)
-        except ImportError:
-            logger.warning("pypdf_not_installed")
-            return ""
-        except Exception as e:
-            logger.warning("pdf_text_extraction_failed", error=str(e))
-            return ""
+        from agentic_cli.tools.pdf_utils import extract_pdf_text
+
+        return extract_pdf_text(file_path)
 
     def _generate_summary(self, content: str) -> str:
         """Generate a summary for document content.
@@ -434,7 +424,7 @@ class KnowledgeBaseManager:
         Returns:
             The created Document object.
         """
-        # Generate summary
+        # Generate summary (may call LLM — do outside lock)
         summary = self._generate_summary(content) if content else ""
 
         # Create document
@@ -452,12 +442,11 @@ class KnowledgeBaseManager:
             rel_path = self.store_file(doc.id, file_bytes, file_extension)
             doc.file_path = rel_path
 
-        # Chunk the document
+        # Chunk and embed outside lock (CPU-bound, no shared state yet)
         chunk_texts = self._embedding_service.chunk_document(
             content, chunk_size, chunk_overlap
         )
 
-        # Create chunks
         for i, chunk_text in enumerate(chunk_texts):
             chunk = DocumentChunk.create(
                 document_id=doc.id,
@@ -466,28 +455,31 @@ class KnowledgeBaseManager:
                 metadata={"title": title},
             )
             doc.chunks.append(chunk)
-            self._chunks[chunk.id] = chunk
 
-        # Generate embeddings
+        embeddings: list[list[float]] = []
         if doc.chunks:
             chunk_texts = [c.content for c in doc.chunks]
             embeddings = self._embedding_service.embed_batch(chunk_texts)
-
-            # Update chunks with embeddings
             for chunk, embedding in zip(doc.chunks, embeddings):
                 chunk.embedding = embedding
 
-            # Add to vector store
-            chunk_ids = [c.id for c in doc.chunks]
-            self._vector_store.add_embeddings(chunk_ids, embeddings)
+        # Mutate shared state under lock
+        with self._lock:
+            # Add embeddings first — if this fails, no state is modified
+            if doc.chunks and embeddings:
+                chunk_ids = [c.id for c in doc.chunks]
+                self._vector_store.add_embeddings(chunk_ids, embeddings)
 
-        # Store document
-        self._documents[doc.id] = doc
+            # Now safe to update in-memory state
+            for chunk in doc.chunks:
+                self._chunks[chunk.id] = chunk
 
-        # Persist (content in per-doc file, headers in metadata index)
-        self._save_document_content(doc)
-        self._save_metadata()
-        self._vector_store.save()
+            self._documents[doc.id] = doc
+
+            # Persist (content in per-doc file, headers in metadata index)
+            self._save_document_content(doc)
+            self._save_metadata()
+            self._vector_store.save()
 
         return doc
 
@@ -509,45 +501,45 @@ class KnowledgeBaseManager:
         """
         start_time = time.time()
 
-        # Generate query embedding
+        # Generate query embedding outside lock (CPU-bound, no shared state)
         embed_start = time.time()
         query_embedding = self._embedding_service.embed_text(query)
         embed_time = (time.time() - embed_start) * 1000
 
-        # Search vector store
-        search_start = time.time()
-        raw_results = self._vector_store.search(query_embedding, top_k * 2)
-        search_time = (time.time() - search_start) * 1000
+        # Read shared state under lock
+        with self._lock:
+            search_start = time.time()
+            raw_results = self._vector_store.search(query_embedding, top_k * 2)
+            search_time = (time.time() - search_start) * 1000
 
-        # Build results with filtering
-        results: list[SearchResult] = []
-        for chunk_id, score in raw_results:
-            if len(results) >= top_k:
-                break
+            # Build results with filtering
+            results: list[SearchResult] = []
+            for chunk_id, score in raw_results:
+                if len(results) >= top_k:
+                    break
 
-            chunk = self._chunks.get(chunk_id)
-            if not chunk:
-                continue
-
-            doc = self._documents.get(chunk.document_id)
-            if not doc:
-                continue
-
-            # Apply filters
-            if filters:
-                if not self._matches_filters(doc, filters):
+                chunk = self._chunks.get(chunk_id)
+                if not chunk:
                     continue
 
-            highlight = truncate(chunk.content)
+                doc = self._documents.get(chunk.document_id)
+                if not doc:
+                    continue
 
-            results.append(
-                SearchResult(
-                    document=doc,
-                    chunk=chunk,
-                    score=score,
-                    highlight=highlight,
+                if filters:
+                    if not self._matches_filters(doc, filters):
+                        continue
+
+                highlight = truncate(chunk.content)
+
+                results.append(
+                    SearchResult(
+                        document=doc,
+                        chunk=chunk,
+                        score=score,
+                        highlight=highlight,
+                    )
                 )
-            )
 
         total_time = (time.time() - start_time) * 1000
 
@@ -639,23 +631,24 @@ class KnowledgeBaseManager:
         Returns:
             True if deleted, False if not found.
         """
-        doc = self._documents.get(doc_id)
-        if not doc:
-            return False
+        with self._lock:
+            doc = self._documents.get(doc_id)
+            if not doc:
+                return False
 
-        # Remove chunks from vector store
-        chunk_ids = [c.id for c in doc.chunks]
-        self._vector_store.remove_embeddings(chunk_ids)
+            # Remove chunks from vector store
+            chunk_ids = [c.id for c in doc.chunks]
+            self._vector_store.remove_embeddings(chunk_ids)
 
-        # Remove from memory
-        for chunk_id in chunk_ids:
-            self._chunks.pop(chunk_id, None)
-        del self._documents[doc_id]
+            # Remove from memory
+            for chunk_id in chunk_ids:
+                self._chunks.pop(chunk_id, None)
+            del self._documents[doc_id]
 
-        # Persist
-        self._delete_document_content(doc_id)
-        self._save_metadata()
-        self._vector_store.save()
+            # Persist
+            self._delete_document_content(doc_id)
+            self._save_metadata()
+            self._vector_store.save()
 
         return True
 
@@ -685,12 +678,13 @@ class KnowledgeBaseManager:
 
     def clear(self) -> None:
         """Clear all documents from the knowledge base."""
-        # Delete per-document content files
-        for doc_id in list(self._documents):
-            self._delete_document_content(doc_id)
+        with self._lock:
+            # Delete per-document content files
+            for doc_id in list(self._documents):
+                self._delete_document_content(doc_id)
 
-        self._documents = {}
-        self._chunks = {}
-        self._vector_store.clear()
-        self._save_metadata()
-        self._vector_store.save()
+            self._documents = {}
+            self._chunks = {}
+            self._vector_store.clear()
+            self._save_metadata()
+            self._vector_store.save()

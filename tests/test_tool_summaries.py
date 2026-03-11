@@ -195,6 +195,16 @@ class TestShellExecutor:
         assert format_tool_summary("shell_executor", result) == "Exit 127 (0.1s)"
 
 
+class TestSaveTasks:
+    def test_with_message(self):
+        result = {"success": True, "count": 3, "message": "Saved 3 tasks"}
+        assert format_tool_summary("save_tasks", result) == "Saved 3 tasks"
+
+    def test_fallback_without_message(self):
+        result = {"success": True, "count": 4}
+        assert format_tool_summary("save_tasks", result) == "4 tasks saved"
+
+
 class TestGetTasks:
     def test_basic(self):
         result = {"success": True, "tasks": [{"id": "1"}, {"id": "2"}], "count": 2}
@@ -380,39 +390,6 @@ class TestFallback:
             result = format_tool_summary(tool_name, {})
             # Should be None (formatter caught the KeyError) or a valid string
             assert result is None or isinstance(result, str), f"{tool_name} failed defensively"
-
-
-# ---------------------------------------------------------------------------
-# ADK event_processor: diff_compare summary dict bug is fixed
-# ---------------------------------------------------------------------------
-
-
-class TestADKSummaryDictBugFix:
-    """Verify the summary dict bug is fixed in ADK event processor."""
-
-    def test_dict_summary_not_stringified(self):
-        from agentic_cli.workflow.adk.event_processor import ADKEventProcessor
-
-        proc = ADKEventProcessor(model="test")
-        result = {
-            "success": True,
-            "diff": "...",
-            "summary": {"added": 3, "removed": 1, "changed": 2},
-            "similarity": 0.85,
-        }
-        summary = proc.generate_tool_summary("diff_compare", result, success=True)
-        # Should NOT contain the raw dict repr
-        assert "{'added'" not in summary
-        assert "+3 -1 ~2, 85% similar" == summary
-
-    def test_string_summary_still_works(self):
-        from agentic_cli.workflow.adk.event_processor import ADKEventProcessor
-
-        proc = ADKEventProcessor(model="test")
-        # A tool that returns a string summary should still pass through
-        result = {"summary": "All good", "other": "data"}
-        summary = proc.generate_tool_summary("some_unknown_tool", result, success=True)
-        assert summary == "All good"
 
 
 # ---------------------------------------------------------------------------

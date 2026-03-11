@@ -7,21 +7,22 @@ The base class provides auto-detection of required managers (memory, planning,
 HITL) based on tool requirements, creating them lazily when needed.
 
 It also provides shared implementations for:
-- User input handling (pending request dict + Future pattern)
+- User input handling (callback-based)
 - Model resolution (lazy resolution from settings)
 """
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
 from abc import ABC, abstractmethod
 from typing import Any, AsyncGenerator, Awaitable, Callable, Iterator, TYPE_CHECKING
 
 from agentic_cli.workflow.events import WorkflowEvent, UserInputRequest
 from agentic_cli.workflow.config import AgentConfig
-from agentic_cli.config import set_context_settings, set_context_workflow
+from agentic_cli.workflow.models import ModelRegistry
+from agentic_cli.config import set_context_settings
 from agentic_cli.workflow.context import (
+    set_context_workflow,
     set_context_memory_store,
     set_context_plan_store,
     set_context_task_store,
@@ -29,6 +30,7 @@ from agentic_cli.workflow.context import (
     set_context_user_kb_manager,
     set_context_approval_manager,
     set_context_llm_summarizer,
+    set_context_sandbox_manager,
 )
 from agentic_cli.logging import Loggers
 
@@ -39,6 +41,7 @@ if TYPE_CHECKING:
     from agentic_cli.tools.task_tools import TaskStore
     from agentic_cli.knowledge_base import KnowledgeBaseManager
     from agentic_cli.tools.hitl_tools import ApprovalManager
+    from agentic_cli.tools.sandbox.manager import SandboxManager
 
 logger = Loggers.workflow()
 
@@ -73,6 +76,7 @@ class BaseWorkflowManager(ABC):
         settings: "BaseSettings | None" = None,
         app_name: str | None = None,
         model: str | None = None,
+        on_event: Callable[[WorkflowEvent], WorkflowEvent | None] | None = None,
     ) -> None:
         """Initialize the workflow manager base.
 
@@ -81,6 +85,7 @@ class BaseWorkflowManager(ABC):
             settings: Application settings (resolved via get_settings() if None).
             app_name: Application name for services.
             model: Model override (auto-detected from API keys if not provided).
+            on_event: Optional hook to transform/filter events before yielding.
         """
         from agentic_cli.config import get_settings
 
@@ -88,14 +93,17 @@ class BaseWorkflowManager(ABC):
         self._settings = settings or get_settings()
         self._app_name = app_name or self._settings.app_name
         self._initialized = False
+        self._on_event = on_event
 
         # Model resolution (lazy)
         self._model: str | None = model
         self._model_resolved: bool = model is not None
 
-        # User input handling
-        self._pending_input: dict[str, tuple[UserInputRequest, asyncio.Future[str]]] = {}
+        # User input handling (callback-only)
         self._user_input_callback: Callable[[UserInputRequest], Awaitable[str]] | None = None
+
+        # Model registry
+        self._model_registry = ModelRegistry()
 
         # Auto-detect required managers from tools
         self._required_managers = self._detect_required_managers()
@@ -108,6 +116,17 @@ class BaseWorkflowManager(ABC):
         self._user_kb_manager: "KnowledgeBaseManager | None" = None
         self._approval_manager: "ApprovalManager | None" = None
         self._llm_summarizer: Any | None = None
+        self._sandbox_manager: "SandboxManager | None" = None
+
+    def set_input_callback(
+        self, callback: Callable[[UserInputRequest], Awaitable[str]]
+    ) -> None:
+        """Register a callback for handling user input requests from tools."""
+        self._user_input_callback = callback
+
+    def clear_input_callback(self) -> None:
+        """Remove the registered user input callback."""
+        self._user_input_callback = None
 
     @property
     def agent_configs(self) -> list[AgentConfig]:
@@ -128,6 +147,11 @@ class BaseWorkflowManager(ABC):
     def is_initialized(self) -> bool:
         """Check if services have been initialized."""
         return self._initialized
+
+    @property
+    def model_registry(self) -> ModelRegistry:
+        """Get the model registry."""
+        return self._model_registry
 
     @property
     def required_managers(self) -> set[str]:
@@ -168,6 +192,11 @@ class BaseWorkflowManager(ABC):
     def llm_summarizer(self) -> Any | None:
         """Get the LLM summarizer (if required by tools)."""
         return self._llm_summarizer
+
+    @property
+    def sandbox_manager(self) -> "SandboxManager | None":
+        """Get the sandbox manager (if required by tools)."""
+        return self._sandbox_manager
 
     def _detect_required_managers(self) -> set[str]:
         """Scan all agent tools for 'requires' metadata.
@@ -235,6 +264,10 @@ class BaseWorkflowManager(ABC):
         if "llm_summarizer" in self._required_managers and self._llm_summarizer is None:
             self._llm_summarizer = self._create_summarizer()
 
+        if "sandbox_manager" in self._required_managers and self._sandbox_manager is None:
+            from agentic_cli.tools.sandbox.manager import SandboxManager
+            self._sandbox_manager = SandboxManager(self._settings)
+
     def _create_summarizer(self) -> Any:
         """Create an LLM summarizer for webfetch.
 
@@ -264,12 +297,41 @@ class BaseWorkflowManager(ABC):
             set_context_user_kb_manager(self._user_kb_manager),
             set_context_approval_manager(self._approval_manager),
             set_context_llm_summarizer(self._llm_summarizer),
+            set_context_sandbox_manager(self._sandbox_manager),
         ]
         try:
             yield
         finally:
             for token in tokens:
                 token.var.reset(token)
+
+    def _cleanup_managers(self) -> None:
+        """Clean up all manager resources (call from subclass cleanup)."""
+        if self._sandbox_manager is not None:
+            self._sandbox_manager.cleanup()
+            self._sandbox_manager = None
+        self._memory_manager = None
+        self._plan_store = None
+        self._task_store = None
+        self._kb_manager = None
+        self._user_kb_manager = None
+        self._approval_manager = None
+        self._llm_summarizer = None
+
+    @property
+    @abstractmethod
+    def backend_type(self) -> str:
+        """Return the backend type identifier (e.g. 'adk', 'langgraph')."""
+        ...
+
+    def _apply_event_hook(self, event: WorkflowEvent) -> WorkflowEvent | None:
+        """Apply the optional on_event transformation hook.
+
+        Returns the (possibly transformed) event, or None if suppressed.
+        """
+        if self._on_event:
+            return self._on_event(event)
+        return event
 
     @property
     def model(self) -> str:
@@ -284,12 +346,12 @@ class BaseWorkflowManager(ABC):
             logger.info("model_resolved", model=self._model)
         return self._model  # type: ignore[return-value]
 
-    @abstractmethod
     async def initialize_services(self, validate: bool = True) -> None:
         """Initialize backend services asynchronously.
 
-        This method should set up all necessary services for the workflow
-        backend (session services, runners, agents, etc.).
+        Template method that handles shared scaffolding (guard, validation,
+        key export, manager init, flag) and delegates backend-specific work
+        to :meth:`_do_initialize`.
 
         Args:
             validate: If True, validate settings before initialization.
@@ -297,7 +359,43 @@ class BaseWorkflowManager(ABC):
         Raises:
             SettingsValidationError: If settings validation fails.
         """
-        pass
+        if self._initialized:
+            return
+
+        from agentic_cli.config import validate_settings
+
+        if validate:
+            validate_settings(self._settings)
+
+        self._settings.export_api_keys_to_env()
+
+        # Refresh model registry from APIs
+        await self._model_registry.refresh(
+            google_api_key=self._settings.google_api_key,
+            anthropic_api_key=self._settings.anthropic_api_key,
+        )
+        self._settings.set_model_registry(self._model_registry)
+
+        await self._do_initialize()
+        self._ensure_managers_initialized()
+        self._initialized = True
+
+    @abstractmethod
+    async def _do_initialize(self) -> None:
+        """Backend-specific initialization (create agents/graph).
+
+        Subclasses implement this instead of ``initialize_services()``.
+        """
+        ...
+
+    def _reset_model(self, model: str | None) -> None:
+        """Reset model state for reinitialisation."""
+        if model is not None:
+            self._model = model
+            self._model_resolved = True
+        else:
+            self._model = None
+            self._model_resolved = False
 
     @abstractmethod
     async def process(
@@ -353,37 +451,23 @@ class BaseWorkflowManager(ABC):
         """
         pass
 
-    # User input handling methods - concrete implementations
-
-    def has_pending_input(self) -> bool:
-        """Check if there are pending user input requests."""
-        return len(self._pending_input) > 0
-
-    def get_pending_input_request(self) -> UserInputRequest | None:
-        """Get the next pending input request without removing it."""
-        if self._pending_input:
-            request_id = next(iter(self._pending_input))
-            return self._pending_input[request_id][0]
-        return None
+    # User input handling — callback-only
 
     async def request_user_input(self, request: UserInputRequest) -> str:
-        """Request user input from the CLI.
+        """Request user input from the CLI via callback.
 
-        Called by tools that need user interaction.
-
-        When ``_user_input_callback`` is set (by MessageProcessor), the
-        callback is invoked directly, which avoids the deadlock inherent
-        in the Future pattern (the Future can never be resolved while the
-        ADK runner is blocked awaiting it).
-
-        When no callback is set (e.g. in tests), falls back to the
-        original Future pattern for backward compatibility.
+        Called by tools that need user interaction. Requires
+        ``set_input_callback()`` to be set by the consumer (e.g.
+        MessageProcessor) before any tool invokes this method.
 
         Args:
             request: The user input request.
 
         Returns:
             User's response string.
+
+        Raises:
+            RuntimeError: If no callback is registered.
         """
         logger.debug(
             "user_input_requested",
@@ -391,40 +475,13 @@ class BaseWorkflowManager(ABC):
             tool_name=request.tool_name,
         )
 
-        if self._user_input_callback is not None:
-            return await self._user_input_callback(request)
+        if self._user_input_callback is None:
+            raise RuntimeError(
+                "No user input callback registered. "
+                "Call set_input_callback() before invoking tools that require user input."
+            )
 
-        # Fallback: Future pattern (for tests without callback)
-        loop = asyncio.get_event_loop()
-        future: asyncio.Future[str] = loop.create_future()
-        self._pending_input[request.request_id] = (request, future)
-        return await future
-
-    def provide_user_input(self, request_id: str, response: str) -> bool:
-        """Provide user input for a pending request.
-
-        Called by CLI when user responds to a USER_INPUT_REQUIRED event.
-
-        Args:
-            request_id: The request ID from the event metadata.
-            response: User's response.
-
-        Returns:
-            True if request was found and resolved, False otherwise.
-        """
-        if request_id not in self._pending_input:
-            logger.warning("unknown_input_request", request_id=request_id)
-            return False
-
-        request, future = self._pending_input.pop(request_id)
-        future.set_result(response)
-
-        logger.debug(
-            "user_input_provided",
-            request_id=request_id,
-            tool_name=request.tool_name,
-        )
-        return True
+        return await self._user_input_callback(request)
 
     # Async context manager support
 
@@ -470,6 +527,139 @@ class BaseWorkflowManager(ABC):
         raise NotImplementedError(
             f"{self.__class__.__name__} does not implement generate_simple"
         )
+
+    # -------------------------------------------------------------------------
+    # Session save/resume
+    # -------------------------------------------------------------------------
+
+    async def save_session(self, session_id: str | None = None) -> dict:
+        """Save current session state to disk.
+
+        Extracts messages and current agent from the backend via abstract
+        hooks, then persists via SessionPersistence.save_snapshot().
+
+        Args:
+            session_id: Session ID to save under. Uses backend session_id if None.
+
+        Returns:
+            Dict with success status and path.
+        """
+        from datetime import datetime
+        from agentic_cli.persistence.session import SessionPersistence, SessionSnapshot
+
+        sid = session_id or getattr(self, "session_id", "default_session")
+
+        try:
+            messages = await self._extract_session_messages(sid)
+            current_agent = await self._extract_current_agent(sid)
+
+            metadata: dict[str, Any] = {
+                "model": self.model,
+                "backend_type": self.backend_type,
+                "app_name": self._app_name,
+            }
+            if current_agent:
+                metadata["current_agent"] = current_agent
+
+            now = datetime.now()
+            snapshot = SessionSnapshot(
+                session_id=sid,
+                created_at=now,
+                saved_at=now,
+                messages=messages,
+                metadata=metadata,
+            )
+
+            persistence = SessionPersistence(self._settings)
+            path = persistence.save_snapshot(snapshot)
+
+            logger.info("session_saved", session_id=sid, message_count=len(messages))
+            return {"success": True, "session_id": sid, "path": str(path), "message_count": len(messages)}
+
+        except Exception as exc:
+            logger.error("session_save_failed", session_id=sid, error=str(exc))
+            return {"success": False, "error": str(exc)}
+
+    async def load_session(self, session_id: str) -> bool:
+        """Load a saved session and inject it into the backend.
+
+        Args:
+            session_id: Session ID to load.
+
+        Returns:
+            True if session was loaded successfully, False otherwise.
+        """
+        from agentic_cli.persistence.session import SessionPersistence
+
+        persistence = SessionPersistence(self._settings)
+        snapshot = persistence.load_session(session_id)
+
+        if snapshot is None:
+            logger.debug("session_not_found_for_load", session_id=session_id)
+            return False
+
+        # Warn on backend mismatch (but still load — format is normalized)
+        saved_backend = snapshot.metadata.get("backend_type")
+        if saved_backend and saved_backend != self.backend_type:
+            logger.warning(
+                "session_backend_mismatch",
+                saved_backend=saved_backend,
+                current_backend=self.backend_type,
+                session_id=session_id,
+            )
+
+        current_agent = snapshot.metadata.get("current_agent")
+
+        try:
+            await self._inject_session_messages(session_id, snapshot.messages, current_agent)
+            if hasattr(self, "session_id"):
+                self.session_id = session_id
+            logger.info(
+                "session_loaded",
+                session_id=session_id,
+                message_count=len(snapshot.messages),
+            )
+            return True
+        except Exception as exc:
+            logger.error("session_load_failed", session_id=session_id, error=str(exc))
+            return False
+
+    def list_sessions(self) -> list[dict]:
+        """List all saved sessions.
+
+        Returns:
+            List of session summary dicts.
+        """
+        from agentic_cli.persistence.session import SessionPersistence
+
+        persistence = SessionPersistence(self._settings)
+        return persistence.list_sessions()
+
+    @abstractmethod
+    async def _extract_session_messages(self, session_id: str) -> list[dict]:
+        """Extract normalized messages from the backend session.
+
+        Returns list of dicts with structure:
+        - {"role": "user", "content": "..."}
+        - {"role": "assistant", "content": "...", "tool_calls": [...]}
+        - {"role": "tool", "tool_call_id": "...", "name": "...", "content": "..."}
+        """
+        ...
+
+    @abstractmethod
+    async def _extract_current_agent(self, session_id: str) -> str | None:
+        """Return the name of the currently active agent, or None."""
+        ...
+
+    @abstractmethod
+    async def _inject_session_messages(
+        self,
+        session_id: str,
+        messages: list[dict],
+        current_agent: str | None = None,
+    ) -> None:
+        """Inject normalized messages into the backend session."""
+        ...
 
     def _emit_task_progress_event(self) -> WorkflowEvent | None:
         """Build a TASK_PROGRESS event from TaskStore or PlanStore.

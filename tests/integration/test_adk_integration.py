@@ -18,9 +18,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager
-from agentic_cli.workflow.adk.event_processor import (
-    _is_rate_limit_error,
-    _parse_retry_delay,
+from agentic_cli.workflow.retry import (
+    is_rate_limit_error,
+    parse_retry_delay,
 )
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.events import EventType, WorkflowEvent
@@ -406,33 +406,33 @@ class TestADKUsageMetadata:
 
 
 class TestIsRateLimitError:
-    """Tests for _is_rate_limit_error helper."""
+    """Tests for is_rate_limit_error helper."""
 
     def test_rate_limit_error_by_code(self):
         """ClientError with code=429 is detected."""
         error = Exception("Too many requests")
         error.code = 429
-        assert _is_rate_limit_error(error) is True
+        assert is_rate_limit_error(error) is True
 
     def test_rate_limit_error_by_status_string(self):
         """Error containing RESOURCE_EXHAUSTED is detected."""
         error = Exception("RESOURCE_EXHAUSTED: quota exceeded")
-        assert _is_rate_limit_error(error) is True
+        assert is_rate_limit_error(error) is True
 
     def test_non_rate_limit_error_500(self):
         """Server error (500) is not a rate limit error."""
         error = Exception("Internal server error")
         error.code = 500
-        assert _is_rate_limit_error(error) is False
+        assert is_rate_limit_error(error) is False
 
     def test_non_rate_limit_generic(self):
         """Generic exception is not a rate limit error."""
         error = ValueError("something went wrong")
-        assert _is_rate_limit_error(error) is False
+        assert is_rate_limit_error(error) is False
 
 
 class TestParseRetryDelay:
-    """Tests for _parse_retry_delay helper."""
+    """Tests for parse_retry_delay helper."""
 
     def test_parse_delay_from_details(self):
         """Extracts delay from structured error.details."""
@@ -444,17 +444,17 @@ class TestParseRetryDelay:
                 ]
             }
         }
-        assert _parse_retry_delay(error) == 41.0
+        assert parse_retry_delay(error) == 41.0
 
     def test_parse_delay_from_message(self):
         """Extracts delay from error message string."""
         error = Exception("Please retry in 2.5s")
-        assert _parse_retry_delay(error) == 2.5
+        assert parse_retry_delay(error) == 2.5
 
     def test_parse_delay_none_for_generic(self):
         """Returns None for generic exception without delay info."""
         error = Exception("something failed")
-        assert _parse_retry_delay(error) is None
+        assert parse_retry_delay(error) is None
 
     def test_parse_delay_from_details_float(self):
         """Handles float seconds in retryDelay field."""
@@ -466,7 +466,7 @@ class TestParseRetryDelay:
                 ]
             }
         }
-        assert _parse_retry_delay(error) == 10.5
+        assert parse_retry_delay(error) == 10.5
 
 
 class TestTaskProgressAutoClean:
@@ -489,8 +489,8 @@ class TestTaskProgressAutoClean:
         event = mgr._emit_task_progress_event()
         assert event is not None
         assert event.type == EventType.TASK_PROGRESS
-        assert "[x] Task 1" in event.content
-        assert "[x] Task 2" in event.content
+        assert "[✓] Task 1" in event.content
+        assert "[✓] Task 2" in event.content
         assert event.metadata["progress"]["completed"] == 2
         assert store.is_empty()
 
@@ -536,7 +536,7 @@ class TestTaskProgressAutoClean:
         assert event is not None
         assert event.type == EventType.TASK_PROGRESS
         assert "Setup:" in event.content
-        assert "[x] Install deps" in event.content
+        assert "[✓] Install deps" in event.content
         assert "[ ] Configure env" in event.content
         assert "Build:" in event.content
         assert "[ ] Compile" in event.content
@@ -720,12 +720,9 @@ class TestUserInputCallback:
         assert result == "user answer"
         assert len(captured_requests) == 1
         assert captured_requests[0].request_id == "req-1"
-        # Future pattern should NOT have been used
-        assert len(manager._pending_input) == 0
 
-    async def test_future_pattern_without_callback(self, mock_settings, simple_agent_config):
-        """Without callback, request_user_input uses the Future pattern."""
-        import asyncio
+    async def test_request_user_input_without_callback_raises(self, mock_settings, simple_agent_config):
+        """Without callback, request_user_input raises RuntimeError."""
         from agentic_cli.workflow.events import UserInputRequest, InputType
 
         manager = _create_manager(mock_settings, simple_agent_config)
@@ -738,18 +735,5 @@ class TestUserInputCallback:
             input_type=InputType.TEXT,
         )
 
-        # Start request_user_input in background — it will block on the Future
-        task = asyncio.create_task(manager.request_user_input(request))
-
-        # Let the event loop tick so the Future is registered
-        await asyncio.sleep(0)
-
-        assert "req-2" in manager._pending_input
-
-        # Resolve via provide_user_input
-        resolved = manager.provide_user_input("req-2", "large")
-        assert resolved is True
-
-        result = await task
-        assert result == "large"
-        assert len(manager._pending_input) == 0
+        with pytest.raises(RuntimeError, match="No user input callback registered"):
+            await manager.request_user_input(request)

@@ -6,6 +6,7 @@ Provides pattern-based content search across files:
 This is a read-only tool with PermissionLevel.SAFE.
 """
 
+import functools
 import re
 import subprocess
 from pathlib import Path
@@ -99,8 +100,9 @@ def grep(
     )
 
 
+@functools.lru_cache(maxsize=1)
 def _ripgrep_available() -> bool:
-    """Check if ripgrep (rg) is available."""
+    """Check if ripgrep (rg) is available. Result is cached."""
     try:
         subprocess.run(["rg", "--version"], capture_output=True, check=True)
         return True

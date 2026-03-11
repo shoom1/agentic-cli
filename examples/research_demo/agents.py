@@ -108,7 +108,7 @@ When the user asks you to research something:
 6. For arXiv paper research, **delegate to arxiv_specialist**
 7. Execute ONE task at a time, updating the plan after each
 8. Use `web_fetch` to extract information from specific URLs found during research
-9. Use `execute_python` for data analysis, calculations, or processing
+9. Use `execute_python` for quick calculations and data validation
 10. Use `ask_clarification` when you need user input to proceed
 11. Update the plan with `save_plan` if you discover changes are needed
 12. Store learnings with `save_memory` and share them with the user
@@ -156,7 +156,8 @@ AGENT_CONFIGS = [
             # arXiv (2 tools)
             search_arxiv,
             fetch_arxiv_paper,
-            # Document store (3 tools)
+            # Document store (4 tools)
+            search_knowledge_base,
             ingest_document,
             list_documents,
             read_document,

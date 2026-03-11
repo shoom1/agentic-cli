@@ -14,6 +14,7 @@ from agentic_cli.logging import Loggers
 from agentic_cli.persistence._utils import (
     atomic_write_json,
     atomic_write_text,
+    file_lock,
     sanitize_filename,
 )
 
@@ -72,7 +73,7 @@ class ArtifactManager:
     """Manages artifact persistence to disk.
 
     Artifacts are stored in a workspace directory with the following structure:
-        {workspace_dir}/workspace/
+        {workspace_dir}/artifacts/
         ├── plans/
         │   └── {plan_name}.md
         ├── code/
@@ -151,7 +152,7 @@ class ArtifactManager:
                     return {"artifacts": migrated}
                 return data
             except (json.JSONDecodeError, KeyError) as exc:
-                logger.debug("artifact_index_load_failed", error=str(exc))
+                logger.warning("artifact_index_load_failed", error=str(exc))
         return {"artifacts": {}}
 
     def _save_index(self, index: dict) -> None:
@@ -175,15 +176,47 @@ class ArtifactManager:
         file_path = self._get_artifact_path(artifact)
         atomic_write_text(file_path, artifact.content)
 
-        # Update index — direct dict assignment (O(1))
-        index = self._load_index()
-        key = self._make_key(artifact.name, artifact.artifact_type.value)
-        artifact_entry = artifact.to_dict()
-        artifact_entry["file_path"] = str(file_path)
-        index["artifacts"][key] = artifact_entry
-        self._save_index(index)
+        # Update index (lock to prevent TOCTOU race)
+        with file_lock(self._get_index_path()):
+            index = self._load_index()
+            key = self._make_key(artifact.name, artifact.artifact_type.value)
+            artifact_entry = artifact.to_dict()
+            artifact_entry["file_path"] = str(file_path)
+            index["artifacts"][key] = artifact_entry
+            self._save_index(index)
 
         return file_path
+
+    def _is_safe_path(self, file_path: Path) -> bool:
+        """Check that a file path is within the workspace directory."""
+        try:
+            file_path.resolve().relative_to(self.workspace_path.resolve())
+            return True
+        except ValueError:
+            logger.warning(
+                "artifact_path_traversal_blocked",
+                file_path=str(file_path),
+                workspace=str(self.workspace_path),
+            )
+            return False
+
+    def _load_artifact_from_entry(self, entry: dict) -> Artifact | None:
+        """Load an artifact from an index entry, reading content from disk.
+
+        Args:
+            entry: Index entry dict with at least 'file_path'.
+
+        Returns:
+            Artifact with content loaded, or None if path is unsafe or missing.
+        """
+        file_path = Path(entry["file_path"])
+        if not self._is_safe_path(file_path):
+            return None
+        if not file_path.exists():
+            return None
+        artifact = Artifact.from_dict(entry)
+        artifact.content = file_path.read_text()
+        return artifact
 
     def load(self, name: str, artifact_type: ArtifactType) -> Artifact | None:
         """Load an artifact from disk.
@@ -199,12 +232,7 @@ class ArtifactManager:
         key = self._make_key(name, artifact_type.value)
         entry = index["artifacts"].get(key)
         if entry:
-            file_path = Path(entry["file_path"])
-            if file_path.exists():
-                content = file_path.read_text()
-                artifact = Artifact.from_dict(entry)
-                artifact.content = content
-                return artifact
+            return self._load_artifact_from_entry(entry)
         return None
 
     def list_artifacts(
@@ -225,10 +253,8 @@ class ArtifactManager:
                 artifact_type is None
                 or entry["artifact_type"] == artifact_type.value
             ):
-                file_path = Path(entry["file_path"])
-                if file_path.exists():
-                    artifact = Artifact.from_dict(entry)
-                    artifact.content = file_path.read_text()
+                artifact = self._load_artifact_from_entry(entry)
+                if artifact is not None:
                     artifacts.append(artifact)
         return artifacts
 
@@ -242,15 +268,16 @@ class ArtifactManager:
         Returns:
             True if deleted, False if not found
         """
-        index = self._load_index()
-        key = self._make_key(name, artifact_type.value)
-        entry = index["artifacts"].pop(key, None)
-        if entry:
-            file_path = Path(entry["file_path"])
-            if file_path.exists():
-                file_path.unlink()
-            self._save_index(index)
-            return True
+        with file_lock(self._get_index_path()):
+            index = self._load_index()
+            key = self._make_key(name, artifact_type.value)
+            entry = index["artifacts"].pop(key, None)
+            if entry:
+                file_path = Path(entry["file_path"])
+                if self._is_safe_path(file_path) and file_path.exists():
+                    file_path.unlink()
+                self._save_index(index)
+                return True
         return False
 
     def get_workspace_path(self) -> Path:

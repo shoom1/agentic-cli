@@ -4,7 +4,9 @@ This module provides the WorkflowController class that encapsulates
 the complex async lifecycle of workflow manager initialization,
 including background init, readiness checking, and reinitialization.
 
-Also exports create_workflow_manager_from_settings() factory function.
+The factory function ``create_workflow_manager_from_settings()`` now
+lives in ``workflow.factory``; it is re-exported here for backward
+compatibility.
 """
 
 from __future__ import annotations
@@ -16,6 +18,13 @@ from typing import TYPE_CHECKING, AsyncIterator
 
 from agentic_cli.logging import Loggers
 
+# Re-export factory helpers for backward compatibility
+from agentic_cli.workflow.factory import (  # noqa: F401
+    _is_claude_model,
+    _resolve_effective_model,
+    create_workflow_manager_from_settings,
+)
+
 if TYPE_CHECKING:
     from agentic_cli.cli.usage_tracker import UsageTracker
     from agentic_cli.config import BaseSettings
@@ -24,102 +33,6 @@ if TYPE_CHECKING:
     from thinking_prompt import ThinkingPromptSession
 
 logger = Loggers.cli()
-
-# Thread pool for background initialization (single worker)
-_init_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="workflow-init")
-
-
-def _is_claude_model(model: str | None) -> bool:
-    """Check if a model string refers to a Claude (Anthropic) model."""
-    return model is not None and model.startswith("claude-")
-
-
-def _resolve_effective_model(
-    model: str | None, settings: "BaseSettings"
-) -> str | None:
-    """Resolve the effective model from explicit override or settings."""
-    if model:
-        return model
-    return getattr(settings, "default_model", None)
-
-
-def create_workflow_manager_from_settings(
-    agent_configs: list["AgentConfig"],
-    settings: "BaseSettings",
-    app_name: str | None = None,
-    model: str | None = None,
-    **kwargs,
-) -> "BaseWorkflowManager":
-    """Factory function to create the appropriate workflow manager based on settings.
-
-    Creates either a GoogleADKWorkflowManager or LangGraphWorkflowManager
-    based on the settings.orchestrator configuration. Claude models are
-    automatically routed to LangGraph because ADK's LiteLLM adapter has
-    critical issues with tool calling, thinking, and streaming.
-
-    Args:
-        agent_configs: List of agent configurations.
-        settings: Application settings (determines orchestrator type).
-        app_name: Application name for services.
-        model: Model override.
-        **kwargs: Additional arguments passed to the specific manager.
-
-    Returns:
-        BaseWorkflowManager instance (ADK or LangGraph based on settings).
-
-    Raises:
-        ImportError: If LangGraph is selected but not installed.
-
-    Example:
-        settings = MySettings(orchestrator="langgraph")
-        configs = [AgentConfig(name="agent", prompt="...")]
-        manager = create_workflow_manager_from_settings(configs, settings)
-    """
-    from agentic_cli.workflow.settings import OrchestratorType
-
-    orchestrator = getattr(settings, "orchestrator", OrchestratorType.ADK)
-    effective_model = _resolve_effective_model(model, settings)
-    use_langgraph = orchestrator == OrchestratorType.LANGGRAPH or _is_claude_model(
-        effective_model
-    )
-
-    if use_langgraph and _is_claude_model(effective_model) and orchestrator != OrchestratorType.LANGGRAPH:
-        logger.info(
-            "auto_switching_to_langgraph",
-            model=effective_model,
-            reason="Claude models require LangGraph orchestrator (ADK LiteLLM adapter has critical issues)",
-        )
-
-    if use_langgraph:
-        try:
-            from agentic_cli.workflow.langgraph import LangGraphWorkflowManager
-
-            checkpointer = getattr(settings, "langgraph_checkpointer", "memory")
-            return LangGraphWorkflowManager(
-                agent_configs=agent_configs,
-                settings=settings,
-                app_name=app_name,
-                model=model,
-                checkpointer=checkpointer,
-                **kwargs,
-            )
-        except ImportError as e:
-            raise ImportError(
-                f"LangGraph orchestrator required but dependencies not installed. "
-                f"Install with: pip install agentic-cli[langgraph]\n"
-                f"Original error: {e}"
-            ) from e
-
-    else:  # Default to ADK
-        from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager
-
-        return GoogleADKWorkflowManager(
-            agent_configs=agent_configs,
-            settings=settings,
-            app_name=app_name,
-            model=model,
-            **kwargs,
-        )
 
 
 class WorkflowController:
@@ -169,6 +82,11 @@ class WorkflowController:
             )
 
         self._create_fn = _create_workflow
+
+        # Thread pool for background initialization (per-controller, single worker)
+        self._init_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="workflow-init"
+        )
 
         # Workflow state
         self._workflow: "BaseWorkflowManager | None" = None
@@ -232,7 +150,7 @@ class WorkflowController:
 
             # Step 1: Create workflow manager (sync, in thread pool)
             self._workflow = await loop.run_in_executor(
-                _init_executor, _create_workflow
+                self._init_executor, _create_workflow
             )
 
             # Step 2: Initialize services (async - builds graph, loads LLM, etc.)
@@ -265,7 +183,7 @@ class WorkflowController:
         if not self._init_task.done():
             # Show user we're waiting for initialization
             if ui is not None:
-                ui.start_thinking(lambda: "Waiting for initialization...")
+                ui.start_thinking(lambda: "Waiting for initialization...", content_format="ansi")
             try:
                 await self._init_task
             finally:
@@ -290,14 +208,12 @@ class WorkflowController:
             return False
 
         from agentic_cli.workflow.settings import OrchestratorType
+        from agentic_cli.workflow.langgraph.manager import LangGraphWorkflowManager
 
         orchestrator = getattr(self._settings, "orchestrator", OrchestratorType.ADK)
         new_needs_langgraph = orchestrator == OrchestratorType.LANGGRAPH or _is_claude_model(new_model)
 
-        # Check current manager type by class name to avoid isinstance issues
-        # when the class may not be importable (LangGraph not installed)
-        current_cls_name = type(self._workflow).__name__
-        current_is_langgraph = current_cls_name == "LangGraphWorkflowManager"
+        current_is_langgraph = isinstance(self._workflow, LangGraphWorkflowManager)
 
         return new_needs_langgraph != current_is_langgraph
 
@@ -342,6 +258,7 @@ class WorkflowController:
                 await self._init_task
             except asyncio.CancelledError:
                 pass
+        self._init_executor.shutdown(wait=False)
 
     def update_status_bar(self, ui: "ThinkingPromptSession") -> None:
         """Update UI status bar with current workflow status.
