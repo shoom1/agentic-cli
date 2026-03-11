@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.4] - 2026-03-11
+
+### Added
+- **Session Save/Resume**: Persistent conversations across CLI exits with `/save` and `/resume`
+- **Sandbox Executor**: Stateful multi-turn Python code execution with sandboxing and default deps
+- **Context Window Management**: Native ADK and LangGraph context trimming with source-level detection
+- **Context Window Visibility**: Trim detection, status bar token display, and `/status` breakdown
+- **Dynamic Model Registry**: Replace static model lists with live API discovery from Google/Anthropic
+- **Task Progress Display**: Rich-colored task progress in thinking box, persisted across turns
+
+### Changed
+- **Architecture**: Separated workflow+tools layer from UI/CLI layer; composable settings mixins
+- **DRY/SOLID Cleanup** (PR #59, #60): Deduplicated config paths, ArXiv parsing, session persistence, artifact loading; extracted `drain_trim_events()`, `format_detail_rows()`, `format_task_checklist()`; removed dead code (`get_help()`, `FinanceResearchState`, unused settings introspection); replaced dynamic `type()` with `_SessionEvent` class; moved token-drop heuristic into `UsageTracker`
+- **MessageProcessor**: Removed dead code, unused params, cleaner state init
+- **HITL**: Removed dead Future-based machinery, simplified callback path
+- **Ripgrep**: Cache availability check with `lru_cache`
+
+### Fixed
+- Executor import validation blocking allowed submodules
+- Settings not persisting (replaced `exclude_defaults` with explicit exclusion)
+- `verbose_thinking` not persisting across restarts
+- Thread safety, path traversal, and TOCTOU race conditions in persistence
+- VectorStore crash safety: write mappings before FAISS index
+- Embeddings: update in-memory state after `ingest_document`
+- `open_document`: extension allowlist, DANGEROUS permission, audit logging
+
+### Removed
+- `FinanceResearchState` (domain-specific code in shared library)
+- Dead `get_help()`, `get_ui_section`, `is_ui_hidden` methods
+- Dead `generate_tool_summary`, `clear_context`/`unbind_context`, model constant re-exports
+- Dead `cli/settings.py` re-export shim
+
 ## [0.4.3] - 2026-02-12
 
 ### Changed
