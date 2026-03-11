@@ -31,8 +31,8 @@ from agentic_cli.tools.registry import (
 
 
 @dataclass
-class SearchResult:
-    """A single search result."""
+class WebSearchResult:
+    """A single web search result."""
 
     title: str
     url: str
@@ -44,7 +44,7 @@ class SearchBackend(ABC):
     """Abstract base class for search backends."""
 
     @abstractmethod
-    async def search(self, query: str, max_results: int = 5) -> list[SearchResult]:
+    async def search(self, query: str, max_results: int = 5) -> list[WebSearchResult]:
         """Execute a search query.
 
         Args:
@@ -71,7 +71,7 @@ class TavilyBackend(SearchBackend):
     def __init__(self, api_key: str) -> None:
         self.api_key = api_key
 
-    async def search(self, query: str, max_results: int = 5) -> list[SearchResult]:
+    async def search(self, query: str, max_results: int = 5) -> list[WebSearchResult]:
         """Search using Tavily API."""
         async with httpx.AsyncClient() as client:
             response = await client.post(
@@ -89,7 +89,7 @@ class TavilyBackend(SearchBackend):
 
         results = []
         for item in data.get("results", []):
-            results.append(SearchResult(
+            results.append(WebSearchResult(
                 title=item.get("title", ""),
                 url=item.get("url", ""),
                 snippet=item.get("content", ""),
@@ -112,7 +112,7 @@ class BraveBackend(SearchBackend):
     def __init__(self, api_key: str) -> None:
         self.api_key = api_key
 
-    async def search(self, query: str, max_results: int = 5) -> list[SearchResult]:
+    async def search(self, query: str, max_results: int = 5) -> list[WebSearchResult]:
         """Search using Brave Search API."""
         async with httpx.AsyncClient() as client:
             response = await client.get(
@@ -132,7 +132,7 @@ class BraveBackend(SearchBackend):
 
         results = []
         for item in data.get("web", {}).get("results", []):
-            results.append(SearchResult(
+            results.append(WebSearchResult(
                 title=item.get("title", ""),
                 url=item.get("url", ""),
                 snippet=item.get("description", ""),

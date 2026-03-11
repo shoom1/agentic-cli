@@ -109,23 +109,6 @@ class ApprovalState(TypedDict, total=False):
     approval_timestamp: datetime | None
 
 
-class FinanceResearchState(ResearchState, ApprovalState, total=False):
-    """State for finance-domain research workflows.
-
-    Combines research state with approval state for workflows that
-    require compliance approval for high-risk findings.
-
-    Fields:
-        risk_level: Assessed risk level (low/medium/high/critical)
-        compliance_notes: Notes from compliance review
-        regulatory_flags: List of regulatory concerns flagged
-    """
-
-    risk_level: Literal["low", "medium", "high", "critical"] | None
-    compliance_notes: str | None
-    regulatory_flags: list[str]
-
-
 @dataclass
 class CheckpointData:
     """Data structure for workflow checkpoints.
@@ -165,4 +148,3 @@ class CheckpointData:
 AgentStateType = AgentState
 ResearchStateType = ResearchState
 ApprovalStateType = ApprovalState
-FinanceResearchStateType = FinanceResearchState

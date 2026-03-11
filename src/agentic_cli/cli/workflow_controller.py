@@ -34,9 +34,6 @@ if TYPE_CHECKING:
 
 logger = Loggers.cli()
 
-# Thread pool for background initialization (single worker)
-_init_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="workflow-init")
-
 
 class WorkflowController:
     """Manages the workflow manager lifecycle.
@@ -85,6 +82,11 @@ class WorkflowController:
             )
 
         self._create_fn = _create_workflow
+
+        # Thread pool for background initialization (per-controller, single worker)
+        self._init_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="workflow-init"
+        )
 
         # Workflow state
         self._workflow: "BaseWorkflowManager | None" = None
@@ -148,7 +150,7 @@ class WorkflowController:
 
             # Step 1: Create workflow manager (sync, in thread pool)
             self._workflow = await loop.run_in_executor(
-                _init_executor, _create_workflow
+                self._init_executor, _create_workflow
             )
 
             # Step 2: Initialize services (async - builds graph, loads LLM, etc.)
@@ -206,11 +208,12 @@ class WorkflowController:
             return False
 
         from agentic_cli.workflow.settings import OrchestratorType
+        from agentic_cli.workflow.langgraph.manager import LangGraphWorkflowManager
 
         orchestrator = getattr(self._settings, "orchestrator", OrchestratorType.ADK)
         new_needs_langgraph = orchestrator == OrchestratorType.LANGGRAPH or _is_claude_model(new_model)
 
-        current_is_langgraph = self._workflow.backend_type == "langgraph"
+        current_is_langgraph = isinstance(self._workflow, LangGraphWorkflowManager)
 
         return new_needs_langgraph != current_is_langgraph
 
@@ -255,6 +258,7 @@ class WorkflowController:
                 await self._init_task
             except asyncio.CancelledError:
                 pass
+        self._init_executor.shutdown(wait=False)
 
     def update_status_bar(self, ui: "ThinkingPromptSession") -> None:
         """Update UI status bar with current workflow status.

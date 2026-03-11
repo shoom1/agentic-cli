@@ -164,11 +164,20 @@ class TestContextWindowTracking:
         tracker.record({"prompt_tokens": 6000, "completion_tokens": 300})
         assert tracker.last_prompt_tokens == 6000
 
-    def test_record_does_not_increment_trimmed_count(self):
-        """record() no longer auto-detects trims; count is externally managed."""
+    def test_record_detects_trim_via_token_drop(self):
+        """record() auto-detects trims when prompt_tokens drop."""
         tracker = UsageTracker()
         tracker.record({"prompt_tokens": 10000})
-        tracker.record({"prompt_tokens": 5000})  # Drop — but no auto-increment
+        result = tracker.record({"prompt_tokens": 5000})  # Drop triggers heuristic
+        assert result is True
+        assert tracker.context_trimmed_count == 1
+
+    def test_record_skips_heuristic_when_already_trimmed(self):
+        """record() skips heuristic when context_trimmed_already is True."""
+        tracker = UsageTracker()
+        tracker.record({"prompt_tokens": 10000})
+        result = tracker.record({"prompt_tokens": 5000}, context_trimmed_already=True)
+        assert result is False
         assert tracker.context_trimmed_count == 0
 
     def test_no_trim_on_increase(self):

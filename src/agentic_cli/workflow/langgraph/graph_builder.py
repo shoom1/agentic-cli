@@ -36,6 +36,16 @@ class LangGraphBuilder:
         # Side-channel for trim events: agent_node appends here, manager drains
         self._trim_events: deque[dict[str, Any]] = deque()
 
+    def drain_trim_events(self) -> list[dict[str, Any]]:
+        """Drain and return all pending context-trim events.
+
+        Returns:
+            List of trim event info dicts (empties the internal deque).
+        """
+        events = list(self._trim_events)
+        self._trim_events.clear()
+        return events
+
     def build(self, agent_configs: list[AgentConfig], default_model: str):
         """Build the LangGraph workflow from agent configs.
 

@@ -335,8 +335,7 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
                                         yield transformed
 
                     # Emit context trimming events (side-channel from agent_node)
-                    while self._builder._trim_events:
-                        info = self._builder._trim_events.popleft()
+                    for info in self._builder.drain_trim_events():
                         transformed = self._apply_event_hook(
                             WorkflowEvent.context_trimmed(
                                 messages_before=info["messages_before"],

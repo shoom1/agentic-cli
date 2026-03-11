@@ -27,6 +27,16 @@ IDENTITY_FIELDS = frozenset({
 })
 
 
+def get_project_config_path(app_name: str) -> Path:
+    """Get path to project config file (./.{app_name}/settings.json)."""
+    return Path.cwd() / f".{app_name}" / "settings.json"
+
+
+def get_user_config_path(app_name: str) -> Path:
+    """Get path to user config file (~/.{app_name}/settings.json)."""
+    return Path.home() / f".{app_name}" / "settings.json"
+
+
 class SettingsPersistence:
     """Manages loading and saving settings to JSON files.
 
@@ -54,12 +64,12 @@ class SettingsPersistence:
     @property
     def project_config_path(self) -> Path:
         """Get path to project config file (./.{app_name}/settings.json)."""
-        return Path.cwd() / f".{self.app_name}" / "settings.json"
+        return get_project_config_path(self.app_name)
 
     @property
     def user_config_path(self) -> Path:
         """Get path to user config file (~/.{app_name}/settings.json)."""
-        return Path.home() / f".{self.app_name}" / "settings.json"
+        return get_user_config_path(self.app_name)
 
     def save(
         self,

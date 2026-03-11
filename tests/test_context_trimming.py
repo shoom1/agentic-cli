@@ -204,7 +204,7 @@ class TestADKHeuristicFallback:
         assert state.usage_tracker.context_trimmed_count == 1
         ui.add_warning.assert_called_once()
         warning = ui.add_warning.call_args[0][0]
-        assert "adk_token_heuristic" in warning
+        assert "token_drop_heuristic" in warning
 
     async def test_no_double_count_with_context_trimmed(self, setup):
         """When CONTEXT_TRIMMED was already received, no fallback detection."""

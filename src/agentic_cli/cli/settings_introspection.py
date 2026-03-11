@@ -152,29 +152,3 @@ def get_ui_order(field: FieldInfo) -> int:
     return extra.get("ui_order", 100)
 
 
-def get_ui_section(field: FieldInfo) -> str | None:
-    """Get UI section from field metadata.
-
-    Allows grouping related settings in the UI.
-
-    Args:
-        field: Pydantic FieldInfo
-
-    Returns:
-        Section name or None if not specified
-    """
-    extra = field.json_schema_extra or {}
-    return extra.get("ui_section")
-
-
-def is_ui_hidden(field: FieldInfo) -> bool:
-    """Check if field should be hidden from UI.
-
-    Args:
-        field: Pydantic FieldInfo
-
-    Returns:
-        True if field should be hidden
-    """
-    extra = field.json_schema_extra or {}
-    return extra.get("ui_hidden", False)

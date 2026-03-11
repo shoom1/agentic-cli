@@ -32,6 +32,36 @@ from agentic_cli.workflow.context import get_context_kb_manager, get_context_use
 # Max chars of extracted text to return via read_document.
 READ_DOCUMENT_MAX_CHARS = 30_000
 
+
+def _build_document_item(d, scope: str) -> dict[str, Any]:
+    """Build a document summary dict from a Document object.
+
+    Args:
+        d: Document instance.
+        scope: "project" or "user".
+
+    Returns:
+        Dict with document metadata suitable for list_documents output.
+    """
+    item: dict[str, Any] = {
+        "id": d.id,
+        "title": d.title,
+        "summary": d.summary,
+        "source_type": d.source_type.value,
+        "created_at": d.created_at.isoformat(),
+        "chunks": len(d.chunks),
+        "scope": scope,
+    }
+    if d.metadata.get("authors"):
+        item["authors"] = d.metadata["authors"]
+    if d.metadata.get("arxiv_id"):
+        item["arxiv_id"] = d.metadata["arxiv_id"]
+    if d.metadata.get("tags"):
+        item["tags"] = d.metadata["tags"]
+    if d.file_path:
+        item["has_file"] = True
+    return item
+
 # Extensions considered safe to open in the system viewer.
 # Excluded: .html (JS execution), .doc/.xls/.ppt (VBA macros),
 # .odt/.ods/.odp (LibreOffice macros), .docm/.xlsm/.pptm (Office macros).
@@ -387,24 +417,19 @@ def _extract_text_from_bytes(pdf_bytes: bytes) -> str:
 def _extract_arxiv_id(url_or_id: str) -> str:
     """Extract arXiv paper ID from a URL or raw ID string.
 
-    Supports both formats:
-    - New (post-2007): 2301.12345, 1706.03762v2
-    - Old (pre-2007):  math/0607733, hep-th/9901001v1
-
-    Also handles full URLs like:
-    - https://arxiv.org/abs/math/0607733
-    - https://arxiv.org/pdf/2301.12345.pdf
+    Delegates to arxiv_tools._clean_arxiv_id for consistent parsing.
+    Returns empty string if the input doesn't look like an arXiv ID.
     """
-    # New format: YYMM.NNNNN (4-5 digit suffix)
-    match = re.search(r"(\d{4}\.\d{4,5})", url_or_id)
-    if match:
-        return match.group(1)
+    import re
 
-    # Old format: subject-class/NNNNNNN (e.g., math/0607733, hep-th/9901001)
-    match = re.search(r"([a-zA-Z-]+/\d{7})", url_or_id)
-    if match:
-        return match.group(1)
+    from agentic_cli.tools.arxiv_tools import _clean_arxiv_id
 
+    cleaned = _clean_arxiv_id(url_or_id)
+    # Validate that the result is actually an arXiv ID pattern
+    if re.match(r"^\d{4}\.\d{4,5}(v\d+)?$", cleaned) or re.match(
+        r"^[a-zA-Z-]+/\d{7}(v\d+)?$", cleaned
+    ):
+        return cleaned
     return ""
 
 
@@ -533,24 +558,7 @@ def list_documents(
     items = []
     seen_ids: set[str] = set()
     for d in docs:
-        item: dict[str, Any] = {
-            "id": d.id,
-            "title": d.title,
-            "summary": d.summary,
-            "source_type": d.source_type.value,
-            "created_at": d.created_at.isoformat(),
-            "chunks": len(d.chunks),
-            "scope": "project",
-        }
-        if d.metadata.get("authors"):
-            item["authors"] = d.metadata["authors"]
-        if d.metadata.get("arxiv_id"):
-            item["arxiv_id"] = d.metadata["arxiv_id"]
-        if d.metadata.get("tags"):
-            item["tags"] = d.metadata["tags"]
-        if d.file_path:
-            item["has_file"] = True
-        items.append(item)
+        items.append(_build_document_item(d, "project"))
         seen_ids.add(d.id)
 
     # Merge user KB documents
@@ -566,27 +574,9 @@ def list_documents(
                     or any(query_lower in a.lower() for a in d.metadata.get("authors", []))
                 ]
             for d in user_docs:
-                if d.id in seen_ids:
-                    continue
-                item = {
-                    "id": d.id,
-                    "title": d.title,
-                    "summary": d.summary,
-                    "source_type": d.source_type.value,
-                    "created_at": d.created_at.isoformat(),
-                    "chunks": len(d.chunks),
-                    "scope": "user",
-                }
-                if d.metadata.get("authors"):
-                    item["authors"] = d.metadata["authors"]
-                if d.metadata.get("arxiv_id"):
-                    item["arxiv_id"] = d.metadata["arxiv_id"]
-                if d.metadata.get("tags"):
-                    item["tags"] = d.metadata["tags"]
-                if d.file_path:
-                    item["has_file"] = True
-                items.append(item)
-                seen_ids.add(d.id)
+                if d.id not in seen_ids:
+                    items.append(_build_document_item(d, "user"))
+                    seen_ids.add(d.id)
         except Exception:
             logger.debug("user_kb_list_documents_failed", exc_info=True)
 
