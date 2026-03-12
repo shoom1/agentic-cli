@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from agentic_cli.cli.workflow_controller import WorkflowController
     from agentic_cli.workflow import WorkflowEvent
     from agentic_cli.workflow.events import UserInputRequest
-    from thinking_prompt import ThinkingPromptSession
+    from thinking_prompt import ThinkingContext, ThinkingPromptSession
 
 
 logger = Loggers.cli()
@@ -120,8 +120,6 @@ class _EventProcessingState:
     usage_tracker: "UsageTracker | None" = field(default=None, repr=False)
     workflow_controller: "WorkflowController | None" = field(default=None, repr=False)
     status_line: str = "Processing..."
-    task_progress_display: str | None = None
-    _last_task_display_content: str | None = None
     thinking_started: bool = False
     thinking_content: list[str] = field(default_factory=list)
     response_content: list[str] = field(default_factory=list)
@@ -129,17 +127,12 @@ class _EventProcessingState:
     _context_trimmed_this_invocation: bool = False
 
     def get_status(self) -> str:
-        """Build status display with current action and task progress."""
-        lines = [self.status_line]
-        if self.task_progress_display:
-            lines.append(self.task_progress_display)
-        return "\n".join(lines)
+        """Return the current status line for the events thinking box."""
+        return self.status_line
 
     def reset_for_retry(self) -> None:
         """Reset state for retry after rate limit."""
         self.status_line = "Processing..."
-        self.task_progress_display = None
-        self._last_task_display_content = None
         self.thinking_content.clear()
         self.response_content.clear()
 
@@ -176,6 +169,8 @@ class MessageProcessor:
         """Initialize the message processor."""
         self._message_history = MessageHistory()
         self._last_task_progress: str | None = None
+        self._task_box: "ThinkingContext | None" = None
+        self._last_task_content: str | None = None
 
     @property
     def history(self) -> MessageHistory:
@@ -183,9 +178,13 @@ class MessageProcessor:
         return self._message_history
 
     def clear_history(self) -> None:
-        """Clear message history."""
+        """Clear message history and task box state."""
         self._message_history.clear()
         self._last_task_progress = None
+        if self._task_box is not None:
+            self._task_box.finish(add_to_history=False, echo_to_console=False)
+            self._task_box = None
+        self._last_task_content = None
 
     async def process(
         self,
@@ -467,26 +466,41 @@ class MessageProcessor:
         settings: "BaseSettings",
         workflow: object,
     ) -> None:
-        """Handle TASK_PROGRESS events — update progress display."""
-        # Deduplicate: skip if content unchanged from last event
-        if event.content and event.content == state._last_task_display_content:
-            return
-        state._last_task_display_content = event.content
-
+        """Handle TASK_PROGRESS events — manage a separate task thinking box."""
         progress = event.metadata.get("progress", {})
-        if progress.get("total", 0) > 0:
-            completed = progress.get("completed", 0)
-            total = progress["total"]
-            from thinking_prompt import rich_to_ansi
+        total = progress.get("total", 0)
+        completed = progress.get("completed", 0)
 
-            state.task_progress_display = rich_to_ansi(
-                f"[bold]--- Tasks: {completed}/{total} ---[/bold]"
+        # Destroy box when tasks are cleared or all complete
+        if total == 0 or completed >= total:
+            if self._task_box is not None:
+                self._task_box.finish(add_to_history=False, echo_to_console=False)
+                self._task_box = None
+                self._last_task_content = None
+            # Update events box status line
+            current_task = event.metadata.get("current_task_description")
+            if current_task:
+                state.status_line = f"Working on: {current_task}"
+            return
+
+        # Create task box on first progress event with work remaining
+        if self._task_box is None:
+            self._task_box = ui.start_thinking(
+                title=f"Tasks: {completed}/{total}",
+                order=100,
+                content_format="ansi",
             )
-            if event.content:
-                state.task_progress_display += f"\n{_richify_task_display(event.content)}"
         else:
-            state.task_progress_display = None
+            # Update title on existing box
+            self._task_box.set_title(f"Tasks: {completed}/{total}")
 
+        # Deduplicate: skip content update if unchanged
+        if event.content and event.content != self._last_task_content:
+            self._last_task_content = event.content
+            self._task_box.clear()
+            self._task_box.append(_richify_task_display(event.content))
+
+        # Update events box status line
         current_task = event.metadata.get("current_task_description")
         if current_task:
             state.status_line = f"Working on: {current_task}"
