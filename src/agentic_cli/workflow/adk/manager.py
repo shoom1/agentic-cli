@@ -651,6 +651,15 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                                 event_count += 1
                                 yield progress_event
 
+            # Final progress check — catches task completions from the last
+            # tool call when the LLM's final output is text.
+            progress_event = self._emit_task_progress_event()
+            if progress_event:
+                progress_event = self._apply_event_hook(progress_event)
+                if progress_event:
+                    event_count += 1
+                    yield progress_event
+
             # Drain any remaining LLM events after processing completes
             if self._llm_event_logger:
                 for llm_event in self._llm_event_logger.drain_events():

@@ -577,8 +577,8 @@ class TestMessageProcessorRateLimit:
 
         # Mock UI
         ui = MagicMock()
-        ui.start_thinking = MagicMock()
-        ui.finish_thinking = MagicMock()
+        ctx_mock = MagicMock()
+        ui.start_thinking.return_value = ctx_mock
         ui.add_response = MagicMock()
         ui.add_warning = MagicMock()
         ui.add_error = MagicMock()
@@ -628,8 +628,8 @@ class TestMessageProcessorRateLimit:
         workflow_controller.workflow = mock_workflow
 
         ui = MagicMock()
-        ui.start_thinking = MagicMock()
-        ui.finish_thinking = MagicMock()
+        ctx_mock = MagicMock()
+        ui.start_thinking.return_value = ctx_mock
         ui.add_error = MagicMock()
         ui.add_rich = MagicMock()
         ui.yes_no_dialog = AsyncMock(return_value=False)  # User declines
@@ -668,8 +668,8 @@ class TestMessageProcessorRateLimit:
         workflow_controller.workflow = mock_workflow
 
         ui = MagicMock()
-        ui.start_thinking = MagicMock()
-        ui.finish_thinking = MagicMock()
+        ctx_mock = MagicMock()
+        ui.start_thinking.return_value = ctx_mock
         ui.add_error = MagicMock()
         ui.add_rich = MagicMock()
         ui.yes_no_dialog = AsyncMock()
