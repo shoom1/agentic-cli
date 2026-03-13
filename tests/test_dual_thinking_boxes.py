@@ -297,3 +297,101 @@ class TestHandleTaskProgress:
             mock_richify.assert_called_once_with(event.content)
             task_box = processor._task_box
             task_box.append.assert_called_once_with("richified")
+
+
+# ---------------------------------------------------------------------------
+# Task 5: process() dual-box management
+# ---------------------------------------------------------------------------
+
+
+class TestProcessDualBoxes:
+    """Verify process() manages events box independently from task box."""
+
+    @pytest.fixture
+    def setup(self):
+        processor = MessageProcessor()
+        ui = MagicMock()
+        events_ctx = MagicMock()
+        ui.start_thinking.return_value = events_ctx
+        settings = MagicMock()
+        settings.log_activity = False
+        settings.default_user = "test"
+
+        workflow_ctrl = MagicMock()
+        workflow_ctrl.ensure_initialized = AsyncMock(return_value=True)
+
+        # workflow.process must be an async generator
+        async def empty_gen(*a, **kw):
+            return
+            yield  # make it an async generator
+
+        workflow_ctrl.workflow.process = empty_gen
+        workflow_ctrl.workflow.set_input_callback = MagicMock()
+        workflow_ctrl.workflow.clear_input_callback = MagicMock()
+        return processor, ui, settings, workflow_ctrl, events_ctx
+
+    @pytest.mark.asyncio
+    async def test_events_box_finished_task_box_untouched(self, setup):
+        """Events box is finished at end, task box is NOT."""
+        processor, ui, settings, wf_ctrl, events_ctx = setup
+        task_ctx = MagicMock()
+        processor._task_box = task_ctx
+
+        await processor.process("hi", wf_ctrl, ui, settings)
+
+        events_ctx.finish.assert_called()
+        task_ctx.finish.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_cold_start_recreates_task_box(self, setup):
+        """Cached _last_task_progress triggers task box recreation."""
+        processor, ui, settings, wf_ctrl, events_ctx = setup
+        processor._last_task_progress = "[▸] Cached"
+
+        await processor.process("hi", wf_ctrl, ui, settings)
+
+        # Two calls: one for task box (order=100), one for events box
+        assert ui.start_thinking.call_count == 2
+        task_call = ui.start_thinking.call_args_list[0]
+        assert task_call.kwargs.get("order") == 100
+
+    @pytest.mark.asyncio
+    async def test_no_cold_start_when_task_box_active(self, setup):
+        """No extra box created if task box already exists."""
+        processor, ui, settings, wf_ctrl, events_ctx = setup
+        processor._task_box = MagicMock()
+        processor._last_task_progress = "[▸] Cached"
+
+        await processor.process("hi", wf_ctrl, ui, settings)
+
+        assert ui.start_thinking.call_count == 1  # Only events box
+
+    @pytest.mark.asyncio
+    async def test_task_progress_cached_on_exit(self, setup):
+        """Task box content cached to _last_task_progress on exit."""
+        processor, ui, settings, wf_ctrl, events_ctx = setup
+        task_ctx = MagicMock()
+        task_ctx.get_content.return_value = "[✓] Done"
+        processor._task_box = task_ctx
+
+        await processor.process("hi", wf_ctrl, ui, settings)
+
+        assert processor._last_task_progress == "[✓] Done"
+
+    @pytest.mark.asyncio
+    async def test_no_session_finish_thinking(self, setup):
+        """Session-level finish_thinking() must NOT be called."""
+        processor, ui, settings, wf_ctrl, events_ctx = setup
+
+        await processor.process("hi", wf_ctrl, ui, settings)
+
+        ui.finish_thinking.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_last_task_progress_none_when_no_task_box(self, setup):
+        """_last_task_progress is None when no task box active."""
+        processor, ui, settings, wf_ctrl, events_ctx = setup
+
+        await processor.process("hi", wf_ctrl, ui, settings)
+
+        assert processor._last_task_progress is None

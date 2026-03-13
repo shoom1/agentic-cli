@@ -225,21 +225,38 @@ class MessageProcessor:
             usage_tracker=usage_tracker,
             workflow_controller=workflow_controller,
         )
-        # Restore task progress from previous turn so it shows immediately
-        state.task_progress_display = self._last_task_progress
         workflow = workflow_controller.workflow
         dispatch = self._get_event_dispatch()
+
+        # Cold start: recreate task box from cached content if it was alive
+        # last turn but got cleaned up between turns
+        if self._task_box is None and self._last_task_progress is not None:
+            self._task_box = ui.start_thinking(
+                title="Tasks",
+                order=100,
+                content_format="ansi",
+            )
+            self._task_box.append(_richify_task_display(self._last_task_progress))
+
+        # Events thinking box context — tracks the per-invocation events box.
+        # This is a callback-driven box (no append/clear), only the callback
+        # (state.get_status) drives its display.
+        events_ctx: "ThinkingContext | None" = None
 
         # Set up direct callback so HITL tools can prompt the user without
         # deadlocking the workflow runner.
         async def _handle_input(request: "UserInputRequest") -> str:
+            nonlocal events_ctx
             if state.thinking_started:
-                ui.finish_thinking(add_to_history=False)
+                assert events_ctx is not None
+                events_ctx.finish(add_to_history=False)
                 state.thinking_started = False
 
             response = await self._prompt_user_input(request, ui)
 
-            ui.start_thinking(state.get_status, content_format="ansi")
+            events_ctx = ui.start_thinking(
+                state.get_status, content_format="ansi"
+            )
             state.thinking_started = True
             return response
 
@@ -247,7 +264,9 @@ class MessageProcessor:
         try:
             while True:
                 try:
-                    ui.start_thinking(state.get_status, content_format="ansi")
+                    events_ctx = ui.start_thinking(
+                        state.get_status, content_format="ansi"
+                    )
                     state.thinking_started = True
 
                     async for event in workflow.process(
@@ -258,9 +277,10 @@ class MessageProcessor:
                         if handler is not None:
                             await handler(self, event, state, ui, settings, workflow)
 
-                    # Finish thinking box (don't add status to history)
+                    # Finish events box only (don't add status to history)
                     if state.thinking_started:
-                        ui.finish_thinking(add_to_history=False)
+                        assert events_ctx is not None
+                        events_ctx.finish(add_to_history=False)
 
                     # Ensure final token counts are reflected in status bar
                     workflow_controller.update_status_bar(ui)
@@ -283,7 +303,8 @@ class MessageProcessor:
 
                 except Exception as e:
                     if state.thinking_started:
-                        ui.finish_thinking(add_to_history=False)
+                        assert events_ctx is not None
+                        events_ctx.finish(add_to_history=False)
                         state.thinking_started = False
 
                     # Check for 429 rate limit errors — prompt user to wait and retry
@@ -311,8 +332,10 @@ class MessageProcessor:
                     break
         finally:
             workflow.clear_input_callback()
-            # Persist task progress so it shows immediately on the next turn
-            self._last_task_progress = state.task_progress_display
+            # Cache task box content so cold start can restore it next turn
+            self._last_task_progress = (
+                self._task_box.get_content() if self._task_box else None
+            )
 
     async def _prompt_user_input(
         self,
