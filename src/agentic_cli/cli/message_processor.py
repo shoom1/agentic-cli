@@ -236,7 +236,7 @@ class MessageProcessor:
                 order=100,
                 content_format="ansi",
             )
-            self._task_box.append(_richify_task_display(self._last_task_progress))
+            self._task_box.append(self._last_task_progress)
 
         # Events thinking box context — tracks the per-invocation events box.
         # This is a callback-driven box (no append/clear), only the callback
@@ -247,8 +247,7 @@ class MessageProcessor:
         # deadlocking the workflow runner.
         async def _handle_input(request: "UserInputRequest") -> str:
             nonlocal events_ctx
-            if state.thinking_started:
-                assert events_ctx is not None
+            if state.thinking_started and events_ctx is not None:
                 events_ctx.finish(add_to_history=False)
                 state.thinking_started = False
 
@@ -278,8 +277,7 @@ class MessageProcessor:
                             await handler(self, event, state, ui, settings, workflow)
 
                     # Finish events box only (don't add status to history)
-                    if state.thinking_started:
-                        assert events_ctx is not None
+                    if state.thinking_started and events_ctx is not None:
                         events_ctx.finish(add_to_history=False)
 
                     # Ensure final token counts are reflected in status bar
@@ -302,8 +300,7 @@ class MessageProcessor:
                     break  # Success — exit retry loop
 
                 except Exception as e:
-                    if state.thinking_started:
-                        assert events_ctx is not None
+                    if state.thinking_started and events_ctx is not None:
                         events_ctx.finish(add_to_history=False)
                         state.thinking_started = False
 
@@ -332,9 +329,10 @@ class MessageProcessor:
                     break
         finally:
             workflow.clear_input_callback()
-            # Cache task box content so cold start can restore it next turn
+            # Cache plain-text task content for cold start on next turn
+            # (not get_content() which returns already-richified ANSI)
             self._last_task_progress = (
-                self._task_box.get_content() if self._task_box else None
+                self._last_task_content if self._task_box else None
             )
 
     async def _prompt_user_input(

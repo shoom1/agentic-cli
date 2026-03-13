@@ -356,6 +356,19 @@ class TestProcessDualBoxes:
         assert task_call.kwargs.get("order") == 100
 
     @pytest.mark.asyncio
+    async def test_cold_start_appends_cached_content_directly(self, setup):
+        """Cold start appends cached content without re-richifying."""
+        processor, ui, settings, wf_ctrl, events_ctx = setup
+        task_box_mock = MagicMock()
+        ui.start_thinking.return_value = task_box_mock
+        processor._last_task_progress = "[▸] Already richified"
+
+        await processor.process("hi", wf_ctrl, ui, settings)
+
+        # The first start_thinking is the task box cold start
+        task_box_mock.append.assert_called_once_with("[▸] Already richified")
+
+    @pytest.mark.asyncio
     async def test_no_cold_start_when_task_box_active(self, setup):
         """No extra box created if task box already exists."""
         processor, ui, settings, wf_ctrl, events_ctx = setup
@@ -368,15 +381,15 @@ class TestProcessDualBoxes:
 
     @pytest.mark.asyncio
     async def test_task_progress_cached_on_exit(self, setup):
-        """Task box content cached to _last_task_progress on exit."""
+        """Plain-text _last_task_content cached to _last_task_progress on exit."""
         processor, ui, settings, wf_ctrl, events_ctx = setup
         task_ctx = MagicMock()
-        task_ctx.get_content.return_value = "[✓] Done"
         processor._task_box = task_ctx
+        processor._last_task_content = "[✓] Done task"
 
         await processor.process("hi", wf_ctrl, ui, settings)
 
-        assert processor._last_task_progress == "[✓] Done"
+        assert processor._last_task_progress == "[✓] Done task"
 
     @pytest.mark.asyncio
     async def test_no_session_finish_thinking(self, setup):
