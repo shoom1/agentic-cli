@@ -183,12 +183,12 @@ class WorkflowController:
         if not self._init_task.done():
             # Show user we're waiting for initialization
             if ui is not None:
-                ui.start_thinking(lambda: "Waiting for initialization...", content_format="ansi")
+                ctx = ui.start_thinking(lambda: "Waiting for initialization...", content_format="ansi")
             try:
                 await self._init_task
             finally:
                 if ui is not None:
-                    ui.finish_thinking(add_to_history=False)
+                    ctx.finish(add_to_history=False)
 
         if self._init_error:
             if ui is not None:
