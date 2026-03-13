@@ -28,23 +28,41 @@ logger = Loggers.cli()
 
 
 def _richify_task_display(plain: str) -> str:
-    """Convert plain task checklist to ANSI-colored icons for the thinking box."""
+    """Convert plain task checklist to rich ANSI-colored display.
+
+    Task box uses full-color styling (not dim grey like thinking/tool boxes):
+    - Completed: green ✓, dim text (done = de-emphasised)
+    - In-progress: yellow ▸, white text (active = prominent)
+    - Pending: white ○, white text (upcoming = visible)
+    - Cancelled: red ✗, dim text (irrelevant = de-emphasised)
+    - Section headers: bold white
+    """
     from thinking_prompt import rich_to_ansi
+
+    def _esc(text: str) -> str:
+        """Escape Rich markup brackets in task text."""
+        return text.replace("[", "\\[")
 
     lines = []
     for line in plain.splitlines():
         stripped = line.lstrip()
         indent = line[: len(line) - len(stripped)]
         if stripped.startswith("[✓]"):
-            lines.append(f"{indent}[green]✓[/green] {stripped[4:]}")
+            lines.append(f"{indent}[green]✓[/green] [dim]{_esc(stripped[4:])}[/dim]")
         elif stripped.startswith("[▸]"):
-            lines.append(f"{indent}[yellow]▸[/yellow] {stripped[4:]}")
+            lines.append(
+                f"{indent}[yellow]▸[/yellow] [white]{_esc(stripped[4:])}[/white]"
+            )
         elif stripped.startswith("[ ]"):
-            lines.append(f"{indent}[dim]○[/dim] {stripped[4:]}")
+            lines.append(
+                f"{indent}[white]○[/white] [white]{_esc(stripped[4:])}[/white]"
+            )
         elif stripped.startswith("[-]"):
-            lines.append(f"{indent}[red dim]✗[/red dim] {stripped[4:]}")
+            lines.append(
+                f"{indent}[red]✗[/red] [dim]{_esc(stripped[4:])}[/dim]"
+            )
         else:
-            lines.append(line.replace("[", "\\["))
+            lines.append(f"[bold white]{_esc(line)}[/bold white]")
     return rich_to_ansi("\n".join(lines))
 
 
