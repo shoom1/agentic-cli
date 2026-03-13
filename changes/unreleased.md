@@ -12,6 +12,8 @@
 - Bumped thinking-prompt dependency to >=0.3.0 for multi-box support
 
 ## Fixed
+- Task progress box now updates when the last task completes (end-of-stream progress emission)
+- Improved `save_tasks` tool description to instruct LLM to always mark tasks as completed
 
 ## Removed
 - `task_progress_display` and `_last_task_display_content` fields from `_EventProcessingState`

@@ -284,6 +284,10 @@ def save_tasks(
     existing tasks. To update a single task's status, include the entire
     list with that task's status changed.
 
+    IMPORTANT: Always call this tool to mark tasks as completed when you
+    finish them. The task progress display depends on this — if you don't
+    update the status, the user will see stale progress.
+
     Args:
         tasks: Complete list of tasks. Each task dict has keys
             "description" (required), "status" (pending/in_progress/

@@ -423,6 +423,14 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
                             yield transformed
 
 
+            # Final progress check — catches task completions from the last
+            # tool call when the LLM's final output is text.
+            progress_event = self._emit_task_progress_event()
+            if progress_event:
+                transformed = self._apply_event_hook(progress_event)
+                if transformed:
+                    yield transformed
+
             logger.info("message_processed_langgraph")
 
     def _extract_content_blocks(
