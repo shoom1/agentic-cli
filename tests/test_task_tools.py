@@ -534,11 +534,8 @@ class _MinimalWorkflowManager(BaseWorkflowManager):
     async def cleanup(self) -> None:
         pass
 
-    async def _extract_session_messages(self, session_id: str) -> list[dict]:
-        return []
-
-    async def _extract_current_agent(self, session_id: str) -> str | None:
-        return None
+    async def _extract_session_data(self, session_id: str) -> tuple[list[dict], str | None]:
+        return [], None
 
     async def _inject_session_messages(self, session_id: str, messages: list[dict], current_agent: str | None = None) -> None:
         pass

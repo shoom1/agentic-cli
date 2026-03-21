@@ -262,22 +262,26 @@ class BaseWorkflowManager(ABC):
             self._approval_manager = ApprovalManager()
 
         if "llm_summarizer" in self._required_managers and self._llm_summarizer is None:
-            self._llm_summarizer = self._create_summarizer()
+            self._llm_summarizer = self
 
         if "sandbox_manager" in self._required_managers and self._sandbox_manager is None:
             from agentic_cli.tools.sandbox.manager import SandboxManager
             self._sandbox_manager = SandboxManager(self._settings)
 
-    def _create_summarizer(self) -> Any:
-        """Create an LLM summarizer for webfetch.
+    async def summarize(self, content: str, prompt: str) -> str:
+        """Summarize content using the configured LLM.
 
-        Subclasses should override this to return a framework-specific
-        summarizer that implements the LLMSummarizer protocol.
+        Satisfies the LLMSummarizer protocol directly, eliminating
+        the need for separate summarizer wrapper classes.
+
+        Args:
+            content: The content to summarize (included in prompt by caller).
+            prompt: The full summarization prompt.
 
         Returns:
-            An LLMSummarizer implementation, or None.
+            Summarized text response.
         """
-        return None
+        return await self.generate_simple(prompt, max_tokens=2000)
 
     @contextlib.contextmanager
     def _workflow_context(self) -> Iterator[None]:
@@ -550,8 +554,7 @@ class BaseWorkflowManager(ABC):
         sid = session_id or getattr(self, "session_id", "default_session")
 
         try:
-            messages = await self._extract_session_messages(sid)
-            current_agent = await self._extract_current_agent(sid)
+            messages, current_agent = await self._extract_session_data(sid)
 
             metadata: dict[str, Any] = {
                 "model": self.model,
@@ -636,19 +639,18 @@ class BaseWorkflowManager(ABC):
         return persistence.list_sessions()
 
     @abstractmethod
-    async def _extract_session_messages(self, session_id: str) -> list[dict]:
-        """Extract normalized messages from the backend session.
+    async def _extract_session_data(
+        self, session_id: str
+    ) -> tuple[list[dict], str | None]:
+        """Extract normalized messages and current agent from backend session.
 
-        Returns list of dicts with structure:
-        - {"role": "user", "content": "..."}
-        - {"role": "assistant", "content": "...", "tool_calls": [...]}
-        - {"role": "tool", "tool_call_id": "...", "name": "...", "content": "..."}
+        Returns:
+            Tuple of (messages, current_agent_name).
+            Messages use normalized format:
+            - {"role": "user", "content": "..."}
+            - {"role": "assistant", "content": "...", "tool_calls": [...]}
+            - {"role": "tool", "tool_call_id": "...", "name": "...", "content": "..."}
         """
-        ...
-
-    @abstractmethod
-    async def _extract_current_agent(self, session_id: str) -> str | None:
-        """Return the name of the currently active agent, or None."""
         ...
 
     @abstractmethod

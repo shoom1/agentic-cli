@@ -53,35 +53,6 @@ logger = Loggers.workflow()
 logging.getLogger("google_genai.types").setLevel(logging.ERROR)
 
 
-class ADKSummarizer:
-    """LLM Summarizer implementation using Google ADK.
-
-    Uses the Gemini API directly (outside the agent loop) to summarize
-    web content for the webfetch tool.
-    """
-
-    def __init__(self, manager: "GoogleADKWorkflowManager") -> None:
-        """Initialize the summarizer.
-
-        Args:
-            manager: The workflow manager to use for LLM calls.
-        """
-        self._manager = manager
-
-    async def summarize(self, content: str, prompt: str) -> str:
-        """Summarize content using Gemini.
-
-        Args:
-            content: The content to summarize (markdown).
-            prompt: The full summarization prompt.
-
-        Returns:
-            Summarized text response.
-        """
-        # Use the manager's generate_simple method
-        return await self._manager.generate_simple(prompt, max_tokens=2000)
-
-
 class GoogleADKWorkflowManager(BaseWorkflowManager):
     """Config-based workflow manager for agentic applications using Google ADK.
 
@@ -119,7 +90,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         settings: BaseSettings | None = None,
         app_name: str | None = None,
         model: str | None = None,
-        session_service_uri: str | None = None,
         on_event: Callable[[WorkflowEvent], WorkflowEvent | None] | None = None,
     ) -> None:
         """Initialize the workflow manager.
@@ -130,7 +100,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             settings: Application settings (uses get_settings() if not provided)
             app_name: Application name for services (uses settings.app_name if not provided)
             model: Model override (auto-detected from API keys if not provided)
-            session_service_uri: Optional URI for remote session service
             on_event: Optional hook to transform/filter events before yielding
         """
         super().__init__(
@@ -140,7 +109,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             model=model,
             on_event=on_event,
         )
-        self.session_service_uri = session_service_uri
         self.session_id = "default_session"
 
         # Lazy-initialized ADK components
@@ -365,14 +333,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         )
         return types.GenerateContentConfig(http_options=http_options)
 
-    def _create_summarizer(self) -> ADKSummarizer:
-        """Create an LLM summarizer for webfetch.
-
-        Returns:
-            ADKSummarizer instance that uses Gemini for summarization.
-        """
-        return ADKSummarizer(self)
-
     def _create_agents(self) -> Agent:
         """Create agent hierarchy from configs.
 
@@ -471,11 +431,8 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         logger.info("initializing_services", app_name=self.app_name)
 
         # Create session service
-        if self.session_service_uri:
-            logger.debug("using_remote_session_service", uri=self.session_service_uri)
-        else:
-            self._session_service = InMemorySessionService()
-            logger.debug("using_in_memory_session_service")
+        self._session_service = InMemorySessionService()
+        logger.debug("using_in_memory_session_service")
 
         # Create agent hierarchy from configs
         self._root_agent = self._create_agents()
@@ -509,20 +466,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             raise RuntimeError(
                 "Workflow Manager failed to initialize. Check API keys and configuration."
             )
-
-    def _create_message(self, message: str) -> types.Content:
-        """Create an ADK Content message from text.
-
-        Args:
-            message: User message text
-
-        Returns:
-            ADK Content object
-        """
-        return types.Content(
-            role="user",
-            parts=[types.Part.from_text(text=message)],
-        )
 
     # -------------------------------------------------------------------------
     # Session handling (inlined from SessionHandler)
@@ -600,7 +543,10 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             session = await self._get_or_create_session(user_id, current_session_id)
 
             # Create message
-            new_message = self._create_message(message)
+            new_message = types.Content(
+                role="user",
+                parts=[types.Part.from_text(text=message)],
+            )
 
             event_count = 0
 
@@ -739,16 +685,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
 
         current_agent = getattr(session.events[-1], "author", None)
         return messages, current_agent
-
-    async def _extract_session_messages(self, session_id: str) -> list[dict]:
-        """Extract normalized messages from ADK session events."""
-        messages, _ = await self._extract_session_data(session_id)
-        return messages
-
-    async def _extract_current_agent(self, session_id: str) -> str | None:
-        """Return the author of the last event in the ADK session."""
-        _, current_agent = await self._extract_session_data(session_id)
-        return current_agent
 
     async def _inject_session_messages(
         self,

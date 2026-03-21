@@ -3,9 +3,7 @@
 This submodule contains all LangGraph-related components:
 - manager: LangGraphWorkflowManager for orchestrating agents
 - state: State definitions for LangGraph workflows
-- middleware/: Native middleware wrappers (HITL, retry, shell, etc.)
 - persistence/: Storage backends (checkpointers, stores)
-- tools/: LangGraph-native tool implementations
 """
 
 # Re-export main components for convenience

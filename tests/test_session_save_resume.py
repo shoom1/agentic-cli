@@ -59,11 +59,8 @@ class _TestWorkflowManager(BaseWorkflowManager):
     async def cleanup(self) -> None:
         pass
 
-    async def _extract_session_messages(self, session_id: str) -> list[dict]:
-        return self._stored_messages
-
-    async def _extract_current_agent(self, session_id: str) -> str | None:
-        return self._stored_agent
+    async def _extract_session_data(self, session_id: str) -> tuple[list[dict], str | None]:
+        return self._stored_messages, self._stored_agent
 
     async def _inject_session_messages(
         self,
