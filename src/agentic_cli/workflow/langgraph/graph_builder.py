@@ -432,38 +432,3 @@ class LangGraphBuilder:
             return "__end__"
 
         return router
-
-    def _normalize_content(self, content: Any) -> str:
-        """Normalize LLM response content to a string.
-
-        Handles various content formats from different providers:
-        - String: returned as-is
-        - List of dicts with 'text' key: extracts and joins text
-        - List of strings: joins them
-        - Other: converts to string
-
-        Args:
-            content: Raw content from LLM response.
-
-        Returns:
-            Normalized string content.
-        """
-        if isinstance(content, str):
-            return content
-
-        if isinstance(content, list):
-            parts = []
-            for item in content:
-                if isinstance(item, dict):
-                    # Handle {'type': 'text', 'text': '...'} format
-                    if "text" in item:
-                        parts.append(item["text"])
-                    elif "content" in item:
-                        parts.append(str(item["content"]))
-                elif isinstance(item, str):
-                    parts.append(item)
-                else:
-                    parts.append(str(item))
-            return "".join(parts)
-
-        return str(content) if content else ""

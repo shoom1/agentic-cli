@@ -12,10 +12,6 @@ from agentic_cli.workflow.events import WorkflowEvent, EventType
 from agentic_cli.workflow.thinking import ThinkingDetector
 from agentic_cli.logging import Loggers
 
-# Re-export for backward compatibility
-from agentic_cli.workflow.retry import is_rate_limit_error as _is_rate_limit_error  # noqa: F401
-from agentic_cli.workflow.retry import parse_retry_delay as _parse_retry_delay  # noqa: F401
-
 logger = Loggers.workflow()
 
 

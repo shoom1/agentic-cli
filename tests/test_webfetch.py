@@ -793,11 +793,8 @@ class TestWorkflowManagerIntegration:
             async def cleanup(self) -> None:
                 pass
 
-            async def _extract_session_messages(self, session_id: str) -> list[dict]:
-                return []
-
-            async def _extract_current_agent(self, session_id: str) -> str | None:
-                return None
+            async def _extract_session_data(self, session_id: str) -> tuple[list[dict], str | None]:
+                return [], None
 
             async def _inject_session_messages(self, session_id: str, messages: list[dict], current_agent: str | None = None) -> None:
                 pass
@@ -849,11 +846,8 @@ class TestWorkflowManagerIntegration:
             async def cleanup(self) -> None:
                 pass
 
-            async def _extract_session_messages(self, session_id: str) -> list[dict]:
-                return []
-
-            async def _extract_current_agent(self, session_id: str) -> str | None:
-                return None
+            async def _extract_session_data(self, session_id: str) -> tuple[list[dict], str | None]:
+                return [], None
 
             async def _inject_session_messages(self, session_id: str, messages: list[dict], current_agent: str | None = None) -> None:
                 pass
@@ -873,17 +867,13 @@ class TestWorkflowManagerIntegration:
         assert manager.llm_summarizer is None
 
     @pytest.mark.asyncio
-    async def test_create_summarizer_called_when_required(self):
-        """Test that _create_summarizer is called when llm_summarizer is required."""
+    async def test_manager_becomes_summarizer_when_required(self):
+        """Test that the manager itself becomes the llm_summarizer when required."""
         from agentic_cli.workflow.base_manager import BaseWorkflowManager
         from agentic_cli.workflow.config import AgentConfig
         from agentic_cli.workflow.events import WorkflowEvent, UserInputRequest
         from agentic_cli.tools.webfetch_tool import web_fetch
         from typing import AsyncGenerator
-
-        # Track if _create_summarizer was called
-        create_summarizer_called = False
-        mock_summarizer = object()
 
         class TestWorkflowManager(BaseWorkflowManager):
             @property
@@ -911,19 +901,11 @@ class TestWorkflowManagerIntegration:
             async def cleanup(self) -> None:
                 pass
 
-            async def _extract_session_messages(self, session_id: str) -> list[dict]:
-                return []
-
-            async def _extract_current_agent(self, session_id: str) -> str | None:
-                return None
+            async def _extract_session_data(self, session_id: str) -> tuple[list[dict], str | None]:
+                return [], None
 
             async def _inject_session_messages(self, session_id: str, messages: list[dict], current_agent: str | None = None) -> None:
                 pass
-
-            def _create_summarizer(self):
-                nonlocal create_summarizer_called
-                create_summarizer_called = True
-                return mock_summarizer
 
         # Create an agent config with web_fetch tool
         agent_config = AgentConfig(
@@ -940,6 +922,6 @@ class TestWorkflowManagerIntegration:
         # Initialize to trigger manager creation (skip validation — no API keys in test)
         await manager.initialize_services(validate=False)
 
-        # Now _create_summarizer should have been called
-        assert create_summarizer_called
-        assert manager.llm_summarizer is mock_summarizer
+        # The manager itself should be the summarizer (has summarize() method)
+        assert manager.llm_summarizer is manager
+        assert hasattr(manager.llm_summarizer, "summarize")

@@ -28,35 +28,6 @@ if TYPE_CHECKING:
 logger = Loggers.workflow()
 
 
-class LangGraphSummarizer:
-    """LLM Summarizer implementation using LangGraph/LangChain.
-
-    Uses the configured LLM (Anthropic, OpenAI, or Google) directly
-    to summarize web content for the webfetch tool.
-    """
-
-    def __init__(self, manager: "LangGraphWorkflowManager") -> None:
-        """Initialize the summarizer.
-
-        Args:
-            manager: The workflow manager to use for LLM calls.
-        """
-        self._manager = manager
-
-    async def summarize(self, content: str, prompt: str) -> str:
-        """Summarize content using the configured LLM.
-
-        Args:
-            content: The content to summarize (markdown).
-            prompt: The full summarization prompt.
-
-        Returns:
-            Summarized text response.
-        """
-        # Use the manager's generate_simple method
-        return await self._manager.generate_simple(prompt, max_tokens=2000)
-
-
 class LangGraphWorkflowManager(BaseWorkflowManager):
     """LangGraph-based workflow manager for agentic applications.
 
@@ -153,14 +124,6 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
         """Get the compiled LangGraph graph."""
         return self._compiled_graph
 
-    def _create_summarizer(self) -> LangGraphSummarizer:
-        """Create an LLM summarizer for webfetch.
-
-        Returns:
-            LangGraphSummarizer instance that uses the configured LLM.
-        """
-        return LangGraphSummarizer(self)
-
     async def _do_initialize(self) -> None:
         """LangGraph-specific initialization: checkpointer, graph, LLM."""
         logger.info("initializing_langgraph_services", app_name=self.app_name)
@@ -168,7 +131,11 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
         # Create checkpointer and store
         from agentic_cli.workflow.langgraph.persistence import create_checkpointer, create_store
 
-        self._checkpointer = create_checkpointer(self._checkpointer_type, self._settings)
+        # Reuse preserved checkpointer from reinitialize, or create new one
+        if getattr(self, '_preserved_checkpointer', None) is not None:
+            self._checkpointer = self._preserved_checkpointer
+        else:
+            self._checkpointer = create_checkpointer(self._checkpointer_type, self._settings)
         store_type = getattr(self._settings, "store_type", "memory")
         self._store = create_store(store_type, self._settings)
 
@@ -226,7 +193,6 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
             preserve_sessions=preserve_sessions,
         )
 
-        # Store checkpointer if preserving sessions
         old_checkpointer = self._checkpointer if preserve_sessions else None
 
         await self.cleanup()
@@ -234,11 +200,10 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
         # Update model
         self._reset_model(model)
 
+        # Set preserved checkpointer before init so _do_initialize can reuse it
+        self._preserved_checkpointer = old_checkpointer
         await self.initialize_services()
-
-        # Restore checkpointer if preserving
-        if old_checkpointer and preserve_sessions:
-            self._checkpointer = old_checkpointer
+        self._preserved_checkpointer = None
 
         logger.info(
             "langgraph_workflow_manager_reinitialized",
@@ -511,12 +476,15 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
             return None
         return state.values
 
-    async def _extract_session_messages(self, session_id: str) -> list[dict]:
-        """Extract normalized messages from LangGraph state."""
+    async def _extract_session_data(
+        self, session_id: str
+    ) -> tuple[list[dict], str | None]:
+        """Extract normalized messages and current agent from LangGraph state."""
         values = self._get_state_values(session_id)
         if not values:
-            return []
+            return [], None
 
+        current_agent = values.get("current_agent")
         raw_messages = values.get("messages", [])
         messages: list[dict] = []
 
@@ -548,14 +516,7 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
                     "content": msg.content if isinstance(msg.content, str) else str(msg.content),
                 })
 
-        return messages
-
-    async def _extract_current_agent(self, session_id: str) -> str | None:
-        """Extract current agent from LangGraph state."""
-        values = self._get_state_values(session_id)
-        if not values:
-            return None
-        return values.get("current_agent")
+        return messages, current_agent
 
     async def _inject_session_messages(
         self,
