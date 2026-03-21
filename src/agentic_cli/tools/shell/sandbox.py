@@ -6,12 +6,21 @@ Layer 7: Resource Limits & Execution Sandbox
 - Configurable limits for memory, processes, files
 """
 
+from __future__ import annotations
+
 import subprocess
 import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
+
+import structlog
+
+if TYPE_CHECKING:
+    from agentic_cli.tools.shell.os_sandbox.policy import OSSandboxPolicy
+
+logger = structlog.get_logger(__name__)
 
 
 @dataclass
@@ -74,21 +83,28 @@ class ExecutionResult:
 
 
 class ExecutionSandbox:
-    """Sandboxed command executor with resource limits.
+    """Sandboxed command executor with resource limits and OS-level isolation.
 
-    Phase 3 implementation uses ulimit for cross-platform resource limits.
-    Phase 4 will extend to use:
-    - Linux: cgroups v2
-    - macOS: sandbox-exec
+    Combines ulimit-based resource limits with OS-native sandboxing:
+    - macOS: sandbox-exec with Seatbelt SBPL profiles
+    - Linux: bubblewrap (bwrap) with namespace isolation
+    - Fallback: ulimit-only when sandbox tools are unavailable
     """
 
-    def __init__(self, limits: ExecutionLimits | None = None):
-        """Initialize sandbox with resource limits.
+    def __init__(
+        self,
+        limits: ExecutionLimits | None = None,
+        os_sandbox_policy: OSSandboxPolicy | None = None,
+    ):
+        """Initialize sandbox with resource limits and optional OS sandbox policy.
 
         Args:
             limits: Resource limits to apply.
+            os_sandbox_policy: OS-level sandbox policy. If None or disabled,
+                only ulimit-based limits are used.
         """
         self.limits = limits or ExecutionLimits()
+        self.os_sandbox_policy = os_sandbox_policy
 
     def execute(
         self,
@@ -106,8 +122,30 @@ class ExecutionSandbox:
         Returns:
             ExecutionResult with execution details.
         """
-        # For now, use ulimit-based limits (cross-platform for Unix-like systems)
-        # Future: dispatch to platform-specific implementations
+        # Apply OS-level sandboxing if enabled
+        if self.os_sandbox_policy and self.os_sandbox_policy.enabled:
+            from agentic_cli.tools.shell.os_sandbox import get_os_sandbox
+
+            sandbox = get_os_sandbox()
+            result = sandbox.wrap_shell_command(
+                command,
+                Path(working_dir).resolve() if working_dir else Path.cwd(),
+                self.os_sandbox_policy,
+            )
+            if result.success:
+                command = result.command
+                env = {**(env or {}), **result.env}
+                logger.debug(
+                    "os_sandbox.shell_wrapped",
+                    sandbox_type=result.sandbox_type,
+                )
+            else:
+                logger.warning(
+                    "os_sandbox.wrap_failed",
+                    error=result.error,
+                    sandbox_type=result.sandbox_type,
+                )
+
         return self._execute_with_ulimit(command, working_dir, env)
 
     def _execute_with_ulimit(
@@ -291,6 +329,7 @@ def execute_sandboxed(
     command: str,
     working_dir: Path | str | None = None,
     limits: ExecutionLimits | None = None,
+    os_sandbox_policy: OSSandboxPolicy | None = None,
 ) -> ExecutionResult:
     """Execute a command in a sandbox with resource limits.
 
@@ -300,9 +339,10 @@ def execute_sandboxed(
         command: The shell command to execute.
         working_dir: Working directory for execution.
         limits: Resource limits to apply.
+        os_sandbox_policy: OS-level sandbox policy.
 
     Returns:
         ExecutionResult with execution details.
     """
-    sandbox = ExecutionSandbox(limits)
+    sandbox = ExecutionSandbox(limits, os_sandbox_policy=os_sandbox_policy)
     return sandbox.execute(command, working_dir)

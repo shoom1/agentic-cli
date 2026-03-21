@@ -242,12 +242,32 @@ class WorkflowSettingsMixin:
         json_schema_extra={"ui_order": 125},
     )
 
+    # OS-level sandboxing
+    os_sandbox_enabled: bool = Field(
+        default=False,
+        title="OS Sandbox Enabled",
+        description="Enable OS-level sandboxing for shell and Python execution (requires sandbox-exec on macOS or bwrap on Linux)",
+        json_schema_extra={"ui_order": 130},
+    )
+    os_sandbox_writable_paths: list[str] = Field(
+        default_factory=list,
+        title="OS Sandbox Writable Paths",
+        description="Additional paths the sandboxed process can write to (working directory is always writable)",
+        json_schema_extra={"ui_order": 131},
+    )
+    os_sandbox_allow_network: bool = Field(
+        default=False,
+        title="OS Sandbox Allow Network",
+        description="Allow network access from sandboxed processes",
+        json_schema_extra={"ui_order": 132},
+    )
+
     # HITL (Human-in-the-Loop) settings
     hitl_enabled: bool = Field(
         default=True,
         title="HITL Enabled",
         description="Enable human-in-the-loop features (approvals)",
-        json_schema_extra={"ui_order": 130},
+        json_schema_extra={"ui_order": 135},
     )
 
     # Persistence settings (LangGraph)
