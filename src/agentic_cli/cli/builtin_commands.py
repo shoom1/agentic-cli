@@ -100,7 +100,7 @@ class StatusCommand(Command):
             table.add_row("Model", workflow.model)
             table.add_row("App Name", workflow.app_name)
             table.add_row("Session ID", workflow.session_id)
-            services = "Initialized" if workflow.runner else "Not initialized"
+            services = "Initialized" if workflow.is_initialized else "Not initialized"
             table.add_row("Services", services)
         except (RuntimeError, AttributeError):
             table.add_row("Workflow", "[yellow]Not available (initializing...)[/yellow]")

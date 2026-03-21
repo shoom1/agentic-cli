@@ -40,6 +40,8 @@ class _SessionEvent:
     def __init__(self, content, author: str = "") -> None:
         self.content = content
         self.author = author
+
+
 from agentic_cli.config import (
     BaseSettings,
     get_settings,
@@ -136,21 +138,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
     def backend_type(self) -> str:
         """Return 'adk'."""
         return "adk"
-
-    @property
-    def session_service(self) -> BaseSessionService | None:
-        """Get the session service."""
-        return self._session_service
-
-    @property
-    def root_agent(self) -> Agent | None:
-        """Get the root agent."""
-        return self._root_agent
-
-    @property
-    def runner(self) -> Runner | None:
-        """Get the runner."""
-        return self._runner
 
     async def generate_simple(self, prompt: str, max_tokens: int = 500) -> str:
         """Generate a simple text response using the current model.
@@ -455,13 +442,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         """Ensure services are initialized before processing."""
         if not self._initialized:
             await self.initialize_services()
-
-    def _validate_initialized(self) -> None:
-        """Validate that all required components are initialized.
-
-        Raises:
-            RuntimeError: If required components are not initialized
-        """
         if not self._runner or not self._session_service or not self._root_agent:
             raise RuntimeError(
                 "Workflow Manager failed to initialize. Check API keys and configuration."
@@ -527,7 +507,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             WorkflowEvent objects representing workflow output
         """
         await self._ensure_initialized()
-        self._validate_initialized()
 
         current_session_id = session_id or self.session_id
         bind_context(session_id=current_session_id, user_id=user_id)
