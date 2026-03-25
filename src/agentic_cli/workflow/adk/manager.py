@@ -25,6 +25,13 @@ from agentic_cli.workflow.events import WorkflowEvent, EventType
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.adk.event_processor import ADKEventProcessor
 from agentic_cli.workflow.adk.llm_event_logger import LLMEventLogger
+from agentic_cli.workflow.adk.plugins import ConfirmationPlugin
+
+from agentic_cli.config import (
+    BaseSettings,
+    get_settings,
+)
+from agentic_cli.logging import Loggers, bind_context
 
 
 class _SessionEvent:
@@ -41,12 +48,6 @@ class _SessionEvent:
         self.content = content
         self.author = author
 
-
-from agentic_cli.config import (
-    BaseSettings,
-    get_settings,
-)
-from agentic_cli.logging import Loggers, bind_context
 
 logger = Loggers.workflow()
 
@@ -233,6 +234,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     app_name=self.app_name,
                     agent=self._root_agent,
                     session_service=self._session_service,
+                    plugins=self._build_plugins(),
                 )
 
         logger.info(
@@ -240,18 +242,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             model=self.model,
             sessions_preserved=preserve_sessions,
         )
-
-    def update_settings(self, settings: BaseSettings) -> None:
-        """Update the settings instance.
-
-        Note: This only updates the settings reference. To apply changes
-        that affect agent behavior (like model changes), call reinitialize().
-
-        Args:
-            settings: New settings instance
-        """
-        self._settings = settings
-        logger.debug("settings_updated")
 
     def _get_planner(self) -> BuiltInPlanner | None:
         """Get planner with thinking configuration."""
@@ -413,6 +403,14 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         logger.info("agents_created", root=root_agent.name, total=len(agent_map))
         return root_agent
 
+    def _build_plugins(self) -> list:
+        """Build the list of ADK plugins for the Runner.
+
+        Returns:
+            List of BasePlugin instances to pass to Runner(plugins=...).
+        """
+        return [ConfirmationPlugin()]
+
     async def _do_initialize(self) -> None:
         """ADK-specific initialization: session service, agents, runner."""
         logger.info("initializing_services", app_name=self.app_name)
@@ -424,11 +422,12 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         # Create agent hierarchy from configs
         self._root_agent = self._create_agents()
 
-        # Create runner
+        # Create runner with plugins
         self._runner = Runner(
             app_name=self.app_name,
             agent=self._root_agent,
             session_service=self._session_service,
+            plugins=self._build_plugins(),
         )
 
         logger.info(
