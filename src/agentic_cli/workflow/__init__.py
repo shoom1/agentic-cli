@@ -13,7 +13,6 @@ Submodules:
 from agentic_cli.workflow.events import WorkflowEvent, EventType, UserInputRequest
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.factory import create_workflow_manager_from_settings
-from agentic_cli.workflow.thinking import ThinkingDetector, ThinkingResult
 from agentic_cli.workflow.settings import WorkflowSettingsMixin
 from agentic_cli.workflow.models import ModelFamily, ModelInfo, ModelRegistry
 from agentic_cli.workflow.context import (
@@ -70,9 +69,6 @@ __all__ = [
     "create_workflow_manager_from_settings",
     # Config
     "AgentConfig",
-    # Thinking
-    "ThinkingDetector",
-    "ThinkingResult",
     # Settings mixin
     "WorkflowSettingsMixin",
     # Model registry
