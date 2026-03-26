@@ -45,7 +45,7 @@ class ToolCategory(Enum):
     KNOWLEDGE = "knowledge"  # arxiv, knowledge_base
 
     # Human interaction
-    INTERACTION = "interaction"  # ask_clarification, request_approval
+    INTERACTION = "interaction"  # ask_clarification
 
     OTHER = "other"
 
@@ -170,39 +170,6 @@ def get_registry() -> ToolRegistry:
     return _default_registry
 
 
-def _wrap_dangerous(f: Callable[..., Any]) -> Callable[..., Any]:
-    """Wrap a DANGEROUS tool with HITL approval gate."""
-    from functools import wraps
-
-    @wraps(f)
-    def _hitl_guarded(*args, **kwargs):
-        from agentic_cli.workflow.context import get_context_approval_manager
-
-        manager = get_context_approval_manager()
-        if manager is not None:
-            tool_name = f.__name__
-            arg_summary = ", ".join(
-                [repr(a)[:50] for a in args[:2]]
-                + [f"{k}={repr(v)[:30]}" for k, v in list(kwargs.items())[:2]]
-            )
-            approved = manager.check_or_request(
-                tool_name, f"{tool_name}({arg_summary})"
-            )
-            if not approved:
-                return {
-                    "success": False,
-                    "error": f"User denied approval for {tool_name}",
-                }
-        return f(*args, **kwargs)
-
-    _hitl_guarded._hitl_guarded = True
-    # Preserve existing attributes (@requires, etc.)
-    for attr in ("requires", "_context_guard"):
-        if hasattr(f, attr):
-            setattr(_hitl_guarded, attr, getattr(f, attr))
-    return _hitl_guarded
-
-
 def register_tool(
     func: Callable[..., Any] | None = None,
     *,
@@ -213,16 +180,14 @@ def register_tool(
 ) -> Callable[..., Any]:
     """Register a tool with the default registry.
 
-    DANGEROUS tools are automatically wrapped with HITL gate that checks
-    with ApprovalManager before executing.
+    DANGEROUS tools are no longer wrapped at registration time. Instead,
+    confirmation is handled at the framework level by ADK ConfirmationPlugin
+    and LangGraph's _wrap_for_confirmation wrapper.
     """
 
     def _outer(f: Callable[..., Any]) -> Callable[..., Any]:
-        actual = f
-        if permission_level == PermissionLevel.DANGEROUS:
-            actual = _wrap_dangerous(f)
         return _default_registry.register(
-            actual,
+            f,
             name=name,
             description=description,
             category=category,

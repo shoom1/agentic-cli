@@ -77,46 +77,6 @@ class PlanCommand(Command):
         app.session.add_rich(panel)
 
 
-class ApprovalsCommand(Command):
-    """Show approval history."""
-
-    def __init__(self) -> None:
-        super().__init__(
-            name="approvals",
-            description="Show approval history",
-            aliases=["approve"],
-            usage="/approvals",
-            category=CommandCategory.GENERAL,
-        )
-
-    async def execute(self, args: str, app: "ResearchDemoApp") -> None:
-        approval_manager = app.workflow.approval_manager if app.workflow else None
-
-        if approval_manager is None:
-            app.session.add_message("system", "Approval manager not initialized")
-            return
-
-        history = approval_manager.history
-
-        if not history:
-            app.session.add_message("system", "No approval history")
-            return
-
-        table = Table(title="Approval History", show_header=True)
-        table.add_column("ID", style="dim")
-        table.add_column("Approved", style="cyan")
-        table.add_column("Reason", style="white")
-
-        for result in history:
-            table.add_row(
-                result.request_id,
-                "Yes" if result.approved else "No",
-                result.reason or "",
-            )
-
-        app.session.add_rich(table)
-
-
 class FilesCommand(Command):
     """List files in workspace."""
 
@@ -263,7 +223,6 @@ DEMO_COMMANDS = [
     MemoryCommand,
     PlanCommand,
     TasksCommand,
-    ApprovalsCommand,
     FilesCommand,
     ClearPlanCommand,
 ]

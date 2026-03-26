@@ -13,7 +13,6 @@ from agentic_cli.tools import (
     memory_tools,
     planning_tools,
     task_tools,
-    hitl_tools,
     web_search,
     web_fetch,
     search_arxiv,
@@ -113,7 +112,7 @@ When the user asks you to research something:
 11. Update the plan with `save_plan` if you discover changes are needed
 12. Store learnings with `save_memory` and share them with the user
 13. Save findings with `write_file` to the workspace findings directory
-14. Use `request_approval` for significant outputs that need review
+14. Use `ask_clarification` when significant outputs need user review
 15. After all tasks complete, read per-paper analyses and synthesize findings
 16. Write comprehensive report following the Report Structure below
 17. Save final report via `write_file`
@@ -134,7 +133,7 @@ After all research tasks are complete, write a comprehensive report:
 ### Report Process
 1. Read all per-paper analyses from the findings directory
 2. Use `read_document` to revisit paper full text for specific evidence
-3. Draft the report and request approval via `request_approval` before finalizing
+3. Draft the report and use `ask_clarification` to check with the user before finalizing
 4. Save the final report via `write_file` to the findings directory
 
 ## Communication Style
@@ -182,8 +181,6 @@ AGENT_CONFIGS = [
             # Task management (2 tools)
             task_tools.save_tasks,
             task_tools.get_tasks,
-            # HITL (1 tool)
-            hitl_tools.request_approval,
             # Knowledge base (4 tools)
             search_knowledge_base,
             list_documents,

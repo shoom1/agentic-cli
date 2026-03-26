@@ -3,31 +3,6 @@
 import pytest
 
 
-class TestHITLConfig:
-    """Tests for HITL configuration."""
-
-    def test_default_config(self):
-        """Test default HITL configuration."""
-        from agentic_cli.tools.hitl_tools import HITLConfig
-
-        config = HITLConfig()
-
-        assert config.confidence_threshold == 0.75
-
-    def test_config_with_approval_rules(self):
-        """Test configuration with approval rules."""
-        from agentic_cli.tools.hitl_tools import HITLConfig, ApprovalRule
-
-        rules = [
-            ApprovalRule(tool="shell_executor"),
-            ApprovalRule(tool="write_file"),
-        ]
-
-        config = HITLConfig(approval_rules=rules)
-
-        assert len(config.approval_rules) == 2
-
-
 class TestApprovalManager:
     """Tests for simplified ApprovalManager class."""
 
@@ -75,20 +50,12 @@ class TestApprovalManager:
 class TestHITLImports:
     """Tests for hitl_tools module exports."""
 
-    def test_import_all(self):
-        """Test all expected exports are available."""
+    def test_import_core_classes(self):
+        """Test core exports are available."""
         from agentic_cli.tools.hitl_tools import (
-            HITLConfig,
-            ApprovalRule,
             ApprovalManager,
-            ApprovalRequest,
             ApprovalResult,
-            request_approval,
         )
 
-        assert HITLConfig is not None
-        assert ApprovalRule is not None
         assert ApprovalManager is not None
-        assert ApprovalRequest is not None
         assert ApprovalResult is not None
-        assert request_approval is not None
