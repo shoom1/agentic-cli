@@ -24,8 +24,7 @@ from agentic_cli.workflow.base_manager import BaseWorkflowManager
 from agentic_cli.workflow.events import WorkflowEvent, EventType
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.adk.event_processor import ADKEventProcessor
-from agentic_cli.workflow.adk.llm_event_logger import LLMEventLogger
-from agentic_cli.workflow.adk.plugins import ConfirmationPlugin
+from agentic_cli.workflow.adk.plugins import ConfirmationPlugin, LLMLoggingPlugin
 
 from agentic_cli.config import (
     BaseSettings,
@@ -125,8 +124,8 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             on_event=on_event,
         )
 
-        # LLM event logger (initialized lazily when raw_llm_logging is enabled)
-        self._llm_event_logger: LLMEventLogger | None = None
+        # LLM logging plugin (initialized lazily when raw_llm_logging is enabled)
+        self._llm_logging_plugin: LLMLoggingPlugin | None = None
 
         logger.debug(
             "workflow_manager_created",
@@ -182,10 +181,10 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         self._session_service = None
         self._initialized = False
 
-        # Clear LLM event logger
-        if self._llm_event_logger:
-            self._llm_event_logger.clear()
-            self._llm_event_logger = None
+        # Clear LLM logging plugin
+        if self._llm_logging_plugin:
+            self._llm_logging_plugin.clear()
+            self._llm_logging_plugin = None
 
         # Clean up managers (sandbox, etc.)
         self._cleanup_managers()
@@ -324,20 +323,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         planner = self._get_planner()
         generate_config = self._get_generate_content_config()
 
-        # Initialize LLM event logger if raw_llm_logging is enabled
-        before_callback = None
-        after_callback = None
-        if self._settings.raw_llm_logging:
-            self._llm_event_logger = LLMEventLogger(
-                model_name=self.model,
-                app_name=self._settings.app_name,
-                include_messages=True,
-                include_raw_parts=True,
-            )
-            before_callback = self._llm_event_logger.before_model_callback
-            after_callback = self._llm_event_logger.after_model_callback
-            logger.info("llm_event_logging_enabled")
-
         # First pass: create agents without sub_agents (leaf agents)
         for config in self._agent_configs:
             if not config.sub_agents:
@@ -349,8 +334,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     description=config.description or None,
                     planner=planner,
                     generate_content_config=generate_config,
-                    before_model_callback=before_callback,
-                    after_model_callback=after_callback,
                 )
                 logger.debug("agent_created", name=config.name, type="leaf")
 
@@ -377,8 +360,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     sub_agents=sub_agent_instances,
                     planner=planner,
                     generate_content_config=generate_config,
-                    before_model_callback=before_callback,
-                    after_model_callback=after_callback,
                 )
                 logger.debug(
                     "agent_created",
@@ -409,7 +390,19 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         Returns:
             List of BasePlugin instances to pass to Runner(plugins=...).
         """
-        return [ConfirmationPlugin()]
+        plugins: list = [ConfirmationPlugin()]
+
+        if self._settings.raw_llm_logging:
+            self._llm_logging_plugin = LLMLoggingPlugin(
+                model_name=self.model,
+                app_name=self._settings.app_name,
+                include_messages=True,
+                include_raw_parts=True,
+            )
+            plugins.append(self._llm_logging_plugin)
+            logger.info("llm_logging_plugin_enabled")
+
+        return plugins
 
     async def _do_initialize(self) -> None:
         """ADK-specific initialization: session service, agents, runner."""
@@ -550,9 +543,9 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                 new_message=new_message,
                 run_config=run_config,
             ):
-                # Yield LLM events from logger first (Option A - raw capture)
-                if self._llm_event_logger:
-                    for llm_event in self._llm_event_logger.drain_events():
+                # Yield LLM events from plugin first (raw capture)
+                if self._llm_logging_plugin:
+                    for llm_event in self._llm_logging_plugin.drain_events():
                         llm_event = self._apply_event_hook(llm_event)
                         if llm_event:
                             event_count += 1
@@ -585,8 +578,8 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     yield progress_event
 
             # Drain any remaining LLM events after processing completes
-            if self._llm_event_logger:
-                for llm_event in self._llm_event_logger.drain_events():
+            if self._llm_logging_plugin:
+                for llm_event in self._llm_logging_plugin.drain_events():
                     llm_event = self._apply_event_hook(llm_event)
                     if llm_event:
                         event_count += 1
