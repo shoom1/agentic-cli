@@ -380,8 +380,8 @@ class KnowledgeBaseManager:
             Summary string (~500 chars).
         """
         try:
-            from agentic_cli.workflow.context import get_context_llm_summarizer
-            summarizer = get_context_llm_summarizer()
+            from agentic_cli.workflow.service_registry import get_service, LLM_SUMMARIZER
+            summarizer = get_service(LLM_SUMMARIZER)
             if summarizer is not None:
                 summary = summarizer.summarize(content, max_length=500)
                 if summary:

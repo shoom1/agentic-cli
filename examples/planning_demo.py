@@ -1,16 +1,16 @@
 #!/usr/bin/env python
-"""Standalone demo for the PlanStore planning system.
+"""Standalone demo for the planning system using the service registry.
 
 This demo shows the simplified flat-markdown planning pattern:
 1. Agent creates a plan with markdown checkboxes
 2. Agent updates the plan as tasks complete
-3. Framework just stores the string
+3. Framework stores the string in the service registry
 
 Usage:
     conda run -n agenticcli python examples/planning_demo.py
 """
 
-from agentic_cli.tools.planning_tools import PlanStore
+from agentic_cli.workflow.service_registry import set_service_registry, get_service_registry
 
 
 def demo_basic_plan():
@@ -19,7 +19,7 @@ def demo_basic_plan():
     print("Basic Plan Demo")
     print("=" * 60)
 
-    store = PlanStore()
+    registry = get_service_registry()
 
     # Agent creates a plan
     plan = (
@@ -30,10 +30,10 @@ def demo_basic_plan():
         "- [ ] Find notable Python community events\n"
         "- [ ] Write summary document\n"
     )
-    store.save(plan)
+    registry["plan"] = plan
 
     print("  Created plan:")
-    print(store.get())
+    print(registry.get("plan", ""))
     print()
 
 
@@ -43,10 +43,10 @@ def demo_progress_tracking():
     print("Progress Tracking Demo")
     print("=" * 60)
 
-    store = PlanStore()
+    registry = get_service_registry()
 
     # Initial plan
-    store.save(
+    registry["plan"] = (
         "## ML Pipeline\n"
         "- [ ] Prepare dataset\n"
         "- [ ] Train model\n"
@@ -54,10 +54,10 @@ def demo_progress_tracking():
         "- [ ] Deploy to production\n"
     )
     print("  Initial plan:")
-    print(store.get())
+    print(registry["plan"])
 
     # Agent completes first two tasks
-    store.save(
+    registry["plan"] = (
         "## ML Pipeline\n"
         "- [x] Prepare dataset\n"
         "- [x] Train model (accuracy: 94.2%)\n"
@@ -65,10 +65,10 @@ def demo_progress_tracking():
         "- [ ] Deploy to production\n"
     )
     print("\n  After completing 2 tasks:")
-    print(store.get())
+    print(registry["plan"])
 
     # Agent adds notes and completes more
-    store.save(
+    registry["plan"] = (
         "## ML Pipeline\n"
         "- [x] Prepare dataset\n"
         "- [x] Train model (accuracy: 94.2%)\n"
@@ -78,7 +78,7 @@ def demo_progress_tracking():
         "- [ ] Deploy to production\n"
     )
     print("\n  After evaluation with notes:")
-    print(store.get())
+    print(registry["plan"])
     print()
 
 
@@ -88,20 +88,20 @@ def demo_plan_revision():
     print("Plan Revision Demo")
     print("=" * 60)
 
-    store = PlanStore()
+    registry = get_service_registry()
 
     # Original plan
-    store.save(
+    registry["plan"] = (
         "## API Integration\n"
         "- [x] Design API schema\n"
         "- [ ] Implement endpoints\n"
         "- [ ] Write tests\n"
     )
     print("  Original plan:")
-    print(store.get())
+    print(registry["plan"])
 
-    # Agent discovers need for auth — revises plan
-    store.save(
+    # Agent discovers need for auth -- revises plan
+    registry["plan"] = (
         "## API Integration\n"
         "- [x] Design API schema\n"
         "- [x] Implement endpoints\n"
@@ -110,7 +110,7 @@ def demo_plan_revision():
         "- [ ] Update documentation\n"
     )
     print("\n  Revised plan (added auth + docs):")
-    print(store.get())
+    print(registry["plan"])
     print()
 
 
@@ -120,19 +120,22 @@ def demo_clear():
     print("Clear Plan Demo")
     print("=" * 60)
 
-    store = PlanStore()
-    store.save("- [ ] Some task")
-    print(f"  Has plan: {not store.is_empty()}")
+    registry = get_service_registry()
+    registry["plan"] = "- [ ] Some task"
+    print(f"  Has plan: {bool(registry.get('plan', ''))}")
 
-    store.clear()
-    print(f"  After clear, is empty: {store.is_empty()}")
+    registry["plan"] = ""
+    print(f"  After clear, is empty: {not registry.get('plan', '')}")
     print()
 
 
 def main():
     """Run all demos."""
+    # Initialize the service registry for this demo
+    set_service_registry({})
+
     print("\n" + "#" * 60)
-    print("#  PlanStore Planning System Demo")
+    print("#  Planning System Demo")
     print("#" * 60)
 
     demo_basic_plan()

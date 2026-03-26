@@ -419,7 +419,7 @@ def test_package_exports_new_modules():
     from agentic_cli.tools.memory_tools import MemoryStore, MemoryItem
 
     # Planning
-    from agentic_cli.tools.planning_tools import PlanStore
+    from agentic_cli.tools.planning_tools import save_plan, get_plan
 
     # HITL
     from agentic_cli.tools.hitl_tools import ApprovalManager
@@ -430,6 +430,7 @@ def test_package_exports_new_modules():
     # All imports should succeed
     assert MemoryStore is not None
     assert MemoryItem is not None
-    assert PlanStore is not None
+    assert save_plan is not None
+    assert get_plan is not None
     assert ApprovalManager is not None
     assert shell_executor is not None

@@ -11,8 +11,14 @@ class TestFindDocumentInKBs:
         main_kb = MagicMock()
         main_kb.find_document.return_value = doc
 
-        with patch("agentic_cli.tools.knowledge_tools.get_context_kb_manager", return_value=main_kb), \
-             patch("agentic_cli.tools.knowledge_tools.get_context_user_kb_manager", return_value=None):
+        def mock_get_service(key):
+            if key == "kb_manager":
+                return main_kb
+            if key == "user_kb_manager":
+                return None
+            return None
+
+        with patch("agentic_cli.tools.knowledge_tools.get_service", side_effect=mock_get_service):
             result_doc, result_kb = _find_document_in_kbs("test-id")
 
         assert result_doc is doc
@@ -27,8 +33,14 @@ class TestFindDocumentInKBs:
         user_kb = MagicMock()
         user_kb.find_document.return_value = doc
 
-        with patch("agentic_cli.tools.knowledge_tools.get_context_kb_manager", return_value=main_kb), \
-             patch("agentic_cli.tools.knowledge_tools.get_context_user_kb_manager", return_value=user_kb):
+        def mock_get_service(key):
+            if key == "kb_manager":
+                return main_kb
+            if key == "user_kb_manager":
+                return user_kb
+            return None
+
+        with patch("agentic_cli.tools.knowledge_tools.get_service", side_effect=mock_get_service):
             result_doc, result_kb = _find_document_in_kbs("test-id")
 
         assert result_doc is doc
@@ -42,8 +54,14 @@ class TestFindDocumentInKBs:
         user_kb = MagicMock()
         user_kb.find_document.return_value = None
 
-        with patch("agentic_cli.tools.knowledge_tools.get_context_kb_manager", return_value=main_kb), \
-             patch("agentic_cli.tools.knowledge_tools.get_context_user_kb_manager", return_value=user_kb):
+        def mock_get_service(key):
+            if key == "kb_manager":
+                return main_kb
+            if key == "user_kb_manager":
+                return user_kb
+            return None
+
+        with patch("agentic_cli.tools.knowledge_tools.get_service", side_effect=mock_get_service):
             result_doc, result_kb = _find_document_in_kbs("test-id")
 
         assert result_doc is None
@@ -55,8 +73,10 @@ class TestFindDocumentInKBs:
         main_kb = MagicMock()
         main_kb.find_document.return_value = None
 
-        with patch("agentic_cli.tools.knowledge_tools.get_context_kb_manager", return_value=main_kb), \
-             patch("agentic_cli.tools.knowledge_tools.get_context_user_kb_manager", return_value=main_kb):
+        def mock_get_service(key):
+            return main_kb  # same instance for both
+
+        with patch("agentic_cli.tools.knowledge_tools.get_service", side_effect=mock_get_service):
             result_doc, result_kb = _find_document_in_kbs("test-id")
 
         assert result_doc is None

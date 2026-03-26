@@ -20,13 +20,13 @@ import structlog
 logger = structlog.get_logger(__name__)
 
 from agentic_cli.constants import truncate
-from agentic_cli.tools import requires, require_context
+from agentic_cli.tools import requires
 from agentic_cli.tools.registry import (
     register_tool,
     ToolCategory,
     PermissionLevel,
 )
-from agentic_cli.workflow.context import get_context_kb_manager, get_context_user_kb_manager
+from agentic_cli.workflow.service_registry import get_service, require_service, KB_MANAGER, USER_KB_MANAGER
 
 
 # Max chars of extracted text to return via read_document.
@@ -81,7 +81,6 @@ SAFE_OPEN_EXTENSIONS: frozenset[str] = frozenset({
     description="Search the local knowledge base for relevant documents using semantic similarity. Use this when you need to find previously ingested papers, notes, or documents.",
 )
 @requires("kb_manager")
-@require_context("KB manager", get_context_kb_manager)
 def search_knowledge_base(
     query: str,
     filters: str = "",
@@ -107,7 +106,9 @@ def search_knowledge_base(
             return {"success": False, "error": f"Invalid JSON in filters: {filters}"}
 
     try:
-        kb = get_context_kb_manager()
+        kb = require_service(KB_MANAGER)
+        if isinstance(kb, dict):
+            return kb
         result = kb.search(query, filters=parsed_filters, top_k=top_k)
 
         # Tag project results with scope
@@ -115,7 +116,7 @@ def search_knowledge_base(
             r["scope"] = "project"
 
         # Merge user KB results (non-fatal if unavailable)
-        user_kb = get_context_user_kb_manager()
+        user_kb = get_service(USER_KB_MANAGER)
         if user_kb is not None and user_kb is not kb:
             try:
                 user_result = user_kb.search(query, filters=parsed_filters, top_k=top_k)
@@ -149,7 +150,6 @@ def search_knowledge_base(
     ),
 )
 @requires("kb_manager")
-@require_context("KB manager", get_context_kb_manager)
 async def ingest_document(
     content: str = "",
     url_or_path: str = "",
@@ -183,7 +183,9 @@ async def ingest_document(
     """
     from agentic_cli.knowledge_base.models import SourceType
 
-    kb = get_context_kb_manager()
+    kb = require_service(KB_MANAGER)
+    if isinstance(kb, dict):
+        return kb
 
     # Build metadata dict from optional fields
     meta: dict[str, Any] = {}
@@ -448,12 +450,14 @@ def _find_document_in_kbs(doc_id_or_title: str) -> tuple:
     Returns:
         (document, source_kb) tuple. document may be None if not found.
     """
-    kb = get_context_kb_manager()
+    kb = get_service(KB_MANAGER)
+    if kb is None:
+        return None, None
     doc = kb.find_document(doc_id_or_title)
     source_kb = kb
 
     if doc is None:
-        user_kb = get_context_user_kb_manager()
+        user_kb = get_service(USER_KB_MANAGER)
         if user_kb is not None and user_kb is not kb:
             doc = user_kb.find_document(doc_id_or_title)
             if doc is not None:
@@ -468,7 +472,6 @@ def _find_document_in_kbs(doc_id_or_title: str) -> tuple:
     description="Read and return the text content of a stored document by ID or title. Returns full text (up to max_chars limit).",
 )
 @requires("kb_manager")
-@require_context("KB manager", get_context_kb_manager)
 def read_document(
     doc_id_or_title: str,
     max_chars: int = READ_DOCUMENT_MAX_CHARS,
@@ -516,7 +519,6 @@ def read_document(
     description="List documents in the knowledge base with summaries. Filter by query or source type. Returns summaries, not full content.",
 )
 @requires("kb_manager")
-@require_context("KB manager", get_context_kb_manager)
 def list_documents(
     query: str = "",
     source_type: str = "",
@@ -534,7 +536,9 @@ def list_documents(
     """
     from agentic_cli.knowledge_base.models import SourceType as ST
 
-    kb = get_context_kb_manager()
+    kb = require_service(KB_MANAGER)
+    if isinstance(kb, dict):
+        return kb
 
     # Parse source_type filter
     st_filter = None
@@ -562,7 +566,7 @@ def list_documents(
         seen_ids.add(d.id)
 
     # Merge user KB documents
-    user_kb = get_context_user_kb_manager()
+    user_kb = get_service(USER_KB_MANAGER)
     if user_kb is not None and user_kb is not kb:
         try:
             user_docs = user_kb.list_documents(source_type=st_filter, limit=limit)
@@ -593,7 +597,6 @@ def list_documents(
     description="Open a document's stored file (e.g. PDF) in the system default viewer. Provide a document ID or title.",
 )
 @requires("kb_manager")
-@require_context("KB manager", get_context_kb_manager)
 def open_document(
     doc_id_or_title: str,
 ) -> dict[str, Any]:

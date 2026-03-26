@@ -15,17 +15,13 @@ from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.factory import create_workflow_manager_from_settings
 from agentic_cli.workflow.settings import WorkflowSettingsMixin
 from agentic_cli.workflow.models import ModelFamily, ModelInfo, ModelRegistry
+from agentic_cli.workflow.service_registry import get_service, get_service_registry
 from agentic_cli.workflow.context import (
-    # Getters for tools
+    # Backward-compat accessors (used by tests)
     get_context_memory_store,
-    get_context_plan_store,
-    get_context_task_store,
     get_context_llm_summarizer,
     get_context_kb_manager,
-    # Setters for workflow managers
     set_context_memory_store,
-    set_context_plan_store,
-    set_context_task_store,
     set_context_llm_summarizer,
     set_context_kb_manager,
 )
@@ -83,16 +79,14 @@ __all__ = [
     "ApprovalState",
     "CheckpointData",
     "add_messages",
-    # Context getters (for tools)
+    # Service registry
+    "get_service",
+    "get_service_registry",
+    # Backward-compat context accessors (prefer get_service)
     "get_context_memory_store",
-    "get_context_plan_store",
-    "get_context_task_store",
     "get_context_llm_summarizer",
     "get_context_kb_manager",
-    # Context setters (for workflow managers)
     "set_context_memory_store",
-    "set_context_plan_store",
-    "set_context_task_store",
     "set_context_llm_summarizer",
     "set_context_kb_manager",
 ]

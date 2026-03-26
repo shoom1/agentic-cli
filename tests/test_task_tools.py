@@ -11,22 +11,22 @@ from agentic_cli.workflow.events import WorkflowEvent, EventType
 
 
 @pytest.fixture
-def task_store_ctx(mock_context):
-    """Provide a TaskStore with context set, auto-cleanup."""
-    from agentic_cli.workflow.context import set_context_task_store
+def task_registry_ctx(mock_context):
+    """Provide a service registry for task tools, auto-cleanup."""
+    from agentic_cli.workflow.service_registry import set_service_registry
 
-    store = TaskStore(mock_context.settings)
-    token = set_context_task_store(store)
-    yield store
+    registry = {}
+    token = set_service_registry(registry)
+    yield registry
     token.var.reset(token)
 
 
 @pytest.fixture
-def no_task_store_ctx():
-    """Set task store context to None, auto-cleanup."""
-    from agentic_cli.workflow.context import set_context_task_store
+def no_task_registry_ctx():
+    """Set service registry to None (no registry), auto-cleanup."""
+    from agentic_cli.workflow.service_registry import clear_service_registry
 
-    token = set_context_task_store(None)
+    token = clear_service_registry()
     yield
     token.var.reset(token)
 
@@ -239,7 +239,7 @@ class TestTaskStore:
 class TestTaskTools:
     """Tests for save_tasks and get_tasks tool functions."""
 
-    def test_save_tasks_bulk_create(self, task_store_ctx):
+    def test_save_tasks_bulk_create(self, task_registry_ctx):
         from agentic_cli.tools.task_tools import save_tasks
 
         result = save_tasks(tasks=[
@@ -251,7 +251,7 @@ class TestTaskTools:
         assert result["count"] == 3
         assert len(result["task_ids"]) == 3
 
-    def test_save_tasks_replaces_existing(self, task_store_ctx):
+    def test_save_tasks_replaces_existing(self, task_registry_ctx):
         from agentic_cli.tools.task_tools import save_tasks
 
         save_tasks(tasks=[{"description": "Old task"}])
@@ -260,10 +260,11 @@ class TestTaskTools:
             {"description": "New task 2"},
         ])
         assert result["count"] == 2
-        assert len(task_store_ctx.list_tasks()) == 2
+        # Verify registry has the right number of tasks
+        assert len(task_registry_ctx.get("tasks", [])) == 2
 
-    def test_save_tasks_with_statuses(self, task_store_ctx):
-        from agentic_cli.tools.task_tools import save_tasks
+    def test_save_tasks_with_statuses(self, task_registry_ctx):
+        from agentic_cli.tools.task_tools import save_tasks, get_tasks
 
         result = save_tasks(tasks=[
             {"description": "Done", "status": "completed"},
@@ -271,20 +272,24 @@ class TestTaskTools:
             {"description": "Todo"},
         ])
         assert result["success"] is True
-        assert len(task_store_ctx.list_tasks(status="completed")) == 1
-        assert len(task_store_ctx.list_tasks(status="in_progress")) == 1
-        assert len(task_store_ctx.list_tasks(status="pending")) == 1
+        # Verify via get_tasks
+        completed = get_tasks(status="completed")
+        assert completed["count"] == 1
+        in_progress = get_tasks(status="in_progress")
+        assert in_progress["count"] == 1
+        pending = get_tasks(status="pending")
+        assert pending["count"] == 1
 
-    def test_save_tasks_empty_clears(self, task_store_ctx):
+    def test_save_tasks_empty_clears(self, task_registry_ctx):
         from agentic_cli.tools.task_tools import save_tasks
 
         save_tasks(tasks=[{"description": "Task"}])
         result = save_tasks(tasks=[])
         assert result["success"] is True
         assert result["count"] == 0
-        assert task_store_ctx.is_empty()
+        assert task_registry_ctx.get("tasks", []) == []
 
-    def test_save_tasks_missing_description(self, task_store_ctx):
+    def test_save_tasks_missing_description(self, task_registry_ctx):
         from agentic_cli.tools.task_tools import save_tasks
 
         result = save_tasks(tasks=[
@@ -295,7 +300,7 @@ class TestTaskTools:
         assert "index 1" in result["error"]
         assert "description" in result["error"].lower()
 
-    def test_save_tasks_invalid_status_returns_error(self, task_store_ctx):
+    def test_save_tasks_invalid_status_returns_error(self, task_registry_ctx):
         from agentic_cli.tools.task_tools import save_tasks
 
         result = save_tasks(tasks=[
@@ -306,7 +311,7 @@ class TestTaskTools:
         assert "index 1" in result["error"]
         assert "bogus" in result["error"]
 
-    def test_save_tasks_invalid_priority_returns_error(self, task_store_ctx):
+    def test_save_tasks_invalid_priority_returns_error(self, task_registry_ctx):
         from agentic_cli.tools.task_tools import save_tasks
 
         result = save_tasks(tasks=[
@@ -316,17 +321,18 @@ class TestTaskTools:
         assert "index 0" in result["error"]
         assert "critical" in result["error"]
 
-    def test_save_tasks_no_store(self, no_task_store_ctx):
+    def test_save_tasks_no_registry(self, no_task_registry_ctx):
         from agentic_cli.tools.task_tools import save_tasks
 
+        # With no registry, get_service_registry() auto-creates one,
+        # so the tool should succeed
         result = save_tasks(tasks=[{"description": "Test"}])
-        assert result["success"] is False
-        assert "not available" in result["error"].lower()
+        assert result["success"] is True
 
-    def test_get_tasks(self, task_store_ctx):
-        from agentic_cli.tools.task_tools import get_tasks
+    def test_get_tasks(self, task_registry_ctx):
+        from agentic_cli.tools.task_tools import save_tasks, get_tasks
 
-        task_store_ctx.replace_all([
+        save_tasks(tasks=[
             {"description": "Task 1"},
             {"description": "Task 2"},
         ])
@@ -335,10 +341,10 @@ class TestTaskTools:
         assert result["count"] == 2
         assert len(result["tasks"]) == 2
 
-    def test_get_tasks_with_filter(self, task_store_ctx):
-        from agentic_cli.tools.task_tools import get_tasks
+    def test_get_tasks_with_filter(self, task_registry_ctx):
+        from agentic_cli.tools.task_tools import save_tasks, get_tasks
 
-        task_store_ctx.replace_all([
+        save_tasks(tasks=[
             {"description": "Task 1", "priority": "high", "status": "in_progress"},
             {"description": "Task 2", "priority": "low"},
         ])
@@ -346,11 +352,12 @@ class TestTaskTools:
         assert result["count"] == 1
         assert result["tasks"][0]["priority"] == "high"
 
-    def test_get_tasks_no_store(self, no_task_store_ctx):
+    def test_get_tasks_empty_registry(self, task_registry_ctx):
         from agentic_cli.tools.task_tools import get_tasks
 
         result = get_tasks()
-        assert result["success"] is False
+        assert result["success"] is True
+        assert result["count"] == 0
 
 
 class TestTaskStoreProgress:
@@ -544,26 +551,25 @@ class _MinimalWorkflowManager(BaseWorkflowManager):
 class TestEmitTaskProgressEvent:
     """Tests for BaseWorkflowManager._emit_task_progress_event()."""
 
-    def test_returns_none_when_no_store(self, mock_context):
+    def test_returns_none_when_no_tasks(self, mock_context):
         mgr = _MinimalWorkflowManager(agent_configs=[], settings=mock_context.settings)
-        mgr._task_store = None
         assert mgr._emit_task_progress_event() is None
 
-    def test_returns_none_when_empty(self, mock_context):
-        store = TaskStore(mock_context.settings)
+    def test_returns_none_when_empty_list(self, mock_context):
         mgr = _MinimalWorkflowManager(agent_configs=[], settings=mock_context.settings)
-        mgr._task_store = store
+        mgr._services["tasks"] = []
         assert mgr._emit_task_progress_event() is None
 
     def test_returns_task_progress_event(self, mock_context):
-        store = TaskStore(mock_context.settings)
+        store = TaskStore()
         ids = store.replace_all([
             {"description": "Research topic", "status": "in_progress"},
             {"description": "Write summary"},
         ])
+        tasks_data = [item.to_dict() for item in store._items.values()]
 
         mgr = _MinimalWorkflowManager(agent_configs=[], settings=mock_context.settings)
-        mgr._task_store = store
+        mgr._services["tasks"] = tasks_data
 
         event = mgr._emit_task_progress_event()
         assert event is not None
@@ -576,11 +582,12 @@ class TestEmitTaskProgressEvent:
         assert event.metadata["current_task_description"] == "Research topic"
 
     def test_works_without_in_progress_task(self, mock_context):
-        store = TaskStore(mock_context.settings)
+        store = TaskStore()
         store.replace_all([{"description": "Pending task"}])
+        tasks_data = [item.to_dict() for item in store._items.values()]
 
         mgr = _MinimalWorkflowManager(agent_configs=[], settings=mock_context.settings)
-        mgr._task_store = store
+        mgr._services["tasks"] = tasks_data
 
         event = mgr._emit_task_progress_event()
         assert event is not None
@@ -588,4 +595,3 @@ class TestEmitTaskProgressEvent:
         assert "[ ] Pending task" in event.content
         assert "current_task_id" not in event.metadata
         assert event.metadata["progress"]["pending"] == 1
-

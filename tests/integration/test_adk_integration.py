@@ -473,17 +473,18 @@ class TestTaskProgressAutoClean:
     """Tests for auto-clear when all tasks are done and plan-based progress."""
 
     def test_auto_clears_when_all_done(self, mock_settings):
-        """When all tasks are completed, emit final event then clear store."""
+        """When all tasks are completed, emit final event then clear."""
         from agentic_cli.tools.task_tools import TaskStore
 
-        store = TaskStore(mock_settings)
+        store = TaskStore()
         store.replace_all([
             {"description": "Task 1", "status": "completed"},
             {"description": "Task 2", "status": "completed"},
         ])
+        tasks_data = [item.to_dict() for item in store._items.values()]
 
         mgr = _create_manager(mock_settings, [AgentConfig(name="test", prompt="test")])
-        mgr._task_store = store
+        mgr._services["tasks"] = tasks_data
 
         # First call: emits final snapshot, then clears
         event = mgr._emit_task_progress_event()
@@ -492,27 +493,28 @@ class TestTaskProgressAutoClean:
         assert "[✓] Task 1" in event.content
         assert "[✓] Task 2" in event.content
         assert event.metadata["progress"]["completed"] == 2
-        assert store.is_empty()
+        assert mgr._services["tasks"] == []
 
-        # Second call: store is empty, returns None
+        # Second call: tasks cleared, returns None
         assert mgr._emit_task_progress_event() is None
 
     def test_no_auto_clear_with_pending(self, mock_settings):
-        """When tasks are not all done, store is NOT cleared."""
+        """When tasks are not all done, tasks are NOT cleared."""
         from agentic_cli.tools.task_tools import TaskStore
 
-        store = TaskStore(mock_settings)
+        store = TaskStore()
         store.replace_all([
             {"description": "Done task", "status": "completed"},
             {"description": "Pending task", "status": "pending"},
         ])
+        tasks_data = [item.to_dict() for item in store._items.values()]
 
         mgr = _create_manager(mock_settings, [AgentConfig(name="test", prompt="test")])
-        mgr._task_store = store
+        mgr._services["tasks"] = tasks_data
 
         event = mgr._emit_task_progress_event()
         assert event is not None
-        assert not store.is_empty()
+        assert mgr._services["tasks"]  # not cleared
 
 
 

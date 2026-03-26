@@ -131,8 +131,8 @@ Workflow:
 ### Key Design Patterns
 - **Tool error handling**: All tools return `{"success": bool, ...}` dicts. Never raise `ToolError`.
 - **Tool registration**: Use `@register_tool(category=..., permission_level=..., description=...)` decorator. Tools are auto-discovered via the global `ToolRegistry`.
-- **Store consolidation**: Stores and managers (MemoryStore, PlanStore, TaskStore, ApprovalManager) live inside their tool files (e.g. `memory_tools.py`, `hitl_tools.py`), not in separate packages.
-- **Context access**: Tools use `get_context_*()` functions from `workflow.context` to access managers and stores via ContextVars.
+- **Service registry**: Tools access services and shared state via `get_service(key)` from `workflow.service_registry`. A single ContextVar holds a `dict[str, Any]` set by the workflow manager during processing. Complex services (KBManager, SandboxManager, MemoryStore) are lazily created; simple state (plan string, task list) lives directly in the registry dict.
+- **Manager detection**: Tools decorated with `@requires("kb_manager")` etc. are scanned by `BaseWorkflowManager._detect_required_managers()` which lazily creates only the needed services.
 - **Atomic writes**: Use `atomic_write_json`/`atomic_write_text` from `persistence/_utils.py` for file persistence.
 
 ### Console Output

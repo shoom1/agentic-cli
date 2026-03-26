@@ -5,7 +5,7 @@ Provides two tools for persistent memory:
 - search_memory: Search stored memories by substring
 
 The MemoryStore is auto-created by the workflow manager when
-these tools are used (via @requires("memory_manager")).
+these tools are used (via @requires("memory_store")).
 
 Example:
     from agentic_cli.tools import memory_tools
@@ -25,7 +25,7 @@ from typing import Any
 from agentic_cli.config import BaseSettings
 from agentic_cli.logging import get_logger
 from agentic_cli.persistence._utils import atomic_write_json
-from agentic_cli.tools import requires, require_context
+from agentic_cli.tools import requires
 
 logger = get_logger("agentic_cli.tools.memory")
 from agentic_cli.tools.registry import (
@@ -33,7 +33,7 @@ from agentic_cli.tools.registry import (
     ToolCategory,
     PermissionLevel,
 )
-from agentic_cli.workflow.context import get_context_memory_store
+from agentic_cli.workflow.service_registry import require_service, MEMORY_STORE
 
 
 # ---------------------------------------------------------------------------
@@ -166,8 +166,7 @@ class MemoryStore:
     permission_level=PermissionLevel.SAFE,
     description="Save information to persistent memory that survives across sessions. Use this to remember user preferences, important facts, or learnings for future conversations.",
 )
-@requires("memory_manager")
-@require_context("Memory store", get_context_memory_store)
+@requires("memory_store")
 def save_memory(
     content: str,
     tags: list[str] | None = None,
@@ -184,7 +183,9 @@ def save_memory(
     Returns:
         A dict with the stored item ID.
     """
-    store = get_context_memory_store()
+    store = require_service(MEMORY_STORE)
+    if isinstance(store, dict):
+        return store
     item_id = store.store(content, tags=tags)
     return {
         "success": True,
@@ -198,8 +199,7 @@ def save_memory(
     permission_level=PermissionLevel.SAFE,
     description="Search persistent memory by keyword/substring. Use this to recall previously saved facts, preferences, or learnings.",
 )
-@requires("memory_manager")
-@require_context("Memory store", get_context_memory_store)
+@requires("memory_store")
 def search_memory(
     query: str,
     limit: int = 10,
@@ -213,7 +213,9 @@ def search_memory(
     Returns:
         A dict with matching memory items.
     """
-    store = get_context_memory_store()
+    store = require_service(MEMORY_STORE)
+    if isinstance(store, dict):
+        return store
     results = store.search(query, limit=limit)
     items = [
         {

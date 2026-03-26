@@ -18,14 +18,11 @@ Framework Tools:
 For resilience patterns, use tenacity, pybreaker, aiolimiter directly.
 """
 
-import asyncio
-import functools
 from typing import Any, Callable, Literal, TypeVar
 
 # Type for manager requirements
 ManagerRequirement = Literal[
-    "memory_manager", "plan_store", "task_store", "kb_manager", "user_kb_manager",
-    "llm_summarizer", "sandbox_manager",
+    "memory_store", "kb_manager", "llm_summarizer", "sandbox_manager",
 ]
 
 F = TypeVar("F", bound=Callable)
@@ -45,49 +42,14 @@ def requires(*managers: ManagerRequirement) -> Callable[[F], F]:
         Decorator that adds 'requires' attribute to the function.
 
     Example:
-        @requires("memory_manager")
+        @requires("memory_store")
         def save_memory(content: str, tags: list[str] | None = None) -> dict:
-            store = get_context_memory_store()
+            store = get_service("memory_store")
             ...
     """
     def decorator(func: F) -> F:
         func.requires = list(managers)  # type: ignore[attr-defined]
         return func
-    return decorator
-
-
-def require_context(
-    context_name: str,
-    getter: Callable[..., Any],
-    error_message: str | None = None,
-) -> Callable[[F], F]:
-    """Guard decorator: returns error dict if getter() is None.
-
-    Apply below @requires / @register_tool so it runs first (innermost).
-    functools.wraps preserves __dict__ so .requires stays visible.
-
-    Args:
-        context_name: Human-readable name for error messages.
-        getter: Zero-arg callable returning the context value or None.
-        error_message: Custom error message (defaults to "{context_name} not available").
-    """
-    msg = error_message or f"{context_name} not available"
-
-    def decorator(func: F) -> F:
-        if asyncio.iscoroutinefunction(func):
-            @functools.wraps(func)
-            async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
-                if getter() is None:
-                    return {"success": False, "error": msg}
-                return await func(*args, **kwargs)
-            return async_wrapper  # type: ignore[return-value]
-        else:
-            @functools.wraps(func)
-            def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
-                if getter() is None:
-                    return {"success": False, "error": msg}
-                return func(*args, **kwargs)
-            return sync_wrapper  # type: ignore[return-value]
     return decorator
 
 
@@ -139,7 +101,6 @@ __all__ = [
     "register_tool",
     # Manager requirements decorator
     "requires",
-    "require_context",
     "ManagerRequirement",
     # Executor classes
     "SafePythonExecutor",

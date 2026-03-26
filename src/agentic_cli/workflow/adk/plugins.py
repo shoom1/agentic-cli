@@ -18,7 +18,7 @@ from typing import Any, TYPE_CHECKING
 from google.adk.plugins.base_plugin import BasePlugin
 
 from agentic_cli.tools.registry import get_registry, PermissionLevel
-from agentic_cli.workflow.context import get_context_workflow
+from agentic_cli.workflow.service_registry import get_service, WORKFLOW
 from agentic_cli.workflow.events import WorkflowEvent, UserInputRequest, InputType
 from agentic_cli.logging import Loggers
 
@@ -54,7 +54,7 @@ async def request_tool_confirmation(
     Returns:
         True if approved, False if denied, None if no workflow/callback available.
     """
-    workflow = get_context_workflow()
+    workflow = get_service(WORKFLOW)
     if workflow is None:
         return None
 

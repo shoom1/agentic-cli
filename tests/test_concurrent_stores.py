@@ -61,45 +61,51 @@ class TestConcurrentMemoryStore:
         assert len(store.search("", limit=100)) == 15
 
 
-class TestConcurrentPlanStore:
-    """Test concurrent access to PlanStore."""
+class TestConcurrentPlanRegistry:
+    """Test concurrent access to plan via service registry."""
 
     async def test_concurrent_save_get(self):
         """Concurrent save/get should not corrupt plan content."""
-        from agentic_cli.tools.planning_tools import PlanStore
+        from agentic_cli.workflow.service_registry import set_service_registry
 
-        store = PlanStore()
+        registry = {}
+        token = set_service_registry(registry)
+        try:
+            async def save_plan(i: int):
+                registry["plan"] = f"## Plan {i}\n- Step 1\n- Step 2"
 
-        async def save_plan(i: int):
-            store.save(f"## Plan {i}\n- Step 1\n- Step 2")
+            async def get_plan():
+                content = registry.get("plan", "")
+                # Content should be either empty or a valid plan
+                if content:
+                    assert content.startswith("## Plan")
+                return content
 
-        async def get_plan():
-            content = store.get()
-            # Content should be either empty or a valid plan
-            if content:
-                assert content.startswith("## Plan")
-            return content
+            tasks = [save_plan(i) for i in range(20)] + [get_plan() for _ in range(20)]
+            await asyncio.gather(*tasks)
 
-        tasks = [save_plan(i) for i in range(20)] + [get_plan() for _ in range(20)]
-        await asyncio.gather(*tasks)
-
-        # Final state should have some plan
-        assert not store.is_empty()
+            # Final state should have some plan
+            assert registry.get("plan", "")
+        finally:
+            token.var.reset(token)
 
     async def test_concurrent_save_clear(self):
         """Concurrent save/clear should not corrupt state."""
-        from agentic_cli.tools.planning_tools import PlanStore
+        from agentic_cli.workflow.service_registry import set_service_registry
 
-        store = PlanStore()
+        registry = {}
+        token = set_service_registry(registry)
+        try:
+            async def save_and_clear(i: int):
+                registry["plan"] = f"Plan {i}"
+                if i % 3 == 0:
+                    registry["plan"] = ""
 
-        async def save_and_clear(i: int):
-            store.save(f"Plan {i}")
-            if i % 3 == 0:
-                store.clear()
-
-        await asyncio.gather(*(save_and_clear(i) for i in range(20)))
-        # Should not raise; state is either empty or has content
-        _ = store.get()
+            await asyncio.gather(*(save_and_clear(i) for i in range(20)))
+            # Should not raise; state is either empty or has content
+            _ = registry.get("plan", "")
+        finally:
+            token.var.reset(token)
 
 
 class TestConcurrentTaskStore:

@@ -25,13 +25,12 @@ from enum import Enum
 from typing import Any
 
 from agentic_cli.config import BaseSettings
-from agentic_cli.tools import requires, require_context
 from agentic_cli.tools.registry import (
     register_tool,
     ToolCategory,
     PermissionLevel,
 )
-from agentic_cli.workflow.context import get_context_task_store
+from agentic_cli.workflow.service_registry import get_service_registry, TASKS
 
 
 class TaskStatus(str, Enum):
@@ -143,7 +142,7 @@ class TaskStore:
     The LLM writes the full task list each time via replace_all().
 
     Example:
-        >>> store = TaskStore(settings)
+        >>> store = TaskStore()
         >>> store.replace_all([
         ...     {"description": "Implement feature X", "status": "in_progress"},
         ...     {"description": "Write tests", "status": "pending"},
@@ -151,9 +150,21 @@ class TaskStore:
         >>> tasks = store.list_tasks(status="pending")
     """
 
-    def __init__(self, settings: BaseSettings) -> None:
-        self._settings = settings
+    def __init__(self, settings: "BaseSettings | None" = None) -> None:
         self._items: dict[str, TaskItem] = {}
+
+    @classmethod
+    def from_dicts(cls, items: list[dict[str, Any]]) -> "TaskStore":
+        """Create a TaskStore pre-populated from a list of task dicts.
+
+        Used by the workflow manager to construct a temporary store
+        from raw task state for display/progress purposes.
+        """
+        store = cls()
+        for item_data in items:
+            item = TaskItem.from_dict(item_data)
+            store._items[item.id] = item
+        return store
 
     def replace_all(self, tasks: list[dict[str, Any]]) -> list[str]:
         """Replace the entire task list.
@@ -273,8 +284,6 @@ class TaskStore:
     permission_level=PermissionLevel.SAFE,
     description="Write the complete task list. This replaces the existing list. Use this to create initial tasks or update statuses. Each task has a description and status (pending/in_progress/completed/cancelled). At most one task should be in_progress at a time.",
 )
-@requires("task_store")
-@require_context("Task store", get_context_task_store)
 def save_tasks(
     tasks: list[dict[str, Any]],
 ) -> dict[str, Any]:
@@ -297,9 +306,9 @@ def save_tasks(
     Returns:
         A dict with the operation result.
     """
-    store = get_context_task_store()
+    registry = get_service_registry()
     if not tasks:
-        store.replace_all([])
+        registry[TASKS] = []
         return {"success": True, "task_ids": [], "count": 0, "message": "Tasks cleared"}
 
     # Validate all tasks have descriptions and valid enum values
@@ -324,7 +333,9 @@ def save_tasks(
                 "error": f"Task at index {i} has invalid priority '{priority}'. Valid: {', '.join(sorted(valid_priorities))}",
             }
 
+    store = TaskStore()
     task_ids = store.replace_all(tasks)
+    registry[TASKS] = [item.to_dict() for item in store._items.values()]
     return {
         "success": True,
         "task_ids": task_ids,
@@ -338,8 +349,6 @@ def save_tasks(
     permission_level=PermissionLevel.SAFE,
     description="List execution tasks with optional filters by status, priority, or tag. Use this to check progress or find tasks to work on.",
 )
-@requires("task_store")
-@require_context("Task store", get_context_task_store)
 def get_tasks(
     status: str = "",
     priority: str = "",
@@ -355,12 +364,11 @@ def get_tasks(
     Returns:
         A dict with matching tasks.
     """
-    store = get_context_task_store()
-    tasks = store.list_tasks(
-        status=status or None,
-        priority=priority or None,
-        tag=tag or None,
-    )
+    tasks_data = get_service_registry().get(TASKS, [])
+    if not tasks_data:
+        return {"success": True, "tasks": [], "count": 0}
+    store = TaskStore.from_dicts(tasks_data)
+    tasks = store.list_tasks(status=status or None, priority=priority or None, tag=tag or None)
 
     items = [
         {
