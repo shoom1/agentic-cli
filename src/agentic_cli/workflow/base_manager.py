@@ -650,11 +650,11 @@ class BaseWorkflowManager(ABC):
         ...
 
     def _emit_task_progress_event(self) -> WorkflowEvent | None:
-        """Build a TASK_PROGRESS event from TaskStore or PlanStore.
+        """Build a TASK_PROGRESS event from TaskStore.
 
         Delegates to :func:`~agentic_cli.workflow.task_progress.build_task_progress_event`.
         """
         from agentic_cli.workflow.task_progress import build_task_progress_event
 
-        return build_task_progress_event(self._task_store, self._plan_store)
+        return build_task_progress_event(self._task_store)
 
