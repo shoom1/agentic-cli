@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import time
 import uuid
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
@@ -29,28 +30,54 @@ if TYPE_CHECKING:
 
 logger = Loggers.workflow()
 
-# Cache of tool names → is_dangerous, built lazily on first call.
-# Safe under CPython GIL (redundant work at worst, not corruption).
-# Call reset_dangerous_cache() in tests after registering/deregistering tools.
-_dangerous_cache: dict[str, bool] | None = None
+_APPROVED_RESPONSES = ("yes", "y", "approve", "true")
 
 
 def is_dangerous(tool_name: str) -> bool:
-    """Check if a tool is registered as DANGEROUS permission level."""
-    global _dangerous_cache
-    if _dangerous_cache is None:
-        registry = get_registry()
-        _dangerous_cache = {
-            defn.name: defn.permission_level == PermissionLevel.DANGEROUS
-            for defn in registry.list_tools()
-        }
-    return _dangerous_cache.get(tool_name, False)
+    """Check if a tool is registered as DANGEROUS permission level.
+
+    Uses the ToolRegistry's O(1) lookup directly — no caching needed.
+    """
+    defn = get_registry().get(tool_name)
+    if defn is None:
+        return False
+    return defn.permission_level == PermissionLevel.DANGEROUS
 
 
-def reset_dangerous_cache() -> None:
-    """Reset the dangerous-tool cache. Call after dynamic tool registration."""
-    global _dangerous_cache
-    _dangerous_cache = None
+async def request_tool_confirmation(
+    tool_name: str, tool_args: dict[str, Any]
+) -> bool | None:
+    """Prompt user for confirmation of a dangerous tool call.
+
+    Shared by ConfirmationPlugin (ADK) and _wrap_for_confirmation (LangGraph).
+
+    Returns:
+        True if approved, False if denied, None if no workflow/callback available.
+    """
+    workflow = get_context_workflow()
+    if workflow is None:
+        return None
+
+    arg_summary = ", ".join(
+        f"{k}={repr(v)[:50]}" for k, v in list(tool_args.items())[:3]
+    )
+    request = UserInputRequest(
+        request_id=str(uuid.uuid4())[:8],
+        tool_name=tool_name,
+        prompt=(
+            f"Tool requires approval: {tool_name}({arg_summary})\n\n"
+            f"Allow this operation? (yes/no)"
+        ),
+        input_type=InputType.CONFIRM,
+        default="no",
+    )
+
+    try:
+        response = await workflow.request_user_input(request)
+    except RuntimeError:
+        return None
+
+    return response.strip().lower() in _APPROVED_RESPONSES
 
 
 class ConfirmationPlugin(BasePlugin):
@@ -77,34 +104,11 @@ class ConfirmationPlugin(BasePlugin):
         if not is_dangerous(tool.name):
             return None
 
-        workflow = get_context_workflow()
-        if workflow is None:
-            logger.warning("confirmation_plugin.no_workflow", tool=tool.name)
+        approved = await request_tool_confirmation(tool.name, tool_args)
+
+        if approved is None:
+            logger.warning("confirmation_plugin.no_workflow_or_callback", tool=tool.name)
             return None
-
-        arg_summary = ", ".join(
-            f"{k}={repr(v)[:50]}" for k, v in list(tool_args.items())[:3]
-        )
-        prompt = (
-            f"Tool requires approval: {tool.name}({arg_summary})\n\n"
-            f"Allow this operation? (yes/no)"
-        )
-
-        request = UserInputRequest(
-            request_id=str(uuid.uuid4())[:8],
-            tool_name=tool.name,
-            prompt=prompt,
-            input_type=InputType.CONFIRM,
-            default="no",
-        )
-
-        try:
-            response = await workflow.request_user_input(request)
-        except RuntimeError:
-            logger.warning("confirmation_plugin.no_callback", tool=tool.name)
-            return None
-
-        approved = response.strip().lower() in ("yes", "y", "approve", "true")
 
         if approved:
             logger.debug("confirmation_plugin.approved", tool=tool.name)
@@ -147,7 +151,7 @@ class LLMLoggingPlugin(BasePlugin):
         self.include_messages = include_messages
         self.include_raw_parts = include_raw_parts
 
-        self._events: list[WorkflowEvent] = []
+        self._events: deque[WorkflowEvent] = deque(maxlen=max_events)
         self._request_timestamps: dict[str, float] = {}
 
         # Initialize log file
@@ -211,7 +215,7 @@ class LLMLoggingPlugin(BasePlugin):
             invocation_id=invocation_id,
         )
 
-        self._add_event(event)
+        self._events.append(event)
         self._write_to_log(event)
 
         return None
@@ -271,7 +275,7 @@ class LLMLoggingPlugin(BasePlugin):
             author=author,
             raw_parts=raw_parts,
         )
-        self._add_event(response_event)
+        self._events.append(response_event)
         self._write_to_log(response_event)
 
         # Create usage event if usage_metadata is available
@@ -287,7 +291,7 @@ class LLMLoggingPlugin(BasePlugin):
                 invocation_id=invocation_id,
                 latency_ms=latency_ms,
             )
-            self._add_event(usage_event)
+            self._events.append(usage_event)
             self._write_to_log(usage_event)
 
         return None
@@ -302,14 +306,14 @@ class LLMLoggingPlugin(BasePlugin):
 
     def drain_events(self) -> list[WorkflowEvent]:
         """Get and clear all captured events."""
-        events = self._events
-        self._events = []
+        events = list(self._events)
+        self._events.clear()
         return events
 
     def clear(self) -> None:
         """Clear all captured events and pending timestamps."""
-        self._events = []
-        self._request_timestamps = {}
+        self._events.clear()
+        self._request_timestamps.clear()
 
     def get_log_file_path(self) -> Path:
         """Get the path to the log file."""
@@ -318,12 +322,6 @@ class LLMLoggingPlugin(BasePlugin):
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
-
-    def _add_event(self, event: WorkflowEvent) -> None:
-        """Add event to buffer, enforcing max_events limit."""
-        self._events.append(event)
-        if len(self._events) > self.max_events:
-            self._events = self._events[-self.max_events:]
 
     def _write_to_log(self, event: WorkflowEvent) -> None:
         """Write event to JSON Lines log file."""

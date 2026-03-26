@@ -8,14 +8,11 @@ from __future__ import annotations
 
 import asyncio
 import functools
-import uuid
 from collections import deque
 from typing import Any, Callable, TYPE_CHECKING
 
 from agentic_cli.workflow.config import AgentConfig
-from agentic_cli.workflow.adk.plugins import is_dangerous
-from agentic_cli.workflow.context import get_context_workflow
-from agentic_cli.workflow.events import UserInputRequest, InputType
+from agentic_cli.workflow.adk.plugins import is_dangerous, request_tool_confirmation
 from agentic_cli.logging import Loggers
 
 if TYPE_CHECKING:
@@ -317,36 +314,13 @@ class LangGraphBuilder:
 
         @functools.wraps(tool)
         async def _confirmed(*args: Any, **kwargs: Any) -> Any:
-            workflow = get_context_workflow()
-            if workflow is not None:
-                arg_summary = ", ".join(
-                    f"{k}={repr(v)[:50]}" for k, v in list(kwargs.items())[:3]
-                )
-                prompt = (
-                    f"Tool requires approval: {tool_name}({arg_summary})\n\n"
-                    f"Allow this operation? (yes/no)"
-                )
-                request = UserInputRequest(
-                    request_id=str(uuid.uuid4())[:8],
-                    tool_name=tool_name,
-                    prompt=prompt,
-                    input_type=InputType.CONFIRM,
-                    default="no",
-                )
-                try:
-                    response = await workflow.request_user_input(request)
-                    approved = response.strip().lower() in (
-                        "yes", "y", "approve", "true",
-                    )
-                    if not approved:
-                        return {
-                            "success": False,
-                            "error": f"User denied approval for {tool_name}",
-                        }
-                except RuntimeError:
-                    # No callback registered -- allow execution
-                    pass
-
+            approved = await request_tool_confirmation(tool_name, kwargs)
+            if approved is False:
+                return {
+                    "success": False,
+                    "error": f"User denied approval for {tool_name}",
+                }
+            # approved is True or None (no workflow/callback) → proceed
             if is_async:
                 return await tool(*args, **kwargs)
             return tool(*args, **kwargs)

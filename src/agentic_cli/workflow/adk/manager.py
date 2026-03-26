@@ -113,12 +113,10 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         )
         self.session_id = "default_session"
 
-        # Lazy-initialized ADK components
         self._session_service: BaseSessionService | None = None
         self._root_agent: Agent | None = None
         self._runner: Runner | None = None
 
-        # Event processor (model set lazily via property)
         self._event_processor = ADKEventProcessor(
             model=model or "",
             on_event=on_event,
@@ -233,7 +231,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     app_name=self.app_name,
                     agent=self._root_agent,
                     session_service=self._session_service,
-                    plugins=self._build_plugins(),
+                    plugins=self._init_plugins(),
                 )
 
         logger.info(
@@ -384,8 +382,8 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         logger.info("agents_created", root=root_agent.name, total=len(agent_map))
         return root_agent
 
-    def _build_plugins(self) -> list:
-        """Build the list of ADK plugins for the Runner.
+    def _init_plugins(self) -> list:
+        """Create ADK plugins and store references for later access.
 
         Returns:
             List of BasePlugin instances to pass to Runner(plugins=...).
@@ -401,6 +399,8 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             )
             plugins.append(self._llm_logging_plugin)
             logger.info("llm_logging_plugin_enabled")
+        else:
+            self._llm_logging_plugin = None
 
         return plugins
 
@@ -420,7 +420,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             app_name=self.app_name,
             agent=self._root_agent,
             session_service=self._session_service,
-            plugins=self._build_plugins(),
+            plugins=self._init_plugins(),
         )
 
         logger.info(
