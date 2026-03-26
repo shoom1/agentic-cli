@@ -122,8 +122,10 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             on_event=on_event,
         )
 
-        # LLM logging plugin (initialized lazily when raw_llm_logging is enabled)
+        # Plugins (initialized lazily in _init_plugins, but we need the
+        # reference to exist before process() is called)
         self._llm_logging_plugin: LLMLoggingPlugin | None = None
+        self._task_progress_plugin: "TaskProgressPlugin | None" = None
 
         logger.debug(
             "workflow_manager_created",
@@ -307,6 +309,13 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         )
         return types.GenerateContentConfig(http_options=http_options)
 
+    def _get_state_tools(self) -> list:
+        """Return ADK-native state tools using ToolContext.state."""
+        from agentic_cli.tools.adk.state_tools import (
+            save_plan, get_plan, save_tasks, get_tasks,
+        )
+        return [save_plan, get_plan, save_tasks, get_tasks]
+
     def _create_agents(self) -> Agent:
         """Create agent hierarchy from configs.
 
@@ -328,7 +337,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     name=config.name,
                     model=config.model or self.model,
                     instruction=config.get_prompt(),
-                    tools=config.tools or [],
+                    tools=self._build_tools(config),
                     description=config.description or None,
                     planner=planner,
                     generate_content_config=generate_config,
@@ -353,7 +362,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     name=config.name,
                     model=config.model or self.model,
                     instruction=config.get_prompt(),
-                    tools=config.tools or [],
+                    tools=self._build_tools(config),
                     description=config.description or None,
                     sub_agents=sub_agent_instances,
                     planner=planner,
@@ -388,7 +397,13 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         Returns:
             List of BasePlugin instances to pass to Runner(plugins=...).
         """
+        from agentic_cli.workflow.adk.task_progress_plugin import TaskProgressPlugin
+
         plugins: list = [ConfirmationPlugin()]
+
+        # Task progress tracking via ToolContext.state
+        self._task_progress_plugin = TaskProgressPlugin()
+        plugins.append(self._task_progress_plugin)
 
         if self._settings.raw_llm_logging:
             self._llm_logging_plugin = LLMLoggingPlugin(
@@ -559,23 +574,21 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     event_count += 1
                     yield workflow_event
 
-                    # Emit task progress after tool results
-                    if workflow_event.type == EventType.TOOL_RESULT:
-                        progress_event = self._emit_task_progress_event()
-                        if progress_event:
+                    # Drain task progress events buffered by the plugin
+                    if workflow_event.type == EventType.TOOL_RESULT and self._task_progress_plugin:
+                        for progress_event in self._task_progress_plugin.drain_events():
                             progress_event = self._apply_event_hook(progress_event)
                             if progress_event:
                                 event_count += 1
                                 yield progress_event
 
-            # Final progress check — catches task completions from the last
-            # tool call when the LLM's final output is text.
-            progress_event = self._emit_task_progress_event()
-            if progress_event:
-                progress_event = self._apply_event_hook(progress_event)
-                if progress_event:
-                    event_count += 1
-                    yield progress_event
+            # Final drain — catches progress from the last tool call
+            if self._task_progress_plugin:
+                for progress_event in self._task_progress_plugin.drain_events():
+                    progress_event = self._apply_event_hook(progress_event)
+                    if progress_event:
+                        event_count += 1
+                        yield progress_event
 
             # Drain any remaining LLM events after processing completes
             if self._llm_logging_plugin:

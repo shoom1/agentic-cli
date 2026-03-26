@@ -49,7 +49,12 @@ class LangGraphBuilder:
         self._trim_events.clear()
         return events
 
-    def build(self, agent_configs: list[AgentConfig], default_model: str):
+    def build(
+        self,
+        agent_configs: list[AgentConfig],
+        default_model: str,
+        tool_overrides: dict[str, list] | None = None,
+    ):
         """Build the LangGraph workflow from agent configs.
 
         Creates a graph where each agent config becomes a node,
@@ -58,6 +63,9 @@ class LangGraphBuilder:
         Args:
             agent_configs: List of agent configurations.
             default_model: Default model name for agents without explicit model.
+            tool_overrides: Optional mapping of agent name to pre-built tool lists.
+                           When provided, these replace ``config.tools`` for tool
+                           node creation and LLM binding.
 
         Returns:
             An uncompiled StateGraph.
@@ -76,7 +84,9 @@ class LangGraphBuilder:
 
         # Create nodes for each agent with retry policy
         for config in agent_configs:
-            node_fn = self._create_agent_node(config, default_model)
+            node_fn = self._create_agent_node(
+                config, default_model, tools=_get_tools(config) or None,
+            )
             graph.add_node(config.name, node_fn, retry=retry_policy)
 
         # Determine entry point (root agent)
@@ -98,16 +108,22 @@ class LangGraphBuilder:
         # Add tool execution nodes for agents that have tools
         from langgraph.prebuilt import ToolNode
 
+        _overrides = tool_overrides or {}
+
+        def _get_tools(config: AgentConfig) -> list:
+            return _overrides.get(config.name, config.tools or [])
+
         agents_with_tools = {
-            config.name for config in agent_configs if config.tools
+            config.name for config in agent_configs if _get_tools(config)
         }
         tool_map = {}
         for config in agent_configs:
-            if config.tools:
+            tools = _get_tools(config)
+            if tools:
                 tool_node_name = f"{config.name}_tools"
                 tool_map[config.name] = tool_node_name
                 wrapped_tools = [
-                    self._wrap_for_confirmation(t) for t in config.tools
+                    self._wrap_for_confirmation(t) for t in tools
                 ]
                 tool_node = ToolNode(
                     wrapped_tools, name=tool_node_name, handle_tool_errors=True,
@@ -332,7 +348,9 @@ class LangGraphBuilder:
 
         return _confirmed
 
-    def _create_agent_node(self, config: AgentConfig, default_model: str) -> Callable:
+    def _create_agent_node(
+        self, config: AgentConfig, default_model: str, tools: list | None = None,
+    ) -> Callable:
         """Create a LangGraph node function for an agent.
 
         Args:
@@ -352,8 +370,9 @@ class LangGraphBuilder:
             llm = self.get_llm(model_name)
 
             # Bind tools if available
-            if config.tools:
-                llm = llm.bind_tools(config.tools)
+            agent_tools = tools or config.tools or []
+            if agent_tools:
+                llm = llm.bind_tools(agent_tools)
 
             # Build messages: system prompt + conversation history
             # State messages are already LangChain objects (add_messages reducer

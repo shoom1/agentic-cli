@@ -55,6 +55,8 @@ class AgentState(TypedDict, total=False):
         session_id: Session identifier
         user_id: User identifier
         metadata: Arbitrary metadata
+        plan: Execution plan markdown string
+        tasks: Task list (list of dicts with id, description, status, ...)
     """
 
     messages: Annotated[list, add_messages]
@@ -62,6 +64,8 @@ class AgentState(TypedDict, total=False):
     session_id: str
     user_id: str
     metadata: dict[str, Any]
+    plan: str
+    tasks: list[dict[str, Any]]
 
 
 class ResearchState(AgentState, total=False):

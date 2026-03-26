@@ -196,6 +196,40 @@ class BaseWorkflowManager(ABC):
         """Get the sandbox manager (if required by tools)."""
         return self._services.get(SANDBOX_MANAGER)
 
+    # ------------------------------------------------------------------
+    # Tool assembly
+    # ------------------------------------------------------------------
+
+    def _build_tools(self, config: "AgentConfig") -> list[Callable]:
+        """Build the tool list for an agent config.
+
+        Swaps state tools (save_plan, save_tasks, ...) with backend-specific
+        implementations from ``_get_state_tools()``.  All other tools pass
+        through unchanged.
+        """
+        from agentic_cli.tools._core import STATE_TOOL_NAMES
+
+        state_map = {t.__name__: t for t in self._get_state_tools()}
+
+        result = []
+        for tool in config.tools or []:
+            name = getattr(tool, "__name__", "")
+            if name in STATE_TOOL_NAMES and name in state_map:
+                result.append(state_map[name])
+            else:
+                result.append(tool)
+        return result
+
+    def _get_state_tools(self) -> list[Callable]:
+        """Return backend-specific state tools.
+
+        Subclasses override to return ADK or LangGraph native tools.
+        Default returns the legacy service-registry-based tools.
+        """
+        from agentic_cli.tools.planning_tools import save_plan, get_plan
+        from agentic_cli.tools.task_tools import save_tasks, get_tasks
+        return [save_plan, get_plan, save_tasks, get_tasks]
+
     def _detect_required_managers(self) -> set[str]:
         """Scan all agent tools for 'requires' metadata.
 

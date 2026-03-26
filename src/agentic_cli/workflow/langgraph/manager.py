@@ -119,6 +119,13 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
         """Return 'langgraph'."""
         return "langgraph"
 
+    def _get_state_tools(self) -> list:
+        """Return LangGraph-native state tools using Command."""
+        from agentic_cli.tools.langgraph.state_tools import (
+            save_plan, get_plan, save_tasks, get_tasks,
+        )
+        return [save_plan, get_plan, save_tasks, get_tasks]
+
     async def _do_initialize(self) -> None:
         """LangGraph-specific initialization: checkpointer, graph, LLM."""
         logger.info("initializing_langgraph_services", app_name=self.app_name)
@@ -134,8 +141,16 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
         store_type = getattr(self._settings, "store_type", "memory")
         self._store = create_store(store_type, self._settings)
 
+        # Build tool overrides (swap state tools for LangGraph-native versions)
+        tool_overrides = {
+            config.name: self._build_tools(config)
+            for config in self._agent_configs
+        }
+
         # Build and compile graph via builder
-        graph = self._builder.build(self._agent_configs, self.model)
+        graph = self._builder.build(
+            self._agent_configs, self.model, tool_overrides=tool_overrides,
+        )
         self._graph = graph
 
         # Compile with checkpointer and store
