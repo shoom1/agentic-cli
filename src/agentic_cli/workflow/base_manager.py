@@ -203,22 +203,57 @@ class BaseWorkflowManager(ABC):
     def _build_tools(self, config: "AgentConfig") -> list[Callable]:
         """Build the tool list for an agent config.
 
-        Swaps state tools (save_plan, save_tasks, ...) with backend-specific
-        implementations from ``_get_state_tools()``.  All other tools pass
-        through unchanged.
+        Swaps state tools with backend-specific implementations and
+        service tools with closure-bound factory versions.  Stateless
+        tools pass through unchanged.
         """
-        from agentic_cli.tools._core import STATE_TOOL_NAMES
+        from agentic_cli.tools._core import STATE_TOOL_NAMES, SERVICE_TOOL_NAMES
 
         state_map = {t.__name__: t for t in self._get_state_tools()}
+        service_map = self._get_service_tool_map()
 
         result = []
         for tool in config.tools or []:
             name = getattr(tool, "__name__", "")
             if name in STATE_TOOL_NAMES and name in state_map:
                 result.append(state_map[name])
+            elif name in SERVICE_TOOL_NAMES and name in service_map:
+                result.append(service_map[name])
             else:
                 result.append(tool)
         return result
+
+    def _get_service_tool_map(self) -> dict[str, Callable]:
+        """Create service tools via factories, returning name→function map.
+
+        Only creates tools for services that have been initialized.
+        """
+        from agentic_cli.tools.factories import (
+            make_memory_tools,
+            make_kb_tools,
+            make_webfetch_tool,
+            make_sandbox_tool,
+            make_interaction_tools,
+        )
+
+        tool_map: dict[str, Callable] = {}
+        s = self._services
+
+        if s.get(MEMORY_STORE):
+            for t in make_memory_tools(s[MEMORY_STORE]):
+                tool_map[t.__name__] = t
+        if s.get(KB_MANAGER):
+            for t in make_kb_tools(s[KB_MANAGER], s.get(USER_KB_MANAGER)):
+                tool_map[t.__name__] = t
+        if s.get(LLM_SUMMARIZER):
+            tool_map["web_fetch"] = make_webfetch_tool(s[LLM_SUMMARIZER])
+        if s.get(SANDBOX_MANAGER):
+            tool_map["sandbox_execute"] = make_sandbox_tool(s[SANDBOX_MANAGER])
+        # Workflow manager is always available for interaction tools
+        for t in make_interaction_tools(self):
+            tool_map[t.__name__] = t
+
+        return tool_map
 
     def _get_state_tools(self) -> list[Callable]:
         """Return backend-specific state tools.
@@ -380,8 +415,10 @@ class BaseWorkflowManager(ABC):
         )
         self._settings.set_model_registry(self._model_registry)
 
-        await self._do_initialize()
+        # Create services BEFORE backend init so _build_tools() can
+        # produce factory-bound tools during agent/graph creation.
         self._ensure_managers_initialized()
+        await self._do_initialize()
         self._initialized = True
 
     @abstractmethod
