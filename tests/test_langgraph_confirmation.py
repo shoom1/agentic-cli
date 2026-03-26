@@ -8,12 +8,12 @@ from agentic_cli.workflow.events import UserInputRequest
 
 
 @pytest.fixture(autouse=True)
-def clear_dangerous_cache():
+def _clear_dangerous_cache():
     """Reset the module-level dangerous cache between tests."""
-    import agentic_cli.workflow.adk.plugins as plugins_mod
-    plugins_mod._dangerous_cache = None
+    from agentic_cli.workflow.adk.plugins import reset_dangerous_cache
+    reset_dangerous_cache()
     yield
-    plugins_mod._dangerous_cache = None
+    reset_dangerous_cache()
 
 
 def _make_sync_tool(name: str = "my_tool"):

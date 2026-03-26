@@ -3,17 +3,18 @@
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from agentic_cli.workflow.adk.plugins import ConfirmationPlugin, is_dangerous, _dangerous_cache
+from agentic_cli.workflow.adk.plugins import (
+    ConfirmationPlugin, is_dangerous, reset_dangerous_cache,
+)
 from agentic_cli.workflow.events import UserInputRequest
 
 
 @pytest.fixture(autouse=True)
-def clear_dangerous_cache():
+def _clear_dangerous_cache():
     """Reset the module-level dangerous cache between tests."""
-    import agentic_cli.workflow.adk.plugins as plugins_mod
-    plugins_mod._dangerous_cache = None
+    reset_dangerous_cache()
     yield
-    plugins_mod._dangerous_cache = None
+    reset_dangerous_cache()
 
 
 def _make_mock_tool(name: str) -> MagicMock:

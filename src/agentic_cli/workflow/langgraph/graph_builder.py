@@ -299,6 +299,10 @@ class LangGraphBuilder:
         that uses the workflow manager's request_user_input callback to prompt
         the user before executing.
 
+        The wrapper is always async regardless of the original tool, because
+        the confirmation prompt requires awaiting request_user_input(). This
+        is safe because LangGraph's ToolNode calls ainvoke() for all tools.
+
         Args:
             tool: The tool function to potentially wrap.
 

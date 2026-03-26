@@ -7,7 +7,7 @@ Provides framework-level cross-cutting concerns as ADK Plugins:
 from __future__ import annotations
 
 import uuid
-from typing import Any, Optional, TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 from google.adk.plugins.base_plugin import BasePlugin
 
@@ -22,7 +22,9 @@ if TYPE_CHECKING:
 
 logger = Loggers.workflow()
 
-# Cache of tool names -> is_dangerous, built lazily
+# Cache of tool names → is_dangerous, built lazily on first call.
+# Safe under CPython GIL (redundant work at worst, not corruption).
+# Call reset_dangerous_cache() in tests after registering/deregistering tools.
 _dangerous_cache: dict[str, bool] | None = None
 
 
@@ -36,6 +38,12 @@ def is_dangerous(tool_name: str) -> bool:
             for defn in registry.list_tools()
         }
     return _dangerous_cache.get(tool_name, False)
+
+
+def reset_dangerous_cache() -> None:
+    """Reset the dangerous-tool cache. Call after dynamic tool registration."""
+    global _dangerous_cache
+    _dangerous_cache = None
 
 
 class ConfirmationPlugin(BasePlugin):
@@ -57,7 +65,7 @@ class ConfirmationPlugin(BasePlugin):
         tool: "BaseTool",
         tool_args: dict[str, Any],
         tool_context: "ToolContext",
-    ) -> Optional[dict]:
+    ) -> dict | None:
         """Intercept DANGEROUS tool calls and request user confirmation."""
         if not is_dangerous(tool.name):
             return None
