@@ -20,7 +20,6 @@ import structlog
 logger = structlog.get_logger(__name__)
 
 from agentic_cli.constants import truncate
-from agentic_cli.tools import requires
 from agentic_cli.tools.registry import (
     register_tool,
     ToolCategory,
@@ -80,7 +79,6 @@ SAFE_OPEN_EXTENSIONS: frozenset[str] = frozenset({
     permission_level=PermissionLevel.SAFE,
     description="Search the local knowledge base for relevant documents using semantic similarity. Use this when you need to find previously ingested papers, notes, or documents.",
 )
-@requires("kb_manager")
 def search_knowledge_base(
     query: str,
     filters: str = "",
@@ -149,7 +147,6 @@ def search_knowledge_base(
         "Valid source_type values: arxiv, ssrn, web, internal, user, local."
     ),
 )
-@requires("kb_manager")
 async def ingest_document(
     content: str = "",
     url_or_path: str = "",
@@ -471,7 +468,6 @@ def _find_document_in_kbs(doc_id_or_title: str) -> tuple:
     permission_level=PermissionLevel.SAFE,
     description="Read and return the text content of a stored document by ID or title. Returns full text (up to max_chars limit).",
 )
-@requires("kb_manager")
 def read_document(
     doc_id_or_title: str,
     max_chars: int = READ_DOCUMENT_MAX_CHARS,
@@ -518,7 +514,6 @@ def read_document(
     permission_level=PermissionLevel.SAFE,
     description="List documents in the knowledge base with summaries. Filter by query or source type. Returns summaries, not full content.",
 )
-@requires("kb_manager")
 def list_documents(
     query: str = "",
     source_type: str = "",
@@ -596,7 +591,6 @@ def list_documents(
     permission_level=PermissionLevel.DANGEROUS,
     description="Open a document's stored file (e.g. PDF) in the system default viewer. Provide a document ID or title.",
 )
-@requires("kb_manager")
 def open_document(
     doc_id_or_title: str,
 ) -> dict[str, Any]:

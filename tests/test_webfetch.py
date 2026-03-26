@@ -747,19 +747,19 @@ class TestWebFetchTool:
         assert "error" in result
         assert "summarizer" in result["error"].lower()
 
-    def test_web_fetch_requires_decorator(self):
-        """Test web_fetch has requires attribute with llm_summarizer."""
-        from agentic_cli.tools.webfetch_tool import web_fetch
+    def test_web_fetch_detected_via_tool_service_map(self):
+        """Test web_fetch is detected via _TOOL_SERVICE_MAP."""
+        from agentic_cli.workflow.base_manager import BaseWorkflowManager
 
-        assert hasattr(web_fetch, "requires")
-        assert "llm_summarizer" in web_fetch.requires
+        assert "web_fetch" in BaseWorkflowManager._TOOL_SERVICE_MAP
+        assert BaseWorkflowManager._TOOL_SERVICE_MAP["web_fetch"] == "llm_summarizer"
 
 
 class TestWorkflowManagerIntegration:
     """Tests for workflow manager integration with webfetch tool."""
 
     def test_llm_summarizer_detected_in_required_managers(self):
-        """Test that llm_summarizer is detected from web_fetch tool's @requires decorator."""
+        """Test that llm_summarizer is detected from web_fetch tool via _TOOL_SERVICE_MAP."""
         from agentic_cli.workflow.base_manager import BaseWorkflowManager
         from agentic_cli.workflow.config import AgentConfig
         from agentic_cli.workflow.events import WorkflowEvent, UserInputRequest

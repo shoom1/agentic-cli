@@ -6,7 +6,6 @@ enabling persistent state across calls (variables, imports, DataFrames).
 
 from typing import Any
 
-from agentic_cli.tools import requires
 from agentic_cli.tools.registry import register_tool, ToolCategory, PermissionLevel
 from agentic_cli.workflow.service_registry import require_service, SANDBOX_MANAGER
 
@@ -23,7 +22,6 @@ from agentic_cli.workflow.service_registry import require_service, SANDBOX_MANAG
         "Use execute_python instead for quick stateless calculations."
     ),
 )
-@requires("sandbox_manager")
 def sandbox_execute(
     code: str,
     session_id: str = "default",

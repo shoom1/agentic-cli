@@ -7,7 +7,6 @@ Tool System:
     - ToolDefinition: Metadata-rich tool definitions
     - ToolRegistry: Registry for tool management and discovery
     - register_tool: Decorator for easy tool registration
-    - requires: Decorator to declare tool's manager requirements
 
 Framework Tools:
     - memory_tools: Working and long-term memory tools
@@ -17,41 +16,6 @@ Framework Tools:
 
 For resilience patterns, use tenacity, pybreaker, aiolimiter directly.
 """
-
-from typing import Any, Callable, Literal, TypeVar
-
-# Type for manager requirements
-ManagerRequirement = Literal[
-    "memory_store", "kb_manager", "llm_summarizer", "sandbox_manager",
-]
-
-F = TypeVar("F", bound=Callable)
-
-
-def requires(*managers: ManagerRequirement) -> Callable[[F], F]:
-    """Decorator to declare a tool's manager requirements.
-
-    Framework tools use this to declare what managers they need.
-    The workflow manager scans tools for this metadata and auto-creates
-    the required managers.
-
-    Args:
-        *managers: One or more manager requirements.
-
-    Returns:
-        Decorator that adds 'requires' attribute to the function.
-
-    Example:
-        @requires("memory_store")
-        def save_memory(content: str, tags: list[str] | None = None) -> dict:
-            store = get_service("memory_store")
-            ...
-    """
-    def decorator(func: F) -> F:
-        func.requires = list(managers)  # type: ignore[attr-defined]
-        return func
-    return decorator
-
 
 from agentic_cli.tools.executor import SafePythonExecutor, MockPythonExecutor, ExecutionTimeoutError
 from agentic_cli.tools.shell import shell_executor, is_shell_enabled
@@ -99,9 +63,6 @@ __all__ = [
     "ToolRegistry",
     "get_registry",
     "register_tool",
-    # Manager requirements decorator
-    "requires",
-    "ManagerRequirement",
     # Executor classes
     "SafePythonExecutor",
     "MockPythonExecutor",

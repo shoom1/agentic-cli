@@ -107,13 +107,13 @@ class TestWrapForConfirmation:
             result = await wrapped(x="test")
         assert result == {"success": True, "result": "test"}
 
-    def test_preserves_requires_attribute(self):
-        """Wrapped function should preserve the 'requires' attribute."""
+    def test_preserves_context_guard_attribute(self):
+        """Wrapped function should preserve the '_context_guard' attribute."""
         tool = _make_sync_tool("dangerous_tool")
-        tool.requires = ["sandbox_manager"]
+        tool._context_guard = "test_guard"
         with patch(_IS_DANGEROUS, return_value=True):
             wrapped = LangGraphBuilder._wrap_for_confirmation(tool)
-        assert wrapped.requires == ["sandbox_manager"]
+        assert wrapped._context_guard == "test_guard"
 
     def test_preserves_docstring(self):
         """Wrapped function should preserve the docstring."""

@@ -369,12 +369,12 @@ class TestSandboxCommand:
 # ---------------------------------------------------------------------------
 
 class TestManagerAutoDetection:
-    def test_requires_sandbox_manager_detected(self):
-        """Verify @requires('sandbox_manager') is detected by _detect_required_managers."""
-        from agentic_cli.tools.sandbox import sandbox_execute
+    def test_sandbox_detected_via_tool_service_map(self):
+        """Verify sandbox_execute is detected via _TOOL_SERVICE_MAP."""
+        from agentic_cli.workflow.base_manager import BaseWorkflowManager
 
-        assert hasattr(sandbox_execute, "requires")
-        assert "sandbox_manager" in sandbox_execute.requires
+        assert "sandbox_execute" in BaseWorkflowManager._TOOL_SERVICE_MAP
+        assert BaseWorkflowManager._TOOL_SERVICE_MAP["sandbox_execute"] == "sandbox_manager"
 
     def test_base_manager_detects_sandbox(self, tmp_path):
         """BaseWorkflowManager picks up sandbox_manager from tool configs."""

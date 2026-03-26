@@ -391,22 +391,47 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
                         yield transformed
 
                     # Emit task progress after tool results
-                    progress_event = self._emit_task_progress_event()
+                    progress_event = self._build_task_progress(current_session_id)
                     if progress_event:
                         transformed = self._apply_event_hook(progress_event)
                         if transformed:
                             yield transformed
 
 
-            # Final progress check — catches task completions from the last
-            # tool call when the LLM's final output is text.
-            progress_event = self._emit_task_progress_event()
+            # Final progress check
+            progress_event = self._build_task_progress(current_session_id)
             if progress_event:
                 transformed = self._apply_event_hook(progress_event)
                 if transformed:
                     yield transformed
 
             logger.info("message_processed_langgraph")
+
+    def _build_task_progress(self, session_id: str) -> "WorkflowEvent | None":
+        """Build task progress from graph state."""
+        from agentic_cli.tools._core.tasks import task_progress_data
+
+        if not self._compiled_graph:
+            return None
+        try:
+            config = {"configurable": {"thread_id": session_id}}
+            state = self._compiled_graph.get_state(config)
+            tasks_data = state.values.get("tasks", []) if state and state.values else []
+        except Exception:
+            return None
+        if not tasks_data:
+            return None
+
+        progress = task_progress_data(tasks_data)
+        if progress is None:
+            return None
+
+        return WorkflowEvent.task_progress(
+            display=progress["display"],
+            progress=progress["progress"],
+            current_task_id=progress.get("current_task_id"),
+            current_task_description=progress.get("current_task_description"),
+        )
 
     def _extract_content_blocks(
         self, content: Any

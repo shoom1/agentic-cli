@@ -28,15 +28,12 @@ from agentic_cli.workflow.service_registry import (
     LLM_SUMMARIZER,
     MEMORY_STORE,
     WORKFLOW,
-    PLAN,
-    TASKS,
 )
 from agentic_cli.logging import Loggers
 
 if TYPE_CHECKING:
     from agentic_cli.config import BaseSettings
     from agentic_cli.tools.memory_tools import MemoryStore
-    from agentic_cli.tools.task_tools import TaskStore
     from agentic_cli.knowledge_base import KnowledgeBaseManager
     from agentic_cli.tools.sandbox.manager import SandboxManager
 
@@ -105,11 +102,10 @@ class BaseWorkflowManager(ABC):
         # Auto-detect required managers from tools
         self._required_managers = self._detect_required_managers()
 
-        # Unified service registry — tools access via get_service(key)
-        self._services: dict[str, Any] = {
-            PLAN: "",
-            TASKS: [],
-        }
+        # Service registry — complex services (KB, sandbox, etc.)
+        # Plan/task state lives in native backend state (ToolContext.state
+        # for ADK, graph state for LangGraph), not here.
+        self._services: dict[str, Any] = {}
 
     def set_input_callback(
         self, callback: Callable[[UserInputRequest], Awaitable[str]]
@@ -160,21 +156,6 @@ class BaseWorkflowManager(ABC):
     def memory_manager(self) -> "MemoryStore | None":
         """Get the memory manager (if required by tools)."""
         return self._services.get(MEMORY_STORE)
-
-    @property
-    def plan_store(self) -> Any | None:
-        """Get the plan string (backward compat — returns raw string or None)."""
-        plan = self._services.get(PLAN, "")
-        return plan if plan else None
-
-    @property
-    def task_store(self) -> "TaskStore | None":
-        """Get a TaskStore view of current tasks (for task_progress)."""
-        tasks = self._services.get(TASKS, [])
-        if not tasks:
-            return None
-        from agentic_cli.tools.task_tools import TaskStore
-        return TaskStore.from_dicts(tasks)
 
     @property
     def kb_manager(self) -> "KnowledgeBaseManager | None":
@@ -265,20 +246,32 @@ class BaseWorkflowManager(ABC):
         from agentic_cli.tools.task_tools import save_tasks, get_tasks
         return [save_plan, get_plan, save_tasks, get_tasks]
 
-    def _detect_required_managers(self) -> set[str]:
-        """Scan all agent tools for 'requires' metadata.
+    # Mapping from tool function name to the service it requires
+    _TOOL_SERVICE_MAP: dict[str, str] = {
+        "save_memory": "memory_store",
+        "search_memory": "memory_store",
+        "search_knowledge_base": "kb_manager",
+        "ingest_document": "kb_manager",
+        "read_document": "kb_manager",
+        "list_documents": "kb_manager",
+        "open_document": "kb_manager",
+        "web_fetch": "llm_summarizer",
+        "sandbox_execute": "sandbox_manager",
+    }
 
-        Tools decorated with @requires("memory_store") etc. will have
-        their requirements detected here.
+    def _detect_required_managers(self) -> set[str]:
+        """Detect which services are needed by scanning tool names.
 
         Returns:
-            Set of required manager types.
+            Set of required service keys (e.g. ``{"kb_manager", "memory_store"}``).
         """
         required: set[str] = set()
         for config in self._agent_configs:
             for tool in config.tools or []:
-                if hasattr(tool, "requires"):
-                    required.update(tool.requires)
+                name = getattr(tool, "__name__", "")
+                service = self._TOOL_SERVICE_MAP.get(name)
+                if service:
+                    required.add(service)
         return required
 
     def _ensure_managers_initialized(self) -> None:
@@ -360,8 +353,7 @@ class BaseWorkflowManager(ABC):
         sandbox = self._services.get(SANDBOX_MANAGER)
         if sandbox is not None:
             sandbox.cleanup()
-        # Reset to defaults — keep plan/tasks as empty state
-        self._services = {PLAN: "", TASKS: []}
+        self._services = {}
 
     @property
     @abstractmethod
@@ -700,34 +692,4 @@ class BaseWorkflowManager(ABC):
         """Inject normalized messages into the backend session."""
         ...
 
-    def _emit_task_progress_event(self) -> WorkflowEvent | None:
-        """Build a TASK_PROGRESS event from task state in the service registry.
-
-        Constructs a temporary TaskStore from the raw task dicts and
-        delegates to :func:`~agentic_cli.workflow.task_progress.build_task_progress_event`.
-        Writes back any mutations (e.g. auto-clear on completion).
-        """
-        from agentic_cli.workflow.task_progress import build_task_progress_event
-        from agentic_cli.tools.task_tools import TaskStore
-
-        tasks_data = self._services.get(TASKS, [])
-        if not tasks_data:
-            self._services.pop("_task_store_cache", None)
-            return None
-
-        # Rebuild cache only when the tasks list has been replaced
-        cache = self._services.get("_task_store_cache")
-        if cache is None or cache[0] is not tasks_data:
-            store = TaskStore.from_dicts(tasks_data)
-            self._services["_task_store_cache"] = (tasks_data, store)
-        else:
-            store = cache[1]
-
-        event = build_task_progress_event(store)
-
-        if store.is_empty():
-            self._services[TASKS] = []
-            self._services.pop("_task_store_cache", None)
-
-        return event
 

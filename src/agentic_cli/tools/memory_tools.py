@@ -5,7 +5,7 @@ Provides two tools for persistent memory:
 - search_memory: Search stored memories by substring
 
 The MemoryStore is auto-created by the workflow manager when
-these tools are used (via @requires("memory_store")).
+these tools are used (detected via _TOOL_SERVICE_MAP).
 
 Example:
     from agentic_cli.tools import memory_tools
@@ -25,7 +25,6 @@ from typing import Any
 from agentic_cli.config import BaseSettings
 from agentic_cli.logging import get_logger
 from agentic_cli.persistence._utils import atomic_write_json
-from agentic_cli.tools import requires
 
 logger = get_logger("agentic_cli.tools.memory")
 from agentic_cli.tools.registry import (
@@ -166,7 +165,6 @@ class MemoryStore:
     permission_level=PermissionLevel.SAFE,
     description="Save information to persistent memory that survives across sessions. Use this to remember user preferences, important facts, or learnings for future conversations.",
 )
-@requires("memory_store")
 def save_memory(
     content: str,
     tags: list[str] | None = None,
@@ -199,7 +197,6 @@ def save_memory(
     permission_level=PermissionLevel.SAFE,
     description="Search persistent memory by keyword/substring. Use this to recall previously saved facts, preferences, or learnings.",
 )
-@requires("memory_store")
 def search_memory(
     query: str,
     limit: int = 10,

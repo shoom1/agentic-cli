@@ -342,7 +342,7 @@ class LangGraphBuilder:
             return tool(*args, **kwargs)
 
         # Preserve tool metadata attributes used by framework
-        for attr in ("requires", "_context_guard"):
+        for attr in ("_context_guard",):
             if hasattr(tool, attr):
                 setattr(_confirmed, attr, getattr(tool, attr))
 

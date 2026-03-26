@@ -1016,11 +1016,10 @@ class TestKBManagerContextVar:
         finally:
             token.var.reset(token)
 
-    def test_kb_manager_in_manager_requirement(self):
-        from agentic_cli.tools import ManagerRequirement
-        from agentic_cli.tools.knowledge_tools import search_knowledge_base
-        assert hasattr(search_knowledge_base, "requires")
-        assert "kb_manager" in search_knowledge_base.requires
+    def test_kb_manager_detected_via_tool_service_map(self):
+        """Verify kb tools are detected via _TOOL_SERVICE_MAP (not @requires)."""
+        from agentic_cli.workflow.base_manager import BaseWorkflowManager
+        assert "search_knowledge_base" in BaseWorkflowManager._TOOL_SERVICE_MAP
 
     def test_base_manager_has_kb_manager_slot(self):
         from agentic_cli.workflow.base_manager import BaseWorkflowManager

@@ -1,13 +1,10 @@
 """Tests for task management tools."""
 
-from typing import AsyncGenerator
 from unittest.mock import patch
 
 import pytest
 
 from agentic_cli.tools.task_tools import TaskStore, TaskItem
-from agentic_cli.workflow.base_manager import BaseWorkflowManager
-from agentic_cli.workflow.events import WorkflowEvent, EventType
 
 
 @pytest.fixture
@@ -519,79 +516,39 @@ class TestTaskStoreProgress:
         assert store.all_done() is False
 
 
-class _MinimalWorkflowManager(BaseWorkflowManager):
-    """Minimal concrete subclass for testing base class methods."""
-
-    @property
-    def backend_type(self) -> str:
-        return "test"
-
-    async def _do_initialize(self) -> None:
-        pass
-
-    async def process(
-        self, message: str, user_id: str, session_id: str | None = None
-    ) -> AsyncGenerator[WorkflowEvent, None]:
-        if False:
-            yield  # type: ignore[misc]
-
-    async def reinitialize(self, model: str | None = None, preserve_sessions: bool = True) -> None:
-        pass
-
-    async def cleanup(self) -> None:
-        pass
-
-    async def _extract_session_data(self, session_id: str) -> tuple[list[dict], str | None]:
-        return [], None
-
-    async def _inject_session_messages(self, session_id: str, messages: list[dict], current_agent: str | None = None) -> None:
-        pass
-
-
 class TestEmitTaskProgressEvent:
-    """Tests for BaseWorkflowManager._emit_task_progress_event()."""
+    """Tests for task progress data (formerly _emit_task_progress_event).
 
-    def test_returns_none_when_no_tasks(self, mock_context):
-        mgr = _MinimalWorkflowManager(agent_configs=[], settings=mock_context.settings)
-        assert mgr._emit_task_progress_event() is None
+    The base manager no longer has this method — task progress is handled
+    per-backend (ADK plugin, LangGraph graph state).  See:
+    - tests/workflow/test_task_progress_plugin.py (ADK)
+    - tests/tools/test_core_tasks.py (shared task_progress_data)
+    """
 
-    def test_returns_none_when_empty_list(self, mock_context):
-        mgr = _MinimalWorkflowManager(agent_configs=[], settings=mock_context.settings)
-        mgr._services["tasks"] = []
-        assert mgr._emit_task_progress_event() is None
+    def test_progress_data_returns_none_when_empty(self):
+        from agentic_cli.tools._core.tasks import task_progress_data
+        assert task_progress_data([]) is None
 
-    def test_returns_task_progress_event(self, mock_context):
-        store = TaskStore()
-        ids = store.replace_all([
+    def test_progress_data_with_tasks(self):
+        from agentic_cli.tools._core.tasks import task_progress_data, normalize_tasks
+        normalized, ids = normalize_tasks([
             {"description": "Research topic", "status": "in_progress"},
             {"description": "Write summary"},
         ])
-        tasks_data = [item.to_dict() for item in store._items.values()]
+        result = task_progress_data(normalized)
+        assert result is not None
+        assert "[▸] Research topic" in result["display"]
+        assert "[ ] Write summary" in result["display"]
+        assert result["progress"]["total"] == 2
+        assert result["progress"]["in_progress"] == 1
+        assert result["current_task_id"] == ids[0]
+        assert result["current_task_description"] == "Research topic"
 
-        mgr = _MinimalWorkflowManager(agent_configs=[], settings=mock_context.settings)
-        mgr._services["tasks"] = tasks_data
-
-        event = mgr._emit_task_progress_event()
-        assert event is not None
-        assert event.type == EventType.TASK_PROGRESS
-        assert "[▸] Research topic" in event.content
-        assert "[ ] Write summary" in event.content
-        assert event.metadata["progress"]["total"] == 2
-        assert event.metadata["progress"]["in_progress"] == 1
-        assert event.metadata["current_task_id"] == ids[0]
-        assert event.metadata["current_task_description"] == "Research topic"
-
-    def test_works_without_in_progress_task(self, mock_context):
-        store = TaskStore()
-        store.replace_all([{"description": "Pending task"}])
-        tasks_data = [item.to_dict() for item in store._items.values()]
-
-        mgr = _MinimalWorkflowManager(agent_configs=[], settings=mock_context.settings)
-        mgr._services["tasks"] = tasks_data
-
-        event = mgr._emit_task_progress_event()
-        assert event is not None
-        assert event.type == EventType.TASK_PROGRESS
-        assert "[ ] Pending task" in event.content
-        assert "current_task_id" not in event.metadata
-        assert event.metadata["progress"]["pending"] == 1
+    def test_progress_data_without_in_progress(self):
+        from agentic_cli.tools._core.tasks import task_progress_data, normalize_tasks
+        normalized, _ = normalize_tasks([{"description": "Pending task"}])
+        result = task_progress_data(normalized)
+        assert result is not None
+        assert "[ ] Pending task" in result["display"]
+        assert result["current_task_id"] is None
+        assert result["progress"]["pending"] == 1

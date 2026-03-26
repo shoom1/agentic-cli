@@ -470,51 +470,55 @@ class TestParseRetryDelay:
 
 
 class TestTaskProgressAutoClean:
-    """Tests for auto-clear when all tasks are done and plan-based progress."""
+    """Tests for auto-clear via TaskProgressPlugin (replaces _emit_task_progress_event)."""
 
-    def test_auto_clears_when_all_done(self, mock_settings):
-        """When all tasks are completed, emit final event then clear."""
-        from agentic_cli.tools.task_tools import TaskStore
+    async def test_auto_clears_when_all_done(self):
+        """Plugin clears tasks from tool_context.state when all done."""
+        from agentic_cli.workflow.adk.task_progress_plugin import TaskProgressPlugin
+        from agentic_cli.tools._core.tasks import normalize_tasks
 
-        store = TaskStore()
-        store.replace_all([
+        normalized, _ = normalize_tasks([
             {"description": "Task 1", "status": "completed"},
             {"description": "Task 2", "status": "completed"},
         ])
-        tasks_data = [item.to_dict() for item in store._items.values()]
 
-        mgr = _create_manager(mock_settings, [AgentConfig(name="test", prompt="test")])
-        mgr._services["tasks"] = tasks_data
+        state = {"tasks": normalized}
+        mock_ctx = type("MockCtx", (), {"state": state})()
+        plugin = TaskProgressPlugin()
 
-        # First call: emits final snapshot, then clears
-        event = mgr._emit_task_progress_event()
-        assert event is not None
-        assert event.type == EventType.TASK_PROGRESS
-        assert "[✓] Task 1" in event.content
-        assert "[✓] Task 2" in event.content
-        assert event.metadata["progress"]["completed"] == 2
-        assert mgr._services["tasks"] == []
+        await plugin.after_tool_callback(
+            tool=None, tool_args={}, tool_context=mock_ctx, result={},
+        )
 
-        # Second call: tasks cleared, returns None
-        assert mgr._emit_task_progress_event() is None
+        events = plugin.drain_events()
+        assert len(events) == 1
+        assert events[0].type == EventType.TASK_PROGRESS
+        assert "[✓] Task 1" in events[0].content
+        assert events[0].metadata["progress"]["completed"] == 2
+        # Auto-cleared
+        assert state["tasks"] == []
 
-    def test_no_auto_clear_with_pending(self, mock_settings):
-        """When tasks are not all done, tasks are NOT cleared."""
-        from agentic_cli.tools.task_tools import TaskStore
+    async def test_no_auto_clear_with_pending(self):
+        """Plugin does NOT clear when tasks remain pending."""
+        from agentic_cli.workflow.adk.task_progress_plugin import TaskProgressPlugin
+        from agentic_cli.tools._core.tasks import normalize_tasks
 
-        store = TaskStore()
-        store.replace_all([
+        normalized, _ = normalize_tasks([
             {"description": "Done task", "status": "completed"},
             {"description": "Pending task", "status": "pending"},
         ])
-        tasks_data = [item.to_dict() for item in store._items.values()]
 
-        mgr = _create_manager(mock_settings, [AgentConfig(name="test", prompt="test")])
-        mgr._services["tasks"] = tasks_data
+        state = {"tasks": normalized}
+        mock_ctx = type("MockCtx", (), {"state": state})()
+        plugin = TaskProgressPlugin()
 
-        event = mgr._emit_task_progress_event()
-        assert event is not None
-        assert mgr._services["tasks"]  # not cleared
+        await plugin.after_tool_callback(
+            tool=None, tool_args={}, tool_context=mock_ctx, result={},
+        )
+
+        events = plugin.drain_events()
+        assert len(events) == 1
+        assert len(state["tasks"]) == 2  # not cleared
 
 
 
