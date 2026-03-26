@@ -422,7 +422,7 @@ def test_package_exports_new_modules():
     from agentic_cli.tools.planning_tools import PlanStore
 
     # HITL
-    from agentic_cli.tools.hitl_tools import HITLConfig, ApprovalManager
+    from agentic_cli.tools.hitl_tools import ApprovalManager
 
     # Tools
     from agentic_cli.tools import shell_executor, read_file, write_file, diff_compare
@@ -431,5 +431,5 @@ def test_package_exports_new_modules():
     assert MemoryStore is not None
     assert MemoryItem is not None
     assert PlanStore is not None
-    assert HITLConfig is not None
+    assert ApprovalManager is not None
     assert shell_executor is not None

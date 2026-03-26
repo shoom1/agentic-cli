@@ -6,10 +6,16 @@ and LLM factory logic from the runtime process loop.
 
 from __future__ import annotations
 
+import asyncio
+import functools
+import uuid
 from collections import deque
 from typing import Any, Callable, TYPE_CHECKING
 
 from agentic_cli.workflow.config import AgentConfig
+from agentic_cli.workflow.adk.plugins import is_dangerous
+from agentic_cli.workflow.context import get_context_workflow
+from agentic_cli.workflow.events import UserInputRequest, InputType
 from agentic_cli.logging import Loggers
 
 if TYPE_CHECKING:
@@ -103,8 +109,11 @@ class LangGraphBuilder:
             if config.tools:
                 tool_node_name = f"{config.name}_tools"
                 tool_map[config.name] = tool_node_name
+                wrapped_tools = [
+                    self._wrap_for_confirmation(t) for t in config.tools
+                ]
                 tool_node = ToolNode(
-                    config.tools, name=tool_node_name, handle_tool_errors=True,
+                    wrapped_tools, name=tool_node_name, handle_tool_errors=True,
                 )
                 graph.add_node(tool_node_name, tool_node)
                 # After tool execution, loop back to the agent
@@ -281,6 +290,73 @@ class LangGraphBuilder:
             initial_interval=self._settings.retry_initial_delay,
             backoff_factor=self._settings.retry_backoff_factor,
         )
+
+    @staticmethod
+    def _wrap_for_confirmation(tool: Callable) -> Callable:
+        """Wrap a DANGEROUS tool with user confirmation logic.
+
+        Safe tools are returned as-is. DANGEROUS tools get an async wrapper
+        that uses the workflow manager's request_user_input callback to prompt
+        the user before executing.
+
+        The wrapper is always async regardless of the original tool, because
+        the confirmation prompt requires awaiting request_user_input(). This
+        is safe because LangGraph's ToolNode calls ainvoke() for all tools.
+
+        Args:
+            tool: The tool function to potentially wrap.
+
+        Returns:
+            The original function (if safe) or a confirmation-wrapped version.
+        """
+        tool_name = getattr(tool, "__name__", str(tool))
+        if not is_dangerous(tool_name):
+            return tool
+
+        is_async = asyncio.iscoroutinefunction(tool)
+
+        @functools.wraps(tool)
+        async def _confirmed(*args: Any, **kwargs: Any) -> Any:
+            workflow = get_context_workflow()
+            if workflow is not None:
+                arg_summary = ", ".join(
+                    f"{k}={repr(v)[:50]}" for k, v in list(kwargs.items())[:3]
+                )
+                prompt = (
+                    f"Tool requires approval: {tool_name}({arg_summary})\n\n"
+                    f"Allow this operation? (yes/no)"
+                )
+                request = UserInputRequest(
+                    request_id=str(uuid.uuid4())[:8],
+                    tool_name=tool_name,
+                    prompt=prompt,
+                    input_type=InputType.CONFIRM,
+                    default="no",
+                )
+                try:
+                    response = await workflow.request_user_input(request)
+                    approved = response.strip().lower() in (
+                        "yes", "y", "approve", "true",
+                    )
+                    if not approved:
+                        return {
+                            "success": False,
+                            "error": f"User denied approval for {tool_name}",
+                        }
+                except RuntimeError:
+                    # No callback registered -- allow execution
+                    pass
+
+            if is_async:
+                return await tool(*args, **kwargs)
+            return tool(*args, **kwargs)
+
+        # Preserve tool metadata attributes used by framework
+        for attr in ("requires", "_context_guard"):
+            if hasattr(tool, attr):
+                setattr(_confirmed, attr, getattr(tool, attr))
+
+        return _confirmed
 
     def _create_agent_node(self, config: AgentConfig, default_model: str) -> Callable:
         """Create a LangGraph node function for an agent.

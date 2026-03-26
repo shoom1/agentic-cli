@@ -25,7 +25,7 @@ from typing import Any, Callable, Literal, TypeVar
 # Type for manager requirements
 ManagerRequirement = Literal[
     "memory_manager", "plan_store", "task_store", "kb_manager", "user_kb_manager",
-    "approval_manager", "llm_summarizer", "sandbox_manager",
+    "llm_summarizer", "sandbox_manager",
 ]
 
 F = TypeVar("F", bound=Callable)

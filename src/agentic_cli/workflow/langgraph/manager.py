@@ -119,11 +119,6 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
         """Return 'langgraph'."""
         return "langgraph"
 
-    @property
-    def graph(self):
-        """Get the compiled LangGraph graph."""
-        return self._compiled_graph
-
     async def _do_initialize(self) -> None:
         """LangGraph-specific initialization: checkpointer, graph, LLM."""
         logger.info("initializing_langgraph_services", app_name=self.app_name)

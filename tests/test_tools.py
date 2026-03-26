@@ -1398,8 +1398,6 @@ class TestToolRegistryConsistency:
             # Task tools
             "save_tasks",
             "get_tasks",
-            # HITL tools
-            "request_approval",
         ]
 
         registered_names = {tool.name for tool in registry.list_tools()}
@@ -1453,7 +1451,6 @@ class TestToolRegistryConsistency:
             "ask_clarification",
             "save_memory", "search_memory",
             "save_plan", "get_plan",
-            "request_approval",
         ]
 
         for tool_name in safe_tools:
@@ -1510,7 +1507,7 @@ class TestToolRegistryConsistency:
 
         interaction_tools = registry.list_by_category(ToolCategory.INTERACTION)
         interaction_names = {t.name for t in interaction_tools}
-        assert "request_approval" in interaction_names, "INTERACTION category should have HITL tools"
+        assert "ask_clarification" in interaction_names, "INTERACTION category should have interaction tools"
 
         knowledge_tools = registry.list_by_category(ToolCategory.KNOWLEDGE)
         knowledge_names = {t.name for t in knowledge_tools}
@@ -1544,7 +1541,7 @@ class TestToolRegistryConsistency:
         registry = get_registry()
         tool_count = len(registry.list_tools())
 
-        # We expect at least 26 tools after unified document store
+        # We expect at least 25 tools after unified document store
         # File ops: 7 (read_file, diff_compare, grep, glob, list_dir, write_file, edit_file)
         # Web/Network: 2 (web_search, web_fetch)
         # Knowledge: 7 (search_kb, ingest_document, read_document, list_documents, open_document, search_arxiv, fetch_arxiv)
@@ -1553,29 +1550,29 @@ class TestToolRegistryConsistency:
         # Memory: 2 (save_memory, search_memory)
         # Planning: 2 (save_plan, get_plan)
         # Tasks: 2 (save_tasks, get_tasks)
-        # HITL: 1 (request_approval)
+        # Sandbox: 1 (sandbox_execute)
         # Total: ~26 tools
-        assert tool_count >= 25, f"Expected at least 25 registered tools, got {tool_count}"
+        assert tool_count >= 24, f"Expected at least 24 registered tools, got {tool_count}"
 
 
-class TestDangerousToolHITLEnforcement:
-    """Tests that DANGEROUS tools auto-gate behind HITL approval."""
+class TestDangerousToolDirectExecution:
+    """Tests that DANGEROUS tools execute directly (no registry-level wrapping).
 
-    def test_dangerous_tool_has_hitl_guard(self):
-        """DANGEROUS tool should be wrapped with HITL guard."""
+    Confirmation is now handled at the framework level by ADK ConfirmationPlugin
+    and LangGraph's _wrap_for_confirmation wrapper.
+    """
+
+    def test_dangerous_tool_not_wrapped(self):
+        """DANGEROUS tool should NOT have _hitl_guarded attribute (no wrapping)."""
         from agentic_cli.tools.sandbox import sandbox_execute
 
-        assert getattr(sandbox_execute, "_hitl_guarded", False), \
-            "DANGEROUS tools should be wrapped with HITL guard"
+        assert not getattr(sandbox_execute, "_hitl_guarded", False), \
+            "DANGEROUS tools should no longer be wrapped with _hitl_guarded"
 
-    def test_dangerous_tool_passes_with_approval(self):
-        """DANGEROUS tool executes when approval manager approves."""
-        from unittest.mock import MagicMock
+    def test_dangerous_tool_executes_directly(self):
+        """DANGEROUS tool executes directly without approval manager."""
         from agentic_cli.tools.sandbox import sandbox_execute
-        from agentic_cli.workflow.context import (
-            set_context_sandbox_manager,
-            set_context_approval_manager,
-        )
+        from agentic_cli.workflow.context import set_context_sandbox_manager
         from agentic_cli.tools.sandbox.models import ExecutionResult
         from tests.conftest import MockContext
         from tests.tools.test_sandbox import MockSandboxBackend
@@ -1587,80 +1584,20 @@ class TestDangerousToolHITLEnforcement:
             from agentic_cli.tools.sandbox.manager import SandboxManager
             mgr = SandboxManager(ctx.settings, backend=backend)
 
-            # Create mock approval manager that auto-approves
-            approval_mgr = MagicMock()
-            approval_mgr.check_or_request.return_value = True
-
-            tok1 = set_context_sandbox_manager(mgr)
-            tok2 = set_context_approval_manager(approval_mgr)
-
-            try:
-                result = sandbox_execute("1 + 1")
-                assert result["success"] is True
-                approval_mgr.check_or_request.assert_called_once()
-            finally:
-                tok1.var.reset(tok1)
-                tok2.var.reset(tok2)
-                mgr.cleanup()
-
-    def test_dangerous_tool_denied(self):
-        """DANGEROUS tool returns error when approval manager denies."""
-        from unittest.mock import MagicMock
-        from agentic_cli.tools.sandbox import sandbox_execute
-        from agentic_cli.workflow.context import (
-            set_context_sandbox_manager,
-            set_context_approval_manager,
-        )
-        from tests.conftest import MockContext
-        from tests.tools.test_sandbox import MockSandboxBackend
-
-        with MockContext() as ctx:
-            backend = MockSandboxBackend()
-            from agentic_cli.tools.sandbox.manager import SandboxManager
-            mgr = SandboxManager(ctx.settings, backend=backend)
-
-            approval_mgr = MagicMock()
-            approval_mgr.check_or_request.return_value = False
-
-            tok1 = set_context_sandbox_manager(mgr)
-            tok2 = set_context_approval_manager(approval_mgr)
-
-            try:
-                result = sandbox_execute("1 + 1")
-                assert result["success"] is False
-                assert "denied" in result["error"].lower()
-                # Original function should NOT have been called
-                assert len(backend.execute_calls) == 0
-            finally:
-                tok1.var.reset(tok1)
-                tok2.var.reset(tok2)
-                mgr.cleanup()
-
-    def test_dangerous_tool_no_approval_manager_executes(self):
-        """DANGEROUS tool executes normally when no approval manager exists."""
-        from agentic_cli.tools.sandbox import sandbox_execute
-        from agentic_cli.workflow.context import (
-            set_context_sandbox_manager,
-            set_context_approval_manager,
-        )
-        from agentic_cli.tools.sandbox.models import ExecutionResult
-        from tests.conftest import MockContext
-        from tests.tools.test_sandbox import MockSandboxBackend
-
-        with MockContext() as ctx:
-            backend = MockSandboxBackend(
-                ExecutionResult(success=True, stdout="ok\n", result="1")
-            )
-            from agentic_cli.tools.sandbox.manager import SandboxManager
-            mgr = SandboxManager(ctx.settings, backend=backend)
-
-            tok1 = set_context_sandbox_manager(mgr)
-            tok2 = set_context_approval_manager(None)
+            tok = set_context_sandbox_manager(mgr)
 
             try:
                 result = sandbox_execute("1 + 1")
                 assert result["success"] is True
             finally:
-                tok1.var.reset(tok1)
-                tok2.var.reset(tok2)
+                tok.var.reset(tok)
                 mgr.cleanup()
+
+    def test_dangerous_tool_has_correct_permission_level(self):
+        """DANGEROUS tools should still be registered with DANGEROUS permission."""
+        from agentic_cli.tools import get_registry, PermissionLevel
+
+        registry = get_registry()
+        tool = registry.get("sandbox_execute")
+        if tool:
+            assert tool.permission_level == PermissionLevel.DANGEROUS

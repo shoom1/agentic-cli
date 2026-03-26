@@ -352,20 +352,6 @@ class TestOpenDocument:
         assert format_tool_summary("open_document", result) == "Opened: My Paper"
 
 
-class TestRequestApproval:
-    def test_approved(self):
-        result = {"success": True, "approved": True, "reason": None}
-        assert format_tool_summary("request_approval", result) == "Approved"
-
-    def test_rejected(self):
-        result = {"success": True, "approved": False, "reason": "Too risky"}
-        assert format_tool_summary("request_approval", result) == "Rejected: Too risky"
-
-    def test_rejected_no_reason(self):
-        result = {"success": True, "approved": False, "reason": ""}
-        assert format_tool_summary("request_approval", result) == "Rejected"
-
-
 # ---------------------------------------------------------------------------
 # Fallback / defensive behaviour
 # ---------------------------------------------------------------------------
@@ -385,7 +371,6 @@ class TestFallback:
             "analyze_arxiv_paper",
             "save_paper", "list_papers", "get_paper_info", "open_paper",
             "ingest_to_knowledge_base",
-            "request_approval",
         ]:
             result = format_tool_summary(tool_name, {})
             # Should be None (formatter caught the KeyError) or a valid string

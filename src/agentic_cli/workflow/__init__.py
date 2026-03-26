@@ -13,21 +13,18 @@ Submodules:
 from agentic_cli.workflow.events import WorkflowEvent, EventType, UserInputRequest
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.factory import create_workflow_manager_from_settings
-from agentic_cli.workflow.thinking import ThinkingDetector, ThinkingResult
 from agentic_cli.workflow.settings import WorkflowSettingsMixin
 from agentic_cli.workflow.models import ModelFamily, ModelInfo, ModelRegistry
 from agentic_cli.workflow.context import (
     # Getters for tools
     get_context_memory_store,
     get_context_plan_store,
-    get_context_approval_manager,
     get_context_task_store,
     get_context_llm_summarizer,
     get_context_kb_manager,
     # Setters for workflow managers
     set_context_memory_store,
     set_context_plan_store,
-    set_context_approval_manager,
     set_context_task_store,
     set_context_llm_summarizer,
     set_context_kb_manager,
@@ -70,9 +67,6 @@ __all__ = [
     "create_workflow_manager_from_settings",
     # Config
     "AgentConfig",
-    # Thinking
-    "ThinkingDetector",
-    "ThinkingResult",
     # Settings mixin
     "WorkflowSettingsMixin",
     # Model registry
@@ -92,14 +86,12 @@ __all__ = [
     # Context getters (for tools)
     "get_context_memory_store",
     "get_context_plan_store",
-    "get_context_approval_manager",
     "get_context_task_store",
     "get_context_llm_summarizer",
     "get_context_kb_manager",
     # Context setters (for workflow managers)
     "set_context_memory_store",
     "set_context_plan_store",
-    "set_context_approval_manager",
     "set_context_task_store",
     "set_context_llm_summarizer",
     "set_context_kb_manager",

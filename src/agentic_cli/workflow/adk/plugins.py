@@ -1,54 +1,128 @@
-"""LLM Event Logger for capturing raw LLM traffic.
+"""ADK Plugins for agentic-cli.
 
-This module provides callbacks for Google ADK's before_model_callback and
-after_model_callback hooks to capture raw LLM request/response data for
-debugging and understanding model-specific behaviors.
-
-Events are written to a JSON Lines file at ./.{app_name}/logs/llm_events.jsonl
-
-Usage:
-    logger = LLMEventLogger(
-        model_name="gemini-2.0-flash",
-        app_name="research_demo",
-    )
-
-    agent = LlmAgent(
-        name="my_agent",
-        before_model_callback=logger.before_model_callback,
-        after_model_callback=logger.after_model_callback,
-    )
-
-    # After processing, retrieve events from memory:
-    for event in logger.get_events():
-        print(event.type, event.metadata)
-
-    # Or read from the log file:
-    # ./.research_demo/logs/llm_events.jsonl
+Provides framework-level cross-cutting concerns as ADK Plugins:
+- ConfirmationPlugin: HITL confirmation for DANGEROUS tools
+- LLMLoggingPlugin: Raw LLM traffic logging for debugging
 """
 
 from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass, field
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
-from agentic_cli.workflow.events import WorkflowEvent
+from google.adk.plugins.base_plugin import BasePlugin
+
+from agentic_cli.tools.registry import get_registry, PermissionLevel
+from agentic_cli.workflow.context import get_context_workflow
+from agentic_cli.workflow.events import WorkflowEvent, UserInputRequest, InputType
+from agentic_cli.logging import Loggers
 
 if TYPE_CHECKING:
-    from google.adk.models import LlmRequest, LlmResponse
     from google.adk.agents.callback_context import CallbackContext
+    from google.adk.models import LlmRequest, LlmResponse
+    from google.adk.tools import BaseTool
+    from google.adk.tools.tool_context import ToolContext
+
+logger = Loggers.workflow()
+
+# Cache of tool names → is_dangerous, built lazily on first call.
+# Safe under CPython GIL (redundant work at worst, not corruption).
+# Call reset_dangerous_cache() in tests after registering/deregistering tools.
+_dangerous_cache: dict[str, bool] | None = None
 
 
-@dataclass
-class LLMEventLogger:
-    """Logger for capturing raw LLM request/response traffic.
+def is_dangerous(tool_name: str) -> bool:
+    """Check if a tool is registered as DANGEROUS permission level."""
+    global _dangerous_cache
+    if _dangerous_cache is None:
+        registry = get_registry()
+        _dangerous_cache = {
+            defn.name: defn.permission_level == PermissionLevel.DANGEROUS
+            for defn in registry.list_tools()
+        }
+    return _dangerous_cache.get(tool_name, False)
 
-    This class provides ADK callbacks that capture LLM interactions for
-    debugging purposes. Events are written to a JSON Lines file and also
-    stored in a memory buffer for programmatic access.
+
+def reset_dangerous_cache() -> None:
+    """Reset the dangerous-tool cache. Call after dynamic tool registration."""
+    global _dangerous_cache
+    _dangerous_cache = None
+
+
+class ConfirmationPlugin(BasePlugin):
+    """ADK Plugin that requires user confirmation for DANGEROUS tools.
+
+    Uses the workflow manager's request_user_input callback to prompt
+    the user before executing any tool with PermissionLevel.DANGEROUS.
+
+    Replaces the old _wrap_dangerous decorator pattern with a single
+    framework-level hook that applies to all agents globally.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(name="confirmation")
+
+    async def before_tool_callback(
+        self,
+        *,
+        tool: "BaseTool",
+        tool_args: dict[str, Any],
+        tool_context: "ToolContext",
+    ) -> dict | None:
+        """Intercept DANGEROUS tool calls and request user confirmation."""
+        if not is_dangerous(tool.name):
+            return None
+
+        workflow = get_context_workflow()
+        if workflow is None:
+            logger.warning("confirmation_plugin.no_workflow", tool=tool.name)
+            return None
+
+        arg_summary = ", ".join(
+            f"{k}={repr(v)[:50]}" for k, v in list(tool_args.items())[:3]
+        )
+        prompt = (
+            f"Tool requires approval: {tool.name}({arg_summary})\n\n"
+            f"Allow this operation? (yes/no)"
+        )
+
+        request = UserInputRequest(
+            request_id=str(uuid.uuid4())[:8],
+            tool_name=tool.name,
+            prompt=prompt,
+            input_type=InputType.CONFIRM,
+            default="no",
+        )
+
+        try:
+            response = await workflow.request_user_input(request)
+        except RuntimeError:
+            logger.warning("confirmation_plugin.no_callback", tool=tool.name)
+            return None
+
+        approved = response.strip().lower() in ("yes", "y", "approve", "true")
+
+        if approved:
+            logger.debug("confirmation_plugin.approved", tool=tool.name)
+            return None
+
+        logger.info("confirmation_plugin.denied", tool=tool.name)
+        return {
+            "success": False,
+            "error": f"User denied approval for {tool.name}",
+        }
+
+
+class LLMLoggingPlugin(BasePlugin):
+    """ADK Plugin that captures raw LLM request/response traffic for debugging.
+
+    Replaces the old per-agent LLMEventLogger with a single global plugin
+    that applies to all agents via the Runner. Events are written to a
+    JSON Lines file and buffered in memory for programmatic access.
 
     Attributes:
         model_name: Default model name (used if not in request)
@@ -58,61 +132,42 @@ class LLMEventLogger:
         include_raw_parts: Whether to include raw response parts
     """
 
-    model_name: str = "unknown"
-    app_name: str = "agentic_cli"
-    max_events: int = 1000
-    include_messages: bool = True
-    include_raw_parts: bool = True
+    def __init__(
+        self,
+        model_name: str = "unknown",
+        app_name: str = "agentic_cli",
+        max_events: int = 1000,
+        include_messages: bool = True,
+        include_raw_parts: bool = True,
+    ) -> None:
+        super().__init__(name="llm_logging")
+        self.model_name = model_name
+        self.app_name = app_name
+        self.max_events = max_events
+        self.include_messages = include_messages
+        self.include_raw_parts = include_raw_parts
 
-    _events: list[WorkflowEvent] = field(default_factory=list)
-    _request_timestamps: dict[str, float] = field(default_factory=dict)
-    _log_file: Path | None = field(default=None, init=False)
+        self._events: list[WorkflowEvent] = []
+        self._request_timestamps: dict[str, float] = {}
 
-    def __post_init__(self) -> None:
-        """Initialize log file path and ensure directory exists."""
+        # Initialize log file
         log_dir = Path.cwd() / f".{self.app_name}" / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
-        self._log_file = log_dir / "llm_events.jsonl"
+        self._log_file: Path = log_dir / "llm_events.jsonl"
 
-    def _write_to_log(self, event: WorkflowEvent) -> None:
-        """Write event to JSON Lines log file.
+    # ------------------------------------------------------------------
+    # ADK Plugin callbacks
+    # ------------------------------------------------------------------
 
-        Args:
-            event: WorkflowEvent to write
-        """
-        if self._log_file is None:
-            return
-
-        record = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "type": event.type.value,
-            "content": event.content,
-            "metadata": event.metadata,
-        }
-
-        try:
-            with open(self._log_file, "a", encoding="utf-8") as f:
-                f.write(json.dumps(record, default=str) + "\n")
-        except OSError:
-            # Silently ignore write errors to avoid disrupting the workflow
-            pass
-
-    def before_model_callback(
+    async def before_model_callback(
         self,
+        *,
         callback_context: "CallbackContext",
         llm_request: "LlmRequest",
     ) -> None:
         """Capture LLM request before it's sent to the model.
 
-        This callback captures the raw request data including messages,
-        tools, system instruction, and configuration.
-
-        Args:
-            callback_context: ADK callback context with session info
-            llm_request: The request being sent to the LLM
-
-        Returns:
-            None (allows request to proceed unchanged)
+        Returns None to allow the request to proceed unchanged.
         """
         invocation_id = getattr(callback_context, "invocation_id", None)
 
@@ -140,7 +195,6 @@ class LLMEventLogger:
             if isinstance(si, str):
                 system_instruction = si
             elif hasattr(si, "parts"):
-                # Content object with parts
                 system_instruction = self._extract_text_from_parts(si.parts)
 
         # Extract generation config
@@ -160,24 +214,17 @@ class LLMEventLogger:
         self._add_event(event)
         self._write_to_log(event)
 
-        return None  # Allow request to proceed
+        return None
 
-    def after_model_callback(
+    async def after_model_callback(
         self,
+        *,
         callback_context: "CallbackContext",
         llm_response: "LlmResponse",
     ) -> None:
         """Capture LLM response after it's received from the model.
 
-        This callback captures the raw response data including content,
-        finish reason, usage metadata, and any errors.
-
-        Args:
-            callback_context: ADK callback context with session info
-            llm_response: The response from the LLM
-
-        Returns:
-            None (allows response to proceed unchanged)
+        Returns None to allow the response to proceed unchanged.
         """
         invocation_id = getattr(callback_context, "invocation_id", None)
 
@@ -243,22 +290,18 @@ class LLMEventLogger:
             self._add_event(usage_event)
             self._write_to_log(usage_event)
 
-        return None  # Allow response to proceed
+        return None
+
+    # ------------------------------------------------------------------
+    # Event buffer management
+    # ------------------------------------------------------------------
 
     def get_events(self) -> list[WorkflowEvent]:
-        """Get all captured events without clearing the buffer.
-
-        Returns:
-            List of captured WorkflowEvent objects
-        """
+        """Get all captured events without clearing the buffer."""
         return list(self._events)
 
     def drain_events(self) -> list[WorkflowEvent]:
-        """Get and clear all captured events.
-
-        Returns:
-            List of captured WorkflowEvent objects (buffer is cleared)
-        """
+        """Get and clear all captured events."""
         events = self._events
         self._events = []
         return events
@@ -268,20 +311,34 @@ class LLMEventLogger:
         self._events = []
         self._request_timestamps = {}
 
-    def get_log_file_path(self) -> Path | None:
-        """Get the path to the log file.
-
-        Returns:
-            Path to the JSON Lines log file, or None if not initialized
-        """
+    def get_log_file_path(self) -> Path:
+        """Get the path to the log file."""
         return self._log_file
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
 
     def _add_event(self, event: WorkflowEvent) -> None:
         """Add event to buffer, enforcing max_events limit."""
         self._events.append(event)
         if len(self._events) > self.max_events:
-            # Drop oldest events
-            self._events = self._events[-self.max_events :]
+            self._events = self._events[-self.max_events:]
+
+    def _write_to_log(self, event: WorkflowEvent) -> None:
+        """Write event to JSON Lines log file."""
+        record = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "type": event.type.value,
+            "content": event.content,
+            "metadata": event.metadata,
+        }
+
+        try:
+            with open(self._log_file, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record, default=str) + "\n")
+        except OSError:
+            pass
 
     def _serialize_contents(self, contents: list[Any]) -> list[dict[str, Any]]:
         """Serialize Content objects to dictionaries."""
@@ -301,15 +358,12 @@ class LLMEventLogger:
         for part in parts:
             item: dict[str, Any] = {}
 
-            # Text content
             if hasattr(part, "text") and part.text:
                 item["text"] = part.text
 
-            # Thinking indicator
             if hasattr(part, "thought") and part.thought:
                 item["thought"] = True
 
-            # Function call
             if hasattr(part, "function_call") and part.function_call:
                 fc = part.function_call
                 item["function_call"] = {
@@ -317,7 +371,6 @@ class LLMEventLogger:
                     "args": dict(fc.args) if fc.args else {},
                 }
 
-            # Function response
             if hasattr(part, "function_response") and part.function_response:
                 fr = part.function_response
                 item["function_response"] = {
@@ -325,7 +378,6 @@ class LLMEventLogger:
                     "response": fr.response,
                 }
 
-            # Executable code
             if hasattr(part, "executable_code") and part.executable_code:
                 ec = part.executable_code
                 item["executable_code"] = {
@@ -333,7 +385,6 @@ class LLMEventLogger:
                     "language": str(ec.language) if ec.language else None,
                 }
 
-            # Code execution result
             if hasattr(part, "code_execution_result") and part.code_execution_result:
                 cer = part.code_execution_result
                 item["code_execution_result"] = {

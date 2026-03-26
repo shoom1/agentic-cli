@@ -152,15 +152,6 @@ def _open_document(r: dict) -> str:
     return f"Opened: {truncate(title, 80)}"
 
 
-def _request_approval(r: dict) -> str:
-    if r.get("approved"):
-        return "Approved"
-    reason = r.get("reason", "")
-    if reason:
-        return f"Rejected: {truncate(reason, TOOL_SUMMARY_MAX_LENGTH - 10)}"
-    return "Rejected"
-
-
 _TOOL_FORMATTERS: dict[str, Callable[[dict[str, Any]], str]] = {
     "read_file": _read_file,
     "diff_compare": _diff_compare,
@@ -182,7 +173,6 @@ _TOOL_FORMATTERS: dict[str, Callable[[dict[str, Any]], str]] = {
     "read_document": _read_document,
     "list_documents": _list_documents,
     "open_document": _open_document,
-    "request_approval": _request_approval,
 }
 
 

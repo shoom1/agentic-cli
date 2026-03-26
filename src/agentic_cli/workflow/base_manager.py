@@ -28,7 +28,6 @@ from agentic_cli.workflow.context import (
     set_context_task_store,
     set_context_kb_manager,
     set_context_user_kb_manager,
-    set_context_approval_manager,
     set_context_llm_summarizer,
     set_context_sandbox_manager,
 )
@@ -40,7 +39,6 @@ if TYPE_CHECKING:
     from agentic_cli.tools.planning_tools import PlanStore
     from agentic_cli.tools.task_tools import TaskStore
     from agentic_cli.knowledge_base import KnowledgeBaseManager
-    from agentic_cli.tools.hitl_tools import ApprovalManager
     from agentic_cli.tools.sandbox.manager import SandboxManager
 
 logger = Loggers.workflow()
@@ -114,7 +112,6 @@ class BaseWorkflowManager(ABC):
         self._task_store: "TaskStore | None" = None
         self._kb_manager: "KnowledgeBaseManager | None" = None
         self._user_kb_manager: "KnowledgeBaseManager | None" = None
-        self._approval_manager: "ApprovalManager | None" = None
         self._llm_summarizer: Any | None = None
         self._sandbox_manager: "SandboxManager | None" = None
 
@@ -182,11 +179,6 @@ class BaseWorkflowManager(ABC):
     def user_kb_manager(self) -> "KnowledgeBaseManager | None":
         """Get the user-scoped knowledge base manager (if required by tools)."""
         return self._user_kb_manager
-
-    @property
-    def approval_manager(self) -> "ApprovalManager | None":
-        """Get the approval manager (if required by tools)."""
-        return self._approval_manager
 
     @property
     def llm_summarizer(self) -> Any | None:
@@ -257,10 +249,6 @@ class BaseWorkflowManager(ABC):
             else:
                 self._user_kb_manager = self._kb_manager
 
-        if "approval_manager" in self._required_managers and self._approval_manager is None:
-            from agentic_cli.tools.hitl_tools import ApprovalManager
-            self._approval_manager = ApprovalManager()
-
         if "llm_summarizer" in self._required_managers and self._llm_summarizer is None:
             self._llm_summarizer = self
 
@@ -299,7 +287,6 @@ class BaseWorkflowManager(ABC):
             set_context_task_store(self._task_store),
             set_context_kb_manager(self._kb_manager),
             set_context_user_kb_manager(self._user_kb_manager),
-            set_context_approval_manager(self._approval_manager),
             set_context_llm_summarizer(self._llm_summarizer),
             set_context_sandbox_manager(self._sandbox_manager),
         ]
@@ -319,7 +306,6 @@ class BaseWorkflowManager(ABC):
         self._task_store = None
         self._kb_manager = None
         self._user_kb_manager = None
-        self._approval_manager = None
         self._llm_summarizer = None
 
     @property
@@ -664,11 +650,11 @@ class BaseWorkflowManager(ABC):
         ...
 
     def _emit_task_progress_event(self) -> WorkflowEvent | None:
-        """Build a TASK_PROGRESS event from TaskStore or PlanStore.
+        """Build a TASK_PROGRESS event from TaskStore.
 
         Delegates to :func:`~agentic_cli.workflow.task_progress.build_task_progress_event`.
         """
         from agentic_cli.workflow.task_progress import build_task_progress_event
 
-        return build_task_progress_event(self._task_store, self._plan_store)
+        return build_task_progress_event(self._task_store)
 
