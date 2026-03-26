@@ -341,11 +341,6 @@ class LangGraphBuilder:
                 return await tool(*args, **kwargs)
             return tool(*args, **kwargs)
 
-        # Preserve tool metadata attributes used by framework
-        for attr in ("_context_guard",):
-            if hasattr(tool, attr):
-                setattr(_confirmed, attr, getattr(tool, attr))
-
         return _confirmed
 
     def _create_agent_node(

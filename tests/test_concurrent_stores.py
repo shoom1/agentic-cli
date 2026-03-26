@@ -1,4 +1,4 @@
-"""Tests for concurrent access to MemoryStore, PlanStore, and TaskStore.
+"""Tests for concurrent access to MemoryStore, plan registry state, and TaskStore.
 
 Verifies that parallel read/write operations don't corrupt data.
 """

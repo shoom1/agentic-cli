@@ -263,20 +263,6 @@ class TaskStore:
                 counts[item.status] += 1
         return counts
 
-    def to_compact_display(self) -> str:
-        """Format tasks as a compact checklist for the thinking box.
-
-        Returns:
-            Multi-line string with status icons.
-        """
-        return format_task_checklist(list(self._items.values()))
-
-    def get_current_task(self) -> TaskItem | None:
-        """Return the first in-progress task, or None."""
-        for item in self._items.values():
-            if item.status == TaskStatus.IN_PROGRESS:
-                return item
-        return None
 
 
 @register_tool(
