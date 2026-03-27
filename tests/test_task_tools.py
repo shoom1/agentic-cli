@@ -4,7 +4,13 @@ from unittest.mock import patch
 
 import pytest
 
-from agentic_cli.tools.task_tools import TaskStore, TaskItem
+from agentic_cli.tools._core.tasks import (
+    TaskStatus,
+    TaskPriority,
+    normalize_tasks,
+    filter_tasks,
+    task_progress_data,
+)
 
 
 @pytest.fixture
@@ -28,29 +34,25 @@ def no_task_registry_ctx():
     token.var.reset(token)
 
 
-class TestTaskItem:
-    """Tests for TaskItem dataclass."""
+class TestNormalizeTasks:
+    """Tests for normalize_tasks (replaces TestTaskItem)."""
 
-    def test_to_dict(self):
-        item = TaskItem(
-            id="abc123",
-            description="Test task",
-            status="pending",
-            priority="high",
-            tags=["feature"],
-            created_at="2024-01-01T00:00:00",
-        )
-        d = item.to_dict()
-        assert d["id"] == "abc123"
-        assert d["description"] == "Test task"
-        assert d["status"] == "pending"
-        assert d["priority"] == "high"
-        assert d["tags"] == ["feature"]
-        assert d["created_at"] == "2024-01-01T00:00:00"
-        assert d["completed_at"] == ""
+    def test_normalize_basic(self):
+        normalized, ids = normalize_tasks([
+            {"description": "Test task", "priority": "high", "tags": ["feature"]},
+        ])
+        assert len(normalized) == 1
+        t = normalized[0]
+        assert t["description"] == "Test task"
+        assert t["status"] == "pending"
+        assert t["priority"] == "high"
+        assert t["tags"] == ["feature"]
+        assert t["created_at"] != ""
+        assert t["completed_at"] == ""
+        assert ids[0] == t["id"]
 
-    def test_from_dict(self):
-        data = {
+    def test_normalize_all_fields(self):
+        normalized, ids = normalize_tasks([{
             "id": "abc123",
             "description": "Test task",
             "status": "in_progress",
@@ -58,179 +60,115 @@ class TestTaskItem:
             "tags": ["bug"],
             "created_at": "2024-01-01T00:00:00",
             "completed_at": "",
-        }
-        item = TaskItem.from_dict(data)
-        assert item.id == "abc123"
-        assert item.description == "Test task"
-        assert item.status == "in_progress"
-        assert item.priority == "low"
-        assert item.tags == ["bug"]
+        }])
+        t = normalized[0]
+        assert t["id"] == "abc123"
+        assert t["description"] == "Test task"
+        assert t["status"] == "in_progress"
+        assert t["priority"] == "low"
+        assert t["tags"] == ["bug"]
 
-    def test_from_dict_defaults(self):
-        data = {"id": "x", "description": "Minimal"}
-        item = TaskItem.from_dict(data)
-        assert item.status == "pending"
-        assert item.priority == "medium"
-        assert item.tags == []
+    def test_normalize_defaults(self):
+        normalized, _ = normalize_tasks([{"description": "Minimal"}])
+        t = normalized[0]
+        assert t["status"] == "pending"
+        assert t["priority"] == "medium"
+        assert t["tags"] == []
 
-    def test_from_dict_invalid_status_defaults_to_pending(self):
-        data = {"id": "x", "description": "Bad status", "status": "bogus"}
-        item = TaskItem.from_dict(data)
-        assert item.status == "pending"
+    def test_normalize_invalid_status_defaults_to_pending(self):
+        normalized, _ = normalize_tasks([
+            {"description": "Bad status", "status": "bogus"},
+        ])
+        assert normalized[0]["status"] == "pending"
 
-    def test_from_dict_invalid_priority_defaults_to_medium(self):
-        data = {"id": "x", "description": "Bad priority", "priority": "critical"}
-        item = TaskItem.from_dict(data)
-        assert item.priority == "medium"
+    def test_normalize_invalid_priority_defaults_to_medium(self):
+        normalized, _ = normalize_tasks([
+            {"description": "Bad priority", "priority": "critical"},
+        ])
+        assert normalized[0]["priority"] == "medium"
 
-    def test_roundtrip(self):
-        item = TaskItem(
-            id="rt1",
-            description="Roundtrip",
-            status="completed",
-            priority="medium",
-            tags=["a", "b"],
-            created_at="2024-06-01T12:00:00",
-            completed_at="2024-06-01T13:00:00",
-        )
-        restored = TaskItem.from_dict(item.to_dict())
-        assert restored.id == item.id
-        assert restored.description == item.description
-        assert restored.status == item.status
-        assert restored.completed_at == item.completed_at
+    def test_normalize_roundtrip(self):
+        original = [{
+            "id": "rt1",
+            "description": "Roundtrip",
+            "status": "completed",
+            "priority": "medium",
+            "tags": ["a", "b"],
+            "created_at": "2024-06-01T12:00:00",
+            "completed_at": "2024-06-01T13:00:00",
+        }]
+        normalized, ids = normalize_tasks(original)
+        t = normalized[0]
+        assert t["id"] == "rt1"
+        assert t["description"] == "Roundtrip"
+        assert t["status"] == "completed"
+        assert t["completed_at"] == "2024-06-01T13:00:00"
 
 
-class TestTaskStore:
-    """Tests for TaskStore class."""
+class TestFilterTasks:
+    """Tests for filter_tasks and normalize_tasks (replaces TestTaskStore)."""
 
-    def test_replace_all_creates_tasks(self, mock_context):
-        store = TaskStore(mock_context.settings)
-        ids = store.replace_all([
+    def test_normalize_creates_tasks(self):
+        normalized, ids = normalize_tasks([
             {"description": "Implement auth module", "priority": "high"},
             {"description": "Write tests"},
         ])
         assert len(ids) == 2
-        task = store.get(ids[0])
-        assert task is not None
-        assert task.description == "Implement auth module"
-        assert task.priority == "high"
-        assert task.status == "pending"
+        assert normalized[0]["description"] == "Implement auth module"
+        assert normalized[0]["priority"] == "high"
+        assert normalized[0]["status"] == "pending"
 
-    def test_replace_all_with_tags(self, mock_context):
-        store = TaskStore(mock_context.settings)
-        ids = store.replace_all([
+    def test_normalize_with_tags(self):
+        normalized, ids = normalize_tasks([
             {"description": "Fix bug", "tags": ["bug", "urgent"]},
         ])
-        task = store.get(ids[0])
-        assert task.tags == ["bug", "urgent"]
+        assert normalized[0]["tags"] == ["bug", "urgent"]
 
-    def test_replace_all_with_statuses(self, mock_context):
-        store = TaskStore(mock_context.settings)
-        ids = store.replace_all([
+    def test_normalize_with_statuses(self):
+        normalized, ids = normalize_tasks([
             {"description": "Done task", "status": "completed"},
             {"description": "Active task", "status": "in_progress"},
             {"description": "Pending task"},
         ])
-        assert store.get(ids[0]).status == "completed"
-        assert store.get(ids[1]).status == "in_progress"
-        assert store.get(ids[2]).status == "pending"
+        assert normalized[0]["status"] == "completed"
+        assert normalized[1]["status"] == "in_progress"
+        assert normalized[2]["status"] == "pending"
 
-    def test_replace_all_completed_sets_timestamp(self, mock_context):
-        store = TaskStore(mock_context.settings)
-        ids = store.replace_all([
+    def test_normalize_completed_sets_timestamp(self):
+        normalized, _ = normalize_tasks([
             {"description": "Test task", "status": "completed"},
         ])
-        task = store.get(ids[0])
-        assert task.status == "completed"
-        assert task.completed_at != ""
+        assert normalized[0]["status"] == "completed"
+        assert normalized[0]["completed_at"] != ""
 
-    def test_replace_all_preserves_existing_id(self, mock_context):
-        store = TaskStore(mock_context.settings)
-        ids = store.replace_all([
+    def test_normalize_preserves_existing_id(self):
+        normalized, ids = normalize_tasks([
             {"id": "custom-id", "description": "Task with ID"},
         ])
         assert ids == ["custom-id"]
-        assert store.get("custom-id") is not None
+        assert normalized[0]["id"] == "custom-id"
 
-    def test_replace_all_clears_previous(self, mock_context):
-        store = TaskStore(mock_context.settings)
-        store.replace_all([{"description": "Old task"}])
-        assert len(store.list_tasks()) == 1
-        store.replace_all([{"description": "New task 1"}, {"description": "New task 2"}])
-        assert len(store.list_tasks()) == 2
-        tasks = store.list_tasks()
-        assert tasks[0].description == "New task 1"
-
-    def test_replace_all_empty_clears(self, mock_context):
-        store = TaskStore(mock_context.settings)
-        store.replace_all([{"description": "Task"}])
-        assert not store.is_empty()
-        store.replace_all([])
-        assert store.is_empty()
-
-    def test_list_all(self, mock_context):
-        store = TaskStore(mock_context.settings)
-        store.replace_all([
-            {"description": "Task 1"},
-            {"description": "Task 2"},
-            {"description": "Task 3"},
-        ])
-        assert len(store.list_tasks()) == 3
-
-    def test_list_filter_status(self, mock_context):
-        store = TaskStore(mock_context.settings)
-        store.replace_all([
+    def test_filter_by_status(self):
+        normalized, _ = normalize_tasks([
             {"description": "Task 1", "status": "in_progress"},
             {"description": "Task 2", "status": "pending"},
         ])
-        assert len(store.list_tasks(status="in_progress")) == 1
-        assert len(store.list_tasks(status="pending")) == 1
+        assert len(filter_tasks(normalized, status="in_progress")) == 1
+        assert len(filter_tasks(normalized, status="pending")) == 1
 
-    def test_list_filter_priority(self, mock_context):
-        store = TaskStore(mock_context.settings)
-        store.replace_all([
+    def test_filter_by_priority(self):
+        normalized, _ = normalize_tasks([
             {"description": "Low", "priority": "low"},
             {"description": "High", "priority": "high"},
         ])
-        assert len(store.list_tasks(priority="high")) == 1
+        assert len(filter_tasks(normalized, priority="high")) == 1
 
-    def test_list_filter_tag(self, mock_context):
-        store = TaskStore(mock_context.settings)
-        store.replace_all([
+    def test_filter_by_tag(self):
+        normalized, _ = normalize_tasks([
             {"description": "Tagged", "tags": ["important"]},
             {"description": "Untagged"},
         ])
-        assert len(store.list_tasks(tag="important")) == 1
-
-    def test_is_empty(self, mock_context):
-        store = TaskStore(mock_context.settings)
-        assert store.is_empty()
-        store.replace_all([{"description": "Task"}])
-        assert not store.is_empty()
-
-    def test_clear_empties_store(self, mock_context):
-        """clear() removes all tasks from memory."""
-        store = TaskStore(mock_context.settings)
-        store.replace_all([
-            {"description": "Task 1"},
-            {"description": "Task 2"},
-        ])
-        assert not store.is_empty()
-        store.clear()
-        assert store.is_empty()
-        assert len(store.list_tasks()) == 0
-
-    def test_clear_on_empty_store(self, mock_context):
-        """clear() on an empty store is a no-op (no exception)."""
-        store = TaskStore(mock_context.settings)
-        store.clear()  # should not raise
-        assert store.is_empty()
-
-    def test_in_memory_only(self, mock_context):
-        """TaskStore has no file persistence attributes."""
-        store = TaskStore(mock_context.settings)
-        assert not hasattr(store, "_storage_path")
-        assert not hasattr(store, "_tasks_dir")
+        assert len(filter_tasks(normalized, tag="important")) == 1
 
 
 class TestTaskTools:
@@ -357,80 +295,72 @@ class TestTaskTools:
         assert result["count"] == 0
 
 
-class TestTaskStoreProgress:
-    """Tests for TaskStore progress/display helper methods."""
+class TestTaskProgressData:
+    """Tests for task_progress_data (replaces TestTaskStoreProgress)."""
 
-    def test_get_progress_empty(self, mock_context):
-        store = TaskStore(mock_context.settings)
-        progress = store.get_progress()
-        assert progress == {"total": 0, "pending": 0, "in_progress": 0, "completed": 0, "cancelled": 0}
+    def test_progress_empty(self):
+        assert task_progress_data([]) is None
 
-    def test_get_progress_mixed(self, mock_context):
-        store = TaskStore(mock_context.settings)
-        store.replace_all([
+    def test_progress_mixed(self):
+        normalized, _ = normalize_tasks([
             {"description": "Task 1", "status": "completed"},
             {"description": "Task 2", "status": "in_progress"},
             {"description": "Task 3", "status": "pending"},
             {"description": "Task 4", "status": "cancelled"},
         ])
-        progress = store.get_progress()
+        result = task_progress_data(normalized)
+        progress = result["progress"]
         assert progress["total"] == 4
         assert progress["pending"] == 1
         assert progress["in_progress"] == 1
         assert progress["completed"] == 1
         assert progress["cancelled"] == 1
 
-    def test_get_progress_all_completed(self, mock_context):
-        store = TaskStore(mock_context.settings)
-        store.replace_all([
+    def test_progress_all_completed(self):
+        normalized, _ = normalize_tasks([
             {"description": "Task 1", "status": "completed"},
             {"description": "Task 2", "status": "completed"},
         ])
-        progress = store.get_progress()
-        assert progress["total"] == 2
-        assert progress["completed"] == 2
-        assert progress["pending"] == 0
+        result = task_progress_data(normalized)
+        assert result["progress"]["total"] == 2
+        assert result["progress"]["completed"] == 2
+        assert result["progress"]["pending"] == 0
 
-    def test_all_done_empty(self, mock_context):
-        """all_done() returns False for empty store."""
-        store = TaskStore(mock_context.settings)
-        assert store.all_done() is False
+    def test_all_done_empty(self):
+        """task_progress_data returns None for empty list."""
+        assert task_progress_data([]) is None
 
-    def test_all_done_all_completed(self, mock_context):
-        """all_done() returns True when all tasks are completed."""
-        store = TaskStore(mock_context.settings)
-        store.replace_all([
+    def test_all_done_all_completed(self):
+        normalized, _ = normalize_tasks([
             {"description": "Task 1", "status": "completed"},
             {"description": "Task 2", "status": "completed"},
         ])
-        assert store.all_done() is True
+        result = task_progress_data(normalized)
+        assert result["all_done"] is True
 
-    def test_all_done_mixed_terminal(self, mock_context):
-        """all_done() returns True for mix of completed and cancelled."""
-        store = TaskStore(mock_context.settings)
-        store.replace_all([
+    def test_all_done_mixed_terminal(self):
+        normalized, _ = normalize_tasks([
             {"description": "Task 1", "status": "completed"},
             {"description": "Task 2", "status": "cancelled"},
         ])
-        assert store.all_done() is True
+        result = task_progress_data(normalized)
+        assert result["all_done"] is True
 
-    def test_all_done_with_pending(self, mock_context):
-        """all_done() returns False when any task is pending."""
-        store = TaskStore(mock_context.settings)
-        store.replace_all([
+    def test_all_done_with_pending(self):
+        normalized, _ = normalize_tasks([
             {"description": "Task 1", "status": "completed"},
             {"description": "Task 2", "status": "pending"},
         ])
-        assert store.all_done() is False
+        result = task_progress_data(normalized)
+        assert result["all_done"] is False
 
-    def test_all_done_with_in_progress(self, mock_context):
-        """all_done() returns False when any task is in_progress."""
-        store = TaskStore(mock_context.settings)
-        store.replace_all([
+    def test_all_done_with_in_progress(self):
+        normalized, _ = normalize_tasks([
             {"description": "Task 1", "status": "completed"},
             {"description": "Task 2", "status": "in_progress"},
         ])
-        assert store.all_done() is False
+        result = task_progress_data(normalized)
+        assert result["all_done"] is False
 
 
 class TestEmitTaskProgressEvent:
@@ -443,11 +373,9 @@ class TestEmitTaskProgressEvent:
     """
 
     def test_progress_data_returns_none_when_empty(self):
-        from agentic_cli.tools._core.tasks import task_progress_data
         assert task_progress_data([]) is None
 
     def test_progress_data_with_tasks(self):
-        from agentic_cli.tools._core.tasks import task_progress_data, normalize_tasks
         normalized, ids = normalize_tasks([
             {"description": "Research topic", "status": "in_progress"},
             {"description": "Write summary"},
@@ -462,7 +390,6 @@ class TestEmitTaskProgressEvent:
         assert result["current_task_description"] == "Research topic"
 
     def test_progress_data_without_in_progress(self):
-        from agentic_cli.tools._core.tasks import task_progress_data, normalize_tasks
         normalized, _ = normalize_tasks([{"description": "Pending task"}])
         result = task_progress_data(normalized)
         assert result is not None

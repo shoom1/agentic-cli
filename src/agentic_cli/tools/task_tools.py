@@ -8,7 +8,6 @@ Uses bulk replacement (like Gemini CLI's write_todos / Claude Code's TodoWrite):
 the LLM sends the full updated list each time, avoiding N sequential tool calls.
 
 Plans are strategic ("what to do"), tasks are tactical ("track execution").
-The TaskStore is auto-created by the workflow manager when these tools are used.
 
 Example:
     from agentic_cli.tools import task_tools
@@ -18,251 +17,21 @@ Example:
     )
 """
 
-import uuid
-from dataclasses import dataclass, field
-from datetime import datetime
-from enum import Enum
 from typing import Any
 
-from agentic_cli.config import BaseSettings
+from agentic_cli.tools._core.tasks import (
+    TaskStatus,
+    TaskPriority,
+    validate_tasks,
+    normalize_tasks,
+    filter_tasks,
+)
 from agentic_cli.tools.registry import (
     register_tool,
     ToolCategory,
     PermissionLevel,
 )
 from agentic_cli.workflow.service_registry import get_service_registry, TASKS
-
-
-class TaskStatus(str, Enum):
-    """Valid task statuses."""
-
-    PENDING = "pending"
-    IN_PROGRESS = "in_progress"
-    COMPLETED = "completed"
-    CANCELLED = "cancelled"
-
-
-class TaskPriority(str, Enum):
-    """Valid task priorities."""
-
-    LOW = "low"
-    MEDIUM = "medium"
-    HIGH = "high"
-
-
-def _safe_enum(enum_cls, value, default):
-    """Convert value to enum, returning default if invalid."""
-    try:
-        return enum_cls(value)
-    except ValueError:
-        return default
-
-
-# ---------------------------------------------------------------------------
-# TaskItem / TaskStore – in-memory task tracking
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class TaskItem:
-    """A single task entry."""
-
-    id: str
-    description: str
-    status: str = TaskStatus.PENDING
-    priority: str = TaskPriority.MEDIUM
-    tags: list[str] = field(default_factory=list)
-    created_at: str = ""
-    completed_at: str = ""
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "id": self.id,
-            "description": self.description,
-            "status": self.status,
-            "priority": self.priority,
-            "tags": self.tags,
-            "created_at": self.created_at,
-            "completed_at": self.completed_at,
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "TaskItem":
-        return cls(
-            id=data["id"],
-            description=data["description"],
-            status=_safe_enum(TaskStatus, data.get("status", "pending"), TaskStatus.PENDING),
-            priority=_safe_enum(TaskPriority, data.get("priority", "medium"), TaskPriority.MEDIUM),
-            tags=data.get("tags", []),
-            created_at=data.get("created_at", ""),
-            completed_at=data.get("completed_at", ""),
-        )
-
-
-_STATUS_ICONS = {
-    TaskStatus.COMPLETED: "[✓]",
-    TaskStatus.IN_PROGRESS: "[▸]",
-    TaskStatus.PENDING: "[ ]",
-    TaskStatus.CANCELLED: "[-]",
-}
-
-_STATUS_ORDER = {
-    TaskStatus.IN_PROGRESS: 0,
-    TaskStatus.PENDING: 1,
-    TaskStatus.CANCELLED: 2,
-    TaskStatus.COMPLETED: 3,
-}
-
-
-def format_task_checklist(items: list[TaskItem]) -> str:
-    """Format tasks as a compact checklist for display.
-
-    Args:
-        items: List of TaskItem objects.
-
-    Returns:
-        Multi-line string with status icons: [✓] Done, [▸] Active,
-        [ ] Pending, [-] Cancelled.  Sorted by status priority
-        (in-progress first, completed last).
-    """
-    if not items:
-        return ""
-    sorted_items = sorted(items, key=lambda t: _STATUS_ORDER.get(t.status, 1))
-    lines = []
-    for item in sorted_items:
-        icon = _STATUS_ICONS.get(item.status, "[ ]")
-        lines.append(f"{icon} {item.description}")
-    return "\n".join(lines)
-
-
-class TaskStore:
-    """In-memory task store using bulk replacement.
-
-    Tasks are ephemeral within a session — no file persistence.
-    The LLM writes the full task list each time via replace_all().
-
-    Example:
-        >>> store = TaskStore()
-        >>> store.replace_all([
-        ...     {"description": "Implement feature X", "status": "in_progress"},
-        ...     {"description": "Write tests", "status": "pending"},
-        ... ])
-        >>> tasks = store.list_tasks(status="pending")
-    """
-
-    def __init__(self, settings: "BaseSettings | None" = None) -> None:
-        self._items: dict[str, TaskItem] = {}
-
-    @classmethod
-    def from_dicts(cls, items: list[dict[str, Any]]) -> "TaskStore":
-        """Create a TaskStore pre-populated from a list of task dicts.
-
-        Used by the workflow manager to construct a temporary store
-        from raw task state for display/progress purposes.
-        """
-        store = cls()
-        for item_data in items:
-            item = TaskItem.from_dict(item_data)
-            store._items[item.id] = item
-        return store
-
-    def replace_all(self, tasks: list[dict[str, Any]]) -> list[str]:
-        """Replace the entire task list.
-
-        Each dict must have "description" and "status". Optional keys:
-        "id" (preserved if provided), "priority", "tags".
-        New items without an id get one auto-assigned.
-
-        Args:
-            tasks: Complete list of task dicts.
-
-        Returns:
-            List of task IDs in the same order as the input.
-        """
-        now = datetime.now().isoformat()
-        self._items.clear()
-        ids: list[str] = []
-        for task_data in tasks:
-            task_id = task_data.get("id") or str(uuid.uuid4())[:8]
-            status = _safe_enum(TaskStatus, task_data.get("status", "pending"), TaskStatus.PENDING)
-            completed_at = task_data.get("completed_at", "")
-            if status == TaskStatus.COMPLETED and not completed_at:
-                completed_at = now
-            item = TaskItem(
-                id=task_id,
-                description=task_data["description"],
-                status=status,
-                priority=_safe_enum(TaskPriority, task_data.get("priority", "medium"), TaskPriority.MEDIUM),
-                tags=task_data.get("tags", []),
-                created_at=task_data.get("created_at", now),
-                completed_at=completed_at,
-            )
-            self._items[task_id] = item
-            ids.append(task_id)
-        return ids
-
-    def get(self, task_id: str) -> TaskItem | None:
-        """Get a task by ID."""
-        return self._items.get(task_id)
-
-    def list_tasks(
-        self,
-        status: str | None = None,
-        priority: str | None = None,
-        tag: str | None = None,
-    ) -> list[TaskItem]:
-        """List tasks with optional filters.
-
-        Args:
-            status: Filter by status.
-            priority: Filter by priority.
-            tag: Filter by tag.
-
-        Returns:
-            List of matching TaskItem objects.
-        """
-        results = list(self._items.values())
-        if status:
-            results = [t for t in results if t.status == status]
-        if priority:
-            results = [t for t in results if t.priority == priority]
-        if tag:
-            results = [t for t in results if tag in t.tags]
-        return results
-
-    def is_empty(self) -> bool:
-        """Check if the task store has any items."""
-        return not self._items
-
-    def clear(self) -> None:
-        """Clear all tasks from memory."""
-        self._items.clear()
-
-    def all_done(self) -> bool:
-        """Check if all tasks are in a terminal state (completed/cancelled).
-
-        Returns False if empty or any task is pending/in_progress.
-        """
-        if not self._items:
-            return False
-        return all(
-            item.status in (TaskStatus.COMPLETED, TaskStatus.CANCELLED)
-            for item in self._items.values()
-        )
-
-    def get_progress(self) -> dict[str, int]:
-        """Return task count by status.
-
-        Returns:
-            Dict with keys: total, pending, in_progress, completed, cancelled.
-        """
-        counts = {"total": 0, "pending": 0, "in_progress": 0, "completed": 0, "cancelled": 0}
-        for item in self._items.values():
-            counts["total"] += 1
-            if item.status in counts:
-                counts[item.status] += 1
-        return counts
-
 
 
 @register_tool(
@@ -297,31 +66,12 @@ def save_tasks(
         registry[TASKS] = []
         return {"success": True, "task_ids": [], "count": 0, "message": "Tasks cleared"}
 
-    # Validate all tasks have descriptions and valid enum values
-    valid_statuses = {s.value for s in TaskStatus}
-    valid_priorities = {p.value for p in TaskPriority}
-    for i, task in enumerate(tasks):
-        if not task.get("description"):
-            return {
-                "success": False,
-                "error": f"Task at index {i} is missing 'description'",
-            }
-        status = task.get("status", "pending")
-        if status not in valid_statuses:
-            return {
-                "success": False,
-                "error": f"Task at index {i} has invalid status '{status}'. Valid: {', '.join(sorted(valid_statuses))}",
-            }
-        priority = task.get("priority", "medium")
-        if priority not in valid_priorities:
-            return {
-                "success": False,
-                "error": f"Task at index {i} has invalid priority '{priority}'. Valid: {', '.join(sorted(valid_priorities))}",
-            }
+    error = validate_tasks(tasks)
+    if error:
+        return error
 
-    store = TaskStore()
-    task_ids = store.replace_all(tasks)
-    registry[TASKS] = [item.to_dict() for item in store._items.values()]
+    normalized, task_ids = normalize_tasks(tasks)
+    registry[TASKS] = normalized
     return {
         "success": True,
         "task_ids": task_ids,
@@ -353,24 +103,15 @@ def get_tasks(
     tasks_data = get_service_registry().get(TASKS, [])
     if not tasks_data:
         return {"success": True, "tasks": [], "count": 0}
-    store = TaskStore.from_dicts(tasks_data)
-    tasks = store.list_tasks(status=status or None, priority=priority or None, tag=tag or None)
 
-    items = [
-        {
-            "id": task.id,
-            "description": task.description,
-            "status": task.status,
-            "priority": task.priority,
-            "tags": task.tags,
-            "created_at": task.created_at,
-            "completed_at": task.completed_at,
-        }
-        for task in tasks
-    ]
-
+    filtered = filter_tasks(
+        tasks_data,
+        status=status or None,
+        priority=priority or None,
+        tag=tag or None,
+    )
     return {
         "success": True,
-        "tasks": items,
-        "count": len(items),
+        "tasks": filtered,
+        "count": len(filtered),
     }

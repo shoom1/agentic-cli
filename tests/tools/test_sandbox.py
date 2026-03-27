@@ -203,13 +203,13 @@ class TestSandboxManager:
 class TestSandboxTools:
     def test_sandbox_execute_success(self, tmp_path):
         with MockContext() as ctx:
-            from agentic_cli.workflow.context import set_context_sandbox_manager
+            from agentic_cli.workflow.service_registry import set_service_registry
 
             backend = MockSandboxBackend(
                 ExecutionResult(success=True, stdout="hi\n", result="42", execution_time=0.123)
             )
             mgr = SandboxManager(ctx.settings, backend=backend)
-            token = set_context_sandbox_manager(mgr)
+            token = set_service_registry({"sandbox_manager": mgr})
 
             try:
                 from agentic_cli.tools.sandbox import sandbox_execute
@@ -224,9 +224,9 @@ class TestSandboxTools:
 
     def test_sandbox_execute_no_manager(self, tmp_path):
         with MockContext():
-            from agentic_cli.workflow.context import set_context_sandbox_manager
+            from agentic_cli.workflow.service_registry import set_service_registry
 
-            token = set_context_sandbox_manager(None)
+            token = set_service_registry({})
             try:
                 from agentic_cli.tools.sandbox import sandbox_execute
                 result = sandbox_execute("1 + 1")

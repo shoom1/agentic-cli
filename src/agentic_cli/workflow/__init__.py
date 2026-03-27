@@ -16,15 +16,6 @@ from agentic_cli.workflow.factory import create_workflow_manager_from_settings
 from agentic_cli.workflow.settings import WorkflowSettingsMixin
 from agentic_cli.workflow.models import ModelFamily, ModelInfo, ModelRegistry
 from agentic_cli.workflow.service_registry import get_service, get_service_registry
-from agentic_cli.workflow.context import (
-    # Backward-compat accessors (used by tests)
-    get_context_memory_store,
-    get_context_llm_summarizer,
-    get_context_kb_manager,
-    set_context_memory_store,
-    set_context_llm_summarizer,
-    set_context_kb_manager,
-)
 
 # Heavy imports - lazy loaded on first access
 _lazy_imports = {
@@ -82,11 +73,4 @@ __all__ = [
     # Service registry
     "get_service",
     "get_service_registry",
-    # Backward-compat context accessors (prefer get_service)
-    "get_context_memory_store",
-    "get_context_llm_summarizer",
-    "get_context_kb_manager",
-    "set_context_memory_store",
-    "set_context_llm_summarizer",
-    "set_context_kb_manager",
 ]

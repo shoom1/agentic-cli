@@ -8,10 +8,10 @@ from agentic_cli.tools.memory_tools import MemoryStore
 @pytest.fixture
 def memory_store_ctx(mock_context):
     """Provide a MemoryStore with context set, auto-cleanup."""
-    from agentic_cli.workflow.context import set_context_memory_store
+    from agentic_cli.workflow.service_registry import set_service_registry
 
     store = MemoryStore(mock_context.settings)
-    token = set_context_memory_store(store)
+    token = set_service_registry({"memory_store": store})
     yield store
     token.var.reset(token)
 

@@ -8,9 +8,25 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from enum import Enum
 from typing import Any
 
-from agentic_cli.tools.task_tools import TaskStatus, TaskPriority
+
+class TaskStatus(str, Enum):
+    """Valid task statuses."""
+
+    PENDING = "pending"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
+
+
+class TaskPriority(str, Enum):
+    """Valid task priorities."""
+
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
 
 
 # ---- Validation ----

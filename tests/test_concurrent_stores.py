@@ -1,4 +1,4 @@
-"""Tests for concurrent access to MemoryStore, plan registry state, and TaskStore.
+"""Tests for concurrent access to MemoryStore, plan registry state, and task functions.
 
 Verifies that parallel read/write operations don't corrupt data.
 """
@@ -108,56 +108,45 @@ class TestConcurrentPlanRegistry:
             token.var.reset(token)
 
 
-class TestConcurrentTaskStore:
-    """Test concurrent access to TaskStore."""
+class TestConcurrentTaskNormalization:
+    """Test concurrent access to task normalization (pure functions)."""
 
-    async def test_concurrent_replace_all(self, mock_context):
-        """Parallel replace_all should not corrupt the store."""
-        from agentic_cli.tools.task_tools import TaskStore
+    async def test_concurrent_normalize(self, mock_context):
+        """Parallel normalize_tasks should not interfere with each other."""
+        from agentic_cli.tools._core.tasks import normalize_tasks
 
-        store = TaskStore(mock_context.settings)
-
-        async def replace_tasks(batch: int):
+        async def normalize_batch(batch: int):
             tasks = [
                 {"description": f"batch-{batch}-task-{j}", "status": "pending"}
                 for j in range(5)
             ]
-            return store.replace_all(tasks)
+            return normalize_tasks(tasks)
 
-        results = await asyncio.gather(*(replace_tasks(i) for i in range(10)))
+        results = await asyncio.gather(*(normalize_batch(i) for i in range(10)))
 
-        # Last write wins — store should have exactly 5 tasks
-        all_tasks = store.list_tasks()
-        assert len(all_tasks) == 5
-        # All returned ID lists should have 5 entries
-        for ids in results:
+        # All returned normalized lists should have 5 entries
+        for normalized, ids in results:
+            assert len(normalized) == 5
             assert len(ids) == 5
 
-    async def test_concurrent_read_write(self, mock_context):
-        """Reads during replace_all should return consistent snapshots."""
-        from agentic_cli.tools.task_tools import TaskStore, TaskStatus
+    async def test_concurrent_filter(self, mock_context):
+        """Concurrent filter_tasks on shared data should be consistent."""
+        from agentic_cli.tools._core.tasks import normalize_tasks, filter_tasks
 
-        store = TaskStore(mock_context.settings)
-        store.replace_all([
-            {"description": f"initial-{i}", "status": "pending"}
-            for i in range(5)
+        normalized, _ = normalize_tasks([
+            {"description": f"task-{i}", "status": "pending" if i % 2 == 0 else "in_progress"}
+            for i in range(10)
         ])
 
-        async def writer(batch: int):
-            tasks = [
-                {"description": f"batch-{batch}-{j}", "status": "in_progress"}
-                for j in range(5)
-            ]
-            store.replace_all(tasks)
-
         async def reader():
-            tasks = store.list_tasks()
-            # Should always get a consistent list (not partially updated)
-            assert len(tasks) == 5
-            return tasks
+            filtered = filter_tasks(normalized, status="pending")
+            # Should always get consistent count
+            assert len(filtered) == 5
+            return filtered
 
-        tasks = [writer(i) for i in range(10)] + [reader() for _ in range(10)]
-        await asyncio.gather(*tasks)
+        results = await asyncio.gather(*(reader() for _ in range(20)))
+        for r in results:
+            assert len(r) == 5
 
 
 class TestFileLockTimeout:

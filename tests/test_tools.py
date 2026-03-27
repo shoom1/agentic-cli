@@ -1572,7 +1572,7 @@ class TestDangerousToolDirectExecution:
     def test_dangerous_tool_executes_directly(self):
         """DANGEROUS tool executes directly without approval manager."""
         from agentic_cli.tools.sandbox import sandbox_execute
-        from agentic_cli.workflow.context import set_context_sandbox_manager
+        from agentic_cli.workflow.service_registry import set_service_registry
         from agentic_cli.tools.sandbox.models import ExecutionResult
         from tests.conftest import MockContext
         from tests.tools.test_sandbox import MockSandboxBackend
@@ -1584,7 +1584,7 @@ class TestDangerousToolDirectExecution:
             from agentic_cli.tools.sandbox.manager import SandboxManager
             mgr = SandboxManager(ctx.settings, backend=backend)
 
-            tok = set_context_sandbox_manager(mgr)
+            tok = set_service_registry({"sandbox_manager": mgr})
 
             try:
                 result = sandbox_execute("1 + 1")
