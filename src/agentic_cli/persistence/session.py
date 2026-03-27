@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from agentic_cli.logging import Loggers
-from agentic_cli.persistence._utils import atomic_write_json, file_lock, sanitize_filename
+from agentic_cli.file_utils import atomic_write_json, file_lock, sanitize_filename
 
 if TYPE_CHECKING:
     from agentic_cli.config import BaseSettings

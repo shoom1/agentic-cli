@@ -154,7 +154,7 @@ class TestFileLockTimeout:
 
     def test_lock_timeout_raises(self, tmp_path):
         """file_lock should raise FileLockTimeout when lock is held."""
-        from agentic_cli.persistence._utils import file_lock, FileLockTimeout
+        from agentic_cli.file_utils import file_lock, FileLockTimeout
 
         target = tmp_path / "test.json"
         target.write_text("{}")
@@ -167,7 +167,7 @@ class TestFileLockTimeout:
 
     def test_lock_no_timeout(self, tmp_path):
         """file_lock with timeout=None should block indefinitely (legacy)."""
-        from agentic_cli.persistence._utils import file_lock
+        from agentic_cli.file_utils import file_lock
 
         target = tmp_path / "test.json"
         target.write_text("{}")
@@ -178,7 +178,7 @@ class TestFileLockTimeout:
 
     def test_lock_default_timeout(self, tmp_path):
         """file_lock with default timeout should work normally."""
-        from agentic_cli.persistence._utils import file_lock
+        from agentic_cli.file_utils import file_lock
 
         target = tmp_path / "test.json"
         target.write_text("{}")

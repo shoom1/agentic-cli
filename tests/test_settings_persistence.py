@@ -97,7 +97,7 @@ class TestAtomicWrite:
         persistence = SettingsPersistence(app_name="test")
         out = tmp_path / "settings.json"
 
-        with patch("agentic_cli.persistence._utils.atomic_write_text") as mock_aw:
+        with patch("agentic_cli.file_utils.atomic_write_text") as mock_aw:
             persistence.save(settings, path=out)
             mock_aw.assert_called_once()
             call_path, call_content = mock_aw.call_args[0]

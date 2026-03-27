@@ -10,7 +10,7 @@ from pathlib import Path
 
 import numpy as np
 
-from agentic_cli.persistence._utils import atomic_write_json
+from agentic_cli.file_utils import atomic_write_json
 
 
 class MockEmbeddingService:

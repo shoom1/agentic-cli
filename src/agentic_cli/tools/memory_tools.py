@@ -24,7 +24,7 @@ from typing import Any
 
 from agentic_cli.config import BaseSettings
 from agentic_cli.logging import get_logger
-from agentic_cli.persistence._utils import atomic_write_json
+from agentic_cli.file_utils import atomic_write_json
 
 logger = get_logger("agentic_cli.tools.memory")
 from agentic_cli.tools.registry import (

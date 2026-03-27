@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from agentic_cli.persistence._utils import atomic_write_json
+from agentic_cli.file_utils import atomic_write_json
 
 if TYPE_CHECKING:
     import faiss

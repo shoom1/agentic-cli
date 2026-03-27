@@ -31,7 +31,7 @@ from agentic_cli.knowledge_base.models import (
 from agentic_cli.knowledge_base.vector_store import VectorStore
 from agentic_cli.constants import truncate
 from agentic_cli.logging import Loggers
-from agentic_cli.persistence._utils import atomic_write_json
+from agentic_cli.file_utils import atomic_write_json
 
 if TYPE_CHECKING:
     from agentic_cli.config import BaseSettings
