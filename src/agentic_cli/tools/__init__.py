@@ -10,7 +10,6 @@ Tool System:
 
 Framework Tools:
     - memory_tools: Working and long-term memory tools
-    - planning_tools: Flat markdown plan tools (save_plan, get_plan)
     - hitl_tools: Human-in-the-loop approval tools
     - web_search: Web search with pluggable backends (Tavily, Brave)
 
@@ -97,8 +96,6 @@ __all__ = [
     "ask_clarification",
     # Framework tool modules (lazy loaded)
     "memory_tools",
-    "planning_tools",
-    "task_tools",
     "hitl_tools",
     "sandbox_tools",
 ]
@@ -107,8 +104,6 @@ __all__ = [
 # Lazy loading for framework tool modules
 _lazy_tool_modules = {
     "memory_tools": "agentic_cli.tools.memory_tools",
-    "planning_tools": "agentic_cli.tools.planning_tools",
-    "task_tools": "agentic_cli.tools.task_tools",
     "hitl_tools": "agentic_cli.tools.hitl_tools",
     "sandbox_tools": "agentic_cli.tools.sandbox",
 }

@@ -11,8 +11,6 @@ Uses framework-provided tools exclusively — no app-specific tools needed.
 from agentic_cli.workflow import AgentConfig
 from agentic_cli.tools import (
     memory_tools,
-    planning_tools,
-    task_tools,
     web_search,
     web_fetch,
     search_arxiv,
@@ -151,6 +149,7 @@ AGENT_CONFIGS = [
     AgentConfig(
         name="arxiv_specialist",
         prompt=ARXIV_SPECIALIST_PROMPT,
+        include_state_tools=False,
         tools=[
             # arXiv (2 tools)
             search_arxiv,
@@ -175,12 +174,6 @@ AGENT_CONFIGS = [
             # Memory (2 tools)
             memory_tools.save_memory,
             memory_tools.search_memory,
-            # Planning (2 tools)
-            planning_tools.save_plan,
-            planning_tools.get_plan,
-            # Task management (2 tools)
-            task_tools.save_tasks,
-            task_tools.get_tasks,
             # Knowledge base (4 tools)
             search_knowledge_base,
             list_documents,

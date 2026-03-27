@@ -76,66 +76,30 @@ class TestPlanViaRegistry:
 
 
 class TestSummarizeCheckboxes:
-    """Tests for _summarize_checkboxes helper."""
+    """Tests for summarize_checkboxes helper."""
 
     def test_with_mixed_checkboxes(self):
-        from agentic_cli.tools.planning_tools import _summarize_checkboxes
+        from agentic_cli.tools._core.planning import summarize_checkboxes
         content = "- [x] Done\n- [x] Also done\n- [ ] Pending\n- [ ] Also pending\n- [ ] Third pending"
-        result = _summarize_checkboxes(content)
+        result = summarize_checkboxes(content)
         assert result == "5 tasks: 2 done, 3 pending"
 
     def test_all_done(self):
-        from agentic_cli.tools.planning_tools import _summarize_checkboxes
-        result = _summarize_checkboxes("- [x] A\n- [x] B")
+        from agentic_cli.tools._core.planning import summarize_checkboxes
+        result = summarize_checkboxes("- [x] A\n- [x] B")
         assert result == "2 tasks: 2 done"
 
     def test_all_pending(self):
-        from agentic_cli.tools.planning_tools import _summarize_checkboxes
-        result = _summarize_checkboxes("- [ ] A\n- [ ] B")
+        from agentic_cli.tools._core.planning import summarize_checkboxes
+        result = summarize_checkboxes("- [ ] A\n- [ ] B")
         assert result == "2 tasks: 2 pending"
 
     def test_no_checkboxes(self):
-        from agentic_cli.tools.planning_tools import _summarize_checkboxes
-        result = _summarize_checkboxes("Just some text")
+        from agentic_cli.tools._core.planning import summarize_checkboxes
+        result = summarize_checkboxes("Just some text")
         assert result == ""
 
     def test_uppercase_x(self):
-        from agentic_cli.tools.planning_tools import _summarize_checkboxes
-        result = _summarize_checkboxes("- [X] Done\n- [ ] Pending")
+        from agentic_cli.tools._core.planning import summarize_checkboxes
+        result = summarize_checkboxes("- [X] Done\n- [ ] Pending")
         assert result == "2 tasks: 1 done, 1 pending"
-
-
-class TestSavePlanSummary:
-    """Tests for save_plan returning checkbox stats."""
-
-    def test_save_plan_with_checkboxes_shows_stats(self, plan_registry_ctx):
-        from agentic_cli.tools.planning_tools import save_plan
-
-        result = save_plan(content="- [x] A\n- [ ] B\n- [ ] C")
-        assert result["success"] is True
-        assert "3 tasks" in result["message"]
-        assert "1 done" in result["message"]
-        assert "2 pending" in result["message"]
-
-    def test_save_plan_without_checkboxes(self, plan_registry_ctx):
-        from agentic_cli.tools.planning_tools import save_plan
-
-        result = save_plan(content="## My Plan\nJust text, no checkboxes.")
-        assert result["success"] is True
-        assert result["message"] == "Plan saved"
-
-
-class TestPlanToolsExport:
-    """Tests for planning module exports."""
-
-    def test_summarize_checkboxes_export(self):
-        from agentic_cli.tools.planning_tools import _summarize_checkboxes
-        assert _summarize_checkboxes is not None
-
-    def test_save_plan_export(self):
-        from agentic_cli.tools.planning_tools import save_plan
-        assert save_plan is not None
-
-    def test_get_plan_export(self):
-        from agentic_cli.tools.planning_tools import get_plan
-        assert get_plan is not None

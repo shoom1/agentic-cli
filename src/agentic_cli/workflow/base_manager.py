@@ -181,27 +181,28 @@ class BaseWorkflowManager(ABC):
     # Tool assembly
     # ------------------------------------------------------------------
 
-    def _build_tools(self, config: "AgentConfig") -> list[Callable]:
+    def _build_tools(
+        self, config: "AgentConfig", service_map: dict[str, Callable] | None = None,
+    ) -> list[Callable]:
         """Build the tool list for an agent config.
 
-        Swaps state tools with backend-specific implementations and
-        service tools with closure-bound factory versions.  Stateless
-        tools pass through unchanged.
+        Replaces service tools with closure-bound factory versions and
+        auto-injects backend-specific state tools when requested.
         """
-        from agentic_cli.tools._core import STATE_TOOL_NAMES, SERVICE_TOOL_NAMES
-
-        state_map = {t.__name__: t for t in self._get_state_tools()}
-        service_map = self._get_service_tool_map()
+        if service_map is None:
+            service_map = self._get_service_tool_map()
 
         result = []
         for tool in config.tools or []:
             name = getattr(tool, "__name__", "")
-            if name in STATE_TOOL_NAMES and name in state_map:
-                result.append(state_map[name])
-            elif name in SERVICE_TOOL_NAMES and name in service_map:
+            if name in service_map:
                 result.append(service_map[name])
             else:
                 result.append(tool)
+
+        if config.include_state_tools:
+            result.extend(self._get_state_tools())
+
         return result
 
     def _get_service_tool_map(self) -> dict[str, Callable]:
@@ -236,15 +237,13 @@ class BaseWorkflowManager(ABC):
 
         return tool_map
 
+    @abstractmethod
     def _get_state_tools(self) -> list[Callable]:
-        """Return backend-specific state tools.
+        """Return backend-specific state tools (plan/task management).
 
-        Subclasses override to return ADK or LangGraph native tools.
-        Default returns the legacy service-registry-based tools.
+        Subclasses must override to return ADK or LangGraph native tools.
         """
-        from agentic_cli.tools.planning_tools import save_plan, get_plan
-        from agentic_cli.tools.task_tools import save_tasks, get_tasks
-        return [save_plan, get_plan, save_tasks, get_tasks]
+        ...
 
     # Mapping from tool function name to the service it requires
     _TOOL_SERVICE_MAP: dict[str, str] = {

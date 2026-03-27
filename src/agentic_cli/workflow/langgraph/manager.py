@@ -141,9 +141,10 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
         store_type = getattr(self._settings, "store_type", "memory")
         self._store = create_store(store_type, self._settings)
 
-        # Build tool overrides (swap state tools for LangGraph-native versions)
+        # Build tool overrides (swap service tools + inject state tools)
+        service_map = self._get_service_tool_map()
         tool_overrides = {
-            config.name: self._build_tools(config)
+            config.name: self._build_tools(config, service_map)
             for config in self._agent_configs
         }
 

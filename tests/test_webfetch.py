@@ -786,6 +786,9 @@ class TestWorkflowManagerIntegration:
             async def _do_initialize(self) -> None:
                 pass
 
+            def _get_state_tools(self) -> list:
+                return []
+
             async def process(
                 self, message: str, user_id: str, session_id: str | None = None
             ) -> AsyncGenerator[WorkflowEvent, None]:
@@ -838,6 +841,9 @@ class TestWorkflowManagerIntegration:
 
             async def _do_initialize(self) -> None:
                 pass
+
+            def _get_state_tools(self) -> list:
+                return []
 
             async def process(
                 self, message: str, user_id: str, session_id: str | None = None
@@ -893,6 +899,9 @@ class TestWorkflowManagerIntegration:
 
             async def _do_initialize(self) -> None:
                 pass
+
+            def _get_state_tools(self) -> list:
+                return []
 
             async def process(
                 self, message: str, user_id: str, session_id: str | None = None

@@ -180,9 +180,9 @@ async def ingest_document(
     """
     from agentic_cli.knowledge_base.models import SourceType
 
-    kb = require_service(KB_MANAGER)
-    if isinstance(kb, dict):
-        return kb
+    kb = get_service(KB_MANAGER)
+    if kb is None:
+        return {"success": False, "error": "kb manager not available"}
 
     # Build metadata dict from optional fields
     meta: dict[str, Any] = {}
@@ -531,9 +531,9 @@ def list_documents(
     """
     from agentic_cli.knowledge_base.models import SourceType as ST
 
-    kb = require_service(KB_MANAGER)
-    if isinstance(kb, dict):
-        return kb
+    kb = get_service(KB_MANAGER)
+    if kb is None:
+        return {"success": False, "error": "kb manager not available"}
 
     # Parse source_type filter
     st_filter = None

@@ -1,4 +1,4 @@
-"""Tests for task management tools."""
+"""Tests for task management pure functions."""
 
 from unittest.mock import patch
 
@@ -11,27 +11,6 @@ from agentic_cli.tools._core.tasks import (
     filter_tasks,
     task_progress_data,
 )
-
-
-@pytest.fixture
-def task_registry_ctx(mock_context):
-    """Provide a service registry for task tools, auto-cleanup."""
-    from agentic_cli.workflow.service_registry import set_service_registry
-
-    registry = {}
-    token = set_service_registry(registry)
-    yield registry
-    token.var.reset(token)
-
-
-@pytest.fixture
-def no_task_registry_ctx():
-    """Set service registry to None (no registry), auto-cleanup."""
-    from agentic_cli.workflow.service_registry import clear_service_registry
-
-    token = clear_service_registry()
-    yield
-    token.var.reset(token)
 
 
 class TestNormalizeTasks:
@@ -169,130 +148,6 @@ class TestFilterTasks:
             {"description": "Untagged"},
         ])
         assert len(filter_tasks(normalized, tag="important")) == 1
-
-
-class TestTaskTools:
-    """Tests for save_tasks and get_tasks tool functions."""
-
-    def test_save_tasks_bulk_create(self, task_registry_ctx):
-        from agentic_cli.tools.task_tools import save_tasks
-
-        result = save_tasks(tasks=[
-            {"description": "Task 1"},
-            {"description": "Task 2"},
-            {"description": "Task 3"},
-        ])
-        assert result["success"] is True
-        assert result["count"] == 3
-        assert len(result["task_ids"]) == 3
-
-    def test_save_tasks_replaces_existing(self, task_registry_ctx):
-        from agentic_cli.tools.task_tools import save_tasks
-
-        save_tasks(tasks=[{"description": "Old task"}])
-        result = save_tasks(tasks=[
-            {"description": "New task 1"},
-            {"description": "New task 2"},
-        ])
-        assert result["count"] == 2
-        # Verify registry has the right number of tasks
-        assert len(task_registry_ctx.get("tasks", [])) == 2
-
-    def test_save_tasks_with_statuses(self, task_registry_ctx):
-        from agentic_cli.tools.task_tools import save_tasks, get_tasks
-
-        result = save_tasks(tasks=[
-            {"description": "Done", "status": "completed"},
-            {"description": "Active", "status": "in_progress"},
-            {"description": "Todo"},
-        ])
-        assert result["success"] is True
-        # Verify via get_tasks
-        completed = get_tasks(status="completed")
-        assert completed["count"] == 1
-        in_progress = get_tasks(status="in_progress")
-        assert in_progress["count"] == 1
-        pending = get_tasks(status="pending")
-        assert pending["count"] == 1
-
-    def test_save_tasks_empty_clears(self, task_registry_ctx):
-        from agentic_cli.tools.task_tools import save_tasks
-
-        save_tasks(tasks=[{"description": "Task"}])
-        result = save_tasks(tasks=[])
-        assert result["success"] is True
-        assert result["count"] == 0
-        assert task_registry_ctx.get("tasks", []) == []
-
-    def test_save_tasks_missing_description(self, task_registry_ctx):
-        from agentic_cli.tools.task_tools import save_tasks
-
-        result = save_tasks(tasks=[
-            {"description": "Valid"},
-            {"status": "pending"},  # missing description
-        ])
-        assert result["success"] is False
-        assert "index 1" in result["error"]
-        assert "description" in result["error"].lower()
-
-    def test_save_tasks_invalid_status_returns_error(self, task_registry_ctx):
-        from agentic_cli.tools.task_tools import save_tasks
-
-        result = save_tasks(tasks=[
-            {"description": "Valid task"},
-            {"description": "Bad status", "status": "bogus"},
-        ])
-        assert result["success"] is False
-        assert "index 1" in result["error"]
-        assert "bogus" in result["error"]
-
-    def test_save_tasks_invalid_priority_returns_error(self, task_registry_ctx):
-        from agentic_cli.tools.task_tools import save_tasks
-
-        result = save_tasks(tasks=[
-            {"description": "Bad priority", "priority": "critical"},
-        ])
-        assert result["success"] is False
-        assert "index 0" in result["error"]
-        assert "critical" in result["error"]
-
-    def test_save_tasks_no_registry(self, no_task_registry_ctx):
-        from agentic_cli.tools.task_tools import save_tasks
-
-        # With no registry, get_service_registry() auto-creates one,
-        # so the tool should succeed
-        result = save_tasks(tasks=[{"description": "Test"}])
-        assert result["success"] is True
-
-    def test_get_tasks(self, task_registry_ctx):
-        from agentic_cli.tools.task_tools import save_tasks, get_tasks
-
-        save_tasks(tasks=[
-            {"description": "Task 1"},
-            {"description": "Task 2"},
-        ])
-        result = get_tasks()
-        assert result["success"] is True
-        assert result["count"] == 2
-        assert len(result["tasks"]) == 2
-
-    def test_get_tasks_with_filter(self, task_registry_ctx):
-        from agentic_cli.tools.task_tools import save_tasks, get_tasks
-
-        save_tasks(tasks=[
-            {"description": "Task 1", "priority": "high", "status": "in_progress"},
-            {"description": "Task 2", "priority": "low"},
-        ])
-        result = get_tasks(status="in_progress")
-        assert result["count"] == 1
-        assert result["tasks"][0]["priority"] == "high"
-
-    def test_get_tasks_empty_registry(self, task_registry_ctx):
-        from agentic_cli.tools.task_tools import get_tasks
-
-        result = get_tasks()
-        assert result["success"] is True
-        assert result["count"] == 0
 
 
 class TestTaskProgressData:

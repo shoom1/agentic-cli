@@ -1354,8 +1354,6 @@ class TestToolRegistryConsistency:
         import agentic_cli.tools.interaction_tools  # noqa: F401
         import agentic_cli.tools.webfetch_tool  # noqa: F401
         import agentic_cli.tools.memory_tools  # noqa: F401
-        import agentic_cli.tools.planning_tools  # noqa: F401
-        import agentic_cli.tools.task_tools  # noqa: F401
         import agentic_cli.tools.hitl_tools  # noqa: F401
         import agentic_cli.tools.shell.executor  # noqa: F401
 
@@ -1392,12 +1390,6 @@ class TestToolRegistryConsistency:
             # Memory tools
             "save_memory",
             "search_memory",
-            # Planning tools
-            "save_plan",
-            "get_plan",
-            # Task tools
-            "save_tasks",
-            "get_tasks",
         ]
 
         registered_names = {tool.name for tool in registry.list_tools()}
@@ -1476,8 +1468,6 @@ class TestToolRegistryConsistency:
         import agentic_cli.tools.interaction_tools  # noqa: F401
         import agentic_cli.tools.webfetch_tool  # noqa: F401
         import agentic_cli.tools.memory_tools  # noqa: F401
-        import agentic_cli.tools.planning_tools  # noqa: F401
-        import agentic_cli.tools.task_tools  # noqa: F401
         import agentic_cli.tools.hitl_tools  # noqa: F401
         import agentic_cli.tools.shell.executor  # noqa: F401
 
@@ -1500,10 +1490,7 @@ class TestToolRegistryConsistency:
         memory_names = {t.name for t in memory_tools}
         assert "save_memory" in memory_names, "MEMORY category should have memory tools"
 
-        planning_tools = registry.list_by_category(ToolCategory.PLANNING)
-        planning_names = {t.name for t in planning_tools}
-        assert "save_plan" in planning_names, "PLANNING category should have planning tools"
-        assert "save_tasks" in planning_names, "PLANNING category should have task tools"
+        # Plan/task state tools are now backend-specific (not in global registry)
 
         interaction_tools = registry.list_by_category(ToolCategory.INTERACTION)
         interaction_names = {t.name for t in interaction_tools}
@@ -1533,26 +1520,22 @@ class TestToolRegistryConsistency:
         import agentic_cli.tools.interaction_tools  # noqa: F401
         import agentic_cli.tools.webfetch_tool  # noqa: F401
         import agentic_cli.tools.memory_tools  # noqa: F401
-        import agentic_cli.tools.planning_tools  # noqa: F401
-        import agentic_cli.tools.task_tools  # noqa: F401
         import agentic_cli.tools.hitl_tools  # noqa: F401
         import agentic_cli.tools.shell.executor  # noqa: F401
 
         registry = get_registry()
         tool_count = len(registry.list_tools())
 
-        # We expect at least 25 tools after unified document store
         # File ops: 7 (read_file, diff_compare, grep, glob, list_dir, write_file, edit_file)
         # Web/Network: 2 (web_search, web_fetch)
         # Knowledge: 7 (search_kb, ingest_document, read_document, list_documents, open_document, search_arxiv, fetch_arxiv)
         # Execution: 2 (execute_python, shell_executor)
         # Interaction: 1 (ask_clarification)
         # Memory: 2 (save_memory, search_memory)
-        # Planning: 2 (save_plan, get_plan)
-        # Tasks: 2 (save_tasks, get_tasks)
         # Sandbox: 1 (sandbox_execute)
-        # Total: ~26 tools
-        assert tool_count >= 24, f"Expected at least 24 registered tools, got {tool_count}"
+        # Plan/task state tools are backend-specific (not in global registry)
+        # Total: ~22 tools
+        assert tool_count >= 20, f"Expected at least 20 registered tools, got {tool_count}"
 
 
 class TestDangerousToolDirectExecution:

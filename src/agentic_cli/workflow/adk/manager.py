@@ -329,6 +329,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         agent_map: dict[str, Agent] = {}
         planner = self._get_planner()
         generate_config = self._get_generate_content_config()
+        service_map = self._get_service_tool_map()
 
         # First pass: create agents without sub_agents (leaf agents)
         for config in self._agent_configs:
@@ -337,7 +338,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     name=config.name,
                     model=config.model or self.model,
                     instruction=config.get_prompt(),
-                    tools=self._build_tools(config),
+                    tools=self._build_tools(config, service_map),
                     description=config.description or None,
                     planner=planner,
                     generate_content_config=generate_config,
@@ -362,7 +363,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     name=config.name,
                     model=config.model or self.model,
                     instruction=config.get_prompt(),
-                    tools=self._build_tools(config),
+                    tools=self._build_tools(config, service_map),
                     description=config.description or None,
                     sub_agents=sub_agent_instances,
                     planner=planner,

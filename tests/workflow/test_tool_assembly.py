@@ -1,4 +1,4 @@
-"""Tests for BaseWorkflowManager._build_tools() — tool assembly and state tool swapping."""
+"""Tests for BaseWorkflowManager._build_tools() — tool assembly and state tool injection."""
 
 from typing import Any, AsyncGenerator
 
@@ -49,9 +49,7 @@ class _TestWorkflowManager(BaseWorkflowManager):
         pass
 
     def _get_state_tools(self) -> list:
-        if self._custom_state_tools:
-            return self._custom_state_tools
-        return super()._get_state_tools()
+        return self._custom_state_tools
 
 
 # ---------------------------------------------------------------------------
@@ -116,98 +114,78 @@ class TestBuildTools:
     """Tests for _build_tools() method."""
 
     def test_passes_through_non_state_tools(self, mock_context):
-        mgr = _TestWorkflowManager(agent_configs=[], settings=mock_context.settings)
+        fake_tools = [_fake_save_plan, _fake_get_plan, _fake_save_tasks, _fake_get_tasks]
+        mgr = _TestWorkflowManager(
+            agent_configs=[], settings=mock_context.settings, state_tools=fake_tools,
+        )
         config = AgentConfig(
             name="agent",
             prompt="test",
             tools=[_dummy_tool, _another_dummy],
+            include_state_tools=False,
         )
         result = mgr._build_tools(config)
         assert result == [_dummy_tool, _another_dummy]
 
-    def test_replaces_state_tools_with_backend_specific(self, mock_context):
-        from agentic_cli.tools.planning_tools import save_plan, get_plan
-        from agentic_cli.tools.task_tools import save_tasks, get_tasks
-
+    def test_auto_injects_state_tools_when_enabled(self, mock_context):
         fake_tools = [_fake_save_plan, _fake_get_plan, _fake_save_tasks, _fake_get_tasks]
         mgr = _TestWorkflowManager(
-            agent_configs=[],
-            settings=mock_context.settings,
-            state_tools=fake_tools,
+            agent_configs=[], settings=mock_context.settings, state_tools=fake_tools,
         )
         config = AgentConfig(
             name="agent",
             prompt="test",
-            tools=[_dummy_tool, save_plan, get_plan, save_tasks, get_tasks],
+            tools=[_dummy_tool],
         )
         result = mgr._build_tools(config)
-        # Non-state tool passes through
         assert result[0] is _dummy_tool
-        # State tools are replaced
         assert result[1] is _fake_save_plan
         assert result[2] is _fake_get_plan
         assert result[3] is _fake_save_tasks
         assert result[4] is _fake_get_tasks
 
-    def test_handles_empty_tool_list(self, mock_context):
-        mgr = _TestWorkflowManager(agent_configs=[], settings=mock_context.settings)
+    def test_no_state_tools_when_disabled(self, mock_context):
+        fake_tools = [_fake_save_plan, _fake_get_plan, _fake_save_tasks, _fake_get_tasks]
+        mgr = _TestWorkflowManager(
+            agent_configs=[], settings=mock_context.settings, state_tools=fake_tools,
+        )
+        config = AgentConfig(
+            name="agent",
+            prompt="test",
+            tools=[_dummy_tool],
+            include_state_tools=False,
+        )
+        result = mgr._build_tools(config)
+        assert result == [_dummy_tool]
+
+    def test_handles_empty_tool_list_with_state_tools(self, mock_context):
+        fake_tools = [_fake_save_plan, _fake_get_plan, _fake_save_tasks, _fake_get_tasks]
+        mgr = _TestWorkflowManager(
+            agent_configs=[], settings=mock_context.settings, state_tools=fake_tools,
+        )
         config = AgentConfig(name="agent", prompt="test", tools=[])
+        result = mgr._build_tools(config)
+        # Empty tool list + state tools injected
+        assert len(result) == 4
+        assert result[0] is _fake_save_plan
+
+    def test_handles_empty_tool_list_without_state_tools(self, mock_context):
+        mgr = _TestWorkflowManager(
+            agent_configs=[], settings=mock_context.settings, state_tools=[],
+        )
+        config = AgentConfig(name="agent", prompt="test", tools=[], include_state_tools=False)
         result = mgr._build_tools(config)
         assert result == []
 
     def test_handles_none_tool_list(self, mock_context):
-        mgr = _TestWorkflowManager(agent_configs=[], settings=mock_context.settings)
-        config = AgentConfig(name="agent", prompt="test", tools=None)
+        mgr = _TestWorkflowManager(
+            agent_configs=[], settings=mock_context.settings, state_tools=[],
+        )
+        config = AgentConfig(name="agent", prompt="test", tools=None, include_state_tools=False)
         result = mgr._build_tools(config)
         assert result == []
 
-    def test_mixed_state_and_regular_tools(self, mock_context):
-        from agentic_cli.tools.planning_tools import save_plan
-
-        fake_tools = [_fake_save_plan, _fake_get_plan, _fake_save_tasks, _fake_get_tasks]
-        mgr = _TestWorkflowManager(
-            agent_configs=[],
-            settings=mock_context.settings,
-            state_tools=fake_tools,
-        )
-        config = AgentConfig(
-            name="agent",
-            prompt="test",
-            tools=[_dummy_tool, save_plan, _another_dummy],
-        )
-        result = mgr._build_tools(config)
-        assert len(result) == 3
-        assert result[0] is _dummy_tool
-        assert result[1] is _fake_save_plan  # replaced
-        assert result[2] is _another_dummy
-
-    def test_state_tool_not_in_override_map_passes_through(self, mock_context):
-        """If backend provides only some state tools, others pass through."""
-        # Only provide save_plan replacement, not get_plan
-        mgr = _TestWorkflowManager(
-            agent_configs=[],
-            settings=mock_context.settings,
-            state_tools=[_fake_save_plan],  # only save_plan
-        )
-
-        from agentic_cli.tools.planning_tools import save_plan, get_plan
-        config = AgentConfig(
-            name="agent",
-            prompt="test",
-            tools=[save_plan, get_plan],
-        )
-        result = mgr._build_tools(config)
-        assert result[0] is _fake_save_plan  # replaced
-        assert result[1] is get_plan  # NOT replaced (no fake_get_plan in state_tools)
-
-
-class TestDefaultGetStateTools:
-    """Tests for default _get_state_tools() implementation."""
-
-    def test_returns_legacy_service_registry_tools(self, mock_context):
-        mgr = _TestWorkflowManager(agent_configs=[], settings=mock_context.settings)
-        # Don't pass custom state_tools, so we get the base class default
-        mgr._custom_state_tools = []
-        tools = mgr._get_state_tools()
-        names = {t.__name__ for t in tools}
-        assert names == {"save_plan", "get_plan", "save_tasks", "get_tasks"}
+    def test_default_include_state_tools_is_true(self, mock_context):
+        """AgentConfig defaults to include_state_tools=True."""
+        config = AgentConfig(name="agent", prompt="test")
+        assert config.include_state_tools is True
