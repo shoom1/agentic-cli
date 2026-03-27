@@ -80,31 +80,24 @@ class TestMessageProcessorTaskAttributes:
         assert hasattr(processor, "_last_task_content")
         assert processor._last_task_content is None
 
-    def test_clear_history_resets_task_box_and_content(self):
-        """clear_history() should set _task_box and _last_task_content to None."""
+    def test_clear_task_state_resets_task_box_and_content(self):
+        """clear_task_state() should set _task_box and _last_task_content to None."""
         processor = MessageProcessor()
         processor._last_task_content = "some content"
-        processor.clear_history()
+        processor.clear_task_state()
         assert processor._task_box is None
         assert processor._last_task_content is None
 
-    def test_clear_history_finishes_active_task_box(self):
-        """clear_history() should call finish() on an active task box."""
+    def test_clear_task_state_finishes_active_task_box(self):
+        """clear_task_state() should call finish() on an active task box."""
         processor = MessageProcessor()
         mock_box = MagicMock()
         processor._task_box = mock_box
-        processor.clear_history()
+        processor.clear_task_state()
         mock_box.finish.assert_called_once_with(
             add_to_history=False, echo_to_console=False
         )
         assert processor._task_box is None
-
-    def test_clear_history_still_clears_message_history(self):
-        """clear_history() should still clear message history."""
-        processor = MessageProcessor()
-        processor._message_history.add("hello", "user")
-        processor.clear_history()
-        assert len(processor._message_history) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -314,7 +307,6 @@ class TestProcessDualBoxes:
         events_ctx = MagicMock()
         ui.start_thinking.return_value = events_ctx
         settings = MagicMock()
-        settings.log_activity = False
         settings.default_user = "test"
 
         workflow_ctrl = MagicMock()

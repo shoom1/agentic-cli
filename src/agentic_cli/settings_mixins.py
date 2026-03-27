@@ -59,11 +59,6 @@ class AppSettingsMixin:
         return self.workspace_dir / "sessions"
 
     @property
-    def artifacts_dir(self) -> Path:
-        """Directory for artifact storage."""
-        return self.workspace_dir / "artifacts"
-
-    @property
     def knowledge_base_dir(self) -> Path:
         """Directory for knowledge base storage."""
         return self.workspace_dir / "knowledge_base"
@@ -103,13 +98,6 @@ class CLISettingsMixin:
         json_schema_extra={"ui_order": 51},
     )
 
-    # Activity logging
-    log_activity: bool = Field(
-        default=False,
-        title="Log Activity",
-        description="Save conversation to file for audit purposes",
-        json_schema_extra={"ui_order": 30},
-    )
 
     # Thinking output control
     verbose_thinking: bool = Field(

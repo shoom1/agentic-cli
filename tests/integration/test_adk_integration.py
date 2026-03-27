@@ -565,7 +565,6 @@ class TestMessageProcessorRateLimit:
         # Mock settings
         settings = MagicMock()
         settings.default_user = "test-user"
-        settings.log_activity = False
         settings.verbose_thinking = False
 
         with patch("agentic_cli.cli.message_processor.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
@@ -613,7 +612,6 @@ class TestMessageProcessorRateLimit:
 
         settings = MagicMock()
         settings.default_user = "test-user"
-        settings.log_activity = False
         settings.verbose_thinking = False
 
         await processor.process(
@@ -653,7 +651,6 @@ class TestMessageProcessorRateLimit:
 
         settings = MagicMock()
         settings.default_user = "test-user"
-        settings.log_activity = False
         settings.verbose_thinking = False
 
         await processor.process(

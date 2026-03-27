@@ -51,7 +51,6 @@ class TestBaseSettings:
             settings = BaseSettings(workspace_dir=temp_workspace)
 
         assert settings.sessions_dir == temp_workspace / "sessions"
-        assert settings.artifacts_dir == temp_workspace / "artifacts"
         assert settings.knowledge_base_dir == temp_workspace / "knowledge_base"
 
 

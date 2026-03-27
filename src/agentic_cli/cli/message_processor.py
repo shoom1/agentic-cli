@@ -1,7 +1,6 @@
 """Message processing for agentic CLI applications.
 
 This module provides:
-- MessageHistory: Tracks conversation history for persistence
 - MessageProcessor: Handles user message processing through workflow
 """
 
@@ -9,8 +8,6 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from datetime import datetime
-from enum import Enum
 from typing import TYPE_CHECKING, ClassVar
 
 from agentic_cli.logging import Loggers, bind_context
@@ -64,68 +61,6 @@ def _richify_task_display(plain: str) -> str:
         else:
             lines.append(f"[bold white]{_esc(line)}[/bold white]")
     return rich_to_ansi("\n".join(lines))
-
-
-# === Message History for Persistence ===
-
-
-class MessageType(Enum):
-    """Types of messages in history."""
-
-    USER = "user"
-    ASSISTANT = "assistant"
-    SYSTEM = "system"
-    ERROR = "error"
-    WARNING = "warning"
-    SUCCESS = "success"
-    THINKING = "thinking"
-
-
-@dataclass
-class Message:
-    """A message stored in history for persistence."""
-
-    content: str
-    message_type: MessageType
-    timestamp: datetime = field(default_factory=datetime.now)
-    metadata: dict = field(default_factory=dict)
-
-
-class MessageHistory:
-    """Simple message history for persistence."""
-
-    def __init__(self) -> None:
-        self._messages: list[Message] = []
-
-    def add(
-        self,
-        content: str,
-        message_type: MessageType | str,
-        timestamp: datetime | None = None,
-        **metadata: object,
-    ) -> None:
-        """Add a message to history."""
-        if isinstance(message_type, str):
-            message_type = MessageType(message_type)
-        self._messages.append(
-            Message(
-                content=content,
-                message_type=message_type,
-                timestamp=timestamp or datetime.now(),
-                metadata=dict(metadata),
-            )
-        )
-
-    def get_all(self) -> list[Message]:
-        """Get all messages."""
-        return list(self._messages)
-
-    def clear(self) -> None:
-        """Clear all messages."""
-        self._messages.clear()
-
-    def __len__(self) -> int:
-        return len(self._messages)
 
 
 # === Event Processing State ===
@@ -185,19 +120,12 @@ class MessageProcessor:
 
     def __init__(self) -> None:
         """Initialize the message processor."""
-        self._message_history = MessageHistory()
         self._last_task_progress: str | None = None
         self._task_box: "ThinkingContext | None" = None
         self._last_task_content: str | None = None
 
-    @property
-    def history(self) -> MessageHistory:
-        """Get the message history."""
-        return self._message_history
-
-    def clear_history(self) -> None:
-        """Clear message history and task box state."""
-        self._message_history.clear()
+    def clear_task_state(self) -> None:
+        """Clear task box state."""
         self._last_task_progress = None
         if self._task_box is not None:
             self._task_box.finish(add_to_history=False, echo_to_console=False)
@@ -234,10 +162,6 @@ class MessageProcessor:
 
         bind_context(user_id=settings.default_user)
         logger.info("handling_message", message_length=len(message))
-
-        # Track message in history (if logging enabled)
-        if settings.log_activity:
-            self._message_history.add(message, MessageType.USER)
 
         state = _EventProcessingState(
             usage_tracker=usage_tracker,
@@ -301,19 +225,6 @@ class MessageProcessor:
                     # Ensure final token counts are reflected in status bar
                     workflow_controller.update_status_bar(ui)
 
-                    # Add accumulated content to message history (if logging enabled)
-                    if settings.log_activity:
-                        if state.thinking_content:
-                            self._message_history.add(
-                                "".join(state.thinking_content),
-                                MessageType.THINKING,
-                            )
-                        if state.response_content:
-                            self._message_history.add(
-                                "".join(state.response_content),
-                                MessageType.ASSISTANT,
-                            )
-
                     logger.debug("message_handled_successfully")
                     break  # Success — exit retry loop
 
@@ -342,8 +253,6 @@ class MessageProcessor:
 
                     # Non-429 or user chose cancel
                     ui.add_error(f"Workflow error: {e}")
-                    if settings.log_activity:
-                        self._message_history.add(str(e), MessageType.ERROR)
                     break
         finally:
             workflow.clear_input_callback()

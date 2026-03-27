@@ -115,9 +115,6 @@ class StatusCommand(Command):
         else:
             table.add_row("Session", "ephemeral (not saved)")
 
-        # Message history stats
-        table.add_row("Messages", str(len(app.message_history)))
-
         # Token usage breakdown
         tracker = getattr(app, "usage_tracker", None)
         if tracker is not None:

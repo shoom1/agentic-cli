@@ -428,7 +428,6 @@ class TestStatusCommandSessionInfo:
         cmd = StatusCommand()
         app = MagicMock()
         app._session_id = "my-research"
-        app.message_history = []
         app.usage_tracker = MagicMock(invocation_count=0)
         # Make workflow access raise to skip workflow section
         type(app).workflow = property(lambda self: (_ for _ in ()).throw(RuntimeError))
@@ -444,7 +443,6 @@ class TestStatusCommandSessionInfo:
         cmd = StatusCommand()
         app = MagicMock()
         app._session_id = None
-        app.message_history = []
         app.usage_tracker = MagicMock(invocation_count=0)
         type(app).workflow = property(lambda self: (_ for _ in ()).throw(RuntimeError))
 
