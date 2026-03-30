@@ -1068,3 +1068,51 @@ class TestFindDocument:
         assert found is None
 
 
+class TestHybridSearch:
+
+    def test_bm25_index_created_on_ingest(self, tmp_path):
+        kb = _make_mock_kb(tmp_path)
+        kb.ingest_document(
+            title="Test Doc",
+            content="Python programming language tutorial for beginners",
+            source_type=SourceType.USER,
+        )
+        assert kb._bm25_index is not None
+        assert kb._bm25_index.size > 0
+
+    def test_hybrid_search_finds_exact_match(self, tmp_path):
+        kb = _make_mock_kb(tmp_path)
+        kb.ingest_document(
+            title="Config Doc",
+            content="Set AGENTIC_WORKSPACE_DIR to configure the workspace directory",
+            source_type=SourceType.USER,
+        )
+        kb.ingest_document(
+            title="General Doc",
+            content="The workspace is where all your files are stored for processing",
+            source_type=SourceType.USER,
+        )
+        results = kb.search("AGENTIC_WORKSPACE_DIR", top_k=2)
+        assert len(results["results"]) > 0
+        assert results["results"][0]["document_title"] == "Config Doc"
+
+    def test_rrf_fusion(self):
+        from agentic_cli.knowledge_base.manager import KnowledgeBaseManager
+        semantic = [("c1", 0.9), ("c2", 0.8), ("c3", 0.7)]
+        bm25 = [("c3", 5.0), ("c1", 3.0), ("c4", 1.0)]
+        fused = KnowledgeBaseManager._fuse_results(semantic, bm25)
+        ids = [cid for cid, _ in fused]
+        assert "c1" in ids[:3]
+        assert "c3" in ids[:3]
+        assert "c4" in ids
+
+    def test_hybrid_search_bm25_graceful_degradation(self, tmp_path):
+        kb = _make_mock_kb(tmp_path)
+        kb.ingest_document(
+            title="Test",
+            content="Some test content for searching",
+            source_type=SourceType.USER,
+        )
+        kb._bm25_index = None  # Force BM25 unavailable
+        results = kb.search("test content", top_k=5)
+        assert len(results["results"]) > 0  # Semantic-only still works

@@ -164,6 +164,16 @@ class KnowledgeBaseManager:
         self._chunks: dict[str, DocumentChunk] = {}
         self._load_metadata()
 
+        # BM25 index for hybrid search
+        self._bm25_index = None
+        try:
+            from agentic_cli.knowledge_base.bm25_index import create_bm25_index
+            self._bm25_index = create_bm25_index(use_mock=use_mock)
+            if self.embeddings_dir.exists():
+                self._bm25_index.load(self.embeddings_dir)
+        except Exception:
+            logger.debug("bm25_init_skipped")
+
 
     def _create_services(
         self, embedding_model: str, batch_size: int
@@ -481,6 +491,14 @@ class KnowledgeBaseManager:
             self._save_metadata()
             self._vector_store.save()
 
+            # Add to BM25 index
+            bm25_index = getattr(self, "_bm25_index", None)
+            if bm25_index is not None and doc.chunks:
+                bm25_ids = [c.id for c in doc.chunks]
+                bm25_texts = [c.content for c in doc.chunks]
+                bm25_index.add_documents(bm25_ids, bm25_texts)
+                bm25_index.save(self.embeddings_dir)
+
         return doc
 
     def search(
@@ -489,49 +507,54 @@ class KnowledgeBaseManager:
         filters: dict[str, Any] | None = None,
         top_k: int = 10,
     ) -> dict[str, Any]:
-        """Search the knowledge base using semantic similarity.
+        """Search the knowledge base using hybrid retrieval.
 
-        Args:
-            query: Natural language search query.
-            filters: Optional filters (source_type, date_from, date_to).
-            top_k: Maximum number of results.
-
-        Returns:
-            Dict with results, timing information, and metadata.
+        Uses both semantic (vector) and keyword (BM25) search, merged via
+        Reciprocal Rank Fusion. Falls back to semantic-only if BM25 is unavailable.
         """
         start_time = time.time()
 
-        # Generate query embedding outside lock (CPU-bound, no shared state)
+        # Semantic search
         embed_start = time.time()
         query_embedding = self._embedding_service.embed_text(query)
         embed_time = (time.time() - embed_start) * 1000
 
-        # Read shared state under lock
         with self._lock:
             search_start = time.time()
-            raw_results = self._vector_store.search(query_embedding, top_k * 2)
+            semantic_results = self._vector_store.search(query_embedding, top_k * 2)
             search_time = (time.time() - search_start) * 1000
 
-            # Build results with filtering
-            results: list[SearchResult] = []
-            for chunk_id, score in raw_results:
+        # BM25 search
+        bm25_results = []
+        bm25_index = getattr(self, "_bm25_index", None)
+        if bm25_index is not None:
+            bm25_results = bm25_index.search(query, top_k=top_k * 2)
+
+        # Fuse results
+        if bm25_results:
+            fused = self._fuse_results(semantic_results, bm25_results)
+        else:
+            fused = semantic_results
+
+        # Build SearchResult objects, apply filters, deduplicate
+        results: list[SearchResult] = []
+        seen_docs: set[str] = set()
+        with self._lock:
+            for chunk_id, score in fused:
                 if len(results) >= top_k:
                     break
-
                 chunk = self._chunks.get(chunk_id)
                 if not chunk:
                     continue
-
                 doc = self._documents.get(chunk.document_id)
                 if not doc:
                     continue
-
-                if filters:
-                    if not self._matches_filters(doc, filters):
-                        continue
-
+                if doc.id in seen_docs:
+                    continue
+                if filters and not self._matches_filters(doc, filters):
+                    continue
+                seen_docs.add(doc.id)
                 highlight = truncate(chunk.content)
-
                 results.append(
                     SearchResult(
                         document=doc,
@@ -550,6 +573,21 @@ class KnowledgeBaseManager:
             "search_time_ms": round(search_time, 2),
             "total_time_ms": round(total_time, 2),
         }
+
+    @staticmethod
+    def _fuse_results(
+        semantic_results: list[tuple[str, float]],
+        bm25_results: list[tuple[str, float]],
+        k: int = 60,
+    ) -> list[tuple[str, float]]:
+        """Merge ranked lists using Reciprocal Rank Fusion."""
+        from collections import defaultdict
+        scores: dict[str, float] = defaultdict(float)
+        for rank, (chunk_id, _) in enumerate(semantic_results):
+            scores[chunk_id] += 1.0 / (k + rank + 1)
+        for rank, (chunk_id, _) in enumerate(bm25_results):
+            scores[chunk_id] += 1.0 / (k + rank + 1)
+        return sorted(scores.items(), key=lambda x: x[1], reverse=True)
 
     def _matches_filters(self, doc: Document, filters: dict[str, Any]) -> bool:
         """Check if document matches the given filters."""
@@ -639,6 +677,11 @@ class KnowledgeBaseManager:
             # Remove chunks from vector store
             chunk_ids = [c.id for c in doc.chunks]
             self._vector_store.remove_embeddings(chunk_ids)
+
+            bm25_index = getattr(self, "_bm25_index", None)
+            if bm25_index is not None:
+                bm25_index.remove_documents(chunk_ids)
+                bm25_index.save(self.embeddings_dir)
 
             # Remove from memory
             for chunk_id in chunk_ids:
