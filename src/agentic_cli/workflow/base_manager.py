@@ -256,6 +256,7 @@ class BaseWorkflowManager(ABC):
         "read_document": "kb_manager",
         "list_documents": "kb_manager",
         "open_document": "kb_manager",
+        "unified_search": "memory_store",
         "web_fetch": "llm_summarizer",
         "sandbox_execute": "sandbox_manager",
     }
