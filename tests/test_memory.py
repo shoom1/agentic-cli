@@ -3,6 +3,7 @@
 import pytest
 
 from agentic_cli.tools.memory_tools import MemoryStore
+from agentic_cli.knowledge_base._mocks import MockEmbeddingService
 
 
 @pytest.fixture
@@ -347,3 +348,65 @@ class TestMemoryToolFunctions:
 
         result = search_memory(query="", limit=2)
         assert result["count"] == 2
+
+
+class TestMemorySemanticSearch:
+    """Tests for semantic search in MemoryStore."""
+
+    def test_semantic_search_returns_results(self, mock_context):
+        emb = MockEmbeddingService()
+        store = MemoryStore(mock_context.settings, embedding_service=emb)
+        store.store("Python is a programming language")
+        store.store("The weather is sunny today")
+        store.store("Machine learning uses Python")
+        results = store.search("Python programming", limit=10)
+        assert len(results) > 0
+        # All results should have embeddings now
+        for item in store._items.values():
+            assert item.embedding is not None
+
+    def test_semantic_search_updates_access_tracking(self, mock_context):
+        emb = MockEmbeddingService()
+        store = MemoryStore(mock_context.settings, embedding_service=emb)
+        item_id = store.store("important fact")
+        results = store.search("fact")
+        assert len(results) == 1
+        item = store._items[item_id]
+        assert item.access_count == 1
+        assert item.last_accessed_at >= item.created_at
+
+    def test_fallback_to_substring_without_embeddings(self, mock_context):
+        store = MemoryStore(mock_context.settings)  # no embedding service
+        store.store("Python is great")
+        store.store("Java is also good")
+        results = store.search("Python")
+        assert len(results) == 1
+        assert results[0].content == "Python is great"
+
+    def test_importance_and_recency_affect_ranking(self, mock_context):
+        emb = MockEmbeddingService()
+        store = MemoryStore(mock_context.settings, embedding_service=emb)
+        store.store("important Python fact", importance=9)
+        store.store("trivial Python fact", importance=1)
+        results = store.search("Python fact", limit=2)
+        assert results[0].importance >= results[1].importance
+
+    def test_embeddings_persisted_separately(self, mock_context):
+        emb = MockEmbeddingService()
+        store = MemoryStore(mock_context.settings, embedding_service=emb)
+        store.store("test content")
+        emb_path = store._embeddings_path
+        assert emb_path.exists()
+        import json
+        main_data = json.loads(store._path.read_text())
+        for item_data in main_data:
+            assert "embedding" not in item_data
+
+    def test_embedding_migration_on_load(self, mock_context):
+        """Existing memories without embeddings get embedded on load."""
+        store1 = MemoryStore(mock_context.settings)
+        store1.store("old memory without embedding")
+        store2 = MemoryStore(mock_context.settings, embedding_service=MockEmbeddingService())
+        items = list(store2._items.values())
+        assert len(items) == 1
+        assert items[0].embedding is not None

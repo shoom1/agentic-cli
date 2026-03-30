@@ -2,7 +2,7 @@
 
 Provides two tools for persistent memory:
 - save_memory: Store information that persists across sessions
-- search_memory: Search stored memories by substring
+- search_memory: Search stored memories by substring or semantic similarity
 
 The MemoryStore is auto-created by the workflow manager when
 these tools are used (detected via _TOOL_SERVICE_MAP).
@@ -16,6 +16,7 @@ Example:
 """
 
 import json
+import math
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
@@ -93,7 +94,8 @@ class MemoryStore:
     """Simple persistent memory store.
 
     Appends memories to a JSON file in the workspace directory.
-    Supports substring search and optional tags.
+    Supports substring search and optional semantic search when an
+    embedding_service is provided.
 
     Example:
         >>> store = MemoryStore(settings)
@@ -103,29 +105,65 @@ class MemoryStore:
         User prefers markdown output
     """
 
-    def __init__(self, settings: BaseSettings) -> None:
+    def __init__(self, settings: BaseSettings, embedding_service=None) -> None:
         self._settings = settings
-        self._memory_dir = settings.workspace_dir / "memory"
-        self._storage_path = self._memory_dir / "memories.json"
+        self._embedding_service = embedding_service
+        mem_dir = settings.workspace_dir / "memory"
+        mem_dir.mkdir(parents=True, exist_ok=True)
+        self._path = mem_dir / "memories.json"
+        self._embeddings_path = mem_dir / "memories_embeddings.json"
         self._items: dict[str, MemoryItem] = {}
         self._load()
+        if self._embedding_service:
+            self._ensure_embeddings()
 
     def _load(self) -> None:
-        if self._storage_path.exists():
+        if self._path.exists():
             try:
-                with open(self._storage_path, "r") as f:
-                    data = json.load(f)
-                for item_data in data.get("items", []):
+                data = json.loads(self._path.read_text())
+                # Support both flat list (new format) and {"items": [...]} (old format)
+                if isinstance(data, dict):
+                    items_list = data.get("items", [])
+                else:
+                    items_list = data
+                for item_data in items_list:
                     item = MemoryItem.from_dict(item_data)
                     self._items[item.id] = item
             except (json.JSONDecodeError, KeyError):
-                logger.warning("memory_load_failed", path=str(self._storage_path))
+                logger.warning("corrupted_memory_file", path=str(self._path))
                 self._items = {}
+        if self._embeddings_path.exists():
+            try:
+                emb_data = json.loads(self._embeddings_path.read_text())
+                for item_id, embedding in emb_data.items():
+                    if item_id in self._items:
+                        self._items[item_id].embedding = embedding
+            except (json.JSONDecodeError, KeyError):
+                logger.warning("corrupted_embeddings_file", path=str(self._embeddings_path))
 
     def _save(self) -> None:
-        self._memory_dir.mkdir(parents=True, exist_ok=True)
-        data = {"items": [item.to_dict() for item in self._items.values()]}
-        atomic_write_json(self._storage_path, data)
+        data = [item.to_dict() for item in self._items.values()]
+        atomic_write_json(self._path, data)
+        self._save_embeddings()
+
+    def _save_embeddings(self) -> None:
+        emb_data = {}
+        for item_id, item in self._items.items():
+            if item.embedding is not None:
+                emb_data[item_id] = item.embedding
+        if emb_data:
+            atomic_write_json(self._embeddings_path, emb_data)
+
+    def _ensure_embeddings(self) -> None:
+        """Batch-embed any items missing embeddings."""
+        to_embed = [item for item in self._items.values() if item.embedding is None]
+        if not to_embed:
+            return
+        texts = [item.content for item in to_embed]
+        embeddings = self._embedding_service.embed_batch(texts)
+        for item, emb in zip(to_embed, embeddings):
+            item.embedding = emb
+        self._save_embeddings()
 
     def store(self, content: str, tags: list[str] | None = None, importance: int = 5) -> str:
         """Append a memory to the persistent store.
@@ -149,6 +187,8 @@ class MemoryStore:
             access_count=0,
             importance=max(1, min(10, importance)),
         )
+        if self._embedding_service:
+            item.embedding = self._embedding_service.embed_text(content)
         self._items[item.id] = item
         self._save()
         return item.id
@@ -197,24 +237,75 @@ class MemoryStore:
         return True
 
     def search(self, query: str, limit: int = 10, include_archived: bool = False) -> list[MemoryItem]:
-        """Search memories by substring match (case-insensitive).
+        """Search memories by substring or semantic similarity.
+
+        When an embedding_service is available and items have embeddings,
+        uses cosine similarity with recency-importance-relevance scoring.
+        Otherwise falls back to case-insensitive substring match.
 
         Args:
-            query: Substring to search for. Empty string matches all.
+            query: The search query. Empty string matches all (substring mode).
             limit: Maximum results to return.
             include_archived: If True, include archived (soft-deleted) items.
 
         Returns:
             List of matching MemoryItem objects.
         """
-        results = []
+        candidates = [
+            item for item in self._items.values()
+            if include_archived or not item.archived
+        ]
+        if not candidates:
+            return []
+        if self._embedding_service and any(item.embedding for item in candidates):
+            results = self._semantic_search(query, candidates, limit)
+        else:
+            results = self._substring_search(query, candidates, limit)
+        # Update access tracking
+        now = datetime.now().isoformat()
+        for item in results:
+            item.access_count += 1
+            item.last_accessed_at = now
+        self._save()
+        return results
+
+    def _substring_search(self, query: str, candidates: list[MemoryItem], limit: int) -> list[MemoryItem]:
+        """Case-insensitive substring search."""
         q = query.lower()
-        for item in self._items.values():
-            if not include_archived and item.archived:
+        if not q:
+            return candidates[:limit]
+        return [item for item in candidates if q in item.content.lower()][:limit]
+
+    def _semantic_search(self, query: str, candidates: list[MemoryItem], limit: int) -> list[MemoryItem]:
+        """Cosine similarity search scored with recency and importance."""
+        query_embedding = self._embedding_service.embed_text(query)
+        now = datetime.now()
+        scored = []
+        for item in candidates:
+            if item.embedding is None:
                 continue
-            if not q or q in item.content.lower():
-                results.append(item)
-        return results[:limit]
+            relevance = self._cosine_similarity(query_embedding, item.embedding)
+            try:
+                last_access = datetime.fromisoformat(item.last_accessed_at)
+                hours_since = max(0, (now - last_access).total_seconds() / 3600)
+            except (ValueError, TypeError):
+                hours_since = 0
+            recency = math.exp(-0.01 * hours_since)  # decay=0.01, ~3 day half-life
+            importance_norm = item.importance / 10.0
+            score = 0.7 * relevance + 0.15 * recency + 0.15 * importance_norm
+            scored.append((score, item))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [item for _, item in scored[:limit]]
+
+    @staticmethod
+    def _cosine_similarity(a: list[float], b: list[float]) -> float:
+        """Compute cosine similarity between two vectors."""
+        dot = sum(x * y for x, y in zip(a, b))
+        norm_a = math.sqrt(sum(x * x for x in a))
+        norm_b = math.sqrt(sum(x * x for x in b))
+        if norm_a == 0 or norm_b == 0:
+            return 0.0
+        return dot / (norm_a * norm_b)
 
     def load_all(self) -> str:
         """Load all memories as a formatted string for system prompt injection.
