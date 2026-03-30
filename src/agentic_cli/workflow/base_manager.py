@@ -27,6 +27,7 @@ from agentic_cli.workflow.service_registry import (
     SANDBOX_MANAGER,
     LLM_SUMMARIZER,
     MEMORY_STORE,
+    REFLECTION_STORE,
     WORKFLOW,
 )
 from agentic_cli.logging import Loggers
@@ -259,6 +260,7 @@ class BaseWorkflowManager(ABC):
         "unified_search": "memory_store",
         "web_fetch": "llm_summarizer",
         "sandbox_execute": "sandbox_manager",
+        "save_reflection": "reflection_store",
     }
 
     def _detect_required_managers(self) -> set[str]:
@@ -335,6 +337,10 @@ class BaseWorkflowManager(ABC):
             from agentic_cli.tools.sandbox.manager import SandboxManager
             s[SANDBOX_MANAGER] = SandboxManager(self._settings)
 
+        if "reflection_store" in self._required_managers and REFLECTION_STORE not in s:
+            from agentic_cli.tools.reflection_tools import ReflectionStore
+            s[REFLECTION_STORE] = ReflectionStore(self._settings)
+
         # Always ensure workflow reference is available
         s[WORKFLOW] = self
 
@@ -347,6 +353,48 @@ class BaseWorkflowManager(ABC):
             Summarized text response.
         """
         return await self.generate_simple(prompt, max_tokens=2000)
+
+    async def on_session_end(self, messages: list[dict] | None = None) -> list[str]:
+        """Hook called when a session ends. Optionally extracts facts.
+
+        Override in downstream apps for custom session-end behavior.
+
+        Args:
+            messages: Recent messages from the session (optional).
+
+        Returns:
+            List of extracted facts (empty if disabled or no messages).
+        """
+        if not getattr(self._settings, "auto_extract_session_facts", False):
+            return []
+        if not messages:
+            return []
+
+        store = self._services.get(MEMORY_STORE)
+        if store is None:
+            return []
+
+        prompt = (
+            "Extract key facts, decisions, and user preferences from this conversation. "
+            "Return each fact as a single concise sentence on its own line. "
+            "Only include facts worth remembering for future conversations. "
+            "If there are no notable facts, return an empty response.\n\n"
+        )
+        content = "\n".join(
+            f"{m.get('role', 'unknown')}: {m.get('content', '')}"
+            for m in messages[-20:]
+        )
+
+        try:
+            summary = await self.generate_simple(prompt + content, max_tokens=2000)
+        except Exception:
+            logger.debug("session_fact_extraction_failed", exc_info=True)
+            return []
+
+        facts = [line.strip() for line in summary.strip().split("\n") if line.strip()]
+        for fact in facts:
+            store.store(fact, tags=["auto-extracted", "session"])
+        return facts
 
     @contextlib.contextmanager
     def _workflow_context(self) -> Iterator[None]:

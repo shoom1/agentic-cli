@@ -159,6 +159,18 @@ class WorkflowSettingsMixin:
         description="Use mock knowledge base (no ML dependencies required)",
         json_schema_extra={"ui_order": 152},
     )
+    enable_tool_reflections: bool = Field(
+        default=False,
+        title="Enable Tool Reflections",
+        description="Store and inject heuristics learned from tool failures",
+        json_schema_extra={"ui_order": 153},
+    )
+    auto_extract_session_facts: bool = Field(
+        default=False,
+        title="Auto-Extract Session Facts",
+        description="At session end, extract key facts into memory via LLM",
+        json_schema_extra={"ui_order": 154},
+    )
 
     # User identity (needed by workflow.process())
     default_user: str = Field(
