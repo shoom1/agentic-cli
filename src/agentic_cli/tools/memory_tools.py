@@ -360,6 +360,7 @@ class MemoryStore:
 def save_memory(
     content: str,
     tags: list[str] | None = None,
+    importance: int = 5,
 ) -> dict[str, Any]:
     """Save information to persistent memory.
 
@@ -369,6 +370,7 @@ def save_memory(
     Args:
         content: The content to store.
         tags: Optional tags for categorization.
+        importance: Importance rating 1-10 (default 5).
 
     Returns:
         A dict with the stored item ID.
@@ -376,7 +378,7 @@ def save_memory(
     store = require_service(MEMORY_STORE)
     if isinstance(store, dict):
         return store
-    item_id = store.store(content, tags=tags)
+    item_id = store.store(content, tags=tags, importance=importance)
     return {
         "success": True,
         "item_id": item_id,
@@ -421,3 +423,55 @@ def search_memory(
         "items": items,
         "count": len(items),
     }
+
+
+@register_tool(
+    category=ToolCategory.MEMORY,
+    permission_level=PermissionLevel.SAFE,
+    description="Update an existing memory item",
+)
+def update_memory(
+    item_id: str,
+    content: str | None = None,
+    tags: list[str] | None = None,
+) -> dict[str, Any]:
+    """Update an existing memory item.
+
+    Args:
+        item_id: ID of the memory to update.
+        content: New content (optional).
+        tags: New tags (optional).
+
+    Returns:
+        A dict indicating success.
+    """
+    store = require_service(MEMORY_STORE)
+    if isinstance(store, dict):
+        return store
+    updated = store.update(item_id, content=content, tags=tags)
+    return {"success": True, "updated": updated}
+
+
+@register_tool(
+    category=ToolCategory.MEMORY,
+    permission_level=PermissionLevel.CAUTION,
+    description="Delete a memory item",
+)
+def delete_memory(
+    item_id: str,
+    purge: bool = False,
+) -> dict[str, Any]:
+    """Delete a memory item (soft-delete by default).
+
+    Args:
+        item_id: ID of the memory to delete.
+        purge: If True, permanently remove. If False, archive.
+
+    Returns:
+        A dict indicating success.
+    """
+    store = require_service(MEMORY_STORE)
+    if isinstance(store, dict):
+        return store
+    deleted = store.delete(item_id, purge=purge)
+    return {"success": True, "deleted": deleted}

@@ -249,6 +249,8 @@ class BaseWorkflowManager(ABC):
     _TOOL_SERVICE_MAP: dict[str, str] = {
         "save_memory": "memory_store",
         "search_memory": "memory_store",
+        "update_memory": "memory_store",
+        "delete_memory": "memory_store",
         "search_knowledge_base": "kb_manager",
         "ingest_document": "kb_manager",
         "read_document": "kb_manager",
@@ -285,7 +287,22 @@ class BaseWorkflowManager(ABC):
 
         if "memory_store" in self._required_managers and MEMORY_STORE not in s:
             from agentic_cli.tools.memory_tools import MemoryStore
-            s[MEMORY_STORE] = MemoryStore(self._settings)
+
+            embedding_service = None
+            if not self._settings.knowledge_base_use_mock:
+                try:
+                    from agentic_cli.knowledge_base.embeddings import EmbeddingService
+                    embedding_service = EmbeddingService(
+                        model_name=self._settings.embedding_model,
+                        batch_size=self._settings.embedding_batch_size,
+                    )
+                except ImportError:
+                    pass
+            else:
+                from agentic_cli.knowledge_base._mocks import MockEmbeddingService
+                embedding_service = MockEmbeddingService()
+
+            s[MEMORY_STORE] = MemoryStore(self._settings, embedding_service=embedding_service)
 
         if "kb_manager" in self._required_managers and KB_MANAGER not in s:
             from pathlib import Path

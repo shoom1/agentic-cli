@@ -349,6 +349,33 @@ class TestMemoryToolFunctions:
         result = search_memory(query="", limit=2)
         assert result["count"] == 2
 
+    def test_update_memory_tool(self, memory_store_ctx):
+        from agentic_cli.tools.memory_tools import save_memory, update_memory
+        result = save_memory(content="original")
+        item_id = result["item_id"]
+        update_result = update_memory(item_id=item_id, content="updated")
+        assert update_result["success"] is True
+        assert update_result["updated"] is True
+
+    def test_update_memory_not_found(self, memory_store_ctx):
+        from agentic_cli.tools.memory_tools import update_memory
+        result = update_memory(item_id="nonexistent", content="new")
+        assert result["success"] is True
+        assert result["updated"] is False
+
+    def test_delete_memory_tool(self, memory_store_ctx):
+        from agentic_cli.tools.memory_tools import save_memory, delete_memory
+        result = save_memory(content="to delete")
+        item_id = result["item_id"]
+        delete_result = delete_memory(item_id=item_id)
+        assert delete_result["success"] is True
+        assert delete_result["deleted"] is True
+
+    def test_save_memory_with_importance(self, memory_store_ctx):
+        from agentic_cli.tools.memory_tools import save_memory
+        result = save_memory(content="important fact", importance=9)
+        assert result["success"] is True
+
 
 class TestMemorySemanticSearch:
     """Tests for semantic search in MemoryStore."""
