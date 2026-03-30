@@ -144,6 +144,68 @@ class TestMemoryStore:
         results = store.search("Timestamped")
         assert results[0].created_at != ""
 
+    def test_update_existing_memory(self, mock_context):
+        store = MemoryStore(mock_context.settings)
+        item_id = store.store("original content", tags=["tag1"])
+        result = store.update(item_id, content="updated content", tags=["tag2"])
+        assert result is True
+        items = store.search("updated")
+        assert len(items) == 1
+        assert items[0].content == "updated content"
+        assert items[0].tags == ["tag2"]
+        assert items[0].updated_at >= items[0].created_at
+
+    def test_update_nonexistent_memory(self, mock_context):
+        store = MemoryStore(mock_context.settings)
+        result = store.update("nonexistent-id", content="new content")
+        assert result is False
+
+    def test_update_partial_fields(self, mock_context):
+        store = MemoryStore(mock_context.settings)
+        item_id = store.store("content", tags=["original"])
+        store.update(item_id, content="new content")
+        item = store._items[item_id]
+        assert item.content == "new content"
+        assert item.tags == ["original"]  # tags unchanged
+
+    def test_delete_soft(self, mock_context):
+        store = MemoryStore(mock_context.settings)
+        item_id = store.store("to be archived")
+        result = store.delete(item_id)
+        assert result is True
+        assert store.search("archived") == []
+        assert item_id in store._items
+        assert store._items[item_id].archived is True
+
+    def test_delete_purge(self, mock_context):
+        store = MemoryStore(mock_context.settings)
+        item_id = store.store("to be purged")
+        result = store.delete(item_id, purge=True)
+        assert result is True
+        assert item_id not in store._items
+
+    def test_delete_nonexistent(self, mock_context):
+        store = MemoryStore(mock_context.settings)
+        result = store.delete("nonexistent-id")
+        assert result is False
+
+    def test_search_excludes_archived(self, mock_context):
+        store = MemoryStore(mock_context.settings)
+        store.store("visible memory")
+        archived_id = store.store("archived memory")
+        store.delete(archived_id)
+        results = store.search("")
+        assert len(results) == 1
+        assert results[0].content == "visible memory"
+
+    def test_search_include_archived(self, mock_context):
+        store = MemoryStore(mock_context.settings)
+        store.store("visible memory")
+        archived_id = store.store("archived memory")
+        store.delete(archived_id)
+        results = store.search("", include_archived=True)
+        assert len(results) == 2
+
 
 class TestMemoryItem:
     """Tests for MemoryItem dataclass."""

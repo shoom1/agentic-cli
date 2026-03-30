@@ -39,6 +39,8 @@ from agentic_cli.workflow.service_registry import require_service, MEMORY_STORE
 # MemoryItem / MemoryStore – simple file-based memory persistence
 # ---------------------------------------------------------------------------
 
+_SENTINEL = object()
+
 
 @dataclass
 class MemoryItem:
@@ -125,45 +127,94 @@ class MemoryStore:
         data = {"items": [item.to_dict() for item in self._items.values()]}
         atomic_write_json(self._storage_path, data)
 
-    def store(self, content: str, tags: list[str] | None = None) -> str:
+    def store(self, content: str, tags: list[str] | None = None, importance: int = 5) -> str:
         """Append a memory to the persistent store.
 
         Args:
             content: The text content to remember.
             tags: Optional tags for categorization.
+            importance: Importance level from 1-10 (default 5).
 
         Returns:
             The unique ID of the stored memory.
         """
-        item_id = str(uuid.uuid4())
+        now = datetime.now().isoformat()
         item = MemoryItem(
-            id=item_id,
+            id=str(uuid.uuid4()),
             content=content,
             tags=tags,
-            created_at=datetime.now().isoformat(),
+            created_at=now,
+            updated_at=now,
+            last_accessed_at=now,
+            access_count=0,
+            importance=max(1, min(10, importance)),
         )
-        self._items[item_id] = item
+        self._items[item.id] = item
         self._save()
-        return item_id
+        return item.id
 
-    def search(self, query: str, limit: int = 10) -> list[MemoryItem]:
+    def update(self, item_id: str, content: str | None = None, tags: list[str] | None = _SENTINEL) -> bool:
+        """Update an existing memory item.
+
+        Args:
+            item_id: The ID of the memory to update.
+            content: New content, or None to leave unchanged.
+            tags: New tags, or _SENTINEL to leave unchanged. Pass None to clear tags.
+
+        Returns:
+            True if updated, False if item not found.
+        """
+        item = self._items.get(item_id)
+        if item is None:
+            return False
+        if content is not None:
+            item.content = content
+        if tags is not _SENTINEL:
+            item.tags = tags
+        item.updated_at = datetime.now().isoformat()
+        item.embedding = None  # invalidate cached embedding
+        self._save()
+        return True
+
+    def delete(self, item_id: str, purge: bool = False) -> bool:
+        """Delete or archive a memory item.
+
+        Args:
+            item_id: The ID of the memory to delete.
+            purge: If True, permanently remove. If False (default), soft-delete (archive).
+
+        Returns:
+            True if deleted/archived, False if item not found.
+        """
+        item = self._items.get(item_id)
+        if item is None:
+            return False
+        if purge:
+            del self._items[item_id]
+        else:
+            item.archived = True
+        self._save()
+        return True
+
+    def search(self, query: str, limit: int = 10, include_archived: bool = False) -> list[MemoryItem]:
         """Search memories by substring match (case-insensitive).
 
         Args:
             query: Substring to search for. Empty string matches all.
             limit: Maximum results to return.
+            include_archived: If True, include archived (soft-deleted) items.
 
         Returns:
             List of matching MemoryItem objects.
         """
-        query_lower = query.lower()
-        results: list[MemoryItem] = []
+        results = []
+        q = query.lower()
         for item in self._items.values():
-            if not query or query_lower in item.content.lower():
+            if not include_archived and item.archived:
+                continue
+            if not q or q in item.content.lower():
                 results.append(item)
-                if len(results) >= limit:
-                    break
-        return results
+        return results[:limit]
 
     def load_all(self) -> str:
         """Load all memories as a formatted string for system prompt injection.
