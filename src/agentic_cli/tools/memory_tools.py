@@ -90,6 +90,16 @@ class MemoryItem:
         )
 
 
+@dataclass
+class ForgettingPolicy:
+    """Configurable policy for archiving old/unused memories."""
+
+    max_age_days: int | None = None
+    max_inactive_days: int | None = None
+    budget_top_n: int | None = None
+    min_importance: int | None = None
+
+
 class MemoryStore:
     """Simple persistent memory store.
 
@@ -350,6 +360,66 @@ class MemoryStore:
             tag_str = f" [{', '.join(item.tags)}]" if item.tags else ""
             lines.append(f"- {item.content}{tag_str}")
         return "\n".join(lines)
+
+    def apply_forgetting(self, policy: ForgettingPolicy) -> dict[str, Any]:
+        """Apply a forgetting policy to archive memories.
+
+        Args:
+            policy: The forgetting policy to apply.
+
+        Returns:
+            Dict with archived_count and remaining_count.
+        """
+        now = datetime.now()
+        archived_count = 0
+        candidates = [item for item in self._items.values() if not item.archived]
+
+        for item in candidates:
+            should_archive = False
+
+            if policy.max_age_days is not None:
+                try:
+                    created = datetime.fromisoformat(item.created_at)
+                    age_days = (now - created).days
+                    if age_days > policy.max_age_days:
+                        should_archive = True
+                except (ValueError, TypeError):
+                    pass
+
+            if policy.max_inactive_days is not None:
+                try:
+                    last_access = datetime.fromisoformat(item.last_accessed_at)
+                    inactive_days = (now - last_access).days
+                    if inactive_days > policy.max_inactive_days:
+                        should_archive = True
+                except (ValueError, TypeError):
+                    pass
+
+            if policy.min_importance is not None:
+                if item.importance < policy.min_importance:
+                    should_archive = True
+
+            if should_archive:
+                item.archived = True
+                archived_count += 1
+
+        # Budget cap: keep only top N by importance (after other filters)
+        if policy.budget_top_n is not None:
+            remaining = [item for item in self._items.values() if not item.archived]
+            if len(remaining) > policy.budget_top_n:
+                remaining.sort(key=lambda x: x.importance, reverse=True)
+                for item in remaining[policy.budget_top_n:]:
+                    item.archived = True
+                    archived_count += 1
+
+        remaining_count = sum(1 for item in self._items.values() if not item.archived)
+        if archived_count > 0:
+            self._save()
+
+        return {
+            "archived_count": archived_count,
+            "remaining_count": remaining_count,
+        }
 
 
 @register_tool(

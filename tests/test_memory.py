@@ -2,7 +2,7 @@
 
 import pytest
 
-from agentic_cli.tools.memory_tools import MemoryStore
+from agentic_cli.tools.memory_tools import MemoryStore, ForgettingPolicy
 from agentic_cli.knowledge_base._mocks import MockEmbeddingService
 
 
@@ -473,3 +473,51 @@ class TestMemoryContradictionDetection:
         result = store.store_with_similarity_check("some content")
         assert result["stored"] is True
         assert result["similar_existing"] == []
+
+
+class TestForgettingPolicy:
+
+    def test_max_age_days(self, mock_context):
+        from datetime import datetime, timedelta
+        store = MemoryStore(mock_context.settings)
+        item_id = store.store("old memory")
+        old_time = (datetime.now() - timedelta(days=100)).isoformat()
+        store._items[item_id].created_at = old_time
+        store._items[item_id].last_accessed_at = old_time
+        store.store("recent memory")
+        result = store.apply_forgetting(ForgettingPolicy(max_age_days=90))
+        assert result["archived_count"] == 1
+        assert result["remaining_count"] == 1
+        assert store._items[item_id].archived is True
+
+    def test_max_inactive_days(self, mock_context):
+        from datetime import datetime, timedelta
+        store = MemoryStore(mock_context.settings)
+        item_id = store.store("inactive memory")
+        old_time = (datetime.now() - timedelta(days=40)).isoformat()
+        store._items[item_id].last_accessed_at = old_time
+        store.store("active memory")
+        result = store.apply_forgetting(ForgettingPolicy(max_inactive_days=30))
+        assert result["archived_count"] == 1
+        assert store._items[item_id].archived is True
+
+    def test_min_importance(self, mock_context):
+        store = MemoryStore(mock_context.settings)
+        store.store("low importance", importance=2)
+        store.store("high importance", importance=8)
+        result = store.apply_forgetting(ForgettingPolicy(min_importance=5))
+        assert result["archived_count"] == 1
+
+    def test_budget_top_n(self, mock_context):
+        store = MemoryStore(mock_context.settings)
+        for i in range(5):
+            store.store(f"memory {i}", importance=i + 1)
+        result = store.apply_forgetting(ForgettingPolicy(budget_top_n=3))
+        assert result["archived_count"] == 2
+        assert result["remaining_count"] == 3
+
+    def test_no_policy_no_changes(self, mock_context):
+        store = MemoryStore(mock_context.settings)
+        store.store("memory")
+        result = store.apply_forgetting(ForgettingPolicy())
+        assert result["archived_count"] == 0
