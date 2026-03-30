@@ -169,8 +169,71 @@ class TestMemoryItem:
 
         data = {"id": "abc", "content": "Hello"}
         item = MemoryItem.from_dict(data)
-        assert item.tags == []
+        assert item.tags is None
         assert item.created_at == ""
+
+    def test_new_fields_defaults(self):
+        """New fields have sensible defaults when created via from_dict with old data."""
+        from agentic_cli.tools.memory_tools import MemoryItem
+
+        old_data = {
+            "id": "abc-123",
+            "content": "test content",
+            "tags": ["tag1"],
+            "created_at": "2026-01-01T00:00:00",
+        }
+        item = MemoryItem.from_dict(old_data)
+        assert item.updated_at == "2026-01-01T00:00:00"  # falls back to created_at
+        assert item.last_accessed_at == "2026-01-01T00:00:00"
+        assert item.access_count == 0
+        assert item.importance == 5
+        assert item.embedding is None
+        assert item.archived is False
+
+    def test_new_fields_roundtrip(self):
+        """New fields survive serialization roundtrip."""
+        from agentic_cli.tools.memory_tools import MemoryItem
+
+        item = MemoryItem(
+            id="abc-123",
+            content="test",
+            tags=None,
+            created_at="2026-01-01T00:00:00",
+            updated_at="2026-01-02T00:00:00",
+            last_accessed_at="2026-01-03T00:00:00",
+            access_count=5,
+            importance=8,
+            embedding=[0.1, 0.2, 0.3],
+            archived=True,
+        )
+        data = item.to_dict()
+        restored = MemoryItem.from_dict(data)
+        assert restored.updated_at == "2026-01-02T00:00:00"
+        assert restored.last_accessed_at == "2026-01-03T00:00:00"
+        assert restored.access_count == 5
+        assert restored.importance == 8
+        # embedding is excluded from to_dict (stored separately), so it won't round-trip
+        assert restored.embedding is None
+        assert restored.archived is True
+
+    def test_to_dict_excludes_embedding(self):
+        """to_dict does NOT include embedding (stored separately)."""
+        from agentic_cli.tools.memory_tools import MemoryItem
+
+        item = MemoryItem(
+            id="abc-123",
+            content="test",
+            tags=None,
+            created_at="2026-01-01T00:00:00",
+            updated_at="2026-01-01T00:00:00",
+            last_accessed_at="2026-01-01T00:00:00",
+            access_count=0,
+            importance=5,
+            embedding=[0.1, 0.2],
+            archived=False,
+        )
+        data = item.to_dict()
+        assert "embedding" not in data
 
 
 class TestMemoryToolFunctions:

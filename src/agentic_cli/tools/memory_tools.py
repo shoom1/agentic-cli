@@ -17,7 +17,7 @@ Example:
 
 import json
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -42,28 +42,48 @@ from agentic_cli.workflow.service_registry import require_service, MEMORY_STORE
 
 @dataclass
 class MemoryItem:
-    """A single persistent memory entry."""
+    """A single memory entry."""
 
     id: str
     content: str
-    tags: list[str] = field(default_factory=list)
+    tags: list[str] | None = None
     created_at: str = ""
+    updated_at: str = ""
+    last_accessed_at: str = ""
+    access_count: int = 0
+    importance: int = 5
+    embedding: list[float] | None = None
+    archived: bool = False
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize to dict. Excludes embedding (stored separately)."""
         return {
             "id": self.id,
             "content": self.content,
             "tags": self.tags,
             "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "last_accessed_at": self.last_accessed_at,
+            "access_count": self.access_count,
+            "importance": self.importance,
+            "archived": self.archived,
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "MemoryItem":
+        """Deserialize from dict. Backward-compatible with old format."""
+        created_at = data.get("created_at", "")
         return cls(
             id=data["id"],
             content=data["content"],
-            tags=data.get("tags", []),
-            created_at=data.get("created_at", ""),
+            tags=data.get("tags"),
+            created_at=created_at,
+            updated_at=data.get("updated_at", created_at),
+            last_accessed_at=data.get("last_accessed_at", created_at),
+            access_count=data.get("access_count", 0),
+            importance=data.get("importance", 5),
+            embedding=data.get("embedding"),
+            archived=data.get("archived", False),
         )
 
 
@@ -119,7 +139,7 @@ class MemoryStore:
         item = MemoryItem(
             id=item_id,
             content=content,
-            tags=tags or [],
+            tags=tags,
             created_at=datetime.now().isoformat(),
         )
         self._items[item_id] = item
