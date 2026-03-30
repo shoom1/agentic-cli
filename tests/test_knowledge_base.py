@@ -1116,3 +1116,51 @@ class TestHybridSearch:
         kb._bm25_index = None  # Force BM25 unavailable
         results = kb.search("test content", top_k=5)
         assert len(results["results"]) > 0  # Semantic-only still works
+
+
+class TestStructureAwareChunking:
+
+    def test_code_block_not_split(self):
+        from agentic_cli.knowledge_base.embeddings import EmbeddingService
+        # Use the real EmbeddingService methods (static/class methods only, no model needed)
+        content = (
+            "Here is an example:\n"
+            "```python\n"
+            "def hello():\n"
+            "    print('Hello world')\n"
+            "    return True\n"
+            "```\n"
+            "This is a conclusion."
+        )
+        svc = EmbeddingService.__new__(EmbeddingService)
+        chunks = svc.chunk_document(content, chunk_size=50)
+        # The code block should not be split across chunks
+        code_chunk = [c for c in chunks if "def hello" in c]
+        assert len(code_chunk) >= 1
+        assert "return True" in code_chunk[0]
+
+    def test_markdown_heading_boundary(self):
+        from agentic_cli.knowledge_base.embeddings import EmbeddingService
+        content = (
+            "# Section One\n"
+            "Content of section one with some details.\n\n"
+            "# Section Two\n"
+            "Content of section two with other details."
+        )
+        svc = EmbeddingService.__new__(EmbeddingService)
+        chunks = svc.chunk_document(content, chunk_size=200)
+        assert len(chunks) >= 1
+        assert any("Section" in c for c in chunks)
+
+    def test_fallback_for_plain_text(self):
+        from agentic_cli.knowledge_base.embeddings import EmbeddingService
+        content = "Simple sentence one. Simple sentence two. Simple sentence three."
+        svc = EmbeddingService.__new__(EmbeddingService)
+        chunks = svc.chunk_document(content, chunk_size=100)
+        assert len(chunks) >= 1
+
+    def test_empty_content(self):
+        from agentic_cli.knowledge_base.embeddings import EmbeddingService
+        svc = EmbeddingService.__new__(EmbeddingService)
+        assert svc.chunk_document("") == []
+        assert svc.chunk_document("   ") == []

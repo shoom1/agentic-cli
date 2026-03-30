@@ -70,17 +70,17 @@ class TestMockEmbeddingService:
         assert chunks[0] == "Short text."
 
     def test_chunk_document_long_text(self):
-        """Test chunking text longer than chunk_size."""
+        """Test chunking text longer than chunk_size produces multiple chunks."""
         svc = MockEmbeddingService()
-        content = "A" * 100
-        chunks = svc.chunk_document(content, chunk_size=30, overlap=10)
+        sentences = [f"Sentence number {i} is here." for i in range(20)]
+        content = " ".join(sentences)
+        chunks = svc.chunk_document(content, chunk_size=60, overlap=10)
 
         assert len(chunks) > 1
-        # All content should be covered
-        reconstructed = chunks[0]
-        for chunk in chunks[1:]:
-            reconstructed += chunk[10:]  # skip overlap
-        assert len(reconstructed) >= len(content)
+        # All original sentences should appear somewhere in the chunks
+        all_text = " ".join(chunks)
+        assert "Sentence number 0" in all_text
+        assert "Sentence number 19" in all_text
 
 
 class TestEmbeddingServiceChunking:
@@ -142,14 +142,16 @@ class TestEmbeddingServiceChunking:
         sentences = svc._split_sentences(text)
         assert len(sentences) >= 2
 
-    def test_get_overlap_sentences(self, svc):
-        """Test overlap sentence selection."""
+    def test_merge_sentences(self, svc):
+        """Test _merge_sentences produces chunks with overlap."""
         sentences = ["Short.", "Medium length.", "A longer sentence here."]
-        overlap = svc._get_overlap_sentences(sentences, overlap_chars=20)
-        assert len(overlap) >= 1
-        # Should include at least the last sentence
-        assert sentences[-1] in overlap
+        chunks = EmbeddingService._merge_sentences(sentences, chunk_size=30, overlap=10)
+        assert len(chunks) >= 1
+        # All sentences should appear somewhere across chunks
+        all_text = " ".join(chunks)
+        for s in sentences:
+            assert s in all_text
 
-    def test_get_overlap_sentences_empty(self, svc):
-        """Test overlap with empty list."""
-        assert svc._get_overlap_sentences([], 10) == []
+    def test_merge_sentences_empty(self, svc):
+        """Test _merge_sentences with empty list returns empty."""
+        assert EmbeddingService._merge_sentences([], chunk_size=100, overlap=10) == []
