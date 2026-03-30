@@ -410,3 +410,39 @@ class TestMemorySemanticSearch:
         items = list(store2._items.values())
         assert len(items) == 1
         assert items[0].embedding is not None
+
+
+class TestMemoryContradictionDetection:
+
+    def test_find_similar_on_store(self, mock_context):
+        emb = MockEmbeddingService()
+        store = MemoryStore(mock_context.settings, embedding_service=emb)
+        store.store("The user prefers dark mode")
+        # MockEmbeddingService uses MD5 hashing — use the same text so
+        # similarity is 1.0 (well above threshold), which is enough to
+        # verify the detection logic without requiring real semantic embeddings.
+        result = store.store_with_similarity_check(
+            "The user prefers dark mode",
+            similarity_threshold=0.5,
+        )
+        assert result["stored"] is True
+        assert result["item_id"] is not None
+        assert len(result["similar_existing"]) > 0
+        assert result["similar_existing"][0]["content"] == "The user prefers dark mode"
+
+    def test_no_similar_when_different(self, mock_context):
+        emb = MockEmbeddingService()
+        store = MemoryStore(mock_context.settings, embedding_service=emb)
+        store.store("The user prefers dark mode")
+        result = store.store_with_similarity_check(
+            "Python is a programming language",
+            similarity_threshold=0.99,
+        )
+        assert result["stored"] is True
+        assert result["similar_existing"] == []
+
+    def test_no_similarity_check_without_embeddings(self, mock_context):
+        store = MemoryStore(mock_context.settings)
+        result = store.store_with_similarity_check("some content")
+        assert result["stored"] is True
+        assert result["similar_existing"] == []

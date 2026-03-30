@@ -307,6 +307,36 @@ class MemoryStore:
             return 0.0
         return dot / (norm_a * norm_b)
 
+    def store_with_similarity_check(
+        self,
+        content: str,
+        tags: list[str] | None = None,
+        importance: int = 5,
+        similarity_threshold: float = 0.85,
+    ) -> dict[str, Any]:
+        """Store a memory and report any similar existing memories."""
+        similar = []
+        if self._embedding_service:
+            new_embedding = self._embedding_service.embed_text(content)
+            for item in self._items.values():
+                if item.archived or item.embedding is None:
+                    continue
+                sim = self._cosine_similarity(new_embedding, item.embedding)
+                if sim >= similarity_threshold:
+                    similar.append({
+                        "id": item.id,
+                        "content": item.content,
+                        "similarity": round(sim, 4),
+                    })
+            similar.sort(key=lambda x: x["similarity"], reverse=True)
+
+        item_id = self.store(content, tags=tags, importance=importance)
+        return {
+            "stored": True,
+            "item_id": item_id,
+            "similar_existing": similar,
+        }
+
     def load_all(self) -> str:
         """Load all memories as a formatted string for system prompt injection.
 
