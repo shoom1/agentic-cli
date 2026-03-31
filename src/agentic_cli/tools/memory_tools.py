@@ -223,6 +223,8 @@ class MemoryStore:
             item.tags = tags
         item.updated_at = datetime.now().isoformat()
         item.embedding = None  # invalidate cached embedding
+        if content is not None and self._embedding_service:
+            item.embedding = self._embedding_service.embed_text(item.content)
         self._save()
         return True
 
@@ -348,18 +350,22 @@ class MemoryStore:
         }
 
     def load_all(self) -> str:
-        """Load all memories as a formatted string for system prompt injection.
+        """Load all non-archived memories as a formatted string for system prompt injection.
 
         Returns:
-            Formatted string of all memories, or empty string if none.
+            Formatted string of all non-archived memories, or empty string if none.
         """
         if not self._items:
             return ""
         lines = []
         for item in self._items.values():
+            if item.archived:
+                continue
             tag_str = f" [{', '.join(item.tags)}]" if item.tags else ""
             lines.append(f"- {item.content}{tag_str}")
-        return "\n".join(lines)
+        if not lines:
+            return ""
+        return "Stored memories:\n" + "\n".join(lines)
 
     def apply_forgetting(self, policy: ForgettingPolicy) -> dict[str, Any]:
         """Apply a forgetting policy to archive memories.
@@ -448,11 +454,12 @@ def save_memory(
     store = require_service(MEMORY_STORE)
     if isinstance(store, dict):
         return store
-    item_id = store.store(content, tags=tags, importance=importance)
+    result = store.store_with_similarity_check(content, tags=tags, importance=importance)
     return {
         "success": True,
-        "item_id": item_id,
+        "item_id": result["item_id"],
         "message": "Saved to persistent memory",
+        "similar_existing": result["similar_existing"],
     }
 
 
@@ -503,14 +510,14 @@ def search_memory(
 def update_memory(
     item_id: str,
     content: str | None = None,
-    tags: list[str] | None = None,
+    tags: list[str] | None = _SENTINEL,
 ) -> dict[str, Any]:
     """Update an existing memory item.
 
     Args:
         item_id: ID of the memory to update.
         content: New content (optional).
-        tags: New tags (optional).
+        tags: New tags (optional). Pass explicitly to update; omit to leave unchanged.
 
     Returns:
         A dict indicating success.

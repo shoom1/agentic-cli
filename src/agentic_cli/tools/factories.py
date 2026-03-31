@@ -101,12 +101,17 @@ def make_memory_tools(memory_store, embedding_service=None) -> list[Callable]:
         Args:
             item_id: ID of the memory to update.
             content: New content (optional).
-            tags: New tags (optional).
+            tags: New tags (optional). Pass explicitly to update; omit (None) to leave unchanged.
 
         Returns:
             A dict indicating success.
         """
-        updated = memory_store.update(item_id, content=content, tags=tags)
+        # Don't forward tags to store.update() unless explicitly provided,
+        # since the store's sentinel default means "leave unchanged" but None means "clear tags".
+        if tags is None:
+            updated = memory_store.update(item_id, content=content)
+        else:
+            updated = memory_store.update(item_id, content=content, tags=tags)
         return {"success": True, "updated": updated}
 
     def delete_memory(

@@ -725,7 +725,7 @@ def unified_search(
                         },
                     ))
             except Exception:
-                pass
+                logger.debug("unified_search_kb_failed", exc_info=True)
 
         # Also check user KB
         user_kb = get_service(USER_KB_MANAGER)
@@ -749,7 +749,7 @@ def unified_search(
                         },
                     ))
             except Exception:
-                pass
+                logger.debug("unified_search_kb_failed", exc_info=True)
 
     # Memory search
     if "memory" in sources:
@@ -769,7 +769,7 @@ def unified_search(
                         },
                     ))
             except Exception:
-                pass
+                logger.debug("unified_search_memory_failed", exc_info=True)
 
     # RRF fusion across sources
     k = 60
