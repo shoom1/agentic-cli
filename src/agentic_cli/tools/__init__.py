@@ -33,6 +33,7 @@ from agentic_cli.tools.knowledge_tools import (
     read_document,
     list_documents,
     open_document,
+    unified_search,
 )
 from agentic_cli.tools.arxiv_tools import (
     search_arxiv,
@@ -90,6 +91,7 @@ __all__ = [
     "read_document",
     "list_documents",
     "open_document",
+    "unified_search",
     "search_arxiv",
     "fetch_arxiv_paper",
     "execute_python",
@@ -98,6 +100,7 @@ __all__ = [
     "memory_tools",
     "hitl_tools",
     "sandbox_tools",
+    "reflection_tools",
 ]
 
 
@@ -106,6 +109,7 @@ _lazy_tool_modules = {
     "memory_tools": "agentic_cli.tools.memory_tools",
     "hitl_tools": "agentic_cli.tools.hitl_tools",
     "sandbox_tools": "agentic_cli.tools.sandbox",
+    "reflection_tools": "agentic_cli.tools.reflection_tools",
 }
 
 
