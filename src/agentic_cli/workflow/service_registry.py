@@ -18,6 +18,7 @@ USER_KB_MANAGER = "user_kb_manager"
 SANDBOX_MANAGER = "sandbox_manager"
 LLM_SUMMARIZER = "llm_summarizer"
 MEMORY_STORE = "memory_store"
+REFLECTION_STORE = "reflection_store"
 WORKFLOW = "workflow"
 
 

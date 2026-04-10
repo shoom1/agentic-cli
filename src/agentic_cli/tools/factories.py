@@ -22,19 +22,21 @@ from typing import Any, Callable
 # Memory tools
 # ---------------------------------------------------------------------------
 
-def make_memory_tools(memory_store) -> list[Callable]:
+def make_memory_tools(memory_store, embedding_service=None) -> list[Callable]:
     """Create memory tools bound to a MemoryStore.
 
     Args:
         memory_store: A MemoryStore instance.
+        embedding_service: Optional EmbeddingService (unused, kept for interface compat).
 
     Returns:
-        [save_memory, search_memory]
+        [save_memory, search_memory, update_memory, delete_memory]
     """
 
     def save_memory(
         content: str,
         tags: list[str] | None = None,
+        importance: int = 5,
     ) -> dict[str, Any]:
         """Save information to persistent memory.
 
@@ -44,36 +46,41 @@ def make_memory_tools(memory_store) -> list[Callable]:
         Args:
             content: The content to store.
             tags: Optional tags for categorization.
+            importance: Importance rating 1-10 (default 5). Higher = more important.
 
         Returns:
-            A dict with the stored item ID.
+            A dict with the stored item ID and any similar existing memories.
         """
-        item_id = memory_store.store(content, tags=tags)
+        result = memory_store.store_with_similarity_check(content, tags=tags, importance=importance)
         return {
             "success": True,
-            "item_id": item_id,
+            "item_id": result["item_id"],
             "message": "Saved to persistent memory",
+            "similar_existing": result["similar_existing"],
         }
 
     def search_memory(
         query: str,
         limit: int = 10,
+        include_archived: bool = False,
     ) -> dict[str, Any]:
         """Search persistent memory for stored information.
 
         Args:
-            query: The search query (substring match, case-insensitive).
+            query: The search query.
             limit: Maximum number of results to return.
+            include_archived: If True, include archived (soft-deleted) memories.
 
         Returns:
             A dict with matching memory items.
         """
-        results = memory_store.search(query, limit=limit)
+        results = memory_store.search(query, limit=limit, include_archived=include_archived)
         items = [
             {
                 "id": item.id,
                 "content": item.content,
                 "tags": item.tags,
+                "importance": item.importance,
             }
             for item in results
         ]
@@ -84,10 +91,51 @@ def make_memory_tools(memory_store) -> list[Callable]:
             "count": len(items),
         }
 
+    def update_memory(
+        item_id: str,
+        content: str | None = None,
+        tags: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Update an existing memory item.
+
+        Args:
+            item_id: ID of the memory to update.
+            content: New content (optional).
+            tags: New tags (optional). Pass explicitly to update; omit (None) to leave unchanged.
+
+        Returns:
+            A dict indicating success.
+        """
+        # Don't forward tags to store.update() unless explicitly provided,
+        # since the store's sentinel default means "leave unchanged" but None means "clear tags".
+        if tags is None:
+            updated = memory_store.update(item_id, content=content)
+        else:
+            updated = memory_store.update(item_id, content=content, tags=tags)
+        return {"success": True, "updated": updated}
+
+    def delete_memory(
+        item_id: str,
+        purge: bool = False,
+    ) -> dict[str, Any]:
+        """Delete a memory item (soft-delete by default).
+
+        Args:
+            item_id: ID of the memory to delete.
+            purge: If True, permanently remove. If False, archive.
+
+        Returns:
+            A dict indicating success.
+        """
+        deleted = memory_store.delete(item_id, purge=purge)
+        return {"success": True, "deleted": deleted}
+
     save_memory.__name__ = "save_memory"
     search_memory.__name__ = "search_memory"
+    update_memory.__name__ = "update_memory"
+    delete_memory.__name__ = "delete_memory"
 
-    return [save_memory, search_memory]
+    return [save_memory, search_memory, update_memory, delete_memory]
 
 
 # ---------------------------------------------------------------------------

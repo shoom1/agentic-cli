@@ -1068,3 +1068,99 @@ class TestFindDocument:
         assert found is None
 
 
+class TestHybridSearch:
+
+    def test_bm25_index_created_on_ingest(self, tmp_path):
+        kb = _make_mock_kb(tmp_path)
+        kb.ingest_document(
+            title="Test Doc",
+            content="Python programming language tutorial for beginners",
+            source_type=SourceType.USER,
+        )
+        assert kb._bm25_index is not None
+        assert kb._bm25_index.size > 0
+
+    def test_hybrid_search_finds_exact_match(self, tmp_path):
+        kb = _make_mock_kb(tmp_path)
+        kb.ingest_document(
+            title="Config Doc",
+            content="Set AGENTIC_WORKSPACE_DIR to configure the workspace directory",
+            source_type=SourceType.USER,
+        )
+        kb.ingest_document(
+            title="General Doc",
+            content="The workspace is where all your files are stored for processing",
+            source_type=SourceType.USER,
+        )
+        results = kb.search("AGENTIC_WORKSPACE_DIR", top_k=2)
+        assert len(results["results"]) > 0
+        assert results["results"][0]["document_title"] == "Config Doc"
+
+    def test_rrf_fusion(self):
+        from agentic_cli.knowledge_base.manager import KnowledgeBaseManager
+        semantic = [("c1", 0.9), ("c2", 0.8), ("c3", 0.7)]
+        bm25 = [("c3", 5.0), ("c1", 3.0), ("c4", 1.0)]
+        fused = KnowledgeBaseManager._fuse_results(semantic, bm25)
+        ids = [cid for cid, _ in fused]
+        assert "c1" in ids[:3]
+        assert "c3" in ids[:3]
+        assert "c4" in ids
+
+    def test_hybrid_search_bm25_graceful_degradation(self, tmp_path):
+        kb = _make_mock_kb(tmp_path)
+        kb.ingest_document(
+            title="Test",
+            content="Some test content for searching",
+            source_type=SourceType.USER,
+        )
+        kb._bm25_index = None  # Force BM25 unavailable
+        results = kb.search("test content", top_k=5)
+        assert len(results["results"]) > 0  # Semantic-only still works
+
+
+class TestStructureAwareChunking:
+
+    def test_code_block_not_split(self):
+        from agentic_cli.knowledge_base.embeddings import EmbeddingService
+        # Use the real EmbeddingService methods (static/class methods only, no model needed)
+        content = (
+            "Here is an example:\n"
+            "```python\n"
+            "def hello():\n"
+            "    print('Hello world')\n"
+            "    return True\n"
+            "```\n"
+            "This is a conclusion."
+        )
+        svc = EmbeddingService.__new__(EmbeddingService)
+        chunks = svc.chunk_document(content, chunk_size=50)
+        # The code block should not be split across chunks
+        code_chunk = [c for c in chunks if "def hello" in c]
+        assert len(code_chunk) >= 1
+        assert "return True" in code_chunk[0]
+
+    def test_markdown_heading_boundary(self):
+        from agentic_cli.knowledge_base.embeddings import EmbeddingService
+        content = (
+            "# Section One\n"
+            "Content of section one with some details.\n\n"
+            "# Section Two\n"
+            "Content of section two with other details."
+        )
+        svc = EmbeddingService.__new__(EmbeddingService)
+        chunks = svc.chunk_document(content, chunk_size=200)
+        assert len(chunks) >= 1
+        assert any("Section" in c for c in chunks)
+
+    def test_fallback_for_plain_text(self):
+        from agentic_cli.knowledge_base.embeddings import EmbeddingService
+        content = "Simple sentence one. Simple sentence two. Simple sentence three."
+        svc = EmbeddingService.__new__(EmbeddingService)
+        chunks = svc.chunk_document(content, chunk_size=100)
+        assert len(chunks) >= 1
+
+    def test_empty_content(self):
+        from agentic_cli.knowledge_base.embeddings import EmbeddingService
+        svc = EmbeddingService.__new__(EmbeddingService)
+        assert svc.chunk_document("") == []
+        assert svc.chunk_document("   ") == []
