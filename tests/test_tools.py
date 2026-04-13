@@ -1091,7 +1091,7 @@ class TestStandardTools:
     """Tests for standard tool functions."""
 
     @pytest.mark.asyncio
-    async def test_fetch_arxiv_paper_returns_paper_details(self):
+    async def test_fetch_arxiv_paper_returns_paper_details(self, arxiv_source_ctx):
         """Test fetch_arxiv_paper returns paper details for valid ID."""
         from unittest.mock import patch, MagicMock
         from agentic_cli.tools.arxiv_tools import fetch_arxiv_paper
@@ -1123,7 +1123,7 @@ class TestStandardTools:
             assert result["paper"]["pdf_url"] == "https://arxiv.org/pdf/1706.03762.pdf"
 
     @pytest.mark.asyncio
-    async def test_fetch_arxiv_paper_not_found(self):
+    async def test_fetch_arxiv_paper_not_found(self, arxiv_source_ctx):
         """Test fetch_arxiv_paper handles missing paper."""
         from unittest.mock import patch, MagicMock
         from agentic_cli.tools.arxiv_tools import fetch_arxiv_paper
@@ -1137,7 +1137,7 @@ class TestStandardTools:
             assert "not found" in result["error"].lower()
 
     @pytest.mark.asyncio
-    async def test_fetch_arxiv_paper_cleans_id(self):
+    async def test_fetch_arxiv_paper_cleans_id(self, arxiv_source_ctx):
         """Test fetch_arxiv_paper handles various ID formats."""
         from unittest.mock import patch, MagicMock
         from agentic_cli.tools.arxiv_tools import fetch_arxiv_paper
@@ -1245,14 +1245,10 @@ class TestFetchArxivPaperRateLimiting:
     """Tests for fetch_arxiv_paper rate limiting."""
 
     @pytest.mark.asyncio
-    async def test_fetch_arxiv_paper_respects_rate_limit(self):
+    async def test_fetch_arxiv_paper_respects_rate_limit(self, arxiv_source_ctx):
         """Test fetch_arxiv_paper respects rate limiting."""
         from unittest.mock import patch, MagicMock
         from agentic_cli.tools.arxiv_tools import fetch_arxiv_paper
-
-        # Reset the source to ensure clean state
-        import agentic_cli.tools.arxiv_tools as arxiv_module
-        arxiv_module._arxiv_source = None
 
         with patch("agentic_cli.tools.arxiv_source.time") as mock_time:
             mock_time.time.return_value = 100.0
@@ -1292,14 +1288,10 @@ class TestArxivSortValidation:
         assert result["success"] is False
         assert "sort_order" in result["error"]
 
-    def test_search_arxiv_valid_sort_options(self):
+    def test_search_arxiv_valid_sort_options(self, arxiv_source_ctx):
         """Test search_arxiv accepts valid sort options."""
         from unittest.mock import patch, MagicMock
         from agentic_cli.tools.arxiv_tools import search_arxiv
-        import agentic_cli.tools.arxiv_tools as arxiv_module
-
-        # Reset the source to ensure clean state
-        arxiv_module._arxiv_source = None
 
         # Mock feedparser to avoid real API calls
         with patch("feedparser.parse") as mock_parse:

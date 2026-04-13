@@ -668,6 +668,79 @@ def make_sandbox_tool(sandbox_manager) -> Callable:
 
 
 # ---------------------------------------------------------------------------
+# ArXiv tools
+# ---------------------------------------------------------------------------
+
+def make_arxiv_tools(arxiv_source) -> list[Callable]:
+    """Create arXiv tools bound to an ArxivSearchSource.
+
+    Args:
+        arxiv_source: An ArxivSearchSource instance (shared rate limiter + cache).
+
+    Returns:
+        [search_arxiv, fetch_arxiv_paper]
+    """
+    from agentic_cli.tools.arxiv_tools import (
+        _validate_sort_options,
+        _search_arxiv_with_source,
+        _fetch_arxiv_paper_with_source,
+    )
+
+    def search_arxiv(
+        query: str,
+        max_results: int = 10,
+        categories: list[str] | None = None,
+        sort_by: str = "relevance",
+        sort_order: str = "descending",
+        date_from: str | None = None,
+        date_to: str | None = None,
+    ) -> dict[str, Any]:
+        """Search arXiv for academic papers.
+
+        Args:
+            query: Search query for arXiv papers
+            max_results: Maximum number of results to return
+            categories: Optional list of arXiv categories to filter (e.g., ['cs.LG', 'cs.CV'])
+            sort_by: Sort by 'relevance', 'lastUpdatedDate', or 'submittedDate'
+            sort_order: Sort order 'ascending' or 'descending'
+            date_from: Filter papers submitted after this date (YYYY-MM-DD)
+            date_to: Filter papers submitted before this date (YYYY-MM-DD)
+
+        Returns:
+            Dictionary with search results and metadata
+        """
+        err = _validate_sort_options(sort_by, sort_order)
+        if err is not None:
+            return err
+        return _search_arxiv_with_source(
+            arxiv_source,
+            query=query,
+            max_results=max_results,
+            categories=categories,
+            sort_by=sort_by,
+            sort_order=sort_order,
+            date_from=date_from,
+            date_to=date_to,
+        )
+
+    async def fetch_arxiv_paper(arxiv_id: str) -> dict[str, Any]:
+        """Fetch detailed information about a specific arXiv paper.
+
+        Args:
+            arxiv_id: The arXiv paper ID, e.g. '1706.03762' or '1706.03762v2'.
+                      Also accepts full arXiv URLs.
+
+        Returns:
+            Dictionary with paper metadata or error information.
+        """
+        return await _fetch_arxiv_paper_with_source(arxiv_source, arxiv_id)
+
+    search_arxiv.__name__ = "search_arxiv"
+    fetch_arxiv_paper.__name__ = "fetch_arxiv_paper"
+    return [search_arxiv, fetch_arxiv_paper]
+
+
+# ---------------------------------------------------------------------------
 # Interaction tools
 # ---------------------------------------------------------------------------
 

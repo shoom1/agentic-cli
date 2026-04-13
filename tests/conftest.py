@@ -177,3 +177,22 @@ def settings_both_keys(temp_workspace: Path) -> BaseSettings:
         clear=True,
     ):
         return BaseSettings(workspace_dir=temp_workspace)
+
+
+@pytest.fixture
+def arxiv_source_ctx():
+    """Publish a fresh ArxivSearchSource into the service registry.
+
+    Use this in tests that call ``search_arxiv`` / ``fetch_arxiv_paper``
+    as module-level functions, which look up the source via
+    ``require_service(ARXIV_SOURCE)``.
+    """
+    from agentic_cli.tools.arxiv_source import ArxivSearchSource
+    from agentic_cli.workflow.service_registry import ARXIV_SOURCE, set_service_registry
+
+    source = ArxivSearchSource()
+    token = set_service_registry({ARXIV_SOURCE: source})
+    try:
+        yield source
+    finally:
+        token.var.reset(token)

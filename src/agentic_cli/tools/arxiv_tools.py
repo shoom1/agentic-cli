@@ -1,6 +1,16 @@
 """ArXiv tools for agentic workflows.
 
 Provides tools for searching and fetching arXiv paper metadata.
+
+The ``search_arxiv`` and ``fetch_arxiv_paper`` functions below are the
+ones discovered by ``@register_tool`` and reached from ad-hoc call sites
+and tests. At runtime inside an agent, ``_get_service_tool_map`` replaces
+them with closure-bound versions produced by ``factories.make_arxiv_tools``.
+
+Both paths share the same implementation via ``_search_arxiv_with_source``
+and ``_fetch_arxiv_paper_with_source`` — the module versions fetch the
+``ArxivSearchSource`` from the service registry, the factory versions
+capture it in a closure.
 """
 
 from typing import Any
@@ -10,19 +20,7 @@ from agentic_cli.tools.registry import (
     ToolCategory,
     PermissionLevel,
 )
-
-
-# Module-level ArxivSearchSource instance for rate limiting and caching
-_arxiv_source = None
-
-
-def _get_arxiv_source():
-    """Get or create the ArxivSearchSource instance."""
-    global _arxiv_source
-    if _arxiv_source is None:
-        from agentic_cli.tools.arxiv_source import ArxivSearchSource
-        _arxiv_source = ArxivSearchSource()
-    return _arxiv_source
+from agentic_cli.workflow.service_registry import ARXIV_SOURCE, require_service
 
 
 def _clean_arxiv_id(arxiv_id: str) -> str:
@@ -62,6 +60,116 @@ def _clean_arxiv_id(arxiv_id: str) -> str:
     return arxiv_id
 
 
+_VALID_SORT_BY = ("relevance", "lastUpdatedDate", "submittedDate")
+_VALID_SORT_ORDER = ("ascending", "descending")
+
+
+def _validate_sort_options(sort_by: str, sort_order: str) -> dict[str, Any] | None:
+    """Return an error dict if sort options are invalid, else None."""
+    if sort_by not in _VALID_SORT_BY:
+        return {"success": False, "error": f"sort_by must be one of {_VALID_SORT_BY}, got '{sort_by}'"}
+    if sort_order not in _VALID_SORT_ORDER:
+        return {"success": False, "error": f"sort_order must be one of {_VALID_SORT_ORDER}, got '{sort_order}'"}
+    return None
+
+
+def _search_arxiv_with_source(
+    source,
+    query: str,
+    max_results: int = 10,
+    categories: list[str] | None = None,
+    sort_by: str = "relevance",
+    sort_order: str = "descending",
+    date_from: str | None = None,
+    date_to: str | None = None,
+) -> dict[str, Any]:
+    """Run an arXiv search against an explicit source instance.
+
+    Shared implementation used by both the module-level ``search_arxiv``
+    and the factory-bound version. Callers must validate sort options
+    before reaching here.
+    """
+    results = source.search(
+        query=query,
+        max_results=max_results,
+        categories=categories,
+        sort_by=sort_by,
+        sort_order=sort_order,
+        date_from=date_from,
+        date_to=date_to,
+    )
+
+    if source.last_error is not None:
+        return {
+            "success": False,
+            "error": source.last_error,
+            "query": query,
+        }
+
+    papers = []
+    for result in results:
+        paper = {
+            "title": result.title,
+            "authors": result.metadata.get("authors", []),
+            "abstract": result.snippet,
+            "url": result.url,
+            "published_date": result.metadata.get("published", ""),
+            "categories": result.metadata.get("categories", []),
+            "arxiv_id": result.metadata.get("arxiv_id", ""),
+        }
+        papers.append(paper)
+
+    return {
+        "success": True,
+        "papers": papers,
+        "total_found": len(papers),
+        "query": query,
+    }
+
+
+async def _fetch_arxiv_paper_with_source(source, arxiv_id: str) -> dict[str, Any]:
+    """Fetch a single arXiv paper's metadata against an explicit source instance.
+
+    Shared implementation used by both the module-level ``fetch_arxiv_paper``
+    and the factory-bound version.
+    """
+    try:
+        import feedparser
+    except ImportError:
+        return {"success": False, "error": "feedparser not installed"}
+
+    arxiv_id = _clean_arxiv_id(arxiv_id)
+
+    source.wait_for_rate_limit()
+
+    url = f"http://export.arxiv.org/api/query?id_list={arxiv_id}"
+
+    try:
+        feed = feedparser.parse(url)
+    except Exception as e:
+        return {"success": False, "error": f"Failed to fetch paper: {e}"}
+
+    if not feed.entries:
+        return {"success": False, "error": f"Paper with ID '{arxiv_id}' not found"}
+
+    entry = feed.entries[0]
+
+    paper = {
+        "arxiv_id": arxiv_id,
+        "title": entry.get("title", "").replace("\n", " ").strip(),
+        "authors": [author.get("name", "") for author in entry.get("authors", [])],
+        "abstract": entry.get("summary", "").replace("\n", " ").strip(),
+        "url": entry.get("link", ""),
+        "pdf_url": f"https://arxiv.org/pdf/{arxiv_id}.pdf",
+        "published_date": entry.get("published", ""),
+        "updated_date": entry.get("updated", ""),
+        "categories": [tag.get("term", "") for tag in entry.get("tags", [])],
+        "primary_category": entry.get("arxiv_primary_category", {}).get("term", ""),
+    }
+
+    return {"success": True, "paper": paper}
+
+
 @register_tool(
     category=ToolCategory.KNOWLEDGE,
     permission_level=PermissionLevel.SAFE,
@@ -90,17 +198,16 @@ def search_arxiv(
     Returns:
         Dictionary with search results and metadata
     """
-    # Validate sort options
-    valid_sort_by = ("relevance", "lastUpdatedDate", "submittedDate")
-    valid_sort_order = ("ascending", "descending")
+    err = _validate_sort_options(sort_by, sort_order)
+    if err is not None:
+        return err
 
-    if sort_by not in valid_sort_by:
-        return {"success": False, "error": f"sort_by must be one of {valid_sort_by}, got '{sort_by}'"}
-    if sort_order not in valid_sort_order:
-        return {"success": False, "error": f"sort_order must be one of {valid_sort_order}, got '{sort_order}'"}
+    source = require_service(ARXIV_SOURCE)
+    if isinstance(source, dict):
+        return source
 
-    source = _get_arxiv_source()
-    results = source.search(
+    return _search_arxiv_with_source(
+        source,
         query=query,
         max_results=max_results,
         categories=categories,
@@ -109,35 +216,6 @@ def search_arxiv(
         date_from=date_from,
         date_to=date_to,
     )
-
-    # Check for errors (rate limiting, parse failures, etc.)
-    if source.last_error is not None:
-        return {
-            "success": False,
-            "error": source.last_error,
-            "query": query,
-        }
-
-    # Convert SearchSourceResult to paper dict format
-    papers = []
-    for result in results:
-        paper = {
-            "title": result.title,
-            "authors": result.metadata.get("authors", []),
-            "abstract": result.snippet,
-            "url": result.url,
-            "published_date": result.metadata.get("published", ""),
-            "categories": result.metadata.get("categories", []),
-            "arxiv_id": result.metadata.get("arxiv_id", ""),
-        }
-        papers.append(paper)
-
-    return {
-        "success": True,
-        "papers": papers,
-        "total_found": len(papers),
-        "query": query,
-    }
 
 
 @register_tool(
@@ -157,43 +235,8 @@ async def fetch_arxiv_paper(
     Returns:
         Dictionary with paper metadata or error information.
     """
-    try:
-        import feedparser
-    except ImportError:
-        return {"success": False, "error": "feedparser not installed"}
+    source = require_service(ARXIV_SOURCE)
+    if isinstance(source, dict):
+        return source
 
-    # Clean the arxiv_id
-    arxiv_id = _clean_arxiv_id(arxiv_id)
-
-    # Enforce rate limiting using shared ArxivSearchSource
-    source = _get_arxiv_source()
-    source.wait_for_rate_limit()
-
-    # Fetch using ArXiv API id_list parameter
-    url = f"http://export.arxiv.org/api/query?id_list={arxiv_id}"
-
-    try:
-        feed = feedparser.parse(url)
-    except Exception as e:
-        return {"success": False, "error": f"Failed to fetch paper: {e}"}
-
-    if not feed.entries:
-        return {"success": False, "error": f"Paper with ID '{arxiv_id}' not found"}
-
-    entry = feed.entries[0]
-
-    # Extract paper details
-    paper = {
-        "arxiv_id": arxiv_id,
-        "title": entry.get("title", "").replace("\n", " ").strip(),
-        "authors": [author.get("name", "") for author in entry.get("authors", [])],
-        "abstract": entry.get("summary", "").replace("\n", " ").strip(),
-        "url": entry.get("link", ""),
-        "pdf_url": f"https://arxiv.org/pdf/{arxiv_id}.pdf",
-        "published_date": entry.get("published", ""),
-        "updated_date": entry.get("updated", ""),
-        "categories": [tag.get("term", "") for tag in entry.get("tags", [])],
-        "primary_category": entry.get("arxiv_primary_category", {}).get("term", ""),
-    }
-
-    return {"success": True, "paper": paper}
+    return await _fetch_arxiv_paper_with_source(source, arxiv_id)
