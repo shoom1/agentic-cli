@@ -5,8 +5,11 @@ arxiv_tools and knowledge_tools. Relocated from knowledge_base/sources.py
 because the KB manager never uses it directly.
 """
 
+import asyncio
+import threading
 import time
 from dataclasses import dataclass
+from typing import Any
 
 from agentic_cli.knowledge_base.sources import SearchSource, SearchSourceResult
 from agentic_cli.logging import Loggers
@@ -41,6 +44,14 @@ class ArxivSearchSource(SearchSource):
         self.max_cache_size = max_cache_size
         self._cache: dict[str, CachedSearchResult] = {}
         self._last_error: str | None = None
+        # Serialize access to _last_request_time across threads and async tasks.
+        # The sync lock guards the timestamp for threaded callers; the async
+        # lock does the same for async callers and also spans the full
+        # request window so another task can't fire while we're mid-fetch.
+        # The async lock is created lazily because a running event loop
+        # is not guaranteed at construction time.
+        self._rate_lock_sync = threading.Lock()
+        self._rate_lock_async: asyncio.Lock | None = None
 
     @property
     def last_error(self) -> str | None:
@@ -96,15 +107,79 @@ class ArxivSearchSource(SearchSource):
         self._cache.clear()
 
     def wait_for_rate_limit(self) -> None:
-        """Wait if necessary to respect rate limiting.
+        """Block until the rate limit allows another request.
 
-        Call this before making any ArXiv API request.
+        Thread-safe via ``_rate_lock_sync``. Do not call from async code —
+        use ``_wait_for_rate_limit_async`` instead so the event loop is
+        not blocked.
         """
-        current_time = time.time()
-        elapsed = current_time - self._last_request_time
-        if self._last_request_time > 0 and elapsed < self.rate_limit:
-            time.sleep(self.rate_limit - elapsed)
-        self._last_request_time = time.time()
+        with self._rate_lock_sync:
+            current_time = time.time()
+            elapsed = current_time - self._last_request_time
+            if self._last_request_time > 0 and elapsed < self.rate_limit:
+                time.sleep(self.rate_limit - elapsed)
+            self._last_request_time = time.time()
+
+    async def _wait_for_rate_limit_async(self) -> None:
+        """Async variant of ``wait_for_rate_limit``.
+
+        Uses ``asyncio.Lock`` and ``asyncio.sleep`` so the event loop stays
+        free and concurrent tasks actually serialize on the lock. The lock
+        is created on first use so the source can be constructed outside a
+        running event loop.
+        """
+        if self._rate_lock_async is None:
+            self._rate_lock_async = asyncio.Lock()
+
+        async with self._rate_lock_async:
+            current_time = time.time()
+            elapsed = current_time - self._last_request_time
+            if self._last_request_time > 0 and elapsed < self.rate_limit:
+                await asyncio.sleep(self.rate_limit - elapsed)
+            self._last_request_time = time.time()
+
+    _API_BASE_URL = "http://export.arxiv.org/api/query"
+
+    async def fetch_by_id(self, arxiv_id: str) -> dict[str, Any]:
+        """Fetch a single paper by arXiv ID.
+
+        Async, rate-limited, and runs feedparser.parse off the event loop.
+        Returns a raw-paper dict (the same shape that
+        ``fetch_arxiv_paper`` surfaces under ``result["paper"]``), or
+        raises ``LookupError`` / ``RuntimeError`` for caller-handled
+        error cases.
+        """
+        try:
+            import feedparser
+        except ImportError as exc:
+            raise RuntimeError("feedparser not installed") from exc
+
+        await self._wait_for_rate_limit_async()
+
+        url = f"{self._API_BASE_URL}?id_list={arxiv_id}"
+
+        try:
+            feed = await asyncio.to_thread(feedparser.parse, url)
+        except Exception as exc:
+            raise RuntimeError(f"Failed to fetch paper: {exc}") from exc
+
+        if not feed.entries:
+            raise LookupError(f"Paper with ID '{arxiv_id}' not found")
+
+        entry = feed.entries[0]
+
+        return {
+            "arxiv_id": arxiv_id,
+            "title": entry.get("title", "").replace("\n", " ").strip(),
+            "authors": [author.get("name", "") for author in entry.get("authors", [])],
+            "abstract": entry.get("summary", "").replace("\n", " ").strip(),
+            "url": entry.get("link", ""),
+            "pdf_url": f"https://arxiv.org/pdf/{arxiv_id}.pdf",
+            "published_date": entry.get("published", ""),
+            "updated_date": entry.get("updated", ""),
+            "categories": [tag.get("term", "") for tag in entry.get("tags", [])],
+            "primary_category": entry.get("arxiv_primary_category", {}).get("term", ""),
+        }
 
     def search(
         self,

@@ -130,42 +130,19 @@ def _search_arxiv_with_source(
 async def _fetch_arxiv_paper_with_source(source, arxiv_id: str) -> dict[str, Any]:
     """Fetch a single arXiv paper's metadata against an explicit source instance.
 
-    Shared implementation used by both the module-level ``fetch_arxiv_paper``
-    and the factory-bound version.
+    Delegates to ``source.fetch_by_id`` and wraps exceptions into the
+    ``{"success": bool, ...}`` contract expected by tool callers. The
+    arxiv URL and feedparser call live on the source — this wrapper
+    only adapts the shape.
     """
-    try:
-        import feedparser
-    except ImportError:
-        return {"success": False, "error": "feedparser not installed"}
-
     arxiv_id = _clean_arxiv_id(arxiv_id)
 
-    source.wait_for_rate_limit()
-
-    url = f"http://export.arxiv.org/api/query?id_list={arxiv_id}"
-
     try:
-        feed = feedparser.parse(url)
-    except Exception as e:
-        return {"success": False, "error": f"Failed to fetch paper: {e}"}
-
-    if not feed.entries:
-        return {"success": False, "error": f"Paper with ID '{arxiv_id}' not found"}
-
-    entry = feed.entries[0]
-
-    paper = {
-        "arxiv_id": arxiv_id,
-        "title": entry.get("title", "").replace("\n", " ").strip(),
-        "authors": [author.get("name", "") for author in entry.get("authors", [])],
-        "abstract": entry.get("summary", "").replace("\n", " ").strip(),
-        "url": entry.get("link", ""),
-        "pdf_url": f"https://arxiv.org/pdf/{arxiv_id}.pdf",
-        "published_date": entry.get("published", ""),
-        "updated_date": entry.get("updated", ""),
-        "categories": [tag.get("term", "") for tag in entry.get("tags", [])],
-        "primary_category": entry.get("arxiv_primary_category", {}).get("term", ""),
-    }
+        paper = await source.fetch_by_id(arxiv_id)
+    except LookupError as exc:
+        return {"success": False, "error": str(exc)}
+    except RuntimeError as exc:
+        return {"success": False, "error": str(exc)}
 
     return {"success": True, "paper": paper}
 

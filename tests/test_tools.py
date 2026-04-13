@@ -1246,27 +1246,29 @@ class TestFetchArxivPaperRateLimiting:
 
     @pytest.mark.asyncio
     async def test_fetch_arxiv_paper_respects_rate_limit(self, arxiv_source_ctx):
-        """Test fetch_arxiv_paper respects rate limiting."""
-        from unittest.mock import patch, MagicMock
+        """Test fetch_arxiv_paper uses asyncio.sleep to honor rate limiting."""
+        from unittest.mock import patch, MagicMock, AsyncMock
         from agentic_cli.tools.arxiv_tools import fetch_arxiv_paper
 
-        with patch("agentic_cli.tools.arxiv_source.time") as mock_time:
+        mock_entry = {
+            "title": "Test", "link": "", "summary": "", "authors": [],
+            "published": "", "updated": "", "tags": [],
+            "id": "http://arxiv.org/abs/1234.5678v1",
+            "arxiv_primary_category": {"term": ""},
+        }
+
+        with patch("agentic_cli.tools.arxiv_source.time") as mock_time, \
+             patch("agentic_cli.tools.arxiv_source.asyncio.sleep", new=AsyncMock()) as mock_sleep, \
+             patch("feedparser.parse") as mock_parse:
             mock_time.time.return_value = 100.0
-            mock_time.sleep = MagicMock()
+            mock_parse.return_value = MagicMock(entries=[mock_entry])
 
-            with patch("feedparser.parse") as mock_parse:
-                mock_parse.return_value = MagicMock(
-                    entries=[{"title": "Test", "link": "", "summary": "", "authors": [],
-                             "published": "", "tags": [], "id": "http://arxiv.org/abs/1234.5678v1"}]
-                )
+            # First call — no sleep (last_request_time == 0)
+            await fetch_arxiv_paper("1234.5678")
+            # Second call immediately — elapsed = 0, triggers async sleep
+            await fetch_arxiv_paper("5678.1234")
 
-                # First call
-                await fetch_arxiv_paper("1234.5678")
-                # Second call immediately - should trigger rate limiting
-                await fetch_arxiv_paper("5678.1234")
-
-                # Verify sleep was called for rate limiting
-                assert mock_time.sleep.call_count >= 1
+            assert mock_sleep.await_count >= 1
 
 
 class TestArxivSortValidation:
