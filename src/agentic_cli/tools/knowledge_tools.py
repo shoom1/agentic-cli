@@ -363,9 +363,10 @@ async def _ingest_arxiv(
     try:
         import httpx
 
-        from agentic_cli.tools.arxiv_tools import _get_arxiv_source
-        source = _get_arxiv_source()
-        source.wait_for_rate_limit()
+        from agentic_cli.workflow.service_registry import ARXIV_SOURCE, get_service
+        source = get_service(ARXIV_SOURCE)
+        if source is not None:
+            source.wait_for_rate_limit()
 
         pdf_url = f"https://arxiv.org/pdf/{arxiv_id}.pdf"
         async with httpx.AsyncClient(follow_redirects=True, timeout=60.0) as client:

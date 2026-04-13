@@ -28,6 +28,7 @@ from agentic_cli.workflow.service_registry import (
     LLM_SUMMARIZER,
     MEMORY_STORE,
     REFLECTION_STORE,
+    ARXIV_SOURCE,
     WORKFLOW,
 )
 from agentic_cli.logging import Loggers
@@ -217,6 +218,7 @@ class BaseWorkflowManager(ABC):
             make_webfetch_tool,
             make_sandbox_tool,
             make_interaction_tools,
+            make_arxiv_tools,
         )
 
         tool_map: dict[str, Callable] = {}
@@ -232,6 +234,9 @@ class BaseWorkflowManager(ABC):
             tool_map["web_fetch"] = make_webfetch_tool(s[LLM_SUMMARIZER])
         if s.get(SANDBOX_MANAGER):
             tool_map["sandbox_execute"] = make_sandbox_tool(s[SANDBOX_MANAGER])
+        if s.get(ARXIV_SOURCE):
+            for t in make_arxiv_tools(s[ARXIV_SOURCE]):
+                tool_map[t.__name__] = t
         # Workflow manager is always available for interaction tools
         for t in make_interaction_tools(self):
             tool_map[t.__name__] = t
@@ -261,6 +266,8 @@ class BaseWorkflowManager(ABC):
         "web_fetch": "llm_summarizer",
         "sandbox_execute": "sandbox_manager",
         "save_reflection": "reflection_store",
+        "search_arxiv": "arxiv_source",
+        "fetch_arxiv_paper": "arxiv_source",
     }
 
     def _detect_required_managers(self) -> set[str]:
@@ -340,6 +347,10 @@ class BaseWorkflowManager(ABC):
         if "reflection_store" in self._required_managers and REFLECTION_STORE not in s:
             from agentic_cli.tools.reflection_tools import ReflectionStore
             s[REFLECTION_STORE] = ReflectionStore(self._settings)
+
+        if "arxiv_source" in self._required_managers and ARXIV_SOURCE not in s:
+            from agentic_cli.tools.arxiv_source import ArxivSearchSource
+            s[ARXIV_SOURCE] = ArxivSearchSource()
 
         # Always ensure workflow reference is available
         s[WORKFLOW] = self

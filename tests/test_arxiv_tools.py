@@ -193,7 +193,7 @@ class TestSearchArxivErrorReporting:
 
     @patch("feedparser.parse")
     @patch("agentic_cli.tools.arxiv_source.time")
-    def test_search_arxiv_returns_success_true_on_results(self, mock_time, mock_parse):
+    def test_search_arxiv_returns_success_true_on_results(self, mock_time, mock_parse, arxiv_source_ctx):
         """search_arxiv includes success=True when results are found."""
         mock_time.time.return_value = 100.0
         mock_time.sleep = MagicMock()
@@ -212,10 +212,6 @@ class TestSearchArxivErrorReporting:
             ]
         )
 
-        import agentic_cli.tools.arxiv_tools as arxiv_module
-
-        arxiv_module._arxiv_source = None
-
         from agentic_cli.tools.arxiv_tools import search_arxiv
 
         result = search_arxiv("test")
@@ -226,7 +222,7 @@ class TestSearchArxivErrorReporting:
 
     @patch("feedparser.parse")
     @patch("agentic_cli.tools.arxiv_source.time")
-    def test_search_arxiv_returns_success_true_on_empty(self, mock_time, mock_parse):
+    def test_search_arxiv_returns_success_true_on_empty(self, mock_time, mock_parse, arxiv_source_ctx):
         """search_arxiv returns success=True for genuine empty results."""
         mock_time.time.return_value = 100.0
         mock_time.sleep = MagicMock()
@@ -236,10 +232,6 @@ class TestSearchArxivErrorReporting:
         mock_feed.bozo = False
         mock_feed.entries = []
         mock_parse.return_value = mock_feed
-
-        import agentic_cli.tools.arxiv_tools as arxiv_module
-
-        arxiv_module._arxiv_source = None
 
         from agentic_cli.tools.arxiv_tools import search_arxiv
 
@@ -251,7 +243,7 @@ class TestSearchArxivErrorReporting:
 
     @patch("feedparser.parse")
     @patch("agentic_cli.tools.arxiv_source.time")
-    def test_search_arxiv_returns_error_on_rate_limit(self, mock_time, mock_parse):
+    def test_search_arxiv_returns_error_on_rate_limit(self, mock_time, mock_parse, arxiv_source_ctx):
         """search_arxiv returns success=False on rate limiting."""
         mock_time.time.return_value = 100.0
         mock_time.sleep = MagicMock()
@@ -261,10 +253,6 @@ class TestSearchArxivErrorReporting:
         mock_feed.entries = []
         mock_feed.bozo = False
         mock_parse.return_value = mock_feed
-
-        import agentic_cli.tools.arxiv_tools as arxiv_module
-
-        arxiv_module._arxiv_source = None
 
         from agentic_cli.tools.arxiv_tools import search_arxiv
 
@@ -278,7 +266,7 @@ class TestSearchArxivErrorReporting:
 
     @patch("feedparser.parse")
     @patch("agentic_cli.tools.arxiv_source.time")
-    def test_search_arxiv_returns_error_on_feed_error(self, mock_time, mock_parse):
+    def test_search_arxiv_returns_error_on_feed_error(self, mock_time, mock_parse, arxiv_source_ctx):
         """search_arxiv returns success=False on feed parse error."""
         mock_time.time.return_value = 100.0
         mock_time.sleep = MagicMock()
@@ -289,10 +277,6 @@ class TestSearchArxivErrorReporting:
         mock_feed.bozo_exception = Exception("Malformed XML")
         mock_feed.entries = []
         mock_parse.return_value = mock_feed
-
-        import agentic_cli.tools.arxiv_tools as arxiv_module
-
-        arxiv_module._arxiv_source = None
 
         from agentic_cli.tools.arxiv_tools import search_arxiv
 
@@ -311,7 +295,7 @@ class TestFetchArxivPaperMetadata:
     """Tests for fetch_arxiv_paper (metadata only)."""
 
     @pytest.mark.asyncio
-    async def test_fetch_returns_metadata(self):
+    async def test_fetch_returns_metadata(self, arxiv_source_ctx):
         """fetch_arxiv_paper returns paper metadata."""
         from agentic_cli.tools.arxiv_tools import fetch_arxiv_paper
 
@@ -337,7 +321,7 @@ class TestFetchArxivPaperMetadata:
         assert result["paper"]["pdf_url"] == "https://arxiv.org/pdf/1234.5678.pdf"
 
     @pytest.mark.asyncio
-    async def test_fetch_not_found(self):
+    async def test_fetch_not_found(self, arxiv_source_ctx):
         """fetch_arxiv_paper handles missing paper."""
         from agentic_cli.tools.arxiv_tools import fetch_arxiv_paper
 
@@ -349,7 +333,7 @@ class TestFetchArxivPaperMetadata:
         assert "not found" in result["error"].lower()
 
     @pytest.mark.asyncio
-    async def test_fetch_cleans_id(self):
+    async def test_fetch_cleans_id(self, arxiv_source_ctx):
         """fetch_arxiv_paper handles various ID formats."""
         from agentic_cli.tools.arxiv_tools import fetch_arxiv_paper
 

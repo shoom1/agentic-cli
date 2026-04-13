@@ -19,6 +19,7 @@ SANDBOX_MANAGER = "sandbox_manager"
 LLM_SUMMARIZER = "llm_summarizer"
 MEMORY_STORE = "memory_store"
 REFLECTION_STORE = "reflection_store"
+ARXIV_SOURCE = "arxiv_source"
 WORKFLOW = "workflow"
 
 
