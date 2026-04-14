@@ -28,6 +28,19 @@ class CachedSearchResult:
     timestamp: float
 
 
+@dataclass
+class CachedEntry:
+    """Cached single-paper entry with timestamp.
+
+    Populated as a side effect of ``search()`` so a subsequent
+    ``fetch_by_id`` for any returned paper hits this cache instead of
+    re-querying the arxiv API.
+    """
+
+    paper: dict[str, Any]
+    timestamp: float
+
+
 class ArxivSearchSource(SearchSource):
     """ArXiv paper search source with rate limiting and caching."""
 
@@ -46,6 +59,11 @@ class ArxivSearchSource(SearchSource):
         self.cache_ttl_seconds = cache_ttl_seconds
         self.max_cache_size = max_cache_size
         self._cache: dict[str, CachedSearchResult] = {}
+        # Side index keyed on normalized (version-stripped) arxiv_id.
+        # Populated as a side effect of search() so that fetch_by_id
+        # returns cached results for any paper a prior search returned,
+        # without a second round trip to the arxiv API.
+        self._entry_cache: dict[str, CachedEntry] = {}
         self._last_error: str | None = None
         # Serialize access to _last_request_time across threads and async tasks.
         # The sync lock guards the timestamp for threaded callers; the async
@@ -105,9 +123,30 @@ class ArxivSearchSource(SearchSource):
             oldest_key = min(self._cache.keys(), key=lambda k: self._cache[k].timestamp)
             del self._cache[oldest_key]
 
+    def _get_cached_entry(self, arxiv_id: str) -> dict[str, Any] | None:
+        """Return cached single-paper entry if present and fresh, else None."""
+        cached = self._entry_cache.get(arxiv_id)
+        if cached is None:
+            return None
+        if time.time() - cached.timestamp > self.cache_ttl_seconds:
+            del self._entry_cache[arxiv_id]
+            return None
+        return cached.paper
+
+    def _store_entry(self, arxiv_id: str, paper: dict[str, Any]) -> None:
+        """Store a parsed paper in the id-indexed cache, evicting if full."""
+        if len(self._entry_cache) >= self.max_cache_size and arxiv_id not in self._entry_cache:
+            oldest_key = min(
+                self._entry_cache.keys(),
+                key=lambda k: self._entry_cache[k].timestamp,
+            )
+            del self._entry_cache[oldest_key]
+        self._entry_cache[arxiv_id] = CachedEntry(paper=paper, timestamp=time.time())
+
     def clear_cache(self) -> None:
-        """Clear all cached search results."""
+        """Clear all cached search results and id-indexed entries."""
         self._cache.clear()
+        self._entry_cache.clear()
 
     def wait_for_rate_limit(self) -> None:
         """Block until the rate limit allows another request.
@@ -236,7 +275,18 @@ class ArxivSearchSource(SearchSource):
         Returns a raw-paper dict (the same shape ``_parse_entry`` produces
         for search results), or raises ``LookupError`` / ``RuntimeError``
         for caller-handled error cases.
+
+        The id is normalized (version suffix stripped) before lookup so
+        ``fetch_by_id("1706.03762v3")`` hits a cache populated by a prior
+        search returning ``1706.03762``. On cache hit, no API call and
+        no rate-limit wait. On miss, the result is cached for next time.
         """
+        normalized_id = _VERSION_SUFFIX_RE.sub("", arxiv_id)
+
+        cached = self._get_cached_entry(normalized_id)
+        if cached is not None:
+            return cached
+
         try:
             import feedparser
         except ImportError as exc:
@@ -244,7 +294,7 @@ class ArxivSearchSource(SearchSource):
 
         await self._wait_for_rate_limit_async()
 
-        url = f"{self._API_BASE_URL}?id_list={arxiv_id}"
+        url = f"{self._API_BASE_URL}?id_list={normalized_id}"
 
         try:
             feed = await asyncio.to_thread(feedparser.parse, url)
@@ -252,9 +302,11 @@ class ArxivSearchSource(SearchSource):
             raise RuntimeError(f"Failed to fetch paper: {exc}") from exc
 
         if not feed.entries:
-            raise LookupError(f"Paper with ID '{arxiv_id}' not found")
+            raise LookupError(f"Paper with ID '{normalized_id}' not found")
 
-        return self._parse_entry(feed.entries[0], arxiv_id=arxiv_id)
+        paper = self._parse_entry(feed.entries[0], arxiv_id=normalized_id)
+        self._store_entry(normalized_id, paper)
+        return paper
 
     def search(
         self,
@@ -339,6 +391,10 @@ class ArxivSearchSource(SearchSource):
         results = []
         for entry in feed.entries:
             paper = self._parse_entry(entry)
+            # Populate id-indexed cache as a side effect so a subsequent
+            # fetch_by_id for any of these papers is free.
+            if paper["arxiv_id"]:
+                self._store_entry(paper["arxiv_id"], paper)
             results.append(
                 SearchSourceResult(
                     title=paper["title"],

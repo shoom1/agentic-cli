@@ -506,3 +506,195 @@ class TestArxivParseEntry:
         assert paper["abs_url"] == "https://arxiv.org/abs/1706.03762v5"
         assert paper["pdf_url"] == "https://arxiv.org/pdf/1706.03762v5"
         assert paper["src_url"] == "https://arxiv.org/e-print/1706.03762"
+
+
+# ---------------------------------------------------------------------------
+# Id-indexed entry cache tests
+# ---------------------------------------------------------------------------
+
+
+class TestArxivEntryCache:
+    """Tests for ArxivSearchSource._entry_cache populated via search()."""
+
+    def _make_search_feed(self, arxiv_id: str = "1706.03762"):
+        from unittest.mock import MagicMock
+        return MagicMock(
+            status=200,
+            bozo=False,
+            entries=[
+                {
+                    "title": "Attention",
+                    "summary": "abs",
+                    "authors": [{"name": "Vaswani"}],
+                    "published": "2017-06-12",
+                    "tags": [{"term": "cs.CL"}],
+                    "id": f"http://arxiv.org/abs/{arxiv_id}v5",
+                    "links": [
+                        {"rel": "alternate", "type": "text/html", "href": f"http://arxiv.org/abs/{arxiv_id}v5"},
+                        {"rel": "related", "type": "application/pdf", "href": f"http://arxiv.org/pdf/{arxiv_id}v5", "title": "pdf"},
+                    ],
+                }
+            ],
+        )
+
+    @pytest.mark.asyncio
+    async def test_fetch_by_id_hits_entry_cache_after_search(self):
+        """search() populates entry cache; subsequent fetch_by_id is free."""
+        from agentic_cli.tools.arxiv_source import ArxivSearchSource
+
+        source = ArxivSearchSource()
+
+        with patch("feedparser.parse") as mock_parse, \
+             patch("agentic_cli.tools.arxiv_source.time") as mock_time:
+            mock_time.time.return_value = 100.0
+            mock_time.sleep = MagicMock()
+            mock_parse.return_value = self._make_search_feed("1706.03762")
+
+            source.search("attention")
+            assert mock_parse.call_count == 1
+
+            paper = await source.fetch_by_id("1706.03762")
+
+        # Second feedparser call did not happen — cache hit
+        assert mock_parse.call_count == 1
+        assert paper["arxiv_id"] == "1706.03762"
+        assert paper["pdf_url"] == "https://arxiv.org/pdf/1706.03762v5"
+
+    @pytest.mark.asyncio
+    async def test_fetch_by_id_normalizes_version_for_cache_lookup(self):
+        """fetch_by_id('Xv2') hits cache populated by search returning X."""
+        from agentic_cli.tools.arxiv_source import ArxivSearchSource
+
+        source = ArxivSearchSource()
+
+        with patch("feedparser.parse") as mock_parse, \
+             patch("agentic_cli.tools.arxiv_source.time") as mock_time:
+            mock_time.time.return_value = 100.0
+            mock_time.sleep = MagicMock()
+            mock_parse.return_value = self._make_search_feed("1706.03762")
+
+            source.search("attention")
+
+            # User asks for a different version — should still cache hit
+            paper = await source.fetch_by_id("1706.03762v3")
+
+        assert mock_parse.call_count == 1
+        assert paper["arxiv_id"] == "1706.03762"
+
+    @pytest.mark.asyncio
+    async def test_fetch_by_id_misses_when_id_not_seen(self):
+        """fetch_by_id for an id that no search returned still hits the API."""
+        from agentic_cli.tools.arxiv_source import ArxivSearchSource
+
+        source = ArxivSearchSource()
+
+        with patch("feedparser.parse") as mock_parse, \
+             patch("agentic_cli.tools.arxiv_source.time") as mock_time, \
+             patch("agentic_cli.tools.arxiv_source.asyncio.sleep", new=AsyncMock()):
+            mock_time.time.return_value = 100.0
+            mock_time.sleep = MagicMock()
+
+            # First populate cache with one paper via search
+            mock_parse.return_value = self._make_search_feed("1706.03762")
+            source.search("attention")
+            assert mock_parse.call_count == 1
+
+            # Now fetch a different id — feed mock is reused but the call should fire
+            mock_parse.return_value = MagicMock(
+                entries=[
+                    {
+                        "title": "Other",
+                        "summary": "x",
+                        "authors": [],
+                        "published": "",
+                        "updated": "",
+                        "tags": [],
+                        "id": "http://arxiv.org/abs/2301.07041v1",
+                        "links": [],
+                        "arxiv_primary_category": {"term": ""},
+                    }
+                ]
+            )
+            paper = await source.fetch_by_id("2301.07041")
+
+        assert mock_parse.call_count == 2  # search + fetch_by_id miss
+        assert paper["arxiv_id"] == "2301.07041"
+
+    @pytest.mark.asyncio
+    async def test_fetch_by_id_caches_its_own_result_on_miss(self):
+        """A second fetch_by_id for the same id is a cache hit."""
+        from agentic_cli.tools.arxiv_source import ArxivSearchSource
+
+        source = ArxivSearchSource()
+
+        with patch("feedparser.parse") as mock_parse, \
+             patch("agentic_cli.tools.arxiv_source.time") as mock_time, \
+             patch("agentic_cli.tools.arxiv_source.asyncio.sleep", new=AsyncMock()):
+            mock_time.time.return_value = 100.0
+            mock_time.sleep = MagicMock()
+            mock_parse.return_value = MagicMock(
+                entries=[
+                    {
+                        "title": "Test",
+                        "summary": "",
+                        "authors": [],
+                        "published": "",
+                        "updated": "",
+                        "tags": [],
+                        "id": "http://arxiv.org/abs/1234.5678v1",
+                        "links": [],
+                        "arxiv_primary_category": {"term": ""},
+                    }
+                ]
+            )
+
+            await source.fetch_by_id("1234.5678")
+            assert mock_parse.call_count == 1
+
+            await source.fetch_by_id("1234.5678")
+
+        assert mock_parse.call_count == 1  # second call was cached
+
+    def test_clear_cache_clears_entry_cache(self):
+        """clear_cache() empties both query and entry caches."""
+        from agentic_cli.tools.arxiv_source import ArxivSearchSource
+
+        source = ArxivSearchSource()
+
+        with patch("feedparser.parse") as mock_parse, \
+             patch("agentic_cli.tools.arxiv_source.time") as mock_time:
+            mock_time.time.return_value = 100.0
+            mock_time.sleep = MagicMock()
+            mock_parse.return_value = self._make_search_feed("1706.03762")
+
+            source.search("attention")
+            assert "1706.03762" in source._entry_cache
+            assert len(source._cache) == 1
+
+            source.clear_cache()
+            assert source._entry_cache == {}
+            assert source._cache == {}
+
+    @pytest.mark.asyncio
+    async def test_entry_cache_respects_ttl(self):
+        """Entry cache entries expire after cache_ttl_seconds."""
+        from agentic_cli.tools.arxiv_source import ArxivSearchSource
+
+        source = ArxivSearchSource(cache_ttl_seconds=60)
+
+        with patch("feedparser.parse") as mock_parse, \
+             patch("agentic_cli.tools.arxiv_source.time") as mock_time, \
+             patch("agentic_cli.tools.arxiv_source.asyncio.sleep", new=AsyncMock()):
+            # Initial population at t=100
+            mock_time.time.return_value = 100.0
+            mock_time.sleep = MagicMock()
+            mock_parse.return_value = self._make_search_feed("1706.03762")
+            source.search("attention")
+            assert mock_parse.call_count == 1
+
+            # Jump past TTL
+            mock_time.time.return_value = 200.0
+            await source.fetch_by_id("1706.03762")
+
+        # Cache expired, second call hit the API again
+        assert mock_parse.call_count == 2
