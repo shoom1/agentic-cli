@@ -15,6 +15,7 @@ capture it in a closure.
 
 from typing import Any
 
+from agentic_cli.tools.arxiv_source import _clean_arxiv_id  # re-exported for tests/back-compat
 from agentic_cli.tools.pdf_utils import extract_pdf_text
 from agentic_cli.tools.registry import (
     register_tool,
@@ -26,43 +27,6 @@ from agentic_cli.workflow.service_registry import (
     KB_MANAGER,
     require_service,
 )
-
-
-def _clean_arxiv_id(arxiv_id: str) -> str:
-    """Clean and normalize an arXiv paper ID.
-
-    Handles various formats:
-    - New plain ID: '1706.03762'
-    - With version: '1706.03762v2'
-    - Old format: 'math/0607733', 'hep-th/9901001v1'
-    - Full URL: 'https://arxiv.org/abs/1706.03762'
-    - Old URL: 'https://arxiv.org/abs/math/0607733'
-    - PDF URL: 'https://arxiv.org/pdf/1706.03762.pdf'
-
-    Args:
-        arxiv_id: The arXiv ID in any supported format
-
-    Returns:
-        Cleaned arXiv ID (e.g., '1706.03762' or 'math/0607733')
-    """
-    import re
-
-    # Extract ID from URLs
-    if "arxiv.org" in arxiv_id:
-        # New format: YYMM.NNNNN
-        match = re.search(r"(\d{4}\.\d{4,5})", arxiv_id)
-        if match:
-            arxiv_id = match.group(1)
-        else:
-            # Old format: subject/NNNNNNN (e.g., math/0607733)
-            match = re.search(r"([a-zA-Z-]+/\d{7})", arxiv_id)
-            if match:
-                arxiv_id = match.group(1)
-
-    # Remove version suffix (e.g., v1, v2)
-    arxiv_id = re.sub(r"v\d+$", "", arxiv_id)
-
-    return arxiv_id
 
 
 _VALID_SORT_BY = ("relevance", "lastUpdatedDate", "submittedDate")

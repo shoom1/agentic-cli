@@ -18,6 +18,45 @@ from agentic_cli.logging import Loggers
 logger = Loggers.knowledge_base()
 
 _VERSION_SUFFIX_RE = re.compile(r"v\d+$")
+_NEW_FORMAT_ID_RE = re.compile(r"(\d{4}\.\d{4,5})")
+_OLD_FORMAT_ID_RE = re.compile(r"([a-zA-Z-]+/\d{7})")
+
+
+def _clean_arxiv_id(arxiv_id: str) -> str:
+    """Normalize an arXiv id from any supported input form.
+
+    Handles:
+    - New plain ID:        '1706.03762'
+    - With version:        '1706.03762v2'
+    - Old format:          'math/0607733', 'hep-th/9901001v1'
+    - Full abs URL:        'https://arxiv.org/abs/1706.03762'
+    - Old abs URL:         'https://arxiv.org/abs/math/0607733'
+    - PDF URL:             'https://arxiv.org/pdf/1706.03762.pdf'
+    - Atom feed entry id:  'http://arxiv.org/abs/1706.03762v5'
+
+    Both ``arxiv_tools._clean_arxiv_id`` (user-supplied strings) and
+    ``ArxivSearchSource._extract_arxiv_id_from_entry`` (Atom feed
+    entries) route through this single function, so the URL-parsing
+    rules and version-strip behavior are guaranteed to match.
+
+    Args:
+        arxiv_id: The arXiv ID in any supported format. Empty input
+            returns an empty string.
+
+    Returns:
+        Cleaned arXiv ID with no URL prefix and no version suffix
+        (e.g. ``'1706.03762'`` or ``'math/0607733'``).
+    """
+    if "arxiv.org" in arxiv_id:
+        match = _NEW_FORMAT_ID_RE.search(arxiv_id)
+        if match:
+            arxiv_id = match.group(1)
+        else:
+            match = _OLD_FORMAT_ID_RE.search(arxiv_id)
+            if match:
+                arxiv_id = match.group(1)
+
+    return _VERSION_SUFFIX_RE.sub("", arxiv_id)
 
 
 @dataclass
@@ -220,14 +259,12 @@ class ArxivSearchSource(SearchSource):
     def _extract_arxiv_id_from_entry(entry: Any) -> str:
         """Pull a version-stripped arxiv id out of a feedparser entry.
 
-        The Atom ``<id>`` element is a URL like ``http://arxiv.org/abs/1706.03762v5``.
-        We split off the ``abs/`` prefix and strip the trailing version suffix
-        so the result matches user-facing ids.
+        The Atom ``<id>`` element is a URL like
+        ``http://arxiv.org/abs/1706.03762v5`` (or ``.../abs/math/0607733v2``
+        for old-style ids). Delegating to ``_clean_arxiv_id`` keeps the
+        URL-parsing rules consistent with the user-supplied id path.
         """
-        raw = entry.get("id", "")
-        if "/abs/" in raw:
-            raw = raw.split("/abs/")[-1]
-        return _VERSION_SUFFIX_RE.sub("", raw)
+        return _clean_arxiv_id(entry.get("id", ""))
 
     @staticmethod
     def _extract_links(entry: Any, arxiv_id: str) -> dict[str, str]:
