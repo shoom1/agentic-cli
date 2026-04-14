@@ -180,6 +180,40 @@ class ArxivSearchSource(SearchSource):
                 await asyncio.sleep(self.rate_limit - elapsed)
             self._last_request_time = time.time()
 
+    async def download_pdf(self, pdf_url: str, timeout: float = 60.0) -> bytes:
+        """Download a paper PDF, respecting the shared rate limit.
+
+        Encapsulates the "wait, then GET" pattern so callers don't need
+        to reach into the rate-limit primitive. Arxiv's crawl policy
+        does not distinguish the API host from arxiv.org, so PDF
+        downloads must share the same per-source rate limiter as
+        ``search`` and ``fetch_by_id``.
+
+        Args:
+            pdf_url: The PDF URL to download (typically the ``pdf_url``
+                field of a paper dict from ``fetch_by_id`` or ``search``).
+            timeout: Request timeout in seconds.
+
+        Returns:
+            Raw PDF bytes.
+
+        Raises:
+            RuntimeError: If httpx is not installed.
+            httpx.HTTPError: For network failures or non-2xx responses
+                (callers typically catch broadly and fall back).
+        """
+        try:
+            import httpx
+        except ImportError as exc:
+            raise RuntimeError("httpx not installed, cannot download PDF") from exc
+
+        await self._wait_for_rate_limit_async()
+
+        async with httpx.AsyncClient(follow_redirects=True, timeout=timeout) as client:
+            response = await client.get(pdf_url)
+            response.raise_for_status()
+            return response.content
+
     _API_BASE_URL = "http://export.arxiv.org/api/query"
 
     @staticmethod

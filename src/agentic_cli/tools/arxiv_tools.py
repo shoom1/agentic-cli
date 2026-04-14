@@ -282,27 +282,19 @@ async def _ingest_arxiv_paper_with_services(
     if tags:
         meta["tags"] = tags
 
-    # 2. PDF download via shared rate limiter
+    # 2. PDF download via the source's encapsulated downloader (shared
+    # rate limiter, shared httpx import). On any failure we fall back to
+    # the abstract so the caller still ends up with searchable content.
     file_bytes: bytes | None = None
     content = ""
     pdf_url = paper.get("pdf_url", "")
 
     if pdf_url:
         try:
-            import httpx
-        except ImportError:
-            return {"success": False, "error": "httpx not installed, cannot download PDF"}
-
-        try:
-            await source._wait_for_rate_limit_async()
-            async with httpx.AsyncClient(follow_redirects=True, timeout=60.0) as client:
-                response = await client.get(pdf_url)
-                response.raise_for_status()
-                file_bytes = response.content
+            file_bytes = await source.download_pdf(pdf_url)
             content = extract_pdf_text(file_bytes)
             meta["file_size_bytes"] = len(file_bytes)
         except Exception as exc:
-            # Fall back to abstract — caller still gets a searchable doc
             file_bytes = None
             content = abstract or title
             meta["pdf_download_error"] = str(exc)

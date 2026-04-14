@@ -701,6 +701,78 @@ class TestArxivEntryCache:
 
 
 # ---------------------------------------------------------------------------
+# ArxivSearchSource.download_pdf tests
+# ---------------------------------------------------------------------------
+
+
+class TestArxivDownloadPdf:
+    """Direct unit tests for the encapsulated PDF downloader."""
+
+    @pytest.mark.asyncio
+    async def test_returns_pdf_bytes_on_success(self):
+        """download_pdf returns response.content from a successful GET."""
+        from agentic_cli.tools.arxiv_source import ArxivSearchSource
+
+        source = ArxivSearchSource()
+        fake_bytes = b"%PDF-1.4 fake content"
+
+        with patch("httpx.AsyncClient") as mock_client_cls, \
+             patch("agentic_cli.tools.arxiv_source.asyncio.sleep", new=AsyncMock()):
+            mock_response = MagicMock()
+            mock_response.content = fake_bytes
+            mock_response.raise_for_status = MagicMock()
+
+            mock_client = MagicMock()
+            mock_client.get = AsyncMock(return_value=mock_response)
+            mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=None)
+
+            result = await source.download_pdf("https://arxiv.org/pdf/1706.03762")
+
+        assert result == fake_bytes
+        mock_client.get.assert_called_once_with("https://arxiv.org/pdf/1706.03762")
+
+    @pytest.mark.asyncio
+    async def test_propagates_http_error(self):
+        """download_pdf re-raises errors from the HTTP layer."""
+        from agentic_cli.tools.arxiv_source import ArxivSearchSource
+
+        source = ArxivSearchSource()
+
+        with patch("httpx.AsyncClient") as mock_client_cls, \
+             patch("agentic_cli.tools.arxiv_source.asyncio.sleep", new=AsyncMock()):
+            mock_client = MagicMock()
+            mock_client.get = AsyncMock(side_effect=RuntimeError("boom"))
+            mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=None)
+
+            with pytest.raises(RuntimeError, match="boom"):
+                await source.download_pdf("https://arxiv.org/pdf/1706.03762")
+
+    @pytest.mark.asyncio
+    async def test_waits_for_rate_limit(self):
+        """download_pdf calls _wait_for_rate_limit_async before the GET."""
+        from agentic_cli.tools.arxiv_source import ArxivSearchSource
+
+        source = ArxivSearchSource()
+        rate_wait = AsyncMock()
+
+        with patch.object(source, "_wait_for_rate_limit_async", rate_wait), \
+             patch("httpx.AsyncClient") as mock_client_cls:
+            mock_response = MagicMock()
+            mock_response.content = b"x"
+            mock_response.raise_for_status = MagicMock()
+            mock_client = MagicMock()
+            mock_client.get = AsyncMock(return_value=mock_response)
+            mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=None)
+
+            await source.download_pdf("https://arxiv.org/pdf/1706.03762")
+
+        rate_wait.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
 # ingest_arxiv_paper tool tests
 # ---------------------------------------------------------------------------
 
