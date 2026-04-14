@@ -219,6 +219,7 @@ class BaseWorkflowManager(ABC):
             make_sandbox_tool,
             make_interaction_tools,
             make_arxiv_tools,
+            make_ingest_arxiv_tool,
         )
 
         tool_map: dict[str, Callable] = {}
@@ -237,6 +238,11 @@ class BaseWorkflowManager(ABC):
         if s.get(ARXIV_SOURCE):
             for t in make_arxiv_tools(s[ARXIV_SOURCE]):
                 tool_map[t.__name__] = t
+        # ingest_arxiv_paper composes both services
+        if s.get(ARXIV_SOURCE) and s.get(KB_MANAGER):
+            tool_map["ingest_arxiv_paper"] = make_ingest_arxiv_tool(
+                s[ARXIV_SOURCE], s[KB_MANAGER]
+            )
         # Workflow manager is always available for interaction tools
         for t in make_interaction_tools(self):
             tool_map[t.__name__] = t
@@ -251,8 +257,10 @@ class BaseWorkflowManager(ABC):
         """
         ...
 
-    # Mapping from tool function name to the service it requires
-    _TOOL_SERVICE_MAP: dict[str, str] = {
+    # Mapping from tool function name to the service(s) it requires.
+    # Value may be a single service key or a tuple of keys for tools
+    # that compose multiple services.
+    _TOOL_SERVICE_MAP: dict[str, str | tuple[str, ...]] = {
         "save_memory": "memory_store",
         "search_memory": "memory_store",
         "update_memory": "memory_store",
@@ -268,6 +276,7 @@ class BaseWorkflowManager(ABC):
         "save_reflection": "reflection_store",
         "search_arxiv": "arxiv_source",
         "fetch_arxiv_paper": "arxiv_source",
+        "ingest_arxiv_paper": ("arxiv_source", "kb_manager"),
     }
 
     def _detect_required_managers(self) -> set[str]:
@@ -281,7 +290,11 @@ class BaseWorkflowManager(ABC):
             for tool in config.tools or []:
                 name = getattr(tool, "__name__", "")
                 service = self._TOOL_SERVICE_MAP.get(name)
-                if service:
+                if service is None:
+                    continue
+                if isinstance(service, tuple):
+                    required.update(service)
+                else:
                     required.add(service)
         return required
 

@@ -626,7 +626,12 @@ class TestArxivSearchSource:
         assert results[0].source_name == "arxiv"
         assert results[0].metadata["authors"] == ["Alice", "Bob"]
         assert results[0].metadata["categories"] == ["cs.AI", "cs.LG"]
-        assert results[0].metadata["arxiv_id"] == "1234.5678v1"
+        # arxiv_id is now normalized (version suffix stripped)
+        assert results[0].metadata["arxiv_id"] == "1234.5678"
+        # Link fields are populated from the feed/synthesized
+        assert results[0].metadata["abs_url"] == "https://arxiv.org/abs/1234.5678"
+        assert results[0].metadata["pdf_url"] == "https://arxiv.org/pdf/1234.5678"
+        assert results[0].metadata["src_url"] == "https://arxiv.org/e-print/1234.5678"
 
     @patch("feedparser.parse")
     def test_search_with_categories(self, mock_parse):

@@ -6,6 +6,7 @@ because the KB manager never uses it directly.
 """
 
 import asyncio
+import re
 import threading
 import time
 from dataclasses import dataclass
@@ -16,12 +17,27 @@ from agentic_cli.logging import Loggers
 
 logger = Loggers.knowledge_base()
 
+_VERSION_SUFFIX_RE = re.compile(r"v\d+$")
+
 
 @dataclass
 class CachedSearchResult:
     """Cached search result with timestamp."""
 
     results: list[SearchSourceResult]
+    timestamp: float
+
+
+@dataclass
+class CachedEntry:
+    """Cached single-paper entry with timestamp.
+
+    Populated as a side effect of ``search()`` so a subsequent
+    ``fetch_by_id`` for any returned paper hits this cache instead of
+    re-querying the arxiv API.
+    """
+
+    paper: dict[str, Any]
     timestamp: float
 
 
@@ -43,6 +59,11 @@ class ArxivSearchSource(SearchSource):
         self.cache_ttl_seconds = cache_ttl_seconds
         self.max_cache_size = max_cache_size
         self._cache: dict[str, CachedSearchResult] = {}
+        # Side index keyed on normalized (version-stripped) arxiv_id.
+        # Populated as a side effect of search() so that fetch_by_id
+        # returns cached results for any paper a prior search returned,
+        # without a second round trip to the arxiv API.
+        self._entry_cache: dict[str, CachedEntry] = {}
         self._last_error: str | None = None
         # Serialize access to _last_request_time across threads and async tasks.
         # The sync lock guards the timestamp for threaded callers; the async
@@ -102,9 +123,30 @@ class ArxivSearchSource(SearchSource):
             oldest_key = min(self._cache.keys(), key=lambda k: self._cache[k].timestamp)
             del self._cache[oldest_key]
 
+    def _get_cached_entry(self, arxiv_id: str) -> dict[str, Any] | None:
+        """Return cached single-paper entry if present and fresh, else None."""
+        cached = self._entry_cache.get(arxiv_id)
+        if cached is None:
+            return None
+        if time.time() - cached.timestamp > self.cache_ttl_seconds:
+            del self._entry_cache[arxiv_id]
+            return None
+        return cached.paper
+
+    def _store_entry(self, arxiv_id: str, paper: dict[str, Any]) -> None:
+        """Store a parsed paper in the id-indexed cache, evicting if full."""
+        if len(self._entry_cache) >= self.max_cache_size and arxiv_id not in self._entry_cache:
+            oldest_key = min(
+                self._entry_cache.keys(),
+                key=lambda k: self._entry_cache[k].timestamp,
+            )
+            del self._entry_cache[oldest_key]
+        self._entry_cache[arxiv_id] = CachedEntry(paper=paper, timestamp=time.time())
+
     def clear_cache(self) -> None:
-        """Clear all cached search results."""
+        """Clear all cached search results and id-indexed entries."""
         self._cache.clear()
+        self._entry_cache.clear()
 
     def wait_for_rate_limit(self) -> None:
         """Block until the rate limit allows another request.
@@ -140,15 +182,111 @@ class ArxivSearchSource(SearchSource):
 
     _API_BASE_URL = "http://export.arxiv.org/api/query"
 
+    @staticmethod
+    def _extract_arxiv_id_from_entry(entry: Any) -> str:
+        """Pull a version-stripped arxiv id out of a feedparser entry.
+
+        The Atom ``<id>`` element is a URL like ``http://arxiv.org/abs/1706.03762v5``.
+        We split off the ``abs/`` prefix and strip the trailing version suffix
+        so the result matches user-facing ids.
+        """
+        raw = entry.get("id", "")
+        if "/abs/" in raw:
+            raw = raw.split("/abs/")[-1]
+        return _VERSION_SUFFIX_RE.sub("", raw)
+
+    @staticmethod
+    def _extract_links(entry: Any, arxiv_id: str) -> dict[str, str]:
+        """Extract abs/pdf/src URLs for an entry.
+
+        The arxiv Atom feed emits multiple ``<link>`` elements per entry —
+        feedparser exposes them as ``entry.links``, a list of dicts with
+        ``rel``, ``type``, ``href``. We pick:
+
+        - ``pdf_url`` from the link whose ``type`` is ``application/pdf``
+        - ``abs_url`` from the ``rel="alternate"`` or ``type="text/html"``
+          link, falling back to ``entry.link`` (feedparser's single-link
+          shortcut) if no multi-link data is present
+        - ``src_url`` is always synthesized from the id because arxiv's
+          feed does not advertise e-print links, though the URL is stable
+
+        All URLs use HTTPS. Falls back to id-synthesized URLs when the
+        feed unexpectedly omits a link.
+        """
+        abs_url = ""
+        pdf_url = ""
+        for link in entry.get("links", []) or []:
+            href = link.get("href", "") if isinstance(link, dict) else getattr(link, "href", "")
+            ltype = link.get("type", "") if isinstance(link, dict) else getattr(link, "type", "")
+            rel = link.get("rel", "") if isinstance(link, dict) else getattr(link, "rel", "")
+            if ltype == "application/pdf" and not pdf_url:
+                pdf_url = href
+            elif (rel == "alternate" or ltype == "text/html") and not abs_url:
+                abs_url = href
+
+        if not abs_url:
+            abs_url = entry.get("link", "") or f"https://arxiv.org/abs/{arxiv_id}"
+        if not pdf_url:
+            pdf_url = f"https://arxiv.org/pdf/{arxiv_id}"
+
+        # Normalize http → https for consistency; arxiv serves both.
+        if abs_url.startswith("http://arxiv.org"):
+            abs_url = "https://" + abs_url[len("http://"):]
+        if pdf_url.startswith("http://arxiv.org"):
+            pdf_url = "https://" + pdf_url[len("http://"):]
+
+        return {
+            "abs_url": abs_url,
+            "pdf_url": pdf_url,
+            "src_url": f"https://arxiv.org/e-print/{arxiv_id}",
+        }
+
+    def _parse_entry(self, entry: Any, arxiv_id: str | None = None) -> dict[str, Any]:
+        """Parse a feedparser entry into a complete paper dict.
+
+        Shared by ``search()`` and ``fetch_by_id()`` so both code paths
+        produce the same field set. If ``arxiv_id`` is not provided it
+        is extracted from the entry (search path); callers that already
+        have a normalized id (fetch_by_id path) pass it in.
+        """
+        if arxiv_id is None:
+            arxiv_id = self._extract_arxiv_id_from_entry(entry)
+
+        links = self._extract_links(entry, arxiv_id)
+
+        return {
+            "arxiv_id": arxiv_id,
+            "title": entry.get("title", "").replace("\n", " ").strip(),
+            "authors": [author.get("name", "") for author in entry.get("authors", [])],
+            "abstract": entry.get("summary", "").replace("\n", " ").strip(),
+            "abs_url": links["abs_url"],
+            "pdf_url": links["pdf_url"],
+            "src_url": links["src_url"],
+            "published_date": entry.get("published", ""),
+            "updated_date": entry.get("updated", ""),
+            "categories": [tag.get("term", "") for tag in entry.get("tags", [])],
+            "primary_category": entry.get("arxiv_primary_category", {}).get("term", ""),
+        }
+
     async def fetch_by_id(self, arxiv_id: str) -> dict[str, Any]:
         """Fetch a single paper by arXiv ID.
 
         Async, rate-limited, and runs feedparser.parse off the event loop.
-        Returns a raw-paper dict (the same shape that
-        ``fetch_arxiv_paper`` surfaces under ``result["paper"]``), or
-        raises ``LookupError`` / ``RuntimeError`` for caller-handled
-        error cases.
+        Returns a raw-paper dict (the same shape ``_parse_entry`` produces
+        for search results), or raises ``LookupError`` / ``RuntimeError``
+        for caller-handled error cases.
+
+        The id is normalized (version suffix stripped) before lookup so
+        ``fetch_by_id("1706.03762v3")`` hits a cache populated by a prior
+        search returning ``1706.03762``. On cache hit, no API call and
+        no rate-limit wait. On miss, the result is cached for next time.
         """
+        normalized_id = _VERSION_SUFFIX_RE.sub("", arxiv_id)
+
+        cached = self._get_cached_entry(normalized_id)
+        if cached is not None:
+            return cached
+
         try:
             import feedparser
         except ImportError as exc:
@@ -156,7 +294,7 @@ class ArxivSearchSource(SearchSource):
 
         await self._wait_for_rate_limit_async()
 
-        url = f"{self._API_BASE_URL}?id_list={arxiv_id}"
+        url = f"{self._API_BASE_URL}?id_list={normalized_id}"
 
         try:
             feed = await asyncio.to_thread(feedparser.parse, url)
@@ -164,22 +302,11 @@ class ArxivSearchSource(SearchSource):
             raise RuntimeError(f"Failed to fetch paper: {exc}") from exc
 
         if not feed.entries:
-            raise LookupError(f"Paper with ID '{arxiv_id}' not found")
+            raise LookupError(f"Paper with ID '{normalized_id}' not found")
 
-        entry = feed.entries[0]
-
-        return {
-            "arxiv_id": arxiv_id,
-            "title": entry.get("title", "").replace("\n", " ").strip(),
-            "authors": [author.get("name", "") for author in entry.get("authors", [])],
-            "abstract": entry.get("summary", "").replace("\n", " ").strip(),
-            "url": entry.get("link", ""),
-            "pdf_url": f"https://arxiv.org/pdf/{arxiv_id}.pdf",
-            "published_date": entry.get("published", ""),
-            "updated_date": entry.get("updated", ""),
-            "categories": [tag.get("term", "") for tag in entry.get("tags", [])],
-            "primary_category": entry.get("arxiv_primary_category", {}).get("term", ""),
-        }
+        paper = self._parse_entry(feed.entries[0], arxiv_id=normalized_id)
+        self._store_entry(normalized_id, paper)
+        return paper
 
     def search(
         self,
@@ -263,21 +390,25 @@ class ArxivSearchSource(SearchSource):
 
         results = []
         for entry in feed.entries:
+            paper = self._parse_entry(entry)
+            # Populate id-indexed cache as a side effect so a subsequent
+            # fetch_by_id for any of these papers is free.
+            if paper["arxiv_id"]:
+                self._store_entry(paper["arxiv_id"], paper)
             results.append(
                 SearchSourceResult(
-                    title=entry.get("title", "").replace("\n", " "),
-                    url=entry.get("link", ""),
-                    snippet=entry.get("summary", "").replace("\n", " ")[:500],
+                    title=paper["title"],
+                    url=paper["abs_url"],
+                    snippet=paper["abstract"][:500],
                     source_name=self.name,
                     metadata={
-                        "authors": [
-                            a.get("name", "") for a in entry.get("authors", [])
-                        ],
-                        "published": entry.get("published", ""),
-                        "categories": [
-                            t.get("term", "") for t in entry.get("tags", [])
-                        ],
-                        "arxiv_id": entry.get("id", "").split("/abs/")[-1],
+                        "authors": paper["authors"],
+                        "published": paper["published_date"],
+                        "categories": paper["categories"],
+                        "arxiv_id": paper["arxiv_id"],
+                        "abs_url": paper["abs_url"],
+                        "pdf_url": paper["pdf_url"],
+                        "src_url": paper["src_url"],
                     },
                 )
             )

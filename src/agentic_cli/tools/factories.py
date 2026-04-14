@@ -161,10 +161,8 @@ def make_kb_tools(kb_manager, user_kb_manager=None) -> list[Callable]:
 
     from agentic_cli.tools.knowledge_tools import (
         _build_document_item,
-        _extract_arxiv_id,
         _extract_text_from_bytes,
         _detect_extension,
-        _ingest_arxiv,
         SAFE_OPEN_EXTENSIONS,
         READ_DOCUMENT_MAX_CHARS,
     )
@@ -267,22 +265,14 @@ def make_kb_tools(kb_manager, user_kb_manager=None) -> list[Callable]:
 
         # --- URL / file path mode ---
         if url_or_path:
-            if "arxiv.org" in url_or_path:
-                source_type = "arxiv"
-            elif url_or_path.startswith(("http://", "https://")) and source_type == "user":
+            if url_or_path.startswith(("http://", "https://")) and source_type == "user":
                 source_type = "web"
             elif not url_or_path.startswith(("http://", "https://")) and source_type == "user":
                 source_type = "local"
 
             source_url = source_url or url_or_path
 
-            if source_type == "arxiv":
-                result = await _ingest_arxiv(
-                    url_or_path, title, authors, abstract, meta, kb
-                )
-                return result
-
-            elif url_or_path.startswith(("http://", "https://")):
+            if url_or_path.startswith(("http://", "https://")):
                 try:
                     import httpx
                 except ImportError:
@@ -330,7 +320,7 @@ def make_kb_tools(kb_manager, user_kb_manager=None) -> list[Callable]:
                 "error": (
                     "No content or file provided. "
                     "You must supply either 'content' (text string) or 'url_or_path' (URL or file path). "
-                    "For ArXiv papers, pass the ArXiv URL as url_or_path."
+                    "For ArXiv papers, use ingest_arxiv_paper instead."
                 ),
             }
 
@@ -738,6 +728,45 @@ def make_arxiv_tools(arxiv_source) -> list[Callable]:
     search_arxiv.__name__ = "search_arxiv"
     fetch_arxiv_paper.__name__ = "fetch_arxiv_paper"
     return [search_arxiv, fetch_arxiv_paper]
+
+
+def make_ingest_arxiv_tool(arxiv_source, kb_manager) -> Callable:
+    """Create ingest_arxiv_paper bound to an arxiv source and KB manager.
+
+    The composed tool downloads a paper's PDF via the arxiv layer (with
+    shared rate limiter and id cache) and stores it in the KB layer.
+
+    Args:
+        arxiv_source: An ArxivSearchSource instance.
+        kb_manager: A KnowledgeBaseManager instance.
+
+    Returns:
+        ingest_arxiv_paper async function with both services captured
+        in the closure.
+    """
+    from agentic_cli.tools.arxiv_tools import _ingest_arxiv_paper_with_services
+
+    async def ingest_arxiv_paper(
+        arxiv_id: str,
+        tags: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Download and ingest an arXiv paper into the knowledge base.
+
+        Args:
+            arxiv_id: The arXiv paper ID, e.g. '1706.03762' or full URL.
+            tags: Optional list of tags to attach to the stored document.
+
+        Returns:
+            Dictionary with document_id, title, chunks_created, and a
+            pdf_downloaded flag (False if PDF fetch failed and the
+            abstract was used as fallback content).
+        """
+        return await _ingest_arxiv_paper_with_services(
+            arxiv_source, kb_manager, arxiv_id, tags=tags
+        )
+
+    ingest_arxiv_paper.__name__ = "ingest_arxiv_paper"
+    return ingest_arxiv_paper
 
 
 # ---------------------------------------------------------------------------
