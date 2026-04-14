@@ -6,11 +6,21 @@ Provides tools for managing documents in the unified knowledge base:
 - read_document: Extract and return text from a stored document
 - list_documents: List documents with summaries
 - open_document: Open a document's file in the system viewer
+
+Each tool comes in two flavors that share a single implementation:
+
+- ``@register_tool``-decorated module functions look up the KB managers
+  from the service registry and call the shared helpers below.
+- The closure-bound versions in ``tools.factories.make_kb_tools`` capture
+  the KB managers in a closure and call the same helpers.
+
+The helpers (``_search_kbs``, ``_ingest_document_with_kb``,
+``_read_document_from_kbs``, ``_list_documents_in_kbs``,
+``_open_document_in_kbs``) take the KB managers as explicit args so both
+call paths stay in sync.
 """
 
 import platform
-import re
-import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -25,11 +35,35 @@ from agentic_cli.tools.registry import (
     ToolCategory,
     PermissionLevel,
 )
-from agentic_cli.workflow.service_registry import get_service, require_service, KB_MANAGER, USER_KB_MANAGER, MEMORY_STORE
+from agentic_cli.workflow.service_registry import (
+    get_service,
+    require_service,
+    KB_MANAGER,
+    USER_KB_MANAGER,
+    MEMORY_STORE,
+)
 
 
 # Max chars of extracted text to return via read_document.
 READ_DOCUMENT_MAX_CHARS = 30_000
+
+
+# Extensions considered safe to open in the system viewer.
+# Excluded: .html (JS execution), .doc/.xls/.ppt (VBA macros),
+# .odt/.ods/.odp (LibreOffice macros), .docm/.xlsm/.pptm (Office macros).
+SAFE_OPEN_EXTENSIONS: frozenset[str] = frozenset({
+    # Documents
+    ".pdf", ".txt", ".md", ".csv", ".json", ".xml", ".rtf", ".epub",
+    # Modern Office (macro-free by design)
+    ".docx", ".xlsx", ".pptx",
+    # Images
+    ".png", ".jpg", ".jpeg", ".gif", ".svg", ".bmp", ".tiff", ".webp",
+})
+
+
+# ---------------------------------------------------------------------------
+# Pure helpers (no service registry dependency)
+# ---------------------------------------------------------------------------
 
 
 def _build_document_item(d, scope: str) -> dict[str, Any]:
@@ -61,38 +95,62 @@ def _build_document_item(d, scope: str) -> dict[str, Any]:
         item["has_file"] = True
     return item
 
-# Extensions considered safe to open in the system viewer.
-# Excluded: .html (JS execution), .doc/.xls/.ppt (VBA macros),
-# .odt/.ods/.odp (LibreOffice macros), .docm/.xlsm/.pptm (Office macros).
-SAFE_OPEN_EXTENSIONS: frozenset[str] = frozenset({
-    # Documents
-    ".pdf", ".txt", ".md", ".csv", ".json", ".xml", ".rtf", ".epub",
-    # Modern Office (macro-free by design)
-    ".docx", ".xlsx", ".pptx",
-    # Images
-    ".png", ".jpg", ".jpeg", ".gif", ".svg", ".bmp", ".tiff", ".webp",
-})
+
+def _extract_text_from_bytes(pdf_bytes: bytes) -> str:
+    """Extract text from PDF bytes."""
+    from agentic_cli.tools.pdf_utils import extract_pdf_text
+
+    return extract_pdf_text(pdf_bytes)
 
 
-@register_tool(
-    category=ToolCategory.KNOWLEDGE,
-    permission_level=PermissionLevel.SAFE,
-    description="Search the local knowledge base for relevant documents using semantic similarity. Use this when you need to find previously ingested papers, notes, or documents.",
-)
-def search_knowledge_base(
+def _detect_extension(url: str) -> str:
+    """Detect file extension from URL."""
+    # Strip query params
+    path = url.split("?")[0].split("#")[0]
+    if path.endswith(".pdf"):
+        return ".pdf"
+    return ".bin"
+
+
+# ---------------------------------------------------------------------------
+# Shared implementations — take KB managers as explicit args
+# ---------------------------------------------------------------------------
+
+
+def _find_doc_in_kbs(kb_manager, user_kb_manager, doc_id_or_title: str) -> tuple:
+    """Find a document across project + user KBs.
+
+    Lookup order: project KB first, then user KB on miss.
+
+    Returns:
+        (document, source_kb) tuple. ``document`` is None if not found
+        in either KB. ``source_kb`` is the project KB on miss (so callers
+        that want to print / open against the project KB still have a
+        handle), or ``(None, None)`` if no project KB was supplied.
+    """
+    if kb_manager is None:
+        return None, None
+    doc = kb_manager.find_document(doc_id_or_title)
+    if doc is not None:
+        return doc, kb_manager
+    if user_kb_manager is not None and user_kb_manager is not kb_manager:
+        doc = user_kb_manager.find_document(doc_id_or_title)
+        if doc is not None:
+            return doc, user_kb_manager
+    return None, kb_manager
+
+
+def _search_kbs(
+    kb_manager,
+    user_kb_manager,
     query: str,
     filters: str = "",
     top_k: int = 10,
 ) -> dict[str, Any]:
-    """Search the knowledge base for relevant information.
+    """Shared implementation for search_knowledge_base.
 
-    Args:
-        query: Natural language search query
-        filters: Optional JSON string with filters (e.g. '{"source_type": "arxiv", "date_from": "2024-01-01"}')
-        top_k: Maximum number of results
-
-    Returns:
-        Dictionary with search results and timing information
+    Caller must pass a non-None ``kb_manager`` — registry-based wrappers
+    handle the missing-kb error case before reaching this helper.
     """
     import json as _json
 
@@ -104,20 +162,16 @@ def search_knowledge_base(
             return {"success": False, "error": f"Invalid JSON in filters: {filters}"}
 
     try:
-        kb = require_service(KB_MANAGER)
-        if isinstance(kb, dict):
-            return kb
-        result = kb.search(query, filters=parsed_filters, top_k=top_k)
+        result = kb_manager.search(query, filters=parsed_filters, top_k=top_k)
 
         # Tag project results with scope
         for r in result.get("results", []):
             r["scope"] = "project"
 
         # Merge user KB results (non-fatal if unavailable)
-        user_kb = get_service(USER_KB_MANAGER)
-        if user_kb is not None and user_kb is not kb:
+        if user_kb_manager is not None and user_kb_manager is not kb_manager:
             try:
-                user_result = user_kb.search(query, filters=parsed_filters, top_k=top_k)
+                user_result = user_kb_manager.search(query, filters=parsed_filters, top_k=top_k)
                 # Deduplicate by document_id (project wins)
                 seen_doc_ids = {r["document_id"] for r in result.get("results", [])}
                 for r in user_result.get("results", []):
@@ -137,17 +191,8 @@ def search_knowledge_base(
         return {"success": False, "error": f"Search failed: {e}"}
 
 
-@register_tool(
-    category=ToolCategory.KNOWLEDGE,
-    permission_level=PermissionLevel.CAUTION,
-    description=(
-        "Ingest a document into the knowledge base. "
-        "REQUIRED: provide either 'content' (text) or 'url_or_path' (file path or URL). "
-        "ArXiv URLs auto-fetch metadata and PDF. "
-        "Valid source_type values: arxiv, ssrn, web, internal, user, local."
-    ),
-)
-async def ingest_document(
+async def _ingest_document_with_kb(
+    kb_manager,
     content: str = "",
     url_or_path: str = "",
     title: str = "",
@@ -157,34 +202,13 @@ async def ingest_document(
     abstract: str = "",
     tags: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Ingest a document into the knowledge base.
+    """Shared implementation for ingest_document.
 
-    You MUST provide at least one of `content` or `url_or_path`:
-    1. Text content: provide `content` directly
-    2. Local file: provide `url_or_path` pointing to a local file
-    3. URL: provide `url_or_path` with an HTTP(S) URL
-
-    For arXiv papers, use `ingest_arxiv_paper` instead — it handles
-    metadata, PDF download, and rate limiting automatically.
-
-    Args:
-        content: Document text content (REQUIRED if url_or_path not given)
-        url_or_path: URL or local file path (REQUIRED if content not given)
-        title: Document title
-        source_type: Source type (ssrn, web, internal, user, local)
-        source_url: Optional URL of the source
-        authors: Optional list of author names
-        abstract: Optional paper abstract
-        tags: Optional tags for categorization
-
-    Returns:
-        Dictionary with ingestion result
+    Handles all three input modes (text content, local file, remote URL),
+    PDF text extraction, source type auto-detection, and ingestion into
+    the supplied ``kb_manager``.
     """
     from agentic_cli.knowledge_base.models import SourceType
-
-    kb = get_service(KB_MANAGER)
-    if kb is None:
-        return {"success": False, "error": "kb manager not available"}
 
     # Build metadata dict from optional fields
     meta: dict[str, Any] = {}
@@ -277,7 +301,7 @@ async def ingest_document(
 
     # --- Ingest ---
     try:
-        doc = kb.ingest_document(
+        doc = kb_manager.ingest_document(
             content=content,
             title=title,
             source_type=source,
@@ -298,63 +322,14 @@ async def ingest_document(
     }
 
 
-def _extract_text_from_bytes(pdf_bytes: bytes) -> str:
-    """Extract text from PDF bytes."""
-    from agentic_cli.tools.pdf_utils import extract_pdf_text
-
-    return extract_pdf_text(pdf_bytes)
-
-
-def _detect_extension(url: str) -> str:
-    """Detect file extension from URL."""
-    # Strip query params
-    path = url.split("?")[0].split("#")[0]
-    if path.endswith(".pdf"):
-        return ".pdf"
-    return ".bin"
-
-
-def _find_document_in_kbs(doc_id_or_title: str) -> tuple:
-    """Find a document across main and user knowledge bases.
-
-    Returns:
-        (document, source_kb) tuple. document may be None if not found.
-    """
-    kb = get_service(KB_MANAGER)
-    if kb is None:
-        return None, None
-    doc = kb.find_document(doc_id_or_title)
-    source_kb = kb
-
-    if doc is None:
-        user_kb = get_service(USER_KB_MANAGER)
-        if user_kb is not None and user_kb is not kb:
-            doc = user_kb.find_document(doc_id_or_title)
-            if doc is not None:
-                source_kb = user_kb
-
-    return doc, source_kb
-
-
-@register_tool(
-    category=ToolCategory.KNOWLEDGE,
-    permission_level=PermissionLevel.SAFE,
-    description="Read and return the text content of a stored document by ID or title. Returns full text (up to max_chars limit).",
-)
-def read_document(
+def _read_document_from_kbs(
+    kb_manager,
+    user_kb_manager,
     doc_id_or_title: str,
     max_chars: int = READ_DOCUMENT_MAX_CHARS,
 ) -> dict[str, Any]:
-    """Extract and return text from a stored document.
-
-    Args:
-        doc_id_or_title: Document ID or title substring.
-        max_chars: Maximum characters to return (default 30K).
-
-    Returns:
-        Dictionary with document text and metadata.
-    """
-    doc, source_kb = _find_document_in_kbs(doc_id_or_title)
+    """Shared implementation for read_document."""
+    doc, source_kb = _find_doc_in_kbs(kb_manager, user_kb_manager, doc_id_or_title)
 
     if doc is None:
         return {"success": False, "error": f"Document not found: {doc_id_or_title}"}
@@ -382,31 +357,15 @@ def read_document(
     }
 
 
-@register_tool(
-    category=ToolCategory.KNOWLEDGE,
-    permission_level=PermissionLevel.SAFE,
-    description="List documents in the knowledge base with summaries. Filter by query or source type. Returns summaries, not full content.",
-)
-def list_documents(
+def _list_documents_in_kbs(
+    kb_manager,
+    user_kb_manager,
     query: str = "",
     source_type: str = "",
     limit: int = 20,
 ) -> dict[str, Any]:
-    """List documents with summaries.
-
-    Args:
-        query: Optional filter by title substring (case-insensitive).
-        source_type: Optional filter by source type.
-        limit: Maximum number of documents to return.
-
-    Returns:
-        Dictionary with document list.
-    """
+    """Shared implementation for list_documents."""
     from agentic_cli.knowledge_base.models import SourceType as ST
-
-    kb = get_service(KB_MANAGER)
-    if kb is None:
-        return {"success": False, "error": "kb manager not available"}
 
     # Parse source_type filter
     st_filter = None
@@ -416,7 +375,7 @@ def list_documents(
         except ValueError:
             pass
 
-    docs = kb.list_documents(source_type=st_filter, limit=limit)
+    docs = kb_manager.list_documents(source_type=st_filter, limit=limit)
 
     # Apply query filter
     if query:
@@ -434,10 +393,9 @@ def list_documents(
         seen_ids.add(d.id)
 
     # Merge user KB documents
-    user_kb = get_service(USER_KB_MANAGER)
-    if user_kb is not None and user_kb is not kb:
+    if user_kb_manager is not None and user_kb_manager is not kb_manager:
         try:
-            user_docs = user_kb.list_documents(source_type=st_filter, limit=limit)
+            user_docs = user_kb_manager.list_documents(source_type=st_filter, limit=limit)
             if query:
                 query_lower = query.lower()
                 user_docs = [
@@ -459,23 +417,13 @@ def list_documents(
     }
 
 
-@register_tool(
-    category=ToolCategory.KNOWLEDGE,
-    permission_level=PermissionLevel.DANGEROUS,
-    description="Open a document's stored file (e.g. PDF) in the system default viewer. Provide a document ID or title.",
-)
-def open_document(
+def _open_document_in_kbs(
+    kb_manager,
+    user_kb_manager,
     doc_id_or_title: str,
 ) -> dict[str, Any]:
-    """Open a document's file in the system viewer.
-
-    Args:
-        doc_id_or_title: Document ID or title substring.
-
-    Returns:
-        Dictionary with result.
-    """
-    doc, source_kb = _find_document_in_kbs(doc_id_or_title)
+    """Shared implementation for open_document."""
+    doc, source_kb = _find_doc_in_kbs(kb_manager, user_kb_manager, doc_id_or_title)
 
     if doc is None:
         return {"success": False, "error": f"Document not found: {doc_id_or_title}"}
@@ -542,6 +490,192 @@ def open_document(
         "file_path": str(file_path),
         "message": f"Opened: {doc.title}",
     }
+
+
+# ---------------------------------------------------------------------------
+# Registry-bound helper (back-compat for tests/callers that don't have
+# explicit KB handles)
+# ---------------------------------------------------------------------------
+
+
+def _find_document_in_kbs(doc_id_or_title: str) -> tuple:
+    """Find a document across main and user KBs via the service registry.
+
+    Thin registry-based wrapper around ``_find_doc_in_kbs``. Used by the
+    module-level ``@register_tool`` functions and exercised directly by
+    ``tests/test_kb_helpers.py``.
+    """
+    kb = get_service(KB_MANAGER)
+    if kb is None:
+        return None, None
+    user_kb = get_service(USER_KB_MANAGER)
+    return _find_doc_in_kbs(kb, user_kb, doc_id_or_title)
+
+
+# ---------------------------------------------------------------------------
+# Module-level @register_tool wrappers
+# ---------------------------------------------------------------------------
+
+
+@register_tool(
+    category=ToolCategory.KNOWLEDGE,
+    permission_level=PermissionLevel.SAFE,
+    description="Search the local knowledge base for relevant documents using semantic similarity. Use this when you need to find previously ingested papers, notes, or documents.",
+)
+def search_knowledge_base(
+    query: str,
+    filters: str = "",
+    top_k: int = 10,
+) -> dict[str, Any]:
+    """Search the knowledge base for relevant information.
+
+    Args:
+        query: Natural language search query
+        filters: Optional JSON string with filters (e.g. '{"source_type": "arxiv", "date_from": "2024-01-01"}')
+        top_k: Maximum number of results
+
+    Returns:
+        Dictionary with search results and timing information
+    """
+    kb = require_service(KB_MANAGER)
+    if isinstance(kb, dict):
+        return kb
+    user_kb = get_service(USER_KB_MANAGER)
+    return _search_kbs(kb, user_kb, query, filters, top_k)
+
+
+@register_tool(
+    category=ToolCategory.KNOWLEDGE,
+    permission_level=PermissionLevel.CAUTION,
+    description=(
+        "Ingest a document into the knowledge base. "
+        "REQUIRED: provide either 'content' (text) or 'url_or_path' (file path or URL). "
+        "ArXiv URLs auto-fetch metadata and PDF. "
+        "Valid source_type values: arxiv, ssrn, web, internal, user, local."
+    ),
+)
+async def ingest_document(
+    content: str = "",
+    url_or_path: str = "",
+    title: str = "",
+    source_type: str = "user",
+    source_url: str | None = None,
+    authors: list[str] | None = None,
+    abstract: str = "",
+    tags: list[str] | None = None,
+) -> dict[str, Any]:
+    """Ingest a document into the knowledge base.
+
+    You MUST provide at least one of `content` or `url_or_path`:
+    1. Text content: provide `content` directly
+    2. Local file: provide `url_or_path` pointing to a local file
+    3. URL: provide `url_or_path` with an HTTP(S) URL
+
+    For arXiv papers, use `ingest_arxiv_paper` instead — it handles
+    metadata, PDF download, and rate limiting automatically.
+
+    Args:
+        content: Document text content (REQUIRED if url_or_path not given)
+        url_or_path: URL or local file path (REQUIRED if content not given)
+        title: Document title
+        source_type: Source type (ssrn, web, internal, user, local)
+        source_url: Optional URL of the source
+        authors: Optional list of author names
+        abstract: Optional paper abstract
+        tags: Optional tags for categorization
+
+    Returns:
+        Dictionary with ingestion result
+    """
+    kb = get_service(KB_MANAGER)
+    if kb is None:
+        return {"success": False, "error": "kb manager not available"}
+    return await _ingest_document_with_kb(
+        kb,
+        content=content,
+        url_or_path=url_or_path,
+        title=title,
+        source_type=source_type,
+        source_url=source_url,
+        authors=authors,
+        abstract=abstract,
+        tags=tags,
+    )
+
+
+@register_tool(
+    category=ToolCategory.KNOWLEDGE,
+    permission_level=PermissionLevel.SAFE,
+    description="Read and return the text content of a stored document by ID or title. Returns full text (up to max_chars limit).",
+)
+def read_document(
+    doc_id_or_title: str,
+    max_chars: int = READ_DOCUMENT_MAX_CHARS,
+) -> dict[str, Any]:
+    """Extract and return text from a stored document.
+
+    Args:
+        doc_id_or_title: Document ID or title substring.
+        max_chars: Maximum characters to return (default 30K).
+
+    Returns:
+        Dictionary with document text and metadata.
+    """
+    kb = get_service(KB_MANAGER)
+    if kb is None:
+        return {"success": False, "error": f"Document not found: {doc_id_or_title}"}
+    user_kb = get_service(USER_KB_MANAGER)
+    return _read_document_from_kbs(kb, user_kb, doc_id_or_title, max_chars)
+
+
+@register_tool(
+    category=ToolCategory.KNOWLEDGE,
+    permission_level=PermissionLevel.SAFE,
+    description="List documents in the knowledge base with summaries. Filter by query or source type. Returns summaries, not full content.",
+)
+def list_documents(
+    query: str = "",
+    source_type: str = "",
+    limit: int = 20,
+) -> dict[str, Any]:
+    """List documents with summaries.
+
+    Args:
+        query: Optional filter by title substring (case-insensitive).
+        source_type: Optional filter by source type.
+        limit: Maximum number of documents to return.
+
+    Returns:
+        Dictionary with document list.
+    """
+    kb = get_service(KB_MANAGER)
+    if kb is None:
+        return {"success": False, "error": "kb manager not available"}
+    user_kb = get_service(USER_KB_MANAGER)
+    return _list_documents_in_kbs(kb, user_kb, query, source_type, limit)
+
+
+@register_tool(
+    category=ToolCategory.KNOWLEDGE,
+    permission_level=PermissionLevel.DANGEROUS,
+    description="Open a document's stored file (e.g. PDF) in the system default viewer. Provide a document ID or title.",
+)
+def open_document(
+    doc_id_or_title: str,
+) -> dict[str, Any]:
+    """Open a document's file in the system viewer.
+
+    Args:
+        doc_id_or_title: Document ID or title substring.
+
+    Returns:
+        Dictionary with result.
+    """
+    kb = get_service(KB_MANAGER)
+    if kb is None:
+        return {"success": False, "error": f"Document not found: {doc_id_or_title}"}
+    user_kb = get_service(USER_KB_MANAGER)
+    return _open_document_in_kbs(kb, user_kb, doc_id_or_title)
 
 
 @register_tool(
@@ -670,4 +804,3 @@ def unified_search(
         "results": results,
         "counts": {"kb": kb_count, "memory": mem_count},
     }
-
