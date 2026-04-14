@@ -1216,31 +1216,6 @@ class TestArxivHelpers:
         assert _clean_arxiv_id("https://arxiv.org/abs/hep-th/9901001") == "hep-th/9901001"
 
 
-class TestIngestArxivIdExtraction:
-    """Tests for arXiv ID extraction in ingest_document."""
-
-    def test_extract_new_format(self):
-        from agentic_cli.tools.knowledge_tools import _extract_arxiv_id
-
-        assert _extract_arxiv_id("1706.03762") == "1706.03762"
-        assert _extract_arxiv_id("2301.12345") == "2301.12345"
-        assert _extract_arxiv_id("https://arxiv.org/abs/1706.03762") == "1706.03762"
-
-    def test_extract_old_format(self):
-        from agentic_cli.tools.knowledge_tools import _extract_arxiv_id
-
-        assert _extract_arxiv_id("math/0607733") == "math/0607733"
-        assert _extract_arxiv_id("hep-th/9901001") == "hep-th/9901001"
-        assert _extract_arxiv_id("https://arxiv.org/abs/math/0607733") == "math/0607733"
-        assert _extract_arxiv_id("https://arxiv.org/pdf/math/0607733.pdf") == "math/0607733"
-
-    def test_extract_no_match(self):
-        from agentic_cli.tools.knowledge_tools import _extract_arxiv_id
-
-        assert _extract_arxiv_id("not-an-id") == ""
-        assert _extract_arxiv_id("") == ""
-
-
 class TestFetchArxivPaperRateLimiting:
     """Tests for fetch_arxiv_paper rate limiting."""
 
@@ -1522,13 +1497,13 @@ class TestToolRegistryConsistency:
 
         # File ops: 7 (read_file, diff_compare, grep, glob, list_dir, write_file, edit_file)
         # Web/Network: 2 (web_search, web_fetch)
-        # Knowledge: 7 (search_kb, ingest_document, read_document, list_documents, open_document, search_arxiv, fetch_arxiv)
+        # Knowledge: 8 (search_kb, ingest_document, read_document, list_documents, open_document, search_arxiv, fetch_arxiv_paper, ingest_arxiv_paper)
         # Execution: 2 (execute_python, shell_executor)
         # Interaction: 1 (ask_clarification)
         # Memory: 2 (save_memory, search_memory)
         # Sandbox: 1 (sandbox_execute)
         # Plan/task state tools are backend-specific (not in global registry)
-        # Total: ~22 tools
+        # Total: ~23 tools
         assert tool_count >= 20, f"Expected at least 20 registered tools, got {tool_count}"
 
 

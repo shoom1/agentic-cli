@@ -698,3 +698,211 @@ class TestArxivEntryCache:
 
         # Cache expired, second call hit the API again
         assert mock_parse.call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# ingest_arxiv_paper tool tests
+# ---------------------------------------------------------------------------
+
+
+class _FakeKB:
+    """Minimal KnowledgeBaseManager stub for ingestion tests.
+
+    Records the kwargs passed to ingest_document and returns a fake
+    Document. Avoids the full KB pipeline and any disk I/O.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    def ingest_document(self, **kwargs):
+        self.calls.append(kwargs)
+        return _FakeDoc(
+            id="doc-123",
+            title=kwargs.get("title", ""),
+            chunks=[object(), object(), object()],
+            summary="fake summary",
+        )
+
+
+class _FakeDoc:
+    def __init__(self, id, title, chunks, summary):
+        self.id = id
+        self.title = title
+        self.chunks = chunks
+        self.summary = summary
+
+
+@pytest.fixture
+def ingest_ctx():
+    """Publish ArxivSearchSource and a fake KB into the registry."""
+    from agentic_cli.tools.arxiv_source import ArxivSearchSource
+    from agentic_cli.workflow.service_registry import (
+        ARXIV_SOURCE,
+        KB_MANAGER,
+        set_service_registry,
+    )
+
+    source = ArxivSearchSource()
+    kb = _FakeKB()
+    token = set_service_registry({ARXIV_SOURCE: source, KB_MANAGER: kb})
+    try:
+        yield source, kb
+    finally:
+        token.var.reset(token)
+
+
+class TestIngestArxivPaper:
+    """Tests for the composed ingest_arxiv_paper tool."""
+
+    @pytest.mark.asyncio
+    async def test_happy_path_downloads_pdf_and_ingests(self, ingest_ctx):
+        """Fetches metadata, downloads PDF, extracts text, ingests into KB."""
+        source, kb = ingest_ctx
+        from agentic_cli.tools.arxiv_tools import ingest_arxiv_paper
+
+        # Pre-populate entry cache so fetch_by_id is a hit (no feedparser needed)
+        source._store_entry(
+            "1706.03762",
+            {
+                "arxiv_id": "1706.03762",
+                "title": "Attention Is All You Need",
+                "authors": ["Vaswani"],
+                "abstract": "We propose a new architecture",
+                "abs_url": "https://arxiv.org/abs/1706.03762",
+                "pdf_url": "https://arxiv.org/pdf/1706.03762",
+                "src_url": "https://arxiv.org/e-print/1706.03762",
+                "published_date": "2017-06-12",
+                "updated_date": "2017-12-06",
+                "categories": ["cs.CL", "cs.LG"],
+                "primary_category": "cs.CL",
+            },
+        )
+
+        fake_pdf_bytes = b"%PDF-fake-bytes"
+
+        with patch("httpx.AsyncClient") as mock_client_cls, \
+             patch("agentic_cli.tools.arxiv_tools.extract_pdf_text") as mock_extract, \
+             patch("agentic_cli.tools.arxiv_source.asyncio.sleep", new=AsyncMock()):
+            mock_response = MagicMock()
+            mock_response.content = fake_pdf_bytes
+            mock_response.raise_for_status = MagicMock()
+
+            mock_client = MagicMock()
+            mock_client.get = AsyncMock(return_value=mock_response)
+            mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=None)
+
+            mock_extract.return_value = "Extracted PDF text content"
+
+            result = await ingest_arxiv_paper("1706.03762", tags=["transformer"])
+
+        assert result["success"] is True
+        assert result["document_id"] == "doc-123"
+        assert result["title"] == "Attention Is All You Need"
+        assert result["chunks_created"] == 3
+        assert result["pdf_downloaded"] is True
+
+        # Verify KB was called with the right shape
+        assert len(kb.calls) == 1
+        call = kb.calls[0]
+        assert call["title"] == "Attention Is All You Need"
+        assert call["content"] == "Extracted PDF text content"
+        assert call["file_bytes"] == fake_pdf_bytes
+        assert call["source_url"] == "https://arxiv.org/abs/1706.03762"
+        assert call["metadata"]["arxiv_id"] == "1706.03762"
+        assert call["metadata"]["pdf_url"] == "https://arxiv.org/pdf/1706.03762"
+        assert call["metadata"]["src_url"] == "https://arxiv.org/e-print/1706.03762"
+        assert call["metadata"]["tags"] == ["transformer"]
+        assert call["metadata"]["authors"] == ["Vaswani"]
+
+        # Verify the PDF was downloaded from the cached pdf_url, not synthesized
+        mock_client.get.assert_called_once_with("https://arxiv.org/pdf/1706.03762")
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_abstract_on_pdf_download_failure(self, ingest_ctx):
+        """When PDF download fails, ingest the abstract as fallback content."""
+        source, kb = ingest_ctx
+        from agentic_cli.tools.arxiv_tools import ingest_arxiv_paper
+
+        source._store_entry(
+            "2301.07041",
+            {
+                "arxiv_id": "2301.07041",
+                "title": "A paper",
+                "authors": [],
+                "abstract": "This is the abstract used as fallback",
+                "abs_url": "https://arxiv.org/abs/2301.07041",
+                "pdf_url": "https://arxiv.org/pdf/2301.07041",
+                "src_url": "https://arxiv.org/e-print/2301.07041",
+                "published_date": "",
+                "updated_date": "",
+                "categories": [],
+                "primary_category": "",
+            },
+        )
+
+        with patch("httpx.AsyncClient") as mock_client_cls, \
+             patch("agentic_cli.tools.arxiv_source.asyncio.sleep", new=AsyncMock()):
+            mock_client = MagicMock()
+            mock_client.get = AsyncMock(side_effect=Exception("network error"))
+            mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=None)
+
+            result = await ingest_arxiv_paper("2301.07041")
+
+        assert result["success"] is True
+        assert result["pdf_downloaded"] is False
+        assert kb.calls[0]["content"] == "This is the abstract used as fallback"
+        assert kb.calls[0]["file_bytes"] is None
+        assert "pdf_download_error" in kb.calls[0]["metadata"]
+
+    @pytest.mark.asyncio
+    async def test_returns_error_when_paper_not_found(self, ingest_ctx):
+        """source.fetch_by_id raises LookupError → wrapper returns error dict."""
+        source, kb = ingest_ctx
+        from agentic_cli.tools.arxiv_tools import ingest_arxiv_paper
+
+        with patch("feedparser.parse") as mock_parse, \
+             patch("agentic_cli.tools.arxiv_source.asyncio.sleep", new=AsyncMock()):
+            mock_parse.return_value = MagicMock(entries=[])
+            result = await ingest_arxiv_paper("9999.99999")
+
+        assert result["success"] is False
+        assert "not found" in result["error"].lower()
+        assert kb.calls == []
+
+    @pytest.mark.asyncio
+    async def test_returns_error_when_arxiv_source_missing(self):
+        """Without a registry, the tool surfaces the require_service error."""
+        from agentic_cli.tools.arxiv_tools import ingest_arxiv_paper
+        from agentic_cli.workflow.service_registry import set_service_registry
+
+        token = set_service_registry({})
+        try:
+            result = await ingest_arxiv_paper("1706.03762")
+        finally:
+            token.var.reset(token)
+
+        assert result["success"] is False
+        assert "arxiv source" in result["error"].lower()
+
+    @pytest.mark.asyncio
+    async def test_returns_error_when_kb_manager_missing(self):
+        """Source present but KB missing returns require_service KB error."""
+        from agentic_cli.tools.arxiv_source import ArxivSearchSource
+        from agentic_cli.tools.arxiv_tools import ingest_arxiv_paper
+        from agentic_cli.workflow.service_registry import (
+            ARXIV_SOURCE,
+            set_service_registry,
+        )
+
+        source = ArxivSearchSource()
+        token = set_service_registry({ARXIV_SOURCE: source})
+        try:
+            result = await ingest_arxiv_paper("1706.03762")
+        finally:
+            token.var.reset(token)
+
+        assert result["success"] is False
+        assert "kb manager" in result["error"].lower()

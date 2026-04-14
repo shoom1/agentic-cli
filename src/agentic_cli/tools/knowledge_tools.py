@@ -163,13 +163,15 @@ async def ingest_document(
     1. Text content: provide `content` directly
     2. Local file: provide `url_or_path` pointing to a local file
     3. URL: provide `url_or_path` with an HTTP(S) URL
-       - ArXiv URLs auto-fetch metadata and download PDF
+
+    For arXiv papers, use `ingest_arxiv_paper` instead — it handles
+    metadata, PDF download, and rate limiting automatically.
 
     Args:
         content: Document text content (REQUIRED if url_or_path not given)
         url_or_path: URL or local file path (REQUIRED if content not given)
-        title: Document title (auto-fetched for ArXiv if empty)
-        source_type: Source type (arxiv, ssrn, web, internal, user, local)
+        title: Document title
+        source_type: Source type (ssrn, web, internal, user, local)
         source_url: Optional URL of the source
         authors: Optional list of author names
         abstract: Optional paper abstract
@@ -199,23 +201,14 @@ async def ingest_document(
     # --- URL / file path mode ---
     if url_or_path:
         # Auto-detect source type
-        if "arxiv.org" in url_or_path:
-            source_type = "arxiv"
-        elif url_or_path.startswith(("http://", "https://")) and source_type == "user":
+        if url_or_path.startswith(("http://", "https://")) and source_type == "user":
             source_type = "web"
         elif not url_or_path.startswith(("http://", "https://")) and source_type == "user":
             source_type = "local"
 
         source_url = source_url or url_or_path
 
-        if source_type == "arxiv":
-            # ArXiv: fetch metadata + download PDF
-            result = await _ingest_arxiv(
-                url_or_path, title, authors, abstract, meta, kb
-            )
-            return result
-
-        elif url_or_path.startswith(("http://", "https://")):
+        if url_or_path.startswith(("http://", "https://")):
             # Generic URL download
             try:
                 import httpx
@@ -268,7 +261,7 @@ async def ingest_document(
             "error": (
                 "No content or file provided. "
                 "You must supply either 'content' (text string) or 'url_or_path' (URL or file path). "
-                "For ArXiv papers, pass the ArXiv URL as url_or_path."
+                "For ArXiv papers, use ingest_arxiv_paper instead."
             ),
         }
 
@@ -305,132 +298,11 @@ async def ingest_document(
     }
 
 
-async def _ingest_arxiv(
-    url_or_path: str,
-    title: str,
-    authors: list[str] | None,
-    abstract: str,
-    meta: dict[str, Any],
-    kb,
-) -> dict[str, Any]:
-    """Handle ArXiv-specific ingestion: fetch metadata + download PDF.
-
-    Args:
-        url_or_path: ArXiv URL or ID.
-        title: User-provided title (may be empty).
-        authors: User-provided authors (may be None).
-        abstract: User-provided abstract (may be empty).
-        meta: Metadata dict to populate.
-        kb: KnowledgeBaseManager instance.
-
-    Returns:
-        Tool result dict.
-    """
-    from agentic_cli.knowledge_base.models import SourceType
-
-    # Extract arxiv ID — supports both new format (2301.12345) and
-    # old format (math/0607733, hep-th/9901001)
-    arxiv_id = _extract_arxiv_id(url_or_path)
-
-    if not arxiv_id:
-        return {"success": False, "error": f"Could not extract ArXiv ID from: {url_or_path}"}
-
-    # Fetch metadata via fetch_arxiv_paper
-    try:
-        from agentic_cli.tools.arxiv_tools import fetch_arxiv_paper
-        metadata_result = await fetch_arxiv_paper(arxiv_id)
-        if metadata_result.get("success") and "paper" in metadata_result:
-            paper_info = metadata_result["paper"]
-            title = title or paper_info.get("title", "")
-            authors = authors or paper_info.get("authors", [])
-            abstract = abstract or paper_info.get("abstract", "")
-            meta["arxiv_id"] = arxiv_id
-            meta["pdf_url"] = paper_info.get("pdf_url", "")
-            meta["categories"] = paper_info.get("categories", [])
-    except Exception:
-        logger.warning("arxiv_metadata_fetch_failed", arxiv_id=arxiv_id, exc_info=True)
-
-    if authors:
-        meta["authors"] = authors
-    if abstract:
-        meta["abstract"] = abstract
-
-    source_url = f"https://arxiv.org/abs/{arxiv_id}"
-
-    # Download PDF
-    file_bytes: bytes | None = None
-    content = ""
-    try:
-        import httpx
-
-        from agentic_cli.workflow.service_registry import ARXIV_SOURCE, get_service
-        source = get_service(ARXIV_SOURCE)
-        if source is not None:
-            source.wait_for_rate_limit()
-
-        pdf_url = f"https://arxiv.org/pdf/{arxiv_id}.pdf"
-        async with httpx.AsyncClient(follow_redirects=True, timeout=60.0) as client:
-            response = await client.get(pdf_url)
-            response.raise_for_status()
-            file_bytes = response.content
-
-        # Extract text
-        content = _extract_text_from_bytes(file_bytes)
-        meta["file_size_bytes"] = len(file_bytes)
-    except Exception:
-        logger.warning("arxiv_pdf_download_failed", arxiv_id=arxiv_id, exc_info=True)
-        # Use abstract as fallback content if PDF download fails
-        content = abstract or title
-
-    if not title:
-        title = f"ArXiv paper {arxiv_id}"
-
-    try:
-        doc = kb.ingest_document(
-            content=content,
-            title=title,
-            source_type=SourceType.ARXIV,
-            source_url=source_url,
-            metadata=meta or None,
-            file_bytes=file_bytes,
-            file_extension=".pdf",
-        )
-    except Exception as e:
-        return {"success": False, "error": f"Ingestion failed: {e}"}
-
-    return {
-        "success": True,
-        "document_id": doc.id,
-        "title": doc.title,
-        "chunks_created": len(doc.chunks),
-        "summary": doc.summary,
-    }
-
-
 def _extract_text_from_bytes(pdf_bytes: bytes) -> str:
     """Extract text from PDF bytes."""
     from agentic_cli.tools.pdf_utils import extract_pdf_text
 
     return extract_pdf_text(pdf_bytes)
-
-
-def _extract_arxiv_id(url_or_id: str) -> str:
-    """Extract arXiv paper ID from a URL or raw ID string.
-
-    Delegates to arxiv_tools._clean_arxiv_id for consistent parsing.
-    Returns empty string if the input doesn't look like an arXiv ID.
-    """
-    import re
-
-    from agentic_cli.tools.arxiv_tools import _clean_arxiv_id
-
-    cleaned = _clean_arxiv_id(url_or_id)
-    # Validate that the result is actually an arXiv ID pattern
-    if re.match(r"^\d{4}\.\d{4,5}(v\d+)?$", cleaned) or re.match(
-        r"^[a-zA-Z-]+/\d{7}(v\d+)?$", cleaned
-    ):
-        return cleaned
-    return ""
 
 
 def _detect_extension(url: str) -> str:
