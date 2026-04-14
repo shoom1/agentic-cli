@@ -113,6 +113,9 @@ def _search_arxiv_with_source(
             "authors": result.metadata.get("authors", []),
             "abstract": result.snippet,
             "url": result.url,
+            "abs_url": result.metadata.get("abs_url", result.url),
+            "pdf_url": result.metadata.get("pdf_url", ""),
+            "src_url": result.metadata.get("src_url", ""),
             "published_date": result.metadata.get("published", ""),
             "categories": result.metadata.get("categories", []),
             "arxiv_id": result.metadata.get("arxiv_id", ""),
@@ -133,7 +136,8 @@ async def _fetch_arxiv_paper_with_source(source, arxiv_id: str) -> dict[str, Any
     Delegates to ``source.fetch_by_id`` and wraps exceptions into the
     ``{"success": bool, ...}`` contract expected by tool callers. The
     arxiv URL and feedparser call live on the source — this wrapper
-    only adapts the shape.
+    only adapts the shape and adds ``url`` as a backward-compat alias
+    for ``abs_url``.
     """
     arxiv_id = _clean_arxiv_id(arxiv_id)
 
@@ -144,7 +148,7 @@ async def _fetch_arxiv_paper_with_source(source, arxiv_id: str) -> dict[str, Any
     except RuntimeError as exc:
         return {"success": False, "error": str(exc)}
 
-    return {"success": True, "paper": paper}
+    return {"success": True, "paper": {**paper, "url": paper["abs_url"]}}
 
 
 @register_tool(

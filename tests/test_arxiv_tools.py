@@ -318,7 +318,9 @@ class TestFetchArxivPaperMetadata:
         assert result["success"] is True
         assert result["paper"]["title"] == "Test Paper"
         assert result["paper"]["arxiv_id"] == "1234.5678"
-        assert result["paper"]["pdf_url"] == "https://arxiv.org/pdf/1234.5678.pdf"
+        assert result["paper"]["pdf_url"] == "https://arxiv.org/pdf/1234.5678"
+        assert result["paper"]["abs_url"] == "https://arxiv.org/abs/1234.5678"
+        assert result["paper"]["src_url"] == "https://arxiv.org/e-print/1234.5678"
 
     @pytest.mark.asyncio
     async def test_fetch_not_found(self, arxiv_source_ctx):
@@ -362,3 +364,145 @@ class TestFetchArxivPaperMetadata:
             call_url = mock_parse.call_args[0][0]
             assert "1234.5678" in call_url
             assert "v2" not in call_url
+
+
+# ---------------------------------------------------------------------------
+# _parse_entry tests — Atom feed link extraction
+# ---------------------------------------------------------------------------
+
+
+class TestArxivParseEntry:
+    """Tests for ArxivSearchSource._parse_entry link extraction."""
+
+    def test_parse_entry_uses_feed_pdf_link(self):
+        """When the feed advertises a pdf link, use it directly."""
+        from agentic_cli.tools.arxiv_source import ArxivSearchSource
+
+        source = ArxivSearchSource()
+        entry = {
+            "title": "Test Paper",
+            "summary": "Abstract",
+            "authors": [{"name": "Author"}],
+            "published": "2024-01-01",
+            "updated": "2024-01-02",
+            "tags": [{"term": "cs.AI"}],
+            "id": "http://arxiv.org/abs/1706.03762v5",
+            "arxiv_primary_category": {"term": "cs.AI"},
+            "links": [
+                {"rel": "alternate", "type": "text/html", "href": "http://arxiv.org/abs/1706.03762v5"},
+                {"rel": "related", "type": "application/pdf", "href": "http://arxiv.org/pdf/1706.03762v5", "title": "pdf"},
+            ],
+        }
+        paper = source._parse_entry(entry)
+
+        # Version stripped from arxiv_id
+        assert paper["arxiv_id"] == "1706.03762"
+        # pdf_url comes from the feed (still has version because that's what the feed said)
+        assert paper["pdf_url"] == "https://arxiv.org/pdf/1706.03762v5"
+        # abs_url upgraded to https
+        assert paper["abs_url"] == "https://arxiv.org/abs/1706.03762v5"
+        # src_url synthesized from version-stripped id
+        assert paper["src_url"] == "https://arxiv.org/e-print/1706.03762"
+
+    def test_parse_entry_synthesizes_links_when_feed_omits_them(self):
+        """When the feed has only a single .link, synthesize pdf and src URLs."""
+        from agentic_cli.tools.arxiv_source import ArxivSearchSource
+
+        source = ArxivSearchSource()
+        entry = {
+            "title": "Test Paper",
+            "summary": "Abstract",
+            "authors": [],
+            "published": "",
+            "updated": "",
+            "tags": [],
+            "id": "http://arxiv.org/abs/1234.5678v1",
+            "arxiv_primary_category": {"term": ""},
+            "link": "https://arxiv.org/abs/1234.5678v1",
+            "links": [],
+        }
+        paper = source._parse_entry(entry)
+
+        assert paper["arxiv_id"] == "1234.5678"
+        assert paper["abs_url"] == "https://arxiv.org/abs/1234.5678v1"
+        assert paper["pdf_url"] == "https://arxiv.org/pdf/1234.5678"
+        assert paper["src_url"] == "https://arxiv.org/e-print/1234.5678"
+
+    def test_parse_entry_with_explicit_arxiv_id(self):
+        """fetch_by_id passes arxiv_id explicitly; _parse_entry uses it."""
+        from agentic_cli.tools.arxiv_source import ArxivSearchSource
+
+        source = ArxivSearchSource()
+        entry = {
+            "title": "T",
+            "summary": "",
+            "authors": [],
+            "published": "",
+            "updated": "",
+            "tags": [],
+            "id": "",
+            "arxiv_primary_category": {"term": ""},
+            "links": [],
+        }
+        paper = source._parse_entry(entry, arxiv_id="2301.07041")
+        assert paper["arxiv_id"] == "2301.07041"
+        assert paper["pdf_url"] == "https://arxiv.org/pdf/2301.07041"
+        assert paper["src_url"] == "https://arxiv.org/e-print/2301.07041"
+        assert paper["abs_url"] == "https://arxiv.org/abs/2301.07041"
+
+    def test_parse_entry_old_format_id(self):
+        """Pre-2007 id format (subject/NNNNNNN) is handled."""
+        from agentic_cli.tools.arxiv_source import ArxivSearchSource
+
+        source = ArxivSearchSource()
+        entry = {
+            "title": "Old",
+            "summary": "",
+            "authors": [],
+            "published": "",
+            "updated": "",
+            "tags": [],
+            "id": "http://arxiv.org/abs/math/0607733v1",
+            "arxiv_primary_category": {"term": ""},
+            "links": [],
+        }
+        paper = source._parse_entry(entry)
+        assert paper["arxiv_id"] == "math/0607733"
+        assert paper["pdf_url"] == "https://arxiv.org/pdf/math/0607733"
+
+    def test_search_metadata_includes_link_fields(self, arxiv_source_ctx):
+        """search() writes abs_url/pdf_url/src_url into SearchSourceResult metadata."""
+        from unittest.mock import patch, MagicMock
+        from agentic_cli.tools.arxiv_tools import search_arxiv
+
+        with patch("agentic_cli.tools.arxiv_source.time") as mock_time, \
+             patch("feedparser.parse") as mock_parse:
+            mock_time.time.return_value = 100.0
+            mock_time.sleep = MagicMock()
+            mock_parse.return_value = MagicMock(
+                status=200,
+                bozo=False,
+                entries=[
+                    {
+                        "title": "Attention",
+                        "summary": "abs",
+                        "authors": [{"name": "Vaswani"}],
+                        "published": "2017-06-12",
+                        "tags": [{"term": "cs.CL"}],
+                        "id": "http://arxiv.org/abs/1706.03762v5",
+                        "links": [
+                            {"rel": "alternate", "type": "text/html", "href": "http://arxiv.org/abs/1706.03762v5"},
+                            {"rel": "related", "type": "application/pdf", "href": "http://arxiv.org/pdf/1706.03762v5", "title": "pdf"},
+                        ],
+                    }
+                ],
+            )
+
+            result = search_arxiv("attention")
+
+        assert result["success"] is True
+        paper = result["papers"][0]
+        assert paper["arxiv_id"] == "1706.03762"
+        assert paper["abs_url"] == "https://arxiv.org/abs/1706.03762v5"
+        assert paper["pdf_url"] == "https://arxiv.org/pdf/1706.03762v5"
+        assert paper["src_url"] == "https://arxiv.org/e-print/1706.03762"

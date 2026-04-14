@@ -1120,7 +1120,7 @@ class TestStandardTools:
             assert result["paper"]["arxiv_id"] == "1706.03762"
             assert "Vaswani" in result["paper"]["authors"]
             assert "cs.CL" in result["paper"]["categories"]
-            assert result["paper"]["pdf_url"] == "https://arxiv.org/pdf/1706.03762.pdf"
+            assert result["paper"]["pdf_url"] == "https://arxiv.org/pdf/1706.03762"
 
     @pytest.mark.asyncio
     async def test_fetch_arxiv_paper_not_found(self, arxiv_source_ctx):

@@ -6,6 +6,7 @@ because the KB manager never uses it directly.
 """
 
 import asyncio
+import re
 import threading
 import time
 from dataclasses import dataclass
@@ -15,6 +16,8 @@ from agentic_cli.knowledge_base.sources import SearchSource, SearchSourceResult
 from agentic_cli.logging import Loggers
 
 logger = Loggers.knowledge_base()
+
+_VERSION_SUFFIX_RE = re.compile(r"v\d+$")
 
 
 @dataclass
@@ -140,14 +143,99 @@ class ArxivSearchSource(SearchSource):
 
     _API_BASE_URL = "http://export.arxiv.org/api/query"
 
+    @staticmethod
+    def _extract_arxiv_id_from_entry(entry: Any) -> str:
+        """Pull a version-stripped arxiv id out of a feedparser entry.
+
+        The Atom ``<id>`` element is a URL like ``http://arxiv.org/abs/1706.03762v5``.
+        We split off the ``abs/`` prefix and strip the trailing version suffix
+        so the result matches user-facing ids.
+        """
+        raw = entry.get("id", "")
+        if "/abs/" in raw:
+            raw = raw.split("/abs/")[-1]
+        return _VERSION_SUFFIX_RE.sub("", raw)
+
+    @staticmethod
+    def _extract_links(entry: Any, arxiv_id: str) -> dict[str, str]:
+        """Extract abs/pdf/src URLs for an entry.
+
+        The arxiv Atom feed emits multiple ``<link>`` elements per entry —
+        feedparser exposes them as ``entry.links``, a list of dicts with
+        ``rel``, ``type``, ``href``. We pick:
+
+        - ``pdf_url`` from the link whose ``type`` is ``application/pdf``
+        - ``abs_url`` from the ``rel="alternate"`` or ``type="text/html"``
+          link, falling back to ``entry.link`` (feedparser's single-link
+          shortcut) if no multi-link data is present
+        - ``src_url`` is always synthesized from the id because arxiv's
+          feed does not advertise e-print links, though the URL is stable
+
+        All URLs use HTTPS. Falls back to id-synthesized URLs when the
+        feed unexpectedly omits a link.
+        """
+        abs_url = ""
+        pdf_url = ""
+        for link in entry.get("links", []) or []:
+            href = link.get("href", "") if isinstance(link, dict) else getattr(link, "href", "")
+            ltype = link.get("type", "") if isinstance(link, dict) else getattr(link, "type", "")
+            rel = link.get("rel", "") if isinstance(link, dict) else getattr(link, "rel", "")
+            if ltype == "application/pdf" and not pdf_url:
+                pdf_url = href
+            elif (rel == "alternate" or ltype == "text/html") and not abs_url:
+                abs_url = href
+
+        if not abs_url:
+            abs_url = entry.get("link", "") or f"https://arxiv.org/abs/{arxiv_id}"
+        if not pdf_url:
+            pdf_url = f"https://arxiv.org/pdf/{arxiv_id}"
+
+        # Normalize http → https for consistency; arxiv serves both.
+        if abs_url.startswith("http://arxiv.org"):
+            abs_url = "https://" + abs_url[len("http://"):]
+        if pdf_url.startswith("http://arxiv.org"):
+            pdf_url = "https://" + pdf_url[len("http://"):]
+
+        return {
+            "abs_url": abs_url,
+            "pdf_url": pdf_url,
+            "src_url": f"https://arxiv.org/e-print/{arxiv_id}",
+        }
+
+    def _parse_entry(self, entry: Any, arxiv_id: str | None = None) -> dict[str, Any]:
+        """Parse a feedparser entry into a complete paper dict.
+
+        Shared by ``search()`` and ``fetch_by_id()`` so both code paths
+        produce the same field set. If ``arxiv_id`` is not provided it
+        is extracted from the entry (search path); callers that already
+        have a normalized id (fetch_by_id path) pass it in.
+        """
+        if arxiv_id is None:
+            arxiv_id = self._extract_arxiv_id_from_entry(entry)
+
+        links = self._extract_links(entry, arxiv_id)
+
+        return {
+            "arxiv_id": arxiv_id,
+            "title": entry.get("title", "").replace("\n", " ").strip(),
+            "authors": [author.get("name", "") for author in entry.get("authors", [])],
+            "abstract": entry.get("summary", "").replace("\n", " ").strip(),
+            "abs_url": links["abs_url"],
+            "pdf_url": links["pdf_url"],
+            "src_url": links["src_url"],
+            "published_date": entry.get("published", ""),
+            "updated_date": entry.get("updated", ""),
+            "categories": [tag.get("term", "") for tag in entry.get("tags", [])],
+            "primary_category": entry.get("arxiv_primary_category", {}).get("term", ""),
+        }
+
     async def fetch_by_id(self, arxiv_id: str) -> dict[str, Any]:
         """Fetch a single paper by arXiv ID.
 
         Async, rate-limited, and runs feedparser.parse off the event loop.
-        Returns a raw-paper dict (the same shape that
-        ``fetch_arxiv_paper`` surfaces under ``result["paper"]``), or
-        raises ``LookupError`` / ``RuntimeError`` for caller-handled
-        error cases.
+        Returns a raw-paper dict (the same shape ``_parse_entry`` produces
+        for search results), or raises ``LookupError`` / ``RuntimeError``
+        for caller-handled error cases.
         """
         try:
             import feedparser
@@ -166,20 +254,7 @@ class ArxivSearchSource(SearchSource):
         if not feed.entries:
             raise LookupError(f"Paper with ID '{arxiv_id}' not found")
 
-        entry = feed.entries[0]
-
-        return {
-            "arxiv_id": arxiv_id,
-            "title": entry.get("title", "").replace("\n", " ").strip(),
-            "authors": [author.get("name", "") for author in entry.get("authors", [])],
-            "abstract": entry.get("summary", "").replace("\n", " ").strip(),
-            "url": entry.get("link", ""),
-            "pdf_url": f"https://arxiv.org/pdf/{arxiv_id}.pdf",
-            "published_date": entry.get("published", ""),
-            "updated_date": entry.get("updated", ""),
-            "categories": [tag.get("term", "") for tag in entry.get("tags", [])],
-            "primary_category": entry.get("arxiv_primary_category", {}).get("term", ""),
-        }
+        return self._parse_entry(feed.entries[0], arxiv_id=arxiv_id)
 
     def search(
         self,
@@ -263,21 +338,21 @@ class ArxivSearchSource(SearchSource):
 
         results = []
         for entry in feed.entries:
+            paper = self._parse_entry(entry)
             results.append(
                 SearchSourceResult(
-                    title=entry.get("title", "").replace("\n", " "),
-                    url=entry.get("link", ""),
-                    snippet=entry.get("summary", "").replace("\n", " ")[:500],
+                    title=paper["title"],
+                    url=paper["abs_url"],
+                    snippet=paper["abstract"][:500],
                     source_name=self.name,
                     metadata={
-                        "authors": [
-                            a.get("name", "") for a in entry.get("authors", [])
-                        ],
-                        "published": entry.get("published", ""),
-                        "categories": [
-                            t.get("term", "") for t in entry.get("tags", [])
-                        ],
-                        "arxiv_id": entry.get("id", "").split("/abs/")[-1],
+                        "authors": paper["authors"],
+                        "published": paper["published_date"],
+                        "categories": paper["categories"],
+                        "arxiv_id": paper["arxiv_id"],
+                        "abs_url": paper["abs_url"],
+                        "pdf_url": paper["pdf_url"],
+                        "src_url": paper["src_url"],
                     },
                 )
             )
