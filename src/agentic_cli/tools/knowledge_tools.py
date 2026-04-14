@@ -140,6 +140,65 @@ def _find_doc_in_kbs(kb_manager, user_kb_manager, doc_id_or_title: str) -> tuple
     return None, kb_manager
 
 
+def _merge_kb_results_rrf(
+    project_results: list[dict],
+    user_results: list[dict],
+    top_k: int,
+    k: int = 60,
+) -> list[dict]:
+    """Merge two KB result lists via Reciprocal Rank Fusion.
+
+    Scores from separate FAISS / BM25 indexes live on different
+    scales and are not comparable in absolute terms, so a "concat +
+    sort by score" merge produces a degenerate ordering whenever the
+    two KBs happen to score on different magnitudes. RRF works on
+    rank position instead, so the merge is well-defined regardless
+    of how the underlying KBs assign scores.
+
+    On document_id collisions, the project entry wins (its dict is
+    kept), but both KBs' ranks contribute to the fused score — so a
+    document that ranks high in both KBs ends up higher in the merged
+    list than one that's only ranked high in one.
+
+    Args:
+        project_results: Ordered list of search-result dicts from project KB.
+        user_results: Ordered list of search-result dicts from user KB.
+        top_k: Maximum results to return after merge.
+        k: RRF constant (default 60, the standard value).
+
+    Returns:
+        Merged list (length <= top_k) with the fused RRF score in
+        each entry's ``score`` field. The original raw KB score is
+        discarded; absolute KB scores from independent indexes do
+        not compose meaningfully across a merge.
+    """
+    fused: dict[str, dict] = {}
+    fused_scores: dict[str, float] = {}
+
+    for rank, r in enumerate(project_results):
+        doc_id = r.get("document_id", "")
+        if not doc_id:
+            continue
+        fused[doc_id] = r
+        fused_scores[doc_id] = fused_scores.get(doc_id, 0.0) + 1.0 / (k + rank + 1)
+
+    for rank, r in enumerate(user_results):
+        doc_id = r.get("document_id", "")
+        if not doc_id:
+            continue
+        if doc_id not in fused:
+            fused[doc_id] = r
+        fused_scores[doc_id] = fused_scores.get(doc_id, 0.0) + 1.0 / (k + rank + 1)
+
+    sorted_ids = sorted(fused_scores.keys(), key=lambda x: fused_scores[x], reverse=True)
+    merged = []
+    for doc_id in sorted_ids[:top_k]:
+        entry = fused[doc_id]
+        entry["score"] = round(fused_scores[doc_id], 4)
+        merged.append(entry)
+    return merged
+
+
 def _search_kbs(
     kb_manager,
     user_kb_manager,
@@ -172,16 +231,13 @@ def _search_kbs(
         if user_kb_manager is not None and user_kb_manager is not kb_manager:
             try:
                 user_result = user_kb_manager.search(query, filters=parsed_filters, top_k=top_k)
-                # Deduplicate by document_id (project wins)
-                seen_doc_ids = {r["document_id"] for r in result.get("results", [])}
                 for r in user_result.get("results", []):
-                    if r["document_id"] not in seen_doc_ids:
-                        r["scope"] = "user"
-                        result["results"].append(r)
-                        seen_doc_ids.add(r["document_id"])
-                # Re-sort by score descending and trim to top_k
-                result["results"].sort(key=lambda r: r.get("score", 0), reverse=True)
-                result["results"] = result["results"][:top_k]
+                    r["scope"] = "user"
+                result["results"] = _merge_kb_results_rrf(
+                    result.get("results", []),
+                    user_result.get("results", []),
+                    top_k,
+                )
                 result["total_matches"] = len(result["results"])
             except Exception:
                 logger.debug("user_kb_search_failed", query=query, exc_info=True)

@@ -1223,3 +1223,62 @@ class TestTwoTierKnowledgeBase:
             assert result["total_matches"] >= 1
         finally:
             token.var.reset(token)
+
+    def test_search_cross_kb_merge_uses_rrf(self):
+        """Cross-KB merge uses Reciprocal Rank Fusion, not absolute scores.
+
+        Scores from separate FAISS / BM25 indexes are not comparable, so
+        a "concat + sort by score" merge produces a degenerate ordering
+        whenever the two KBs happen to score on different scales. RRF
+        works on rank position instead, so a project rank-0 result and
+        a user rank-0 result should both end up above either KB's
+        rank-1 result, regardless of absolute score magnitudes.
+        """
+        from agentic_cli.tools.knowledge_tools import search_knowledge_base
+        from agentic_cli.workflow.service_registry import set_service_registry
+
+        project_kb = MagicMock()
+        project_kb.search.return_value = {
+            "results": [
+                {"document_id": "p1", "score": 0.5, "document_title": "Project Top"},
+                {"document_id": "p2", "score": 0.4, "document_title": "Project Mid"},
+            ],
+            "total_matches": 2,
+        }
+        user_kb = MagicMock()
+        user_kb.search.return_value = {
+            "results": [
+                {"document_id": "u1", "score": 0.9, "document_title": "User Top"},
+                {"document_id": "u2", "score": 0.8, "document_title": "User Mid"},
+            ],
+            "total_matches": 2,
+        }
+
+        token = set_service_registry({
+            "kb_manager": project_kb,
+            "user_kb_manager": user_kb,
+        })
+        try:
+            result = search_knowledge_base("query")
+            assert result["success"] is True
+
+            merged_ids = [r["document_id"] for r in result["results"]]
+            assert set(merged_ids) == {"p1", "p2", "u1", "u2"}
+
+            # Both rank-0 results (p1, u1) must come before both rank-1
+            # results (p2, u2). The old "concat + sort by raw score"
+            # would have produced [u1, u2, p1, p2] because user scores
+            # happened to be larger — putting u2 (rank 1) above p1
+            # (rank 0), which is the bug.
+            p1_idx = merged_ids.index("p1")
+            p2_idx = merged_ids.index("p2")
+            u1_idx = merged_ids.index("u1")
+            u2_idx = merged_ids.index("u2")
+            assert max(p1_idx, u1_idx) < min(p2_idx, u2_idx)
+
+            # Output scores are RRF-fused, not raw KB scores. RRF rank-0
+            # with k=60 is 1/61 ≈ 0.016 — well below the raw 0.4-0.9 input.
+            for r in result["results"]:
+                assert r["score"] < 0.1
+        finally:
+            token.var.reset(token)
