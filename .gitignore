@@ -48,6 +48,7 @@ plans/
 docs/
 changes/
 findings/
+demo_dir/
 
 # Git worktrees
 .worktrees/

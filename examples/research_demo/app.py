@@ -3,9 +3,6 @@
 Multi-agent research assistant showcasing framework features:
 - research_coordinator: Root agent with memory, planning, tasks, HITL, web, code, files
 - arxiv_specialist: Sub-agent for focused arXiv paper search, analysis, and cataloging
-
-Feature managers (MemoryStore, PlanStore, TaskStore, ApprovalManager)
-are auto-created by the workflow manager based on tool requirements.
 """
 
 from rich.panel import Panel
@@ -32,8 +29,7 @@ def _create_app_info() -> AppInfo:
     text.append("  - arxiv_specialist — arXiv paper search, analysis, cataloging\n", style="dim")
     text.append("\nFeatures:\n", style="bold")
     text.append("  - Persistent memory across sessions\n", style="dim")
-    text.append("  - Planning (markdown checkboxes)\n", style="dim")
-    text.append("  - Task tracking (status & priority)\n", style="dim")
+    text.append("  - Planning & task tracking\n", style="dim")
     text.append("  - Knowledge base (search & ingest)\n", style="dim")
     text.append("  - Web search & content fetching (incl. PDF)\n", style="dim")
     text.append("  - Academic research (arXiv)\n", style="dim")
@@ -42,12 +38,9 @@ def _create_app_info() -> AppInfo:
     text.append("  - Human-in-the-loop (approvals)\n", style="dim")
     text.append("\n")
     text.append("Commands:\n", style="bold")
-    text.append("  /memory     - Show saved memories\n", style="cyan")
-    text.append("  /plan       - Show current plan\n", style="cyan")
-    text.append("  /tasks      - Show execution tasks\n", style="cyan")
-    text.append("  /files      - List workspace files\n", style="cyan")
-    text.append("  /approvals  - Show approval history\n", style="cyan")
-    text.append("  /help       - All commands\n", style="cyan")
+    text.append("  /memory   - Show saved memories\n", style="cyan")
+    text.append("  /files    - List workspace files\n", style="cyan")
+    text.append("  /help     - All commands\n", style="cyan")
 
     return AppInfo(
         name="Research Demo",
@@ -65,9 +58,6 @@ class ResearchDemoApp(BaseCLIApp):
       web search, code execution, file operations
     - arxiv_specialist: Sub-agent for arXiv paper search, analysis, and
       knowledge base ingestion (incl. PDF full-text extraction)
-
-    Feature managers are auto-created by the workflow manager based on
-    the @requires decorators on framework tools.
     """
 
     def __init__(self, settings: ResearchDemoSettings | None = None) -> None:
@@ -87,4 +77,4 @@ class ResearchDemoApp(BaseCLIApp):
 
         Includes verbose_thinking in addition to standard settings.
         """
-        return ["model", "thinking_effort", "log_activity", "verbose_thinking"]
+        return ["model", "thinking_effort", "verbose_thinking"]

@@ -1,11 +1,13 @@
-"""Research Demo - A demo CLI application showcasing P0/P1 features.
+"""Research Demo - A multi-agent research assistant.
 
 This demo showcases:
 - Memory: Stores research context and learnings
-- Planning: Breaks down research into task graphs
-- File ops: Saves findings, compares drafts
-- Shell: Runs safe commands (ls, cat, etc.)
-- HITL: Requires approval for destructive ops, checkpoints for review
+- Planning & task tracking via backend state tools
+- Knowledge base: Search, ingest, and read documents
+- Web search & content fetching (incl. PDF)
+- Academic research (arXiv)
+- File operations (read, write, search)
+- Human-in-the-loop (approvals)
 
 Usage:
     conda run -n agenticcli python -m examples.research_demo
