@@ -10,11 +10,12 @@ This demo showcases:
 - Human-in-the-loop (approvals)
 
 Usage:
-    conda run -n agenticcli python -m examples.research_demo
+    research-demo          # console script (after pip install -e .)
+    python -m research_demo
 """
 
-from examples.research_demo.app import ResearchDemoApp
-from examples.research_demo.settings import ResearchDemoSettings
+from .app import ResearchDemoApp
+from .settings import ResearchDemoSettings
 
 __all__ = [
     "ResearchDemoApp",

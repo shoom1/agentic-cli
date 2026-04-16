@@ -12,9 +12,9 @@ from agentic_cli import BaseCLIApp
 from agentic_cli.cli import AppInfo
 from agentic_cli.logging import Loggers
 
-from examples.research_demo.agents import AGENT_CONFIGS
-from examples.research_demo.commands import DEMO_COMMANDS
-from examples.research_demo.settings import ResearchDemoSettings
+from .agents import AGENT_CONFIGS
+from .commands import DEMO_COMMANDS
+from .settings import ResearchDemoSettings
 
 logger = Loggers.cli()
 

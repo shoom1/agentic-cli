@@ -1,12 +1,13 @@
 """Entry point for the Research Demo application.
 
 Usage:
-    conda run -n agenticcli python -m examples.research_demo
+    research-demo          # console script (after pip install -e .)
+    python -m research_demo
 """
 
 import asyncio
 
-from examples.research_demo.app import ResearchDemoApp
+from .app import ResearchDemoApp
 
 
 def main() -> None:

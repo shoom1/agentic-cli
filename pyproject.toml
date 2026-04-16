@@ -29,7 +29,7 @@ dependencies = [
     "rich>=13.0.0",
     "prompt-toolkit>=3.0.0",
     "httpx>=0.27.0",
-    "numpy>=1.26.0",
+    "numpy>=1.26.0,<2.0",
     "feedparser>=6.0.0",
     "pypdf>=4.0.0",
     "jupyter_client>=8.0.0",
@@ -42,6 +42,11 @@ dev = [
     "pytest-asyncio>=0.24.0",
     "pytest-cov>=6.0.0",
 ]
+kb = [
+    "torch>=2.2.0",
+    "sentence-transformers>=2.0.0,<3.0.0",
+    "faiss-cpu>=1.7.0",
+]
 langgraph = [
     "langgraph>=0.2.0",
     "langchain>=0.3.0",
@@ -51,12 +56,15 @@ langgraph = [
     "langchain-google-genai>=2.0.0",
 ]
 
+[project.scripts]
+research-demo = "research_demo.__main__:main"
+
 [project.urls]
 Homepage = "https://github.com/shoom1/agentic-cli"
 Repository = "https://github.com/shoom1/agentic-cli"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/agentic_cli"]
+packages = ["src/agentic_cli", "examples/research_demo"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
