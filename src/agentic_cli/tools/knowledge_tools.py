@@ -355,6 +355,9 @@ async def _ingest_document_with_kb(
         valid = ", ".join(t.value for t in SourceType)
         return {"success": False, "error": f"Invalid source_type: {source_type!r}. Valid: {valid}"}
 
+    # --- Generate summary (async LLM call, safe to run outside the lock) ---
+    summary = await kb_manager.generate_summary(content, title=title)
+
     # --- Ingest ---
     try:
         doc = kb_manager.ingest_document(
@@ -365,6 +368,7 @@ async def _ingest_document_with_kb(
             metadata=meta or None,
             file_bytes=file_bytes,
             file_extension=file_extension,
+            summary=summary,
         )
     except Exception as e:
         return {"success": False, "error": f"Ingestion failed: {e}"}

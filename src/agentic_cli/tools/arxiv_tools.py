@@ -266,7 +266,10 @@ async def _ingest_arxiv_paper_with_services(
     if not content:
         content = abstract or title
 
-    # 3. Ingest into KB
+    # 3. Generate LLM summary (async, safe before taking the KB lock)
+    summary = await kb_manager.generate_summary(content, title=title)
+
+    # 4. Ingest into KB
     try:
         doc = kb_manager.ingest_document(
             content=content,
@@ -276,6 +279,7 @@ async def _ingest_arxiv_paper_with_services(
             metadata=meta,
             file_bytes=file_bytes,
             file_extension=".pdf",
+            summary=summary,
         )
     except Exception as exc:
         return {"success": False, "error": f"Ingestion failed: {exc}"}

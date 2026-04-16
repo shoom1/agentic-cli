@@ -786,6 +786,11 @@ class _FakeKB:
 
     def __init__(self) -> None:
         self.calls: list[dict] = []
+        self.summary_calls: list[dict] = []
+
+    async def generate_summary(self, content: str, title: str = "") -> str:
+        self.summary_calls.append({"content": content, "title": title})
+        return "fake summary"
 
     def ingest_document(self, **kwargs):
         self.calls.append(kwargs)
@@ -793,7 +798,7 @@ class _FakeKB:
             id="doc-123",
             title=kwargs.get("title", ""),
             chunks=[object(), object(), object()],
-            summary="fake summary",
+            summary=kwargs.get("summary", "fake summary"),
         )
 
 

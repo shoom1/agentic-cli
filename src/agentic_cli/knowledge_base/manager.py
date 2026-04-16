@@ -377,30 +377,61 @@ class KnowledgeBaseManager:
 
         return extract_pdf_text(file_path)
 
-    def _generate_summary(self, content: str) -> str:
-        """Generate a summary for document content.
+    @staticmethod
+    def _truncate_summary(content: str) -> str:
+        """Return the deterministic fallback summary (first ~500 chars)."""
+        return truncate(content, 500) if content else ""
 
-        Uses the LLM summarizer from workflow context if available,
-        otherwise falls back to the first ~500 chars of content.
+    # Cap the amount of content we hand to the LLM summarizer. Long PDFs
+    # can easily exceed sensible prompt budgets, and the summary only
+    # needs the lead-in to be useful.
+    _SUMMARY_INPUT_CHAR_LIMIT = 12_000
+
+    _SUMMARY_PROMPT_TEMPLATE = (
+        "Summarize the following document in 2-3 sentences (max ~500 "
+        "characters). Focus on the main topic, key contributions, and "
+        "why the document is relevant. Return only the summary text "
+        "with no preamble or markdown.\n\n"
+        "Title: {title}\n\n"
+        "Content:\n---\n{content}\n---"
+    )
+
+    async def generate_summary(self, content: str, title: str = "") -> str:
+        """Generate a document summary via the registered LLM summarizer.
+
+        Falls back to the first ~500 chars of ``content`` if no summarizer
+        is registered, if the summarizer raises, or if it returns empty.
 
         Args:
             content: Full document text.
+            title: Document title, embedded in the prompt for context.
 
         Returns:
             Summary string (~500 chars).
         """
+        if not content:
+            return ""
+
         try:
-            from agentic_cli.workflow.service_registry import get_service, LLM_SUMMARIZER
+            from agentic_cli.workflow.service_registry import (
+                get_service,
+                LLM_SUMMARIZER,
+            )
+
             summarizer = get_service(LLM_SUMMARIZER)
             if summarizer is not None:
-                summary = summarizer.summarize(content, max_length=500)
+                capped = content[: self._SUMMARY_INPUT_CHAR_LIMIT]
+                prompt = self._SUMMARY_PROMPT_TEMPLATE.format(
+                    title=title or "(untitled)",
+                    content=capped,
+                )
+                summary = await summarizer.summarize(capped, prompt)
                 if summary:
-                    return summary
+                    return summary.strip()
         except Exception:
-            pass
+            logger.debug("kb_summary_generation_failed", exc_info=True)
 
-        # Fallback: first ~500 chars
-        return truncate(content, 500)
+        return self._truncate_summary(content)
 
     # ------------------------------------------------------------------
     # Document ingestion
@@ -417,6 +448,7 @@ class KnowledgeBaseManager:
         file_extension: str = ".pdf",
         chunk_size: int = 512,
         chunk_overlap: int = 50,
+        summary: str | None = None,
     ) -> Document:
         """Ingest a new document into the knowledge base.
 
@@ -430,12 +462,17 @@ class KnowledgeBaseManager:
             file_extension: Extension for stored file (default ".pdf").
             chunk_size: Size of chunks for embedding.
             chunk_overlap: Overlap between chunks.
+            summary: Optional pre-computed summary. When ``None``, falls
+                back to the deterministic truncation of ``content``.
+                Async callers that want an LLM-generated summary should
+                ``await self.generate_summary(...)`` first and pass the
+                result in here.
 
         Returns:
             The created Document object.
         """
-        # Generate summary (may call LLM — do outside lock)
-        summary = self._generate_summary(content) if content else ""
+        if summary is None:
+            summary = self._truncate_summary(content)
 
         # Create document
         doc = Document.create(

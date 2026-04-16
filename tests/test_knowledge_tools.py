@@ -425,6 +425,73 @@ class TestKBSummaryGeneration:
 
         assert doc.summary == content
 
+    async def test_ingest_tool_uses_llm_summarizer_when_available(self, kb):
+        """Tool-level ingest should invoke the registered async LLM summarizer
+        and store its output in Document.summary (not the truncate fallback)."""
+        from agentic_cli.workflow.service_registry import (
+            set_service_registry,
+            LLM_SUMMARIZER,
+        )
+        from agentic_cli.tools.knowledge_tools import _ingest_document_with_kb
+
+        received: dict = {}
+
+        class FakeSummarizer:
+            async def summarize(self, content: str, prompt: str) -> str:
+                received["content"] = content
+                received["prompt"] = prompt
+                return "FAKE_LLM_SUMMARY"
+
+        token = set_service_registry({LLM_SUMMARIZER: FakeSummarizer()})
+        try:
+            long_content = "This is a lengthy body. " * 50
+            result = await _ingest_document_with_kb(
+                kb,
+                content=long_content,
+                title="Test Paper",
+                source_type="user",
+            )
+        finally:
+            token.var.reset(token)
+
+        assert result["success"] is True
+        assert result["summary"] == "FAKE_LLM_SUMMARY"
+        doc = kb.get_document(result["document_id"])
+        assert doc.summary == "FAKE_LLM_SUMMARY"
+        # The prompt should mention the title so the LLM has context.
+        assert "Test Paper" in received["prompt"]
+        # The raw content should be passed through to the summarizer.
+        assert long_content in received["content"]
+
+    async def test_ingest_tool_falls_back_when_summarizer_errors(self, kb):
+        """If the LLM summarizer raises, ingest should fall back to truncation
+        rather than losing the document."""
+        from agentic_cli.workflow.service_registry import (
+            set_service_registry,
+            LLM_SUMMARIZER,
+        )
+        from agentic_cli.tools.knowledge_tools import _ingest_document_with_kb
+
+        class BrokenSummarizer:
+            async def summarize(self, content: str, prompt: str) -> str:
+                raise RuntimeError("LLM unavailable")
+
+        token = set_service_registry({LLM_SUMMARIZER: BrokenSummarizer()})
+        try:
+            content = "Fallback test content that should survive summarizer errors."
+            result = await _ingest_document_with_kb(
+                kb,
+                content=content,
+                title="Fallback Test",
+                source_type="user",
+            )
+        finally:
+            token.var.reset(token)
+
+        assert result["success"] is True
+        # Fallback is the first 500 chars of content.
+        assert result["summary"] == content
+
 
 # ============================================================================
 # Paper store migration tests
