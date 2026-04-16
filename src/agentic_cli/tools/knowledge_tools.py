@@ -103,9 +103,15 @@ def _extract_text_from_bytes(pdf_bytes: bytes) -> str:
     return extract_pdf_text(pdf_bytes)
 
 
-def _detect_extension(url: str) -> str:
-    """Detect file extension from URL."""
-    # Strip query params
+def _detect_extension(url: str, content_type: str = "") -> str:
+    """Detect file extension from URL and/or Content-Type header.
+
+    The Content-Type header is the authoritative source; URL suffix is
+    a fallback. Many services (arxiv, S3, CDNs) serve PDFs from URLs
+    that don't end in ``.pdf``.
+    """
+    if "application/pdf" in content_type:
+        return ".pdf"
     path = url.split("?")[0].split("#")[0]
     if path.endswith(".pdf"):
         return ".pdf"
@@ -305,8 +311,9 @@ async def _ingest_document_with_kb(
             except httpx.RequestError as e:
                 return {"success": False, "error": f"Failed to download: {e}"}
 
-            # Detect extension from URL
-            file_extension = _detect_extension(url_or_path)
+            # Detect extension from Content-Type header, fall back to URL
+            content_type = response.headers.get("content-type", "")
+            file_extension = _detect_extension(url_or_path, content_type)
 
             # Extract text if PDF
             if file_extension == ".pdf" and file_bytes:

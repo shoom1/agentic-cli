@@ -20,6 +20,15 @@ class EmbeddingService:
     Supports lazy loading to avoid loading the model until needed.
     """
 
+    @staticmethod
+    def is_available() -> bool:
+        """Check whether sentence-transformers can be imported."""
+        try:
+            import sentence_transformers  # noqa: F401
+            return True
+        except ImportError:
+            return False
+
     def __init__(
         self,
         model_name: str = "all-MiniLM-L6-v2",

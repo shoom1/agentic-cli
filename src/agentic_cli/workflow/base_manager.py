@@ -313,14 +313,12 @@ class BaseWorkflowManager(ABC):
 
             embedding_service = None
             if not self._settings.knowledge_base_use_mock:
-                try:
-                    from agentic_cli.knowledge_base.embeddings import EmbeddingService
+                from agentic_cli.knowledge_base.embeddings import EmbeddingService
+                if EmbeddingService.is_available():
                     embedding_service = EmbeddingService(
                         model_name=self._settings.embedding_model,
                         batch_size=self._settings.embedding_batch_size,
                     )
-                except ImportError:
-                    pass
             else:
                 from agentic_cli.knowledge_base._mocks import MockEmbeddingService
                 embedding_service = MockEmbeddingService()

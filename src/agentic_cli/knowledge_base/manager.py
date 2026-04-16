@@ -183,7 +183,7 @@ class KnowledgeBaseManager:
         Tries real implementations first; falls back to mocks if
         dependencies (sentence_transformers, faiss) are unavailable.
         """
-        if not self._use_mock:
+        if not self._use_mock and EmbeddingService.is_available():
             try:
                 emb = EmbeddingService(
                     model_name=embedding_model,
@@ -195,7 +195,8 @@ class KnowledgeBaseManager:
                 )
                 return emb, vs
             except ImportError:
-                self._use_mock = True
+                pass
+        self._use_mock = True
 
         from agentic_cli.knowledge_base._mocks import (
             MockEmbeddingService,
