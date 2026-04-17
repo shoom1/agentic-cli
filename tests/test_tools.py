@@ -1347,7 +1347,6 @@ class TestToolRegistryConsistency:
             "kb_ingest",
             "kb_read",
             "kb_list",
-            "open_document",
             # ArXiv (metadata only)
             "search_arxiv",
             "fetch_arxiv_paper",
@@ -1375,7 +1374,7 @@ class TestToolRegistryConsistency:
 
         registry = get_registry()
 
-        dangerous_tools = ["shell_executor", "execute_python", "open_document"]
+        dangerous_tools = ["shell_executor", "execute_python"]
         for tool_name in dangerous_tools:
             tool = registry.get(tool_name)
             if tool:
@@ -1497,7 +1496,7 @@ class TestToolRegistryConsistency:
 
         # File ops: 7 (read_file, diff_compare, grep, glob, list_dir, write_file, edit_file)
         # Web/Network: 2 (web_search, web_fetch)
-        # Knowledge: 8 (kb_search, kb_ingest, kb_read, kb_list, open_document, search_arxiv, fetch_arxiv_paper, ingest_arxiv_paper)
+        # Knowledge: 7 (kb_search, kb_ingest, kb_read, kb_list, search_arxiv, fetch_arxiv_paper, ingest_arxiv_paper)
         # Execution: 2 (execute_python, shell_executor)
         # Interaction: 1 (ask_clarification)
         # Memory: 2 (save_memory, search_memory)

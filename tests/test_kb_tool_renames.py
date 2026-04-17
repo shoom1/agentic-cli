@@ -40,3 +40,8 @@ def test_old_read_name_gone():
 def test_unified_search_dropped():
     import agentic_cli.tools as t
     assert not hasattr(t, "unified_search")
+
+
+def test_open_document_dropped():
+    import agentic_cli.tools as t
+    assert not hasattr(t, "open_document")

@@ -5,7 +5,6 @@ Provides tools for managing documents in the unified knowledge base:
 - kb_search: Semantic search across all documents
 - kb_read: Read a stored document (sidecar by default, full text with full=True)
 - kb_list: List documents with summaries
-- open_document: Open a document's file in the system viewer
 
 Each tool comes in two flavors that share a single implementation:
 
@@ -15,13 +14,10 @@ Each tool comes in two flavors that share a single implementation:
   the KB managers in a closure and call the same helpers.
 
 The helpers (``_search_kbs``, ``_ingest_document_with_kb``,
-``_read_document_from_kbs``, ``_list_documents_in_kbs``,
-``_open_document_in_kbs``) take the KB managers as explicit args so both
-call paths stay in sync.
+``_read_document_from_kbs``, ``_list_documents_in_kbs``) take the KB
+managers as explicit args so both call paths stay in sync.
 """
 
-import platform
-import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -45,19 +41,6 @@ from agentic_cli.workflow.service_registry import (
 
 # Max chars of extracted text to return via kb_read (full=True).
 READ_DOCUMENT_MAX_CHARS = 30_000
-
-
-# Extensions considered safe to open in the system viewer.
-# Excluded: .html (JS execution), .doc/.xls/.ppt (VBA macros),
-# .odt/.ods/.odp (LibreOffice macros), .docm/.xlsm/.pptm (Office macros).
-SAFE_OPEN_EXTENSIONS: frozenset[str] = frozenset({
-    # Documents
-    ".pdf", ".txt", ".md", ".csv", ".json", ".xml", ".rtf", ".epub",
-    # Modern Office (macro-free by design)
-    ".docx", ".xlsx", ".pptx",
-    # Images
-    ".png", ".jpg", ".jpeg", ".gif", ".svg", ".bmp", ".tiff", ".webp",
-})
 
 
 # ---------------------------------------------------------------------------
@@ -525,81 +508,6 @@ def _list_documents_in_kbs(
     }
 
 
-def _open_document_in_kbs(
-    kb_manager,
-    user_kb_manager,
-    doc_id_or_title: str,
-) -> dict[str, Any]:
-    """Shared implementation for open_document."""
-    doc, source_kb = _find_doc_in_kbs(kb_manager, user_kb_manager, doc_id_or_title)
-
-    if doc is None:
-        return {"success": False, "error": f"Document not found: {doc_id_or_title}"}
-
-    file_path = source_kb.get_file_path(doc.id)
-    if file_path is None:
-        return {"success": False, "error": f"No file stored for document: {doc.title}"}
-
-    ext = file_path.suffix.lower()
-    if ext not in SAFE_OPEN_EXTENSIONS:
-        logger.warning(
-            "open_document_blocked_extension",
-            file_path=str(file_path),
-            title=doc.title,
-            extension=ext,
-        )
-        return {
-            "success": False,
-            "error": f"File type '{ext}' is not allowed. Supported: documents, images, and office files.",
-        }
-
-    system = platform.system()
-    try:
-        if system == "Darwin":
-            cmd = ["open", str(file_path)]
-        elif system == "Linux":
-            cmd = ["xdg-open", str(file_path)]
-        elif system == "Windows":
-            cmd = ["start", "", str(file_path)]
-        else:
-            return {"success": False, "error": f"Unsupported platform: {system}"}
-
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=10,
-            shell=(system == "Windows"),
-        )
-        if result.returncode != 0:
-            stderr = result.stderr.strip()
-            logger.warning(
-                "open_document_failed",
-                file_path=str(file_path),
-                returncode=result.returncode,
-                stderr=stderr,
-            )
-            return {"success": False, "error": f"Failed to open file: {stderr or 'unknown error'}"}
-    except subprocess.TimeoutExpired:
-        # open/xdg-open may block if viewer takes time — treat as success
-        pass
-    except OSError as e:
-        return {"success": False, "error": f"Failed to open file: {e}"}
-
-    logger.info(
-        "open_document_success",
-        file_path=str(file_path),
-        title=doc.title,
-        extension=ext,
-    )
-    return {
-        "success": True,
-        "title": doc.title,
-        "file_path": str(file_path),
-        "message": f"Opened: {doc.title}",
-    }
-
-
 # ---------------------------------------------------------------------------
 # Registry-bound helper (back-compat for tests/callers that don't have
 # explicit KB handles)
@@ -764,28 +672,5 @@ def kb_list(
         return {"success": False, "error": "kb manager not available"}
     user_kb = get_service(USER_KB_MANAGER)
     return _list_documents_in_kbs(kb, user_kb, query, source_type, limit)
-
-
-@register_tool(
-    category=ToolCategory.KNOWLEDGE,
-    permission_level=PermissionLevel.DANGEROUS,
-    description="Open a document's stored file (e.g. PDF) in the system default viewer. Provide a document ID or title.",
-)
-def open_document(
-    doc_id_or_title: str,
-) -> dict[str, Any]:
-    """Open a document's file in the system viewer.
-
-    Args:
-        doc_id_or_title: Document ID or title substring.
-
-    Returns:
-        Dictionary with result.
-    """
-    kb = get_service(KB_MANAGER)
-    if kb is None:
-        return {"success": False, "error": f"Document not found: {doc_id_or_title}"}
-    user_kb = get_service(USER_KB_MANAGER)
-    return _open_document_in_kbs(kb, user_kb, doc_id_or_title)
 
 

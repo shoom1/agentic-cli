@@ -346,12 +346,6 @@ class TestListDocuments:
         assert format_tool_summary("kb_list", result) == "0 documents"
 
 
-class TestOpenDocument:
-    def test_basic(self):
-        result = {"success": True, "title": "My Paper", "file_path": "/tmp/abc.pdf"}
-        assert format_tool_summary("open_document", result) == "Opened: My Paper"
-
-
 # ---------------------------------------------------------------------------
 # Fallback / defensive behaviour
 # ---------------------------------------------------------------------------

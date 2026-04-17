@@ -155,19 +155,16 @@ def make_kb_tools(kb_manager, user_kb_manager=None) -> list[Callable]:
         user_kb_manager: Optional user-scoped KnowledgeBaseManager.
 
     Returns:
-        [kb_search, kb_ingest, kb_read,
-         kb_list, open_document]
+        [kb_search, kb_ingest, kb_read, kb_list]
     """
     from agentic_cli.tools.knowledge_tools import (
         READ_DOCUMENT_MAX_CHARS,
         _ingest_document_with_kb,
         _list_documents_in_kbs,
-        _open_document_in_kbs,
         _read_document_from_kbs,
         _search_kbs,
         kb_ingest as _orig_ingest,
         kb_list as _orig_list,
-        open_document as _orig_open,
         kb_read as _orig_read,
         kb_search as _orig_search,
     )
@@ -219,9 +216,6 @@ def make_kb_tools(kb_manager, user_kb_manager=None) -> list[Callable]:
             kb_manager, user_kb_manager, query, source_type, limit
         )
 
-    def open_document(doc_id_or_title: str) -> dict[str, Any]:
-        return _open_document_in_kbs(kb_manager, user_kb_manager, doc_id_or_title)
-
     kb_search.__name__ = "kb_search"
     kb_search.__doc__ = _orig_search.__doc__
     kb_ingest.__name__ = "kb_ingest"
@@ -230,10 +224,8 @@ def make_kb_tools(kb_manager, user_kb_manager=None) -> list[Callable]:
     kb_read.__doc__ = _orig_read.__doc__
     kb_list.__name__ = "kb_list"
     kb_list.__doc__ = _orig_list.__doc__
-    open_document.__name__ = "open_document"
-    open_document.__doc__ = _orig_open.__doc__
 
-    return [kb_search, kb_ingest, kb_read, kb_list, open_document]
+    return [kb_search, kb_ingest, kb_read, kb_list]
 
 
 # ---------------------------------------------------------------------------

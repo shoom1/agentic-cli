@@ -147,11 +147,6 @@ def _list_documents(r: dict) -> str:
     return f"{count} document{'s' if count != 1 else ''}"
 
 
-def _open_document(r: dict) -> str:
-    title = r.get("title", "")
-    return f"Opened: {truncate(title, 80)}"
-
-
 _TOOL_FORMATTERS: dict[str, Callable[[dict[str, Any]], str]] = {
     "read_file": _read_file,
     "diff_compare": _diff_compare,
@@ -172,7 +167,6 @@ _TOOL_FORMATTERS: dict[str, Callable[[dict[str, Any]], str]] = {
     "kb_ingest": _ingest_document,
     "kb_read": _kb_read,
     "kb_list": _list_documents,
-    "open_document": _open_document,
 }
 
 
