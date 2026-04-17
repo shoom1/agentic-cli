@@ -155,18 +155,23 @@ def make_kb_tools(kb_manager, user_kb_manager=None) -> list[Callable]:
         user_kb_manager: Optional user-scoped KnowledgeBaseManager.
 
     Returns:
-        [kb_search, kb_ingest, kb_read, kb_list]
+        [kb_search, kb_ingest, kb_read, kb_list, kb_write_concept, kb_search_concepts]
+        (six tools — the concept pages pair was added in Phase 2.)
     """
     from agentic_cli.tools.knowledge_tools import (
         READ_DOCUMENT_MAX_CHARS,
         _ingest_document_with_kb,
         _list_documents_in_kbs,
         _read_document_from_kbs,
+        _search_concepts_with_kb,
         _search_kbs,
+        _write_concept_with_kb,
         kb_ingest as _orig_ingest,
         kb_list as _orig_list,
         kb_read as _orig_read,
         kb_search as _orig_search,
+        kb_search_concepts as _orig_search_concepts,
+        kb_write_concept as _orig_write_concept,
     )
 
     def kb_search(
@@ -216,6 +221,25 @@ def make_kb_tools(kb_manager, user_kb_manager=None) -> list[Callable]:
             kb_manager, user_kb_manager, query, source_type, limit
         )
 
+    async def kb_write_concept(
+        title: str,
+        body: str,
+        sources: list[str],
+        slug: str = "",
+    ) -> dict[str, Any]:
+        return await _write_concept_with_kb(
+            kb_manager, user_kb_manager,
+            title=title, body=body, sources=sources, slug=slug,
+        )
+
+    async def kb_search_concepts(
+        query: str,
+        limit: int = 10,
+    ) -> dict[str, Any]:
+        return await _search_concepts_with_kb(
+            kb_manager, user_kb_manager, query=query, limit=limit,
+        )
+
     kb_search.__name__ = "kb_search"
     kb_search.__doc__ = _orig_search.__doc__
     kb_ingest.__name__ = "kb_ingest"
@@ -224,8 +248,19 @@ def make_kb_tools(kb_manager, user_kb_manager=None) -> list[Callable]:
     kb_read.__doc__ = _orig_read.__doc__
     kb_list.__name__ = "kb_list"
     kb_list.__doc__ = _orig_list.__doc__
+    kb_write_concept.__name__ = "kb_write_concept"
+    kb_write_concept.__doc__ = _orig_write_concept.__doc__
+    kb_search_concepts.__name__ = "kb_search_concepts"
+    kb_search_concepts.__doc__ = _orig_search_concepts.__doc__
 
-    return [kb_search, kb_ingest, kb_read, kb_list]
+    return [
+        kb_search,
+        kb_ingest,
+        kb_read,
+        kb_list,
+        kb_write_concept,
+        kb_search_concepts,
+    ]
 
 
 # ---------------------------------------------------------------------------
