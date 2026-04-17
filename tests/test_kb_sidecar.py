@@ -42,7 +42,7 @@ class TestRenderSidecarMarkdown:
         assert "id: " + doc.id in md
         assert "title: Attention Is All You Need" in md
         assert "source_type: arxiv" in md
-        assert "arxiv_id: '1706.03762'" in md or "arxiv_id: 1706.03762" in md
+        assert "arxiv_id: 1706.03762" in md
         assert "ingested_at: 2026-04-16T10:23:00" in md
         # Body sections
         assert "## Summary" in md

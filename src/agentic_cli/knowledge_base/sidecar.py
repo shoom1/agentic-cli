@@ -27,6 +27,12 @@ def render_sidecar_markdown(doc: Document, payload: dict[str, Any]) -> str:
 
     Returns:
         Markdown string with YAML frontmatter and body sections.
+
+    Precondition:
+        Author names must not contain commas, colons, or brackets — they
+        are emitted in YAML flow-list form (``authors: [a, b, c]``) which
+        does not survive those characters. This matches the design spec
+        and is not enforced at runtime.
     """
     fm_lines = ["---"]
     fm_lines.append(f"id: {doc.id}")
@@ -74,9 +80,11 @@ def render_sidecar_markdown(doc: Document, payload: dict[str, Any]) -> str:
 def parse_sidecar_frontmatter(md: str) -> dict[str, str]:
     """Parse the YAML frontmatter block out of a sidecar string.
 
-    Returns a flat dict of string keys to string values. List/structured
-    values are returned as their raw markdown representation. Used for
-    audit/debug, not as a generic YAML parser.
+    Returns a flat dict of string keys to string values. Any line without
+    a colon is silently skipped — this is a deliberate non-recursive
+    parser intended for round-tripping the keys this module emits, not a
+    general YAML implementation. Returns an empty dict if no frontmatter
+    fence is found.
     """
     m = _FRONTMATTER_RE.match(md)
     if not m:
@@ -116,15 +124,10 @@ def _index_line(d: Document) -> str:
     arxiv_id = d.metadata.get("arxiv_id") if d.metadata else None
     authors = d.metadata.get("authors") if d.metadata else None
     date = d.created_at.date().isoformat()
-    if arxiv_id:
-        prefix = f"[{arxiv_id}]"
-    else:
-        prefix = "-"
-    parts = [prefix, d.title]
+
+    head = f"[{arxiv_id}] {d.title}" if arxiv_id else d.title
+    parts = [head]
     if authors:
         parts.append(f"— {authors[0]} et al.")
     parts.append(f"— {date}")
-    line = " ".join(parts)
-    if not line.startswith("- "):
-        line = "- " + line
-    return line
+    return "- " + " ".join(parts)
