@@ -9,6 +9,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 
@@ -102,3 +103,152 @@ def parse_concept_markdown(md: str) -> dict[str, Any] | None:
         "sources": sources,
         "body": m.group(2).lstrip("\n"),
     }
+
+
+class ConceptStore:
+    """File-backed store for agent-curated concept pages.
+
+    All concepts live at ``<base_dir>/{slug}.md``. No database; each
+    write is an atomic file replace. Search is grep-based.
+    """
+
+    def __init__(self, base_dir: Path) -> None:
+        self.base_dir = Path(base_dir)
+
+    def _concept_path(self, slug: str) -> Path:
+        return self.base_dir / f"{slug}.md"
+
+    def write(
+        self,
+        title: str,
+        body: str,
+        sources: list[str],
+        slug: str = "",
+        valid_ids_check: "Any | None" = None,
+    ) -> dict[str, Any]:
+        """Create or overwrite a concept page.
+
+        Args:
+            title: Human-readable title.
+            body: Markdown body (with or without its own ## sections).
+            sources: Document IDs this concept cites. Must be non-empty
+                after validation — an empty ``sources`` list or all-IDs-
+                invalid returns ``{"success": False, ...}``.
+            slug: Optional explicit slug. If empty, auto-generated from
+                ``title`` and collision-suffixed on conflict. If explicit
+                and already exists, the existing concept is overwritten
+                (body replaced, sources merged as union).
+            valid_ids_check: Optional ``Callable[[str], bool]``. When
+                provided, source IDs that fail the check are dropped and
+                returned in ``invalid_sources``. When all sources are
+                invalid, the write fails.
+
+        Returns:
+            Dict with keys ``success``, ``slug``, ``path``, ``action``
+            (``"created"`` or ``"updated"``), and ``invalid_sources``.
+        """
+        from agentic_cli.file_utils import atomic_write_text
+
+        valid_sources, invalid = _partition_sources(sources, valid_ids_check)
+
+        if not valid_sources:
+            return {
+                "success": False,
+                "error": (
+                    "concept page requires at least one valid source "
+                    "document id; got none"
+                ),
+                "invalid_sources": invalid,
+            }
+
+        self.base_dir.mkdir(parents=True, exist_ok=True)
+
+        if slug:
+            # Explicit slug: overwrite if exists, merge sources
+            existing = self.read(slug)
+            action = "updated" if existing is not None else "created"
+            if existing is not None:
+                merged: list[str] = list(existing["sources"])
+                for s in valid_sources:
+                    if s not in merged:
+                        merged.append(s)
+                valid_sources = merged
+                created_at = _parse_iso(existing["created_at"]) or datetime.now()
+            else:
+                created_at = datetime.now()
+            final_slug = slug
+        else:
+            # Auto slug: collision-suffix if exists (never overwrites)
+            base_slug = slug_from_title(title)
+            final_slug = self._resolve_collision(base_slug)
+            created_at = datetime.now()
+            action = "created"
+
+        now = datetime.now()
+        path = self._concept_path(final_slug)
+        md = render_concept_markdown(
+            slug=final_slug,
+            title=title,
+            body=body,
+            sources=valid_sources,
+            created_at=created_at,
+            updated_at=now,
+        )
+        atomic_write_text(path, md)
+
+        return {
+            "success": True,
+            "slug": final_slug,
+            "path": str(path),
+            "action": action,
+            "invalid_sources": invalid,
+        }
+
+    def read(self, slug: str) -> dict[str, Any] | None:
+        """Load a concept page by slug. Returns None if missing."""
+        path = self._concept_path(slug)
+        if not path.exists():
+            return None
+        return parse_concept_markdown(path.read_text())
+
+    def _resolve_collision(self, base_slug: str) -> str:
+        """Return ``base_slug`` if free, else ``base_slug-2``, ``-3``, ..."""
+        if not self._concept_path(base_slug).exists():
+            return base_slug
+        for suffix in range(2, 1000):
+            candidate = f"{base_slug}-{suffix}"
+            if not self._concept_path(candidate).exists():
+                return candidate
+        raise RuntimeError(
+            f"exhausted collision suffixes 2..999 for slug {base_slug!r}"
+        )
+
+
+def _partition_sources(
+    sources: list[str],
+    valid_ids_check: "Any | None",
+) -> tuple[list[str], list[str]]:
+    """Split a sources list into (valid, invalid) using the check callable.
+
+    When ``valid_ids_check`` is None, all sources are considered valid.
+    De-duplicates while preserving order.
+    """
+    seen: set[str] = set()
+    valid: list[str] = []
+    invalid: list[str] = []
+    for s in sources:
+        if not s or s in seen:
+            continue
+        seen.add(s)
+        if valid_ids_check is None or valid_ids_check(s):
+            valid.append(s)
+        else:
+            invalid.append(s)
+    return valid, invalid
+
+
+def _parse_iso(s: str) -> datetime | None:
+    try:
+        return datetime.fromisoformat(s)
+    except (ValueError, TypeError):
+        return None

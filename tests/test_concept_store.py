@@ -100,3 +100,34 @@ class TestParseConceptMarkdown:
     def test_missing_frontmatter_returns_none(self):
         from agentic_cli.knowledge_base.concepts import parse_concept_markdown
         assert parse_concept_markdown("# Just a heading\n\nbody") is None
+
+
+class TestConceptStoreWrite:
+    def test_write_creates_new_concept(self, tmp_path):
+        from agentic_cli.knowledge_base.concepts import ConceptStore
+
+        store = ConceptStore(tmp_path / "concepts")
+        result = store.write(
+            title="Diffusion Models",
+            body="Synthesis text.",
+            sources=["doc-a"],
+            slug="diffusion-models",
+        )
+
+        assert result["action"] == "created"
+        assert result["slug"] == "diffusion-models"
+        assert result["path"].endswith("diffusion-models.md")
+        assert result["invalid_sources"] == []
+
+        on_disk = (tmp_path / "concepts" / "diffusion-models.md").read_text()
+        assert "slug: diffusion-models" in on_disk
+        assert "Synthesis text." in on_disk
+        assert "sources: [doc-a]" in on_disk
+
+    def test_write_creates_directory_if_missing(self, tmp_path):
+        from agentic_cli.knowledge_base.concepts import ConceptStore
+
+        base = tmp_path / "does-not-exist-yet" / "concepts"
+        store = ConceptStore(base)
+        store.write(title="X", body="b", sources=["a"], slug="x")
+        assert (base / "x.md").exists()
