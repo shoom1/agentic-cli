@@ -413,8 +413,7 @@ async def _read_document_from_kbs(
     # Sidecar mode (default). Lazily generate if missing.
     sidecar_path = source_kb._sidecar_path(doc.id)
     if not sidecar_path.exists():
-        import asyncio as _asyncio
-        lock = source_kb._sidecar_locks.setdefault(doc.id, _asyncio.Lock())
+        lock = source_kb.get_or_create_sidecar_lock(doc.id)
         async with lock:
             if not sidecar_path.exists():
                 # Resolve content the same way full=True does — extract from

@@ -602,3 +602,74 @@ class TestDeleteCleansLockDict:
 
         kb.delete_document(d.id)
         assert d.id not in kb._sidecar_locks
+
+
+class TestGetOrCreateSidecarLock:
+    """The public accessor replaces direct access to _sidecar_locks and is
+    the single path through which per-doc async locks are created, so
+    concurrent callers (backfill + lazy kb_read) always see the same lock.
+    """
+
+    @pytest.fixture
+    def kb(self, tmp_path):
+        return _make_kb(tmp_path)
+
+    def test_returns_same_lock_on_repeat_calls(self, kb):
+        import asyncio
+
+        lock1 = kb.get_or_create_sidecar_lock("doc-a")
+        lock2 = kb.get_or_create_sidecar_lock("doc-a")
+        assert lock1 is lock2
+        assert isinstance(lock1, asyncio.Lock)
+
+    def test_returns_distinct_locks_for_different_docs(self, kb):
+        lock_a = kb.get_or_create_sidecar_lock("doc-a")
+        lock_b = kb.get_or_create_sidecar_lock("doc-b")
+        assert lock_a is not lock_b
+
+    async def test_lock_is_usable_for_serialization(self, kb):
+        """The returned lock actually serializes — two tasks that both
+        `async with` it run sequentially, not interleaved.
+        """
+        import asyncio
+
+        lock = kb.get_or_create_sidecar_lock("doc-a")
+        order: list[str] = []
+
+        async def worker(name: str, hold_ms: int):
+            async with lock:
+                order.append(f"{name}:start")
+                await asyncio.sleep(hold_ms / 1000)
+                order.append(f"{name}:end")
+
+        await asyncio.gather(worker("A", 20), worker("B", 5))
+        # A must fully finish before B starts (or vice versa)
+        assert order in (
+            ["A:start", "A:end", "B:start", "B:end"],
+            ["B:start", "B:end", "A:start", "A:end"],
+        )
+
+    async def test_kb_read_lazy_path_uses_accessor(self, kb):
+        """The lazy sidecar generation path in knowledge_tools must go
+        through the public accessor, not reach into `_sidecar_locks`
+        directly.
+        """
+        from agentic_cli.tools.knowledge_tools import _read_document_from_kbs
+        from unittest.mock import patch
+
+        doc = kb.ingest_document(
+            content="body", title="X", source_type=SourceType.USER,
+        )
+        kb._sidecar_path(doc.id).unlink()
+
+        original = kb.get_or_create_sidecar_lock
+        seen: list[str] = []
+
+        def spy(doc_id: str):
+            seen.append(doc_id)
+            return original(doc_id)
+
+        with patch.object(kb, "get_or_create_sidecar_lock", side_effect=spy):
+            await _read_document_from_kbs(kb, None, doc.id)
+
+        assert doc.id in seen
