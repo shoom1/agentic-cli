@@ -82,3 +82,72 @@ class TestParseSidecarFrontmatter:
     def test_returns_empty_dict_when_no_frontmatter(self):
         from agentic_cli.knowledge_base.sidecar import parse_sidecar_frontmatter
         assert parse_sidecar_frontmatter("# Just a heading\n\nbody") == {}
+
+
+import pytest
+
+from tests.test_knowledge_tools import _make_kb
+
+
+class TestGenerateSidecarPayload:
+    @pytest.fixture
+    def kb(self, tmp_path):
+        return _make_kb(tmp_path)
+
+    async def test_returns_structured_payload_from_llm(self, kb):
+        from agentic_cli.workflow.service_registry import (
+            set_service_registry,
+            LLM_SUMMARIZER,
+        )
+
+        class FakeSummarizer:
+            async def summarize(self, content: str, prompt: str) -> str:
+                return (
+                    "SUMMARY: Self-attention suffices.\n"
+                    "CLAIMS:\n"
+                    "- Self-attention alone is enough.\n"
+                    "- 28.4 BLEU on WMT14.\n"
+                    "ENTITIES:\n"
+                    "Models: Transformer\n"
+                    "Datasets: WMT14\n"
+                )
+
+        token = set_service_registry({LLM_SUMMARIZER: FakeSummarizer()})
+        try:
+            payload = await kb.generate_sidecar_payload(
+                "Long body text here.",
+                title="Attention Is All You Need",
+            )
+        finally:
+            token.var.reset(token)
+
+        assert payload["summary"] == "Self-attention suffices."
+        assert "Self-attention alone is enough." in payload["claims"]
+        assert "28.4 BLEU on WMT14." in payload["claims"]
+        assert payload["entities"]["Models"] == ["Transformer"]
+        assert payload["entities"]["Datasets"] == ["WMT14"]
+
+    async def test_falls_back_when_no_summarizer(self, kb):
+        payload = await kb.generate_sidecar_payload("body text", title="t")
+        assert payload["summary"] == "body text"
+        assert payload["claims"] == []
+        assert payload["entities"] == {}
+
+    async def test_falls_back_when_summarizer_errors(self, kb):
+        from agentic_cli.workflow.service_registry import (
+            set_service_registry,
+            LLM_SUMMARIZER,
+        )
+
+        class BoomSummarizer:
+            async def summarize(self, content: str, prompt: str) -> str:
+                raise RuntimeError("boom")
+
+        token = set_service_registry({LLM_SUMMARIZER: BoomSummarizer()})
+        try:
+            payload = await kb.generate_sidecar_payload("body text", title="t")
+        finally:
+            token.var.reset(token)
+        assert payload["summary"] == "body text"
+        assert payload["claims"] == []
+        assert payload["entities"] == {}

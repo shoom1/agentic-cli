@@ -434,6 +434,105 @@ class KnowledgeBaseManager:
 
         return self._truncate_summary(content)
 
+    _SIDECAR_PROMPT_TEMPLATE = (
+        "Extract a structured payload from the document below. "
+        "Return PLAIN TEXT in exactly this layout:\n"
+        "SUMMARY: <2-3 sentence summary, max ~500 chars>\n"
+        "CLAIMS:\n"
+        "- <one specific claim>\n"
+        "- <one specific claim>\n"
+        "...\n"
+        "ENTITIES:\n"
+        "<KindLabel>: <comma-separated names>\n"
+        "<KindLabel>: <comma-separated names>\n"
+        "...\n"
+        "Use kind labels like Models, Datasets, Methods, Authors, Tools as relevant. "
+        "Omit any section that has no real content. "
+        "Return only the structured text, no preamble or markdown.\n\n"
+        "Title: {title}\n\n"
+        "Content:\n---\n{content}\n---"
+    )
+
+    async def generate_sidecar_payload(
+        self, content: str, title: str = ""
+    ) -> dict[str, Any]:
+        """Generate the structured payload for a document sidecar.
+
+        Returns a dict with keys ``summary`` (str), ``claims`` (list[str]),
+        and ``entities`` (dict[str, list[str]]). Falls back to
+        ``{summary: truncate(content), claims: [], entities: {}}`` if no
+        summarizer is registered or the LLM call fails.
+        """
+        fallback = {
+            "summary": self._truncate_summary(content),
+            "claims": [],
+            "entities": {},
+        }
+        if not content:
+            return fallback
+
+        try:
+            from agentic_cli.workflow.service_registry import (
+                get_service,
+                LLM_SUMMARIZER,
+            )
+
+            summarizer = get_service(LLM_SUMMARIZER)
+            if summarizer is None:
+                return fallback
+
+            capped = content[: self._SUMMARY_INPUT_CHAR_LIMIT]
+            prompt = self._SIDECAR_PROMPT_TEMPLATE.format(
+                title=title or "(untitled)",
+                content=capped,
+            )
+            raw = await summarizer.summarize(capped, prompt)
+        except Exception:
+            logger.debug("kb_sidecar_payload_failed", exc_info=True)
+            return fallback
+
+        return self._parse_sidecar_response(raw) or fallback
+
+    @staticmethod
+    def _parse_sidecar_response(raw: str) -> dict[str, Any] | None:
+        """Parse the SUMMARY/CLAIMS/ENTITIES blocks. Returns None on garbage."""
+        if not raw:
+            return None
+        summary = ""
+        claims: list[str] = []
+        entities: dict[str, list[str]] = {}
+        section = None
+        for raw_line in raw.splitlines():
+            line = raw_line.rstrip()
+            if not line:
+                continue
+            upper = line.upper()
+            if upper.startswith("SUMMARY:"):
+                section = "summary"
+                summary = line.split(":", 1)[1].strip()
+                continue
+            if upper.startswith("CLAIMS:"):
+                section = "claims"
+                continue
+            if upper.startswith("ENTITIES:"):
+                section = "entities"
+                continue
+            if section == "summary":
+                summary = (summary + " " + line.strip()).strip()
+            elif section == "claims":
+                stripped = line.lstrip("-* ").strip()
+                if stripped:
+                    claims.append(stripped)
+            elif section == "entities":
+                if ":" in line:
+                    kind, _, names = line.partition(":")
+                    items = [n.strip() for n in names.split(",") if n.strip()]
+                    if items:
+                        entities[kind.strip()] = items
+        if not summary and not claims and not entities:
+            return None
+        return {"summary": summary, "claims": claims, "entities": entities}
+
     # ------------------------------------------------------------------
     # Document ingestion
     # ------------------------------------------------------------------
