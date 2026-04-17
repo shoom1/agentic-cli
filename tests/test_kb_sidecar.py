@@ -178,3 +178,55 @@ class TestGenerateSidecarPayload:
         assert payload["summary"] == "ok."
         assert payload["claims"] == ["one"]
         assert payload["entities"] == {"Models": ["A", "B"]}
+
+
+class TestSidecarWrittenOnIngest:
+    @pytest.fixture
+    def kb(self, tmp_path):
+        return _make_kb(tmp_path)
+
+    async def test_ingest_writes_sidecar_with_llm_payload(self, kb):
+        from agentic_cli.workflow.service_registry import (
+            set_service_registry,
+            LLM_SUMMARIZER,
+        )
+        from agentic_cli.tools.knowledge_tools import _ingest_document_with_kb
+
+        class FakeSummarizer:
+            async def summarize(self, content: str, prompt: str) -> str:
+                return (
+                    "SUMMARY: A short summary.\n"
+                    "CLAIMS:\n- Claim one.\n- Claim two.\n"
+                    "ENTITIES:\nModels: Foo\n"
+                )
+
+        token = set_service_registry({LLM_SUMMARIZER: FakeSummarizer()})
+        try:
+            result = await _ingest_document_with_kb(
+                kb, content="body", title="Test", source_type="user",
+            )
+        finally:
+            token.var.reset(token)
+
+        assert result["success"] is True
+        sidecar_path = kb.documents_dir / f"{result['document_id']}.md"
+        assert sidecar_path.exists()
+        text = sidecar_path.read_text()
+        assert "## Summary" in text
+        assert "A short summary." in text
+        assert "## Key Claims" in text
+        assert "- Claim one." in text
+        assert "## Key Entities" in text
+        assert "Models: Foo" in text
+
+    def test_direct_ingest_writes_sidecar_with_truncation_fallback(self, kb):
+        # Sync direct path: no summarizer, no payload — sidecar still written
+        # with summary-only content.
+        doc = kb.ingest_document(
+            content="raw body content",
+            title="Direct Test",
+            source_type=__import__("agentic_cli.knowledge_base.models", fromlist=["SourceType"]).SourceType.USER,
+        )
+        sidecar_path = kb.documents_dir / f"{doc.id}.md"
+        assert sidecar_path.exists()
+        assert "## Summary" in sidecar_path.read_text()

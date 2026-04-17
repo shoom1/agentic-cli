@@ -440,7 +440,7 @@ class TestKBSummaryGeneration:
             async def summarize(self, content: str, prompt: str) -> str:
                 received["content"] = content
                 received["prompt"] = prompt
-                return "FAKE_LLM_SUMMARY"
+                return "SUMMARY: FAKE_LLM_SUMMARY"
 
         token = set_service_registry({LLM_SUMMARIZER: FakeSummarizer()})
         try:

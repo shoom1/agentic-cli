@@ -255,6 +255,30 @@ class KnowledgeBaseManager:
         if path.exists():
             path.unlink()
 
+    def _sidecar_path(self, doc_id: str) -> Path:
+        return self.documents_dir / f"{doc_id}.md"
+
+    def _write_sidecar(
+        self, doc: Document, payload: dict[str, Any] | None = None
+    ) -> Path:
+        """Write the per-document markdown sidecar.
+
+        If ``payload`` is None, falls back to a summary-only payload built
+        from ``doc.summary``. Idempotent — overwrites existing sidecar.
+        """
+        from agentic_cli.knowledge_base.sidecar import render_sidecar_markdown
+
+        if payload is None:
+            payload = {"summary": doc.summary or "", "claims": [], "entities": {}}
+        path = self._sidecar_path(doc.id)
+        path.write_text(render_sidecar_markdown(doc, payload))
+        return path
+
+    def _delete_sidecar(self, doc_id: str) -> None:
+        path = self._sidecar_path(doc_id)
+        if path.exists():
+            path.unlink()
+
     def _load_metadata(self) -> None:
         """Load document metadata from disk.
 
@@ -550,6 +574,7 @@ class KnowledgeBaseManager:
         chunk_size: int = 512,
         chunk_overlap: int = 50,
         summary: str | None = None,
+        sidecar_payload: dict[str, Any] | None = None,
     ) -> Document:
         """Ingest a new document into the knowledge base.
 
@@ -626,6 +651,7 @@ class KnowledgeBaseManager:
 
             # Persist (content in per-doc file, headers in metadata index)
             self._save_document_content(doc)
+            self._write_sidecar(doc, sidecar_payload)
             self._save_metadata()
             self._vector_store.save()
 
@@ -828,6 +854,7 @@ class KnowledgeBaseManager:
 
             # Persist
             self._delete_document_content(doc_id)
+            self._delete_sidecar(doc_id)
             self._save_metadata()
             self._vector_store.save()
 
