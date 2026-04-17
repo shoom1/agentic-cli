@@ -14,7 +14,9 @@ Auto-migrated to v2 on first load.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import re
 import threading
 import time
 from datetime import datetime
@@ -31,7 +33,7 @@ from agentic_cli.knowledge_base.models import (
 from agentic_cli.knowledge_base.vector_store import VectorStore
 from agentic_cli.constants import truncate
 from agentic_cli.logging import Loggers
-from agentic_cli.persistence._utils import atomic_write_json
+from agentic_cli.file_utils import atomic_write_json, atomic_write_text
 
 if TYPE_CHECKING:
     from agentic_cli.config import BaseSettings
@@ -40,6 +42,12 @@ logger = Loggers.knowledge_base()
 
 # Current persistence format version
 _FORMAT_VERSION = 3
+
+
+def _utc_iso_now() -> str:
+    """Return current UTC time as ISO-8601 with a trailing 'Z'."""
+    from datetime import timezone
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def matches_document_filters(doc: Document, filters: dict[str, Any]) -> bool:
@@ -111,6 +119,9 @@ class KnowledgeBaseManager:
             vector_store: Optional pre-configured vector store.
         """
         self._lock = threading.Lock()
+        self._sidecar_locks: dict[str, asyncio.Lock] = {}
+        self._backfill_running: bool = False
+        self._concepts_store: "ConceptStore | None" = None
         self._settings = settings
         self._use_mock = use_mock
 
@@ -123,9 +134,11 @@ class KnowledgeBaseManager:
             if settings:
                 embedding_model = settings.embedding_model
                 batch_size = settings.embedding_batch_size
+                embedding_device = settings.embedding_device
             else:
                 embedding_model = "all-MiniLM-L6-v2"
                 batch_size = 32
+                embedding_device = "auto"
         elif settings:
             # Get paths from settings
             self.kb_dir = settings.knowledge_base_dir
@@ -133,6 +146,7 @@ class KnowledgeBaseManager:
             self.embeddings_dir = settings.knowledge_base_embeddings_dir
             embedding_model = settings.embedding_model
             batch_size = settings.embedding_batch_size
+            embedding_device = settings.embedding_device
         else:
             # Fallback defaults for standalone use
             self.kb_dir = Path.home() / ".agentic" / "knowledge_base"
@@ -140,6 +154,7 @@ class KnowledgeBaseManager:
             self.embeddings_dir = self.kb_dir / "embeddings"
             embedding_model = "all-MiniLM-L6-v2"
             batch_size = 32
+            embedding_device = "auto"
 
         self.metadata_path = self.kb_dir / "metadata.json"
         self.files_dir = self.kb_dir / "files"
@@ -156,7 +171,7 @@ class KnowledgeBaseManager:
             self._vector_store = vector_store
         else:
             self._embedding_service, self._vector_store = self._create_services(
-                embedding_model, batch_size
+                embedding_model, batch_size, embedding_device
             )
 
         # Load document metadata
@@ -164,20 +179,38 @@ class KnowledgeBaseManager:
         self._chunks: dict[str, DocumentChunk] = {}
         self._load_metadata()
 
+        # BM25 index for hybrid search
+        self._bm25_index = None
+        try:
+            from agentic_cli.knowledge_base.bm25_index import create_bm25_index
+            self._bm25_index = create_bm25_index(use_mock=use_mock)
+            if self.embeddings_dir.exists():
+                self._bm25_index.load(self.embeddings_dir)
+        except Exception:
+            logger.debug("bm25_init_skipped")
+
+    @property
+    def concepts(self) -> "ConceptStore":
+        """Lazy-loaded ConceptStore pointed at ``<kb_dir>/concepts/``."""
+        if self._concepts_store is None:
+            from agentic_cli.knowledge_base.concepts import ConceptStore
+            self._concepts_store = ConceptStore(self.kb_dir / "concepts")
+        return self._concepts_store
 
     def _create_services(
-        self, embedding_model: str, batch_size: int
+        self, embedding_model: str, batch_size: int, embedding_device: str = "auto"
     ) -> tuple[Any, Any]:
         """Create embedding service and vector store.
 
         Tries real implementations first; falls back to mocks if
         dependencies (sentence_transformers, faiss) are unavailable.
         """
-        if not self._use_mock:
+        if not self._use_mock and EmbeddingService.is_available():
             try:
                 emb = EmbeddingService(
                     model_name=embedding_model,
                     batch_size=batch_size,
+                    device=embedding_device,
                 )
                 vs = VectorStore(
                     index_path=self.embeddings_dir / "index.faiss",
@@ -185,7 +218,8 @@ class KnowledgeBaseManager:
                 )
                 return emb, vs
             except ImportError:
-                self._use_mock = True
+                pass
+        self._use_mock = True
 
         from agentic_cli.knowledge_base._mocks import (
             MockEmbeddingService,
@@ -244,6 +278,69 @@ class KnowledgeBaseManager:
         if path.exists():
             path.unlink()
 
+    def _sidecar_path(self, doc_id: str) -> Path:
+        return self.documents_dir / f"{doc_id}.md"
+
+    def _write_sidecar(
+        self, doc: Document, payload: dict[str, Any] | None = None
+    ) -> Path:
+        """Write the per-document markdown sidecar.
+
+        If ``payload`` is None, falls back to a summary-only payload built
+        from ``doc.summary``. Idempotent — overwrites existing sidecar.
+        """
+        from agentic_cli.knowledge_base.sidecar import render_sidecar_markdown
+
+        if payload is None:
+            payload = {"summary": doc.summary or "", "claims": [], "entities": {}}
+        path = self._sidecar_path(doc.id)
+        atomic_write_text(path, render_sidecar_markdown(doc, payload))
+        return path
+
+    def _delete_sidecar(self, doc_id: str) -> None:
+        path = self._sidecar_path(doc_id)
+        if path.exists():
+            path.unlink()
+
+    def _index_md_path(self) -> Path:
+        return self.kb_dir / "index.md"
+
+    def _rebuild_index_md(self) -> None:
+        """Rebuild index.md from current in-memory documents."""
+        from agentic_cli.knowledge_base.sidecar import render_index_md
+
+        text = render_index_md(
+            list(self._documents.values()),
+            updated_at_iso=_utc_iso_now(),
+        )
+        atomic_write_text(self._index_md_path(), text)
+
+    def _ingest_log_path(self) -> Path:
+        return self.kb_dir / "ingest_log.md"
+
+    def _append_ingest_log(self, action: str, doc: Document) -> None:
+        """Append one audit line to ingest_log.md."""
+        ts = _utc_iso_now()
+        ident = doc.metadata.get("arxiv_id") if doc.metadata else None
+        title_quoted = f'"{doc.title}"'
+        parts = [
+            "-",
+            ts,
+            "·",
+            action,
+            "·",
+            doc.source_type.value,
+        ]
+        if ident:
+            parts += ["·", ident]
+        parts += ["·", title_quoted]
+        if action == "ingest":
+            parts += ["·", f"{len(doc.chunks)} chunks"]
+        line = " ".join(parts) + "\n"
+        path = self._ingest_log_path()
+        with path.open("a", encoding="utf-8") as f:
+            f.write(line)
+
     def _load_metadata(self) -> None:
         """Load document metadata from disk.
 
@@ -289,6 +386,10 @@ class KnowledgeBaseManager:
                     for doc in self._documents.values():
                         self._save_document_content(doc)
                 self._save_metadata()
+
+            # Ensure index.md exists for legacy KBs (no extra cost; ~ms)
+            if self._documents and not self._index_md_path().exists():
+                self._rebuild_index_md()
 
         except (json.JSONDecodeError, KeyError) as e:
             # Log error but continue with empty state
@@ -367,30 +468,185 @@ class KnowledgeBaseManager:
 
         return extract_pdf_text(file_path)
 
-    def _generate_summary(self, content: str) -> str:
-        """Generate a summary for document content.
+    @staticmethod
+    def _truncate_summary(content: str) -> str:
+        """Return the deterministic fallback summary (first ~500 chars)."""
+        return truncate(content, 500) if content else ""
 
-        Uses the LLM summarizer from workflow context if available,
-        otherwise falls back to the first ~500 chars of content.
+    # Cap the amount of content we hand to the LLM summarizer. Long PDFs
+    # can easily exceed sensible prompt budgets, and the summary only
+    # needs the lead-in to be useful.
+    _SUMMARY_INPUT_CHAR_LIMIT = 12_000
+
+    _SUMMARY_PROMPT_TEMPLATE = (
+        "Summarize the following document in 2-3 sentences (max ~500 "
+        "characters). Focus on the main topic, key contributions, and "
+        "why the document is relevant. Return only the summary text "
+        "with no preamble or markdown.\n\n"
+        "Title: {title}\n\n"
+        "Content:\n---\n{content}\n---"
+    )
+
+    async def generate_summary(self, content: str, title: str = "") -> str:
+        """Generate a document summary via the registered LLM summarizer.
+
+        Falls back to the first ~500 chars of ``content`` if no summarizer
+        is registered, if the summarizer raises, or if it returns empty.
 
         Args:
             content: Full document text.
+            title: Document title, embedded in the prompt for context.
 
         Returns:
             Summary string (~500 chars).
         """
-        try:
-            from agentic_cli.workflow.context import get_context_llm_summarizer
-            summarizer = get_context_llm_summarizer()
-            if summarizer is not None:
-                summary = summarizer.summarize(content, max_length=500)
-                if summary:
-                    return summary
-        except Exception:
-            pass
+        if not content:
+            return ""
 
-        # Fallback: first ~500 chars
-        return truncate(content, 500)
+        try:
+            from agentic_cli.workflow.service_registry import (
+                get_service,
+                LLM_SUMMARIZER,
+            )
+
+            summarizer = get_service(LLM_SUMMARIZER)
+            if summarizer is not None:
+                capped = content[: self._SUMMARY_INPUT_CHAR_LIMIT]
+                prompt = self._SUMMARY_PROMPT_TEMPLATE.format(
+                    title=title or "(untitled)",
+                    content=capped,
+                )
+                summary = await summarizer.summarize(capped, prompt)
+                if summary:
+                    return summary.strip()
+        except Exception:
+            logger.debug("kb_summary_generation_failed", exc_info=True)
+
+        return self._truncate_summary(content)
+
+    _SIDECAR_PROMPT_TEMPLATE = (
+        "Extract a structured payload from the document below. "
+        "Return PLAIN TEXT in exactly this layout, with section headers "
+        "in ALL CAPS followed by a colon:\n\n"
+        "SUMMARY:\n"
+        "<3-5 paragraph synthesis of the document, roughly 1500-3000 "
+        "chars total. Use blank lines between paragraphs. Cover, in "
+        "order: (1) the problem the work addresses and why it matters, "
+        "(2) the technical approach / methodology with enough detail "
+        "to convey how it works, (3) the main results with concrete "
+        "numbers or outcomes, (4) limitations or open questions, and "
+        "(5) how this fits into the broader landscape. Write for a "
+        "reader who will use this instead of re-reading the paper.>\n\n"
+        "CLAIMS:\n"
+        "- <one specific claim with numbers or concrete evidence>\n"
+        "- <one specific claim with numbers or concrete evidence>\n"
+        "- <aim for 5-10 claims, each standalone and specific>\n\n"
+        "ENTITIES:\n"
+        "<KindLabel>: <comma-separated names>\n"
+        "<KindLabel>: <comma-separated names>\n"
+        "Use kind labels like Models, Datasets, Methods, Authors, Tools, "
+        "Organizations as relevant; be exhaustive within each kind. "
+        "Omit any section that has no real content.\n\n"
+        "STRICT OUTPUT RULES:\n"
+        "- No preamble, no meta-commentary, no thinking trace.\n"
+        "- No markdown bold/italic on the SUMMARY/CLAIMS/ENTITIES headers.\n"
+        "- Start your response directly with 'SUMMARY:'.\n"
+        "- Always emit all three sections when content supports them.\n"
+        "- The summary is prose (paragraphs), not a bullet list.\n\n"
+        "Title: {title}\n\n"
+        "Content:\n---\n{content}\n---"
+    )
+
+    async def generate_sidecar_payload(
+        self, content: str, title: str = ""
+    ) -> dict[str, Any]:
+        """Generate the structured payload for a document sidecar.
+
+        Returns a dict with keys ``summary`` (str), ``claims`` (list[str]),
+        and ``entities`` (dict[str, list[str]]). Falls back to
+        ``{summary: truncate(content), claims: [], entities: {}}`` if no
+        summarizer is registered or the LLM call fails.
+        """
+        fallback = {
+            "summary": self._truncate_summary(content),
+            "claims": [],
+            "entities": {},
+        }
+        if not content:
+            return fallback
+
+        try:
+            from agentic_cli.workflow.service_registry import (
+                get_service,
+                LLM_SUMMARIZER,
+            )
+
+            summarizer = get_service(LLM_SUMMARIZER)
+            if summarizer is None:
+                return fallback
+
+            capped = content[: self._SUMMARY_INPUT_CHAR_LIMIT]
+            prompt = self._SIDECAR_PROMPT_TEMPLATE.format(
+                title=title or "(untitled)",
+                content=capped,
+            )
+            raw = await summarizer.summarize(capped, prompt)
+        except Exception:
+            logger.debug("kb_sidecar_payload_failed", exc_info=True)
+            return fallback
+
+        return self._parse_sidecar_response(raw) or fallback
+
+    # Matches section headers like "SUMMARY:", "**SUMMARY:**", "  Claims :",
+    # tolerating leading whitespace and optional markdown bold wrappers
+    # (including a trailing ``**`` immediately after the colon).
+    _SECTION_HEADER_RE = re.compile(
+        r"^\s*\**\s*(SUMMARY|CLAIMS|ENTITIES)\s*\**\s*:\**",
+        re.MULTILINE | re.IGNORECASE,
+    )
+
+    @classmethod
+    def _parse_sidecar_response(cls, raw: str) -> dict[str, Any] | None:
+        """Parse the SUMMARY/CLAIMS/ENTITIES blocks. Returns None on garbage.
+
+        Sections are split by regex so multi-paragraph summaries preserve
+        their blank-line breaks verbatim. CLAIMS is parsed as a bullet
+        list; ENTITIES as ``Kind: comma, separated, names`` lines.
+        """
+        if not raw:
+            return None
+
+        matches = list(cls._SECTION_HEADER_RE.finditer(raw))
+        if not matches:
+            return None
+
+        sections: dict[str, str] = {}
+        for i, m in enumerate(matches):
+            key = m.group(1).lower()
+            start = m.end()
+            end = matches[i + 1].start() if i + 1 < len(matches) else len(raw)
+            sections[key] = raw[start:end].strip()
+
+        summary = sections.get("summary", "")
+
+        claims: list[str] = []
+        for line in sections.get("claims", "").splitlines():
+            stripped = line.strip().lstrip("-*").strip()
+            if stripped:
+                claims.append(stripped)
+
+        entities: dict[str, list[str]] = {}
+        for line in sections.get("entities", "").splitlines():
+            stripped = line.strip().lstrip("-*").strip()
+            if ":" in stripped:
+                kind, _, names = stripped.partition(":")
+                items = [n.strip() for n in names.split(",") if n.strip()]
+                if items:
+                    entities[kind.strip()] = items
+
+        if not summary and not claims and not entities:
+            return None
+        return {"summary": summary, "claims": claims, "entities": entities}
 
     # ------------------------------------------------------------------
     # Document ingestion
@@ -407,6 +663,8 @@ class KnowledgeBaseManager:
         file_extension: str = ".pdf",
         chunk_size: int = 512,
         chunk_overlap: int = 50,
+        summary: str | None = None,
+        sidecar_payload: dict[str, Any] | None = None,
     ) -> Document:
         """Ingest a new document into the knowledge base.
 
@@ -420,12 +678,17 @@ class KnowledgeBaseManager:
             file_extension: Extension for stored file (default ".pdf").
             chunk_size: Size of chunks for embedding.
             chunk_overlap: Overlap between chunks.
+            summary: Optional pre-computed summary. When ``None``, falls
+                back to the deterministic truncation of ``content``.
+                Async callers that want an LLM-generated summary should
+                ``await self.generate_summary(...)`` first and pass the
+                result in here.
 
         Returns:
             The created Document object.
         """
-        # Generate summary (may call LLM — do outside lock)
-        summary = self._generate_summary(content) if content else ""
+        if summary is None:
+            summary = self._truncate_summary(content)
 
         # Create document
         doc = Document.create(
@@ -478,8 +741,19 @@ class KnowledgeBaseManager:
 
             # Persist (content in per-doc file, headers in metadata index)
             self._save_document_content(doc)
+            self._write_sidecar(doc, sidecar_payload)
+            self._rebuild_index_md()
+            self._append_ingest_log("ingest", doc)
             self._save_metadata()
             self._vector_store.save()
+
+            # Add to BM25 index
+            bm25_index = getattr(self, "_bm25_index", None)
+            if bm25_index is not None and doc.chunks:
+                bm25_ids = [c.id for c in doc.chunks]
+                bm25_texts = [c.content for c in doc.chunks]
+                bm25_index.add_documents(bm25_ids, bm25_texts)
+                bm25_index.save(self.embeddings_dir)
 
         return doc
 
@@ -489,49 +763,54 @@ class KnowledgeBaseManager:
         filters: dict[str, Any] | None = None,
         top_k: int = 10,
     ) -> dict[str, Any]:
-        """Search the knowledge base using semantic similarity.
+        """Search the knowledge base using hybrid retrieval.
 
-        Args:
-            query: Natural language search query.
-            filters: Optional filters (source_type, date_from, date_to).
-            top_k: Maximum number of results.
-
-        Returns:
-            Dict with results, timing information, and metadata.
+        Uses both semantic (vector) and keyword (BM25) search, merged via
+        Reciprocal Rank Fusion. Falls back to semantic-only if BM25 is unavailable.
         """
         start_time = time.time()
 
-        # Generate query embedding outside lock (CPU-bound, no shared state)
+        # Semantic search
         embed_start = time.time()
         query_embedding = self._embedding_service.embed_text(query)
         embed_time = (time.time() - embed_start) * 1000
 
-        # Read shared state under lock
         with self._lock:
             search_start = time.time()
-            raw_results = self._vector_store.search(query_embedding, top_k * 2)
+            semantic_results = self._vector_store.search(query_embedding, top_k * 2)
             search_time = (time.time() - search_start) * 1000
 
-            # Build results with filtering
-            results: list[SearchResult] = []
-            for chunk_id, score in raw_results:
+        # BM25 search
+        bm25_results = []
+        bm25_index = getattr(self, "_bm25_index", None)
+        if bm25_index is not None:
+            bm25_results = bm25_index.search(query, top_k=top_k * 2)
+
+        # Fuse results
+        if bm25_results:
+            fused = self._fuse_results(semantic_results, bm25_results)
+        else:
+            fused = semantic_results
+
+        # Build SearchResult objects, apply filters, deduplicate
+        results: list[SearchResult] = []
+        seen_docs: set[str] = set()
+        with self._lock:
+            for chunk_id, score in fused:
                 if len(results) >= top_k:
                     break
-
                 chunk = self._chunks.get(chunk_id)
                 if not chunk:
                     continue
-
                 doc = self._documents.get(chunk.document_id)
                 if not doc:
                     continue
-
-                if filters:
-                    if not self._matches_filters(doc, filters):
-                        continue
-
+                if doc.id in seen_docs:
+                    continue
+                if filters and not self._matches_filters(doc, filters):
+                    continue
+                seen_docs.add(doc.id)
                 highlight = truncate(chunk.content)
-
                 results.append(
                     SearchResult(
                         document=doc,
@@ -550,6 +829,21 @@ class KnowledgeBaseManager:
             "search_time_ms": round(search_time, 2),
             "total_time_ms": round(total_time, 2),
         }
+
+    @staticmethod
+    def _fuse_results(
+        semantic_results: list[tuple[str, float]],
+        bm25_results: list[tuple[str, float]],
+        k: int = 60,
+    ) -> list[tuple[str, float]]:
+        """Merge ranked lists using Reciprocal Rank Fusion."""
+        from collections import defaultdict
+        scores: dict[str, float] = defaultdict(float)
+        for rank, (chunk_id, _) in enumerate(semantic_results):
+            scores[chunk_id] += 1.0 / (k + rank + 1)
+        for rank, (chunk_id, _) in enumerate(bm25_results):
+            scores[chunk_id] += 1.0 / (k + rank + 1)
+        return sorted(scores.items(), key=lambda x: x[1], reverse=True)
 
     def _matches_filters(self, doc: Document, filters: dict[str, Any]) -> bool:
         """Check if document matches the given filters."""
@@ -640,13 +934,22 @@ class KnowledgeBaseManager:
             chunk_ids = [c.id for c in doc.chunks]
             self._vector_store.remove_embeddings(chunk_ids)
 
+            bm25_index = getattr(self, "_bm25_index", None)
+            if bm25_index is not None:
+                bm25_index.remove_documents(chunk_ids)
+                bm25_index.save(self.embeddings_dir)
+
             # Remove from memory
             for chunk_id in chunk_ids:
                 self._chunks.pop(chunk_id, None)
             del self._documents[doc_id]
+            self._sidecar_locks.pop(doc_id, None)
 
             # Persist
             self._delete_document_content(doc_id)
+            self._delete_sidecar(doc_id)
+            self._rebuild_index_md()
+            self._append_ingest_log("delete", doc)
             self._save_metadata()
             self._vector_store.save()
 
@@ -679,12 +982,93 @@ class KnowledgeBaseManager:
     def clear(self) -> None:
         """Clear all documents from the knowledge base."""
         with self._lock:
-            # Delete per-document content files
+            # Delete per-document content files and sidecars
             for doc_id in list(self._documents):
                 self._delete_document_content(doc_id)
+                self._delete_sidecar(doc_id)
 
             self._documents = {}
             self._chunks = {}
+            self._sidecar_locks.clear()
             self._vector_store.clear()
             self._save_metadata()
             self._vector_store.save()
+            self._rebuild_index_md()
+
+    async def backfill_sidecars(
+        self,
+        progress_cb: "Any | None" = None,
+    ) -> int:
+        """Generate missing sidecars for all documents in the KB.
+
+        Iterates the in-memory document set, generates a sidecar payload
+        via the registered LLM summarizer for any doc that doesn't have a
+        sidecar file, and writes it. Returns the count of sidecars written.
+        Existing sidecars are not touched.
+
+        Per-doc locks (``_sidecar_locks``) coordinate with the lazy
+        sidecar-generation path in ``kb_read`` (Task 8): concurrent
+        backfill + read on the same doc never double-LLM.
+
+        Raises ``BackfillAlreadyRunning`` if another ``backfill_sidecars``
+        call is already in progress on this manager. The in-progress flag
+        is set and cleared synchronously (before/after any ``await``), so
+        two concurrent callers cannot both acquire it.
+
+        Skips ingest_log/index updates — they're already current; only
+        the sidecar files are out of date.
+
+        Args:
+            progress_cb: Optional callable ``(done, total, doc)`` invoked
+                BEFORE each per-doc LLM call. ``done`` is zero-indexed
+                (0 on the first doc). Use to surface progress in UIs.
+                Called inside the per-doc lock, so raising from it will
+                abort the backfill.
+
+        Returns:
+            Number of sidecars written this call.
+        """
+        if self._backfill_running:
+            raise BackfillAlreadyRunning(
+                "backfill_sidecars is already running on this KB"
+            )
+        self._backfill_running = True
+        try:
+            written = 0
+            # Snapshot the docs that need backfilling up front so the
+            # progress denominator is stable even if ingest/delete runs
+            # concurrently.
+            todo = [
+                doc
+                for doc in list(self._documents.values())
+                if not self._sidecar_path(doc.id).exists()
+            ]
+            total = len(todo)
+            for i, doc in enumerate(todo):
+                # Guard against delete-during-backfill — doc may have
+                # been removed since the snapshot was taken.
+                if doc.id not in self._documents:
+                    continue
+                lock = self._sidecar_locks.setdefault(doc.id, asyncio.Lock())
+                async with lock:
+                    # Double-check inside the lock — another task may
+                    # have written it (e.g. lazy kb_read fallback).
+                    if self._sidecar_path(doc.id).exists():
+                        continue
+                    if doc.id not in self._documents:
+                        continue
+                    if progress_cb is not None:
+                        progress_cb(i, total, doc)
+                    payload = await self.generate_sidecar_payload(
+                        doc.content, title=doc.title
+                    )
+                    self._write_sidecar(doc, payload)
+                    written += 1
+            return written
+        finally:
+            self._backfill_running = False
+
+
+class BackfillAlreadyRunning(RuntimeError):
+    """Raised when ``backfill_sidecars`` is called while another call is
+    already in progress on the same ``KnowledgeBaseManager``."""

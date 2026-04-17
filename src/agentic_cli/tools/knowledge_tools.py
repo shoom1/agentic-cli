@@ -1,17 +1,23 @@
 """Knowledge base tools for agentic workflows.
 
 Provides tools for managing documents in the unified knowledge base:
-- ingest_document: Ingest text, files, or URLs into KB
-- search_knowledge_base: Semantic search across all documents
-- read_document: Extract and return text from a stored document
-- list_documents: List documents with summaries
-- open_document: Open a document's file in the system viewer
+- kb_ingest: Ingest text, files, or URLs into KB
+- kb_search: Semantic search across all documents
+- kb_read: Read a stored document (sidecar by default, full text with full=True)
+- kb_list: List documents with summaries
+
+Each tool comes in two flavors that share a single implementation:
+
+- ``@register_tool``-decorated module functions look up the KB managers
+  from the service registry and call the shared helpers below.
+- The closure-bound versions in ``tools.factories.make_kb_tools`` capture
+  the KB managers in a closure and call the same helpers.
+
+The helpers (``_search_kbs``, ``_ingest_document_with_kb``,
+``_read_document_from_kbs``, ``_list_documents_in_kbs``) take the KB
+managers as explicit args so both call paths stay in sync.
 """
 
-import platform
-import re
-import shutil
-import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -20,17 +26,26 @@ import structlog
 logger = structlog.get_logger(__name__)
 
 from agentic_cli.constants import truncate
-from agentic_cli.tools import requires, require_context
 from agentic_cli.tools.registry import (
     register_tool,
     ToolCategory,
     PermissionLevel,
 )
-from agentic_cli.workflow.context import get_context_kb_manager, get_context_user_kb_manager
+from agentic_cli.workflow.service_registry import (
+    get_service,
+    require_service,
+    KB_MANAGER,
+    USER_KB_MANAGER,
+)
 
 
-# Max chars of extracted text to return via read_document.
+# Max chars of extracted text to return via kb_read (full=True).
 READ_DOCUMENT_MAX_CHARS = 30_000
+
+
+# ---------------------------------------------------------------------------
+# Pure helpers (no service registry dependency)
+# ---------------------------------------------------------------------------
 
 
 def _build_document_item(d, scope: str) -> dict[str, Any]:
@@ -41,7 +56,7 @@ def _build_document_item(d, scope: str) -> dict[str, Any]:
         scope: "project" or "user".
 
     Returns:
-        Dict with document metadata suitable for list_documents output.
+        Dict with document metadata suitable for kb_list output.
     """
     item: dict[str, Any] = {
         "id": d.id,
@@ -62,40 +77,127 @@ def _build_document_item(d, scope: str) -> dict[str, Any]:
         item["has_file"] = True
     return item
 
-# Extensions considered safe to open in the system viewer.
-# Excluded: .html (JS execution), .doc/.xls/.ppt (VBA macros),
-# .odt/.ods/.odp (LibreOffice macros), .docm/.xlsm/.pptm (Office macros).
-SAFE_OPEN_EXTENSIONS: frozenset[str] = frozenset({
-    # Documents
-    ".pdf", ".txt", ".md", ".csv", ".json", ".xml", ".rtf", ".epub",
-    # Modern Office (macro-free by design)
-    ".docx", ".xlsx", ".pptx",
-    # Images
-    ".png", ".jpg", ".jpeg", ".gif", ".svg", ".bmp", ".tiff", ".webp",
-})
+
+def _extract_text_from_bytes(pdf_bytes: bytes) -> str:
+    """Extract text from PDF bytes."""
+    from agentic_cli.tools.pdf_utils import extract_pdf_text
+
+    return extract_pdf_text(pdf_bytes)
 
 
-@register_tool(
-    category=ToolCategory.KNOWLEDGE,
-    permission_level=PermissionLevel.SAFE,
-    description="Search the local knowledge base for relevant documents using semantic similarity. Use this when you need to find previously ingested papers, notes, or documents.",
-)
-@requires("kb_manager")
-@require_context("KB manager", get_context_kb_manager)
-def search_knowledge_base(
+def _detect_extension(url: str, content_type: str = "") -> str:
+    """Detect file extension from URL and/or Content-Type header.
+
+    The Content-Type header is the authoritative source; URL suffix is
+    a fallback. Many services (arxiv, S3, CDNs) serve PDFs from URLs
+    that don't end in ``.pdf``.
+    """
+    if "application/pdf" in content_type:
+        return ".pdf"
+    path = url.split("?")[0].split("#")[0]
+    if path.endswith(".pdf"):
+        return ".pdf"
+    return ".bin"
+
+
+# ---------------------------------------------------------------------------
+# Shared implementations — take KB managers as explicit args
+# ---------------------------------------------------------------------------
+
+
+def _find_doc_in_kbs(kb_manager, user_kb_manager, doc_id_or_title: str) -> tuple:
+    """Find a document across project + user KBs.
+
+    Lookup order: project KB first, then user KB on miss.
+
+    Returns:
+        (document, source_kb) tuple. ``document`` is None if not found
+        in either KB. ``source_kb`` is the project KB on miss (so callers
+        that want to print / open against the project KB still have a
+        handle), or ``(None, None)`` if no project KB was supplied.
+    """
+    if kb_manager is None:
+        return None, None
+    doc = kb_manager.find_document(doc_id_or_title)
+    if doc is not None:
+        return doc, kb_manager
+    if user_kb_manager is not None and user_kb_manager is not kb_manager:
+        doc = user_kb_manager.find_document(doc_id_or_title)
+        if doc is not None:
+            return doc, user_kb_manager
+    return None, kb_manager
+
+
+def _merge_kb_results_rrf(
+    project_results: list[dict],
+    user_results: list[dict],
+    top_k: int,
+    k: int = 60,
+) -> list[dict]:
+    """Merge two KB result lists via Reciprocal Rank Fusion.
+
+    Scores from separate FAISS / BM25 indexes live on different
+    scales and are not comparable in absolute terms, so a "concat +
+    sort by score" merge produces a degenerate ordering whenever the
+    two KBs happen to score on different magnitudes. RRF works on
+    rank position instead, so the merge is well-defined regardless
+    of how the underlying KBs assign scores.
+
+    On document_id collisions, the project entry wins (its dict is
+    kept), but both KBs' ranks contribute to the fused score — so a
+    document that ranks high in both KBs ends up higher in the merged
+    list than one that's only ranked high in one.
+
+    Args:
+        project_results: Ordered list of search-result dicts from project KB.
+        user_results: Ordered list of search-result dicts from user KB.
+        top_k: Maximum results to return after merge.
+        k: RRF constant (default 60, the standard value).
+
+    Returns:
+        Merged list (length <= top_k) with the fused RRF score in
+        each entry's ``score`` field. The original raw KB score is
+        discarded; absolute KB scores from independent indexes do
+        not compose meaningfully across a merge.
+    """
+    fused: dict[str, dict] = {}
+    fused_scores: dict[str, float] = {}
+
+    for rank, r in enumerate(project_results):
+        doc_id = r.get("document_id", "")
+        if not doc_id:
+            continue
+        fused[doc_id] = r
+        fused_scores[doc_id] = fused_scores.get(doc_id, 0.0) + 1.0 / (k + rank + 1)
+
+    for rank, r in enumerate(user_results):
+        doc_id = r.get("document_id", "")
+        if not doc_id:
+            continue
+        if doc_id not in fused:
+            fused[doc_id] = r
+        fused_scores[doc_id] = fused_scores.get(doc_id, 0.0) + 1.0 / (k + rank + 1)
+
+    sorted_ids = sorted(fused_scores.keys(), key=lambda x: fused_scores[x], reverse=True)
+    merged = []
+    for doc_id in sorted_ids[:top_k]:
+        entry = fused[doc_id]
+        entry["score"] = round(fused_scores[doc_id], 4)
+        merged.append(entry)
+    return merged
+
+
+def _search_kbs(
+    kb_manager,
+    user_kb_manager,
     query: str,
     filters: str = "",
     top_k: int = 10,
 ) -> dict[str, Any]:
-    """Search the knowledge base for relevant information.
+    """Shared implementation for kb_search.
 
-    Args:
-        query: Natural language search query
-        filters: Optional JSON string with filters (e.g. '{"source_type": "arxiv", "date_from": "2024-01-01"}')
-        top_k: Maximum number of results
-
-    Returns:
-        Dictionary with search results and timing information
+    Caller must pass a non-None ``kb_manager`` — registry-based wrappers
+    handle the missing-kb error case before reaching this helper.
     """
     import json as _json
 
@@ -107,28 +209,23 @@ def search_knowledge_base(
             return {"success": False, "error": f"Invalid JSON in filters: {filters}"}
 
     try:
-        kb = get_context_kb_manager()
-        result = kb.search(query, filters=parsed_filters, top_k=top_k)
+        result = kb_manager.search(query, filters=parsed_filters, top_k=top_k)
 
         # Tag project results with scope
         for r in result.get("results", []):
             r["scope"] = "project"
 
         # Merge user KB results (non-fatal if unavailable)
-        user_kb = get_context_user_kb_manager()
-        if user_kb is not None and user_kb is not kb:
+        if user_kb_manager is not None and user_kb_manager is not kb_manager:
             try:
-                user_result = user_kb.search(query, filters=parsed_filters, top_k=top_k)
-                # Deduplicate by document_id (project wins)
-                seen_doc_ids = {r["document_id"] for r in result.get("results", [])}
+                user_result = user_kb_manager.search(query, filters=parsed_filters, top_k=top_k)
                 for r in user_result.get("results", []):
-                    if r["document_id"] not in seen_doc_ids:
-                        r["scope"] = "user"
-                        result["results"].append(r)
-                        seen_doc_ids.add(r["document_id"])
-                # Re-sort by score descending and trim to top_k
-                result["results"].sort(key=lambda r: r.get("score", 0), reverse=True)
-                result["results"] = result["results"][:top_k]
+                    r["scope"] = "user"
+                result["results"] = _merge_kb_results_rrf(
+                    result.get("results", []),
+                    user_result.get("results", []),
+                    top_k,
+                )
                 result["total_matches"] = len(result["results"])
             except Exception:
                 logger.debug("user_kb_search_failed", query=query, exc_info=True)
@@ -138,19 +235,8 @@ def search_knowledge_base(
         return {"success": False, "error": f"Search failed: {e}"}
 
 
-@register_tool(
-    category=ToolCategory.KNOWLEDGE,
-    permission_level=PermissionLevel.CAUTION,
-    description=(
-        "Ingest a document into the knowledge base. "
-        "REQUIRED: provide either 'content' (text) or 'url_or_path' (file path or URL). "
-        "ArXiv URLs auto-fetch metadata and PDF. "
-        "Valid source_type values: arxiv, ssrn, web, internal, user, local."
-    ),
-)
-@requires("kb_manager")
-@require_context("KB manager", get_context_kb_manager)
-async def ingest_document(
+async def _ingest_document_with_kb(
+    kb_manager,
     content: str = "",
     url_or_path: str = "",
     title: str = "",
@@ -160,30 +246,13 @@ async def ingest_document(
     abstract: str = "",
     tags: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Ingest a document into the knowledge base.
+    """Shared implementation for kb_ingest.
 
-    You MUST provide at least one of `content` or `url_or_path`:
-    1. Text content: provide `content` directly
-    2. Local file: provide `url_or_path` pointing to a local file
-    3. URL: provide `url_or_path` with an HTTP(S) URL
-       - ArXiv URLs auto-fetch metadata and download PDF
-
-    Args:
-        content: Document text content (REQUIRED if url_or_path not given)
-        url_or_path: URL or local file path (REQUIRED if content not given)
-        title: Document title (auto-fetched for ArXiv if empty)
-        source_type: Source type (arxiv, ssrn, web, internal, user, local)
-        source_url: Optional URL of the source
-        authors: Optional list of author names
-        abstract: Optional paper abstract
-        tags: Optional tags for categorization
-
-    Returns:
-        Dictionary with ingestion result
+    Handles all three input modes (text content, local file, remote URL),
+    PDF text extraction, source type auto-detection, and ingestion into
+    the supplied ``kb_manager``.
     """
     from agentic_cli.knowledge_base.models import SourceType
-
-    kb = get_context_kb_manager()
 
     # Build metadata dict from optional fields
     meta: dict[str, Any] = {}
@@ -200,23 +269,14 @@ async def ingest_document(
     # --- URL / file path mode ---
     if url_or_path:
         # Auto-detect source type
-        if "arxiv.org" in url_or_path:
-            source_type = "arxiv"
-        elif url_or_path.startswith(("http://", "https://")) and source_type == "user":
+        if url_or_path.startswith(("http://", "https://")) and source_type == "user":
             source_type = "web"
         elif not url_or_path.startswith(("http://", "https://")) and source_type == "user":
             source_type = "local"
 
         source_url = source_url or url_or_path
 
-        if source_type == "arxiv":
-            # ArXiv: fetch metadata + download PDF
-            result = await _ingest_arxiv(
-                url_or_path, title, authors, abstract, meta, kb
-            )
-            return result
-
-        elif url_or_path.startswith(("http://", "https://")):
+        if url_or_path.startswith(("http://", "https://")):
             # Generic URL download
             try:
                 import httpx
@@ -233,8 +293,9 @@ async def ingest_document(
             except httpx.RequestError as e:
                 return {"success": False, "error": f"Failed to download: {e}"}
 
-            # Detect extension from URL
-            file_extension = _detect_extension(url_or_path)
+            # Detect extension from Content-Type header, fall back to URL
+            content_type = response.headers.get("content-type", "")
+            file_extension = _detect_extension(url_or_path, content_type)
 
             # Extract text if PDF
             if file_extension == ".pdf" and file_bytes:
@@ -269,7 +330,7 @@ async def ingest_document(
             "error": (
                 "No content or file provided. "
                 "You must supply either 'content' (text string) or 'url_or_path' (URL or file path). "
-                "For ArXiv papers, pass the ArXiv URL as url_or_path."
+                "For ArXiv papers, use ingest_arxiv_paper instead."
             ),
         }
 
@@ -283,9 +344,12 @@ async def ingest_document(
         valid = ", ".join(t.value for t in SourceType)
         return {"success": False, "error": f"Invalid source_type: {source_type!r}. Valid: {valid}"}
 
+    # --- Generate sidecar payload via async LLM call (outside lock) ---
+    payload = await kb_manager.generate_sidecar_payload(content, title=title)
+
     # --- Ingest ---
     try:
-        doc = kb.ingest_document(
+        doc = kb_manager.ingest_document(
             content=content,
             title=title,
             source_type=source,
@@ -293,6 +357,8 @@ async def ingest_document(
             metadata=meta or None,
             file_bytes=file_bytes,
             file_extension=file_extension,
+            summary=payload["summary"] or None,
+            sidecar_payload=payload,
         )
     except Exception as e:
         return {"success": False, "error": f"Ingestion failed: {e}"}
@@ -306,235 +372,91 @@ async def ingest_document(
     }
 
 
-async def _ingest_arxiv(
-    url_or_path: str,
-    title: str,
-    authors: list[str] | None,
-    abstract: str,
-    meta: dict[str, Any],
-    kb,
-) -> dict[str, Any]:
-    """Handle ArXiv-specific ingestion: fetch metadata + download PDF.
-
-    Args:
-        url_or_path: ArXiv URL or ID.
-        title: User-provided title (may be empty).
-        authors: User-provided authors (may be None).
-        abstract: User-provided abstract (may be empty).
-        meta: Metadata dict to populate.
-        kb: KnowledgeBaseManager instance.
-
-    Returns:
-        Tool result dict.
-    """
-    from agentic_cli.knowledge_base.models import SourceType
-
-    # Extract arxiv ID — supports both new format (2301.12345) and
-    # old format (math/0607733, hep-th/9901001)
-    arxiv_id = _extract_arxiv_id(url_or_path)
-
-    if not arxiv_id:
-        return {"success": False, "error": f"Could not extract ArXiv ID from: {url_or_path}"}
-
-    # Fetch metadata via fetch_arxiv_paper
-    try:
-        from agentic_cli.tools.arxiv_tools import fetch_arxiv_paper
-        metadata_result = await fetch_arxiv_paper(arxiv_id)
-        if metadata_result.get("success") and "paper" in metadata_result:
-            paper_info = metadata_result["paper"]
-            title = title or paper_info.get("title", "")
-            authors = authors or paper_info.get("authors", [])
-            abstract = abstract or paper_info.get("abstract", "")
-            meta["arxiv_id"] = arxiv_id
-            meta["pdf_url"] = paper_info.get("pdf_url", "")
-            meta["categories"] = paper_info.get("categories", [])
-    except Exception:
-        logger.warning("arxiv_metadata_fetch_failed", arxiv_id=arxiv_id, exc_info=True)
-
-    if authors:
-        meta["authors"] = authors
-    if abstract:
-        meta["abstract"] = abstract
-
-    source_url = f"https://arxiv.org/abs/{arxiv_id}"
-
-    # Download PDF
-    file_bytes: bytes | None = None
-    content = ""
-    try:
-        import httpx
-
-        from agentic_cli.tools.arxiv_tools import _get_arxiv_source
-        source = _get_arxiv_source()
-        source.wait_for_rate_limit()
-
-        pdf_url = f"https://arxiv.org/pdf/{arxiv_id}.pdf"
-        async with httpx.AsyncClient(follow_redirects=True, timeout=60.0) as client:
-            response = await client.get(pdf_url)
-            response.raise_for_status()
-            file_bytes = response.content
-
-        # Extract text
-        content = _extract_text_from_bytes(file_bytes)
-        meta["file_size_bytes"] = len(file_bytes)
-    except Exception:
-        logger.warning("arxiv_pdf_download_failed", arxiv_id=arxiv_id, exc_info=True)
-        # Use abstract as fallback content if PDF download fails
-        content = abstract or title
-
-    if not title:
-        title = f"ArXiv paper {arxiv_id}"
-
-    try:
-        doc = kb.ingest_document(
-            content=content,
-            title=title,
-            source_type=SourceType.ARXIV,
-            source_url=source_url,
-            metadata=meta or None,
-            file_bytes=file_bytes,
-            file_extension=".pdf",
-        )
-    except Exception as e:
-        return {"success": False, "error": f"Ingestion failed: {e}"}
-
-    return {
-        "success": True,
-        "document_id": doc.id,
-        "title": doc.title,
-        "chunks_created": len(doc.chunks),
-        "summary": doc.summary,
-    }
-
-
-def _extract_text_from_bytes(pdf_bytes: bytes) -> str:
-    """Extract text from PDF bytes."""
-    from agentic_cli.tools.pdf_utils import extract_pdf_text
-
-    return extract_pdf_text(pdf_bytes)
-
-
-def _extract_arxiv_id(url_or_id: str) -> str:
-    """Extract arXiv paper ID from a URL or raw ID string.
-
-    Delegates to arxiv_tools._clean_arxiv_id for consistent parsing.
-    Returns empty string if the input doesn't look like an arXiv ID.
-    """
-    import re
-
-    from agentic_cli.tools.arxiv_tools import _clean_arxiv_id
-
-    cleaned = _clean_arxiv_id(url_or_id)
-    # Validate that the result is actually an arXiv ID pattern
-    if re.match(r"^\d{4}\.\d{4,5}(v\d+)?$", cleaned) or re.match(
-        r"^[a-zA-Z-]+/\d{7}(v\d+)?$", cleaned
-    ):
-        return cleaned
-    return ""
-
-
-def _detect_extension(url: str) -> str:
-    """Detect file extension from URL."""
-    # Strip query params
-    path = url.split("?")[0].split("#")[0]
-    if path.endswith(".pdf"):
-        return ".pdf"
-    return ".bin"
-
-
-def _find_document_in_kbs(doc_id_or_title: str) -> tuple:
-    """Find a document across main and user knowledge bases.
-
-    Returns:
-        (document, source_kb) tuple. document may be None if not found.
-    """
-    kb = get_context_kb_manager()
-    doc = kb.find_document(doc_id_or_title)
-    source_kb = kb
-
-    if doc is None:
-        user_kb = get_context_user_kb_manager()
-        if user_kb is not None and user_kb is not kb:
-            doc = user_kb.find_document(doc_id_or_title)
-            if doc is not None:
-                source_kb = user_kb
-
-    return doc, source_kb
-
-
-@register_tool(
-    category=ToolCategory.KNOWLEDGE,
-    permission_level=PermissionLevel.SAFE,
-    description="Read and return the text content of a stored document by ID or title. Returns full text (up to max_chars limit).",
-)
-@requires("kb_manager")
-@require_context("KB manager", get_context_kb_manager)
-def read_document(
+async def _read_document_from_kbs(
+    kb_manager,
+    user_kb_manager,
     doc_id_or_title: str,
+    full: bool = False,
     max_chars: int = READ_DOCUMENT_MAX_CHARS,
 ) -> dict[str, Any]:
-    """Extract and return text from a stored document.
+    """Shared implementation for kb_read.
 
-    Args:
-        doc_id_or_title: Document ID or title substring.
-        max_chars: Maximum characters to return (default 30K).
-
-    Returns:
-        Dictionary with document text and metadata.
+    Default returns the sidecar payload (summary + claims + entities).
+    With ``full=True``, returns the raw extracted text up to ``max_chars``.
+    Lazily generates a missing sidecar via the manager's per-doc lock.
     """
-    doc, source_kb = _find_document_in_kbs(doc_id_or_title)
-
+    doc, source_kb = _find_doc_in_kbs(kb_manager, user_kb_manager, doc_id_or_title)
     if doc is None:
         return {"success": False, "error": f"Document not found: {doc_id_or_title}"}
 
-    content = doc.content
+    if full:
+        content = doc.content
+        if not content and doc.file_path:
+            file_path = source_kb.get_file_path(doc.id)
+            if file_path and str(file_path).endswith(".pdf"):
+                from agentic_cli.knowledge_base.manager import KnowledgeBaseManager
+                content = KnowledgeBaseManager.extract_text_from_pdf(file_path)
+        truncated = len(content) > max_chars
+        if truncated:
+            content = content[:max_chars]
+        return {
+            "success": True,
+            "full": True,
+            "document_id": doc.id,
+            "title": doc.title,
+            "scope": "user" if user_kb_manager is not None and source_kb is user_kb_manager else "project",
+            "content": content,
+            "truncated": truncated,
+            "source_type": doc.source_type.value,
+        }
 
-    # If no content, try extracting from stored file
-    if not content and doc.file_path:
-        file_path = source_kb.get_file_path(doc.id)
-        if file_path and str(file_path).endswith(".pdf"):
-            from agentic_cli.knowledge_base.manager import KnowledgeBaseManager
-            content = KnowledgeBaseManager.extract_text_from_pdf(file_path)
+    # Sidecar mode (default). Lazily generate if missing.
+    sidecar_path = source_kb._sidecar_path(doc.id)
+    if not sidecar_path.exists():
+        import asyncio as _asyncio
+        lock = source_kb._sidecar_locks.setdefault(doc.id, _asyncio.Lock())
+        async with lock:
+            if not sidecar_path.exists():
+                # Resolve content the same way full=True does — extract from
+                # PDF when in-memory content is empty. Avoids caching a
+                # useless empty sidecar for legacy PDFs.
+                content_for_payload = doc.content
+                if not content_for_payload and doc.file_path:
+                    file_path = source_kb.get_file_path(doc.id)
+                    if file_path and str(file_path).endswith(".pdf"):
+                        from agentic_cli.knowledge_base.manager import (
+                            KnowledgeBaseManager,
+                        )
+                        content_for_payload = (
+                            KnowledgeBaseManager.extract_text_from_pdf(file_path)
+                        )
+                payload = await source_kb.generate_sidecar_payload(
+                    content_for_payload, title=doc.title
+                )
+                source_kb._write_sidecar(doc, payload)
 
-    truncated = len(content) > max_chars
-    if truncated:
-        content = content[:max_chars]
-
+    sidecar_text = sidecar_path.read_text()
     return {
         "success": True,
+        "full": False,
         "document_id": doc.id,
         "title": doc.title,
-        "content": content,
-        "truncated": truncated,
         "source_type": doc.source_type.value,
+        "scope": "user" if user_kb_manager is not None and source_kb is user_kb_manager else "project",
+        "summary": doc.summary,
+        "sidecar": sidecar_text,
     }
 
 
-@register_tool(
-    category=ToolCategory.KNOWLEDGE,
-    permission_level=PermissionLevel.SAFE,
-    description="List documents in the knowledge base with summaries. Filter by query or source type. Returns summaries, not full content.",
-)
-@requires("kb_manager")
-@require_context("KB manager", get_context_kb_manager)
-def list_documents(
+def _list_documents_in_kbs(
+    kb_manager,
+    user_kb_manager,
     query: str = "",
     source_type: str = "",
     limit: int = 20,
 ) -> dict[str, Any]:
-    """List documents with summaries.
-
-    Args:
-        query: Optional filter by title substring (case-insensitive).
-        source_type: Optional filter by source type.
-        limit: Maximum number of documents to return.
-
-    Returns:
-        Dictionary with document list.
-    """
+    """Shared implementation for kb_list."""
     from agentic_cli.knowledge_base.models import SourceType as ST
-
-    kb = get_context_kb_manager()
 
     # Parse source_type filter
     st_filter = None
@@ -544,7 +466,7 @@ def list_documents(
         except ValueError:
             pass
 
-    docs = kb.list_documents(source_type=st_filter, limit=limit)
+    docs = kb_manager.list_documents(source_type=st_filter, limit=limit)
 
     # Apply query filter
     if query:
@@ -562,10 +484,9 @@ def list_documents(
         seen_ids.add(d.id)
 
     # Merge user KB documents
-    user_kb = get_context_user_kb_manager()
-    if user_kb is not None and user_kb is not kb:
+    if user_kb_manager is not None and user_kb_manager is not kb_manager:
         try:
-            user_docs = user_kb.list_documents(source_type=st_filter, limit=limit)
+            user_docs = user_kb_manager.list_documents(source_type=st_filter, limit=limit)
             if query:
                 query_lower = query.lower()
                 user_docs = [
@@ -587,90 +508,297 @@ def list_documents(
     }
 
 
+async def _write_concept_with_kb(
+    kb_manager,
+    user_kb_manager,
+    title: str,
+    body: str,
+    sources: list[str],
+    slug: str = "",
+) -> dict[str, Any]:
+    """Shared implementation for kb_write_concept.
+
+    Writes to the project KB's concepts directory. Source IDs are
+    validated against BOTH KBs (project first, then user if distinct) so
+    cross-KB citations work.
+    """
+    if kb_manager is None:
+        return {"success": False, "error": "kb manager not available"}
+
+    def _is_valid_id(doc_id: str) -> bool:
+        if kb_manager.get_document(doc_id) is not None:
+            return True
+        if user_kb_manager is not None and user_kb_manager is not kb_manager:
+            if user_kb_manager.get_document(doc_id) is not None:
+                return True
+        return False
+
+    try:
+        return kb_manager.concepts.write(
+            title=title,
+            body=body,
+            sources=sources,
+            slug=slug,
+            valid_ids_check=_is_valid_id,
+        )
+    except Exception as e:
+        return {"success": False, "error": f"write_concept failed: {e}"}
+
+
+async def _search_concepts_with_kb(
+    kb_manager,
+    user_kb_manager,
+    query: str,
+    limit: int = 10,
+) -> dict[str, Any]:
+    """Shared implementation for kb_search_concepts.
+
+    Searches the project KB's concepts directory. Async signature
+    matches the other tool helpers even though the underlying
+    implementation is synchronous grep.
+    """
+    if kb_manager is None:
+        return {"success": False, "error": "kb manager not available"}
+
+    try:
+        hits = kb_manager.concepts.search(query, limit=limit)
+    except Exception as e:
+        return {"success": False, "error": f"search_concepts failed: {e}"}
+
+    return {
+        "success": True,
+        "concepts": hits,
+        "count": len(hits),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Registry-bound helper (back-compat for tests/callers that don't have
+# explicit KB handles)
+# ---------------------------------------------------------------------------
+
+
+def _find_document_in_kbs(doc_id_or_title: str) -> tuple:
+    """Find a document across main and user KBs via the service registry.
+
+    Thin registry-based wrapper around ``_find_doc_in_kbs``. Used by the
+    module-level ``@register_tool`` functions and exercised directly by
+    ``tests/test_kb_helpers.py``.
+    """
+    kb = get_service(KB_MANAGER)
+    if kb is None:
+        return None, None
+    user_kb = get_service(USER_KB_MANAGER)
+    return _find_doc_in_kbs(kb, user_kb, doc_id_or_title)
+
+
+# ---------------------------------------------------------------------------
+# Module-level @register_tool wrappers
+# ---------------------------------------------------------------------------
+
+
 @register_tool(
     category=ToolCategory.KNOWLEDGE,
-    permission_level=PermissionLevel.DANGEROUS,
-    description="Open a document's stored file (e.g. PDF) in the system default viewer. Provide a document ID or title.",
+    permission_level=PermissionLevel.SAFE,
+    description="Search the local knowledge base for relevant documents using semantic similarity. Use this when you need to find previously ingested papers, notes, or documents.",
 )
-@requires("kb_manager")
-@require_context("KB manager", get_context_kb_manager)
-def open_document(
-    doc_id_or_title: str,
+def kb_search(
+    query: str,
+    filters: str = "",
+    top_k: int = 10,
 ) -> dict[str, Any]:
-    """Open a document's file in the system viewer.
+    """Search the knowledge base for relevant information.
+
+    Args:
+        query: Natural language search query
+        filters: Optional JSON string with filters (e.g. '{"source_type": "arxiv", "date_from": "2024-01-01"}')
+        top_k: Maximum number of results
+
+    Returns:
+        Dictionary with search results and timing information
+    """
+    kb = require_service(KB_MANAGER)
+    if isinstance(kb, dict):
+        return kb
+    user_kb = get_service(USER_KB_MANAGER)
+    return _search_kbs(kb, user_kb, query, filters, top_k)
+
+
+@register_tool(
+    category=ToolCategory.KNOWLEDGE,
+    permission_level=PermissionLevel.CAUTION,
+    description=(
+        "Ingest a document into the knowledge base. "
+        "REQUIRED: provide either 'content' (text) or 'url_or_path' (file path or URL). "
+        "ArXiv URLs auto-fetch metadata and PDF. "
+        "Valid source_type values: arxiv, ssrn, web, internal, user, local."
+    ),
+)
+async def kb_ingest(
+    content: str = "",
+    url_or_path: str = "",
+    title: str = "",
+    source_type: str = "user",
+    source_url: str | None = None,
+    authors: list[str] | None = None,
+    abstract: str = "",
+    tags: list[str] | None = None,
+) -> dict[str, Any]:
+    """Ingest a document into the knowledge base.
+
+    You MUST provide at least one of `content` or `url_or_path`:
+    1. Text content: provide `content` directly
+    2. Local file: provide `url_or_path` pointing to a local file
+    3. URL: provide `url_or_path` with an HTTP(S) URL
+
+    For arXiv papers, use `ingest_arxiv_paper` instead — it handles
+    metadata, PDF download, and rate limiting automatically.
+
+    Args:
+        content: Document text content (REQUIRED if url_or_path not given)
+        url_or_path: URL or local file path (REQUIRED if content not given)
+        title: Document title
+        source_type: Source type (ssrn, web, internal, user, local)
+        source_url: Optional URL of the source
+        authors: Optional list of author names
+        abstract: Optional paper abstract
+        tags: Optional tags for categorization
+
+    Returns:
+        Dictionary with ingestion result
+    """
+    kb = get_service(KB_MANAGER)
+    if kb is None:
+        return {"success": False, "error": "kb manager not available"}
+    return await _ingest_document_with_kb(
+        kb,
+        content=content,
+        url_or_path=url_or_path,
+        title=title,
+        source_type=source_type,
+        source_url=source_url,
+        authors=authors,
+        abstract=abstract,
+        tags=tags,
+    )
+
+
+@register_tool(
+    category=ToolCategory.KNOWLEDGE,
+    permission_level=PermissionLevel.SAFE,
+    description=(
+        "Read a stored document by ID or title. Returns the per-document "
+        "sidecar (summary, key claims, entities) by default. Pass full=True "
+        "to get the raw extracted text up to max_chars."
+    ),
+)
+async def kb_read(
+    doc_id_or_title: str,
+    full: bool = False,
+    max_chars: int = READ_DOCUMENT_MAX_CHARS,
+) -> dict[str, Any]:
+    """Read a stored document.
 
     Args:
         doc_id_or_title: Document ID or title substring.
+        full: If True, return raw text. Default returns the sidecar payload.
+        max_chars: Maximum characters of raw text to return when full=True.
+    """
+    kb = get_service(KB_MANAGER)
+    if kb is None:
+        return {"success": False, "error": f"Document not found: {doc_id_or_title}"}
+    user_kb = get_service(USER_KB_MANAGER)
+    return await _read_document_from_kbs(kb, user_kb, doc_id_or_title, full, max_chars)
+
+
+@register_tool(
+    category=ToolCategory.KNOWLEDGE,
+    permission_level=PermissionLevel.SAFE,
+    description="List documents in the knowledge base with summaries. Filter by query or source type. Returns summaries, not full content.",
+)
+def kb_list(
+    query: str = "",
+    source_type: str = "",
+    limit: int = 20,
+) -> dict[str, Any]:
+    """List documents with summaries.
+
+    Args:
+        query: Optional filter by title substring (case-insensitive).
+        source_type: Optional filter by source type.
+        limit: Maximum number of documents to return.
 
     Returns:
-        Dictionary with result.
+        Dictionary with document list.
     """
-    doc, source_kb = _find_document_in_kbs(doc_id_or_title)
+    kb = get_service(KB_MANAGER)
+    if kb is None:
+        return {"success": False, "error": "kb manager not available"}
+    user_kb = get_service(USER_KB_MANAGER)
+    return _list_documents_in_kbs(kb, user_kb, query, source_type, limit)
 
-    if doc is None:
-        return {"success": False, "error": f"Document not found: {doc_id_or_title}"}
 
-    file_path = source_kb.get_file_path(doc.id)
-    if file_path is None:
-        return {"success": False, "error": f"No file stored for document: {doc.title}"}
+@register_tool(
+    category=ToolCategory.KNOWLEDGE,
+    permission_level=PermissionLevel.CAUTION,
+    description=(
+        "Save an agent-curated concept page summarizing what the KB "
+        "knows about a topic. Pages live at concepts/{slug}.md and are "
+        "agent-writable, grep-searchable, and human-readable. `sources` "
+        "must cite at least one valid document ID from the KB."
+    ),
+)
+async def kb_write_concept(
+    title: str,
+    body: str,
+    sources: list[str],
+    slug: str = "",
+) -> dict[str, Any]:
+    """Create or overwrite a concept page.
 
-    ext = file_path.suffix.lower()
-    if ext not in SAFE_OPEN_EXTENSIONS:
-        logger.warning(
-            "open_document_blocked_extension",
-            file_path=str(file_path),
-            title=doc.title,
-            extension=ext,
-        )
-        return {
-            "success": False,
-            "error": f"File type '{ext}' is not allowed. Supported: documents, images, and office files.",
-        }
-
-    system = platform.system()
-    try:
-        if system == "Darwin":
-            cmd = ["open", str(file_path)]
-        elif system == "Linux":
-            cmd = ["xdg-open", str(file_path)]
-        elif system == "Windows":
-            cmd = ["start", "", str(file_path)]
-        else:
-            return {"success": False, "error": f"Unsupported platform: {system}"}
-
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=10,
-            shell=(system == "Windows"),
-        )
-        if result.returncode != 0:
-            stderr = result.stderr.strip()
-            logger.warning(
-                "open_document_failed",
-                file_path=str(file_path),
-                returncode=result.returncode,
-                stderr=stderr,
-            )
-            return {"success": False, "error": f"Failed to open file: {stderr or 'unknown error'}"}
-    except subprocess.TimeoutExpired:
-        # open/xdg-open may block if viewer takes time — treat as success
-        pass
-    except OSError as e:
-        return {"success": False, "error": f"Failed to open file: {e}"}
-
-    logger.info(
-        "open_document_success",
-        file_path=str(file_path),
-        title=doc.title,
-        extension=ext,
+    Args:
+        title: Human-readable concept title. Used to derive the slug
+            when ``slug`` is empty.
+        body: Markdown body. Free-form; no required sections.
+        sources: Document IDs this concept cites. Must include at least
+            one valid ID (verified against the KB).
+        slug: Optional explicit slug. If given and already exists, the
+            existing concept is overwritten (body replaced, sources
+            merged as union). If empty, auto-generated from title and
+            collision-suffixed on conflict.
+    """
+    kb = get_service(KB_MANAGER)
+    if kb is None:
+        return {"success": False, "error": "kb manager not available"}
+    user_kb = get_service(USER_KB_MANAGER)
+    return await _write_concept_with_kb(
+        kb, user_kb, title=title, body=body, sources=sources, slug=slug,
     )
-    return {
-        "success": True,
-        "title": doc.title,
-        "file_path": str(file_path),
-        "message": f"Opened: {doc.title}",
-    }
+
+
+@register_tool(
+    category=ToolCategory.KNOWLEDGE,
+    permission_level=PermissionLevel.SAFE,
+    description=(
+        "Search concept pages (agent-curated synthesis notes). "
+        "Case-insensitive substring match; title hits rank above body "
+        "hits. Use when asking 'what does the KB know about X?'."
+    ),
+)
+async def kb_search_concepts(
+    query: str,
+    limit: int = 10,
+) -> dict[str, Any]:
+    """Search concept pages.
+
+    Args:
+        query: Case-insensitive substring.
+        limit: Max hits to return.
+    """
+    kb = get_service(KB_MANAGER)
+    if kb is None:
+        return {"success": False, "error": "kb manager not available"}
+    user_kb = get_service(USER_KB_MANAGER)
+    return await _search_concepts_with_kb(kb, user_kb, query=query, limit=limit)
 
 

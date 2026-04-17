@@ -10,10 +10,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from agentic_cli.logging import Loggers
-from agentic_cli.persistence._utils import atomic_write_json, file_lock, sanitize_filename
+from agentic_cli.file_utils import atomic_write_json, file_lock, sanitize_filename
 
 if TYPE_CHECKING:
-    from agentic_cli.cli.app import MessageHistory
     from agentic_cli.config import BaseSettings
 
 logger = Loggers.persistence()
@@ -144,10 +143,7 @@ class SessionPersistence:
         return index
 
     def save_snapshot(self, snapshot: SessionSnapshot) -> Path:
-        """Save a pre-built SessionSnapshot directly.
-
-        Used by the workflow layer which has normalized message dicts
-        rather than MessageHistory objects.
+        """Save a SessionSnapshot to disk.
 
         Args:
             snapshot: The session snapshot to persist.
@@ -173,49 +169,6 @@ class SessionPersistence:
         )
         return session_path
 
-    def save_session(
-        self,
-        session_id: str,
-        message_history: "MessageHistory",
-        metadata: dict | None = None,
-    ) -> Path:
-        """Save current session state.
-
-        Builds a SessionSnapshot from the MessageHistory and delegates
-        to save_snapshot for the actual persistence.
-
-        Args:
-            session_id: Unique session identifier
-            message_history: MessageHistory instance with messages
-            metadata: Optional additional metadata to save
-
-        Returns:
-            Path to saved session file
-        """
-        # Convert message history to serializable format
-        messages = []
-        all_messages = message_history.get_all()
-        for msg in all_messages:
-            messages.append(
-                {
-                    "content": msg.content,
-                    "message_type": msg.message_type.value,
-                    "timestamp": msg.timestamp.isoformat(),
-                    "metadata": msg.metadata,
-                }
-            )
-
-        # Build snapshot and delegate to save_snapshot
-        snapshot = SessionSnapshot(
-            session_id=session_id,
-            created_at=all_messages[0].timestamp if all_messages else datetime.now(),
-            saved_at=datetime.now(),
-            messages=messages,
-            metadata=metadata or {},
-        )
-
-        return self.save_snapshot(snapshot)
-
     def load_session(self, session_id: str) -> SessionSnapshot | None:
         """Load a saved session.
 
@@ -240,32 +193,6 @@ class SessionPersistence:
             message_count=len(snapshot.messages),
         )
         return snapshot
-
-    def restore_to_history(
-        self, snapshot: SessionSnapshot, message_history: "MessageHistory"
-    ) -> int:
-        """Restore session messages to a MessageHistory instance.
-
-        Args:
-            snapshot: Session snapshot to restore
-            message_history: MessageHistory instance to restore to
-
-        Returns:
-            Number of messages restored
-        """
-        from agentic_cli.cli.app import MessageType
-
-        message_history.clear()
-
-        for msg_data in snapshot.messages:
-            message_history.add(
-                content=msg_data["content"],
-                message_type=MessageType(msg_data["message_type"]),
-                timestamp=datetime.fromisoformat(msg_data["timestamp"]),
-                **msg_data.get("metadata", {}),
-            )
-
-        return len(snapshot.messages)
 
     def list_sessions(self) -> list[dict]:
         """List all saved sessions.

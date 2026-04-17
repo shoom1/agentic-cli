@@ -12,7 +12,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from agentic_cli.persistence._utils import atomic_write_text
+from agentic_cli.file_utils import atomic_write_text
 from agentic_cli.tools.registry import (
     ToolCategory,
     PermissionLevel,

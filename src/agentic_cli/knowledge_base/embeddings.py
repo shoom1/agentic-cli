@@ -6,11 +6,44 @@ and document chunking for efficient retrieval.
 
 from __future__ import annotations
 
+import platform
 import re
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from sentence_transformers import SentenceTransformer
+
+
+def resolve_embedding_device(preference: str = "auto") -> str:
+    """Resolve the device string for sentence-transformers.
+
+    PyTorch's own autodetect trusts ``torch.backends.mps.is_available()``,
+    which returns True on Intel Macs with discrete AMD GPUs where MPS
+    command buffers routinely fail with ``Internal Error (e00002bd)``.
+    This helper restricts MPS to Apple Silicon (``arm64``) where it's
+    stable and falls back to CPU on Intel Macs.
+
+    Args:
+        preference: One of ``"auto"``, ``"cpu"``, ``"mps"``, ``"cuda"``.
+            ``"auto"`` picks the best stable device; explicit values are
+            honored as-is (no fallback).
+
+    Returns:
+        Resolved device string to pass to ``SentenceTransformer(..., device=...)``.
+    """
+    if preference != "auto":
+        return preference
+
+    try:
+        import torch
+    except ImportError:
+        return "cpu"
+
+    if torch.cuda.is_available():
+        return "cuda"
+    if platform.machine() == "arm64" and torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
 
 
 class EmbeddingService:
@@ -20,10 +53,20 @@ class EmbeddingService:
     Supports lazy loading to avoid loading the model until needed.
     """
 
+    @staticmethod
+    def is_available() -> bool:
+        """Check whether sentence-transformers can be imported."""
+        try:
+            import sentence_transformers  # noqa: F401
+            return True
+        except ImportError:
+            return False
+
     def __init__(
         self,
         model_name: str = "all-MiniLM-L6-v2",
         batch_size: int = 32,
+        device: str = "auto",
     ) -> None:
         """Initialize the embedding service.
 
@@ -33,9 +76,13 @@ class EmbeddingService:
                 - "all-MiniLM-L6-v2" (fast, 384 dims, good quality)
                 - "all-mpnet-base-v2" (slower, 768 dims, best quality)
             batch_size: Batch size for embedding generation.
+            device: Device preference — ``"auto"`` (default) resolves via
+                :func:`resolve_embedding_device`. Explicit values
+                ``"cpu"``, ``"mps"``, ``"cuda"`` are passed through.
         """
         self.model_name = model_name
         self.batch_size = batch_size
+        self.device = resolve_embedding_device(device)
         self._model: SentenceTransformer | None = None
         self._embedding_dim: int | None = None
 
@@ -45,7 +92,7 @@ class EmbeddingService:
         if self._model is None:
             from sentence_transformers import SentenceTransformer
 
-            self._model = SentenceTransformer(self.model_name)
+            self._model = SentenceTransformer(self.model_name, device=self.device)
             self._embedding_dim = self._model.get_sentence_embedding_dimension()
         return self._model
 
@@ -95,14 +142,16 @@ class EmbeddingService:
         chunk_size: int = 512,
         overlap: int = 50,
     ) -> list[str]:
-        """Split document into overlapping chunks.
+        """Split content into chunks, respecting structure.
 
-        Uses sentence-aware splitting to avoid breaking mid-sentence.
+        Splits on markdown structure (headings, code fences) first,
+        then splits prose sections into sentences. Code blocks are
+        never split.
 
         Args:
-            content: Document content to chunk.
-            chunk_size: Target size of each chunk in characters.
-            overlap: Number of characters to overlap between chunks.
+            content: The text content to chunk.
+            chunk_size: Target size per chunk in characters.
+            overlap: Overlap between adjacent prose chunks in characters.
 
         Returns:
             List of text chunks.
@@ -110,76 +159,106 @@ class EmbeddingService:
         if not content or not content.strip():
             return []
 
-        # Split into sentences
-        sentences = self._split_sentences(content)
+        blocks = self._split_structural_blocks(content)
 
-        chunks: list[str] = []
-        current_chunk: list[str] = []
-        current_length = 0
+        chunks = []
+        for block_type, block_text in blocks:
+            if block_type == "code":
+                chunks.append(block_text.strip())
+            else:
+                sentences = self._split_sentences(block_text)
+                prose_chunks = self._merge_sentences(sentences, chunk_size, overlap)
+                chunks.extend(prose_chunks)
 
-        for sentence in sentences:
-            sentence_length = len(sentence)
+        return [c for c in chunks if c.strip()]
 
-            # If adding this sentence exceeds chunk_size, finalize current chunk
-            if current_length + sentence_length > chunk_size and current_chunk:
-                chunk_text = " ".join(current_chunk)
-                chunks.append(chunk_text)
+    @staticmethod
+    def _split_structural_blocks(content: str) -> list[tuple[str, str]]:
+        """Split content into structural blocks: code vs prose.
 
-                # Keep some sentences for overlap
-                overlap_sentences = self._get_overlap_sentences(current_chunk, overlap)
-                current_chunk = overlap_sentences
-                current_length = sum(len(s) for s in current_chunk)
+        Returns list of (type, text) tuples where type is 'code' or 'prose'.
+        """
+        blocks: list[tuple[str, str]] = []
+        lines = content.split("\n")
+        current_lines: list[str] = []
+        in_code_fence = False
 
-            current_chunk.append(sentence)
-            current_length += sentence_length
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("```") and not in_code_fence:
+                # Start of code block — flush prose
+                if current_lines:
+                    blocks.append(("prose", "\n".join(current_lines)))
+                    current_lines = []
+                in_code_fence = True
+                current_lines.append(line)
+            elif stripped.startswith("```") and in_code_fence:
+                # End of code block
+                current_lines.append(line)
+                blocks.append(("code", "\n".join(current_lines)))
+                current_lines = []
+                in_code_fence = False
+            elif not in_code_fence and re.match(r"^#{1,6}\s", stripped):
+                # Markdown heading — natural boundary
+                if current_lines:
+                    blocks.append(("prose", "\n".join(current_lines)))
+                    current_lines = []
+                current_lines.append(line)
+            else:
+                current_lines.append(line)
 
-        # Add final chunk
-        if current_chunk:
-            chunk_text = " ".join(current_chunk)
-            chunks.append(chunk_text)
+        if current_lines:
+            block_type = "code" if in_code_fence else "prose"
+            blocks.append((block_type, "\n".join(current_lines)))
 
-        return chunks
+        return blocks
 
     def _split_sentences(self, text: str) -> list[str]:
         """Split text into sentences.
 
-        Args:
-            text: Text to split.
-
-        Returns:
-            List of sentences.
+        Uses nltk.sent_tokenize if available, falls back to regex.
         """
-        # Simple sentence splitting on common terminators
-        # More sophisticated splitting could use NLTK or spaCy
-        sentence_pattern = r"(?<=[.!?])\s+(?=[A-Z])"
-        sentences = re.split(sentence_pattern, text)
-        return [s.strip() for s in sentences if s.strip()]
+        if not text.strip():
+            return []
+        try:
+            import nltk
+            return nltk.sent_tokenize(text)
+        except ImportError:
+            pass
+        # Regex fallback
+        parts = re.split(r"(?<=[.!?])\s+(?=[A-Z])", text)
+        return [p.strip() for p in parts if p.strip()]
 
-    def _get_overlap_sentences(
-        self,
+    @staticmethod
+    def _merge_sentences(
         sentences: list[str],
-        overlap_chars: int,
+        chunk_size: int,
+        overlap: int,
     ) -> list[str]:
-        """Get sentences for overlap from the end of a chunk.
-
-        Args:
-            sentences: List of sentences in the chunk.
-            overlap_chars: Target overlap in characters.
-
-        Returns:
-            List of sentences to include in overlap.
-        """
+        """Merge sentences into chunks respecting size and overlap."""
         if not sentences:
             return []
+        chunks = []
+        current: list[str] = []
+        current_len = 0
 
-        overlap_sentences: list[str] = []
-        current_length = 0
+        for sentence in sentences:
+            if current_len + len(sentence) > chunk_size and current:
+                chunks.append(" ".join(current))
+                # Keep overlap from end of current chunk
+                overlap_sentences: list[str] = []
+                overlap_len = 0
+                for s in reversed(current):
+                    if overlap_len + len(s) > overlap:
+                        break
+                    overlap_sentences.insert(0, s)
+                    overlap_len += len(s)
+                current = overlap_sentences
+                current_len = overlap_len
+            current.append(sentence)
+            current_len += len(sentence)
 
-        # Work backwards from end
-        for sentence in reversed(sentences):
-            if current_length >= overlap_chars:
-                break
-            overlap_sentences.insert(0, sentence)
-            current_length += len(sentence)
+        if current:
+            chunks.append(" ".join(current))
 
-        return overlap_sentences
+        return chunks

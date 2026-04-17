@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
 from agentic_cli.logging import Loggers
-from agentic_cli.persistence._utils import sanitize_filename
+from agentic_cli.file_utils import sanitize_filename
 from agentic_cli.tools.sandbox.models import ExecutionResult
 
 if TYPE_CHECKING:

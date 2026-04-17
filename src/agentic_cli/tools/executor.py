@@ -12,9 +12,13 @@ import subprocess
 import sys
 import textwrap
 import time
-from typing import Any
+from pathlib import Path
+from typing import Any, TYPE_CHECKING
 
 import structlog
+
+if TYPE_CHECKING:
+    from agentic_cli.tools.shell.os_sandbox.policy import OSSandboxPolicy
 
 logger = structlog.get_logger(__name__)
 
@@ -111,16 +115,22 @@ class SafePythonExecutor:
     }
 
     def __init__(
-        self, default_timeout: int = 30, max_memory_mb: int = 512
+        self,
+        default_timeout: int = 30,
+        max_memory_mb: int = 512,
+        os_sandbox_policy: OSSandboxPolicy | None = None,
     ) -> None:
         """Initialize the executor.
 
         Args:
             default_timeout: Default execution timeout in seconds.
             max_memory_mb: Maximum memory for subprocess (MB, Unix only).
+            os_sandbox_policy: OS-level sandbox policy. If provided and enabled,
+                Python execution is wrapped with OS-native sandboxing.
         """
         self.default_timeout = default_timeout
         self.max_memory_mb = max_memory_mb
+        self.os_sandbox_policy = os_sandbox_policy
 
     def validate_code(self, code: str) -> tuple[bool, str]:
         """Validate code for safety.
@@ -233,13 +243,48 @@ class SafePythonExecutor:
         )
 
         try:
-            proc = subprocess.run(
-                [sys.executable, "-c", script],
-                input=code,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-            )
+            if self.os_sandbox_policy and self.os_sandbox_policy.enabled:
+                from agentic_cli.tools.shell.os_sandbox import get_os_sandbox
+
+                sandbox = get_os_sandbox()
+                wrap_result = sandbox.wrap_python_command(
+                    [sys.executable, "-c", script],
+                    Path.cwd(),
+                    self.os_sandbox_policy,
+                )
+                if wrap_result.success:
+                    logger.debug(
+                        "python_executor.os_sandbox_wrapped",
+                        sandbox_type=wrap_result.sandbox_type,
+                    )
+                    proc = subprocess.run(
+                        wrap_result.command,
+                        shell=True,
+                        input=code,
+                        capture_output=True,
+                        text=True,
+                        timeout=timeout,
+                    )
+                else:
+                    logger.warning(
+                        "python_executor.os_sandbox_wrap_failed",
+                        error=wrap_result.error,
+                    )
+                    proc = subprocess.run(
+                        [sys.executable, "-c", script],
+                        input=code,
+                        capture_output=True,
+                        text=True,
+                        timeout=timeout,
+                    )
+            else:
+                proc = subprocess.run(
+                    [sys.executable, "-c", script],
+                    input=code,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                )
         except subprocess.TimeoutExpired:
             elapsed = (time.time() - start_time) * 1000
             logger.warning("python_executor.timeout", timeout=timeout)

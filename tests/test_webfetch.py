@@ -604,27 +604,32 @@ class TestLLMSummarizer:
         assert issubclass(LLMSummarizer, Protocol)
 
     def test_context_getter_setter(self):
-        """Test context getter and setter for LLM summarizer."""
-        from agentic_cli.workflow.context import (
-            get_context_llm_summarizer,
-            set_context_llm_summarizer,
+        """Test service registry getter/setter for LLM summarizer."""
+        from agentic_cli.workflow.service_registry import (
+            get_service,
+            get_service_registry,
+            set_service_registry,
         )
 
-        # Initially None
-        assert get_context_llm_summarizer() is None
+        token = set_service_registry({})
+        try:
+            # Initially None
+            assert get_service("llm_summarizer") is None
 
-        # Set a mock summarizer
-        class MockSummarizer:
-            async def summarize(self, content: str, prompt: str) -> str:
-                return "Summary"
+            # Set a mock summarizer
+            class MockSummarizer:
+                async def summarize(self, content: str, prompt: str) -> str:
+                    return "Summary"
 
-        mock = MockSummarizer()
-        set_context_llm_summarizer(mock)
-        assert get_context_llm_summarizer() is mock
+            mock = MockSummarizer()
+            get_service_registry()["llm_summarizer"] = mock
+            assert get_service("llm_summarizer") is mock
 
-        # Clear
-        set_context_llm_summarizer(None)
-        assert get_context_llm_summarizer() is None
+            # Clear
+            get_service_registry()["llm_summarizer"] = None
+            assert get_service("llm_summarizer") is None
+        finally:
+            token.var.reset(token)
 
     def test_fast_model_map(self):
         """Test FAST_MODEL_MAP contains expected mappings."""
@@ -651,15 +656,14 @@ class TestWebFetchTool:
         """Test successful web fetch with mocked fetcher and summarizer."""
         from agentic_cli.tools.webfetch_tool import web_fetch
         from agentic_cli.tools.webfetch.fetcher import FetchResult
-        from agentic_cli.workflow.context import set_context_llm_summarizer
+        from agentic_cli.workflow.service_registry import set_service_registry
 
         # Create mock summarizer
         class MockSummarizer:
             async def summarize(self, content: str, prompt: str) -> str:
                 return f"Summary of: {content[:20]}..."
 
-        # Set summarizer in context
-        set_context_llm_summarizer(MockSummarizer())
+        token = set_service_registry({"llm_summarizer": MockSummarizer()})
 
         try:
             # Mock the fetcher
@@ -685,21 +689,21 @@ class TestWebFetchTool:
             assert result["truncated"] is False
             assert result["cached"] is False
         finally:
-            set_context_llm_summarizer(None)
+            token.var.reset(token)
 
     @pytest.mark.asyncio
     async def test_web_fetch_redirect(self):
         """Test web fetch returns redirect info for cross-host redirects."""
         from agentic_cli.tools.webfetch_tool import web_fetch
         from agentic_cli.tools.webfetch.fetcher import FetchResult, RedirectInfo
-        from agentic_cli.workflow.context import set_context_llm_summarizer
+        from agentic_cli.workflow.service_registry import set_service_registry
 
         # Create mock summarizer
         class MockSummarizer:
             async def summarize(self, content: str, prompt: str) -> str:
                 return "Summary"
 
-        set_context_llm_summarizer(MockSummarizer())
+        token = set_service_registry({"llm_summarizer": MockSummarizer()})
 
         try:
             with patch("agentic_cli.tools.webfetch_tool.get_or_create_fetcher") as mock_get_fetcher:
@@ -727,39 +731,42 @@ class TestWebFetchTool:
             assert "message" in result
             assert result["url"] == "https://example.com/page"
         finally:
-            set_context_llm_summarizer(None)
+            token.var.reset(token)
 
     @pytest.mark.asyncio
     async def test_web_fetch_no_summarizer(self):
         """Test web fetch returns error when no summarizer in context."""
         from agentic_cli.tools.webfetch_tool import web_fetch
-        from agentic_cli.workflow.context import set_context_llm_summarizer
+        from agentic_cli.workflow.service_registry import set_service_registry
 
-        # Ensure no summarizer in context
-        set_context_llm_summarizer(None)
+        # Ensure no summarizer in context (empty registry)
+        token = set_service_registry({})
 
-        result = await web_fetch(
-            url="https://example.com/page",
-            prompt="Summarize this page",
-        )
+        try:
+            result = await web_fetch(
+                url="https://example.com/page",
+                prompt="Summarize this page",
+            )
 
-        assert result["success"] is False
-        assert "error" in result
-        assert "summarizer" in result["error"].lower()
+            assert result["success"] is False
+            assert "error" in result
+            assert "summarizer" in result["error"].lower()
+        finally:
+            token.var.reset(token)
 
-    def test_web_fetch_requires_decorator(self):
-        """Test web_fetch has requires attribute with llm_summarizer."""
-        from agentic_cli.tools.webfetch_tool import web_fetch
+    def test_web_fetch_detected_via_tool_service_map(self):
+        """Test web_fetch is detected via _TOOL_SERVICE_MAP."""
+        from agentic_cli.workflow.base_manager import BaseWorkflowManager
 
-        assert hasattr(web_fetch, "requires")
-        assert "llm_summarizer" in web_fetch.requires
+        assert "web_fetch" in BaseWorkflowManager._TOOL_SERVICE_MAP
+        assert BaseWorkflowManager._TOOL_SERVICE_MAP["web_fetch"] == "llm_summarizer"
 
 
 class TestWorkflowManagerIntegration:
     """Tests for workflow manager integration with webfetch tool."""
 
     def test_llm_summarizer_detected_in_required_managers(self):
-        """Test that llm_summarizer is detected from web_fetch tool's @requires decorator."""
+        """Test that llm_summarizer is detected from web_fetch tool via _TOOL_SERVICE_MAP."""
         from agentic_cli.workflow.base_manager import BaseWorkflowManager
         from agentic_cli.workflow.config import AgentConfig
         from agentic_cli.workflow.events import WorkflowEvent, UserInputRequest
@@ -779,6 +786,9 @@ class TestWorkflowManagerIntegration:
             async def _do_initialize(self) -> None:
                 pass
 
+            def _get_state_tools(self) -> list:
+                return []
+
             async def process(
                 self, message: str, user_id: str, session_id: str | None = None
             ) -> AsyncGenerator[WorkflowEvent, None]:
@@ -793,11 +803,8 @@ class TestWorkflowManagerIntegration:
             async def cleanup(self) -> None:
                 pass
 
-            async def _extract_session_messages(self, session_id: str) -> list[dict]:
-                return []
-
-            async def _extract_current_agent(self, session_id: str) -> str | None:
-                return None
+            async def _extract_session_data(self, session_id: str) -> tuple[list[dict], str | None]:
+                return [], None
 
             async def _inject_session_messages(self, session_id: str, messages: list[dict], current_agent: str | None = None) -> None:
                 pass
@@ -835,6 +842,9 @@ class TestWorkflowManagerIntegration:
             async def _do_initialize(self) -> None:
                 pass
 
+            def _get_state_tools(self) -> list:
+                return []
+
             async def process(
                 self, message: str, user_id: str, session_id: str | None = None
             ) -> AsyncGenerator[WorkflowEvent, None]:
@@ -849,11 +859,8 @@ class TestWorkflowManagerIntegration:
             async def cleanup(self) -> None:
                 pass
 
-            async def _extract_session_messages(self, session_id: str) -> list[dict]:
-                return []
-
-            async def _extract_current_agent(self, session_id: str) -> str | None:
-                return None
+            async def _extract_session_data(self, session_id: str) -> tuple[list[dict], str | None]:
+                return [], None
 
             async def _inject_session_messages(self, session_id: str, messages: list[dict], current_agent: str | None = None) -> None:
                 pass
@@ -873,17 +880,13 @@ class TestWorkflowManagerIntegration:
         assert manager.llm_summarizer is None
 
     @pytest.mark.asyncio
-    async def test_create_summarizer_called_when_required(self):
-        """Test that _create_summarizer is called when llm_summarizer is required."""
+    async def test_manager_becomes_summarizer_when_required(self):
+        """Test that the manager itself becomes the llm_summarizer when required."""
         from agentic_cli.workflow.base_manager import BaseWorkflowManager
         from agentic_cli.workflow.config import AgentConfig
         from agentic_cli.workflow.events import WorkflowEvent, UserInputRequest
         from agentic_cli.tools.webfetch_tool import web_fetch
         from typing import AsyncGenerator
-
-        # Track if _create_summarizer was called
-        create_summarizer_called = False
-        mock_summarizer = object()
 
         class TestWorkflowManager(BaseWorkflowManager):
             @property
@@ -896,6 +899,9 @@ class TestWorkflowManagerIntegration:
 
             async def _do_initialize(self) -> None:
                 pass
+
+            def _get_state_tools(self) -> list:
+                return []
 
             async def process(
                 self, message: str, user_id: str, session_id: str | None = None
@@ -911,19 +917,11 @@ class TestWorkflowManagerIntegration:
             async def cleanup(self) -> None:
                 pass
 
-            async def _extract_session_messages(self, session_id: str) -> list[dict]:
-                return []
-
-            async def _extract_current_agent(self, session_id: str) -> str | None:
-                return None
+            async def _extract_session_data(self, session_id: str) -> tuple[list[dict], str | None]:
+                return [], None
 
             async def _inject_session_messages(self, session_id: str, messages: list[dict], current_agent: str | None = None) -> None:
                 pass
-
-            def _create_summarizer(self):
-                nonlocal create_summarizer_called
-                create_summarizer_called = True
-                return mock_summarizer
 
         # Create an agent config with web_fetch tool
         agent_config = AgentConfig(
@@ -940,6 +938,6 @@ class TestWorkflowManagerIntegration:
         # Initialize to trigger manager creation (skip validation — no API keys in test)
         await manager.initialize_services(validate=False)
 
-        # Now _create_summarizer should have been called
-        assert create_summarizer_called
-        assert manager.llm_summarizer is mock_summarizer
+        # The manager itself should be the summarizer (has summarize() method)
+        assert manager.llm_summarizer is manager
+        assert hasattr(manager.llm_summarizer, "summarize")

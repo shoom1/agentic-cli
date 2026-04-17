@@ -1091,7 +1091,7 @@ class TestStandardTools:
     """Tests for standard tool functions."""
 
     @pytest.mark.asyncio
-    async def test_fetch_arxiv_paper_returns_paper_details(self):
+    async def test_fetch_arxiv_paper_returns_paper_details(self, arxiv_source_ctx):
         """Test fetch_arxiv_paper returns paper details for valid ID."""
         from unittest.mock import patch, MagicMock
         from agentic_cli.tools.arxiv_tools import fetch_arxiv_paper
@@ -1120,10 +1120,10 @@ class TestStandardTools:
             assert result["paper"]["arxiv_id"] == "1706.03762"
             assert "Vaswani" in result["paper"]["authors"]
             assert "cs.CL" in result["paper"]["categories"]
-            assert result["paper"]["pdf_url"] == "https://arxiv.org/pdf/1706.03762.pdf"
+            assert result["paper"]["pdf_url"] == "https://arxiv.org/pdf/1706.03762"
 
     @pytest.mark.asyncio
-    async def test_fetch_arxiv_paper_not_found(self):
+    async def test_fetch_arxiv_paper_not_found(self, arxiv_source_ctx):
         """Test fetch_arxiv_paper handles missing paper."""
         from unittest.mock import patch, MagicMock
         from agentic_cli.tools.arxiv_tools import fetch_arxiv_paper
@@ -1137,7 +1137,7 @@ class TestStandardTools:
             assert "not found" in result["error"].lower()
 
     @pytest.mark.asyncio
-    async def test_fetch_arxiv_paper_cleans_id(self):
+    async def test_fetch_arxiv_paper_cleans_id(self, arxiv_source_ctx):
         """Test fetch_arxiv_paper handles various ID formats."""
         from unittest.mock import patch, MagicMock
         from agentic_cli.tools.arxiv_tools import fetch_arxiv_paper
@@ -1216,61 +1216,34 @@ class TestArxivHelpers:
         assert _clean_arxiv_id("https://arxiv.org/abs/hep-th/9901001") == "hep-th/9901001"
 
 
-class TestIngestArxivIdExtraction:
-    """Tests for arXiv ID extraction in ingest_document."""
-
-    def test_extract_new_format(self):
-        from agentic_cli.tools.knowledge_tools import _extract_arxiv_id
-
-        assert _extract_arxiv_id("1706.03762") == "1706.03762"
-        assert _extract_arxiv_id("2301.12345") == "2301.12345"
-        assert _extract_arxiv_id("https://arxiv.org/abs/1706.03762") == "1706.03762"
-
-    def test_extract_old_format(self):
-        from agentic_cli.tools.knowledge_tools import _extract_arxiv_id
-
-        assert _extract_arxiv_id("math/0607733") == "math/0607733"
-        assert _extract_arxiv_id("hep-th/9901001") == "hep-th/9901001"
-        assert _extract_arxiv_id("https://arxiv.org/abs/math/0607733") == "math/0607733"
-        assert _extract_arxiv_id("https://arxiv.org/pdf/math/0607733.pdf") == "math/0607733"
-
-    def test_extract_no_match(self):
-        from agentic_cli.tools.knowledge_tools import _extract_arxiv_id
-
-        assert _extract_arxiv_id("not-an-id") == ""
-        assert _extract_arxiv_id("") == ""
-
-
 class TestFetchArxivPaperRateLimiting:
     """Tests for fetch_arxiv_paper rate limiting."""
 
     @pytest.mark.asyncio
-    async def test_fetch_arxiv_paper_respects_rate_limit(self):
-        """Test fetch_arxiv_paper respects rate limiting."""
-        from unittest.mock import patch, MagicMock
+    async def test_fetch_arxiv_paper_respects_rate_limit(self, arxiv_source_ctx):
+        """Test fetch_arxiv_paper uses asyncio.sleep to honor rate limiting."""
+        from unittest.mock import patch, MagicMock, AsyncMock
         from agentic_cli.tools.arxiv_tools import fetch_arxiv_paper
 
-        # Reset the source to ensure clean state
-        import agentic_cli.tools.arxiv_tools as arxiv_module
-        arxiv_module._arxiv_source = None
+        mock_entry = {
+            "title": "Test", "link": "", "summary": "", "authors": [],
+            "published": "", "updated": "", "tags": [],
+            "id": "http://arxiv.org/abs/1234.5678v1",
+            "arxiv_primary_category": {"term": ""},
+        }
 
-        with patch("agentic_cli.tools.arxiv_source.time") as mock_time:
+        with patch("agentic_cli.tools.arxiv_source.time") as mock_time, \
+             patch("agentic_cli.tools.arxiv_source.asyncio.sleep", new=AsyncMock()) as mock_sleep, \
+             patch("feedparser.parse") as mock_parse:
             mock_time.time.return_value = 100.0
-            mock_time.sleep = MagicMock()
+            mock_parse.return_value = MagicMock(entries=[mock_entry])
 
-            with patch("feedparser.parse") as mock_parse:
-                mock_parse.return_value = MagicMock(
-                    entries=[{"title": "Test", "link": "", "summary": "", "authors": [],
-                             "published": "", "tags": [], "id": "http://arxiv.org/abs/1234.5678v1"}]
-                )
+            # First call — no sleep (last_request_time == 0)
+            await fetch_arxiv_paper("1234.5678")
+            # Second call immediately — elapsed = 0, triggers async sleep
+            await fetch_arxiv_paper("5678.1234")
 
-                # First call
-                await fetch_arxiv_paper("1234.5678")
-                # Second call immediately - should trigger rate limiting
-                await fetch_arxiv_paper("5678.1234")
-
-                # Verify sleep was called for rate limiting
-                assert mock_time.sleep.call_count >= 1
+            assert mock_sleep.await_count >= 1
 
 
 class TestArxivSortValidation:
@@ -1292,14 +1265,10 @@ class TestArxivSortValidation:
         assert result["success"] is False
         assert "sort_order" in result["error"]
 
-    def test_search_arxiv_valid_sort_options(self):
+    def test_search_arxiv_valid_sort_options(self, arxiv_source_ctx):
         """Test search_arxiv accepts valid sort options."""
         from unittest.mock import patch, MagicMock
         from agentic_cli.tools.arxiv_tools import search_arxiv
-        import agentic_cli.tools.arxiv_tools as arxiv_module
-
-        # Reset the source to ensure clean state
-        arxiv_module._arxiv_source = None
 
         # Mock feedparser to avoid real API calls
         with patch("feedparser.parse") as mock_parse:
@@ -1354,8 +1323,6 @@ class TestToolRegistryConsistency:
         import agentic_cli.tools.interaction_tools  # noqa: F401
         import agentic_cli.tools.webfetch_tool  # noqa: F401
         import agentic_cli.tools.memory_tools  # noqa: F401
-        import agentic_cli.tools.planning_tools  # noqa: F401
-        import agentic_cli.tools.task_tools  # noqa: F401
         import agentic_cli.tools.hitl_tools  # noqa: F401
         import agentic_cli.tools.shell.executor  # noqa: F401
 
@@ -1376,11 +1343,10 @@ class TestToolRegistryConsistency:
             "web_search",
             "web_fetch",
             # Knowledge base (unified document store)
-            "search_knowledge_base",
-            "ingest_document",
-            "read_document",
-            "list_documents",
-            "open_document",
+            "kb_search",
+            "kb_ingest",
+            "kb_read",
+            "kb_list",
             # ArXiv (metadata only)
             "search_arxiv",
             "fetch_arxiv_paper",
@@ -1392,14 +1358,6 @@ class TestToolRegistryConsistency:
             # Memory tools
             "save_memory",
             "search_memory",
-            # Planning tools
-            "save_plan",
-            "get_plan",
-            # Task tools
-            "save_tasks",
-            "get_tasks",
-            # HITL tools
-            "request_approval",
         ]
 
         registered_names = {tool.name for tool in registry.list_tools()}
@@ -1416,7 +1374,7 @@ class TestToolRegistryConsistency:
 
         registry = get_registry()
 
-        dangerous_tools = ["shell_executor", "execute_python", "open_document"]
+        dangerous_tools = ["shell_executor", "execute_python"]
         for tool_name in dangerous_tools:
             tool = registry.get(tool_name)
             if tool:
@@ -1430,7 +1388,7 @@ class TestToolRegistryConsistency:
 
         registry = get_registry()
 
-        caution_tools = ["write_file", "edit_file", "ingest_document"]
+        caution_tools = ["write_file", "edit_file", "kb_ingest"]
 
         for tool_name in caution_tools:
             tool = registry.get(tool_name)
@@ -1447,13 +1405,12 @@ class TestToolRegistryConsistency:
 
         safe_tools = [
             "read_file", "diff_compare", "grep", "glob", "list_dir",
-            "web_search", "web_fetch", "search_knowledge_base",
-            "read_document", "list_documents",
+            "web_search", "web_fetch", "kb_search",
+            "kb_read", "kb_list",
             "search_arxiv", "fetch_arxiv_paper",
             "ask_clarification",
             "save_memory", "search_memory",
             "save_plan", "get_plan",
-            "request_approval",
         ]
 
         for tool_name in safe_tools:
@@ -1479,8 +1436,6 @@ class TestToolRegistryConsistency:
         import agentic_cli.tools.interaction_tools  # noqa: F401
         import agentic_cli.tools.webfetch_tool  # noqa: F401
         import agentic_cli.tools.memory_tools  # noqa: F401
-        import agentic_cli.tools.planning_tools  # noqa: F401
-        import agentic_cli.tools.task_tools  # noqa: F401
         import agentic_cli.tools.hitl_tools  # noqa: F401
         import agentic_cli.tools.shell.executor  # noqa: F401
 
@@ -1503,14 +1458,11 @@ class TestToolRegistryConsistency:
         memory_names = {t.name for t in memory_tools}
         assert "save_memory" in memory_names, "MEMORY category should have memory tools"
 
-        planning_tools = registry.list_by_category(ToolCategory.PLANNING)
-        planning_names = {t.name for t in planning_tools}
-        assert "save_plan" in planning_names, "PLANNING category should have planning tools"
-        assert "save_tasks" in planning_names, "PLANNING category should have task tools"
+        # Plan/task state tools are now backend-specific (not in global registry)
 
         interaction_tools = registry.list_by_category(ToolCategory.INTERACTION)
         interaction_names = {t.name for t in interaction_tools}
-        assert "request_approval" in interaction_names, "INTERACTION category should have HITL tools"
+        assert "ask_clarification" in interaction_names, "INTERACTION category should have interaction tools"
 
         knowledge_tools = registry.list_by_category(ToolCategory.KNOWLEDGE)
         knowledge_names = {t.name for t in knowledge_tools}
@@ -1536,46 +1488,42 @@ class TestToolRegistryConsistency:
         import agentic_cli.tools.interaction_tools  # noqa: F401
         import agentic_cli.tools.webfetch_tool  # noqa: F401
         import agentic_cli.tools.memory_tools  # noqa: F401
-        import agentic_cli.tools.planning_tools  # noqa: F401
-        import agentic_cli.tools.task_tools  # noqa: F401
         import agentic_cli.tools.hitl_tools  # noqa: F401
         import agentic_cli.tools.shell.executor  # noqa: F401
 
         registry = get_registry()
         tool_count = len(registry.list_tools())
 
-        # We expect at least 26 tools after unified document store
         # File ops: 7 (read_file, diff_compare, grep, glob, list_dir, write_file, edit_file)
         # Web/Network: 2 (web_search, web_fetch)
-        # Knowledge: 7 (search_kb, ingest_document, read_document, list_documents, open_document, search_arxiv, fetch_arxiv)
+        # Knowledge: 7 (kb_search, kb_ingest, kb_read, kb_list, search_arxiv, fetch_arxiv_paper, ingest_arxiv_paper)
         # Execution: 2 (execute_python, shell_executor)
         # Interaction: 1 (ask_clarification)
         # Memory: 2 (save_memory, search_memory)
-        # Planning: 2 (save_plan, get_plan)
-        # Tasks: 2 (save_tasks, get_tasks)
-        # HITL: 1 (request_approval)
-        # Total: ~26 tools
-        assert tool_count >= 25, f"Expected at least 25 registered tools, got {tool_count}"
+        # Sandbox: 1 (sandbox_execute)
+        # Plan/task state tools are backend-specific (not in global registry)
+        # Total: ~23 tools
+        assert tool_count >= 20, f"Expected at least 20 registered tools, got {tool_count}"
 
 
-class TestDangerousToolHITLEnforcement:
-    """Tests that DANGEROUS tools auto-gate behind HITL approval."""
+class TestDangerousToolDirectExecution:
+    """Tests that DANGEROUS tools execute directly (no registry-level wrapping).
 
-    def test_dangerous_tool_has_hitl_guard(self):
-        """DANGEROUS tool should be wrapped with HITL guard."""
+    Confirmation is now handled at the framework level by ADK ConfirmationPlugin
+    and LangGraph's _wrap_for_confirmation wrapper.
+    """
+
+    def test_dangerous_tool_not_wrapped(self):
+        """DANGEROUS tool should NOT have _hitl_guarded attribute (no wrapping)."""
         from agentic_cli.tools.sandbox import sandbox_execute
 
-        assert getattr(sandbox_execute, "_hitl_guarded", False), \
-            "DANGEROUS tools should be wrapped with HITL guard"
+        assert not getattr(sandbox_execute, "_hitl_guarded", False), \
+            "DANGEROUS tools should no longer be wrapped with _hitl_guarded"
 
-    def test_dangerous_tool_passes_with_approval(self):
-        """DANGEROUS tool executes when approval manager approves."""
-        from unittest.mock import MagicMock
+    def test_dangerous_tool_executes_directly(self):
+        """DANGEROUS tool executes directly without approval manager."""
         from agentic_cli.tools.sandbox import sandbox_execute
-        from agentic_cli.workflow.context import (
-            set_context_sandbox_manager,
-            set_context_approval_manager,
-        )
+        from agentic_cli.workflow.service_registry import set_service_registry
         from agentic_cli.tools.sandbox.models import ExecutionResult
         from tests.conftest import MockContext
         from tests.tools.test_sandbox import MockSandboxBackend
@@ -1587,80 +1535,20 @@ class TestDangerousToolHITLEnforcement:
             from agentic_cli.tools.sandbox.manager import SandboxManager
             mgr = SandboxManager(ctx.settings, backend=backend)
 
-            # Create mock approval manager that auto-approves
-            approval_mgr = MagicMock()
-            approval_mgr.check_or_request.return_value = True
-
-            tok1 = set_context_sandbox_manager(mgr)
-            tok2 = set_context_approval_manager(approval_mgr)
-
-            try:
-                result = sandbox_execute("1 + 1")
-                assert result["success"] is True
-                approval_mgr.check_or_request.assert_called_once()
-            finally:
-                tok1.var.reset(tok1)
-                tok2.var.reset(tok2)
-                mgr.cleanup()
-
-    def test_dangerous_tool_denied(self):
-        """DANGEROUS tool returns error when approval manager denies."""
-        from unittest.mock import MagicMock
-        from agentic_cli.tools.sandbox import sandbox_execute
-        from agentic_cli.workflow.context import (
-            set_context_sandbox_manager,
-            set_context_approval_manager,
-        )
-        from tests.conftest import MockContext
-        from tests.tools.test_sandbox import MockSandboxBackend
-
-        with MockContext() as ctx:
-            backend = MockSandboxBackend()
-            from agentic_cli.tools.sandbox.manager import SandboxManager
-            mgr = SandboxManager(ctx.settings, backend=backend)
-
-            approval_mgr = MagicMock()
-            approval_mgr.check_or_request.return_value = False
-
-            tok1 = set_context_sandbox_manager(mgr)
-            tok2 = set_context_approval_manager(approval_mgr)
-
-            try:
-                result = sandbox_execute("1 + 1")
-                assert result["success"] is False
-                assert "denied" in result["error"].lower()
-                # Original function should NOT have been called
-                assert len(backend.execute_calls) == 0
-            finally:
-                tok1.var.reset(tok1)
-                tok2.var.reset(tok2)
-                mgr.cleanup()
-
-    def test_dangerous_tool_no_approval_manager_executes(self):
-        """DANGEROUS tool executes normally when no approval manager exists."""
-        from agentic_cli.tools.sandbox import sandbox_execute
-        from agentic_cli.workflow.context import (
-            set_context_sandbox_manager,
-            set_context_approval_manager,
-        )
-        from agentic_cli.tools.sandbox.models import ExecutionResult
-        from tests.conftest import MockContext
-        from tests.tools.test_sandbox import MockSandboxBackend
-
-        with MockContext() as ctx:
-            backend = MockSandboxBackend(
-                ExecutionResult(success=True, stdout="ok\n", result="1")
-            )
-            from agentic_cli.tools.sandbox.manager import SandboxManager
-            mgr = SandboxManager(ctx.settings, backend=backend)
-
-            tok1 = set_context_sandbox_manager(mgr)
-            tok2 = set_context_approval_manager(None)
+            tok = set_service_registry({"sandbox_manager": mgr})
 
             try:
                 result = sandbox_execute("1 + 1")
                 assert result["success"] is True
             finally:
-                tok1.var.reset(tok1)
-                tok2.var.reset(tok2)
+                tok.var.reset(tok)
                 mgr.cleanup()
+
+    def test_dangerous_tool_has_correct_permission_level(self):
+        """DANGEROUS tools should still be registered with DANGEROUS permission."""
+        from agentic_cli.tools import get_registry, PermissionLevel
+
+        registry = get_registry()
+        tool = registry.get("sandbox_execute")
+        if tool:
+            assert tool.permission_level == PermissionLevel.DANGEROUS

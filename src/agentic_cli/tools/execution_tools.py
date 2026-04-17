@@ -44,8 +44,21 @@ def execute_python(
             return {"success": False, "error": f"Invalid JSON in context: {context}"}
 
     settings = get_settings()
+
+    # Build OS sandbox policy from settings
+    os_sandbox_policy = None
+    if getattr(settings, "os_sandbox_enabled", False):
+        from agentic_cli.tools.shell.os_sandbox import OSSandboxPolicy
+
+        os_sandbox_policy = OSSandboxPolicy(
+            enabled=True,
+            writable_paths=getattr(settings, "os_sandbox_writable_paths", []),
+            allow_network=getattr(settings, "os_sandbox_allow_network", False),
+        )
+
     executor = SafePythonExecutor(
         default_timeout=settings.python_executor_timeout,
         max_memory_mb=settings.python_executor_max_memory_mb,
+        os_sandbox_policy=os_sandbox_policy,
     )
     return executor.execute(code, context=parsed_context, timeout_seconds=timeout_seconds)

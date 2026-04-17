@@ -478,65 +478,6 @@ class TestPersistenceLayer:
         assert store is None
 
 
-class TestToolsModule:
-    """Tests for the tools module."""
-
-    def test_file_search_glob(self):
-        """Test glob search function."""
-        from agentic_cli.workflow.langgraph.tools import glob_search
-        import tempfile
-        import os
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            # Create test files
-            test_file = os.path.join(tmpdir, "test.py")
-            with open(test_file, "w") as f:
-                f.write("# test file")
-
-            results = glob_search("*.py", directory=tmpdir)
-
-            assert len(results) == 1
-            assert "test.py" in results[0]
-
-    def test_file_search_grep(self):
-        """Test grep search function."""
-        from agentic_cli.workflow.langgraph.tools import grep_search
-        import tempfile
-        import os
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            # Create test file
-            test_file = os.path.join(tmpdir, "test.py")
-            with open(test_file, "w") as f:
-                f.write("def hello_world():\n    pass\n")
-
-            results = grep_search("hello", directory=tmpdir, file_pattern="*.py")
-
-            assert len(results) == 1
-            assert results[0]["line"] == 1
-            assert "hello" in results[0]["content"]
-
-    @pytest.mark.xfail(reason="Shell tool disabled pending security review")
-    def test_shell_execute_safe_command(self):
-        """Test shell execution with safe command."""
-        from agentic_cli.workflow.langgraph.tools import shell_execute
-
-        result = shell_execute("echo hello")
-
-        assert result["success"] is True
-        assert "hello" in result["stdout"]
-
-    def test_shell_execute_blocked_command(self):
-        """Test shell execution blocks dangerous commands or is disabled."""
-        from agentic_cli.workflow.langgraph.tools import shell_execute
-
-        result = shell_execute("rm -rf /")
-
-        assert result["success"] is False
-        # Either blocked by security or disabled entirely
-        assert "blocked" in result["error"].lower() or "disabled" in result["error"].lower()
-
-
 class TestManagerCheckpointerOptions:
     """Tests for checkpointer options in LangGraphWorkflowManager."""
 

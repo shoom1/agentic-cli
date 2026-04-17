@@ -470,79 +470,56 @@ class TestParseRetryDelay:
 
 
 class TestTaskProgressAutoClean:
-    """Tests for auto-clear when all tasks are done and plan-based progress."""
+    """Tests for auto-clear via TaskProgressPlugin (replaces _emit_task_progress_event)."""
 
-    def test_auto_clears_when_all_done(self, mock_settings):
-        """When all tasks are completed, emit final event then clear store."""
-        from agentic_cli.tools.task_tools import TaskStore
+    async def test_auto_clears_when_all_done(self):
+        """Plugin clears tasks from tool_context.state when all done."""
+        from agentic_cli.workflow.adk.task_progress_plugin import TaskProgressPlugin
+        from agentic_cli.tools._core.tasks import normalize_tasks
 
-        store = TaskStore(mock_settings)
-        store.replace_all([
+        normalized, _ = normalize_tasks([
             {"description": "Task 1", "status": "completed"},
             {"description": "Task 2", "status": "completed"},
         ])
 
-        mgr = _create_manager(mock_settings, [AgentConfig(name="test", prompt="test")])
-        mgr._task_store = store
+        state = {"tasks": normalized}
+        mock_ctx = type("MockCtx", (), {"state": state})()
+        plugin = TaskProgressPlugin()
 
-        # First call: emits final snapshot, then clears
-        event = mgr._emit_task_progress_event()
-        assert event is not None
-        assert event.type == EventType.TASK_PROGRESS
-        assert "[✓] Task 1" in event.content
-        assert "[✓] Task 2" in event.content
-        assert event.metadata["progress"]["completed"] == 2
-        assert store.is_empty()
+        await plugin.after_tool_callback(
+            tool=None, tool_args={}, tool_context=mock_ctx, result={},
+        )
 
-        # Second call: store is empty, returns None
-        assert mgr._emit_task_progress_event() is None
+        events = plugin.drain_events()
+        assert len(events) == 1
+        assert events[0].type == EventType.TASK_PROGRESS
+        assert "[✓] Task 1" in events[0].content
+        assert events[0].metadata["progress"]["completed"] == 2
+        # Auto-cleared
+        assert state["tasks"] == []
 
-    def test_no_auto_clear_with_pending(self, mock_settings):
-        """When tasks are not all done, store is NOT cleared."""
-        from agentic_cli.tools.task_tools import TaskStore
+    async def test_no_auto_clear_with_pending(self):
+        """Plugin does NOT clear when tasks remain pending."""
+        from agentic_cli.workflow.adk.task_progress_plugin import TaskProgressPlugin
+        from agentic_cli.tools._core.tasks import normalize_tasks
 
-        store = TaskStore(mock_settings)
-        store.replace_all([
+        normalized, _ = normalize_tasks([
             {"description": "Done task", "status": "completed"},
             {"description": "Pending task", "status": "pending"},
         ])
 
-        mgr = _create_manager(mock_settings, [AgentConfig(name="test", prompt="test")])
-        mgr._task_store = store
+        state = {"tasks": normalized}
+        mock_ctx = type("MockCtx", (), {"state": state})()
+        plugin = TaskProgressPlugin()
 
-        event = mgr._emit_task_progress_event()
-        assert event is not None
-        assert not store.is_empty()
-
-    def test_plan_progress_after_save_plan(self, mock_settings):
-        """PlanStore with checkboxes emits TASK_PROGRESS when no TaskStore."""
-        from agentic_cli.tools.planning_tools import PlanStore
-
-        plan_store = PlanStore()
-        plan_store.save(
-            "## Setup\n"
-            "- [x] Install deps\n"
-            "- [ ] Configure env\n"
-            "\n"
-            "## Build\n"
-            "- [ ] Compile\n"
+        await plugin.after_tool_callback(
+            tool=None, tool_args={}, tool_context=mock_ctx, result={},
         )
 
-        mgr = _create_manager(mock_settings, [AgentConfig(name="test", prompt="test")])
-        mgr._task_store = None
-        mgr._plan_store = plan_store
+        events = plugin.drain_events()
+        assert len(events) == 1
+        assert len(state["tasks"]) == 2  # not cleared
 
-        event = mgr._emit_task_progress_event()
-        assert event is not None
-        assert event.type == EventType.TASK_PROGRESS
-        assert "Setup:" in event.content
-        assert "[✓] Install deps" in event.content
-        assert "[ ] Configure env" in event.content
-        assert "Build:" in event.content
-        assert "[ ] Compile" in event.content
-        assert event.metadata["progress"]["total"] == 3
-        assert event.metadata["progress"]["completed"] == 1
-        assert event.metadata["progress"]["pending"] == 2
 
 
 class TestMessageProcessorRateLimit:
@@ -577,8 +554,8 @@ class TestMessageProcessorRateLimit:
 
         # Mock UI
         ui = MagicMock()
-        ui.start_thinking = MagicMock()
-        ui.finish_thinking = MagicMock()
+        ctx_mock = MagicMock()
+        ui.start_thinking.return_value = ctx_mock
         ui.add_response = MagicMock()
         ui.add_warning = MagicMock()
         ui.add_error = MagicMock()
@@ -588,7 +565,6 @@ class TestMessageProcessorRateLimit:
         # Mock settings
         settings = MagicMock()
         settings.default_user = "test-user"
-        settings.log_activity = False
         settings.verbose_thinking = False
 
         with patch("agentic_cli.cli.message_processor.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
@@ -628,15 +604,14 @@ class TestMessageProcessorRateLimit:
         workflow_controller.workflow = mock_workflow
 
         ui = MagicMock()
-        ui.start_thinking = MagicMock()
-        ui.finish_thinking = MagicMock()
+        ctx_mock = MagicMock()
+        ui.start_thinking.return_value = ctx_mock
         ui.add_error = MagicMock()
         ui.add_rich = MagicMock()
         ui.yes_no_dialog = AsyncMock(return_value=False)  # User declines
 
         settings = MagicMock()
         settings.default_user = "test-user"
-        settings.log_activity = False
         settings.verbose_thinking = False
 
         await processor.process(
@@ -668,15 +643,14 @@ class TestMessageProcessorRateLimit:
         workflow_controller.workflow = mock_workflow
 
         ui = MagicMock()
-        ui.start_thinking = MagicMock()
-        ui.finish_thinking = MagicMock()
+        ctx_mock = MagicMock()
+        ui.start_thinking.return_value = ctx_mock
         ui.add_error = MagicMock()
         ui.add_rich = MagicMock()
         ui.yes_no_dialog = AsyncMock()
 
         settings = MagicMock()
         settings.default_user = "test-user"
-        settings.log_activity = False
         settings.verbose_thinking = False
 
         await processor.process(

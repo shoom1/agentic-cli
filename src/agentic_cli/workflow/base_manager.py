@@ -20,27 +20,23 @@ from typing import Any, AsyncGenerator, Awaitable, Callable, Iterator, TYPE_CHEC
 from agentic_cli.workflow.events import WorkflowEvent, UserInputRequest
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.models import ModelRegistry
-from agentic_cli.config import set_context_settings
-from agentic_cli.workflow.context import (
-    set_context_workflow,
-    set_context_memory_store,
-    set_context_plan_store,
-    set_context_task_store,
-    set_context_kb_manager,
-    set_context_user_kb_manager,
-    set_context_approval_manager,
-    set_context_llm_summarizer,
-    set_context_sandbox_manager,
+from agentic_cli.workflow.service_registry import (
+    set_service_registry,
+    KB_MANAGER,
+    USER_KB_MANAGER,
+    SANDBOX_MANAGER,
+    LLM_SUMMARIZER,
+    MEMORY_STORE,
+    REFLECTION_STORE,
+    ARXIV_SOURCE,
+    WORKFLOW,
 )
 from agentic_cli.logging import Loggers
 
 if TYPE_CHECKING:
     from agentic_cli.config import BaseSettings
     from agentic_cli.tools.memory_tools import MemoryStore
-    from agentic_cli.tools.planning_tools import PlanStore
-    from agentic_cli.tools.task_tools import TaskStore
     from agentic_cli.knowledge_base import KnowledgeBaseManager
-    from agentic_cli.tools.hitl_tools import ApprovalManager
     from agentic_cli.tools.sandbox.manager import SandboxManager
 
 logger = Loggers.workflow()
@@ -108,15 +104,10 @@ class BaseWorkflowManager(ABC):
         # Auto-detect required managers from tools
         self._required_managers = self._detect_required_managers()
 
-        # Manager slots (created lazily by _ensure_managers_initialized)
-        self._memory_manager: "MemoryStore | None" = None
-        self._plan_store: "PlanStore | None" = None
-        self._task_store: "TaskStore | None" = None
-        self._kb_manager: "KnowledgeBaseManager | None" = None
-        self._user_kb_manager: "KnowledgeBaseManager | None" = None
-        self._approval_manager: "ApprovalManager | None" = None
-        self._llm_summarizer: Any | None = None
-        self._sandbox_manager: "SandboxManager | None" = None
+        # Service registry — complex services (KB, sandbox, etc.)
+        # Plan/task state lives in native backend state (ToolContext.state
+        # for ADK, graph state for LangGraph), not here.
+        self._services: dict[str, Any] = {}
 
     def set_input_callback(
         self, callback: Callable[[UserInputRequest], Awaitable[str]]
@@ -159,59 +150,152 @@ class BaseWorkflowManager(ABC):
         return self._required_managers
 
     @property
+    def services(self) -> dict[str, Any]:
+        """Get the service registry dict."""
+        return self._services
+
+    @property
     def memory_manager(self) -> "MemoryStore | None":
         """Get the memory manager (if required by tools)."""
-        return self._memory_manager
-
-    @property
-    def plan_store(self) -> "PlanStore | None":
-        """Get the plan store (if required by tools)."""
-        return self._plan_store
-
-    @property
-    def task_store(self) -> "TaskStore | None":
-        """Get the task store (if required by tools)."""
-        return self._task_store
+        return self._services.get(MEMORY_STORE)
 
     @property
     def kb_manager(self) -> "KnowledgeBaseManager | None":
         """Get the project-scoped knowledge base manager (if required by tools)."""
-        return self._kb_manager
+        return self._services.get(KB_MANAGER)
 
     @property
     def user_kb_manager(self) -> "KnowledgeBaseManager | None":
         """Get the user-scoped knowledge base manager (if required by tools)."""
-        return self._user_kb_manager
-
-    @property
-    def approval_manager(self) -> "ApprovalManager | None":
-        """Get the approval manager (if required by tools)."""
-        return self._approval_manager
+        return self._services.get(USER_KB_MANAGER)
 
     @property
     def llm_summarizer(self) -> Any | None:
         """Get the LLM summarizer (if required by tools)."""
-        return self._llm_summarizer
+        return self._services.get(LLM_SUMMARIZER)
 
     @property
     def sandbox_manager(self) -> "SandboxManager | None":
         """Get the sandbox manager (if required by tools)."""
-        return self._sandbox_manager
+        return self._services.get(SANDBOX_MANAGER)
+
+    # ------------------------------------------------------------------
+    # Tool assembly
+    # ------------------------------------------------------------------
+
+    def _build_tools(
+        self, config: "AgentConfig", service_map: dict[str, Callable] | None = None,
+    ) -> list[Callable]:
+        """Build the tool list for an agent config.
+
+        Replaces service tools with closure-bound factory versions and
+        auto-injects backend-specific state tools when requested.
+        """
+        if service_map is None:
+            service_map = self._get_service_tool_map()
+
+        result = []
+        for tool in config.tools or []:
+            name = getattr(tool, "__name__", "")
+            if name in service_map:
+                result.append(service_map[name])
+            else:
+                result.append(tool)
+
+        if config.include_state_tools:
+            result.extend(self._get_state_tools())
+
+        return result
+
+    def _get_service_tool_map(self) -> dict[str, Callable]:
+        """Create service tools via factories, returning name→function map.
+
+        Only creates tools for services that have been initialized.
+        """
+        from agentic_cli.tools.factories import (
+            make_memory_tools,
+            make_kb_tools,
+            make_webfetch_tool,
+            make_sandbox_tool,
+            make_interaction_tools,
+            make_arxiv_tools,
+            make_ingest_arxiv_tool,
+        )
+
+        tool_map: dict[str, Callable] = {}
+        s = self._services
+
+        if s.get(MEMORY_STORE):
+            for t in make_memory_tools(s[MEMORY_STORE]):
+                tool_map[t.__name__] = t
+        if s.get(KB_MANAGER):
+            for t in make_kb_tools(s[KB_MANAGER], s.get(USER_KB_MANAGER)):
+                tool_map[t.__name__] = t
+        if s.get(LLM_SUMMARIZER):
+            tool_map["web_fetch"] = make_webfetch_tool(s[LLM_SUMMARIZER])
+        if s.get(SANDBOX_MANAGER):
+            tool_map["sandbox_execute"] = make_sandbox_tool(s[SANDBOX_MANAGER])
+        if s.get(ARXIV_SOURCE):
+            for t in make_arxiv_tools(s[ARXIV_SOURCE]):
+                tool_map[t.__name__] = t
+        # ingest_arxiv_paper composes both services
+        if s.get(ARXIV_SOURCE) and s.get(KB_MANAGER):
+            tool_map["ingest_arxiv_paper"] = make_ingest_arxiv_tool(
+                s[ARXIV_SOURCE], s[KB_MANAGER]
+            )
+        # Workflow manager is always available for interaction tools
+        for t in make_interaction_tools(self):
+            tool_map[t.__name__] = t
+
+        return tool_map
+
+    @abstractmethod
+    def _get_state_tools(self) -> list[Callable]:
+        """Return backend-specific state tools (plan/task management).
+
+        Subclasses must override to return ADK or LangGraph native tools.
+        """
+        ...
+
+    # Mapping from tool function name to the service(s) it requires.
+    # Value may be a single service key or a tuple of keys for tools
+    # that compose multiple services.
+    _TOOL_SERVICE_MAP: dict[str, str | tuple[str, ...]] = {
+        "save_memory": "memory_store",
+        "search_memory": "memory_store",
+        "update_memory": "memory_store",
+        "delete_memory": "memory_store",
+        "kb_search": "kb_manager",
+        "kb_ingest": "kb_manager",
+        "kb_read": "kb_manager",
+        "kb_list": "kb_manager",
+        "kb_write_concept": "kb_manager",
+        "kb_search_concepts": "kb_manager",
+        "web_fetch": "llm_summarizer",
+        "sandbox_execute": "sandbox_manager",
+        "save_reflection": "reflection_store",
+        "search_arxiv": "arxiv_source",
+        "fetch_arxiv_paper": "arxiv_source",
+        "ingest_arxiv_paper": ("arxiv_source", "kb_manager"),
+    }
 
     def _detect_required_managers(self) -> set[str]:
-        """Scan all agent tools for 'requires' metadata.
-
-        Tools decorated with @requires("memory_manager") etc. will have
-        their requirements detected here.
+        """Detect which services are needed by scanning tool names.
 
         Returns:
-            Set of required manager types.
+            Set of required service keys (e.g. ``{"kb_manager", "memory_store"}``).
         """
         required: set[str] = set()
         for config in self._agent_configs:
             for tool in config.tools or []:
-                if hasattr(tool, "requires"):
-                    required.update(tool.requires)
+                name = getattr(tool, "__name__", "")
+                service = self._TOOL_SERVICE_MAP.get(name)
+                if service is None:
+                    continue
+                if isinstance(service, tuple):
+                    required.update(service)
+                else:
+                    required.add(service)
         return required
 
     def _ensure_managers_initialized(self) -> None:
@@ -219,20 +303,30 @@ class BaseWorkflowManager(ABC):
 
         Called during initialize_services() to lazily create only the
         managers that are actually needed by the configured tools.
+        Populates ``self._services`` which is exposed to tools via
+        the service registry ContextVar.
         """
-        if "memory_manager" in self._required_managers and self._memory_manager is None:
+        s = self._services
+
+        if "memory_store" in self._required_managers and MEMORY_STORE not in s:
             from agentic_cli.tools.memory_tools import MemoryStore
-            self._memory_manager = MemoryStore(self._settings)
 
-        if "plan_store" in self._required_managers and self._plan_store is None:
-            from agentic_cli.tools.planning_tools import PlanStore
-            self._plan_store = PlanStore()
+            embedding_service = None
+            if not self._settings.knowledge_base_use_mock:
+                from agentic_cli.knowledge_base.embeddings import EmbeddingService
+                if EmbeddingService.is_available():
+                    embedding_service = EmbeddingService(
+                        model_name=self._settings.embedding_model,
+                        batch_size=self._settings.embedding_batch_size,
+                        device=self._settings.embedding_device,
+                    )
+            else:
+                from agentic_cli.knowledge_base._mocks import MockEmbeddingService
+                embedding_service = MockEmbeddingService()
 
-        if "task_store" in self._required_managers and self._task_store is None:
-            from agentic_cli.tools.task_tools import TaskStore
-            self._task_store = TaskStore(self._settings)
+            s[MEMORY_STORE] = MemoryStore(self._settings, embedding_service=embedding_service)
 
-        if "kb_manager" in self._required_managers and self._kb_manager is None:
+        if "kb_manager" in self._required_managers and KB_MANAGER not in s:
             from pathlib import Path
             from agentic_cli.knowledge_base import KnowledgeBaseManager
 
@@ -240,83 +334,114 @@ class BaseWorkflowManager(ABC):
             project_kb_dir = Path.cwd() / f".{self._settings.app_name}" / "knowledge_base"
             user_kb_dir = self._settings.knowledge_base_dir
 
-            # Project KB (agent read-write)
-            self._kb_manager = KnowledgeBaseManager(
+            s[KB_MANAGER] = KnowledgeBaseManager(
                 settings=self._settings,
                 use_mock=use_mock,
                 base_dir=project_kb_dir,
             )
 
-            # User KB (agent read-only) — reuse project instance if paths overlap
             if project_kb_dir.resolve() != user_kb_dir.resolve():
-                self._user_kb_manager = KnowledgeBaseManager(
+                s[USER_KB_MANAGER] = KnowledgeBaseManager(
                     settings=self._settings,
                     use_mock=use_mock,
                     base_dir=user_kb_dir,
                 )
             else:
-                self._user_kb_manager = self._kb_manager
+                s[USER_KB_MANAGER] = s[KB_MANAGER]
 
-        if "approval_manager" in self._required_managers and self._approval_manager is None:
-            from agentic_cli.tools.hitl_tools import ApprovalManager
-            self._approval_manager = ApprovalManager()
+        if "llm_summarizer" in self._required_managers and LLM_SUMMARIZER not in s:
+            s[LLM_SUMMARIZER] = self
 
-        if "llm_summarizer" in self._required_managers and self._llm_summarizer is None:
-            self._llm_summarizer = self._create_summarizer()
-
-        if "sandbox_manager" in self._required_managers and self._sandbox_manager is None:
+        if "sandbox_manager" in self._required_managers and SANDBOX_MANAGER not in s:
             from agentic_cli.tools.sandbox.manager import SandboxManager
-            self._sandbox_manager = SandboxManager(self._settings)
+            s[SANDBOX_MANAGER] = SandboxManager(self._settings)
 
-    def _create_summarizer(self) -> Any:
-        """Create an LLM summarizer for webfetch.
+        if "reflection_store" in self._required_managers and REFLECTION_STORE not in s:
+            from agentic_cli.tools.reflection_tools import ReflectionStore
+            s[REFLECTION_STORE] = ReflectionStore(self._settings)
 
-        Subclasses should override this to return a framework-specific
-        summarizer that implements the LLMSummarizer protocol.
+        if "arxiv_source" in self._required_managers and ARXIV_SOURCE not in s:
+            from agentic_cli.tools.arxiv_source import ArxivSearchSource
+            s[ARXIV_SOURCE] = ArxivSearchSource()
+
+        # Always ensure workflow reference is available
+        s[WORKFLOW] = self
+
+    async def summarize(self, content: str, prompt: str) -> str:
+        """Summarize content using the configured LLM.
+        Args:
+            content: The content to summarize (included in prompt by caller).
+            prompt: The full summarization prompt.
+        Returns:
+            Summarized text response.
+        """
+        return await self.generate_simple(prompt, max_tokens=12000)
+
+    async def on_session_end(self, messages: list[dict] | None = None) -> list[str]:
+        """Hook called when a session ends. Optionally extracts facts.
+
+        Override in downstream apps for custom session-end behavior.
+
+        Args:
+            messages: Recent messages from the session (optional).
 
         Returns:
-            An LLMSummarizer implementation, or None.
+            List of extracted facts (empty if disabled or no messages).
         """
-        return None
+        if not getattr(self._settings, "auto_extract_session_facts", False):
+            return []
+        if not messages:
+            return []
+
+        store = self._services.get(MEMORY_STORE)
+        if store is None:
+            return []
+
+        prompt = (
+            "Extract key facts, decisions, and user preferences from this conversation. "
+            "Return each fact as a single concise sentence on its own line. "
+            "Only include facts worth remembering for future conversations. "
+            "If there are no notable facts, return an empty response.\n\n"
+        )
+        content = "\n".join(
+            f"{m.get('role', 'unknown')}: {m.get('content', '')}"
+            for m in messages[-20:]
+        )
+
+        try:
+            summary = await self.generate_simple(prompt + content, max_tokens=2000)
+        except Exception:
+            logger.debug("session_fact_extraction_failed", exc_info=True)
+            return []
+
+        facts = [line.strip() for line in summary.strip().split("\n") if line.strip()]
+        for fact in facts:
+            store.store(fact, tags=["auto-extracted", "session"])
+        return facts
 
     @contextlib.contextmanager
     def _workflow_context(self) -> Iterator[None]:
-        """Context manager for settings, workflow, and manager contexts.
+        """Context manager that exposes the service registry to tools.
 
-        Sets context variables that allow tools to access settings,
-        the workflow manager, and feature managers during execution.
-        Uses token-based reset to correctly restore parent context.
+        Sets a single ContextVar (the service registry) so tools can
+        call ``get_service(key)`` during execution.
         """
-        tokens = [
-            set_context_settings(self._settings),
-            set_context_workflow(self),
-            set_context_memory_store(self._memory_manager),
-            set_context_plan_store(self._plan_store),
-            set_context_task_store(self._task_store),
-            set_context_kb_manager(self._kb_manager),
-            set_context_user_kb_manager(self._user_kb_manager),
-            set_context_approval_manager(self._approval_manager),
-            set_context_llm_summarizer(self._llm_summarizer),
-            set_context_sandbox_manager(self._sandbox_manager),
-        ]
+        from agentic_cli.config import set_context_settings
+
+        settings_token = set_context_settings(self._settings)
+        registry_token = set_service_registry(self._services)
         try:
             yield
         finally:
-            for token in tokens:
-                token.var.reset(token)
+            registry_token.var.reset(registry_token)
+            settings_token.var.reset(settings_token)
 
     def _cleanup_managers(self) -> None:
         """Clean up all manager resources (call from subclass cleanup)."""
-        if self._sandbox_manager is not None:
-            self._sandbox_manager.cleanup()
-            self._sandbox_manager = None
-        self._memory_manager = None
-        self._plan_store = None
-        self._task_store = None
-        self._kb_manager = None
-        self._user_kb_manager = None
-        self._approval_manager = None
-        self._llm_summarizer = None
+        sandbox = self._services.get(SANDBOX_MANAGER)
+        if sandbox is not None:
+            sandbox.cleanup()
+        self._services = {}
 
     @property
     @abstractmethod
@@ -348,14 +473,8 @@ class BaseWorkflowManager(ABC):
 
     async def initialize_services(self, validate: bool = True) -> None:
         """Initialize backend services asynchronously.
-
-        Template method that handles shared scaffolding (guard, validation,
-        key export, manager init, flag) and delegates backend-specific work
-        to :meth:`_do_initialize`.
-
         Args:
             validate: If True, validate settings before initialization.
-
         Raises:
             SettingsValidationError: If settings validation fails.
         """
@@ -376,8 +495,10 @@ class BaseWorkflowManager(ABC):
         )
         self._settings.set_model_registry(self._model_registry)
 
-        await self._do_initialize()
+        # Create services BEFORE backend init so _build_tools() can
+        # produce factory-bound tools during agent/graph creation.
         self._ensure_managers_initialized()
+        await self._do_initialize()
         self._initialized = True
 
     @abstractmethod
@@ -550,8 +671,7 @@ class BaseWorkflowManager(ABC):
         sid = session_id or getattr(self, "session_id", "default_session")
 
         try:
-            messages = await self._extract_session_messages(sid)
-            current_agent = await self._extract_current_agent(sid)
+            messages, current_agent = await self._extract_session_data(sid)
 
             metadata: dict[str, Any] = {
                 "model": self.model,
@@ -636,19 +756,18 @@ class BaseWorkflowManager(ABC):
         return persistence.list_sessions()
 
     @abstractmethod
-    async def _extract_session_messages(self, session_id: str) -> list[dict]:
-        """Extract normalized messages from the backend session.
+    async def _extract_session_data(
+        self, session_id: str
+    ) -> tuple[list[dict], str | None]:
+        """Extract normalized messages and current agent from backend session.
 
-        Returns list of dicts with structure:
-        - {"role": "user", "content": "..."}
-        - {"role": "assistant", "content": "...", "tool_calls": [...]}
-        - {"role": "tool", "tool_call_id": "...", "name": "...", "content": "..."}
+        Returns:
+            Tuple of (messages, current_agent_name).
+            Messages use normalized format:
+            - {"role": "user", "content": "..."}
+            - {"role": "assistant", "content": "...", "tool_calls": [...]}
+            - {"role": "tool", "tool_call_id": "...", "name": "...", "content": "..."}
         """
-        ...
-
-    @abstractmethod
-    async def _extract_current_agent(self, session_id: str) -> str | None:
-        """Return the name of the currently active agent, or None."""
         ...
 
     @abstractmethod
@@ -661,12 +780,4 @@ class BaseWorkflowManager(ABC):
         """Inject normalized messages into the backend session."""
         ...
 
-    def _emit_task_progress_event(self) -> WorkflowEvent | None:
-        """Build a TASK_PROGRESS event from TaskStore or PlanStore.
-
-        Delegates to :func:`~agentic_cli.workflow.task_progress.build_task_progress_event`.
-        """
-        from agentic_cli.workflow.task_progress import build_task_progress_event
-
-        return build_task_progress_event(self._task_store, self._plan_store)
 

@@ -18,6 +18,7 @@ class AgentConfig:
         sub_agents: Names of agents that this agent can delegate to
         description: Short description for routing/logging
         model: Optional model override (defaults to manager's model)
+        include_state_tools: Whether to auto-inject plan/task state tools (default True)
     """
 
     name: str
@@ -26,6 +27,7 @@ class AgentConfig:
     sub_agents: list[str] = field(default_factory=list)
     description: str = ""
     model: str | None = None
+    include_state_tools: bool = True
 
     def get_prompt(self) -> str:
         """Get the prompt string, calling the getter if needed."""

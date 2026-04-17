@@ -104,7 +104,7 @@ class SettingsPersistence:
         data = self._serialize_paths(data)
 
         # Write atomically
-        from agentic_cli.persistence._utils import atomic_write_text
+        from agentic_cli.file_utils import atomic_write_text
         atomic_write_text(target_path, json.dumps(data, indent=2, default=str))
 
         return target_path

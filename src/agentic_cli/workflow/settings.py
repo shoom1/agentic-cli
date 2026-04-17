@@ -153,11 +153,34 @@ class WorkflowSettingsMixin:
         description="Batch size for embedding generation",
         json_schema_extra={"ui_order": 151},
     )
+    embedding_device: str = Field(
+        default="auto",
+        title="Embedding Device",
+        description=(
+            "Device for sentence-transformers: 'auto' picks cuda → "
+            "mps (Apple Silicon only) → cpu. Force 'cpu' on Intel Macs "
+            "with discrete AMD GPUs (MPS command-buffer failures). "
+            "Valid values: auto, cpu, mps, cuda."
+        ),
+        json_schema_extra={"ui_order": 152},
+    )
     knowledge_base_use_mock: bool = Field(
         default=False,
         title="Use Mock Knowledge Base",
         description="Use mock knowledge base (no ML dependencies required)",
         json_schema_extra={"ui_order": 152},
+    )
+    enable_tool_reflections: bool = Field(
+        default=False,
+        title="Enable Tool Reflections",
+        description="Store and inject heuristics learned from tool failures",
+        json_schema_extra={"ui_order": 153},
+    )
+    auto_extract_session_facts: bool = Field(
+        default=False,
+        title="Auto-Extract Session Facts",
+        description="At session end, extract key facts into memory via LLM",
+        json_schema_extra={"ui_order": 154},
     )
 
     # User identity (needed by workflow.process())
@@ -242,12 +265,32 @@ class WorkflowSettingsMixin:
         json_schema_extra={"ui_order": 125},
     )
 
+    # OS-level sandboxing
+    os_sandbox_enabled: bool = Field(
+        default=False,
+        title="OS Sandbox Enabled",
+        description="Enable OS-level sandboxing for shell and Python execution (requires sandbox-exec on macOS or bwrap on Linux)",
+        json_schema_extra={"ui_order": 130},
+    )
+    os_sandbox_writable_paths: list[str] = Field(
+        default_factory=list,
+        title="OS Sandbox Writable Paths",
+        description="Additional paths the sandboxed process can write to (working directory is always writable)",
+        json_schema_extra={"ui_order": 131},
+    )
+    os_sandbox_allow_network: bool = Field(
+        default=False,
+        title="OS Sandbox Allow Network",
+        description="Allow network access from sandboxed processes",
+        json_schema_extra={"ui_order": 132},
+    )
+
     # HITL (Human-in-the-Loop) settings
     hitl_enabled: bool = Field(
         default=True,
         title="HITL Enabled",
         description="Enable human-in-the-loop features (approvals)",
-        json_schema_extra={"ui_order": 130},
+        json_schema_extra={"ui_order": 135},
     )
 
     # Persistence settings (LangGraph)

@@ -11,6 +11,7 @@ from typing import Any
 import yaml
 
 from agentic_cli.tools.shell.audit import AuditConfig
+from agentic_cli.tools.shell.os_sandbox.policy import OSSandboxPolicy
 from agentic_cli.tools.shell.sandbox import ExecutionLimits
 
 
@@ -59,6 +60,9 @@ class ShellSecurityConfig:
     enable_preprocessing: bool = True
     block_on_encoding: bool = True  # Block high obfuscation score commands
 
+    # OS-level sandboxing
+    os_sandbox_policy: OSSandboxPolicy | None = None
+
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ShellSecurityConfig":
         """Create config from dictionary.
@@ -89,6 +93,21 @@ class ShellSecurityConfig:
             max_preview_length=audit_data.get("max_preview_length", 500),
         )
 
+        # Parse OS sandbox policy if present
+        os_sandbox_data = data.get("os_sandbox_policy")
+        os_sandbox_policy = None
+        if os_sandbox_data is not None:
+            os_sandbox_policy = OSSandboxPolicy(
+                enabled=os_sandbox_data.get("enabled", True),
+                writable_paths=os_sandbox_data.get("writable_paths", []),
+                deny_write_paths=os_sandbox_data.get(
+                    "deny_write_paths",
+                    list(OSSandboxPolicy().deny_write_paths),
+                ),
+                deny_read_paths=os_sandbox_data.get("deny_read_paths", []),
+                allow_network=os_sandbox_data.get("allow_network", False),
+            )
+
         return cls(
             allowed_paths=data.get("allowed_paths", []),
             allow_commands=data.get("allow_commands", []),
@@ -103,6 +122,7 @@ class ShellSecurityConfig:
             audit=audit_config,
             enable_preprocessing=data.get("enable_preprocessing", True),
             block_on_encoding=data.get("block_on_encoding", True),
+            os_sandbox_policy=os_sandbox_policy,
         )
 
     @classmethod
@@ -175,6 +195,17 @@ class ShellSecurityConfig:
             },
             "enable_preprocessing": self.enable_preprocessing,
             "block_on_encoding": self.block_on_encoding,
+            "os_sandbox_policy": (
+                {
+                    "enabled": self.os_sandbox_policy.enabled,
+                    "writable_paths": self.os_sandbox_policy.writable_paths,
+                    "deny_write_paths": self.os_sandbox_policy.deny_write_paths,
+                    "deny_read_paths": self.os_sandbox_policy.deny_read_paths,
+                    "allow_network": self.os_sandbox_policy.allow_network,
+                }
+                if self.os_sandbox_policy
+                else None
+            ),
         }
 
     def merge_with(self, other: "ShellSecurityConfig") -> "ShellSecurityConfig":
@@ -200,6 +231,7 @@ class ShellSecurityConfig:
             audit=other.audit,
             enable_preprocessing=other.enable_preprocessing,
             block_on_encoding=other.block_on_encoding,
+            os_sandbox_policy=other.os_sandbox_policy or self.os_sandbox_policy,
         )
 
 

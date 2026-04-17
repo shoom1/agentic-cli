@@ -60,6 +60,12 @@ from agentic_cli.tools.shell.risk_assessor import RiskAssessor
 from agentic_cli.tools.shell.preprocessor import InputPreprocessor, PreprocessResult
 from agentic_cli.tools.shell.sandbox import ExecutionSandbox, ExecutionLimits, ExecutionResult
 from agentic_cli.tools.shell.audit import AuditLogger, AuditEntry, AuditConfig
+from agentic_cli.tools.shell.os_sandbox import (
+    get_os_sandbox,
+    OSSandbox,
+    OSSandboxPolicy,
+    OSSandboxResult,
+)
 
 __all__ = [
     # Main executor
@@ -97,4 +103,9 @@ __all__ = [
     "RiskLevel",
     "SecurityAnalysis",
     "TokenizeResult",
+    # OS-level sandboxing
+    "get_os_sandbox",
+    "OSSandbox",
+    "OSSandboxPolicy",
+    "OSSandboxResult",
 ]

@@ -179,8 +179,11 @@ def _execute_command(
 
     Internal function that actually runs the command using the sandbox.
     """
-    # Create sandbox with configured limits
-    sandbox = ExecutionSandbox(config.execution_limits)
+    # Create sandbox with configured limits and OS sandbox policy
+    sandbox = ExecutionSandbox(
+        config.execution_limits,
+        os_sandbox_policy=config.os_sandbox_policy,
+    )
 
     # Execute in sandbox
     result = sandbox.execute(command, working_dir)

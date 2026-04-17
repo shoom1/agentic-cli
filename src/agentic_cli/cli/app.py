@@ -18,7 +18,7 @@ from thinking_prompt import ThinkingPromptSession, AppInfo
 from thinking_prompt.styles import ThinkingPromptStyles
 
 from agentic_cli.cli.commands import Command, CommandRegistry
-from agentic_cli.cli.message_processor import MessageProcessor, MessageHistory, MessageType
+from agentic_cli.cli.message_processor import MessageProcessor
 from agentic_cli.cli.usage_tracker import UsageTracker
 from agentic_cli.cli.workflow_controller import WorkflowController
 from agentic_cli.config import BaseSettings
@@ -183,12 +183,12 @@ class BaseCLIApp:
         """Get field names to display in the settings dialog.
 
         Override to customize which settings appear in the UI.
-        Default: model, thinking_effort, log_activity
+        Default: model, thinking_effort
 
         Returns:
             List of field names that should appear in the settings UI
         """
-        return ["model", "thinking_effort", "log_activity"]
+        return ["model", "thinking_effort"]
 
     def _build_ui_items(self) -> list[Any]:
         """Build UI items from settings fields using introspection.
@@ -270,11 +270,6 @@ class BaseCLIApp:
             RuntimeError: If workflow is not yet initialized
         """
         return self._workflow_controller.workflow
-
-    @property
-    def message_history(self) -> MessageHistory:
-        """Get the message history (for persistence)."""
-        return self._message_processor.history
 
     @property
     def usage_tracker(self) -> UsageTracker:
@@ -430,28 +425,6 @@ class BaseCLIApp:
             usage_tracker=self._usage_tracker,
         )
 
-    async def _save_activity_log(self) -> None:
-        """Save activity log to file on exit."""
-        from datetime import datetime
-        from agentic_cli.persistence import SessionPersistence
-
-        session_name = f"activity_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        persistence = SessionPersistence(self._settings)
-
-        try:
-            metadata = {"app_name": self._settings.app_name}
-            if self._workflow_controller.is_ready:
-                metadata["model"] = self._workflow_controller.model
-
-            saved_path = persistence.save_session(
-                session_id=session_name,
-                message_history=self.message_history,
-                metadata=metadata,
-            )
-            logger.info("activity_log_saved", path=str(saved_path))
-        except Exception as e:
-            logger.error("activity_log_save_failed", error=str(e))
-
     async def _load_session_on_startup(self) -> None:
         """Load a saved session after workflow initialization."""
         if not self._session_id:
@@ -504,10 +477,6 @@ class BaseCLIApp:
         # Save persistent session on exit
         if self._session_id:
             await self._save_session_on_exit()
-
-        # Auto-save activity log if enabled
-        if self._settings.log_activity and len(self.message_history) > 0:
-            await self._save_activity_log()
 
         logger.info("app_ending")
         self.session.add_message("system", "Goodbye!")

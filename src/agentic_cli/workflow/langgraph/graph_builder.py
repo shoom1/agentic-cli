@@ -6,10 +6,13 @@ and LLM factory logic from the runtime process loop.
 
 from __future__ import annotations
 
+import asyncio
+import functools
 from collections import deque
 from typing import Any, Callable, TYPE_CHECKING
 
 from agentic_cli.workflow.config import AgentConfig
+from agentic_cli.workflow.adk.plugins import is_dangerous, request_tool_confirmation
 from agentic_cli.logging import Loggers
 
 if TYPE_CHECKING:
@@ -46,7 +49,12 @@ class LangGraphBuilder:
         self._trim_events.clear()
         return events
 
-    def build(self, agent_configs: list[AgentConfig], default_model: str):
+    def build(
+        self,
+        agent_configs: list[AgentConfig],
+        default_model: str,
+        tool_overrides: dict[str, list] | None = None,
+    ):
         """Build the LangGraph workflow from agent configs.
 
         Creates a graph where each agent config becomes a node,
@@ -55,6 +63,9 @@ class LangGraphBuilder:
         Args:
             agent_configs: List of agent configurations.
             default_model: Default model name for agents without explicit model.
+            tool_overrides: Optional mapping of agent name to pre-built tool lists.
+                           When provided, these replace ``config.tools`` for tool
+                           node creation and LLM binding.
 
         Returns:
             An uncompiled StateGraph.
@@ -73,7 +84,9 @@ class LangGraphBuilder:
 
         # Create nodes for each agent with retry policy
         for config in agent_configs:
-            node_fn = self._create_agent_node(config, default_model)
+            node_fn = self._create_agent_node(
+                config, default_model, tools=_get_tools(config) or None,
+            )
             graph.add_node(config.name, node_fn, retry=retry_policy)
 
         # Determine entry point (root agent)
@@ -95,16 +108,25 @@ class LangGraphBuilder:
         # Add tool execution nodes for agents that have tools
         from langgraph.prebuilt import ToolNode
 
+        _overrides = tool_overrides or {}
+
+        def _get_tools(config: AgentConfig) -> list:
+            return _overrides.get(config.name, config.tools or [])
+
         agents_with_tools = {
-            config.name for config in agent_configs if config.tools
+            config.name for config in agent_configs if _get_tools(config)
         }
         tool_map = {}
         for config in agent_configs:
-            if config.tools:
+            tools = _get_tools(config)
+            if tools:
                 tool_node_name = f"{config.name}_tools"
                 tool_map[config.name] = tool_node_name
+                wrapped_tools = [
+                    self._wrap_for_confirmation(t) for t in tools
+                ]
                 tool_node = ToolNode(
-                    config.tools, name=tool_node_name, handle_tool_errors=True,
+                    wrapped_tools, name=tool_node_name, handle_tool_errors=True,
                 )
                 graph.add_node(tool_node_name, tool_node)
                 # After tool execution, loop back to the agent
@@ -282,7 +304,48 @@ class LangGraphBuilder:
             backoff_factor=self._settings.retry_backoff_factor,
         )
 
-    def _create_agent_node(self, config: AgentConfig, default_model: str) -> Callable:
+    @staticmethod
+    def _wrap_for_confirmation(tool: Callable) -> Callable:
+        """Wrap a DANGEROUS tool with user confirmation logic.
+
+        Safe tools are returned as-is. DANGEROUS tools get an async wrapper
+        that uses the workflow manager's request_user_input callback to prompt
+        the user before executing.
+
+        The wrapper is always async regardless of the original tool, because
+        the confirmation prompt requires awaiting request_user_input(). This
+        is safe because LangGraph's ToolNode calls ainvoke() for all tools.
+
+        Args:
+            tool: The tool function to potentially wrap.
+
+        Returns:
+            The original function (if safe) or a confirmation-wrapped version.
+        """
+        tool_name = getattr(tool, "__name__", str(tool))
+        if not is_dangerous(tool_name):
+            return tool
+
+        is_async = asyncio.iscoroutinefunction(tool)
+
+        @functools.wraps(tool)
+        async def _confirmed(*args: Any, **kwargs: Any) -> Any:
+            approved = await request_tool_confirmation(tool_name, kwargs)
+            if approved is False:
+                return {
+                    "success": False,
+                    "error": f"User denied approval for {tool_name}",
+                }
+            # approved is True or None (no workflow/callback) → proceed
+            if is_async:
+                return await tool(*args, **kwargs)
+            return tool(*args, **kwargs)
+
+        return _confirmed
+
+    def _create_agent_node(
+        self, config: AgentConfig, default_model: str, tools: list | None = None,
+    ) -> Callable:
         """Create a LangGraph node function for an agent.
 
         Args:
@@ -302,8 +365,9 @@ class LangGraphBuilder:
             llm = self.get_llm(model_name)
 
             # Bind tools if available
-            if config.tools:
-                llm = llm.bind_tools(config.tools)
+            agent_tools = tools or config.tools or []
+            if agent_tools:
+                llm = llm.bind_tools(agent_tools)
 
             # Build messages: system prompt + conversation history
             # State messages are already LangChain objects (add_messages reducer
@@ -432,38 +496,3 @@ class LangGraphBuilder:
             return "__end__"
 
         return router
-
-    def _normalize_content(self, content: Any) -> str:
-        """Normalize LLM response content to a string.
-
-        Handles various content formats from different providers:
-        - String: returned as-is
-        - List of dicts with 'text' key: extracts and joins text
-        - List of strings: joins them
-        - Other: converts to string
-
-        Args:
-            content: Raw content from LLM response.
-
-        Returns:
-            Normalized string content.
-        """
-        if isinstance(content, str):
-            return content
-
-        if isinstance(content, list):
-            parts = []
-            for item in content:
-                if isinstance(item, dict):
-                    # Handle {'type': 'text', 'text': '...'} format
-                    if "text" in item:
-                        parts.append(item["text"])
-                    elif "content" in item:
-                        parts.append(str(item["content"]))
-                elif isinstance(item, str):
-                    parts.append(item)
-                else:
-                    parts.append(str(item))
-            return "".join(parts)
-
-        return str(content) if content else ""

@@ -352,9 +352,9 @@ class TestWorkflowManagerLifecycle:
 
         assert manager.app_name == "test_app"
         assert manager.is_initialized is False
-        assert manager.runner is None
-        assert manager.root_agent is None
-        assert manager.session_service is None
+        assert manager._runner is None
+        assert manager._root_agent is None
+        assert manager._session_service is None
 
     def test_workflow_manager_with_model_override(self, mock_settings, agent_configs):
         """Test workflow manager with explicit model."""
@@ -431,9 +431,9 @@ class TestWorkflowManagerLifecycle:
         await manager.cleanup()
 
         assert manager.is_initialized is False
-        assert manager.runner is None
-        assert manager.root_agent is None
-        assert manager.session_service is None
+        assert manager._runner is None
+        assert manager._root_agent is None
+        assert manager._session_service is None
 
     @pytest.mark.asyncio
     async def test_context_manager(self, mock_settings, agent_configs):
@@ -524,7 +524,7 @@ class TestWorkflowManagerLifecycle:
             await manager.reinitialize(model="new-model", preserve_sessions=True)
 
             # Session service should be preserved
-            assert manager.session_service is old_session_service
+            assert manager._session_service is old_session_service
 
     @pytest.mark.asyncio
     async def test_reinitialize_can_discard_sessions(

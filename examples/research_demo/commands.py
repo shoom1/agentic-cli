@@ -1,12 +1,10 @@
 """Status commands for the Research Demo application.
 
-Provides commands for inspecting memory, plan, files, and approvals.
-Managers are accessed via app.workflow which auto-creates them based on tool requirements.
+Provides commands for inspecting memory and workspace files.
 """
 
 from typing import TYPE_CHECKING
 
-from rich.panel import Panel
 from rich.table import Table
 
 from agentic_cli.cli.commands import Command, CommandCategory
@@ -46,73 +44,6 @@ class MemoryCommand(Command):
 
         if table.row_count == 0:
             table.add_row("(empty)", "", "")
-
-        app.session.add_rich(table)
-
-
-class PlanCommand(Command):
-    """Show current task plan."""
-
-    def __init__(self) -> None:
-        super().__init__(
-            name="plan",
-            description="Show current research task graph",
-            aliases=[],
-            usage="/plan",
-            category=CommandCategory.GENERAL,
-        )
-
-    async def execute(self, args: str, app: "ResearchDemoApp") -> None:
-        plan_store = app.workflow.plan_store if app.workflow else None
-
-        if plan_store is None:
-            app.session.add_message("system", "Plan store not initialized")
-            return
-
-        if plan_store.is_empty():
-            app.session.add_message("system", "No plan created yet. Ask the agent to create a research plan.")
-            return
-
-        panel = Panel(plan_store.get(), title="Research Plan", border_style="blue")
-        app.session.add_rich(panel)
-
-
-class ApprovalsCommand(Command):
-    """Show approval history."""
-
-    def __init__(self) -> None:
-        super().__init__(
-            name="approvals",
-            description="Show approval history",
-            aliases=["approve"],
-            usage="/approvals",
-            category=CommandCategory.GENERAL,
-        )
-
-    async def execute(self, args: str, app: "ResearchDemoApp") -> None:
-        approval_manager = app.workflow.approval_manager if app.workflow else None
-
-        if approval_manager is None:
-            app.session.add_message("system", "Approval manager not initialized")
-            return
-
-        history = approval_manager.history
-
-        if not history:
-            app.session.add_message("system", "No approval history")
-            return
-
-        table = Table(title="Approval History", show_header=True)
-        table.add_column("ID", style="dim")
-        table.add_column("Approved", style="cyan")
-        table.add_column("Reason", style="white")
-
-        for result in history:
-            table.add_row(
-                result.request_id,
-                "Yes" if result.approved else "No",
-                result.reason or "",
-            )
 
         app.session.add_rich(table)
 
@@ -175,95 +106,84 @@ class FilesCommand(Command):
         app.session.add_message("system", f"Total: {result['total']} items")
 
 
-class TasksCommand(Command):
-    """Show execution tasks."""
+class KbBackfillCommand(Command):
+    """Pre-bake markdown sidecars for any KB docs that don't have one yet."""
 
     def __init__(self) -> None:
         super().__init__(
-            name="tasks",
-            description="Show execution tasks and progress",
+            name="kb-backfill",
+            description="Generate missing sidecars for every KB doc (batch LLM call)",
             aliases=[],
-            usage="/tasks [--status=STATUS]",
-            examples=[
-                "/tasks",
-                "/tasks --status=pending",
-                "/tasks --status=in_progress",
-            ],
+            usage="/kb-backfill",
+            examples=["/kb-backfill"],
             category=CommandCategory.GENERAL,
         )
 
     async def execute(self, args: str, app: "ResearchDemoApp") -> None:
-        task_store = app.workflow.task_store if app.workflow else None
+        from agentic_cli.knowledge_base.manager import BackfillAlreadyRunning
+        from agentic_cli.workflow.service_registry import set_service_registry
 
-        if task_store is None:
-            app.session.add_message("system", "Task store not initialized")
+        workflow = app.workflow
+        if workflow is None:
+            app.session.add_error("Workflow not initialized")
             return
 
-        parsed = self.parse_args(args)
-        status_filter = parsed.get_option("status")
+        project_kb = workflow.kb_manager
+        user_kb = workflow.user_kb_manager
 
-        tasks = task_store.list_tasks(status=status_filter or None)
-
-        if not tasks:
-            app.session.add_message("system", "No tasks found")
-            return
-
-        table = Table(title="Execution Tasks", show_header=True)
-        table.add_column("ID", style="dim", width=8)
-        table.add_column("Description", style="white")
-        table.add_column("Status", style="cyan")
-        table.add_column("Priority", style="yellow")
-        table.add_column("Tags", style="dim")
-
-        for task in tasks:
-            status_style = {
-                "pending": "dim",
-                "in_progress": "bold cyan",
-                "completed": "green",
-                "cancelled": "red",
-            }.get(task.status, "white")
-            tags_str = ", ".join(task.tags) if task.tags else ""
-            table.add_row(
-                task.id[:8],
-                task.description,
-                f"[{status_style}]{task.status}[/]",
-                task.priority,
-                tags_str,
+        if project_kb is None:
+            app.session.add_warning(
+                "No knowledge base configured. Ingest a document first, "
+                "or enable KB tools in the agent config."
             )
+            return
 
-        app.session.add_rich(table)
+        kbs: list[tuple[str, object]] = [("project", project_kb)]
+        if user_kb is not None and user_kb is not project_kb:
+            kbs.append(("user", user_kb))
+
+        # backfill_sidecars() → generate_sidecar_payload() reads LLM_SUMMARIZER
+        # from the service-registry ContextVar, which is normally only set
+        # during agent message processing. Push it here so the LLM is actually
+        # called (otherwise the fallback fires and we write truncated content).
+        registry_token = set_service_registry(workflow._services)
+        try:
+            total_written = 0
+            for label, kb in kbs:
+                def _progress(done: int, total: int, doc) -> None:
+                    title = doc.title if len(doc.title) < 80 else doc.title[:77] + "…"
+                    app.session.add_message(
+                        "system",
+                        f"[{label} KB] {done + 1}/{total}: {title}",
+                    )
+
+                app.session.add_message(
+                    "system", f"Backfilling {label} KB at {kb.kb_dir}…"
+                )
+                try:
+                    written = await kb.backfill_sidecars(progress_cb=_progress)
+                except BackfillAlreadyRunning:
+                    app.session.add_warning(
+                        f"{label} KB: backfill already in progress; "
+                        "wait for it to finish before running /kb-backfill again."
+                    )
+                    continue
+                except Exception as e:
+                    app.session.add_error(f"{label} KB backfill failed: {e}")
+                    continue
+                total_written += written
+                app.session.add_success(
+                    f"{label} KB: {written} sidecar(s) generated"
+                )
+        finally:
+            registry_token.var.reset(registry_token)
+
+        if total_written == 0:
+            app.session.add_message("system", "All documents already have sidecars.")
 
 
-class ClearPlanCommand(Command):
-    """Clear the task plan."""
-
-    def __init__(self) -> None:
-        super().__init__(
-            name="clear-plan",
-            description="Clear the current task plan",
-            aliases=["clearplan"],
-            usage="/clear-plan",
-            category=CommandCategory.GENERAL,
-        )
-
-    async def execute(self, args: str, app: "ResearchDemoApp") -> None:
-        plan_store = app.workflow.plan_store if app.workflow else None
-
-        if plan_store:
-            plan_store.clear()
-            app.session.add_success("Plan cleared")
-        else:
-            app.session.add_error("Plan store not initialized")
-
-
-# Export all commands for registration
-# Note: Settings command is now handled by the base SettingsCommand
-# with get_ui_setting_keys() override in ResearchDemoApp
 DEMO_COMMANDS = [
     MemoryCommand,
-    PlanCommand,
-    TasksCommand,
-    ApprovalsCommand,
     FilesCommand,
-    ClearPlanCommand,
+    KbBackfillCommand,
 ]

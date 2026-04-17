@@ -45,6 +45,9 @@ class _TestWorkflowManager(BaseWorkflowManager):
     async def _do_initialize(self) -> None:
         pass
 
+    def _get_state_tools(self) -> list:
+        return []
+
     async def process(
         self, message: str, user_id: str, session_id: str | None = None
     ) -> AsyncGenerator[WorkflowEvent, None]:
@@ -59,11 +62,8 @@ class _TestWorkflowManager(BaseWorkflowManager):
     async def cleanup(self) -> None:
         pass
 
-    async def _extract_session_messages(self, session_id: str) -> list[dict]:
-        return self._stored_messages
-
-    async def _extract_current_agent(self, session_id: str) -> str | None:
-        return self._stored_agent
+    async def _extract_session_data(self, session_id: str) -> tuple[list[dict], str | None]:
+        return self._stored_messages, self._stored_agent
 
     async def _inject_session_messages(
         self,
@@ -428,7 +428,6 @@ class TestStatusCommandSessionInfo:
         cmd = StatusCommand()
         app = MagicMock()
         app._session_id = "my-research"
-        app.message_history = []
         app.usage_tracker = MagicMock(invocation_count=0)
         # Make workflow access raise to skip workflow section
         type(app).workflow = property(lambda self: (_ for _ in ()).throw(RuntimeError))
@@ -444,7 +443,6 @@ class TestStatusCommandSessionInfo:
         cmd = StatusCommand()
         app = MagicMock()
         app._session_id = None
-        app.message_history = []
         app.usage_tracker = MagicMock(invocation_count=0)
         type(app).workflow = property(lambda self: (_ for _ in ()).throw(RuntimeError))
 

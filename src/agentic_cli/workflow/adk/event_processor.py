@@ -9,12 +9,7 @@ from __future__ import annotations
 from typing import AsyncGenerator, Any, Callable
 
 from agentic_cli.workflow.events import WorkflowEvent, EventType
-from agentic_cli.workflow.thinking import ThinkingDetector
 from agentic_cli.logging import Loggers
-
-# Re-export for backward compatibility
-from agentic_cli.workflow.retry import is_rate_limit_error as _is_rate_limit_error  # noqa: F401
-from agentic_cli.workflow.retry import parse_retry_delay as _parse_retry_delay  # noqa: F401
 
 logger = Loggers.workflow()
 
@@ -22,8 +17,7 @@ logger = Loggers.workflow()
 class ADKEventProcessor:
     """Converts ADK events into framework-agnostic WorkflowEvents.
 
-    Owns a ThinkingDetector and an optional on_event callback for
-    event transformation/filtering.
+    Owns an optional on_event callback for event transformation/filtering.
 
     Args:
         model: Model name used for usage metadata.
@@ -107,10 +101,9 @@ class ADKEventProcessor:
             WorkflowEvent if the part produces one, None otherwise.
         """
         if part.text:
-            result = ThinkingDetector.detect_from_part(part)
-            if result.is_thinking:
-                return WorkflowEvent.thinking(result.content, session_id)
-            return WorkflowEvent.text(result.content, session_id)
+            if getattr(part, "thought", False):
+                return WorkflowEvent.thinking(part.text, session_id)
+            return WorkflowEvent.text(part.text, session_id)
 
         if part.function_call:
             logger.debug("tool_call", tool_name=part.function_call.name)

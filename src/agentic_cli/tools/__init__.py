@@ -7,89 +7,14 @@ Tool System:
     - ToolDefinition: Metadata-rich tool definitions
     - ToolRegistry: Registry for tool management and discovery
     - register_tool: Decorator for easy tool registration
-    - requires: Decorator to declare tool's manager requirements
 
 Framework Tools:
     - memory_tools: Working and long-term memory tools
-    - planning_tools: Flat markdown plan tools (save_plan, get_plan)
     - hitl_tools: Human-in-the-loop approval tools
     - web_search: Web search with pluggable backends (Tavily, Brave)
 
 For resilience patterns, use tenacity, pybreaker, aiolimiter directly.
 """
-
-import asyncio
-import functools
-from typing import Any, Callable, Literal, TypeVar
-
-# Type for manager requirements
-ManagerRequirement = Literal[
-    "memory_manager", "plan_store", "task_store", "kb_manager", "user_kb_manager",
-    "approval_manager", "llm_summarizer", "sandbox_manager",
-]
-
-F = TypeVar("F", bound=Callable)
-
-
-def requires(*managers: ManagerRequirement) -> Callable[[F], F]:
-    """Decorator to declare a tool's manager requirements.
-
-    Framework tools use this to declare what managers they need.
-    The workflow manager scans tools for this metadata and auto-creates
-    the required managers.
-
-    Args:
-        *managers: One or more manager requirements.
-
-    Returns:
-        Decorator that adds 'requires' attribute to the function.
-
-    Example:
-        @requires("memory_manager")
-        def save_memory(content: str, tags: list[str] | None = None) -> dict:
-            store = get_context_memory_store()
-            ...
-    """
-    def decorator(func: F) -> F:
-        func.requires = list(managers)  # type: ignore[attr-defined]
-        return func
-    return decorator
-
-
-def require_context(
-    context_name: str,
-    getter: Callable[..., Any],
-    error_message: str | None = None,
-) -> Callable[[F], F]:
-    """Guard decorator: returns error dict if getter() is None.
-
-    Apply below @requires / @register_tool so it runs first (innermost).
-    functools.wraps preserves __dict__ so .requires stays visible.
-
-    Args:
-        context_name: Human-readable name for error messages.
-        getter: Zero-arg callable returning the context value or None.
-        error_message: Custom error message (defaults to "{context_name} not available").
-    """
-    msg = error_message or f"{context_name} not available"
-
-    def decorator(func: F) -> F:
-        if asyncio.iscoroutinefunction(func):
-            @functools.wraps(func)
-            async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
-                if getter() is None:
-                    return {"success": False, "error": msg}
-                return await func(*args, **kwargs)
-            return async_wrapper  # type: ignore[return-value]
-        else:
-            @functools.wraps(func)
-            def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
-                if getter() is None:
-                    return {"success": False, "error": msg}
-                return func(*args, **kwargs)
-            return sync_wrapper  # type: ignore[return-value]
-    return decorator
-
 
 from agentic_cli.tools.executor import SafePythonExecutor, MockPythonExecutor, ExecutionTimeoutError
 from agentic_cli.tools.shell import shell_executor, is_shell_enabled
@@ -103,12 +28,16 @@ from agentic_cli.tools.glob_tool import glob, list_dir
 from agentic_cli.tools.file_write import write_file, edit_file
 
 from agentic_cli.tools.knowledge_tools import (
-    search_knowledge_base,
-    ingest_document,
-    read_document,
-    list_documents,
-    open_document,
+    kb_search,
+    kb_ingest,
+    kb_read,
+    kb_list,
+    kb_write_concept,
+    kb_search_concepts,
 )
+
+KB_READER_TOOLS = [kb_search, kb_read, kb_list, kb_search_concepts]
+KB_WRITER_TOOLS = [*KB_READER_TOOLS, kb_ingest, kb_write_concept]
 from agentic_cli.tools.arxiv_tools import (
     search_arxiv,
     fetch_arxiv_paper,
@@ -137,10 +66,6 @@ __all__ = [
     "ToolRegistry",
     "get_registry",
     "register_tool",
-    # Manager requirements decorator
-    "requires",
-    "require_context",
-    "ManagerRequirement",
     # Executor classes
     "SafePythonExecutor",
     "MockPythonExecutor",
@@ -164,31 +89,32 @@ __all__ = [
     # Search (ADK built-in - note: can't mix with function calling)
     "google_search_tool",
     # Standard tool functions (ready to use with agents)
-    "search_knowledge_base",
-    "ingest_document",
-    "read_document",
-    "list_documents",
-    "open_document",
+    "kb_search",
+    "kb_ingest",
+    "kb_read",
+    "kb_list",
+    "kb_write_concept",
+    "kb_search_concepts",
+    "KB_READER_TOOLS",
+    "KB_WRITER_TOOLS",
     "search_arxiv",
     "fetch_arxiv_paper",
     "execute_python",
     "ask_clarification",
     # Framework tool modules (lazy loaded)
     "memory_tools",
-    "planning_tools",
-    "task_tools",
     "hitl_tools",
     "sandbox_tools",
+    "reflection_tools",
 ]
 
 
 # Lazy loading for framework tool modules
 _lazy_tool_modules = {
     "memory_tools": "agentic_cli.tools.memory_tools",
-    "planning_tools": "agentic_cli.tools.planning_tools",
-    "task_tools": "agentic_cli.tools.task_tools",
     "hitl_tools": "agentic_cli.tools.hitl_tools",
     "sandbox_tools": "agentic_cli.tools.sandbox",
+    "reflection_tools": "agentic_cli.tools.reflection_tools",
 }
 
 

@@ -10,7 +10,7 @@ from pathlib import Path
 
 import numpy as np
 
-from agentic_cli.persistence._utils import atomic_write_json
+from agentic_cli.file_utils import atomic_write_json
 
 
 class MockEmbeddingService:
@@ -52,17 +52,27 @@ class MockEmbeddingService:
         chunk_size: int = 512,
         overlap: int = 50,
     ) -> list[str]:
-        if not content:
+        """Structure-aware chunking (delegates to real EmbeddingService logic)."""
+        if not content or not content.strip():
             return []
 
-        chunks = []
-        start = 0
-        while start < len(content):
-            end = min(start + chunk_size, len(content))
-            chunks.append(content[start:end])
-            start = end - overlap if end < len(content) else end
+        from agentic_cli.knowledge_base.embeddings import EmbeddingService
 
-        return chunks
+        blocks = EmbeddingService._split_structural_blocks(content)
+        chunks = []
+        for block_type, block_text in blocks:
+            if block_type == "code":
+                stripped = block_text.strip()
+                if stripped:
+                    chunks.append(stripped)
+            else:
+                # Create a temporary instance to access _split_sentences
+                svc = EmbeddingService.__new__(EmbeddingService)
+                sentences = svc._split_sentences(block_text)
+                prose_chunks = EmbeddingService._merge_sentences(sentences, chunk_size, overlap)
+                chunks.extend(prose_chunks)
+
+        return [c for c in chunks if c.strip()]
 
 
 class MockVectorStore:

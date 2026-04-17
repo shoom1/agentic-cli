@@ -31,7 +31,7 @@ from agentic_cli.tools.webfetch import (
     build_summarize_prompt,
 )
 from agentic_cli.tools.webfetch_tool import web_fetch
-from agentic_cli.workflow.context import set_context_llm_summarizer
+from agentic_cli.workflow.service_registry import get_service_registry
 
 
 # =============================================================================
@@ -225,8 +225,8 @@ async def demo_full_webfetch(url: str, use_real_llm: bool = False):
     print(f"  URL: {url}")
     print()
 
-    # Set summarizer in context
-    set_context_llm_summarizer(summarizer)
+    # Set summarizer in service registry
+    get_service_registry()["llm_summarizer"] = summarizer
 
     try:
         # Reset the module-level fetcher for clean state
@@ -261,7 +261,7 @@ async def demo_full_webfetch(url: str, use_real_llm: bool = False):
         print()
 
     finally:
-        set_context_llm_summarizer(None)
+        get_service_registry()["llm_summarizer"] = None
 
 
 async def demo_model_mapping():

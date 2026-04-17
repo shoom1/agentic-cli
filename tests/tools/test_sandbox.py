@@ -203,13 +203,13 @@ class TestSandboxManager:
 class TestSandboxTools:
     def test_sandbox_execute_success(self, tmp_path):
         with MockContext() as ctx:
-            from agentic_cli.workflow.context import set_context_sandbox_manager
+            from agentic_cli.workflow.service_registry import set_service_registry
 
             backend = MockSandboxBackend(
                 ExecutionResult(success=True, stdout="hi\n", result="42", execution_time=0.123)
             )
             mgr = SandboxManager(ctx.settings, backend=backend)
-            token = set_context_sandbox_manager(mgr)
+            token = set_service_registry({"sandbox_manager": mgr})
 
             try:
                 from agentic_cli.tools.sandbox import sandbox_execute
@@ -224,9 +224,9 @@ class TestSandboxTools:
 
     def test_sandbox_execute_no_manager(self, tmp_path):
         with MockContext():
-            from agentic_cli.workflow.context import set_context_sandbox_manager
+            from agentic_cli.workflow.service_registry import set_service_registry
 
-            token = set_context_sandbox_manager(None)
+            token = set_service_registry({})
             try:
                 from agentic_cli.tools.sandbox import sandbox_execute
                 result = sandbox_execute("1 + 1")
@@ -369,12 +369,12 @@ class TestSandboxCommand:
 # ---------------------------------------------------------------------------
 
 class TestManagerAutoDetection:
-    def test_requires_sandbox_manager_detected(self):
-        """Verify @requires('sandbox_manager') is detected by _detect_required_managers."""
-        from agentic_cli.tools.sandbox import sandbox_execute
+    def test_sandbox_detected_via_tool_service_map(self):
+        """Verify sandbox_execute is detected via _TOOL_SERVICE_MAP."""
+        from agentic_cli.workflow.base_manager import BaseWorkflowManager
 
-        assert hasattr(sandbox_execute, "requires")
-        assert "sandbox_manager" in sandbox_execute.requires
+        assert "sandbox_execute" in BaseWorkflowManager._TOOL_SERVICE_MAP
+        assert BaseWorkflowManager._TOOL_SERVICE_MAP["sandbox_execute"] == "sandbox_manager"
 
     def test_base_manager_detects_sandbox(self, tmp_path):
         """BaseWorkflowManager picks up sandbox_manager from tool configs."""

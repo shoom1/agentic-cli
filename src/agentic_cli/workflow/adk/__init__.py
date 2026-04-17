@@ -3,14 +3,14 @@
 This submodule contains ADK-specific components:
 - manager.py: GoogleADKWorkflowManager
 - event_processor.py: ADKEventProcessor
-- llm_event_logger.py: LLM traffic logging for debugging
+- plugins.py: ADK plugins (ConfirmationPlugin, LLMLoggingPlugin)
 
 Note: GoogleADKWorkflowManager is NOT re-exported here to avoid circular
 imports. Import it directly from agentic_cli.workflow.adk.manager.
 """
 
-from agentic_cli.workflow.adk.llm_event_logger import LLMEventLogger
+from agentic_cli.workflow.adk.plugins import LLMLoggingPlugin
 
 __all__ = [
-    "LLMEventLogger",
+    "LLMLoggingPlugin",
 ]

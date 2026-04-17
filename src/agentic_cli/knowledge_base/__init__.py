@@ -19,6 +19,7 @@ from agentic_cli.knowledge_base.sources import (
     SearchSource,
     SearchSourceResult,
 )
+from agentic_cli.knowledge_base.bm25_index import create_bm25_index
 
 __all__ = [
     # Manager
@@ -36,4 +37,6 @@ __all__ = [
     # Search Sources
     "SearchSource",
     "SearchSourceResult",
+    # BM25
+    "create_bm25_index",
 ]

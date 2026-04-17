@@ -24,7 +24,13 @@ from agentic_cli.workflow.base_manager import BaseWorkflowManager
 from agentic_cli.workflow.events import WorkflowEvent, EventType
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.adk.event_processor import ADKEventProcessor
-from agentic_cli.workflow.adk.llm_event_logger import LLMEventLogger
+from agentic_cli.workflow.adk.plugins import ConfirmationPlugin, LLMLoggingPlugin
+
+from agentic_cli.config import (
+    BaseSettings,
+    get_settings,
+)
+from agentic_cli.logging import Loggers, bind_context
 
 
 class _SessionEvent:
@@ -40,46 +46,13 @@ class _SessionEvent:
     def __init__(self, content, author: str = "") -> None:
         self.content = content
         self.author = author
-from agentic_cli.config import (
-    BaseSettings,
-    get_settings,
-)
-from agentic_cli.logging import Loggers, bind_context
+
 
 logger = Loggers.workflow()
 
 # Suppress Google GenAI SDK warning about non-text parts (function_call) in
 # mixed responses. We already handle all part types individually in process_part.
 logging.getLogger("google_genai.types").setLevel(logging.ERROR)
-
-
-class ADKSummarizer:
-    """LLM Summarizer implementation using Google ADK.
-
-    Uses the Gemini API directly (outside the agent loop) to summarize
-    web content for the webfetch tool.
-    """
-
-    def __init__(self, manager: "GoogleADKWorkflowManager") -> None:
-        """Initialize the summarizer.
-
-        Args:
-            manager: The workflow manager to use for LLM calls.
-        """
-        self._manager = manager
-
-    async def summarize(self, content: str, prompt: str) -> str:
-        """Summarize content using Gemini.
-
-        Args:
-            content: The content to summarize (markdown).
-            prompt: The full summarization prompt.
-
-        Returns:
-            Summarized text response.
-        """
-        # Use the manager's generate_simple method
-        return await self._manager.generate_simple(prompt, max_tokens=2000)
 
 
 class GoogleADKWorkflowManager(BaseWorkflowManager):
@@ -119,7 +92,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         settings: BaseSettings | None = None,
         app_name: str | None = None,
         model: str | None = None,
-        session_service_uri: str | None = None,
         on_event: Callable[[WorkflowEvent], WorkflowEvent | None] | None = None,
     ) -> None:
         """Initialize the workflow manager.
@@ -130,7 +102,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             settings: Application settings (uses get_settings() if not provided)
             app_name: Application name for services (uses settings.app_name if not provided)
             model: Model override (auto-detected from API keys if not provided)
-            session_service_uri: Optional URI for remote session service
             on_event: Optional hook to transform/filter events before yielding
         """
         super().__init__(
@@ -140,22 +111,21 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             model=model,
             on_event=on_event,
         )
-        self.session_service_uri = session_service_uri
         self.session_id = "default_session"
 
-        # Lazy-initialized ADK components
         self._session_service: BaseSessionService | None = None
         self._root_agent: Agent | None = None
         self._runner: Runner | None = None
 
-        # Event processor (model set lazily via property)
         self._event_processor = ADKEventProcessor(
             model=model or "",
             on_event=on_event,
         )
 
-        # LLM event logger (initialized lazily when raw_llm_logging is enabled)
-        self._llm_event_logger: LLMEventLogger | None = None
+        # Plugins (initialized lazily in _init_plugins, but we need the
+        # reference to exist before process() is called)
+        self._llm_logging_plugin: LLMLoggingPlugin | None = None
+        self._task_progress_plugin: "TaskProgressPlugin | None" = None
 
         logger.debug(
             "workflow_manager_created",
@@ -168,21 +138,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
     def backend_type(self) -> str:
         """Return 'adk'."""
         return "adk"
-
-    @property
-    def session_service(self) -> BaseSessionService | None:
-        """Get the session service."""
-        return self._session_service
-
-    @property
-    def root_agent(self) -> Agent | None:
-        """Get the root agent."""
-        return self._root_agent
-
-    @property
-    def runner(self) -> Runner | None:
-        """Get the runner."""
-        return self._runner
 
     async def generate_simple(self, prompt: str, max_tokens: int = 500) -> str:
         """Generate a simple text response using the current model.
@@ -226,10 +181,10 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         self._session_service = None
         self._initialized = False
 
-        # Clear LLM event logger
-        if self._llm_event_logger:
-            self._llm_event_logger.clear()
-            self._llm_event_logger = None
+        # Clear LLM logging plugin
+        if self._llm_logging_plugin:
+            self._llm_logging_plugin.clear()
+            self._llm_logging_plugin = None
 
         # Clean up managers (sandbox, etc.)
         self._cleanup_managers()
@@ -278,6 +233,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     app_name=self.app_name,
                     agent=self._root_agent,
                     session_service=self._session_service,
+                    plugins=self._init_plugins(),
                 )
 
         logger.info(
@@ -285,18 +241,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             model=self.model,
             sessions_preserved=preserve_sessions,
         )
-
-    def update_settings(self, settings: BaseSettings) -> None:
-        """Update the settings instance.
-
-        Note: This only updates the settings reference. To apply changes
-        that affect agent behavior (like model changes), call reinitialize().
-
-        Args:
-            settings: New settings instance
-        """
-        self._settings = settings
-        logger.debug("settings_updated")
 
     def _get_planner(self) -> BuiltInPlanner | None:
         """Get planner with thinking configuration."""
@@ -365,13 +309,12 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         )
         return types.GenerateContentConfig(http_options=http_options)
 
-    def _create_summarizer(self) -> ADKSummarizer:
-        """Create an LLM summarizer for webfetch.
-
-        Returns:
-            ADKSummarizer instance that uses Gemini for summarization.
-        """
-        return ADKSummarizer(self)
+    def _get_state_tools(self) -> list:
+        """Return ADK-native state tools using ToolContext.state."""
+        from agentic_cli.tools.adk.state_tools import (
+            save_plan, get_plan, save_tasks, get_tasks,
+        )
+        return [save_plan, get_plan, save_tasks, get_tasks]
 
     def _create_agents(self) -> Agent:
         """Create agent hierarchy from configs.
@@ -386,20 +329,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         agent_map: dict[str, Agent] = {}
         planner = self._get_planner()
         generate_config = self._get_generate_content_config()
-
-        # Initialize LLM event logger if raw_llm_logging is enabled
-        before_callback = None
-        after_callback = None
-        if self._settings.raw_llm_logging:
-            self._llm_event_logger = LLMEventLogger(
-                model_name=self.model,
-                app_name=self._settings.app_name,
-                include_messages=True,
-                include_raw_parts=True,
-            )
-            before_callback = self._llm_event_logger.before_model_callback
-            after_callback = self._llm_event_logger.after_model_callback
-            logger.info("llm_event_logging_enabled")
+        service_map = self._get_service_tool_map()
 
         # First pass: create agents without sub_agents (leaf agents)
         for config in self._agent_configs:
@@ -408,12 +338,10 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     name=config.name,
                     model=config.model or self.model,
                     instruction=config.get_prompt(),
-                    tools=config.tools or [],
+                    tools=self._build_tools(config, service_map),
                     description=config.description or None,
                     planner=planner,
                     generate_content_config=generate_config,
-                    before_model_callback=before_callback,
-                    after_model_callback=after_callback,
                 )
                 logger.debug("agent_created", name=config.name, type="leaf")
 
@@ -435,13 +363,11 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     name=config.name,
                     model=config.model or self.model,
                     instruction=config.get_prompt(),
-                    tools=config.tools or [],
+                    tools=self._build_tools(config, service_map),
                     description=config.description or None,
                     sub_agents=sub_agent_instances,
                     planner=planner,
                     generate_content_config=generate_config,
-                    before_model_callback=before_callback,
-                    after_model_callback=after_callback,
                 )
                 logger.debug(
                     "agent_created",
@@ -466,25 +392,51 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         logger.info("agents_created", root=root_agent.name, total=len(agent_map))
         return root_agent
 
+    def _init_plugins(self) -> list:
+        """Create ADK plugins and store references for later access.
+
+        Returns:
+            List of BasePlugin instances to pass to Runner(plugins=...).
+        """
+        from agentic_cli.workflow.adk.task_progress_plugin import TaskProgressPlugin
+
+        plugins: list = [ConfirmationPlugin()]
+
+        # Task progress tracking via ToolContext.state
+        self._task_progress_plugin = TaskProgressPlugin()
+        plugins.append(self._task_progress_plugin)
+
+        if self._settings.raw_llm_logging:
+            self._llm_logging_plugin = LLMLoggingPlugin(
+                model_name=self.model,
+                app_name=self._settings.app_name,
+                include_messages=True,
+                include_raw_parts=True,
+            )
+            plugins.append(self._llm_logging_plugin)
+            logger.info("llm_logging_plugin_enabled")
+        else:
+            self._llm_logging_plugin = None
+
+        return plugins
+
     async def _do_initialize(self) -> None:
         """ADK-specific initialization: session service, agents, runner."""
         logger.info("initializing_services", app_name=self.app_name)
 
         # Create session service
-        if self.session_service_uri:
-            logger.debug("using_remote_session_service", uri=self.session_service_uri)
-        else:
-            self._session_service = InMemorySessionService()
-            logger.debug("using_in_memory_session_service")
+        self._session_service = InMemorySessionService()
+        logger.debug("using_in_memory_session_service")
 
         # Create agent hierarchy from configs
         self._root_agent = self._create_agents()
 
-        # Create runner
+        # Create runner with plugins
         self._runner = Runner(
             app_name=self.app_name,
             agent=self._root_agent,
             session_service=self._session_service,
+            plugins=self._init_plugins(),
         )
 
         logger.info(
@@ -498,31 +450,10 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         """Ensure services are initialized before processing."""
         if not self._initialized:
             await self.initialize_services()
-
-    def _validate_initialized(self) -> None:
-        """Validate that all required components are initialized.
-
-        Raises:
-            RuntimeError: If required components are not initialized
-        """
         if not self._runner or not self._session_service or not self._root_agent:
             raise RuntimeError(
                 "Workflow Manager failed to initialize. Check API keys and configuration."
             )
-
-    def _create_message(self, message: str) -> types.Content:
-        """Create an ADK Content message from text.
-
-        Args:
-            message: User message text
-
-        Returns:
-            ADK Content object
-        """
-        return types.Content(
-            role="user",
-            parts=[types.Part.from_text(text=message)],
-        )
 
     # -------------------------------------------------------------------------
     # Session handling (inlined from SessionHandler)
@@ -584,7 +515,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             WorkflowEvent objects representing workflow output
         """
         await self._ensure_initialized()
-        self._validate_initialized()
 
         current_session_id = session_id or self.session_id
         bind_context(session_id=current_session_id, user_id=user_id)
@@ -600,7 +530,10 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             session = await self._get_or_create_session(user_id, current_session_id)
 
             # Create message
-            new_message = self._create_message(message)
+            new_message = types.Content(
+                role="user",
+                parts=[types.Part.from_text(text=message)],
+            )
 
             event_count = 0
 
@@ -626,9 +559,9 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                 new_message=new_message,
                 run_config=run_config,
             ):
-                # Yield LLM events from logger first (Option A - raw capture)
-                if self._llm_event_logger:
-                    for llm_event in self._llm_event_logger.drain_events():
+                # Yield LLM events from plugin first (raw capture)
+                if self._llm_logging_plugin:
+                    for llm_event in self._llm_logging_plugin.drain_events():
                         llm_event = self._apply_event_hook(llm_event)
                         if llm_event:
                             event_count += 1
@@ -642,18 +575,25 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     event_count += 1
                     yield workflow_event
 
-                    # Emit task progress after tool results
-                    if workflow_event.type == EventType.TOOL_RESULT:
-                        progress_event = self._emit_task_progress_event()
-                        if progress_event:
+                    # Drain task progress events buffered by the plugin
+                    if workflow_event.type == EventType.TOOL_RESULT and self._task_progress_plugin:
+                        for progress_event in self._task_progress_plugin.drain_events():
                             progress_event = self._apply_event_hook(progress_event)
                             if progress_event:
                                 event_count += 1
                                 yield progress_event
 
+            # Final drain — catches progress from the last tool call
+            if self._task_progress_plugin:
+                for progress_event in self._task_progress_plugin.drain_events():
+                    progress_event = self._apply_event_hook(progress_event)
+                    if progress_event:
+                        event_count += 1
+                        yield progress_event
+
             # Drain any remaining LLM events after processing completes
-            if self._llm_event_logger:
-                for llm_event in self._llm_event_logger.drain_events():
+            if self._llm_logging_plugin:
+                for llm_event in self._llm_logging_plugin.drain_events():
                     llm_event = self._apply_event_hook(llm_event)
                     if llm_event:
                         event_count += 1
@@ -730,16 +670,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
 
         current_agent = getattr(session.events[-1], "author", None)
         return messages, current_agent
-
-    async def _extract_session_messages(self, session_id: str) -> list[dict]:
-        """Extract normalized messages from ADK session events."""
-        messages, _ = await self._extract_session_data(session_id)
-        return messages
-
-    async def _extract_current_agent(self, session_id: str) -> str | None:
-        """Return the author of the last event in the ADK session."""
-        _, current_agent = await self._extract_session_data(session_id)
-        return current_agent
 
     async def _inject_session_messages(
         self,

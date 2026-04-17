@@ -1,4 +1,4 @@
-"""Tests for concurrent access to MemoryStore, PlanStore, and TaskStore.
+"""Tests for concurrent access to MemoryStore, plan registry state, and task functions.
 
 Verifies that parallel read/write operations don't corrupt data.
 """
@@ -61,97 +61,92 @@ class TestConcurrentMemoryStore:
         assert len(store.search("", limit=100)) == 15
 
 
-class TestConcurrentPlanStore:
-    """Test concurrent access to PlanStore."""
+class TestConcurrentPlanRegistry:
+    """Test concurrent access to plan via service registry."""
 
     async def test_concurrent_save_get(self):
         """Concurrent save/get should not corrupt plan content."""
-        from agentic_cli.tools.planning_tools import PlanStore
+        from agentic_cli.workflow.service_registry import set_service_registry
 
-        store = PlanStore()
+        registry = {}
+        token = set_service_registry(registry)
+        try:
+            async def save_plan(i: int):
+                registry["plan"] = f"## Plan {i}\n- Step 1\n- Step 2"
 
-        async def save_plan(i: int):
-            store.save(f"## Plan {i}\n- Step 1\n- Step 2")
+            async def get_plan():
+                content = registry.get("plan", "")
+                # Content should be either empty or a valid plan
+                if content:
+                    assert content.startswith("## Plan")
+                return content
 
-        async def get_plan():
-            content = store.get()
-            # Content should be either empty or a valid plan
-            if content:
-                assert content.startswith("## Plan")
-            return content
+            tasks = [save_plan(i) for i in range(20)] + [get_plan() for _ in range(20)]
+            await asyncio.gather(*tasks)
 
-        tasks = [save_plan(i) for i in range(20)] + [get_plan() for _ in range(20)]
-        await asyncio.gather(*tasks)
-
-        # Final state should have some plan
-        assert not store.is_empty()
+            # Final state should have some plan
+            assert registry.get("plan", "")
+        finally:
+            token.var.reset(token)
 
     async def test_concurrent_save_clear(self):
         """Concurrent save/clear should not corrupt state."""
-        from agentic_cli.tools.planning_tools import PlanStore
+        from agentic_cli.workflow.service_registry import set_service_registry
 
-        store = PlanStore()
+        registry = {}
+        token = set_service_registry(registry)
+        try:
+            async def save_and_clear(i: int):
+                registry["plan"] = f"Plan {i}"
+                if i % 3 == 0:
+                    registry["plan"] = ""
 
-        async def save_and_clear(i: int):
-            store.save(f"Plan {i}")
-            if i % 3 == 0:
-                store.clear()
-
-        await asyncio.gather(*(save_and_clear(i) for i in range(20)))
-        # Should not raise; state is either empty or has content
-        _ = store.get()
+            await asyncio.gather(*(save_and_clear(i) for i in range(20)))
+            # Should not raise; state is either empty or has content
+            _ = registry.get("plan", "")
+        finally:
+            token.var.reset(token)
 
 
-class TestConcurrentTaskStore:
-    """Test concurrent access to TaskStore."""
+class TestConcurrentTaskNormalization:
+    """Test concurrent access to task normalization (pure functions)."""
 
-    async def test_concurrent_replace_all(self, mock_context):
-        """Parallel replace_all should not corrupt the store."""
-        from agentic_cli.tools.task_tools import TaskStore
+    async def test_concurrent_normalize(self, mock_context):
+        """Parallel normalize_tasks should not interfere with each other."""
+        from agentic_cli.tools._core.tasks import normalize_tasks
 
-        store = TaskStore(mock_context.settings)
-
-        async def replace_tasks(batch: int):
+        async def normalize_batch(batch: int):
             tasks = [
                 {"description": f"batch-{batch}-task-{j}", "status": "pending"}
                 for j in range(5)
             ]
-            return store.replace_all(tasks)
+            return normalize_tasks(tasks)
 
-        results = await asyncio.gather(*(replace_tasks(i) for i in range(10)))
+        results = await asyncio.gather(*(normalize_batch(i) for i in range(10)))
 
-        # Last write wins — store should have exactly 5 tasks
-        all_tasks = store.list_tasks()
-        assert len(all_tasks) == 5
-        # All returned ID lists should have 5 entries
-        for ids in results:
+        # All returned normalized lists should have 5 entries
+        for normalized, ids in results:
+            assert len(normalized) == 5
             assert len(ids) == 5
 
-    async def test_concurrent_read_write(self, mock_context):
-        """Reads during replace_all should return consistent snapshots."""
-        from agentic_cli.tools.task_tools import TaskStore, TaskStatus
+    async def test_concurrent_filter(self, mock_context):
+        """Concurrent filter_tasks on shared data should be consistent."""
+        from agentic_cli.tools._core.tasks import normalize_tasks, filter_tasks
 
-        store = TaskStore(mock_context.settings)
-        store.replace_all([
-            {"description": f"initial-{i}", "status": "pending"}
-            for i in range(5)
+        normalized, _ = normalize_tasks([
+            {"description": f"task-{i}", "status": "pending" if i % 2 == 0 else "in_progress"}
+            for i in range(10)
         ])
 
-        async def writer(batch: int):
-            tasks = [
-                {"description": f"batch-{batch}-{j}", "status": "in_progress"}
-                for j in range(5)
-            ]
-            store.replace_all(tasks)
-
         async def reader():
-            tasks = store.list_tasks()
-            # Should always get a consistent list (not partially updated)
-            assert len(tasks) == 5
-            return tasks
+            filtered = filter_tasks(normalized, status="pending")
+            # Should always get consistent count
+            assert len(filtered) == 5
+            return filtered
 
-        tasks = [writer(i) for i in range(10)] + [reader() for _ in range(10)]
-        await asyncio.gather(*tasks)
+        results = await asyncio.gather(*(reader() for _ in range(20)))
+        for r in results:
+            assert len(r) == 5
 
 
 class TestFileLockTimeout:
@@ -159,7 +154,7 @@ class TestFileLockTimeout:
 
     def test_lock_timeout_raises(self, tmp_path):
         """file_lock should raise FileLockTimeout when lock is held."""
-        from agentic_cli.persistence._utils import file_lock, FileLockTimeout
+        from agentic_cli.file_utils import file_lock, FileLockTimeout
 
         target = tmp_path / "test.json"
         target.write_text("{}")
@@ -172,7 +167,7 @@ class TestFileLockTimeout:
 
     def test_lock_no_timeout(self, tmp_path):
         """file_lock with timeout=None should block indefinitely (legacy)."""
-        from agentic_cli.persistence._utils import file_lock
+        from agentic_cli.file_utils import file_lock
 
         target = tmp_path / "test.json"
         target.write_text("{}")
@@ -183,7 +178,7 @@ class TestFileLockTimeout:
 
     def test_lock_default_timeout(self, tmp_path):
         """file_lock with default timeout should work normally."""
-        from agentic_cli.persistence._utils import file_lock
+        from agentic_cli.file_utils import file_lock
 
         target = tmp_path / "test.json"
         target.write_text("{}")

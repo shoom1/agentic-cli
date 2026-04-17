@@ -1,4 +1,4 @@
-"""Shared persistence utilities."""
+"""Shared file utilities — atomic writes, file locking, filename sanitization."""
 
 import fcntl
 import json
@@ -29,10 +29,8 @@ def file_lock(path: Path, timeout: float = 10.0) -> Generator[None, None, None]:
     """
     lock_path = path.with_suffix(path.suffix + ".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    fd = open(lock_path, "w")  # noqa: SIM115
-    try:
+    with open(lock_path, "w") as fd:
         if timeout is None:
-            # Indefinite blocking (legacy behavior)
             fcntl.flock(fd, fcntl.LOCK_EX)
         else:
             deadline = time.monotonic() + timeout
@@ -48,9 +46,7 @@ def file_lock(path: Path, timeout: float = 10.0) -> Generator[None, None, None]:
                         )
                     time.sleep(0.05)
         yield
-    finally:
         fcntl.flock(fd, fcntl.LOCK_UN)
-        fd.close()
 
 
 def sanitize_filename(name: str) -> str:
@@ -61,21 +57,19 @@ def sanitize_filename(name: str) -> str:
     return "".join(c if c.isalnum() or c in "-_" else "_" for c in name)
 
 
-def atomic_write_json(path: Path, data: Any, indent: int = 2) -> None:
-    """Write JSON data to a file atomically.
-
-    Writes to a temporary file first, then renames to the target path.
-    This prevents data corruption if the process crashes mid-write.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    tmp_path.write_text(json.dumps(data, indent=indent))
-    tmp_path.replace(path)
-
-
-def atomic_write_text(path: Path, content: str) -> None:
-    """Write text to a file atomically."""
+def _atomic_write(path: Path, content: str) -> None:
+    """Write content to a file atomically (write tmp, then rename)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_suffix(path.suffix + ".tmp")
     tmp_path.write_text(content)
     tmp_path.replace(path)
+
+
+def atomic_write_json(path: Path, data: Any, indent: int = 2) -> None:
+    """Write JSON data to a file atomically."""
+    _atomic_write(path, json.dumps(data, indent=indent))
+
+
+def atomic_write_text(path: Path, content: str) -> None:
+    """Write text to a file atomically."""
+    _atomic_write(path, content)

@@ -2,86 +2,64 @@
 
 import pytest
 
-from agentic_cli.tools.planning_tools import PlanStore
+from agentic_cli.workflow.service_registry import set_service_registry, get_service_registry
 
 
 @pytest.fixture
-def plan_store_ctx():
-    """Provide a PlanStore with context set, auto-cleanup."""
-    from agentic_cli.workflow.context import set_context_plan_store
-
-    store = PlanStore()
-    token = set_context_plan_store(store)
-    yield store
+def plan_registry_ctx():
+    """Provide a service registry with plan support, auto-cleanup."""
+    registry = {}
+    token = set_service_registry(registry)
+    yield registry
     token.var.reset(token)
 
 
-class TestPlanStore:
-    """Tests for PlanStore class."""
+class TestPlanViaRegistry:
+    """Tests for plan storage via service registry."""
 
-    def test_empty_by_default(self):
-        from agentic_cli.tools.planning_tools import PlanStore
-        store = PlanStore()
-        assert store.is_empty()
-        assert store.get() == ""
+    def test_empty_by_default(self, plan_registry_ctx):
+        assert plan_registry_ctx.get("plan", "") == ""
 
-    def test_save_and_get(self):
-        from agentic_cli.tools.planning_tools import PlanStore
-        store = PlanStore()
+    def test_save_and_get(self, plan_registry_ctx):
         plan = "## Plan\n- [ ] Task 1\n- [ ] Task 2"
-        store.save(plan)
-        assert store.get() == plan
-        assert not store.is_empty()
+        plan_registry_ctx["plan"] = plan
+        assert plan_registry_ctx.get("plan", "") == plan
 
-    def test_save_overwrites(self):
-        from agentic_cli.tools.planning_tools import PlanStore
-        store = PlanStore()
-        store.save("Plan v1")
-        store.save("Plan v2")
-        assert store.get() == "Plan v2"
+    def test_save_overwrites(self, plan_registry_ctx):
+        plan_registry_ctx["plan"] = "Plan v1"
+        plan_registry_ctx["plan"] = "Plan v2"
+        assert plan_registry_ctx["plan"] == "Plan v2"
 
-    def test_clear(self):
-        from agentic_cli.tools.planning_tools import PlanStore
-        store = PlanStore()
-        store.save("Some plan")
-        store.clear()
-        assert store.is_empty()
-        assert store.get() == ""
+    def test_clear(self, plan_registry_ctx):
+        plan_registry_ctx["plan"] = "Some plan"
+        plan_registry_ctx["plan"] = ""
+        assert plan_registry_ctx.get("plan", "") == ""
 
-    def test_save_empty_string(self):
-        from agentic_cli.tools.planning_tools import PlanStore
-        store = PlanStore()
-        store.save("Has content")
-        store.save("")
-        assert store.is_empty()
+    def test_save_empty_string(self, plan_registry_ctx):
+        plan_registry_ctx["plan"] = "Has content"
+        plan_registry_ctx["plan"] = ""
+        assert not plan_registry_ctx.get("plan", "")
 
-    def test_markdown_checkboxes(self):
+    def test_markdown_checkboxes(self, plan_registry_ctx):
         """Test that markdown checkbox plan round-trips correctly."""
-        from agentic_cli.tools.planning_tools import PlanStore
-        store = PlanStore()
         plan = (
             "## Research Plan\n"
             "- [x] Gather data\n"
             "- [ ] Analyze results\n"
             "- [ ] Write summary"
         )
-        store.save(plan)
-        assert "- [x] Gather data" in store.get()
-        assert "- [ ] Analyze results" in store.get()
+        plan_registry_ctx["plan"] = plan
+        assert "- [x] Gather data" in plan_registry_ctx["plan"]
+        assert "- [ ] Analyze results" in plan_registry_ctx["plan"]
 
-    def test_update_checkboxes(self):
+    def test_update_checkboxes(self, plan_registry_ctx):
         """Test updating plan with checkbox progress."""
-        from agentic_cli.tools.planning_tools import PlanStore
-        store = PlanStore()
-        store.save("- [ ] Task A\n- [ ] Task B")
-        # Agent updates the plan with progress
-        store.save("- [x] Task A\n- [ ] Task B")
-        assert "- [x] Task A" in store.get()
+        plan_registry_ctx["plan"] = "- [ ] Task A\n- [ ] Task B"
+        plan_registry_ctx["plan"] = "- [x] Task A\n- [ ] Task B"
+        assert "- [x] Task A" in plan_registry_ctx["plan"]
 
-    def test_multiline_plan(self):
+    def test_multiline_plan(self, plan_registry_ctx):
         """Test complex multi-line plan."""
-        from agentic_cli.tools.planning_tools import PlanStore
-        store = PlanStore()
         plan = (
             "# Project Plan\n"
             "\n"
@@ -93,67 +71,35 @@ class TestPlanStore:
             "- [ ] Implement\n"
             "- [ ] Test\n"
         )
-        store.save(plan)
-        assert store.get() == plan
+        plan_registry_ctx["plan"] = plan
+        assert plan_registry_ctx["plan"] == plan
 
 
 class TestSummarizeCheckboxes:
-    """Tests for _summarize_checkboxes helper."""
+    """Tests for summarize_checkboxes helper."""
 
     def test_with_mixed_checkboxes(self):
-        from agentic_cli.tools.planning_tools import _summarize_checkboxes
+        from agentic_cli.tools._core.planning import summarize_checkboxes
         content = "- [x] Done\n- [x] Also done\n- [ ] Pending\n- [ ] Also pending\n- [ ] Third pending"
-        result = _summarize_checkboxes(content)
+        result = summarize_checkboxes(content)
         assert result == "5 tasks: 2 done, 3 pending"
 
     def test_all_done(self):
-        from agentic_cli.tools.planning_tools import _summarize_checkboxes
-        result = _summarize_checkboxes("- [x] A\n- [x] B")
+        from agentic_cli.tools._core.planning import summarize_checkboxes
+        result = summarize_checkboxes("- [x] A\n- [x] B")
         assert result == "2 tasks: 2 done"
 
     def test_all_pending(self):
-        from agentic_cli.tools.planning_tools import _summarize_checkboxes
-        result = _summarize_checkboxes("- [ ] A\n- [ ] B")
+        from agentic_cli.tools._core.planning import summarize_checkboxes
+        result = summarize_checkboxes("- [ ] A\n- [ ] B")
         assert result == "2 tasks: 2 pending"
 
     def test_no_checkboxes(self):
-        from agentic_cli.tools.planning_tools import _summarize_checkboxes
-        result = _summarize_checkboxes("Just some text")
+        from agentic_cli.tools._core.planning import summarize_checkboxes
+        result = summarize_checkboxes("Just some text")
         assert result == ""
 
     def test_uppercase_x(self):
-        from agentic_cli.tools.planning_tools import _summarize_checkboxes
-        result = _summarize_checkboxes("- [X] Done\n- [ ] Pending")
+        from agentic_cli.tools._core.planning import summarize_checkboxes
+        result = summarize_checkboxes("- [X] Done\n- [ ] Pending")
         assert result == "2 tasks: 1 done, 1 pending"
-
-
-class TestSavePlanSummary:
-    """Tests for save_plan returning checkbox stats."""
-
-    def test_save_plan_with_checkboxes_shows_stats(self, plan_store_ctx):
-        from agentic_cli.tools.planning_tools import save_plan
-
-        result = save_plan(content="- [x] A\n- [ ] B\n- [ ] C")
-        assert result["success"] is True
-        assert "3 tasks" in result["message"]
-        assert "1 done" in result["message"]
-        assert "2 pending" in result["message"]
-
-    def test_save_plan_without_checkboxes(self, plan_store_ctx):
-        from agentic_cli.tools.planning_tools import save_plan
-
-        result = save_plan(content="## My Plan\nJust text, no checkboxes.")
-        assert result["success"] is True
-        assert result["message"] == "Plan saved"
-
-
-class TestPlanStoreImport:
-    """Tests for planning module exports."""
-
-    def test_import_plan_store(self):
-        from agentic_cli.tools.planning_tools import PlanStore
-        assert PlanStore is not None
-
-    def test_plan_store_only_export(self):
-        import agentic_cli.tools.planning_tools as planning_tools
-        assert hasattr(planning_tools, "PlanStore")
