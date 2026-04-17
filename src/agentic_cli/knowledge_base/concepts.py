@@ -242,10 +242,10 @@ class ConceptStore:
         Title hits are ranked above body hits. Ties within a rank tier
         preserve filesystem glob order.
         """
-        if not query or not self.base_dir.exists():
+        if not query.strip() or not self.base_dir.exists():
             return []
 
-        q = query.lower()
+        q = query.strip().lower()
         title_hits: list[dict[str, Any]] = []
         body_hits: list[dict[str, Any]] = []
 

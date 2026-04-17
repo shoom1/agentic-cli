@@ -392,3 +392,11 @@ class TestConceptStoreSearch:
             )
         hits = store.search("match", limit=3)
         assert len(hits) == 3
+
+    def test_search_whitespace_only_query_returns_empty(self, tmp_path):
+        from agentic_cli.knowledge_base.concepts import ConceptStore
+
+        store = ConceptStore(tmp_path / "concepts")
+        store.write(title="Has a space in body", body="body text", sources=["a"])
+        assert store.search("   ") == []
+        assert store.search("\t\n ") == []
