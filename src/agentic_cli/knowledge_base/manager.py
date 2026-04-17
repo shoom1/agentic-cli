@@ -42,6 +42,12 @@ logger = Loggers.knowledge_base()
 _FORMAT_VERSION = 3
 
 
+def _utc_iso_now() -> str:
+    """Return current UTC time as ISO-8601 with a trailing 'Z'."""
+    from datetime import timezone
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def matches_document_filters(doc: Document, filters: dict[str, Any]) -> bool:
     """Check if a document matches the given filters.
 
@@ -288,7 +294,7 @@ class KnowledgeBaseManager:
 
         text = render_index_md(
             list(self._documents.values()),
-            updated_at_iso=datetime.now().isoformat(),
+            updated_at_iso=_utc_iso_now(),
         )
         atomic_write_text(self._index_md_path(), text)
 
@@ -297,7 +303,7 @@ class KnowledgeBaseManager:
 
     def _append_ingest_log(self, action: str, doc: Document) -> None:
         """Append one audit line to ingest_log.md."""
-        ts = datetime.now().isoformat()
+        ts = _utc_iso_now()
         ident = doc.metadata.get("arxiv_id") if doc.metadata else None
         title_quoted = f'"{doc.title}"'
         parts = [
@@ -315,7 +321,7 @@ class KnowledgeBaseManager:
             parts += ["·", f"{len(doc.chunks)} chunks"]
         line = " ".join(parts) + "\n"
         path = self._ingest_log_path()
-        with path.open("a") as f:
+        with path.open("a", encoding="utf-8") as f:
             f.write(line)
 
     def _load_metadata(self) -> None:

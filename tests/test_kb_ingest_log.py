@@ -39,3 +39,16 @@ class TestIngestLog:
         kb.ingest_document(content="b", title="Two", source_type=SourceType.USER)
         second = log_path.read_text()
         assert second.startswith(first)
+
+    def test_log_includes_arxiv_id_when_present(self, kb):
+        kb.ingest_document(
+            content="abstract",
+            title="Attention Is All You Need",
+            source_type=SourceType.ARXIV,
+            metadata={"arxiv_id": "1706.03762"},
+        )
+        log = (kb.kb_dir / "ingest_log.md").read_text()
+        line = next(ln for ln in log.splitlines() if ln.startswith("- "))
+        assert "1706.03762" in line
+        assert "arxiv" in line
+        assert "Attention Is All You Need" in line
