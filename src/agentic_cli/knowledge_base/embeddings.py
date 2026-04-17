@@ -6,11 +6,44 @@ and document chunking for efficient retrieval.
 
 from __future__ import annotations
 
+import platform
 import re
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from sentence_transformers import SentenceTransformer
+
+
+def resolve_embedding_device(preference: str = "auto") -> str:
+    """Resolve the device string for sentence-transformers.
+
+    PyTorch's own autodetect trusts ``torch.backends.mps.is_available()``,
+    which returns True on Intel Macs with discrete AMD GPUs where MPS
+    command buffers routinely fail with ``Internal Error (e00002bd)``.
+    This helper restricts MPS to Apple Silicon (``arm64``) where it's
+    stable and falls back to CPU on Intel Macs.
+
+    Args:
+        preference: One of ``"auto"``, ``"cpu"``, ``"mps"``, ``"cuda"``.
+            ``"auto"`` picks the best stable device; explicit values are
+            honored as-is (no fallback).
+
+    Returns:
+        Resolved device string to pass to ``SentenceTransformer(..., device=...)``.
+    """
+    if preference != "auto":
+        return preference
+
+    try:
+        import torch
+    except ImportError:
+        return "cpu"
+
+    if torch.cuda.is_available():
+        return "cuda"
+    if platform.machine() == "arm64" and torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
 
 
 class EmbeddingService:
@@ -33,6 +66,7 @@ class EmbeddingService:
         self,
         model_name: str = "all-MiniLM-L6-v2",
         batch_size: int = 32,
+        device: str = "auto",
     ) -> None:
         """Initialize the embedding service.
 
@@ -42,9 +76,13 @@ class EmbeddingService:
                 - "all-MiniLM-L6-v2" (fast, 384 dims, good quality)
                 - "all-mpnet-base-v2" (slower, 768 dims, best quality)
             batch_size: Batch size for embedding generation.
+            device: Device preference — ``"auto"`` (default) resolves via
+                :func:`resolve_embedding_device`. Explicit values
+                ``"cpu"``, ``"mps"``, ``"cuda"`` are passed through.
         """
         self.model_name = model_name
         self.batch_size = batch_size
+        self.device = resolve_embedding_device(device)
         self._model: SentenceTransformer | None = None
         self._embedding_dim: int | None = None
 
@@ -54,7 +92,7 @@ class EmbeddingService:
         if self._model is None:
             from sentence_transformers import SentenceTransformer
 
-            self._model = SentenceTransformer(self.model_name)
+            self._model = SentenceTransformer(self.model_name, device=self.device)
             self._embedding_dim = self._model.get_sentence_embedding_dimension()
         return self._model
 

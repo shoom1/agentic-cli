@@ -106,7 +106,58 @@ class FilesCommand(Command):
         app.session.add_message("system", f"Total: {result['total']} items")
 
 
+class KbBackfillCommand(Command):
+    """Pre-bake markdown sidecars for any KB docs that don't have one yet."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            name="kb-backfill",
+            description="Generate missing sidecars for every KB doc (batch LLM call)",
+            aliases=[],
+            usage="/kb-backfill",
+            examples=["/kb-backfill"],
+            category=CommandCategory.GENERAL,
+        )
+
+    async def execute(self, args: str, app: "ResearchDemoApp") -> None:
+        workflow = app.workflow
+        if workflow is None:
+            app.session.add_error("Workflow not initialized")
+            return
+
+        project_kb = workflow.kb_manager
+        user_kb = workflow.user_kb_manager
+
+        if project_kb is None:
+            app.session.add_warning(
+                "No knowledge base configured. Ingest a document first, "
+                "or enable KB tools in the agent config."
+            )
+            return
+
+        kbs: list[tuple[str, object]] = [("project", project_kb)]
+        if user_kb is not None and user_kb is not project_kb:
+            kbs.append(("user", user_kb))
+
+        total_written = 0
+        for label, kb in kbs:
+            app.session.add_message("system", f"Backfilling {label} KB at {kb.kb_dir}…")
+            try:
+                written = await kb.backfill_sidecars()
+            except Exception as e:
+                app.session.add_error(f"{label} KB backfill failed: {e}")
+                continue
+            total_written += written
+            app.session.add_success(
+                f"{label} KB: {written} sidecar(s) generated"
+            )
+
+        if total_written == 0:
+            app.session.add_message("system", "All documents already have sidecars.")
+
+
 DEMO_COMMANDS = [
     MemoryCommand,
     FilesCommand,
+    KbBackfillCommand,
 ]

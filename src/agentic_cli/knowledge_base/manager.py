@@ -131,9 +131,11 @@ class KnowledgeBaseManager:
             if settings:
                 embedding_model = settings.embedding_model
                 batch_size = settings.embedding_batch_size
+                embedding_device = settings.embedding_device
             else:
                 embedding_model = "all-MiniLM-L6-v2"
                 batch_size = 32
+                embedding_device = "auto"
         elif settings:
             # Get paths from settings
             self.kb_dir = settings.knowledge_base_dir
@@ -141,6 +143,7 @@ class KnowledgeBaseManager:
             self.embeddings_dir = settings.knowledge_base_embeddings_dir
             embedding_model = settings.embedding_model
             batch_size = settings.embedding_batch_size
+            embedding_device = settings.embedding_device
         else:
             # Fallback defaults for standalone use
             self.kb_dir = Path.home() / ".agentic" / "knowledge_base"
@@ -148,6 +151,7 @@ class KnowledgeBaseManager:
             self.embeddings_dir = self.kb_dir / "embeddings"
             embedding_model = "all-MiniLM-L6-v2"
             batch_size = 32
+            embedding_device = "auto"
 
         self.metadata_path = self.kb_dir / "metadata.json"
         self.files_dir = self.kb_dir / "files"
@@ -164,7 +168,7 @@ class KnowledgeBaseManager:
             self._vector_store = vector_store
         else:
             self._embedding_service, self._vector_store = self._create_services(
-                embedding_model, batch_size
+                embedding_model, batch_size, embedding_device
             )
 
         # Load document metadata
@@ -184,7 +188,7 @@ class KnowledgeBaseManager:
 
 
     def _create_services(
-        self, embedding_model: str, batch_size: int
+        self, embedding_model: str, batch_size: int, embedding_device: str = "auto"
     ) -> tuple[Any, Any]:
         """Create embedding service and vector store.
 
@@ -196,6 +200,7 @@ class KnowledgeBaseManager:
                 emb = EmbeddingService(
                     model_name=embedding_model,
                     batch_size=batch_size,
+                    device=embedding_device,
                 )
                 vs = VectorStore(
                     index_path=self.embeddings_dir / "index.faiss",

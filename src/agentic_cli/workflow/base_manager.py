@@ -316,6 +316,7 @@ class BaseWorkflowManager(ABC):
                     embedding_service = EmbeddingService(
                         model_name=self._settings.embedding_model,
                         batch_size=self._settings.embedding_batch_size,
+                        device=self._settings.embedding_device,
                     )
             else:
                 from agentic_cli.knowledge_base._mocks import MockEmbeddingService
