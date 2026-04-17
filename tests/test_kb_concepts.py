@@ -76,3 +76,54 @@ class TestKbWriteConcept:
             kb, None, title="X", body="b", sources=[],
         )
         assert result["success"] is False
+
+
+class TestKbSearchConcepts:
+    @pytest.fixture
+    def kb(self, tmp_path):
+        from tests.test_knowledge_tools import _make_kb
+        return _make_kb(tmp_path)
+
+    async def test_search_finds_written_concept(self, kb):
+        from agentic_cli.knowledge_base.models import SourceType
+        from agentic_cli.tools.knowledge_tools import (
+            _write_concept_with_kb,
+            _search_concepts_with_kb,
+        )
+
+        d = kb.ingest_document(content="body", title="P", source_type=SourceType.ARXIV)
+        await _write_concept_with_kb(
+            kb, None,
+            title="Diffusion Models",
+            body="Synthesis.",
+            sources=[d.id],
+        )
+        result = await _search_concepts_with_kb(kb, None, query="diffusion")
+
+        assert result["success"] is True
+        assert result["count"] == 1
+        assert result["concepts"][0]["slug"] == "diffusion-models"
+
+    async def test_search_no_matches_returns_empty(self, kb):
+        from agentic_cli.tools.knowledge_tools import _search_concepts_with_kb
+
+        result = await _search_concepts_with_kb(kb, None, query="nothing")
+        assert result["success"] is True
+        assert result["count"] == 0
+        assert result["concepts"] == []
+
+    async def test_search_respects_limit(self, kb):
+        from agentic_cli.knowledge_base.models import SourceType
+        from agentic_cli.tools.knowledge_tools import (
+            _write_concept_with_kb,
+            _search_concepts_with_kb,
+        )
+
+        d = kb.ingest_document(content="body", title="P", source_type=SourceType.ARXIV)
+        for i in range(5):
+            await _write_concept_with_kb(
+                kb, None, title=f"match {i}", body="b", sources=[d.id],
+                slug=f"c{i}",
+            )
+        result = await _search_concepts_with_kb(kb, None, query="match", limit=2)
+        assert result["count"] == 2

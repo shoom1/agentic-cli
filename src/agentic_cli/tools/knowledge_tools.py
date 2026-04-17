@@ -545,6 +545,33 @@ async def _write_concept_with_kb(
         return {"success": False, "error": f"write_concept failed: {e}"}
 
 
+async def _search_concepts_with_kb(
+    kb_manager,
+    user_kb_manager,
+    query: str,
+    limit: int = 10,
+) -> dict[str, Any]:
+    """Shared implementation for kb_search_concepts.
+
+    Searches the project KB's concepts directory. Async signature
+    matches the other tool helpers even though the underlying
+    implementation is synchronous grep.
+    """
+    if kb_manager is None:
+        return {"success": False, "error": "kb manager not available"}
+
+    try:
+        hits = kb_manager.concepts.search(query, limit=limit)
+    except Exception as e:
+        return {"success": False, "error": f"search_concepts failed: {e}"}
+
+    return {
+        "success": True,
+        "concepts": hits,
+        "count": len(hits),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Registry-bound helper (back-compat for tests/callers that don't have
 # explicit KB handles)
@@ -747,5 +774,31 @@ async def kb_write_concept(
     return await _write_concept_with_kb(
         kb, user_kb, title=title, body=body, sources=sources, slug=slug,
     )
+
+
+@register_tool(
+    category=ToolCategory.KNOWLEDGE,
+    permission_level=PermissionLevel.SAFE,
+    description=(
+        "Search concept pages (agent-curated synthesis notes). "
+        "Case-insensitive substring match; title hits rank above body "
+        "hits. Use when asking 'what does the KB know about X?'."
+    ),
+)
+async def kb_search_concepts(
+    query: str,
+    limit: int = 10,
+) -> dict[str, Any]:
+    """Search concept pages.
+
+    Args:
+        query: Case-insensitive substring.
+        limit: Max hits to return.
+    """
+    kb = get_service(KB_MANAGER)
+    if kb is None:
+        return {"success": False, "error": "kb manager not available"}
+    user_kb = get_service(USER_KB_MANAGER)
+    return await _search_concepts_with_kb(kb, user_kb, query=query, limit=limit)
 
 
