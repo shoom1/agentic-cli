@@ -37,10 +37,51 @@ class TestIndexMdRebuild:
         assert "Web One" in text
 
     def test_index_md_removes_entry_on_delete(self, kb):
-        d1 = kb.ingest_document(content="a", title="Keep Me", source_type=SourceType.USER)
+        kb.ingest_document(content="a", title="Keep Me", source_type=SourceType.USER)
         d2 = kb.ingest_document(content="b", title="Delete Me", source_type=SourceType.USER)
         kb.delete_document(d2.id)
         text = (kb.kb_dir / "index.md").read_text()
         assert "Keep Me" in text
         assert "Delete Me" not in text
+        assert "1 documents" in text
+
+
+class TestIndexMdLoadTimeMaterialization:
+    """Verify the legacy-KB code path: load_metadata materializes index.md
+    when documents exist but the file is absent."""
+
+    def test_load_materializes_missing_index_md(self, tmp_path):
+        from agentic_cli.knowledge_base.manager import KnowledgeBaseManager
+
+        # First manager: ingest, confirm index.md exists, then delete it
+        kb = _make_kb(tmp_path)
+        kb.ingest_document(
+            content="legacy body",
+            title="Legacy Doc",
+            source_type=SourceType.USER,
+        )
+        index_path = kb.kb_dir / "index.md"
+        assert index_path.exists()
+        index_path.unlink()
+        assert not index_path.exists()
+
+        # Second manager pointing at the same dir: load should re-create it
+        kb2 = KnowledgeBaseManager.__new__(KnowledgeBaseManager)
+        kb2._lock = __import__("threading").Lock()
+        kb2._settings = None
+        kb2._use_mock = True
+        kb2.kb_dir = kb.kb_dir
+        kb2.documents_dir = kb.documents_dir
+        kb2.embeddings_dir = kb.embeddings_dir
+        kb2.files_dir = kb.files_dir
+        kb2.metadata_path = kb.metadata_path
+        kb2._embedding_service = kb._embedding_service
+        kb2._vector_store = kb._vector_store
+        kb2._documents = {}
+        kb2._chunks = {}
+        kb2._load_metadata()
+
+        assert index_path.exists()
+        text = index_path.read_text()
+        assert "Legacy Doc" in text
         assert "1 documents" in text

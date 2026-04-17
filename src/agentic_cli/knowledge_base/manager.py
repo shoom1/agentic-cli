@@ -31,7 +31,7 @@ from agentic_cli.knowledge_base.models import (
 from agentic_cli.knowledge_base.vector_store import VectorStore
 from agentic_cli.constants import truncate
 from agentic_cli.logging import Loggers
-from agentic_cli.file_utils import atomic_write_json
+from agentic_cli.file_utils import atomic_write_json, atomic_write_text
 
 if TYPE_CHECKING:
     from agentic_cli.config import BaseSettings
@@ -271,7 +271,6 @@ class KnowledgeBaseManager:
         if payload is None:
             payload = {"summary": doc.summary or "", "claims": [], "entities": {}}
         path = self._sidecar_path(doc.id)
-        from agentic_cli.file_utils import atomic_write_text
         atomic_write_text(path, render_sidecar_markdown(doc, payload))
         return path
 
@@ -286,7 +285,6 @@ class KnowledgeBaseManager:
     def _rebuild_index_md(self) -> None:
         """Rebuild index.md from current in-memory documents."""
         from agentic_cli.knowledge_base.sidecar import render_index_md
-        from agentic_cli.file_utils import atomic_write_text
 
         text = render_index_md(
             list(self._documents.values()),
