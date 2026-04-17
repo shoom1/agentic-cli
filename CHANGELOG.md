@@ -5,6 +5,49 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-04-17
+
+### Added
+- **Knowledge Base concept pages** (PR #70): Agent-authored concept/summary pages via `kb_write_concept` and `kb_search_concepts`. Title-weighted case-insensitive search, slug-based addressing, merge-on-overwrite, UTC timestamps.
+- **Hybrid BM25 + vector KB search** (PR #69): `kb_search` fuses BM25 and vector results with Reciprocal Rank Fusion. New `create_bm25_index` abstraction, structure-aware document chunking.
+- **Per-document KB sidecars**: Markdown sidecars written at ingest, surfaced via async `kb_read`. Lazy-regenerated on first read if missing. Append-only `ingest_log.md` audit trail and auto-maintained `index.md`. New `backfill_sidecars()` with per-document locking and in-progress guard.
+- **KB tool bundles**: `KB_READER_TOOLS` and `KB_WRITER_TOOLS` for convenient agent wiring.
+- **MemoryStore lifecycle** (PR #66): Embedding-backed semantic search, contradiction detection (`store_with_similarity_check`), `ForgettingPolicy` + `apply_forgetting()`, archive filtering, `update_memory` and `delete_memory` tools.
+- **Tool Reflection Store**: Bounded per-tool heuristic memory (`save_reflection`) learned from failures, wired via session-end hook.
+- **OS-native sandboxing** (PR #63): macOS seatbelt and Linux namespace sandboxes for shell and Python execution.
+- **Dual thinking boxes** (PR #62): Persistent task-progress box alongside the ephemeral LLM-events box; task state persists across turns. New status icons (`[✓]`, `[▸]`).
+- **ADK `ConfirmationPlugin` + LangGraph tool wrapper**: Framework-level HITL for `DANGEROUS` tools.
+- **ADK `LLMLoggingPlugin`** replaces `LLMEventLogger` for structured LLM traffic logging. **`TaskProgressPlugin`** emits task progress events.
+- **Dual-backend state tools**: Native planning/task tools for ADK (`tools/adk/state_tools.py`) and LangGraph (`tools/langgraph/state_tools.py`) built on shared `tools/_core/` logic.
+- **`research_demo` is now a pip-installable console script**; new `/kb-backfill` demo command.
+
+### Changed
+- **KB tool naming**: `search_knowledge_base` → `kb_search`, `ingest_to_knowledge_base` → `kb_ingest`. Added `kb_read`, `kb_list`.
+- **Service registry** (PR #65): Replaced 8 per-concern ContextVars with a unified service registry; tools reach KB, memory, sandbox, reflection stores, etc. through it. Self-contained, backend-specific tool factories.
+- **ArXiv flow** (PR #67, #68): `ArxivSearchSource` is service-registered, async-safe, and handles PDF download + ID parsing. ArXiv ingestion moved to `arxiv_tools.ingest_arxiv_paper`. Search results expose `pdf_url`/`abs_url`/`src_url`. Id-indexed entry cache.
+- **Workflow manager simplification** (PR #64): Private internals, removed public `graph` property, inlined native `part.thought` check, simplified initialization.
+- **KB ingestion** uses async LLM summarizer; densified sidecar prompt with higher output budget; `embedding_device` autodetection.
+- **`persistence/_utils.py` → `file_utils.py`** at the package top level.
+- **Cross-KB search** uses RRF fusion; `PlanStore` decoupled from task progress display.
+
+### Removed
+- **`@requires` decorator** — replaced by service-registry detection.
+- **`open_document` tool** (CLI-app concern, not framework) and **`unified_search` tool** (buggy, redundant).
+- **`ArtifactManager`** and activity-logging dead code.
+- **`context.py`**, **`task_progress.py` module**, legacy `planning_tools.py` and `task_tools.py` — state tools auto-inject per backend.
+- **`ThinkingDetector`** (inlined into native `part.thought` check).
+- **Old HITL infrastructure** — superseded by `ConfirmationPlugin` and the LangGraph tool wrapper.
+
+### Fixed
+- Concept timestamps use UTC with trailing `Z`; `kb_search` rejects whitespace-only queries.
+- `kb_read` PDF lazy-gen fallback; drops frontmatter; adds scope.
+- `KnowledgeBase.clear()` removes sidecars and rebuilds index; `delete` drops lock entry.
+- KB audit log uses UTF-8 + UTC timestamps.
+- Tags sentinel handling, `load_all` filter, re-embedding on update, contradiction-detection edge cases in `MemoryStore`.
+- Eager detection for missing ML deps; `Content-Type` PDF detection in `web_fetch`.
+- Final task-progress emission at end of event stream; full-color styling for the task box.
+- Research demo: stale prompts, bundle/tool-name alignment, path-placeholder escaping, service-registry push in `/kb-backfill`.
+
 ## [0.4.4] - 2026-03-11
 
 ### Added
