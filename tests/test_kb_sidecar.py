@@ -400,3 +400,49 @@ class TestKbReadLazySidecar:
             token.var.reset(token)
 
         assert call_count["n"] == 1, "lock did not serialize concurrent first-reads"
+
+    async def test_kb_read_lazy_gen_extracts_pdf_when_content_empty(self, kb, tmp_path):
+        """Lazy sidecar gen for a legacy PDF doc (empty doc.content) should
+        extract text from the file rather than caching a useless empty sidecar."""
+        from agentic_cli.knowledge_base.models import SourceType
+        from agentic_cli.workflow.service_registry import (
+            set_service_registry,
+            LLM_SUMMARIZER,
+        )
+        from agentic_cli.tools.knowledge_tools import _read_document_from_kbs
+        from unittest.mock import patch
+
+        # Ingest a PDF doc with content; remove the sidecar; null out doc.content
+        # to simulate a legacy doc that didn't preserve text.
+        fake_pdf_bytes = b"%PDF-1.4 fake"
+        doc = kb.ingest_document(
+            content="will-be-cleared",
+            title="Legacy PDF",
+            source_type=SourceType.USER,
+            file_bytes=fake_pdf_bytes,
+            file_extension=".pdf",
+        )
+        kb._sidecar_path(doc.id).unlink()
+        kb._documents[doc.id].content = ""  # legacy: no in-memory content
+
+        captured = {}
+
+        class CapturingSummarizer:
+            async def summarize(self, content, prompt):
+                captured["content"] = content
+                return "SUMMARY: extracted from pdf."
+
+        token = set_service_registry({LLM_SUMMARIZER: CapturingSummarizer()})
+        try:
+            with patch(
+                "agentic_cli.knowledge_base.manager.KnowledgeBaseManager.extract_text_from_pdf",
+                return_value="EXTRACTED PDF TEXT",
+            ):
+                result = await _read_document_from_kbs(kb, None, doc.id)
+        finally:
+            token.var.reset(token)
+
+        assert result["success"] is True
+        assert kb._sidecar_path(doc.id).exists()
+        # The PDF text should have been the input to the LLM
+        assert "EXTRACTED PDF TEXT" in captured["content"]

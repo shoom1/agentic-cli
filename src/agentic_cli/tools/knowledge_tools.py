@@ -422,6 +422,7 @@ async def _read_document_from_kbs(
             "full": True,
             "document_id": doc.id,
             "title": doc.title,
+            "scope": "user" if user_kb_manager is not None and source_kb is user_kb_manager else "project",
             "content": content,
             "truncated": truncated,
             "source_type": doc.source_type.value,
@@ -434,23 +435,34 @@ async def _read_document_from_kbs(
         lock = source_kb._sidecar_locks.setdefault(doc.id, _asyncio.Lock())
         async with lock:
             if not sidecar_path.exists():
+                # Resolve content the same way full=True does — extract from
+                # PDF when in-memory content is empty. Avoids caching a
+                # useless empty sidecar for legacy PDFs.
+                content_for_payload = doc.content
+                if not content_for_payload and doc.file_path:
+                    file_path = source_kb.get_file_path(doc.id)
+                    if file_path and str(file_path).endswith(".pdf"):
+                        from agentic_cli.knowledge_base.manager import (
+                            KnowledgeBaseManager,
+                        )
+                        content_for_payload = (
+                            KnowledgeBaseManager.extract_text_from_pdf(file_path)
+                        )
                 payload = await source_kb.generate_sidecar_payload(
-                    doc.content, title=doc.title
+                    content_for_payload, title=doc.title
                 )
                 source_kb._write_sidecar(doc, payload)
 
     sidecar_text = sidecar_path.read_text()
-    from agentic_cli.knowledge_base.sidecar import parse_sidecar_frontmatter
-    fm = parse_sidecar_frontmatter(sidecar_text)
     return {
         "success": True,
         "full": False,
         "document_id": doc.id,
         "title": doc.title,
         "source_type": doc.source_type.value,
+        "scope": "user" if user_kb_manager is not None and source_kb is user_kb_manager else "project",
         "summary": doc.summary,
         "sidecar": sidecar_text,
-        "frontmatter": fm,
     }
 
 
