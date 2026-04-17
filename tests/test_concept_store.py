@@ -1,5 +1,6 @@
 """Tests for the ConceptStore — pure file ops for concept pages."""
 
+import time
 from datetime import datetime
 
 import pytest
@@ -235,3 +236,32 @@ class TestConceptStoreSourcesValidation:
         assert result["success"] is True
         read = store.read(result["slug"])
         assert read["sources"] == ["a", "b"]
+
+
+class TestConceptStoreOverwriteMerge:
+    def test_overwrite_merges_sources_union(self, tmp_path):
+        from agentic_cli.knowledge_base.concepts import ConceptStore
+
+        store = ConceptStore(tmp_path / "concepts")
+        store.write(title="X", body="v1", sources=["a", "b"], slug="x")
+        store.write(title="X", body="v2", sources=["b", "c"], slug="x")
+
+        read = store.read("x")
+        # Union, preserving order of first appearance
+        assert read["sources"] == ["a", "b", "c"]
+        # Body replaced, not merged
+        assert "v2" in read["body"]
+        assert "v1" not in read["body"]
+
+    def test_overwrite_preserves_created_at_bumps_updated_at(self, tmp_path):
+        from agentic_cli.knowledge_base.concepts import ConceptStore
+
+        store = ConceptStore(tmp_path / "concepts")
+        store.write(title="X", body="v1", sources=["a"], slug="x")
+        first = store.read("x")
+        time.sleep(0.01)  # ensure tick
+        store.write(title="X", body="v2", sources=["a"], slug="x")
+        second = store.read("x")
+
+        assert second["created_at"] == first["created_at"]
+        assert second["updated_at"] > first["updated_at"]
