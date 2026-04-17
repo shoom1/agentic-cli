@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import threading
 import time
 from datetime import datetime
@@ -517,13 +518,20 @@ class KnowledgeBaseManager:
     _SIDECAR_PROMPT_TEMPLATE = (
         "Extract a structured payload from the document below. "
         "Return PLAIN TEXT in exactly this layout, with section headers "
-        "in ALL CAPS followed by a colon:\n"
-        "SUMMARY: <3-5 sentence summary, max ~800 chars — cover problem, "
-        "approach, main results, and what makes the work distinctive>\n"
+        "in ALL CAPS followed by a colon:\n\n"
+        "SUMMARY:\n"
+        "<3-5 paragraph synthesis of the document, roughly 1500-3000 "
+        "chars total. Use blank lines between paragraphs. Cover, in "
+        "order: (1) the problem the work addresses and why it matters, "
+        "(2) the technical approach / methodology with enough detail "
+        "to convey how it works, (3) the main results with concrete "
+        "numbers or outcomes, (4) limitations or open questions, and "
+        "(5) how this fits into the broader landscape. Write for a "
+        "reader who will use this instead of re-reading the paper.>\n\n"
         "CLAIMS:\n"
         "- <one specific claim with numbers or concrete evidence>\n"
         "- <one specific claim with numbers or concrete evidence>\n"
-        "- <aim for 5-8 claims total>\n"
+        "- <aim for 5-10 claims, each standalone and specific>\n\n"
         "ENTITIES:\n"
         "<KindLabel>: <comma-separated names>\n"
         "<KindLabel>: <comma-separated names>\n"
@@ -534,7 +542,8 @@ class KnowledgeBaseManager:
         "- No preamble, no meta-commentary, no thinking trace.\n"
         "- No markdown bold/italic on the SUMMARY/CLAIMS/ENTITIES headers.\n"
         "- Start your response directly with 'SUMMARY:'.\n"
-        "- Always emit all three sections when content supports them.\n\n"
+        "- Always emit all three sections when content supports them.\n"
+        "- The summary is prose (paragraphs), not a bullet list.\n\n"
         "Title: {title}\n\n"
         "Content:\n---\n{content}\n---"
     )
@@ -579,43 +588,53 @@ class KnowledgeBaseManager:
 
         return self._parse_sidecar_response(raw) or fallback
 
-    @staticmethod
-    def _parse_sidecar_response(raw: str) -> dict[str, Any] | None:
-        """Parse the SUMMARY/CLAIMS/ENTITIES blocks. Returns None on garbage."""
+    # Matches section headers like "SUMMARY:", "**SUMMARY:**", "  Claims :",
+    # tolerating leading whitespace and optional markdown bold wrappers
+    # (including a trailing ``**`` immediately after the colon).
+    _SECTION_HEADER_RE = re.compile(
+        r"^\s*\**\s*(SUMMARY|CLAIMS|ENTITIES)\s*\**\s*:\**",
+        re.MULTILINE | re.IGNORECASE,
+    )
+
+    @classmethod
+    def _parse_sidecar_response(cls, raw: str) -> dict[str, Any] | None:
+        """Parse the SUMMARY/CLAIMS/ENTITIES blocks. Returns None on garbage.
+
+        Sections are split by regex so multi-paragraph summaries preserve
+        their blank-line breaks verbatim. CLAIMS is parsed as a bullet
+        list; ENTITIES as ``Kind: comma, separated, names`` lines.
+        """
         if not raw:
             return None
-        summary = ""
+
+        matches = list(cls._SECTION_HEADER_RE.finditer(raw))
+        if not matches:
+            return None
+
+        sections: dict[str, str] = {}
+        for i, m in enumerate(matches):
+            key = m.group(1).lower()
+            start = m.end()
+            end = matches[i + 1].start() if i + 1 < len(matches) else len(raw)
+            sections[key] = raw[start:end].strip()
+
+        summary = sections.get("summary", "")
+
         claims: list[str] = []
+        for line in sections.get("claims", "").splitlines():
+            stripped = line.strip().lstrip("-*").strip()
+            if stripped:
+                claims.append(stripped)
+
         entities: dict[str, list[str]] = {}
-        section = None
-        for raw_line in raw.splitlines():
-            line = raw_line.strip()
-            if not line:
-                continue
-            upper = line.upper()
-            if upper.startswith("SUMMARY:"):
-                section = "summary"
-                summary = line.split(":", 1)[1].strip()
-                continue
-            if upper.startswith("CLAIMS:"):
-                section = "claims"
-                continue
-            if upper.startswith("ENTITIES:"):
-                section = "entities"
-                continue
-            if section == "summary":
-                summary = (summary + " " + line.strip()).strip()
-            elif section == "claims":
-                stripped = line.lstrip("-* ").strip()
-                if stripped:
-                    claims.append(stripped)
-            elif section == "entities":
-                stripped = line.lstrip("-* ").strip()
-                if ":" in stripped:
-                    kind, _, names = stripped.partition(":")
-                    items = [n.strip() for n in names.split(",") if n.strip()]
-                    if items:
-                        entities[kind.strip()] = items
+        for line in sections.get("entities", "").splitlines():
+            stripped = line.strip().lstrip("-*").strip()
+            if ":" in stripped:
+                kind, _, names = stripped.partition(":")
+                items = [n.strip() for n in names.split(",") if n.strip()]
+                if items:
+                    entities[kind.strip()] = items
+
         if not summary and not claims and not entities:
             return None
         return {"summary": summary, "claims": claims, "entities": entities}

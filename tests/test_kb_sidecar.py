@@ -179,6 +179,69 @@ class TestGenerateSidecarPayload:
         assert payload["claims"] == ["one"]
         assert payload["entities"] == {"Models": ["A", "B"]}
 
+    async def test_multi_paragraph_summary_preserves_blank_lines(self, kb):
+        """Summary spanning multiple paragraphs keeps paragraph breaks
+        and is not collapsed into a single line."""
+        from agentic_cli.workflow.service_registry import (
+            set_service_registry,
+            LLM_SUMMARIZER,
+        )
+
+        class ProseSummarizer:
+            async def summarize(self, content: str, prompt: str) -> str:
+                return (
+                    "SUMMARY:\n"
+                    "First paragraph talks about problem.\n"
+                    "\n"
+                    "Second paragraph talks about approach.\n"
+                    "\n"
+                    "Third paragraph talks about results.\n"
+                    "\n"
+                    "CLAIMS:\n"
+                    "- Some claim.\n"
+                )
+
+        token = set_service_registry({LLM_SUMMARIZER: ProseSummarizer()})
+        try:
+            payload = await kb.generate_sidecar_payload("body", title="t")
+        finally:
+            token.var.reset(token)
+
+        assert "First paragraph talks about problem." in payload["summary"]
+        assert "Second paragraph talks about approach." in payload["summary"]
+        assert "Third paragraph talks about results." in payload["summary"]
+        # Blank lines between paragraphs must survive the parse
+        assert "\n\n" in payload["summary"]
+        assert payload["claims"] == ["Some claim."]
+
+    async def test_parser_tolerates_markdown_bolded_headers(self, kb):
+        """LLMs sometimes bold-wrap section headers despite the 'no markdown'
+        instruction; the parser should still split sections correctly."""
+        from agentic_cli.workflow.service_registry import (
+            set_service_registry,
+            LLM_SUMMARIZER,
+        )
+
+        class BoldSummarizer:
+            async def summarize(self, content: str, prompt: str) -> str:
+                return (
+                    "**SUMMARY:** Bold header summary.\n"
+                    "**CLAIMS:**\n"
+                    "- A claim.\n"
+                    "**ENTITIES:**\n"
+                    "Models: X\n"
+                )
+
+        token = set_service_registry({LLM_SUMMARIZER: BoldSummarizer()})
+        try:
+            payload = await kb.generate_sidecar_payload("body", title="t")
+        finally:
+            token.var.reset(token)
+
+        assert payload["summary"] == "Bold header summary."
+        assert payload["claims"] == ["A claim."]
+        assert payload["entities"] == {"Models": ["X"]}
+
 
 class TestSidecarWrittenOnIngest:
     @pytest.fixture
