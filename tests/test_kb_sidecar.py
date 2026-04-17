@@ -151,3 +151,30 @@ class TestGenerateSidecarPayload:
         assert payload["summary"] == "body text"
         assert payload["claims"] == []
         assert payload["entities"] == {}
+
+    async def test_parser_tolerates_whitespace_and_bullet_prefixes(self, kb):
+        from agentic_cli.workflow.service_registry import (
+            set_service_registry,
+            LLM_SUMMARIZER,
+        )
+
+        class WonkySummarizer:
+            async def summarize(self, content: str, prompt: str) -> str:
+                # Leading whitespace on headers; bullet-prefixed entity lines.
+                return (
+                    "  SUMMARY: ok.\n"
+                    "  CLAIMS:\n"
+                    "  - one\n"
+                    "  ENTITIES:\n"
+                    "- Models: A, B\n"
+                )
+
+        token = set_service_registry({LLM_SUMMARIZER: WonkySummarizer()})
+        try:
+            payload = await kb.generate_sidecar_payload("body", title="t")
+        finally:
+            token.var.reset(token)
+
+        assert payload["summary"] == "ok."
+        assert payload["claims"] == ["one"]
+        assert payload["entities"] == {"Models": ["A", "B"]}

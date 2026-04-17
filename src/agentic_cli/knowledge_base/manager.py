@@ -503,7 +503,7 @@ class KnowledgeBaseManager:
         entities: dict[str, list[str]] = {}
         section = None
         for raw_line in raw.splitlines():
-            line = raw_line.rstrip()
+            line = raw_line.strip()
             if not line:
                 continue
             upper = line.upper()
@@ -524,8 +524,9 @@ class KnowledgeBaseManager:
                 if stripped:
                     claims.append(stripped)
             elif section == "entities":
-                if ":" in line:
-                    kind, _, names = line.partition(":")
+                stripped = line.lstrip("-* ").strip()
+                if ":" in stripped:
+                    kind, _, names = stripped.partition(":")
                     items = [n.strip() for n in names.split(",") if n.strip()]
                     if items:
                         entities[kind.strip()] = items
