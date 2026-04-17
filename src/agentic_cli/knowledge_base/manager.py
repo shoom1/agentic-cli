@@ -271,7 +271,8 @@ class KnowledgeBaseManager:
         if payload is None:
             payload = {"summary": doc.summary or "", "claims": [], "entities": {}}
         path = self._sidecar_path(doc.id)
-        path.write_text(render_sidecar_markdown(doc, payload))
+        from agentic_cli.file_utils import atomic_write_text
+        atomic_write_text(path, render_sidecar_markdown(doc, payload))
         return path
 
     def _delete_sidecar(self, doc_id: str) -> None:

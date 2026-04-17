@@ -225,8 +225,34 @@ class TestSidecarWrittenOnIngest:
         doc = kb.ingest_document(
             content="raw body content",
             title="Direct Test",
-            source_type=__import__("agentic_cli.knowledge_base.models", fromlist=["SourceType"]).SourceType.USER,
+            source_type=SourceType.USER,
         )
         sidecar_path = kb.documents_dir / f"{doc.id}.md"
         assert sidecar_path.exists()
         assert "## Summary" in sidecar_path.read_text()
+
+    async def test_empty_summary_in_payload_falls_back_to_truncation(self, kb):
+        """If the LLM returns CLAIMS but no SUMMARY:, doc.summary should
+        fall back to truncated content rather than being persisted as ''."""
+        from agentic_cli.workflow.service_registry import (
+            set_service_registry,
+            LLM_SUMMARIZER,
+        )
+        from agentic_cli.tools.knowledge_tools import _ingest_document_with_kb
+
+        class ClaimsOnlySummarizer:
+            async def summarize(self, content: str, prompt: str) -> str:
+                return "CLAIMS:\n- one\n- two\n"  # no SUMMARY: line
+
+        token = set_service_registry({LLM_SUMMARIZER: ClaimsOnlySummarizer()})
+        try:
+            result = await _ingest_document_with_kb(
+                kb, content="raw body for fallback", title="X", source_type="user",
+            )
+        finally:
+            token.var.reset(token)
+
+        assert result["success"] is True
+        doc = kb.get_document(result["document_id"])
+        # Summary should be the truncated body, not empty string
+        assert doc.summary == "raw body for fallback"

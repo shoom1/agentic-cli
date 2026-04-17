@@ -375,7 +375,7 @@ async def _ingest_document_with_kb(
             metadata=meta or None,
             file_bytes=file_bytes,
             file_extension=file_extension,
-            summary=payload["summary"],
+            summary=payload["summary"] or None,
             sidecar_payload=payload,
         )
     except Exception as e:
