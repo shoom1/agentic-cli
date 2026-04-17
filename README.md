@@ -7,39 +7,46 @@ A framework for building domain-specific agentic CLI applications powered by LLM
 Agentic CLI provides the core infrastructure for building interactive CLI applications that leverage LLM agents for complex tasks. It offers:
 
 - **Pluggable Orchestration**: Choose between Google ADK or LangGraph for agent workflows
-- **Rich Terminal UI**: Thinking boxes, markdown rendering, and streaming responses via `thinking-prompt`
+- **Rich Terminal UI**: Dual thinking boxes, markdown rendering, and streaming responses via `thinking-prompt`
 - **Declarative Agents**: Define agents with simple configuration objects
-- **Built-in Tools**: Python execution, file operations, knowledge base, web search, web fetch, arXiv search
-- **Session Persistence**: Save and restore conversation sessions
-- **Type-safe Configuration**: Settings management with pydantic-settings
+- **Native Tool Architecture**: Backend-specific tool factories for ADK and LangGraph, with automatic HITL confirmation for dangerous tools
+- **Built-in Tools**: Python execution, stateful sandbox, file operations, web search, web fetch, arXiv search
+- **Knowledge Base**: Semantic + BM25 hybrid search with RRF fusion, per-document markdown sidecars, and agent-authored concept pages
+- **Semantic Memory**: Embedding-backed memory with lifecycle management, contradiction detection, and forgetting policy
+- **Tool Reflection**: Bounded per-tool heuristic memory learned from failures
+- **Session Save/Resume**: Persistent conversations across CLI restarts
+- **Context Window Management**: Native trim detection and token-usage visibility
+- **Dynamic Model Registry**: Live model discovery from provider APIs
+- **Type-safe Configuration**: Composable settings mixins (`pydantic-settings`)
 
 ## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
 │                         BaseCLIApp                                  │
-│  - Terminal UI (thinking-prompt)                                    │
-│  - Command registry (/help, /status, /clear, etc.)                  │
-│  - Message history                                                  │
-│  - Background initialization (no first-message lag)                 │
-│  - Task progress display in thinking box                            │
+│  - Terminal UI (thinking-prompt): response + task-progress boxes    │
+│  - Command registry (/help, /status, /settings, /sandbox, ...)      │
+│  - Message history, background initialization                       │
 └─────────────────────────────────────────────────────────────────────┘
                                  │
                                  ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │                    BaseWorkflowManager                              │
-│  - Agent orchestration                                              │
-│  - Event streaming                                                  │
-│  - Session management                                               │
+│  - Agent orchestration, event streaming                             │
+│  - Session save/resume, usage tracking, context-trim detection      │
+│  - Service registry: shared state for tools (KB, memory, sandbox…)  │
 ├─────────────────────────────┬───────────────────────────────────────┤
 │   GoogleADKWorkflowManager  │     LangGraphWorkflowManager          │
-│   (Default)                 │     (Optional: langgraph extra)       │
+│   (default)                 │     (optional: langgraph extra)       │
+│   + ConfirmationPlugin      │     + confirmation tool wrapper       │
+│   + LLMLoggingPlugin        │     + native ToolNode                 │
+│   + TaskProgressPlugin      │                                       │
 └─────────────────────────────┴───────────────────────────────────────┘
                                  │
                                  ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │                         AgentConfig[]                               │
-│  - name, prompt, tools, sub_agents, description                     │
+│  - name, prompt, tools, sub_agents, description, model              │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -90,7 +97,7 @@ from agentic_cli.workflow import AgentConfig
 # Define your tools
 def greet(name: str) -> dict:
     """Greet a person by name."""
-    return {"greeting": f"Hello, {name}!"}
+    return {"success": True, "greeting": f"Hello, {name}!"}
 
 # Configure your agent
 AGENTS = [
@@ -133,9 +140,14 @@ from agentic_cli import GoogleADKWorkflowManager
 manager = GoogleADKWorkflowManager(
     agent_configs=AGENTS,
     settings=settings,
-    model="gemini-2.0-flash",  # Optional: auto-detected from API keys
+    model="gemini-2.5-flash",  # Optional: auto-detected from API keys
 )
 ```
+
+ADK integrations:
+- **ConfirmationPlugin** — intercepts `DANGEROUS` tools and prompts the user for approval
+- **LLMLoggingPlugin** — structured logging of LLM requests/responses
+- **TaskProgressPlugin** — streams the task checklist into its own thinking box
 
 ### LangGraphWorkflowManager
 
@@ -159,6 +171,7 @@ Features:
 - **Explicit provider support**: Uses `langchain-google-genai` for Gemini (not VertexAI)
 - **Thinking mode**: Native support for Claude and Gemini thinking/reasoning
 - **Retry policies**: Automatic retry with exponential backoff
+- **Confirmation wrapper**: Wraps `DANGEROUS` tools to request HITL approval
 - **Event streaming**: Real-time workflow events via `WorkflowEvent`
 
 Requires: `pip install agentic-cli[langgraph]`
@@ -172,14 +185,16 @@ Requires: `pip install agentic-cli[langgraph]`
 | Multi-provider | Google only | OpenAI, Anthropic, Google (GenAI) |
 | State persistence | In-memory | Memory, PostgreSQL, or SQLite |
 | Thinking support | Native (Gemini) | Native (Claude & Gemini) |
-| Retry handling | Manual | Built-in with backoff |
+| Retry handling | Built-in | Built-in with backoff |
+| HITL confirmation | ConfirmationPlugin | Tool wrapper |
+| Context trimming | Native | Native |
 
 ### Auto-selection via Settings
 
 ```python
 from agentic_cli import create_workflow_manager_from_settings
 
-settings = BaseSettings(orchestrator="langgraph")  # or "adk"
+settings = BaseSettings(orchestrator="langgraph")  # or "adk" (default)
 manager = create_workflow_manager_from_settings(agent_configs=AGENTS, settings=settings)
 ```
 
@@ -187,9 +202,13 @@ manager = create_workflow_manager_from_settings(agent_configs=AGENTS, settings=s
 
 ### BaseSettings
 
+Settings are organized into composable mixins (`AppSettingsMixin`, `CLISettingsMixin`, `WorkflowSettingsMixin`). `BaseSettings` composes all three.
+
 All settings can be configured via environment variables with the `AGENTIC_` prefix or in a `.env` file:
 
 ```python
+from pathlib import Path
+from pydantic_settings import SettingsConfigDict
 from agentic_cli import BaseSettings
 
 class MySettings(BaseSettings):
@@ -209,13 +228,18 @@ class MySettings(BaseSettings):
 | `anthropic_api_key` | `ANTHROPIC_API_KEY` | None | Anthropic API key for Claude |
 | `default_model` | `AGENTIC_DEFAULT_MODEL` | Auto | Model to use |
 | `thinking_effort` | `AGENTIC_THINKING_EFFORT` | "medium" | Thinking level: none, low, medium, high |
-| `orchestrator` | `AGENTIC_ORCHESTRATOR` | "adk" | Orchestrator: adk or langgraph |
+| `orchestrator` | `AGENTIC_ORCHESTRATOR` | "adk" | Orchestrator: `adk` or `langgraph` |
+| `langgraph_checkpointer` | `AGENTIC_LANGGRAPH_CHECKPOINTER` | "memory" | `memory`, `postgres`, or `null` |
 | `workspace_dir` | `AGENTIC_WORKSPACE_DIR` | ~/.agentic | Storage directory |
 | `log_level` | `AGENTIC_LOG_LEVEL` | "warning" | Logging level |
 | `tavily_api_key` | `TAVILY_API_KEY` | None | Tavily API key for web search |
 | `brave_api_key` | `BRAVE_API_KEY` | None | Brave Search API key |
 | `search_backend` | `AGENTIC_SEARCH_BACKEND` | Auto | Web search provider (tavily/brave) |
 | `webfetch_model` | `AGENTIC_WEBFETCH_MODEL` | Auto | Model for web content summarization |
+| `retry_max_attempts` | `AGENTIC_RETRY_MAX_ATTEMPTS` | 3 | Max retries on transient errors |
+| `retry_initial_delay` | `AGENTIC_RETRY_INITIAL_DELAY` | 2.0 | Initial retry backoff (seconds) |
+
+Settings are persisted by `SettingsPersistence` (atomic writes) and editable at runtime via the `/settings` command.
 
 ### Settings Context
 
@@ -293,9 +317,16 @@ configs = [coordinator, researcher, analyst]
 
 ### Creating Tools
 
-Tools are regular Python functions with type hints and docstrings:
+Tools are regular Python functions with type hints and docstrings. **All tools return `{"success": bool, ...}` dicts** — never raise exceptions.
 
 ```python
+from agentic_cli.tools import register_tool, ToolCategory, PermissionLevel
+
+@register_tool(
+    category=ToolCategory.DATA,
+    permission_level=PermissionLevel.SAFE,
+    description="Search the database for matching records.",
+)
 def search_database(query: str, limit: int = 10) -> dict:
     """Search the database for matching records.
 
@@ -307,28 +338,39 @@ def search_database(query: str, limit: int = 10) -> dict:
         Dict with results and count
     """
     results = db.search(query, limit=limit)
-    return {"results": results, "count": len(results)}
+    return {"success": True, "results": results, "count": len(results)}
 ```
+
+Registering via `@register_tool` is optional — you can pass raw callables into `AgentConfig.tools`. Registering gives the tool metadata for the registry, permission-aware HITL wrapping, and tool-summary formatting.
+
+### Permission Levels
+
+| Level | Behavior |
+|-------|----------|
+| `SAFE` | Runs silently |
+| `CAUTION` | Runs; result is surfaced prominently |
+| `DANGEROUS` | Intercepted by HITL — user must approve before execution |
 
 ### Built-in Tools
 
-#### SafePythonExecutor
+#### Python Execution
 
-Execute Python code in a sandboxed environment:
+Two complementary tools:
+
+- **`execute_python`** — stateless, sandboxed Python via `SafePythonExecutor`. Use for quick calculations.
+- **`sandbox_execute`** — stateful, multi-turn Python in a Jupyter kernel. Variables, imports, and DataFrames persist across calls within a session. Shares the workspace filesystem. Network and `pip install` are blocked.
 
 ```python
-from agentic_cli.tools import SafePythonExecutor
+from agentic_cli.tools import execute_python
+# Stateless: result = execute_python("import math; math.sqrt(2)")
 
-executor = SafePythonExecutor(default_timeout=30)
-result = executor.execute("""
-import numpy as np
-data = np.array([1, 2, 3, 4, 5])
-np.mean(data)
-""")
-# result = {"success": True, "result": "3.0", "output": "", "error": ""}
+from agentic_cli.tools.sandbox import sandbox_execute
+# Stateful (requires sandbox service):
+# sandbox_execute("x = 42", session_id="analysis")
+# sandbox_execute("print(x * 2)", session_id="analysis")  # sees x
 ```
 
-Allowed modules: numpy, pandas, scipy, math, json, datetime, collections, itertools, re, random
+The `/sandbox` CLI command lists and resets sandbox sessions.
 
 #### Web Search
 
@@ -337,15 +379,9 @@ Search the web using pluggable backends (Tavily or Brave):
 ```python
 from agentic_cli.tools import web_search
 
-# Use as agent tool
-agent = AgentConfig(
-    name="researcher",
-    tools=[web_search],
-)
-
 # Or call directly
 results = await web_search("Python async programming", max_results=5)
-# Returns: {"results": [{"title": "...", "url": "...", "snippet": "..."}], ...}
+# Returns: {"success": True, "results": [{"title": "...", "url": "...", "snippet": "..."}], ...}
 ```
 
 Backends auto-select based on available API keys. Set `TAVILY_API_KEY` or `BRAVE_API_KEY`.
@@ -361,110 +397,152 @@ result = await web_fetch(
     url="https://example.com/article",
     prompt="Extract the main points from this article",
 )
-# Returns: {"url": "...", "summary": "...", "content_length": ...}
 ```
 
-Features: URL validation, robots.txt compliance, SSRF protection, content caching.
+Features: URL validation, robots.txt compliance, SSRF protection, content caching, PDF extraction (including arXiv).
 
 #### ArXiv Search
 
-Search and analyze academic papers:
+Search and fetch academic papers:
 
 ```python
 from agentic_cli.tools import search_arxiv, fetch_arxiv_paper
 
-# Search papers
 results = search_arxiv("transformer attention", max_results=10, categories=["cs.CL"])
-
-# Fetch paper details
 paper = fetch_arxiv_paper("1706.03762")  # "Attention Is All You Need"
 ```
+
+The `ArxivSearchSource` (in `knowledge_base/sources.py`) is cached via the service registry and reused across tools, including `kb_ingest` for arXiv URLs.
 
 #### File Operations
 
 Categorized file tools with permission levels:
 
-**READ Tools (Safe)**
+**READ tools (safe)**
 
 ```python
 from agentic_cli.tools import read_file, grep, glob, list_dir, diff_compare
 
-# Read file contents
-result = read_file("src/main.py", offset=0, limit=100)
-# Returns: {"success": True, "content": "...", "size": 1234, "lines_read": 100}
-
-# Search for patterns (ripgrep-like)
-result = grep("def.*async", path="src/", file_pattern="*.py", recursive=True)
-# Returns: {"success": True, "matches": [...], "file_count": 5}
-
-# Find files by pattern
-result = glob("**/*.py", path="src/", include_metadata=True)
-# Returns: {"success": True, "files": [...], "count": 42}
-
-# List directory contents
-result = list_dir("src/", include_hidden=False)
-# Returns: {"success": True, "entries": [...]}
-
-# Compare files or text
-result = diff_compare(source_a="old.txt", source_b="new.txt")
-# Returns: {"success": True, "diff": "...", "similarity": 0.85}
+read_file("src/main.py", offset=0, limit=100)
+grep("def.*async", path="src/", file_pattern="*.py", recursive=True)
+glob("**/*.py", path="src/", include_metadata=True)
+list_dir("src/", include_hidden=False)
+diff_compare(source_a="old.txt", source_b="new.txt")
 ```
 
-**WRITE Tools (Caution)**
+**WRITE tools (caution)**
 
 ```python
 from agentic_cli.tools import write_file, edit_file
 
-# Write file (creates or overwrites)
-result = write_file("output.txt", content="Hello, World!", create_dirs=True)
-# Returns: {"success": True, "path": "...", "size": 13, "created": True}
-
-# Edit file (sed-like replacement)
-result = edit_file("config.py", old_text="DEBUG = True", new_text="DEBUG = False")
-# Returns: {"success": True, "replacements": 1}
+write_file("output.txt", content="Hello, World!", create_dirs=True)
+edit_file("config.py", old_text="DEBUG = True", new_text="DEBUG = False")
 ```
+
+Writes are atomic (temp file + rename) via `agentic_cli.file_utils`.
 
 #### Shell Executor
 
-> **Note**: Shell execution is currently **disabled by default** while security safeguards are being validated.
+> **Note**: Shell execution is **disabled by default** (`_SHELL_TOOL_ENABLED = False` in `tools/shell/executor.py`) while security safeguards are being validated.
 
-The shell tool provides layered security with 8 defense layers:
+The shell tool provides layered security:
 - Input preprocessing (encoding/obfuscation detection)
 - Command tokenization and classification
-- Path analysis and sandboxing
+- Path analysis and OS-native sandboxing (macOS seatbelt / Linux namespaces)
 - Risk assessment with approval workflows
 - Audit logging
 
 ```python
 from agentic_cli.tools import shell_executor, is_shell_enabled
 
-# Check if shell is enabled
 if is_shell_enabled():
     result = shell_executor("ls -la", working_dir="/project")
-else:
-    print("Shell tool disabled pending security validation")
 ```
 
-#### KnowledgeBaseManager
+#### Knowledge Base Tools
 
-Semantic search over documents:
+Renamed tools and a new concept-pages subsystem:
+
+```python
+from agentic_cli.tools import (
+    kb_search, kb_ingest, kb_read, kb_list,
+    kb_write_concept, kb_search_concepts,
+    KB_READER_TOOLS, KB_WRITER_TOOLS,
+)
+```
+
+| Tool | Purpose |
+|------|---------|
+| `kb_search` | Hybrid BM25 + vector search with RRF fusion, filters by source/date |
+| `kb_ingest` | Ingest content or URL (arXiv URLs auto-fetch metadata + PDF) |
+| `kb_read` | Return the per-document markdown sidecar (lazy-generated on first read) |
+| `kb_list` | List documents, optionally filtered |
+| `kb_write_concept` | Agent-authored concept/summary page (slugged, merged on overwrite) |
+| `kb_search_concepts` | Search concept pages (title-weighted, case-insensitive) |
+
+Bundle convenience:
+
+```python
+researcher = AgentConfig(name="researcher", prompt=..., tools=KB_WRITER_TOOLS)
+reader     = AgentConfig(name="reader",     prompt=..., tools=KB_READER_TOOLS)
+```
+
+Direct manager API for embedding in custom flows:
 
 ```python
 from agentic_cli.knowledge_base import KnowledgeBaseManager, SourceType
 
 kb = KnowledgeBaseManager(settings=settings)
-
-# Ingest a document
-doc = kb.ingest_document(
+doc = await kb.ingest_document(
     content="Machine learning is...",
     title="ML Introduction",
     source_type=SourceType.WEB,
     source_url="https://example.com/ml",
 )
-
-# Search
-results = kb.search("neural networks", top_k=5)
+results = kb.search("neural networks", top_k=5)        # hybrid by default
+concepts = kb.concepts.search("attention")             # concept pages
+await kb.backfill_sidecars()                           # regenerate markdown summaries
 ```
+
+The KB also maintains `index.md` and an append-only `ingest_log.md` audit trail. Source-type constants (`arxiv`, `ssrn`, `web`, `internal`, `user`, `local`) live on `SourceType`.
+
+#### Memory Tools
+
+Semantic, lifecycle-aware memory:
+
+```python
+from agentic_cli.tools import memory_tools
+# save_memory, search_memory, update_memory, delete_memory
+```
+
+`MemoryStore` features:
+- Embedding-backed semantic search
+- Contradiction detection via `store_with_similarity_check`
+- `ForgettingPolicy` with `apply_forgetting()` for bounded retention
+- Archive filtering and `load_all` with tag/source filters
+
+#### Tool Reflection
+
+Bounded heuristic memory learned from tool failures:
+
+```python
+from agentic_cli.tools import reflection_tools
+# save_reflection(tool_name, error_summary, heuristic)
+```
+
+Each tool keeps at most N reflections (FIFO eviction). Reflections can be injected into tool descriptions to help agents avoid repeating mistakes. Wired via session-end hook.
+
+#### HITL (Human-in-the-Loop)
+
+Two mechanisms:
+
+1. **Automatic confirmation for `DANGEROUS` tools** — handled by ADK's `ConfirmationPlugin` and LangGraph's tool wrapper. No code changes needed; just mark the tool `DANGEROUS`.
+2. **Explicit `request_approval` tool** — for domain-level checkpoints:
+
+   ```python
+   from agentic_cli.tools import hitl_tools
+   # request_approval(message, options) -> {"success": True, "choice": "..."}
+   ```
 
 ## CLI Commands
 
@@ -472,10 +550,16 @@ Built-in slash commands available in all apps:
 
 | Command | Aliases | Description |
 |---------|---------|-------------|
-| `/help` | | Show available commands |
-| `/status` | | Show session and workflow status |
+| `/help` | | Show available commands and usage information |
+| `/status` | | Show current session, workflow, and context-window status |
 | `/clear` | | Clear the screen |
 | `/exit` | `/quit` | Exit the application |
+| `/settings` | | Interactive settings editor (with persistence) |
+| `/sandbox` | `/sb` | List / reset stateful sandbox sessions |
+| `/papers` | `/docs` | List knowledge-base documents (filter by source, query, --global) |
+| `/sessions` | `/sess` | List saved sessions (and delete with `--delete=<id>`) |
+
+Apps can add more. Examples like `research_demo` ship with commands like `/save`, `/resume`, and `/kb-backfill`.
 
 ### Adding Custom Commands
 
@@ -493,27 +577,29 @@ class MyCommand(Command):
     async def execute(self, args: str, app: Any) -> None:
         app.session.add_response(f"Executed with args: {args}")
 
-# In your app
 class MyApp(BaseCLIApp):
-    def register_commands(self) -> None:
-        super().register_commands()
+    def _register_builtin_commands(self) -> None:
+        super()._register_builtin_commands()
         self.command_registry.register(MyCommand())
 ```
 
 ## Events
 
-WorkflowEvent types for UI integration:
+`WorkflowEvent` types for UI integration:
 
-| EventType | Description | Metadata |
-|-----------|-------------|----------|
-| `TEXT` | Final text response | session_id |
-| `THINKING` | Model reasoning | session_id |
-| `TOOL_CALL` | Tool invocation | tool_name, tool_args |
-| `TOOL_RESULT` | Tool result | tool_name, result, success |
-| `CODE_EXECUTION` | Code execution result | outcome |
-| `ERROR` | Error message | recoverable, error_code |
-| `USER_INPUT_REQUIRED` | Tool needs user input | request_id, prompt |
-| `TASK_PROGRESS` | Task graph update | current_task_description, progress |
+| EventType | Description |
+|-----------|-------------|
+| `TEXT` | Final text response |
+| `THINKING` | Model reasoning |
+| `TOOL_CALL` | Tool invocation |
+| `TOOL_RESULT` | Tool result |
+| `CODE_EXECUTION` | Code execution result |
+| `EXECUTABLE_CODE` | Code the model intends to run |
+| `FILE_DATA` | Binary/file payload from a tool |
+| `ERROR` | Error message (`recoverable`, `error_code` metadata) |
+| `TASK_PROGRESS` | Task checklist update (drives the task box) |
+| `CONTEXT_TRIMMED` | Context trimming event (drop count, remaining tokens) |
+| `LLM_REQUEST` / `LLM_RESPONSE` / `LLM_USAGE` | LLM traffic + token accounting |
 
 ### Processing Events
 
@@ -529,45 +615,45 @@ async for event in manager.process(message, user_id="user1"):
         print(f"Result: {event.metadata['result']}")
 ```
 
-### Task Progress Display
+### Dual Thinking Boxes + Task Progress
 
-When using plan checkboxes or task tools, the CLI thinking box dynamically shows task progress:
+The CLI renders two independent thinking boxes: one for the model's response stream, one for the task checklist:
 
 ```
 Calling: web_search
 --- Tasks: 1/3 ---
 Research:
-  [x] Gather data
-  [ ] Analyze results
-Writing:
+  [✓] Gather data
+  [▸] Analyze results
   [ ] Draft report
 ```
 
-Status icons (task tools):
-- `[x]` Completed
-- `[>]` In progress
+Status icons:
+- `[✓]` Completed
+- `[▸]` In progress
 - `[ ]` Pending
 - `[-]` Cancelled
+
+Task state persists across turns within a session.
 
 ## Examples
 
 See the `examples/` directory for complete working examples:
 
 **Getting Started**
-- **hello_agent.py** - Simple assistant using Google ADK
-- **hello_langgraph.py** - Same assistant using LangGraph orchestration
+- `hello_agent.py` — Simple assistant using Google ADK
+- `hello_langgraph.py` — Same assistant using LangGraph orchestration
 
 **Feature Demos**
-- **arxiv_demo.py** - ArXiv paper search and analysis
-- **fileops_demo.py** - File operation tools (read, write, grep, glob)
-- **memory_demo.py** - Memory persistence system
-- **planning_demo.py** - Task graph and planning tools
-- **shell_demo.py** - Shell security pattern detection
-- **webfetch_demo.py** - Web fetching and summarization
-- **websearch_demo.py** - Web search with multiple backends
+- `arxiv_demo.py` — ArXiv paper search and analysis
+- `fileops_demo.py` — File operation tools (read, write, grep, glob)
+- `memory_demo.py` — Memory persistence system (save/search/update/delete)
+- `shell_demo.py` — Shell security pattern detection
+- `webfetch_demo.py` — Web fetching and summarization
+- `websearch_demo.py` — Web search with multiple backends
 
 **Full Applications**
-- **research_demo/** - Full-featured research assistant with memory, planning, and file operations
+- `research_demo/` — Full-featured research assistant with KB ingest + concept pages, semantic memory, sandbox execution, session save/resume. Installable as a console script.
 
 Run examples:
 
@@ -575,11 +661,11 @@ Run examples:
 export GOOGLE_API_KEY="your-key"
 python examples/hello_agent.py
 
-# Feature demos (no API key needed for some)
+# Feature demos
 python examples/fileops_demo.py
 python examples/shell_demo.py
 
-# Or with LangGraph (requires langgraph extra)
+# Or with LangGraph
 pip install agentic-cli[langgraph]
 python examples/hello_langgraph.py
 
@@ -592,14 +678,10 @@ python -m examples.research_demo
 ### Running Tests
 
 ```bash
-# With conda
 conda run -n agenticcli python -m pytest tests/ -v
 
-# With pip
-pytest tests/ -v
-
 # With coverage
-pytest tests/ -v --cov=agentic_cli
+conda run -n agenticcli python -m pytest tests/ -v --cov=agentic_cli
 ```
 
 ### Project Structure
@@ -607,79 +689,99 @@ pytest tests/ -v --cov=agentic_cli
 ```
 agentic-cli/
 ├── src/agentic_cli/
-│   ├── __init__.py           # Package exports
-│   ├── config.py             # BaseSettings, SettingsContext
-│   ├── constants.py          # Shared constants (truncation, limits)
-│   ├── resolvers.py          # Model/path constants (GOOGLE_MODELS, etc.)
-│   ├── settings_persistence.py
-│   ├── logging.py            # Structlog configuration
+│   ├── __init__.py               # Package exports, lazy imports
+│   ├── config.py                 # BaseSettings, SettingsContext
+│   ├── settings_mixins.py        # AppSettingsMixin, CLISettingsMixin
+│   ├── settings_persistence.py   # SettingsPersistence
+│   ├── constants.py              # Shared constants (truncation, limits)
+│   ├── file_utils.py             # Atomic write helpers
+│   ├── logging.py                # Structlog configuration
 │   ├── cli/
-│   │   ├── app.py            # BaseCLIApp
-│   │   ├── commands.py       # Command, CommandRegistry
-│   │   ├── builtin_commands.py
-│   │   ├── workflow_controller.py  # Workflow orchestration
-│   │   ├── message_processor.py    # Event stream processing
-│   │   └── settings*.py      # Settings UI (introspection, dialog)
+│   │   ├── app.py                # BaseCLIApp
+│   │   ├── commands.py           # Command, CommandRegistry
+│   │   ├── builtin_commands.py   # help/status/clear/exit/sandbox/papers/sessions
+│   │   ├── settings_command.py   # /settings
+│   │   ├── settings_introspection.py
+│   │   ├── workflow_controller.py
+│   │   ├── message_processor.py
+│   │   └── usage_tracker.py      # Token / context-window accounting
 │   ├── workflow/
-│   │   ├── base_manager.py   # BaseWorkflowManager (abstract)
-│   │   ├── events.py         # WorkflowEvent, EventType
-│   │   ├── config.py         # AgentConfig
-│   │   ├── context.py        # Context variables for tools
-│   │   ├── thinking.py       # ThinkingDetector
-│   │   ├── task_progress.py  # Task progress events
-│   │   ├── tool_summaries.py # Tool result summaries
-│   │   ├── settings.py       # WorkflowSettingsMixin
-│   │   ├── adk/              # ADK orchestrator
-│   │   │   ├── manager.py    # GoogleADKWorkflowManager
-│   │   │   ├── event_processor.py  # ADK event processing
-│   │   │   └── llm_event_logger.py # LLM traffic logging
-│   │   └── langgraph/        # LangGraph submodule
-│   │       ├── manager.py    # LangGraphWorkflowManager
-│   │       ├── graph_builder.py # Graph + LLM factory
-│   │       ├── state.py      # AgentState
-│   │       ├── persistence/  # Checkpointers and stores
-│   │       └── tools/        # LangChain-compatible wrappers
+│   │   ├── base_manager.py       # BaseWorkflowManager (abstract)
+│   │   ├── factory.py            # create_workflow_manager_from_settings
+│   │   ├── service_registry.py   # Unified service ContextVar for tools
+│   │   ├── events.py             # WorkflowEvent, EventType
+│   │   ├── models.py             # Shared data models
+│   │   ├── config.py             # AgentConfig
+│   │   ├── settings.py           # WorkflowSettingsMixin
+│   │   ├── retry.py              # Exponential-backoff retry
+│   │   ├── tool_summaries.py     # Tool result one-liner summaries
+│   │   ├── adk/
+│   │   │   ├── manager.py                # GoogleADKWorkflowManager
+│   │   │   ├── event_processor.py
+│   │   │   ├── plugins.py                # ConfirmationPlugin, LLMLoggingPlugin
+│   │   │   └── task_progress_plugin.py
+│   │   └── langgraph/
+│   │       ├── manager.py                # LangGraphWorkflowManager
+│   │       ├── graph_builder.py
+│   │       ├── state.py
+│   │       └── persistence/              # Checkpointers and stores
 │   ├── tools/
-│   │   ├── registry.py       # ToolRegistry, ToolCategory, PermissionLevel
-│   │   ├── executor.py       # SafePythonExecutor
-│   │   ├── arxiv_tools.py    # search_arxiv, fetch_arxiv_paper
-│   │   ├── arxiv_source.py   # ArxivSearchSource
-│   │   ├── execution_tools.py # execute_python
-│   │   ├── interaction_tools.py # ask_clarification
-│   │   ├── knowledge_tools.py # search/ingest_to_knowledge_base
-│   │   ├── file_read.py      # read_file, diff_compare
-│   │   ├── file_write.py     # write_file, edit_file
-│   │   ├── grep_tool.py      # grep (pattern search)
-│   │   ├── glob_tool.py      # glob, list_dir (file discovery)
-│   │   ├── search.py         # Web search (Tavily, Brave)
-│   │   ├── webfetch_tool.py  # Web content fetching
-│   │   ├── memory_tools.py   # MemoryStore, save/search_memory
-│   │   ├── planning_tools.py # PlanStore, save/get_plan
-│   │   ├── task_tools.py     # TaskStore, save/get_tasks
-│   │   ├── hitl_tools.py     # request_approval, ApprovalManager
-│   │   └── shell/            # Shell executor with security
-│   │       ├── executor.py   # Main entry point (disabled by default)
-│   │       ├── tokenizer.py  # Command parsing
-│   │       ├── classifier.py # Risk classification
-│   │       ├── sandbox.py    # Execution sandboxing
-│   │       └── audit.py      # Security logging
+│   │   ├── registry.py           # ToolRegistry, ToolCategory, PermissionLevel
+│   │   ├── factories.py          # Backend-aware tool factories
+│   │   ├── executor.py           # SafePythonExecutor
+│   │   ├── arxiv_tools.py        # search_arxiv, fetch_arxiv_paper, ingest_arxiv_paper
+│   │   ├── arxiv_source.py       # ArxivSearchSource (service-registered)
+│   │   ├── execution_tools.py    # execute_python
+│   │   ├── interaction_tools.py  # ask_clarification
+│   │   ├── knowledge_tools.py    # kb_search / kb_ingest / kb_read / kb_list /
+│   │   │                         #   kb_write_concept / kb_search_concepts
+│   │   ├── file_read.py          # read_file, diff_compare
+│   │   ├── file_write.py         # write_file, edit_file (atomic)
+│   │   ├── grep_tool.py          # grep
+│   │   ├── glob_tool.py          # glob, list_dir
+│   │   ├── search.py             # web_search (Tavily / Brave)
+│   │   ├── webfetch_tool.py      # web_fetch (orchestrator)
+│   │   ├── pdf_utils.py          # PDF text extraction helpers
+│   │   ├── memory_tools.py       # save/search/update/delete + MemoryStore
+│   │   ├── reflection_tools.py   # save_reflection + ToolReflectionStore
+│   │   ├── hitl_tools.py         # request_approval
+│   │   ├── _core/                # Shared planning/task logic
+│   │   │   ├── planning.py
+│   │   │   └── tasks.py
+│   │   ├── adk/state_tools.py       # ADK-native planning/task tools
+│   │   ├── langgraph/state_tools.py # LangGraph-native planning/task tools
+│   │   ├── sandbox/
+│   │   │   ├── __init__.py       # sandbox_execute tool
+│   │   │   ├── manager.py        # SandboxManager + session lifecycle
+│   │   │   ├── models.py
+│   │   │   └── backends/         # Jupyter local backend
+│   │   ├── shell/                # Layered shell executor (disabled by default)
+│   │   │   ├── executor.py
+│   │   │   ├── os_sandbox/       # macOS seatbelt / Linux namespace sandboxes
+│   │   │   └── ...               # tokenizer, classifier, sandbox, audit
+│   │   └── webfetch/             # Fetcher, converter, validator, robots, summarizer
 │   ├── knowledge_base/
-│   │   ├── manager.py        # KnowledgeBaseManager
-│   │   ├── models.py         # Document, SearchResult
-│   │   ├── embeddings.py     # EmbeddingService
-│   │   ├── vector_store.py   # VectorStore
-│   │   ├── _mocks.py         # MockEmbeddingService, MockVectorStore
-│   │   └── sources.py        # ArxivSearchSource
+│   │   ├── manager.py            # KnowledgeBaseManager (+ .concepts)
+│   │   ├── models.py             # Document, SearchResult, SourceType, …
+│   │   ├── embeddings.py         # EmbeddingService
+│   │   ├── vector_store.py       # FAISS-backed vector store
+│   │   ├── bm25_index.py         # BM25 index (hybrid search)
+│   │   ├── concepts.py           # ConceptStore (agent-authored pages)
+│   │   ├── sidecar.py            # Per-doc markdown sidecar render/parse
+│   │   ├── sources.py            # SearchSource + ArxivSearchSource
+│   │   └── _mocks.py             # MockEmbeddingService, MockVectorStore, mock BM25
 │   └── persistence/
-│       ├── session.py        # SessionPersistence
-│       ├── artifacts.py      # ArtifactManager
-│       └── _utils.py         # Atomic write utilities
+│       └── session.py            # SessionPersistence (save/resume)
 ├── examples/
-│   ├── hello_agent.py        # Basic ADK example
-│   ├── hello_langgraph.py    # Basic LangGraph example
-│   ├── *_demo.py             # Feature demonstration scripts
-│   └── research_demo/        # Full-featured example
+│   ├── hello_agent.py            # Basic ADK example
+│   ├── hello_langgraph.py        # Basic LangGraph example
+│   ├── *_demo.py                 # Feature demonstration scripts
+│   └── research_demo/            # Full-featured example (pip-installable)
 └── tests/
+    ├── conftest.py               # MockContext and shared fixtures
+    ├── tools/                    # Tool-specific tests (incl. sandbox)
+    ├── workflow/                 # Workflow unit tests
+    └── integration/              # ADK + LangGraph pipeline tests
 ```
 
 ## License
