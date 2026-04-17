@@ -120,6 +120,7 @@ class KnowledgeBaseManager:
         """
         self._lock = threading.Lock()
         self._sidecar_locks: dict[str, asyncio.Lock] = {}
+        self._backfill_running: bool = False
         self._settings = settings
         self._use_mock = use_mock
 
@@ -986,7 +987,10 @@ class KnowledgeBaseManager:
             self._vector_store.save()
             self._rebuild_index_md()
 
-    async def backfill_sidecars(self) -> int:
+    async def backfill_sidecars(
+        self,
+        progress_cb: "Any | None" = None,
+    ) -> int:
         """Generate missing sidecars for all documents in the KB.
 
         Iterates the in-memory document set, generates a sidecar payload
@@ -998,22 +1002,65 @@ class KnowledgeBaseManager:
         sidecar-generation path in ``kb_read`` (Task 8): concurrent
         backfill + read on the same doc never double-LLM.
 
+        Raises ``BackfillAlreadyRunning`` if another ``backfill_sidecars``
+        call is already in progress on this manager. The in-progress flag
+        is set and cleared synchronously (before/after any ``await``), so
+        two concurrent callers cannot both acquire it.
+
         Skips ingest_log/index updates — they're already current; only
         the sidecar files are out of date.
+
+        Args:
+            progress_cb: Optional callable ``(done, total, doc)`` invoked
+                BEFORE each per-doc LLM call. ``done`` is zero-indexed
+                (0 on the first doc). Use to surface progress in UIs.
+                Called inside the per-doc lock, so raising from it will
+                abort the backfill.
+
+        Returns:
+            Number of sidecars written this call.
         """
-        written = 0
-        for doc in list(self._documents.values()):
-            if self._sidecar_path(doc.id).exists():
-                continue
-            lock = self._sidecar_locks.setdefault(doc.id, asyncio.Lock())
-            async with lock:
-                # Double-check inside the lock — another task may have
-                # written it (e.g. lazy kb_read fallback in Task 8).
-                if self._sidecar_path(doc.id).exists():
+        if self._backfill_running:
+            raise BackfillAlreadyRunning(
+                "backfill_sidecars is already running on this KB"
+            )
+        self._backfill_running = True
+        try:
+            written = 0
+            # Snapshot the docs that need backfilling up front so the
+            # progress denominator is stable even if ingest/delete runs
+            # concurrently.
+            todo = [
+                doc
+                for doc in list(self._documents.values())
+                if not self._sidecar_path(doc.id).exists()
+            ]
+            total = len(todo)
+            for i, doc in enumerate(todo):
+                # Guard against delete-during-backfill — doc may have
+                # been removed since the snapshot was taken.
+                if doc.id not in self._documents:
                     continue
-                payload = await self.generate_sidecar_payload(
-                    doc.content, title=doc.title
-                )
-                self._write_sidecar(doc, payload)
-                written += 1
-        return written
+                lock = self._sidecar_locks.setdefault(doc.id, asyncio.Lock())
+                async with lock:
+                    # Double-check inside the lock — another task may
+                    # have written it (e.g. lazy kb_read fallback).
+                    if self._sidecar_path(doc.id).exists():
+                        continue
+                    if doc.id not in self._documents:
+                        continue
+                    if progress_cb is not None:
+                        progress_cb(i, total, doc)
+                    payload = await self.generate_sidecar_payload(
+                        doc.content, title=doc.title
+                    )
+                    self._write_sidecar(doc, payload)
+                    written += 1
+            return written
+        finally:
+            self._backfill_running = False
+
+
+class BackfillAlreadyRunning(RuntimeError):
+    """Raised when ``backfill_sidecars`` is called while another call is
+    already in progress on the same ``KnowledgeBaseManager``."""

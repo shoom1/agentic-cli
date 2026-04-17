@@ -120,6 +120,7 @@ class KbBackfillCommand(Command):
         )
 
     async def execute(self, args: str, app: "ResearchDemoApp") -> None:
+        from agentic_cli.knowledge_base.manager import BackfillAlreadyRunning
         from agentic_cli.workflow.service_registry import set_service_registry
 
         workflow = app.workflow
@@ -149,11 +150,24 @@ class KbBackfillCommand(Command):
         try:
             total_written = 0
             for label, kb in kbs:
+                def _progress(done: int, total: int, doc) -> None:
+                    title = doc.title if len(doc.title) < 80 else doc.title[:77] + "…"
+                    app.session.add_message(
+                        "system",
+                        f"[{label} KB] {done + 1}/{total}: {title}",
+                    )
+
                 app.session.add_message(
                     "system", f"Backfilling {label} KB at {kb.kb_dir}…"
                 )
                 try:
-                    written = await kb.backfill_sidecars()
+                    written = await kb.backfill_sidecars(progress_cb=_progress)
+                except BackfillAlreadyRunning:
+                    app.session.add_warning(
+                        f"{label} KB: backfill already in progress; "
+                        "wait for it to finish before running /kb-backfill again."
+                    )
+                    continue
                 except Exception as e:
                     app.session.add_error(f"{label} KB backfill failed: {e}")
                     continue

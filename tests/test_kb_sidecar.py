@@ -349,40 +349,94 @@ class TestBackfillSidecars:
         assert n == 0
         assert sidecar.read_text() == original
 
-    async def test_backfill_serializes_with_per_doc_lock(self, kb):
-        """Two concurrent backfills must not double-LLM the same doc."""
+    async def test_backfill_reports_progress_per_doc(self, kb):
+        kb.ingest_document(content="a", title="One", source_type=SourceType.USER)
+        kb.ingest_document(content="b", title="Two", source_type=SourceType.USER)
+        for doc in list(kb._documents.values()):
+            kb._sidecar_path(doc.id).unlink()
+
+        calls: list[tuple[int, int, str]] = []
+
+        def cb(done: int, total: int, doc) -> None:
+            calls.append((done, total, doc.title))
+
+        n = await kb.backfill_sidecars(progress_cb=cb)
+
+        assert n == 2
+        assert [(d, t) for d, t, _ in calls] == [(0, 2), (1, 2)]
+        assert {title for _, _, title in calls} == {"One", "Two"}
+
+    async def test_backfill_rejects_concurrent_call(self, kb):
+        """Second backfill on the same KB while first is running must raise
+        BackfillAlreadyRunning, not silently corrupt state."""
         import asyncio
+        from agentic_cli.knowledge_base.manager import BackfillAlreadyRunning
         from agentic_cli.workflow.service_registry import (
             set_service_registry,
             LLM_SUMMARIZER,
         )
 
-        d1 = kb.ingest_document(content="body one", title="One", source_type=SourceType.USER)
-        kb._sidecar_path(d1.id).unlink()
+        d = kb.ingest_document(content="body", title="One", source_type=SourceType.USER)
+        kb._sidecar_path(d.id).unlink()
 
-        call_count = {"n": 0}
+        gate = asyncio.Event()
 
-        class CountingSummarizer:
+        class BlockingSummarizer:
             async def summarize(self, content, prompt):
-                call_count["n"] += 1
-                await asyncio.sleep(0.05)
-                return "SUMMARY: ok."
+                await gate.wait()
+                return "SUMMARY: done."
 
-        token = set_service_registry({LLM_SUMMARIZER: CountingSummarizer()})
+        token = set_service_registry({LLM_SUMMARIZER: BlockingSummarizer()})
         try:
-            results = await asyncio.gather(
-                kb.backfill_sidecars(),
-                kb.backfill_sidecars(),
-            )
+            first = asyncio.create_task(kb.backfill_sidecars())
+            # Let the first call enter backfill_sidecars and hit the LLM await
+            await asyncio.sleep(0.01)
+
+            with pytest.raises(BackfillAlreadyRunning):
+                await kb.backfill_sidecars()
+
+            gate.set()
+            n = await first
         finally:
             token.var.reset(token)
 
-        # One backfill writes 1; the other sees the file already exists
-        # (either via the outer .exists() check or the inner re-check) and
-        # writes 0. Sum must be exactly 1.
-        assert sum(results) == 1
-        assert call_count["n"] == 1
-        assert kb._sidecar_path(d1.id).exists()
+        assert n == 1
+        assert kb._backfill_running is False
+
+    async def test_backfill_clears_running_flag_on_exception(self, kb):
+        """Even if the inner LLM call raises, the in-progress flag resets
+        so a retry is possible."""
+        from agentic_cli.workflow.service_registry import (
+            set_service_registry,
+            LLM_SUMMARIZER,
+        )
+
+        d = kb.ingest_document(content="body", title="One", source_type=SourceType.USER)
+        kb._sidecar_path(d.id).unlink()
+
+        class ExplodingCallback:
+            def __call__(self, done, total, doc):
+                raise RuntimeError("progress_cb said no")
+
+        token = set_service_registry({LLM_SUMMARIZER: None})
+        try:
+            with pytest.raises(RuntimeError, match="progress_cb"):
+                await kb.backfill_sidecars(progress_cb=ExplodingCallback())
+        finally:
+            token.var.reset(token)
+
+        assert kb._backfill_running is False
+
+    # NOTE: an earlier test asserted that two concurrent backfill calls
+    # would serialize via the per-doc lock with one writing and one
+    # no-opping. That test is now superseded by the
+    # ``BackfillAlreadyRunning`` guard, which rejects concurrent
+    # backfills at the method boundary (covered by
+    # ``test_backfill_rejects_concurrent_call`` above). The per-doc
+    # lock itself is still exercised by the
+    # ``TestKbReadLazySidecar::test_kb_read_concurrent_reads_serialize``
+    # case, which tests the same ``_sidecar_locks`` dict via the lazy
+    # read path.
 
 
 class TestKbReadLazySidecar:

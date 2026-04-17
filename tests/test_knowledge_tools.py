@@ -54,6 +54,7 @@ def _make_kb(tmp_path):
     manager._documents = {}
     manager._chunks = {}
     manager._sidecar_locks = {}
+    manager._backfill_running = False
     return manager
 
 
@@ -251,6 +252,7 @@ class TestKBManagerMigrationV1ToV2:
         manager._documents = {}
         manager._chunks = {}
         manager._sidecar_locks = {}
+        manager._backfill_running = False
         return manager
 
     def test_v1_loaded_correctly(self, kb_dir):
