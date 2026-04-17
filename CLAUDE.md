@@ -114,6 +114,9 @@ Workflow:
 2. For features: create `feature/<name>` (or `fix/<name>` or `refactor/<name>`) from `develop`, work there, merge back to `develop`
 3. When ready to release: merge `develop` → `main` and tag the release
 
+### What NOT to commit
+- `docs/` is gitignored on purpose (see `.gitignore`). It is a scratchpad for review notes, plans, and internal analysis. **Never `git add docs/…` or suggest committing anything under `docs/`.** If a document belongs in the repo, it lives elsewhere (README, CHANGELOG, top-level `*.md`).
+
 ## Development Principles
 
 ### Code Style
