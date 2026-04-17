@@ -236,6 +236,50 @@ class ConceptStore:
         items.sort(key=lambda it: it["updated_at"], reverse=True)
         return items
 
+    def search(self, query: str, limit: int = 10) -> list[dict[str, Any]]:
+        """Case-insensitive substring search across title + body.
+
+        Title hits are ranked above body hits. Ties within a rank tier
+        preserve filesystem glob order.
+        """
+        if not query or not self.base_dir.exists():
+            return []
+
+        q = query.lower()
+        title_hits: list[dict[str, Any]] = []
+        body_hits: list[dict[str, Any]] = []
+
+        for path in self.base_dir.glob("*.md"):
+            parsed = parse_concept_markdown(path.read_text())
+            if parsed is None:
+                continue
+            title_lower = parsed["title"].lower()
+            body_lower = parsed["body"].lower()
+
+            title_match = q in title_lower
+            body_match = q in body_lower
+            if not (title_match or body_match):
+                continue
+
+            if title_match:
+                snippet = _snippet_around(parsed["title"], q)
+            else:
+                snippet = _snippet_around(parsed["body"], q)
+
+            hit = {
+                "slug": parsed["slug"] or path.stem,
+                "title": parsed["title"],
+                "snippet": snippet,
+                "sources": parsed["sources"],
+            }
+            if title_match:
+                title_hits.append(hit)
+            else:
+                body_hits.append(hit)
+
+        ranked = title_hits + body_hits
+        return ranked[:limit]
+
     def _resolve_collision(self, base_slug: str) -> str:
         """Return ``base_slug`` if free, else ``base_slug-2``, ``-3``, ..."""
         if not self._concept_path(base_slug).exists():
@@ -277,3 +321,18 @@ def _parse_iso(s: str) -> datetime | None:
         return datetime.fromisoformat(s)
     except (ValueError, TypeError):
         return None
+
+
+def _snippet_around(text: str, query_lower: str, radius: int = 150) -> str:
+    """Return ``text[max(0, i-radius) : i+len(q)+radius]`` with ellipses."""
+    idx = text.lower().find(query_lower)
+    if idx < 0:
+        return text[: radius * 2]
+    start = max(0, idx - radius)
+    end = min(len(text), idx + len(query_lower) + radius)
+    snippet = text[start:end]
+    if start > 0:
+        snippet = "…" + snippet
+    if end < len(text):
+        snippet = snippet + "…"
+    return snippet

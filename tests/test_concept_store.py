@@ -304,3 +304,91 @@ class TestConceptStoreList:
         # "index.md" has no frontmatter → skipped; notes.txt is not .md
         assert len(items) == 1
         assert items[0]["slug"] == "one"
+
+
+class TestConceptStoreSearch:
+    def test_search_empty_store_returns_empty(self, tmp_path):
+        from agentic_cli.knowledge_base.concepts import ConceptStore
+        store = ConceptStore(tmp_path / "concepts")
+        assert store.search("anything") == []
+
+    def test_search_matches_title(self, tmp_path):
+        from agentic_cli.knowledge_base.concepts import ConceptStore
+
+        store = ConceptStore(tmp_path / "concepts")
+        store.write(title="Diffusion Models", body="Unrelated body.", sources=["a"])
+        store.write(title="Something Else", body="No match here.", sources=["a"])
+
+        hits = store.search("diffusion")
+        assert len(hits) == 1
+        assert hits[0]["slug"] == "diffusion-models"
+        assert "Diffusion" in hits[0]["snippet"]
+
+    def test_search_matches_body(self, tmp_path):
+        from agentic_cli.knowledge_base.concepts import ConceptStore
+
+        store = ConceptStore(tmp_path / "concepts")
+        store.write(
+            title="Generic",
+            body="Body discusses transformer attention mechanisms.",
+            sources=["a"],
+        )
+        hits = store.search("attention")
+        assert len(hits) == 1
+        assert "attention" in hits[0]["snippet"].lower()
+
+    def test_title_hits_rank_above_body_hits(self, tmp_path):
+        from agentic_cli.knowledge_base.concepts import ConceptStore
+
+        store = ConceptStore(tmp_path / "concepts")
+        store.write(
+            title="About Animals",
+            body="The word transformer appears in the body.",
+            sources=["a"],
+            slug="animals",
+        )
+        store.write(
+            title="Transformer Models",
+            body="Body has nothing relevant.",
+            sources=["a"],
+            slug="transformers",
+        )
+
+        hits = store.search("transformer")
+        assert len(hits) == 2
+        # Title match ranked above body match
+        assert hits[0]["slug"] == "transformers"
+        assert hits[1]["slug"] == "animals"
+
+    def test_search_is_case_insensitive(self, tmp_path):
+        from agentic_cli.knowledge_base.concepts import ConceptStore
+
+        store = ConceptStore(tmp_path / "concepts")
+        store.write(title="FooBar", body="Body text", sources=["a"])
+        assert len(store.search("foobar")) == 1
+        assert len(store.search("FOOBAR")) == 1
+
+    def test_search_snippet_centered_on_match(self, tmp_path):
+        from agentic_cli.knowledge_base.concepts import ConceptStore
+
+        store = ConceptStore(tmp_path / "concepts")
+        long_body = "x" * 300 + " needle " + "y" * 300
+        store.write(title="Generic", body=long_body, sources=["a"])
+
+        hits = store.search("needle")
+        assert len(hits) == 1
+        snippet = hits[0]["snippet"]
+        assert "needle" in snippet
+        # Snippet should be bounded — not the entire 600-char body
+        assert len(snippet) <= 350  # ±150 + the word + some leeway
+
+    def test_search_limit_respected(self, tmp_path):
+        from agentic_cli.knowledge_base.concepts import ConceptStore
+
+        store = ConceptStore(tmp_path / "concepts")
+        for i in range(5):
+            store.write(
+                title=f"match {i}", body="b", sources=["a"], slug=f"s{i}",
+            )
+        hits = store.search("match", limit=3)
+        assert len(hits) == 3
