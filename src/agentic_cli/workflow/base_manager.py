@@ -373,7 +373,7 @@ class BaseWorkflowManager(ABC):
         Returns:
             Summarized text response.
         """
-        return await self.generate_simple(prompt, max_tokens=2000)
+        return await self.generate_simple(prompt, max_tokens=12000)
 
     async def on_session_end(self, messages: list[dict] | None = None) -> list[str]:
         """Hook called when a session ends. Optionally extracts facts.
