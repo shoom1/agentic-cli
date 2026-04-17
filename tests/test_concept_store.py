@@ -265,3 +265,42 @@ class TestConceptStoreOverwriteMerge:
 
         assert second["created_at"] == first["created_at"]
         assert second["updated_at"] > first["updated_at"]
+
+
+class TestConceptStoreList:
+    def test_list_empty_dir(self, tmp_path):
+        from agentic_cli.knowledge_base.concepts import ConceptStore
+        store = ConceptStore(tmp_path / "concepts")
+        assert store.list() == []
+
+    def test_list_returns_summaries_sorted_by_updated_desc(self, tmp_path):
+        from agentic_cli.knowledge_base.concepts import ConceptStore
+        import time
+
+        store = ConceptStore(tmp_path / "concepts")
+        store.write(title="First", body="b", sources=["a"], slug="first")
+        time.sleep(0.01)
+        store.write(title="Second", body="b", sources=["a"], slug="second")
+        time.sleep(0.01)
+        store.write(title="Third", body="b", sources=["a"], slug="third")
+
+        items = store.list()
+        assert [it["slug"] for it in items] == ["third", "second", "first"]
+        for it in items:
+            assert "title" in it
+            assert "updated_at" in it
+            assert "sources" in it
+
+    def test_list_ignores_non_md_files(self, tmp_path):
+        from agentic_cli.knowledge_base.concepts import ConceptStore
+
+        store = ConceptStore(tmp_path / "concepts")
+        store.write(title="One", body="b", sources=["a"], slug="one")
+        # Drop a non-concept file alongside
+        (tmp_path / "concepts" / "notes.txt").write_text("not a concept")
+        (tmp_path / "concepts" / "index.md").write_text("# Index\n")
+
+        items = store.list()
+        # "index.md" has no frontmatter → skipped; notes.txt is not .md
+        assert len(items) == 1
+        assert items[0]["slug"] == "one"

@@ -215,6 +215,27 @@ class ConceptStore:
             return None
         return parse_concept_markdown(path.read_text())
 
+    def list(self) -> list[dict[str, Any]]:
+        """Return all concepts as summary dicts, sorted by updated_at desc.
+
+        Files missing frontmatter are silently skipped.
+        """
+        if not self.base_dir.exists():
+            return []
+        items: list[dict[str, Any]] = []
+        for path in self.base_dir.glob("*.md"):
+            parsed = parse_concept_markdown(path.read_text())
+            if parsed is None:
+                continue
+            items.append({
+                "slug": parsed["slug"] or path.stem,
+                "title": parsed["title"],
+                "updated_at": parsed["updated_at"],
+                "sources": parsed["sources"],
+            })
+        items.sort(key=lambda it: it["updated_at"], reverse=True)
+        return items
+
     def _resolve_collision(self, base_slug: str) -> str:
         """Return ``base_slug`` if free, else ``base_slug-2``, ``-3``, ..."""
         if not self._concept_path(base_slug).exists():
