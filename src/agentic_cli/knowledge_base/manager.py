@@ -292,6 +292,32 @@ class KnowledgeBaseManager:
         )
         atomic_write_text(self._index_md_path(), text)
 
+    def _ingest_log_path(self) -> Path:
+        return self.kb_dir / "ingest_log.md"
+
+    def _append_ingest_log(self, action: str, doc: Document) -> None:
+        """Append one audit line to ingest_log.md."""
+        ts = datetime.now().isoformat()
+        ident = doc.metadata.get("arxiv_id") if doc.metadata else None
+        title_quoted = f'"{doc.title}"'
+        parts = [
+            "-",
+            ts,
+            "·",
+            action,
+            "·",
+            doc.source_type.value,
+        ]
+        if ident:
+            parts += ["·", ident]
+        parts += ["·", title_quoted]
+        if action == "ingest":
+            parts += ["·", f"{len(doc.chunks)} chunks"]
+        line = " ".join(parts) + "\n"
+        path = self._ingest_log_path()
+        with path.open("a") as f:
+            f.write(line)
+
     def _load_metadata(self) -> None:
         """Load document metadata from disk.
 
@@ -670,6 +696,7 @@ class KnowledgeBaseManager:
             self._save_document_content(doc)
             self._write_sidecar(doc, sidecar_payload)
             self._rebuild_index_md()
+            self._append_ingest_log("ingest", doc)
             self._save_metadata()
             self._vector_store.save()
 
@@ -874,6 +901,7 @@ class KnowledgeBaseManager:
             self._delete_document_content(doc_id)
             self._delete_sidecar(doc_id)
             self._rebuild_index_md()
+            self._append_ingest_log("delete", doc)
             self._save_metadata()
             self._vector_store.save()
 
