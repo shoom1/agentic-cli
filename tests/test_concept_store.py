@@ -133,6 +133,22 @@ class TestConceptStoreWrite:
         store.write(title="X", body="b", sources=["a"], slug="x")
         assert (base / "x.md").exists()
 
+    def test_write_timestamps_are_utc_with_z_suffix(self, tmp_path):
+        """Concept timestamps must use UTC with trailing Z (matches Phase 1
+        sidecar/ingest_log format; avoids timezone drift across machines)."""
+        from agentic_cli.knowledge_base.concepts import ConceptStore
+
+        store = ConceptStore(tmp_path / "concepts")
+        store.write(title="X", body="b", sources=["a"], slug="x")
+
+        on_disk = (tmp_path / "concepts" / "x.md").read_text()
+        # Line format: "created_at: 2026-04-17T10:09:23.391871Z"
+        import re
+        m = re.search(r"created_at: (\S+)", on_disk)
+        assert m is not None
+        assert m.group(1).endswith("Z")
+        assert "+00:00" not in m.group(1)
+
     def test_failure_returns_uniform_dict_shape(self, tmp_path):
         """Failure path must include slug/path/action keys for safe access."""
         from agentic_cli.knowledge_base.concepts import ConceptStore

@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -66,8 +66,8 @@ def render_concept_markdown(
         "---",
         f"slug: {slug}",
         f"title: {title}",
-        f"created_at: {created_at.isoformat()}",
-        f"updated_at: {updated_at.isoformat()}",
+        f"created_at: {_iso_z(created_at)}",
+        f"updated_at: {_iso_z(updated_at)}",
         f"sources: {sources_str}",
         "---",
         "",
@@ -177,18 +177,18 @@ class ConceptStore:
                     if s not in merged:
                         merged.append(s)
                 valid_sources = merged
-                created_at = _parse_iso(existing["created_at"]) or datetime.now()
+                created_at = _parse_iso(existing["created_at"]) or datetime.now(timezone.utc)
             else:
-                created_at = datetime.now()
+                created_at = datetime.now(timezone.utc)
             final_slug = slug
         else:
             # Auto slug: collision-suffix if exists (never overwrites)
             base_slug = slug_from_title(title)
             final_slug = self._resolve_collision(base_slug)
-            created_at = datetime.now()
+            created_at = datetime.now(timezone.utc)
             action = "created"
 
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         path = self._concept_path(final_slug)
         md = render_concept_markdown(
             slug=final_slug,
@@ -318,9 +318,20 @@ def _partition_sources(
 
 def _parse_iso(s: str) -> datetime | None:
     try:
-        return datetime.fromisoformat(s)
+        return datetime.fromisoformat(s.replace("Z", "+00:00"))
     except (ValueError, TypeError):
         return None
+
+
+def _iso_z(dt: datetime) -> str:
+    """Serialize a UTC datetime as ISO-8601 with trailing ``Z``.
+
+    Microseconds are preserved (needed for sub-second updated_at
+    comparisons). Timezone-naive datetimes are assumed UTC.
+    """
+    iso = dt.isoformat()
+    # Turn "+00:00" suffix into "Z" to match Phase 1 sidecar/ingest-log format
+    return iso.replace("+00:00", "Z")
 
 
 def _snippet_around(text: str, query_lower: str, radius: int = 150) -> str:
