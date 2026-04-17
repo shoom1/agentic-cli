@@ -3,7 +3,7 @@
 Provides tools for managing documents in the unified knowledge base:
 - kb_ingest: Ingest text, files, or URLs into KB
 - kb_search: Semantic search across all documents
-- read_document: Extract and return text from a stored document
+- kb_read: Read a stored document (sidecar by default, full text with full=True)
 - kb_list: List documents with summaries
 - open_document: Open a document's file in the system viewer
 
@@ -44,7 +44,7 @@ from agentic_cli.workflow.service_registry import (
 )
 
 
-# Max chars of extracted text to return via read_document.
+# Max chars of extracted text to return via kb_read (full=True).
 READ_DOCUMENT_MAX_CHARS = 30_000
 
 
@@ -390,38 +390,67 @@ async def _ingest_document_with_kb(
     }
 
 
-def _read_document_from_kbs(
+async def _read_document_from_kbs(
     kb_manager,
     user_kb_manager,
     doc_id_or_title: str,
+    full: bool = False,
     max_chars: int = READ_DOCUMENT_MAX_CHARS,
 ) -> dict[str, Any]:
-    """Shared implementation for read_document."""
-    doc, source_kb = _find_doc_in_kbs(kb_manager, user_kb_manager, doc_id_or_title)
+    """Shared implementation for kb_read.
 
+    Default returns the sidecar payload (summary + claims + entities).
+    With ``full=True``, returns the raw extracted text up to ``max_chars``.
+    Lazily generates a missing sidecar via the manager's per-doc lock.
+    """
+    doc, source_kb = _find_doc_in_kbs(kb_manager, user_kb_manager, doc_id_or_title)
     if doc is None:
         return {"success": False, "error": f"Document not found: {doc_id_or_title}"}
 
-    content = doc.content
+    if full:
+        content = doc.content
+        if not content and doc.file_path:
+            file_path = source_kb.get_file_path(doc.id)
+            if file_path and str(file_path).endswith(".pdf"):
+                from agentic_cli.knowledge_base.manager import KnowledgeBaseManager
+                content = KnowledgeBaseManager.extract_text_from_pdf(file_path)
+        truncated = len(content) > max_chars
+        if truncated:
+            content = content[:max_chars]
+        return {
+            "success": True,
+            "full": True,
+            "document_id": doc.id,
+            "title": doc.title,
+            "content": content,
+            "truncated": truncated,
+            "source_type": doc.source_type.value,
+        }
 
-    # If no content, try extracting from stored file
-    if not content and doc.file_path:
-        file_path = source_kb.get_file_path(doc.id)
-        if file_path and str(file_path).endswith(".pdf"):
-            from agentic_cli.knowledge_base.manager import KnowledgeBaseManager
-            content = KnowledgeBaseManager.extract_text_from_pdf(file_path)
+    # Sidecar mode (default). Lazily generate if missing.
+    sidecar_path = source_kb._sidecar_path(doc.id)
+    if not sidecar_path.exists():
+        import asyncio as _asyncio
+        lock = source_kb._sidecar_locks.setdefault(doc.id, _asyncio.Lock())
+        async with lock:
+            if not sidecar_path.exists():
+                payload = await source_kb.generate_sidecar_payload(
+                    doc.content, title=doc.title
+                )
+                source_kb._write_sidecar(doc, payload)
 
-    truncated = len(content) > max_chars
-    if truncated:
-        content = content[:max_chars]
-
+    sidecar_text = sidecar_path.read_text()
+    from agentic_cli.knowledge_base.sidecar import parse_sidecar_frontmatter
+    fm = parse_sidecar_frontmatter(sidecar_text)
     return {
         "success": True,
+        "full": False,
         "document_id": doc.id,
         "title": doc.title,
-        "content": content,
-        "truncated": truncated,
         "source_type": doc.source_type.value,
+        "summary": doc.summary,
+        "sidecar": sidecar_text,
+        "frontmatter": fm,
     }
 
 
@@ -674,26 +703,29 @@ async def kb_ingest(
 @register_tool(
     category=ToolCategory.KNOWLEDGE,
     permission_level=PermissionLevel.SAFE,
-    description="Read and return the text content of a stored document by ID or title. Returns full text (up to max_chars limit).",
+    description=(
+        "Read a stored document by ID or title. Returns the per-document "
+        "sidecar (summary, key claims, entities) by default. Pass full=True "
+        "to get the raw extracted text up to max_chars."
+    ),
 )
-def read_document(
+async def kb_read(
     doc_id_or_title: str,
+    full: bool = False,
     max_chars: int = READ_DOCUMENT_MAX_CHARS,
 ) -> dict[str, Any]:
-    """Extract and return text from a stored document.
+    """Read a stored document.
 
     Args:
         doc_id_or_title: Document ID or title substring.
-        max_chars: Maximum characters to return (default 30K).
-
-    Returns:
-        Dictionary with document text and metadata.
+        full: If True, return raw text. Default returns the sidecar payload.
+        max_chars: Maximum characters of raw text to return when full=True.
     """
     kb = get_service(KB_MANAGER)
     if kb is None:
         return {"success": False, "error": f"Document not found: {doc_id_or_title}"}
     user_kb = get_service(USER_KB_MANAGER)
-    return _read_document_from_kbs(kb, user_kb, doc_id_or_title, max_chars)
+    return await _read_document_from_kbs(kb, user_kb, doc_id_or_title, full, max_chars)
 
 
 @register_tool(

@@ -5,7 +5,7 @@ Covers:
 - E2: success key in kb_search
 - E4: ContextVar-based KB manager lifecycle
 - E5: Content separation and v1→v2→v3 migration
-- New tools: read_document, kb_list, open_document
+- New tools: kb_read, kb_list, open_document
 - File storage and summary generation
 - Paper store migration
 """
@@ -667,17 +667,17 @@ class TestIngestDocumentTool:
 
 
 # ============================================================================
-# read_document tests
+# kb_read tests
 # ============================================================================
 
 
-class TestReadDocument:
-    """Tests for read_document tool."""
+class TestKbRead:
+    """Tests for kb_read tool."""
 
-    def test_read_by_id(self):
-        """Read document by exact ID."""
+    async def test_read_by_id(self):
+        """Read document by exact ID (full=True)."""
         from agentic_cli.workflow.service_registry import set_service_registry
-        from agentic_cli.tools.knowledge_tools import read_document
+        from agentic_cli.tools.knowledge_tools import kb_read
 
         with tempfile.TemporaryDirectory() as tmp:
             kb = _make_kb(Path(tmp))
@@ -688,7 +688,7 @@ class TestReadDocument:
             )
             token = set_service_registry({"kb_manager": kb})
             try:
-                result = read_document(doc.id)
+                result = await kb_read(doc.id, full=True)
                 assert result["success"] is True
                 assert result["content"] == "Full document content here."
                 assert result["title"] == "Readable Doc"
@@ -696,10 +696,10 @@ class TestReadDocument:
             finally:
                 token.var.reset(token)
 
-    def test_read_by_title(self):
+    async def test_read_by_title(self):
         """Read document by title substring."""
         from agentic_cli.workflow.service_registry import set_service_registry
-        from agentic_cli.tools.knowledge_tools import read_document
+        from agentic_cli.tools.knowledge_tools import kb_read
 
         with tempfile.TemporaryDirectory() as tmp:
             kb = _make_kb(Path(tmp))
@@ -710,31 +710,31 @@ class TestReadDocument:
             )
             token = set_service_registry({"kb_manager": kb})
             try:
-                result = read_document("Unique Title")
+                result = await kb_read("Unique Title")
                 assert result["success"] is True
                 assert result["title"] == "Unique Title ABC"
             finally:
                 token.var.reset(token)
 
-    def test_read_not_found(self):
+    async def test_read_not_found(self):
         """Read nonexistent document returns error."""
         from agentic_cli.workflow.service_registry import set_service_registry
-        from agentic_cli.tools.knowledge_tools import read_document
+        from agentic_cli.tools.knowledge_tools import kb_read
 
         with tempfile.TemporaryDirectory() as tmp:
             kb = _make_kb(Path(tmp))
             token = set_service_registry({"kb_manager": kb})
             try:
-                result = read_document("nonexistent")
+                result = await kb_read("nonexistent")
                 assert result["success"] is False
                 assert "not found" in result["error"].lower()
             finally:
                 token.var.reset(token)
 
-    def test_read_truncation(self):
-        """Long content is truncated to max_chars."""
+    async def test_read_truncation(self):
+        """Long content is truncated to max_chars when full=True."""
         from agentic_cli.workflow.service_registry import set_service_registry
-        from agentic_cli.tools.knowledge_tools import read_document
+        from agentic_cli.tools.knowledge_tools import kb_read
 
         with tempfile.TemporaryDirectory() as tmp:
             kb = _make_kb(Path(tmp))
@@ -746,7 +746,7 @@ class TestReadDocument:
             )
             token = set_service_registry({"kb_manager": kb})
             try:
-                result = read_document(doc.id, max_chars=1000)
+                result = await kb_read(doc.id, full=True, max_chars=1000)
                 assert result["success"] is True
                 assert len(result["content"]) == 1000
                 assert result["truncated"] is True
@@ -1208,9 +1208,9 @@ class TestTwoTierKnowledgeBase:
         finally:
             self._reset_token(token)
 
-    def test_read_document_project_first(self, tmp_path):
+    async def test_read_document_project_first(self, tmp_path):
         """When both KBs have a matching doc, project is returned first."""
-        from agentic_cli.tools.knowledge_tools import read_document
+        from agentic_cli.tools.knowledge_tools import kb_read
 
         pkb = _make_kb(tmp_path / "proj")
         ukb = _make_kb(tmp_path / "usr")
@@ -1227,19 +1227,19 @@ class TestTwoTierKnowledgeBase:
 
         token = self._set_both_contexts(pkb, ukb)
         try:
-            result = read_document("Shared Title")
+            result = await kb_read("Shared Title", full=True)
             assert result["success"] is True
             assert result["content"] == "Project version of the doc."
         finally:
             self._reset_token(token)
 
-    def test_read_document_falls_back_to_user(self, project_kb, user_kb):
+    async def test_read_document_falls_back_to_user(self, project_kb, user_kb):
         """Doc only in user KB is still found via fallback."""
-        from agentic_cli.tools.knowledge_tools import read_document
+        from agentic_cli.tools.knowledge_tools import kb_read
 
         token = self._set_both_contexts(project_kb, user_kb)
         try:
-            result = read_document("User Attention Paper")
+            result = await kb_read("User Attention Paper", full=True)
             assert result["success"] is True
             assert result["title"] == "User Attention Paper"
             assert "attention" in result["content"].lower()

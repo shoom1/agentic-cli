@@ -322,14 +322,14 @@ class TestIngestDocument:
         assert format_tool_summary("kb_ingest", result) == "Ingested 'Paper' (5 chunks)"
 
 
-class TestReadDocument:
+class TestKbRead:
     def test_basic(self):
         result = {"success": True, "title": "My Paper", "content": "..."}
-        assert format_tool_summary("read_document", result) == "My Paper"
+        assert format_tool_summary("kb_read", result) == "My Paper"
 
     def test_truncated(self):
         result = {"success": True, "title": "My Paper", "content": "...", "truncated": True}
-        assert format_tool_summary("read_document", result) == "My Paper (truncated)"
+        assert format_tool_summary("kb_read", result) == "My Paper (truncated)"
 
 
 class TestListDocuments:

@@ -1345,7 +1345,7 @@ class TestToolRegistryConsistency:
             # Knowledge base (unified document store)
             "kb_search",
             "kb_ingest",
-            "read_document",
+            "kb_read",
             "kb_list",
             "open_document",
             # ArXiv (metadata only)
@@ -1407,7 +1407,7 @@ class TestToolRegistryConsistency:
         safe_tools = [
             "read_file", "diff_compare", "grep", "glob", "list_dir",
             "web_search", "web_fetch", "kb_search",
-            "read_document", "kb_list",
+            "kb_read", "kb_list",
             "search_arxiv", "fetch_arxiv_paper",
             "ask_clarification",
             "save_memory", "search_memory",
@@ -1497,7 +1497,7 @@ class TestToolRegistryConsistency:
 
         # File ops: 7 (read_file, diff_compare, grep, glob, list_dir, write_file, edit_file)
         # Web/Network: 2 (web_search, web_fetch)
-        # Knowledge: 8 (kb_search, kb_ingest, read_document, kb_list, open_document, search_arxiv, fetch_arxiv_paper, ingest_arxiv_paper)
+        # Knowledge: 8 (kb_search, kb_ingest, kb_read, kb_list, open_document, search_arxiv, fetch_arxiv_paper, ingest_arxiv_paper)
         # Execution: 2 (execute_python, shell_executor)
         # Interaction: 1 (ask_clarification)
         # Memory: 2 (save_memory, search_memory)

@@ -322,3 +322,81 @@ class TestBackfillSidecars:
         assert sum(results) == 1
         assert call_count["n"] == 1
         assert kb._sidecar_path(d1.id).exists()
+
+
+class TestKbReadLazySidecar:
+    @pytest.fixture
+    def kb(self, tmp_path):
+        return _make_kb(tmp_path)
+
+    async def test_kb_read_default_returns_sidecar_payload(self, kb):
+        from agentic_cli.knowledge_base.models import SourceType
+        from agentic_cli.tools.knowledge_tools import _read_document_from_kbs
+
+        doc = kb.ingest_document(
+            content="raw body", title="X", source_type=SourceType.USER,
+        )
+        result = await _read_document_from_kbs(kb, None, doc.id)
+        assert result["success"] is True
+        assert result["full"] is False
+        assert "summary" in result
+        # Raw text should NOT be in the default response
+        assert "content" not in result or not result.get("content")
+
+    async def test_kb_read_full_returns_raw_text(self, kb):
+        from agentic_cli.knowledge_base.models import SourceType
+        from agentic_cli.tools.knowledge_tools import _read_document_from_kbs
+
+        doc = kb.ingest_document(
+            content="raw body content", title="X", source_type=SourceType.USER,
+        )
+        result = await _read_document_from_kbs(kb, None, doc.id, full=True)
+        assert result["full"] is True
+        assert result["content"] == "raw body content"
+
+    async def test_kb_read_lazily_generates_missing_sidecar(self, kb):
+        from agentic_cli.knowledge_base.models import SourceType
+        from agentic_cli.tools.knowledge_tools import _read_document_from_kbs
+
+        doc = kb.ingest_document(
+            content="body", title="Y", source_type=SourceType.USER,
+        )
+        # Simulate legacy doc: remove sidecar
+        kb._sidecar_path(doc.id).unlink()
+        assert not kb._sidecar_path(doc.id).exists()
+
+        result = await _read_document_from_kbs(kb, None, doc.id)
+        assert result["success"] is True
+        # Sidecar should have been generated
+        assert kb._sidecar_path(doc.id).exists()
+
+    async def test_kb_read_concurrent_reads_serialize(self, kb):
+        """Two concurrent first-reads on the same doc must not double-LLM."""
+        import asyncio
+        from agentic_cli.knowledge_base.models import SourceType
+        from agentic_cli.workflow.service_registry import (
+            set_service_registry, LLM_SUMMARIZER,
+        )
+        from agentic_cli.tools.knowledge_tools import _read_document_from_kbs
+
+        call_count = {"n": 0}
+
+        class CountingSummarizer:
+            async def summarize(self, content, prompt):
+                call_count["n"] += 1
+                await asyncio.sleep(0.05)  # simulate latency
+                return "SUMMARY: lazy summary."
+
+        doc = kb.ingest_document(content="body", title="Z", source_type=SourceType.USER)
+        kb._sidecar_path(doc.id).unlink()
+
+        token = set_service_registry({LLM_SUMMARIZER: CountingSummarizer()})
+        try:
+            await asyncio.gather(
+                _read_document_from_kbs(kb, None, doc.id),
+                _read_document_from_kbs(kb, None, doc.id),
+            )
+        finally:
+            token.var.reset(token)
+
+        assert call_count["n"] == 1, "lock did not serialize concurrent first-reads"

@@ -155,7 +155,7 @@ def make_kb_tools(kb_manager, user_kb_manager=None) -> list[Callable]:
         user_kb_manager: Optional user-scoped KnowledgeBaseManager.
 
     Returns:
-        [kb_search, kb_ingest, read_document,
+        [kb_search, kb_ingest, kb_read,
          kb_list, open_document]
     """
     from agentic_cli.tools.knowledge_tools import (
@@ -168,7 +168,7 @@ def make_kb_tools(kb_manager, user_kb_manager=None) -> list[Callable]:
         kb_ingest as _orig_ingest,
         kb_list as _orig_list,
         open_document as _orig_open,
-        read_document as _orig_read,
+        kb_read as _orig_read,
         kb_search as _orig_search,
     )
 
@@ -201,12 +201,13 @@ def make_kb_tools(kb_manager, user_kb_manager=None) -> list[Callable]:
             tags=tags,
         )
 
-    def read_document(
+    async def kb_read(
         doc_id_or_title: str,
+        full: bool = False,
         max_chars: int = READ_DOCUMENT_MAX_CHARS,
     ) -> dict[str, Any]:
-        return _read_document_from_kbs(
-            kb_manager, user_kb_manager, doc_id_or_title, max_chars
+        return await _read_document_from_kbs(
+            kb_manager, user_kb_manager, doc_id_or_title, full, max_chars
         )
 
     def kb_list(
@@ -225,14 +226,14 @@ def make_kb_tools(kb_manager, user_kb_manager=None) -> list[Callable]:
     kb_search.__doc__ = _orig_search.__doc__
     kb_ingest.__name__ = "kb_ingest"
     kb_ingest.__doc__ = _orig_ingest.__doc__
-    read_document.__name__ = "read_document"
-    read_document.__doc__ = _orig_read.__doc__
+    kb_read.__name__ = "kb_read"
+    kb_read.__doc__ = _orig_read.__doc__
     kb_list.__name__ = "kb_list"
     kb_list.__doc__ = _orig_list.__doc__
     open_document.__name__ = "open_document"
     open_document.__doc__ = _orig_open.__doc__
 
-    return [kb_search, kb_ingest, read_document, kb_list, open_document]
+    return [kb_search, kb_ingest, kb_read, kb_list, open_document]
 
 
 # ---------------------------------------------------------------------------

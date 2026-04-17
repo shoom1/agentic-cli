@@ -204,7 +204,7 @@ class TestMakeKBTools:
         assert names == [
             "kb_search",
             "kb_ingest",
-            "read_document",
+            "kb_read",
             "kb_list",
             "open_document",
         ]

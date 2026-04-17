@@ -30,7 +30,7 @@ from agentic_cli.tools.file_write import write_file, edit_file
 from agentic_cli.tools.knowledge_tools import (
     kb_search,
     kb_ingest,
-    read_document,
+    kb_read,
     kb_list,
     open_document,
     unified_search,
@@ -88,7 +88,7 @@ __all__ = [
     # Standard tool functions (ready to use with agents)
     "kb_search",
     "kb_ingest",
-    "read_document",
+    "kb_read",
     "kb_list",
     "open_document",
     "unified_search",

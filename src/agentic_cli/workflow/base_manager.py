@@ -267,7 +267,7 @@ class BaseWorkflowManager(ABC):
         "delete_memory": "memory_store",
         "kb_search": "kb_manager",
         "kb_ingest": "kb_manager",
-        "read_document": "kb_manager",
+        "kb_read": "kb_manager",
         "kb_list": "kb_manager",
         "open_document": "kb_manager",
         "unified_search": "memory_store",
