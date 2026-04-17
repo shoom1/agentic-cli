@@ -144,3 +144,41 @@ class TestConceptStoreWrite:
         assert result["path"] == ""
         assert result["action"] == "failed"
         assert "error" in result
+
+
+class TestConceptStoreSlugCollisions:
+    def test_auto_slug_collision_appends_suffix(self, tmp_path):
+        from agentic_cli.knowledge_base.concepts import ConceptStore
+
+        store = ConceptStore(tmp_path / "concepts")
+        r1 = store.write(title="Attention", body="b", sources=["a"])
+        r2 = store.write(title="Attention", body="b", sources=["a"])
+        r3 = store.write(title="Attention", body="b", sources=["a"])
+
+        assert r1["slug"] == "attention"
+        assert r2["slug"] == "attention-2"
+        assert r3["slug"] == "attention-3"
+        assert r1["action"] == "created"
+        assert r2["action"] == "created"
+        assert r3["action"] == "created"
+        # Three distinct files on disk
+        dir_ = tmp_path / "concepts"
+        assert (dir_ / "attention.md").exists()
+        assert (dir_ / "attention-2.md").exists()
+        assert (dir_ / "attention-3.md").exists()
+
+    def test_explicit_slug_existing_overwrites_not_collides(self, tmp_path):
+        from agentic_cli.knowledge_base.concepts import ConceptStore
+
+        store = ConceptStore(tmp_path / "concepts")
+        store.write(title="A", body="first body", sources=["a"], slug="foo")
+        result = store.write(
+            title="A v2", body="second body", sources=["b"], slug="foo",
+        )
+
+        assert result["action"] == "updated"
+        assert result["slug"] == "foo"
+        # Only one file — no -2 suffix
+        dir_ = tmp_path / "concepts"
+        assert (dir_ / "foo.md").exists()
+        assert not (dir_ / "foo-2.md").exists()
