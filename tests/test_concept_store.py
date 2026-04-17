@@ -182,3 +182,56 @@ class TestConceptStoreSlugCollisions:
         dir_ = tmp_path / "concepts"
         assert (dir_ / "foo.md").exists()
         assert not (dir_ / "foo-2.md").exists()
+
+
+class TestConceptStoreSourcesValidation:
+    def test_empty_sources_fails(self, tmp_path):
+        from agentic_cli.knowledge_base.concepts import ConceptStore
+
+        store = ConceptStore(tmp_path / "concepts")
+        result = store.write(title="X", body="b", sources=[])
+
+        assert result["success"] is False
+        assert "at least one valid source" in result["error"]
+        assert not (tmp_path / "concepts" / "x.md").exists()
+
+    def test_invalid_ids_dropped_with_warning(self, tmp_path):
+        from agentic_cli.knowledge_base.concepts import ConceptStore
+
+        store = ConceptStore(tmp_path / "concepts")
+        known = {"good-id-1", "good-id-2"}
+        result = store.write(
+            title="X",
+            body="b",
+            sources=["good-id-1", "bad-id", "good-id-2", "also-bad"],
+            valid_ids_check=lambda i: i in known,
+        )
+
+        assert result["success"] is True
+        assert result["invalid_sources"] == ["bad-id", "also-bad"]
+        read = store.read(result["slug"])
+        assert read["sources"] == ["good-id-1", "good-id-2"]
+
+    def test_all_invalid_fails(self, tmp_path):
+        from agentic_cli.knowledge_base.concepts import ConceptStore
+
+        store = ConceptStore(tmp_path / "concepts")
+        result = store.write(
+            title="X", body="b", sources=["bad1", "bad2"],
+            valid_ids_check=lambda i: False,
+        )
+
+        assert result["success"] is False
+        assert result["invalid_sources"] == ["bad1", "bad2"]
+
+    def test_duplicate_sources_deduplicated(self, tmp_path):
+        from agentic_cli.knowledge_base.concepts import ConceptStore
+
+        store = ConceptStore(tmp_path / "concepts")
+        result = store.write(
+            title="X", body="b", sources=["a", "a", "b", "a"],
+        )
+
+        assert result["success"] is True
+        read = store.read(result["slug"])
+        assert read["sources"] == ["a", "b"]
