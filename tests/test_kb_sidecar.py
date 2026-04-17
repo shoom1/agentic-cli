@@ -287,3 +287,38 @@ class TestBackfillSidecars:
 
         assert n == 0
         assert sidecar.read_text() == original
+
+    async def test_backfill_serializes_with_per_doc_lock(self, kb):
+        """Two concurrent backfills must not double-LLM the same doc."""
+        import asyncio
+        from agentic_cli.workflow.service_registry import (
+            set_service_registry,
+            LLM_SUMMARIZER,
+        )
+
+        d1 = kb.ingest_document(content="body one", title="One", source_type=SourceType.USER)
+        kb._sidecar_path(d1.id).unlink()
+
+        call_count = {"n": 0}
+
+        class CountingSummarizer:
+            async def summarize(self, content, prompt):
+                call_count["n"] += 1
+                await asyncio.sleep(0.05)
+                return "SUMMARY: ok."
+
+        token = set_service_registry({LLM_SUMMARIZER: CountingSummarizer()})
+        try:
+            results = await asyncio.gather(
+                kb.backfill_sidecars(),
+                kb.backfill_sidecars(),
+            )
+        finally:
+            token.var.reset(token)
+
+        # One backfill writes 1; the other sees the file already exists
+        # (either via the outer .exists() check or the inner re-check) and
+        # writes 0. Sum must be exactly 1.
+        assert sum(results) == 1
+        assert call_count["n"] == 1
+        assert kb._sidecar_path(d1.id).exists()

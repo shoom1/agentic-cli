@@ -14,6 +14,7 @@ Auto-migrated to v2 on first load.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import threading
 import time
@@ -117,8 +118,7 @@ class KnowledgeBaseManager:
             vector_store: Optional pre-configured vector store.
         """
         self._lock = threading.Lock()
-        import asyncio as _asyncio
-        self._sidecar_locks: dict[str, _asyncio.Lock] = {}
+        self._sidecar_locks: dict[str, asyncio.Lock] = {}
         self._settings = settings
         self._use_mock = use_mock
 
@@ -960,6 +960,10 @@ class KnowledgeBaseManager:
         sidecar file, and writes it. Returns the count of sidecars written.
         Existing sidecars are not touched.
 
+        Per-doc locks (``_sidecar_locks``) coordinate with the lazy
+        sidecar-generation path in ``kb_read`` (Task 8): concurrent
+        backfill + read on the same doc never double-LLM.
+
         Skips ingest_log/index updates — they're already current; only
         the sidecar files are out of date.
         """
@@ -967,9 +971,15 @@ class KnowledgeBaseManager:
         for doc in list(self._documents.values()):
             if self._sidecar_path(doc.id).exists():
                 continue
-            payload = await self.generate_sidecar_payload(
-                doc.content, title=doc.title
-            )
-            self._write_sidecar(doc, payload)
-            written += 1
+            lock = self._sidecar_locks.setdefault(doc.id, asyncio.Lock())
+            async with lock:
+                # Double-check inside the lock — another task may have
+                # written it (e.g. lazy kb_read fallback in Task 8).
+                if self._sidecar_path(doc.id).exists():
+                    continue
+                payload = await self.generate_sidecar_payload(
+                    doc.content, title=doc.title
+                )
+                self._write_sidecar(doc, payload)
+                written += 1
         return written
