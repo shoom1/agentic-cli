@@ -32,10 +32,12 @@ from agentic_cli.tools.knowledge_tools import (
     kb_ingest,
     kb_read,
     kb_list,
+    kb_write_concept,
+    kb_search_concepts,
 )
 
-KB_READER_TOOLS = [kb_search, kb_read, kb_list]
-KB_WRITER_TOOLS = [*KB_READER_TOOLS, kb_ingest]
+KB_READER_TOOLS = [kb_search, kb_read, kb_list, kb_search_concepts]
+KB_WRITER_TOOLS = [*KB_READER_TOOLS, kb_ingest, kb_write_concept]
 from agentic_cli.tools.arxiv_tools import (
     search_arxiv,
     fetch_arxiv_paper,
@@ -91,6 +93,8 @@ __all__ = [
     "kb_ingest",
     "kb_read",
     "kb_list",
+    "kb_write_concept",
+    "kb_search_concepts",
     "KB_READER_TOOLS",
     "KB_WRITER_TOOLS",
     "search_arxiv",

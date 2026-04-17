@@ -47,20 +47,30 @@ def test_open_document_dropped():
     assert not hasattr(t, "open_document")
 
 
-def test_reader_bundle_contents():
+def test_kb_write_concept_exported():
+    from agentic_cli.tools import kb_write_concept  # noqa: F401
+
+
+def test_kb_search_concepts_exported():
+    from agentic_cli.tools import kb_search_concepts  # noqa: F401
+
+
+def test_reader_bundle_includes_search_concepts():
     from agentic_cli.tools import (
         KB_READER_TOOLS,
         kb_search,
         kb_read,
         kb_list,
+        kb_search_concepts,
     )
-    assert KB_READER_TOOLS == [kb_search, kb_read, kb_list]
+    assert KB_READER_TOOLS == [kb_search, kb_read, kb_list, kb_search_concepts]
 
 
-def test_writer_bundle_contents():
+def test_writer_bundle_includes_write_concept():
     from agentic_cli.tools import (
         KB_WRITER_TOOLS,
         KB_READER_TOOLS,
         kb_ingest,
+        kb_write_concept,
     )
-    assert KB_WRITER_TOOLS == [*KB_READER_TOOLS, kb_ingest]
+    assert KB_WRITER_TOOLS == [*KB_READER_TOOLS, kb_ingest, kb_write_concept]
