@@ -269,6 +269,7 @@ class BaseWorkflowManager(ABC):
         "kb_ingest": "kb_manager",
         "kb_read": "kb_manager",
         "kb_list": "kb_manager",
+        "kb_write_concept": "kb_manager",
         "web_fetch": "llm_summarizer",
         "sandbox_execute": "sandbox_manager",
         "save_reflection": "reflection_store",
