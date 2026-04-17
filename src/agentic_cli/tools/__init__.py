@@ -33,6 +33,9 @@ from agentic_cli.tools.knowledge_tools import (
     kb_read,
     kb_list,
 )
+
+KB_READER_TOOLS = [kb_search, kb_read, kb_list]
+KB_WRITER_TOOLS = [*KB_READER_TOOLS, kb_ingest]
 from agentic_cli.tools.arxiv_tools import (
     search_arxiv,
     fetch_arxiv_paper,
@@ -88,6 +91,8 @@ __all__ = [
     "kb_ingest",
     "kb_read",
     "kb_list",
+    "KB_READER_TOOLS",
+    "KB_WRITER_TOOLS",
     "search_arxiv",
     "fetch_arxiv_paper",
     "execute_python",

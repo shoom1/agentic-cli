@@ -45,3 +45,22 @@ def test_unified_search_dropped():
 def test_open_document_dropped():
     import agentic_cli.tools as t
     assert not hasattr(t, "open_document")
+
+
+def test_reader_bundle_contents():
+    from agentic_cli.tools import (
+        KB_READER_TOOLS,
+        kb_search,
+        kb_read,
+        kb_list,
+    )
+    assert KB_READER_TOOLS == [kb_search, kb_read, kb_list]
+
+
+def test_writer_bundle_contents():
+    from agentic_cli.tools import (
+        KB_WRITER_TOOLS,
+        KB_READER_TOOLS,
+        kb_ingest,
+    )
+    assert KB_WRITER_TOOLS == [*KB_READER_TOOLS, kb_ingest]
