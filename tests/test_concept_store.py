@@ -400,3 +400,14 @@ class TestConceptStoreSearch:
         store.write(title="Has a space in body", body="body text", sources=["a"])
         assert store.search("   ") == []
         assert store.search("\t\n ") == []
+
+
+class TestManagerConceptsProperty:
+    def test_manager_exposes_concepts_pointing_at_kb_dir(self, tmp_path):
+        from tests.test_knowledge_tools import _make_kb
+
+        kb = _make_kb(tmp_path)
+        store = kb.concepts
+        assert store.base_dir == kb.kb_dir / "concepts"
+        # Idempotent — returns the same instance
+        assert kb.concepts is store

@@ -121,6 +121,7 @@ class KnowledgeBaseManager:
         self._lock = threading.Lock()
         self._sidecar_locks: dict[str, asyncio.Lock] = {}
         self._backfill_running: bool = False
+        self._concepts_store: "ConceptStore | None" = None
         self._settings = settings
         self._use_mock = use_mock
 
@@ -188,6 +189,13 @@ class KnowledgeBaseManager:
         except Exception:
             logger.debug("bm25_init_skipped")
 
+    @property
+    def concepts(self) -> "ConceptStore":
+        """Lazy-loaded ConceptStore pointed at ``<kb_dir>/concepts/``."""
+        if self._concepts_store is None:
+            from agentic_cli.knowledge_base.concepts import ConceptStore
+            self._concepts_store = ConceptStore(self.kb_dir / "concepts")
+        return self._concepts_store
 
     def _create_services(
         self, embedding_model: str, batch_size: int, embedding_device: str = "auto"
