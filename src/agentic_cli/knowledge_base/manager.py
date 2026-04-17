@@ -904,6 +904,7 @@ class KnowledgeBaseManager:
             for chunk_id in chunk_ids:
                 self._chunks.pop(chunk_id, None)
             del self._documents[doc_id]
+            self._sidecar_locks.pop(doc_id, None)
 
             # Persist
             self._delete_document_content(doc_id)
@@ -942,15 +943,18 @@ class KnowledgeBaseManager:
     def clear(self) -> None:
         """Clear all documents from the knowledge base."""
         with self._lock:
-            # Delete per-document content files
+            # Delete per-document content files and sidecars
             for doc_id in list(self._documents):
                 self._delete_document_content(doc_id)
+                self._delete_sidecar(doc_id)
 
             self._documents = {}
             self._chunks = {}
+            self._sidecar_locks.clear()
             self._vector_store.clear()
             self._save_metadata()
             self._vector_store.save()
+            self._rebuild_index_md()
 
     async def backfill_sidecars(self) -> int:
         """Generate missing sidecars for all documents in the KB.

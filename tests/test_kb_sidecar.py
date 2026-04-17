@@ -444,3 +444,44 @@ class TestKbReadLazySidecar:
         assert kb._sidecar_path(doc.id).exists()
         # The PDF text should have been the input to the LLM
         assert "EXTRACTED PDF TEXT" in captured["content"]
+
+
+class TestClearCleansArtifacts:
+    @pytest.fixture
+    def kb(self, tmp_path):
+        return _make_kb(tmp_path)
+
+    def test_clear_removes_sidecars(self, kb):
+        d1 = kb.ingest_document(content="a", title="One", source_type=SourceType.USER)
+        d2 = kb.ingest_document(content="b", title="Two", source_type=SourceType.USER)
+        assert kb._sidecar_path(d1.id).exists()
+        assert kb._sidecar_path(d2.id).exists()
+
+        kb.clear()
+
+        assert not kb._sidecar_path(d1.id).exists()
+        assert not kb._sidecar_path(d2.id).exists()
+
+    def test_clear_rebuilds_empty_index_md(self, kb):
+        kb.ingest_document(content="a", title="One", source_type=SourceType.USER)
+        kb.clear()
+        text = (kb.kb_dir / "index.md").read_text()
+        assert "0 documents" in text
+
+
+class TestDeleteCleansLockDict:
+    @pytest.fixture
+    def kb(self, tmp_path):
+        return _make_kb(tmp_path)
+
+    async def test_delete_removes_lock_entry(self, kb):
+        from agentic_cli.tools.knowledge_tools import _read_document_from_kbs
+
+        d = kb.ingest_document(content="body", title="X", source_type=SourceType.USER)
+        # Force a lazy-read to populate the lock dict
+        kb._sidecar_path(d.id).unlink()
+        await _read_document_from_kbs(kb, None, d.id)
+        assert d.id in kb._sidecar_locks
+
+        kb.delete_document(d.id)
+        assert d.id not in kb._sidecar_locks
