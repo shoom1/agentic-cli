@@ -508,6 +508,70 @@ def _list_documents_in_kbs(
     }
 
 
+async def _write_concept_with_kb(
+    kb_manager,
+    user_kb_manager,
+    title: str,
+    body: str,
+    sources: list[str],
+    slug: str = "",
+) -> dict[str, Any]:
+    """Shared implementation for kb_write_concept.
+
+    Writes to the project KB's concepts directory. Source IDs are
+    validated against BOTH KBs (project first, then user if distinct) so
+    cross-KB citations work.
+    """
+    if kb_manager is None:
+        return {"success": False, "error": "kb manager not available"}
+
+    def _is_valid_id(doc_id: str) -> bool:
+        if kb_manager.get_document(doc_id) is not None:
+            return True
+        if user_kb_manager is not None and user_kb_manager is not kb_manager:
+            if user_kb_manager.get_document(doc_id) is not None:
+                return True
+        return False
+
+    try:
+        return kb_manager.concepts.write(
+            title=title,
+            body=body,
+            sources=sources,
+            slug=slug,
+            valid_ids_check=_is_valid_id,
+        )
+    except Exception as e:
+        return {"success": False, "error": f"write_concept failed: {e}"}
+
+
+async def _search_concepts_with_kb(
+    kb_manager,
+    user_kb_manager,
+    query: str,
+    limit: int = 10,
+) -> dict[str, Any]:
+    """Shared implementation for kb_search_concepts.
+
+    Searches the project KB's concepts directory. Async signature
+    matches the other tool helpers even though the underlying
+    implementation is synchronous grep.
+    """
+    if kb_manager is None:
+        return {"success": False, "error": "kb manager not available"}
+
+    try:
+        hits = kb_manager.concepts.search(query, limit=limit)
+    except Exception as e:
+        return {"success": False, "error": f"search_concepts failed: {e}"}
+
+    return {
+        "success": True,
+        "concepts": hits,
+        "count": len(hits),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Registry-bound helper (back-compat for tests/callers that don't have
 # explicit KB handles)
@@ -672,5 +736,69 @@ def kb_list(
         return {"success": False, "error": "kb manager not available"}
     user_kb = get_service(USER_KB_MANAGER)
     return _list_documents_in_kbs(kb, user_kb, query, source_type, limit)
+
+
+@register_tool(
+    category=ToolCategory.KNOWLEDGE,
+    permission_level=PermissionLevel.CAUTION,
+    description=(
+        "Save an agent-curated concept page summarizing what the KB "
+        "knows about a topic. Pages live at concepts/{slug}.md and are "
+        "agent-writable, grep-searchable, and human-readable. `sources` "
+        "must cite at least one valid document ID from the KB."
+    ),
+)
+async def kb_write_concept(
+    title: str,
+    body: str,
+    sources: list[str],
+    slug: str = "",
+) -> dict[str, Any]:
+    """Create or overwrite a concept page.
+
+    Args:
+        title: Human-readable concept title. Used to derive the slug
+            when ``slug`` is empty.
+        body: Markdown body. Free-form; no required sections.
+        sources: Document IDs this concept cites. Must include at least
+            one valid ID (verified against the KB).
+        slug: Optional explicit slug. If given and already exists, the
+            existing concept is overwritten (body replaced, sources
+            merged as union). If empty, auto-generated from title and
+            collision-suffixed on conflict.
+    """
+    kb = get_service(KB_MANAGER)
+    if kb is None:
+        return {"success": False, "error": "kb manager not available"}
+    user_kb = get_service(USER_KB_MANAGER)
+    return await _write_concept_with_kb(
+        kb, user_kb, title=title, body=body, sources=sources, slug=slug,
+    )
+
+
+@register_tool(
+    category=ToolCategory.KNOWLEDGE,
+    permission_level=PermissionLevel.SAFE,
+    description=(
+        "Search concept pages (agent-curated synthesis notes). "
+        "Case-insensitive substring match; title hits rank above body "
+        "hits. Use when asking 'what does the KB know about X?'."
+    ),
+)
+async def kb_search_concepts(
+    query: str,
+    limit: int = 10,
+) -> dict[str, Any]:
+    """Search concept pages.
+
+    Args:
+        query: Case-insensitive substring.
+        limit: Max hits to return.
+    """
+    kb = get_service(KB_MANAGER)
+    if kb is None:
+        return {"success": False, "error": "kb manager not available"}
+    user_kb = get_service(USER_KB_MANAGER)
+    return await _search_concepts_with_kb(kb, user_kb, query=query, limit=limit)
 
 

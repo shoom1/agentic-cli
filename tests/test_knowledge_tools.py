@@ -55,6 +55,7 @@ def _make_kb(tmp_path):
     manager._chunks = {}
     manager._sidecar_locks = {}
     manager._backfill_running = False
+    manager._concepts_store = None
     return manager
 
 

@@ -193,10 +193,14 @@ class TestMakeMemoryTools:
 class TestMakeKBTools:
     """Tests for make_kb_tools factory."""
 
-    def test_returns_four_functions(self):
-        # We don't need a real KB manager for checking the return value
+    def test_returns_six_functions(self):
+        """With concept tools added in Phase 2, make_kb_tools returns 6."""
+        from agentic_cli.tools.factories import make_kb_tools
         tools = make_kb_tools(kb_manager=object())
-        assert len(tools) == 4
+        assert len(tools) == 6
+        names = [t.__name__ for t in tools]
+        assert "kb_write_concept" in names
+        assert "kb_search_concepts" in names
 
     def test_function_names(self):
         tools = make_kb_tools(kb_manager=object())
@@ -206,6 +210,8 @@ class TestMakeKBTools:
             "kb_ingest",
             "kb_read",
             "kb_list",
+            "kb_write_concept",
+            "kb_search_concepts",
         ]
 
     def test_functions_have_docstrings(self):
