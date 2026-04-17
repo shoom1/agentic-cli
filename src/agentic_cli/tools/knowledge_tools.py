@@ -1,10 +1,10 @@
 """Knowledge base tools for agentic workflows.
 
 Provides tools for managing documents in the unified knowledge base:
-- ingest_document: Ingest text, files, or URLs into KB
-- search_knowledge_base: Semantic search across all documents
+- kb_ingest: Ingest text, files, or URLs into KB
+- kb_search: Semantic search across all documents
 - read_document: Extract and return text from a stored document
-- list_documents: List documents with summaries
+- kb_list: List documents with summaries
 - open_document: Open a document's file in the system viewer
 
 Each tool comes in two flavors that share a single implementation:
@@ -74,7 +74,7 @@ def _build_document_item(d, scope: str) -> dict[str, Any]:
         scope: "project" or "user".
 
     Returns:
-        Dict with document metadata suitable for list_documents output.
+        Dict with document metadata suitable for kb_list output.
     """
     item: dict[str, Any] = {
         "id": d.id,
@@ -212,7 +212,7 @@ def _search_kbs(
     filters: str = "",
     top_k: int = 10,
 ) -> dict[str, Any]:
-    """Shared implementation for search_knowledge_base.
+    """Shared implementation for kb_search.
 
     Caller must pass a non-None ``kb_manager`` — registry-based wrappers
     handle the missing-kb error case before reaching this helper.
@@ -264,7 +264,7 @@ async def _ingest_document_with_kb(
     abstract: str = "",
     tags: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Shared implementation for ingest_document.
+    """Shared implementation for kb_ingest.
 
     Handles all three input modes (text content, local file, remote URL),
     PDF text extraction, source type auto-detection, and ingestion into
@@ -432,7 +432,7 @@ def _list_documents_in_kbs(
     source_type: str = "",
     limit: int = 20,
 ) -> dict[str, Any]:
-    """Shared implementation for list_documents."""
+    """Shared implementation for kb_list."""
     from agentic_cli.knowledge_base.models import SourceType as ST
 
     # Parse source_type filter
@@ -590,7 +590,7 @@ def _find_document_in_kbs(doc_id_or_title: str) -> tuple:
     permission_level=PermissionLevel.SAFE,
     description="Search the local knowledge base for relevant documents using semantic similarity. Use this when you need to find previously ingested papers, notes, or documents.",
 )
-def search_knowledge_base(
+def kb_search(
     query: str,
     filters: str = "",
     top_k: int = 10,
@@ -622,7 +622,7 @@ def search_knowledge_base(
         "Valid source_type values: arxiv, ssrn, web, internal, user, local."
     ),
 )
-async def ingest_document(
+async def kb_ingest(
     content: str = "",
     url_or_path: str = "",
     title: str = "",
@@ -701,7 +701,7 @@ def read_document(
     permission_level=PermissionLevel.SAFE,
     description="List documents in the knowledge base with summaries. Filter by query or source type. Returns summaries, not full content.",
 )
-def list_documents(
+def kb_list(
     query: str = "",
     source_type: str = "",
     limit: int = 20,

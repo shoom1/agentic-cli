@@ -28,10 +28,10 @@ from agentic_cli.tools.glob_tool import glob, list_dir
 from agentic_cli.tools.file_write import write_file, edit_file
 
 from agentic_cli.tools.knowledge_tools import (
-    search_knowledge_base,
-    ingest_document,
+    kb_search,
+    kb_ingest,
     read_document,
-    list_documents,
+    kb_list,
     open_document,
     unified_search,
 )
@@ -86,10 +86,10 @@ __all__ = [
     # Search (ADK built-in - note: can't mix with function calling)
     "google_search_tool",
     # Standard tool functions (ready to use with agents)
-    "search_knowledge_base",
-    "ingest_document",
+    "kb_search",
+    "kb_ingest",
     "read_document",
-    "list_documents",
+    "kb_list",
     "open_document",
     "unified_search",
     "search_arxiv",

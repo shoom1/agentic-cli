@@ -319,7 +319,7 @@ class TestFetchArxivPaper:
 class TestIngestDocument:
     def test_basic(self):
         result = {"success": True, "document_id": "abc", "title": "Paper", "chunks_created": 5}
-        assert format_tool_summary("ingest_document", result) == "Ingested 'Paper' (5 chunks)"
+        assert format_tool_summary("kb_ingest", result) == "Ingested 'Paper' (5 chunks)"
 
 
 class TestReadDocument:
@@ -335,15 +335,15 @@ class TestReadDocument:
 class TestListDocuments:
     def test_multiple(self):
         result = {"success": True, "documents": [{}, {}], "count": 2}
-        assert format_tool_summary("list_documents", result) == "2 documents"
+        assert format_tool_summary("kb_list", result) == "2 documents"
 
     def test_single(self):
         result = {"success": True, "documents": [{}], "count": 1}
-        assert format_tool_summary("list_documents", result) == "1 document"
+        assert format_tool_summary("kb_list", result) == "1 document"
 
     def test_zero(self):
         result = {"success": True, "documents": [], "count": 0}
-        assert format_tool_summary("list_documents", result) == "0 documents"
+        assert format_tool_summary("kb_list", result) == "0 documents"
 
 
 class TestOpenDocument:

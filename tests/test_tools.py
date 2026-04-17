@@ -1343,10 +1343,10 @@ class TestToolRegistryConsistency:
             "web_search",
             "web_fetch",
             # Knowledge base (unified document store)
-            "search_knowledge_base",
-            "ingest_document",
+            "kb_search",
+            "kb_ingest",
             "read_document",
-            "list_documents",
+            "kb_list",
             "open_document",
             # ArXiv (metadata only)
             "search_arxiv",
@@ -1389,7 +1389,7 @@ class TestToolRegistryConsistency:
 
         registry = get_registry()
 
-        caution_tools = ["write_file", "edit_file", "ingest_document"]
+        caution_tools = ["write_file", "edit_file", "kb_ingest"]
 
         for tool_name in caution_tools:
             tool = registry.get(tool_name)
@@ -1406,8 +1406,8 @@ class TestToolRegistryConsistency:
 
         safe_tools = [
             "read_file", "diff_compare", "grep", "glob", "list_dir",
-            "web_search", "web_fetch", "search_knowledge_base",
-            "read_document", "list_documents",
+            "web_search", "web_fetch", "kb_search",
+            "read_document", "kb_list",
             "search_arxiv", "fetch_arxiv_paper",
             "ask_clarification",
             "save_memory", "search_memory",
@@ -1497,7 +1497,7 @@ class TestToolRegistryConsistency:
 
         # File ops: 7 (read_file, diff_compare, grep, glob, list_dir, write_file, edit_file)
         # Web/Network: 2 (web_search, web_fetch)
-        # Knowledge: 8 (search_kb, ingest_document, read_document, list_documents, open_document, search_arxiv, fetch_arxiv_paper, ingest_arxiv_paper)
+        # Knowledge: 8 (kb_search, kb_ingest, read_document, kb_list, open_document, search_arxiv, fetch_arxiv_paper, ingest_arxiv_paper)
         # Execution: 2 (execute_python, shell_executor)
         # Interaction: 1 (ask_clarification)
         # Memory: 2 (save_memory, search_memory)

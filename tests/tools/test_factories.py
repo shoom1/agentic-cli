@@ -202,10 +202,10 @@ class TestMakeKBTools:
         tools = make_kb_tools(kb_manager=object())
         names = [t.__name__ for t in tools]
         assert names == [
-            "search_knowledge_base",
-            "ingest_document",
+            "kb_search",
+            "kb_ingest",
             "read_document",
-            "list_documents",
+            "kb_list",
             "open_document",
         ]
 
