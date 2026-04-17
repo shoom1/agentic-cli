@@ -155,31 +155,28 @@ def make_kb_tools(kb_manager, user_kb_manager=None) -> list[Callable]:
         user_kb_manager: Optional user-scoped KnowledgeBaseManager.
 
     Returns:
-        [search_knowledge_base, ingest_document, read_document,
-         list_documents, open_document]
+        [kb_search, kb_ingest, kb_read, kb_list]
     """
     from agentic_cli.tools.knowledge_tools import (
         READ_DOCUMENT_MAX_CHARS,
         _ingest_document_with_kb,
         _list_documents_in_kbs,
-        _open_document_in_kbs,
         _read_document_from_kbs,
         _search_kbs,
-        ingest_document as _orig_ingest,
-        list_documents as _orig_list,
-        open_document as _orig_open,
-        read_document as _orig_read,
-        search_knowledge_base as _orig_search,
+        kb_ingest as _orig_ingest,
+        kb_list as _orig_list,
+        kb_read as _orig_read,
+        kb_search as _orig_search,
     )
 
-    def search_knowledge_base(
+    def kb_search(
         query: str,
         filters: str = "",
         top_k: int = 10,
     ) -> dict[str, Any]:
         return _search_kbs(kb_manager, user_kb_manager, query, filters, top_k)
 
-    async def ingest_document(
+    async def kb_ingest(
         content: str = "",
         url_or_path: str = "",
         title: str = "",
@@ -201,15 +198,16 @@ def make_kb_tools(kb_manager, user_kb_manager=None) -> list[Callable]:
             tags=tags,
         )
 
-    def read_document(
+    async def kb_read(
         doc_id_or_title: str,
+        full: bool = False,
         max_chars: int = READ_DOCUMENT_MAX_CHARS,
     ) -> dict[str, Any]:
-        return _read_document_from_kbs(
-            kb_manager, user_kb_manager, doc_id_or_title, max_chars
+        return await _read_document_from_kbs(
+            kb_manager, user_kb_manager, doc_id_or_title, full, max_chars
         )
 
-    def list_documents(
+    def kb_list(
         query: str = "",
         source_type: str = "",
         limit: int = 20,
@@ -218,21 +216,16 @@ def make_kb_tools(kb_manager, user_kb_manager=None) -> list[Callable]:
             kb_manager, user_kb_manager, query, source_type, limit
         )
 
-    def open_document(doc_id_or_title: str) -> dict[str, Any]:
-        return _open_document_in_kbs(kb_manager, user_kb_manager, doc_id_or_title)
+    kb_search.__name__ = "kb_search"
+    kb_search.__doc__ = _orig_search.__doc__
+    kb_ingest.__name__ = "kb_ingest"
+    kb_ingest.__doc__ = _orig_ingest.__doc__
+    kb_read.__name__ = "kb_read"
+    kb_read.__doc__ = _orig_read.__doc__
+    kb_list.__name__ = "kb_list"
+    kb_list.__doc__ = _orig_list.__doc__
 
-    search_knowledge_base.__name__ = "search_knowledge_base"
-    search_knowledge_base.__doc__ = _orig_search.__doc__
-    ingest_document.__name__ = "ingest_document"
-    ingest_document.__doc__ = _orig_ingest.__doc__
-    read_document.__name__ = "read_document"
-    read_document.__doc__ = _orig_read.__doc__
-    list_documents.__name__ = "list_documents"
-    list_documents.__doc__ = _orig_list.__doc__
-    open_document.__name__ = "open_document"
-    open_document.__doc__ = _orig_open.__doc__
-
-    return [search_knowledge_base, ingest_document, read_document, list_documents, open_document]
+    return [kb_search, kb_ingest, kb_read, kb_list]
 
 
 # ---------------------------------------------------------------------------

@@ -14,7 +14,9 @@ Auto-migrated to v2 on first load.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import re
 import threading
 import time
 from datetime import datetime
@@ -31,7 +33,7 @@ from agentic_cli.knowledge_base.models import (
 from agentic_cli.knowledge_base.vector_store import VectorStore
 from agentic_cli.constants import truncate
 from agentic_cli.logging import Loggers
-from agentic_cli.file_utils import atomic_write_json
+from agentic_cli.file_utils import atomic_write_json, atomic_write_text
 
 if TYPE_CHECKING:
     from agentic_cli.config import BaseSettings
@@ -40,6 +42,12 @@ logger = Loggers.knowledge_base()
 
 # Current persistence format version
 _FORMAT_VERSION = 3
+
+
+def _utc_iso_now() -> str:
+    """Return current UTC time as ISO-8601 with a trailing 'Z'."""
+    from datetime import timezone
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def matches_document_filters(doc: Document, filters: dict[str, Any]) -> bool:
@@ -111,6 +119,8 @@ class KnowledgeBaseManager:
             vector_store: Optional pre-configured vector store.
         """
         self._lock = threading.Lock()
+        self._sidecar_locks: dict[str, asyncio.Lock] = {}
+        self._backfill_running: bool = False
         self._settings = settings
         self._use_mock = use_mock
 
@@ -123,9 +133,11 @@ class KnowledgeBaseManager:
             if settings:
                 embedding_model = settings.embedding_model
                 batch_size = settings.embedding_batch_size
+                embedding_device = settings.embedding_device
             else:
                 embedding_model = "all-MiniLM-L6-v2"
                 batch_size = 32
+                embedding_device = "auto"
         elif settings:
             # Get paths from settings
             self.kb_dir = settings.knowledge_base_dir
@@ -133,6 +145,7 @@ class KnowledgeBaseManager:
             self.embeddings_dir = settings.knowledge_base_embeddings_dir
             embedding_model = settings.embedding_model
             batch_size = settings.embedding_batch_size
+            embedding_device = settings.embedding_device
         else:
             # Fallback defaults for standalone use
             self.kb_dir = Path.home() / ".agentic" / "knowledge_base"
@@ -140,6 +153,7 @@ class KnowledgeBaseManager:
             self.embeddings_dir = self.kb_dir / "embeddings"
             embedding_model = "all-MiniLM-L6-v2"
             batch_size = 32
+            embedding_device = "auto"
 
         self.metadata_path = self.kb_dir / "metadata.json"
         self.files_dir = self.kb_dir / "files"
@@ -156,7 +170,7 @@ class KnowledgeBaseManager:
             self._vector_store = vector_store
         else:
             self._embedding_service, self._vector_store = self._create_services(
-                embedding_model, batch_size
+                embedding_model, batch_size, embedding_device
             )
 
         # Load document metadata
@@ -176,7 +190,7 @@ class KnowledgeBaseManager:
 
 
     def _create_services(
-        self, embedding_model: str, batch_size: int
+        self, embedding_model: str, batch_size: int, embedding_device: str = "auto"
     ) -> tuple[Any, Any]:
         """Create embedding service and vector store.
 
@@ -188,6 +202,7 @@ class KnowledgeBaseManager:
                 emb = EmbeddingService(
                     model_name=embedding_model,
                     batch_size=batch_size,
+                    device=embedding_device,
                 )
                 vs = VectorStore(
                     index_path=self.embeddings_dir / "index.faiss",
@@ -255,6 +270,69 @@ class KnowledgeBaseManager:
         if path.exists():
             path.unlink()
 
+    def _sidecar_path(self, doc_id: str) -> Path:
+        return self.documents_dir / f"{doc_id}.md"
+
+    def _write_sidecar(
+        self, doc: Document, payload: dict[str, Any] | None = None
+    ) -> Path:
+        """Write the per-document markdown sidecar.
+
+        If ``payload`` is None, falls back to a summary-only payload built
+        from ``doc.summary``. Idempotent — overwrites existing sidecar.
+        """
+        from agentic_cli.knowledge_base.sidecar import render_sidecar_markdown
+
+        if payload is None:
+            payload = {"summary": doc.summary or "", "claims": [], "entities": {}}
+        path = self._sidecar_path(doc.id)
+        atomic_write_text(path, render_sidecar_markdown(doc, payload))
+        return path
+
+    def _delete_sidecar(self, doc_id: str) -> None:
+        path = self._sidecar_path(doc_id)
+        if path.exists():
+            path.unlink()
+
+    def _index_md_path(self) -> Path:
+        return self.kb_dir / "index.md"
+
+    def _rebuild_index_md(self) -> None:
+        """Rebuild index.md from current in-memory documents."""
+        from agentic_cli.knowledge_base.sidecar import render_index_md
+
+        text = render_index_md(
+            list(self._documents.values()),
+            updated_at_iso=_utc_iso_now(),
+        )
+        atomic_write_text(self._index_md_path(), text)
+
+    def _ingest_log_path(self) -> Path:
+        return self.kb_dir / "ingest_log.md"
+
+    def _append_ingest_log(self, action: str, doc: Document) -> None:
+        """Append one audit line to ingest_log.md."""
+        ts = _utc_iso_now()
+        ident = doc.metadata.get("arxiv_id") if doc.metadata else None
+        title_quoted = f'"{doc.title}"'
+        parts = [
+            "-",
+            ts,
+            "·",
+            action,
+            "·",
+            doc.source_type.value,
+        ]
+        if ident:
+            parts += ["·", ident]
+        parts += ["·", title_quoted]
+        if action == "ingest":
+            parts += ["·", f"{len(doc.chunks)} chunks"]
+        line = " ".join(parts) + "\n"
+        path = self._ingest_log_path()
+        with path.open("a", encoding="utf-8") as f:
+            f.write(line)
+
     def _load_metadata(self) -> None:
         """Load document metadata from disk.
 
@@ -300,6 +378,10 @@ class KnowledgeBaseManager:
                     for doc in self._documents.values():
                         self._save_document_content(doc)
                 self._save_metadata()
+
+            # Ensure index.md exists for legacy KBs (no extra cost; ~ms)
+            if self._documents and not self._index_md_path().exists():
+                self._rebuild_index_md()
 
         except (json.JSONDecodeError, KeyError) as e:
             # Log error but continue with empty state
@@ -434,6 +516,130 @@ class KnowledgeBaseManager:
 
         return self._truncate_summary(content)
 
+    _SIDECAR_PROMPT_TEMPLATE = (
+        "Extract a structured payload from the document below. "
+        "Return PLAIN TEXT in exactly this layout, with section headers "
+        "in ALL CAPS followed by a colon:\n\n"
+        "SUMMARY:\n"
+        "<3-5 paragraph synthesis of the document, roughly 1500-3000 "
+        "chars total. Use blank lines between paragraphs. Cover, in "
+        "order: (1) the problem the work addresses and why it matters, "
+        "(2) the technical approach / methodology with enough detail "
+        "to convey how it works, (3) the main results with concrete "
+        "numbers or outcomes, (4) limitations or open questions, and "
+        "(5) how this fits into the broader landscape. Write for a "
+        "reader who will use this instead of re-reading the paper.>\n\n"
+        "CLAIMS:\n"
+        "- <one specific claim with numbers or concrete evidence>\n"
+        "- <one specific claim with numbers or concrete evidence>\n"
+        "- <aim for 5-10 claims, each standalone and specific>\n\n"
+        "ENTITIES:\n"
+        "<KindLabel>: <comma-separated names>\n"
+        "<KindLabel>: <comma-separated names>\n"
+        "Use kind labels like Models, Datasets, Methods, Authors, Tools, "
+        "Organizations as relevant; be exhaustive within each kind. "
+        "Omit any section that has no real content.\n\n"
+        "STRICT OUTPUT RULES:\n"
+        "- No preamble, no meta-commentary, no thinking trace.\n"
+        "- No markdown bold/italic on the SUMMARY/CLAIMS/ENTITIES headers.\n"
+        "- Start your response directly with 'SUMMARY:'.\n"
+        "- Always emit all three sections when content supports them.\n"
+        "- The summary is prose (paragraphs), not a bullet list.\n\n"
+        "Title: {title}\n\n"
+        "Content:\n---\n{content}\n---"
+    )
+
+    async def generate_sidecar_payload(
+        self, content: str, title: str = ""
+    ) -> dict[str, Any]:
+        """Generate the structured payload for a document sidecar.
+
+        Returns a dict with keys ``summary`` (str), ``claims`` (list[str]),
+        and ``entities`` (dict[str, list[str]]). Falls back to
+        ``{summary: truncate(content), claims: [], entities: {}}`` if no
+        summarizer is registered or the LLM call fails.
+        """
+        fallback = {
+            "summary": self._truncate_summary(content),
+            "claims": [],
+            "entities": {},
+        }
+        if not content:
+            return fallback
+
+        try:
+            from agentic_cli.workflow.service_registry import (
+                get_service,
+                LLM_SUMMARIZER,
+            )
+
+            summarizer = get_service(LLM_SUMMARIZER)
+            if summarizer is None:
+                return fallback
+
+            capped = content[: self._SUMMARY_INPUT_CHAR_LIMIT]
+            prompt = self._SIDECAR_PROMPT_TEMPLATE.format(
+                title=title or "(untitled)",
+                content=capped,
+            )
+            raw = await summarizer.summarize(capped, prompt)
+        except Exception:
+            logger.debug("kb_sidecar_payload_failed", exc_info=True)
+            return fallback
+
+        return self._parse_sidecar_response(raw) or fallback
+
+    # Matches section headers like "SUMMARY:", "**SUMMARY:**", "  Claims :",
+    # tolerating leading whitespace and optional markdown bold wrappers
+    # (including a trailing ``**`` immediately after the colon).
+    _SECTION_HEADER_RE = re.compile(
+        r"^\s*\**\s*(SUMMARY|CLAIMS|ENTITIES)\s*\**\s*:\**",
+        re.MULTILINE | re.IGNORECASE,
+    )
+
+    @classmethod
+    def _parse_sidecar_response(cls, raw: str) -> dict[str, Any] | None:
+        """Parse the SUMMARY/CLAIMS/ENTITIES blocks. Returns None on garbage.
+
+        Sections are split by regex so multi-paragraph summaries preserve
+        their blank-line breaks verbatim. CLAIMS is parsed as a bullet
+        list; ENTITIES as ``Kind: comma, separated, names`` lines.
+        """
+        if not raw:
+            return None
+
+        matches = list(cls._SECTION_HEADER_RE.finditer(raw))
+        if not matches:
+            return None
+
+        sections: dict[str, str] = {}
+        for i, m in enumerate(matches):
+            key = m.group(1).lower()
+            start = m.end()
+            end = matches[i + 1].start() if i + 1 < len(matches) else len(raw)
+            sections[key] = raw[start:end].strip()
+
+        summary = sections.get("summary", "")
+
+        claims: list[str] = []
+        for line in sections.get("claims", "").splitlines():
+            stripped = line.strip().lstrip("-*").strip()
+            if stripped:
+                claims.append(stripped)
+
+        entities: dict[str, list[str]] = {}
+        for line in sections.get("entities", "").splitlines():
+            stripped = line.strip().lstrip("-*").strip()
+            if ":" in stripped:
+                kind, _, names = stripped.partition(":")
+                items = [n.strip() for n in names.split(",") if n.strip()]
+                if items:
+                    entities[kind.strip()] = items
+
+        if not summary and not claims and not entities:
+            return None
+        return {"summary": summary, "claims": claims, "entities": entities}
+
     # ------------------------------------------------------------------
     # Document ingestion
     # ------------------------------------------------------------------
@@ -450,6 +656,7 @@ class KnowledgeBaseManager:
         chunk_size: int = 512,
         chunk_overlap: int = 50,
         summary: str | None = None,
+        sidecar_payload: dict[str, Any] | None = None,
     ) -> Document:
         """Ingest a new document into the knowledge base.
 
@@ -526,6 +733,9 @@ class KnowledgeBaseManager:
 
             # Persist (content in per-doc file, headers in metadata index)
             self._save_document_content(doc)
+            self._write_sidecar(doc, sidecar_payload)
+            self._rebuild_index_md()
+            self._append_ingest_log("ingest", doc)
             self._save_metadata()
             self._vector_store.save()
 
@@ -725,9 +935,13 @@ class KnowledgeBaseManager:
             for chunk_id in chunk_ids:
                 self._chunks.pop(chunk_id, None)
             del self._documents[doc_id]
+            self._sidecar_locks.pop(doc_id, None)
 
             # Persist
             self._delete_document_content(doc_id)
+            self._delete_sidecar(doc_id)
+            self._rebuild_index_md()
+            self._append_ingest_log("delete", doc)
             self._save_metadata()
             self._vector_store.save()
 
@@ -760,12 +974,93 @@ class KnowledgeBaseManager:
     def clear(self) -> None:
         """Clear all documents from the knowledge base."""
         with self._lock:
-            # Delete per-document content files
+            # Delete per-document content files and sidecars
             for doc_id in list(self._documents):
                 self._delete_document_content(doc_id)
+                self._delete_sidecar(doc_id)
 
             self._documents = {}
             self._chunks = {}
+            self._sidecar_locks.clear()
             self._vector_store.clear()
             self._save_metadata()
             self._vector_store.save()
+            self._rebuild_index_md()
+
+    async def backfill_sidecars(
+        self,
+        progress_cb: "Any | None" = None,
+    ) -> int:
+        """Generate missing sidecars for all documents in the KB.
+
+        Iterates the in-memory document set, generates a sidecar payload
+        via the registered LLM summarizer for any doc that doesn't have a
+        sidecar file, and writes it. Returns the count of sidecars written.
+        Existing sidecars are not touched.
+
+        Per-doc locks (``_sidecar_locks``) coordinate with the lazy
+        sidecar-generation path in ``kb_read`` (Task 8): concurrent
+        backfill + read on the same doc never double-LLM.
+
+        Raises ``BackfillAlreadyRunning`` if another ``backfill_sidecars``
+        call is already in progress on this manager. The in-progress flag
+        is set and cleared synchronously (before/after any ``await``), so
+        two concurrent callers cannot both acquire it.
+
+        Skips ingest_log/index updates — they're already current; only
+        the sidecar files are out of date.
+
+        Args:
+            progress_cb: Optional callable ``(done, total, doc)`` invoked
+                BEFORE each per-doc LLM call. ``done`` is zero-indexed
+                (0 on the first doc). Use to surface progress in UIs.
+                Called inside the per-doc lock, so raising from it will
+                abort the backfill.
+
+        Returns:
+            Number of sidecars written this call.
+        """
+        if self._backfill_running:
+            raise BackfillAlreadyRunning(
+                "backfill_sidecars is already running on this KB"
+            )
+        self._backfill_running = True
+        try:
+            written = 0
+            # Snapshot the docs that need backfilling up front so the
+            # progress denominator is stable even if ingest/delete runs
+            # concurrently.
+            todo = [
+                doc
+                for doc in list(self._documents.values())
+                if not self._sidecar_path(doc.id).exists()
+            ]
+            total = len(todo)
+            for i, doc in enumerate(todo):
+                # Guard against delete-during-backfill — doc may have
+                # been removed since the snapshot was taken.
+                if doc.id not in self._documents:
+                    continue
+                lock = self._sidecar_locks.setdefault(doc.id, asyncio.Lock())
+                async with lock:
+                    # Double-check inside the lock — another task may
+                    # have written it (e.g. lazy kb_read fallback).
+                    if self._sidecar_path(doc.id).exists():
+                        continue
+                    if doc.id not in self._documents:
+                        continue
+                    if progress_cb is not None:
+                        progress_cb(i, total, doc)
+                    payload = await self.generate_sidecar_payload(
+                        doc.content, title=doc.title
+                    )
+                    self._write_sidecar(doc, payload)
+                    written += 1
+            return written
+        finally:
+            self._backfill_running = False
+
+
+class BackfillAlreadyRunning(RuntimeError):
+    """Raised when ``backfill_sidecars`` is called while another call is
+    already in progress on the same ``KnowledgeBaseManager``."""

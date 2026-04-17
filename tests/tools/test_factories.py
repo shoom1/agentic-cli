@@ -193,20 +193,19 @@ class TestMakeMemoryTools:
 class TestMakeKBTools:
     """Tests for make_kb_tools factory."""
 
-    def test_returns_five_functions(self):
+    def test_returns_four_functions(self):
         # We don't need a real KB manager for checking the return value
         tools = make_kb_tools(kb_manager=object())
-        assert len(tools) == 5
+        assert len(tools) == 4
 
     def test_function_names(self):
         tools = make_kb_tools(kb_manager=object())
         names = [t.__name__ for t in tools]
         assert names == [
-            "search_knowledge_base",
-            "ingest_document",
-            "read_document",
-            "list_documents",
-            "open_document",
+            "kb_search",
+            "kb_ingest",
+            "kb_read",
+            "kb_list",
         ]
 
     def test_functions_have_docstrings(self):

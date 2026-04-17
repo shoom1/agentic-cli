@@ -1,11 +1,11 @@
 """Tests for knowledge_tools and KnowledgeBaseManager persistence.
 
 Covers:
-- E1: Error handling in ingest_document
-- E2: success key in search_knowledge_base
+- E1: Error handling in kb_ingest
+- E2: success key in kb_search
 - E4: ContextVar-based KB manager lifecycle
 - E5: Content separation and v1→v2→v3 migration
-- New tools: read_document, list_documents, open_document
+- New tools: kb_read, kb_list
 - File storage and summary generation
 - Paper store migration
 """
@@ -53,6 +53,8 @@ def _make_kb(tmp_path):
     )
     manager._documents = {}
     manager._chunks = {}
+    manager._sidecar_locks = {}
+    manager._backfill_running = False
     return manager
 
 
@@ -249,6 +251,8 @@ class TestKBManagerMigrationV1ToV2:
         )
         manager._documents = {}
         manager._chunks = {}
+        manager._sidecar_locks = {}
+        manager._backfill_running = False
         return manager
 
     def test_v1_loaded_correctly(self, kb_dir):
@@ -440,7 +444,7 @@ class TestKBSummaryGeneration:
             async def summarize(self, content: str, prompt: str) -> str:
                 received["content"] = content
                 received["prompt"] = prompt
-                return "FAKE_LLM_SUMMARY"
+                return "SUMMARY: FAKE_LLM_SUMMARY"
 
         token = set_service_registry({LLM_SUMMARIZER: FakeSummarizer()})
         try:
@@ -504,25 +508,25 @@ class TestKBSummaryGeneration:
 
 
 class TestSearchKnowledgeBaseTool:
-    """Tests for search_knowledge_base error handling and success key."""
+    """Tests for kb_search error handling and success key."""
 
     def test_invalid_json_filters_returns_error(self):
         """Invalid JSON in filters returns error dict."""
-        from agentic_cli.tools.knowledge_tools import search_knowledge_base
+        from agentic_cli.tools.knowledge_tools import kb_search
 
-        result = search_knowledge_base("query", filters="not json")
+        result = kb_search("query", filters="not json")
         assert result["success"] is False
 
     def test_search_returns_success_key(self):
         """Search results include success=True when context is set."""
         from agentic_cli.workflow.service_registry import set_service_registry
-        from agentic_cli.tools.knowledge_tools import search_knowledge_base
+        from agentic_cli.tools.knowledge_tools import kb_search
 
         with tempfile.TemporaryDirectory() as tmp:
             kb = _make_kb(Path(tmp))
             token = set_service_registry({"kb_manager": kb})
             try:
-                result = search_knowledge_base("test query")
+                result = kb_search("test query")
                 assert result["success"] is True
                 assert "results" in result
                 assert "total_matches" in result
@@ -530,13 +534,13 @@ class TestSearchKnowledgeBaseTool:
                 token.var.reset(token)
 
     def test_no_context_returns_error(self):
-        """search_knowledge_base returns error when KB context is not set."""
+        """kb_search returns error when KB context is not set."""
         from agentic_cli.workflow.service_registry import set_service_registry
-        from agentic_cli.tools.knowledge_tools import search_knowledge_base
+        from agentic_cli.tools.knowledge_tools import kb_search
 
         token = set_service_registry({})
         try:
-            result = search_knowledge_base("query")
+            result = kb_search("query")
             assert result["success"] is False
             assert "error" in result
         finally:
@@ -544,19 +548,19 @@ class TestSearchKnowledgeBaseTool:
 
 
 class TestIngestDocumentTool:
-    """Tests for ingest_document error handling."""
+    """Tests for kb_ingest error handling."""
 
     @pytest.mark.asyncio
     async def test_invalid_source_type_returns_error(self):
         """Invalid source_type returns error dict."""
         from agentic_cli.workflow.service_registry import set_service_registry
-        from agentic_cli.tools.knowledge_tools import ingest_document
+        from agentic_cli.tools.knowledge_tools import kb_ingest
 
         with tempfile.TemporaryDirectory() as tmp:
             kb = _make_kb(Path(tmp))
             token = set_service_registry({"kb_manager": kb})
             try:
-                result = await ingest_document(
+                result = await kb_ingest(
                     content="Test",
                     title="Test",
                     source_type="invalid_type",
@@ -570,13 +574,13 @@ class TestIngestDocumentTool:
     async def test_valid_ingest_returns_success(self):
         """Valid ingestion returns success=True with document info."""
         from agentic_cli.workflow.service_registry import set_service_registry
-        from agentic_cli.tools.knowledge_tools import ingest_document
+        from agentic_cli.tools.knowledge_tools import kb_ingest
 
         with tempfile.TemporaryDirectory() as tmp:
             kb = _make_kb(Path(tmp))
             token = set_service_registry({"kb_manager": kb})
             try:
-                result = await ingest_document(
+                result = await kb_ingest(
                     content="Test content for ingestion.",
                     title="Test Document",
                     source_type="user",
@@ -591,13 +595,13 @@ class TestIngestDocumentTool:
 
     @pytest.mark.asyncio
     async def test_no_context_returns_error(self):
-        """ingest_document returns error when KB context is not set."""
+        """kb_ingest returns error when KB context is not set."""
         from agentic_cli.workflow.service_registry import set_service_registry
-        from agentic_cli.tools.knowledge_tools import ingest_document
+        from agentic_cli.tools.knowledge_tools import kb_ingest
 
         token = set_service_registry({})
         try:
-            result = await ingest_document(
+            result = await kb_ingest(
                 content="Test",
                 title="Test",
             )
@@ -610,13 +614,13 @@ class TestIngestDocumentTool:
     async def test_no_content_or_file_returns_error(self):
         """Providing neither content nor url_or_path returns error."""
         from agentic_cli.workflow.service_registry import set_service_registry
-        from agentic_cli.tools.knowledge_tools import ingest_document
+        from agentic_cli.tools.knowledge_tools import kb_ingest
 
         with tempfile.TemporaryDirectory() as tmp:
             kb = _make_kb(Path(tmp))
             token = set_service_registry({"kb_manager": kb})
             try:
-                result = await ingest_document(title="Empty")
+                result = await kb_ingest(title="Empty")
                 assert result["success"] is False
                 assert "No content" in result["error"]
             finally:
@@ -626,7 +630,7 @@ class TestIngestDocumentTool:
     async def test_ingest_local_file(self):
         """Ingesting a local PDF copies and extracts text."""
         from agentic_cli.workflow.service_registry import set_service_registry
-        from agentic_cli.tools.knowledge_tools import ingest_document
+        from agentic_cli.tools.knowledge_tools import kb_ingest
 
         with tempfile.TemporaryDirectory() as tmp:
             kb = _make_kb(Path(tmp))
@@ -636,7 +640,7 @@ class TestIngestDocumentTool:
                 pdf_path = Path(tmp) / "test.pdf"
                 pdf_path.write_bytes(b"%PDF-1.4 fake content")
 
-                result = await ingest_document(
+                result = await kb_ingest(
                     url_or_path=str(pdf_path),
                     title="Local PDF",
                 )
@@ -649,13 +653,13 @@ class TestIngestDocumentTool:
     async def test_ingest_local_file_not_found(self):
         """Ingesting a nonexistent file returns error."""
         from agentic_cli.workflow.service_registry import set_service_registry
-        from agentic_cli.tools.knowledge_tools import ingest_document
+        from agentic_cli.tools.knowledge_tools import kb_ingest
 
         with tempfile.TemporaryDirectory() as tmp:
             kb = _make_kb(Path(tmp))
             token = set_service_registry({"kb_manager": kb})
             try:
-                result = await ingest_document(
+                result = await kb_ingest(
                     url_or_path="/nonexistent/file.pdf",
                 )
                 assert result["success"] is False
@@ -665,17 +669,17 @@ class TestIngestDocumentTool:
 
 
 # ============================================================================
-# read_document tests
+# kb_read tests
 # ============================================================================
 
 
-class TestReadDocument:
-    """Tests for read_document tool."""
+class TestKbRead:
+    """Tests for kb_read tool."""
 
-    def test_read_by_id(self):
-        """Read document by exact ID."""
+    async def test_read_by_id(self):
+        """Read document by exact ID (full=True)."""
         from agentic_cli.workflow.service_registry import set_service_registry
-        from agentic_cli.tools.knowledge_tools import read_document
+        from agentic_cli.tools.knowledge_tools import kb_read
 
         with tempfile.TemporaryDirectory() as tmp:
             kb = _make_kb(Path(tmp))
@@ -686,7 +690,7 @@ class TestReadDocument:
             )
             token = set_service_registry({"kb_manager": kb})
             try:
-                result = read_document(doc.id)
+                result = await kb_read(doc.id, full=True)
                 assert result["success"] is True
                 assert result["content"] == "Full document content here."
                 assert result["title"] == "Readable Doc"
@@ -694,10 +698,10 @@ class TestReadDocument:
             finally:
                 token.var.reset(token)
 
-    def test_read_by_title(self):
+    async def test_read_by_title(self):
         """Read document by title substring."""
         from agentic_cli.workflow.service_registry import set_service_registry
-        from agentic_cli.tools.knowledge_tools import read_document
+        from agentic_cli.tools.knowledge_tools import kb_read
 
         with tempfile.TemporaryDirectory() as tmp:
             kb = _make_kb(Path(tmp))
@@ -708,31 +712,31 @@ class TestReadDocument:
             )
             token = set_service_registry({"kb_manager": kb})
             try:
-                result = read_document("Unique Title")
+                result = await kb_read("Unique Title")
                 assert result["success"] is True
                 assert result["title"] == "Unique Title ABC"
             finally:
                 token.var.reset(token)
 
-    def test_read_not_found(self):
+    async def test_read_not_found(self):
         """Read nonexistent document returns error."""
         from agentic_cli.workflow.service_registry import set_service_registry
-        from agentic_cli.tools.knowledge_tools import read_document
+        from agentic_cli.tools.knowledge_tools import kb_read
 
         with tempfile.TemporaryDirectory() as tmp:
             kb = _make_kb(Path(tmp))
             token = set_service_registry({"kb_manager": kb})
             try:
-                result = read_document("nonexistent")
+                result = await kb_read("nonexistent")
                 assert result["success"] is False
                 assert "not found" in result["error"].lower()
             finally:
                 token.var.reset(token)
 
-    def test_read_truncation(self):
-        """Long content is truncated to max_chars."""
+    async def test_read_truncation(self):
+        """Long content is truncated to max_chars when full=True."""
         from agentic_cli.workflow.service_registry import set_service_registry
-        from agentic_cli.tools.knowledge_tools import read_document
+        from agentic_cli.tools.knowledge_tools import kb_read
 
         with tempfile.TemporaryDirectory() as tmp:
             kb = _make_kb(Path(tmp))
@@ -744,7 +748,7 @@ class TestReadDocument:
             )
             token = set_service_registry({"kb_manager": kb})
             try:
-                result = read_document(doc.id, max_chars=1000)
+                result = await kb_read(doc.id, full=True, max_chars=1000)
                 assert result["success"] is True
                 assert len(result["content"]) == 1000
                 assert result["truncated"] is True
@@ -753,23 +757,23 @@ class TestReadDocument:
 
 
 # ============================================================================
-# list_documents tests
+# kb_list tests
 # ============================================================================
 
 
 class TestListDocuments:
-    """Tests for list_documents tool."""
+    """Tests for kb_list tool."""
 
     def test_list_empty(self):
         """List returns empty when no documents."""
         from agentic_cli.workflow.service_registry import set_service_registry
-        from agentic_cli.tools.knowledge_tools import list_documents
+        from agentic_cli.tools.knowledge_tools import kb_list
 
         with tempfile.TemporaryDirectory() as tmp:
             kb = _make_kb(Path(tmp))
             token = set_service_registry({"kb_manager": kb})
             try:
-                result = list_documents()
+                result = kb_list()
                 assert result["success"] is True
                 assert result["count"] == 0
                 assert result["documents"] == []
@@ -779,7 +783,7 @@ class TestListDocuments:
     def test_list_with_documents(self):
         """List returns documents with summaries."""
         from agentic_cli.workflow.service_registry import set_service_registry
-        from agentic_cli.tools.knowledge_tools import list_documents
+        from agentic_cli.tools.knowledge_tools import kb_list
 
         with tempfile.TemporaryDirectory() as tmp:
             kb = _make_kb(Path(tmp))
@@ -796,7 +800,7 @@ class TestListDocuments:
             )
             token = set_service_registry({"kb_manager": kb})
             try:
-                result = list_documents()
+                result = kb_list()
                 assert result["success"] is True
                 assert result["count"] == 2
                 # Check document fields
@@ -809,7 +813,7 @@ class TestListDocuments:
     def test_list_filter_source_type(self):
         """List filters by source type."""
         from agentic_cli.workflow.service_registry import set_service_registry
-        from agentic_cli.tools.knowledge_tools import list_documents
+        from agentic_cli.tools.knowledge_tools import kb_list
 
         with tempfile.TemporaryDirectory() as tmp:
             kb = _make_kb(Path(tmp))
@@ -817,7 +821,7 @@ class TestListDocuments:
             kb.ingest_document(content="B.", title="B", source_type=SourceType.USER)
             token = set_service_registry({"kb_manager": kb})
             try:
-                result = list_documents(source_type="arxiv")
+                result = kb_list(source_type="arxiv")
                 assert result["count"] == 1
                 assert result["documents"][0]["source_type"] == "arxiv"
             finally:
@@ -826,7 +830,7 @@ class TestListDocuments:
     def test_list_filter_query(self):
         """List filters by title query."""
         from agentic_cli.workflow.service_registry import set_service_registry
-        from agentic_cli.tools.knowledge_tools import list_documents
+        from agentic_cli.tools.knowledge_tools import kb_list
 
         with tempfile.TemporaryDirectory() as tmp:
             kb = _make_kb(Path(tmp))
@@ -834,214 +838,11 @@ class TestListDocuments:
             kb.ingest_document(content="B.", title="BERT Paper", source_type=SourceType.USER)
             token = set_service_registry({"kb_manager": kb})
             try:
-                result = list_documents(query="attention")
+                result = kb_list(query="attention")
                 assert result["count"] == 1
                 assert result["documents"][0]["title"] == "Attention Paper"
             finally:
                 token.var.reset(token)
-
-
-# ============================================================================
-# open_document tests
-# ============================================================================
-
-
-class TestOpenDocument:
-    """Tests for open_document tool."""
-
-    def test_open_not_found(self):
-        """Open nonexistent document returns error."""
-        from agentic_cli.workflow.service_registry import set_service_registry
-        from agentic_cli.tools.knowledge_tools import open_document
-
-        with tempfile.TemporaryDirectory() as tmp:
-            kb = _make_kb(Path(tmp))
-            token = set_service_registry({"kb_manager": kb})
-            try:
-                result = open_document("nonexistent")
-                assert result["success"] is False
-                assert "not found" in result["error"].lower()
-            finally:
-                token.var.reset(token)
-
-    def test_open_no_file(self):
-        """Open document without file returns error."""
-        from agentic_cli.workflow.service_registry import set_service_registry
-        from agentic_cli.tools.knowledge_tools import open_document
-
-        with tempfile.TemporaryDirectory() as tmp:
-            kb = _make_kb(Path(tmp))
-            doc = kb.ingest_document(
-                content="Text only.",
-                title="No File Doc",
-                source_type=SourceType.USER,
-            )
-            token = set_service_registry({"kb_manager": kb})
-            try:
-                result = open_document(doc.id)
-                assert result["success"] is False
-                assert "no file" in result["error"].lower()
-            finally:
-                token.var.reset(token)
-
-    def test_open_success(self):
-        """Open document with file calls system viewer."""
-        from agentic_cli.workflow.service_registry import set_service_registry
-        from agentic_cli.tools.knowledge_tools import open_document
-
-        with tempfile.TemporaryDirectory() as tmp:
-            kb = _make_kb(Path(tmp))
-            doc = kb.ingest_document(
-                content="PDF content.",
-                title="PDF Doc",
-                source_type=SourceType.USER,
-                file_bytes=b"%PDF-1.4 content",
-                file_extension=".pdf",
-            )
-            token = set_service_registry({"kb_manager": kb})
-            try:
-                mock_result = MagicMock(returncode=0, stderr="")
-                with patch("agentic_cli.tools.knowledge_tools.subprocess.run", return_value=mock_result) as mock_run:
-                    result = open_document(doc.id)
-                assert result["success"] is True
-                assert result["title"] == "PDF Doc"
-                mock_run.assert_called_once()
-            finally:
-                token.var.reset(token)
-
-    def test_open_subprocess_failure(self):
-        """Open document surfaces subprocess failure."""
-        from agentic_cli.workflow.service_registry import set_service_registry
-        from agentic_cli.tools.knowledge_tools import open_document
-
-        with tempfile.TemporaryDirectory() as tmp:
-            kb = _make_kb(Path(tmp))
-            doc = kb.ingest_document(
-                content="PDF content.",
-                title="Bad PDF",
-                source_type=SourceType.USER,
-                file_bytes=b"%PDF-1.4 content",
-                file_extension=".pdf",
-            )
-            token = set_service_registry({"kb_manager": kb})
-            try:
-                mock_result = MagicMock(returncode=1, stderr="The file has no associated application.")
-                with patch("agentic_cli.tools.knowledge_tools.subprocess.run", return_value=mock_result):
-                    result = open_document(doc.id)
-                assert result["success"] is False
-                assert "no associated application" in result["error"].lower()
-            finally:
-                token.var.reset(token)
-
-    def test_open_subprocess_timeout(self):
-        """Open document treats timeout as success (viewer may block)."""
-        import subprocess as _subprocess
-
-        from agentic_cli.workflow.service_registry import set_service_registry
-        from agentic_cli.tools.knowledge_tools import open_document
-
-        with tempfile.TemporaryDirectory() as tmp:
-            kb = _make_kb(Path(tmp))
-            doc = kb.ingest_document(
-                content="PDF content.",
-                title="Slow PDF",
-                source_type=SourceType.USER,
-                file_bytes=b"%PDF-1.4 content",
-                file_extension=".pdf",
-            )
-            token = set_service_registry({"kb_manager": kb})
-            try:
-                with patch(
-                    "agentic_cli.tools.knowledge_tools.subprocess.run",
-                    side_effect=_subprocess.TimeoutExpired(cmd=["open"], timeout=10),
-                ):
-                    result = open_document(doc.id)
-                assert result["success"] is True
-                assert result["title"] == "Slow PDF"
-            finally:
-                token.var.reset(token)
-
-    def test_open_blocked_extension(self):
-        """Blocked extension returns error and subprocess is never called."""
-        from agentic_cli.workflow.service_registry import set_service_registry
-        from agentic_cli.tools.knowledge_tools import open_document
-
-        with tempfile.TemporaryDirectory() as tmp:
-            kb = _make_kb(Path(tmp))
-            doc = kb.ingest_document(
-                content="Executable content.",
-                title="Bad File",
-                source_type=SourceType.USER,
-                file_bytes=b"MZ\x90\x00",
-                file_extension=".exe",
-            )
-            token = set_service_registry({"kb_manager": kb})
-            try:
-                with patch("agentic_cli.tools.knowledge_tools.subprocess.run") as mock_run:
-                    result = open_document(doc.id)
-                assert result["success"] is False
-                assert "not allowed" in result["error"]
-                mock_run.assert_not_called()
-            finally:
-                token.var.reset(token)
-
-    def test_open_blocked_extension_logging(self):
-        """Blocked extension triggers warning log."""
-        from agentic_cli.workflow.service_registry import set_service_registry
-        from agentic_cli.tools.knowledge_tools import open_document
-
-        with tempfile.TemporaryDirectory() as tmp:
-            kb = _make_kb(Path(tmp))
-            doc = kb.ingest_document(
-                content="Shell script.",
-                title="Script File",
-                source_type=SourceType.USER,
-                file_bytes=b"#!/bin/bash\necho pwned",
-                file_extension=".sh",
-            )
-            token = set_service_registry({"kb_manager": kb})
-            try:
-                with patch("agentic_cli.tools.knowledge_tools.logger") as mock_logger:
-                    result = open_document(doc.id)
-                assert result["success"] is False
-                mock_logger.warning.assert_called_once()
-                assert mock_logger.warning.call_args[0][0] == "open_document_blocked_extension"
-            finally:
-                token.var.reset(token)
-
-    def test_open_success_logging(self):
-        """Successful open triggers info log."""
-        from agentic_cli.workflow.service_registry import set_service_registry
-        from agentic_cli.tools.knowledge_tools import open_document
-
-        with tempfile.TemporaryDirectory() as tmp:
-            kb = _make_kb(Path(tmp))
-            doc = kb.ingest_document(
-                content="PDF content.",
-                title="Good PDF",
-                source_type=SourceType.USER,
-                file_bytes=b"%PDF-1.4 content",
-                file_extension=".pdf",
-            )
-            token = set_service_registry({"kb_manager": kb})
-            try:
-                mock_result = MagicMock(returncode=0, stderr="")
-                with patch("agentic_cli.tools.knowledge_tools.subprocess.run", return_value=mock_result), \
-                     patch("agentic_cli.tools.knowledge_tools.logger") as mock_logger:
-                    result = open_document(doc.id)
-                assert result["success"] is True
-                mock_logger.info.assert_called_once()
-                assert mock_logger.info.call_args[0][0] == "open_document_success"
-            finally:
-                token.var.reset(token)
-
-    def test_open_permission_level_is_dangerous(self):
-        """open_document is registered with DANGEROUS permission level."""
-        from agentic_cli.tools.registry import get_registry, PermissionLevel
-
-        registry = get_registry()
-        tool_def = registry._tools["open_document"]
-        assert tool_def.permission_level == PermissionLevel.DANGEROUS
 
 
 # ============================================================================
@@ -1086,7 +887,7 @@ class TestKBManagerContextVar:
     def test_kb_manager_detected_via_tool_service_map(self):
         """Verify kb tools are detected via _TOOL_SERVICE_MAP (not @requires)."""
         from agentic_cli.workflow.base_manager import BaseWorkflowManager
-        assert "search_knowledge_base" in BaseWorkflowManager._TOOL_SERVICE_MAP
+        assert "kb_search" in BaseWorkflowManager._TOOL_SERVICE_MAP
 
     def test_base_manager_has_kb_manager_slot(self):
         from agentic_cli.workflow.base_manager import BaseWorkflowManager
@@ -1154,11 +955,11 @@ class TestTwoTierKnowledgeBase:
 
     def test_search_merges_both_kbs(self, project_kb, user_kb):
         """Search returns results from both KBs with scope tags."""
-        from agentic_cli.tools.knowledge_tools import search_knowledge_base
+        from agentic_cli.tools.knowledge_tools import kb_search
 
         token = self._set_both_contexts(project_kb, user_kb)
         try:
-            result = search_knowledge_base("attention transformers")
+            result = kb_search("attention transformers")
             assert result["success"] is True
             scopes = {r.get("scope") for r in result["results"]}
             assert "project" in scopes or "user" in scopes
@@ -1170,14 +971,14 @@ class TestTwoTierKnowledgeBase:
     @pytest.mark.asyncio
     async def test_ingest_writes_to_project_only(self, project_kb, user_kb):
         """Ingestion only writes to project KB, not user KB."""
-        from agentic_cli.tools.knowledge_tools import ingest_document
+        from agentic_cli.tools.knowledge_tools import kb_ingest
 
         token = self._set_both_contexts(project_kb, user_kb)
         try:
             user_count_before = len(user_kb._documents)
             project_count_before = len(project_kb._documents)
 
-            result = await ingest_document(
+            result = await kb_ingest(
                 content="New ingested document.",
                 title="New Doc",
                 source_type="user",
@@ -1192,12 +993,12 @@ class TestTwoTierKnowledgeBase:
             self._reset_token(token)
 
     def test_list_documents_shows_scope(self, project_kb, user_kb):
-        """list_documents includes scope indicator for both tiers."""
-        from agentic_cli.tools.knowledge_tools import list_documents
+        """kb_list includes scope indicator for both tiers."""
+        from agentic_cli.tools.knowledge_tools import kb_list
 
         token = self._set_both_contexts(project_kb, user_kb)
         try:
-            result = list_documents()
+            result = kb_list()
             assert result["success"] is True
             assert result["count"] == 2
 
@@ -1206,9 +1007,9 @@ class TestTwoTierKnowledgeBase:
         finally:
             self._reset_token(token)
 
-    def test_read_document_project_first(self, tmp_path):
+    async def test_read_document_project_first(self, tmp_path):
         """When both KBs have a matching doc, project is returned first."""
-        from agentic_cli.tools.knowledge_tools import read_document
+        from agentic_cli.tools.knowledge_tools import kb_read
 
         pkb = _make_kb(tmp_path / "proj")
         ukb = _make_kb(tmp_path / "usr")
@@ -1225,19 +1026,19 @@ class TestTwoTierKnowledgeBase:
 
         token = self._set_both_contexts(pkb, ukb)
         try:
-            result = read_document("Shared Title")
+            result = await kb_read("Shared Title", full=True)
             assert result["success"] is True
             assert result["content"] == "Project version of the doc."
         finally:
             self._reset_token(token)
 
-    def test_read_document_falls_back_to_user(self, project_kb, user_kb):
+    async def test_read_document_falls_back_to_user(self, project_kb, user_kb):
         """Doc only in user KB is still found via fallback."""
-        from agentic_cli.tools.knowledge_tools import read_document
+        from agentic_cli.tools.knowledge_tools import kb_read
 
         token = self._set_both_contexts(project_kb, user_kb)
         try:
-            result = read_document("User Attention Paper")
+            result = await kb_read("User Attention Paper", full=True)
             assert result["success"] is True
             assert result["title"] == "User Attention Paper"
             assert "attention" in result["content"].lower()
@@ -1246,7 +1047,7 @@ class TestTwoTierKnowledgeBase:
 
     def test_same_dir_single_instance(self, tmp_path):
         """When project and user paths resolve to same dir, one manager is reused."""
-        from agentic_cli.tools.knowledge_tools import search_knowledge_base
+        from agentic_cli.tools.knowledge_tools import kb_search
 
         kb = _make_kb(tmp_path / "shared")
         kb.ingest_document(
@@ -1262,7 +1063,7 @@ class TestTwoTierKnowledgeBase:
             "user_kb_manager": kb,
         })
         try:
-            result = search_knowledge_base("shared")
+            result = kb_search("shared")
             assert result["success"] is True
             # Should not have duplicates — user KB is same instance, so merge is skipped
             doc_ids = [r["document_id"] for r in result["results"]]
@@ -1272,7 +1073,7 @@ class TestTwoTierKnowledgeBase:
 
     def test_user_kb_search_failure_non_fatal(self, project_kb):
         """Project results returned even if user KB search raises."""
-        from agentic_cli.tools.knowledge_tools import search_knowledge_base
+        from agentic_cli.tools.knowledge_tools import kb_search
         from agentic_cli.workflow.service_registry import set_service_registry
 
         # Create a mock user KB that raises on search
@@ -1284,7 +1085,7 @@ class TestTwoTierKnowledgeBase:
             "user_kb_manager": failing_kb,
         })
         try:
-            result = search_knowledge_base("transformers")
+            result = kb_search("transformers")
             assert result["success"] is True
             # Project results should still be present
             assert result["total_matches"] >= 1
@@ -1301,7 +1102,7 @@ class TestTwoTierKnowledgeBase:
         a user rank-0 result should both end up above either KB's
         rank-1 result, regardless of absolute score magnitudes.
         """
-        from agentic_cli.tools.knowledge_tools import search_knowledge_base
+        from agentic_cli.tools.knowledge_tools import kb_search
         from agentic_cli.workflow.service_registry import set_service_registry
 
         project_kb = MagicMock()
@@ -1326,7 +1127,7 @@ class TestTwoTierKnowledgeBase:
             "user_kb_manager": user_kb,
         })
         try:
-            result = search_knowledge_base("query")
+            result = kb_search("query")
             assert result["success"] is True
 
             merged_ids = [r["document_id"] for r in result["results"]]

@@ -1,11 +1,10 @@
 """Knowledge base tools for agentic workflows.
 
 Provides tools for managing documents in the unified knowledge base:
-- ingest_document: Ingest text, files, or URLs into KB
-- search_knowledge_base: Semantic search across all documents
-- read_document: Extract and return text from a stored document
-- list_documents: List documents with summaries
-- open_document: Open a document's file in the system viewer
+- kb_ingest: Ingest text, files, or URLs into KB
+- kb_search: Semantic search across all documents
+- kb_read: Read a stored document (sidecar by default, full text with full=True)
+- kb_list: List documents with summaries
 
 Each tool comes in two flavors that share a single implementation:
 
@@ -15,13 +14,10 @@ Each tool comes in two flavors that share a single implementation:
   the KB managers in a closure and call the same helpers.
 
 The helpers (``_search_kbs``, ``_ingest_document_with_kb``,
-``_read_document_from_kbs``, ``_list_documents_in_kbs``,
-``_open_document_in_kbs``) take the KB managers as explicit args so both
-call paths stay in sync.
+``_read_document_from_kbs``, ``_list_documents_in_kbs``) take the KB
+managers as explicit args so both call paths stay in sync.
 """
 
-import platform
-import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -40,25 +36,11 @@ from agentic_cli.workflow.service_registry import (
     require_service,
     KB_MANAGER,
     USER_KB_MANAGER,
-    MEMORY_STORE,
 )
 
 
-# Max chars of extracted text to return via read_document.
+# Max chars of extracted text to return via kb_read (full=True).
 READ_DOCUMENT_MAX_CHARS = 30_000
-
-
-# Extensions considered safe to open in the system viewer.
-# Excluded: .html (JS execution), .doc/.xls/.ppt (VBA macros),
-# .odt/.ods/.odp (LibreOffice macros), .docm/.xlsm/.pptm (Office macros).
-SAFE_OPEN_EXTENSIONS: frozenset[str] = frozenset({
-    # Documents
-    ".pdf", ".txt", ".md", ".csv", ".json", ".xml", ".rtf", ".epub",
-    # Modern Office (macro-free by design)
-    ".docx", ".xlsx", ".pptx",
-    # Images
-    ".png", ".jpg", ".jpeg", ".gif", ".svg", ".bmp", ".tiff", ".webp",
-})
 
 
 # ---------------------------------------------------------------------------
@@ -74,7 +56,7 @@ def _build_document_item(d, scope: str) -> dict[str, Any]:
         scope: "project" or "user".
 
     Returns:
-        Dict with document metadata suitable for list_documents output.
+        Dict with document metadata suitable for kb_list output.
     """
     item: dict[str, Any] = {
         "id": d.id,
@@ -212,7 +194,7 @@ def _search_kbs(
     filters: str = "",
     top_k: int = 10,
 ) -> dict[str, Any]:
-    """Shared implementation for search_knowledge_base.
+    """Shared implementation for kb_search.
 
     Caller must pass a non-None ``kb_manager`` — registry-based wrappers
     handle the missing-kb error case before reaching this helper.
@@ -264,7 +246,7 @@ async def _ingest_document_with_kb(
     abstract: str = "",
     tags: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Shared implementation for ingest_document.
+    """Shared implementation for kb_ingest.
 
     Handles all three input modes (text content, local file, remote URL),
     PDF text extraction, source type auto-detection, and ingestion into
@@ -362,8 +344,8 @@ async def _ingest_document_with_kb(
         valid = ", ".join(t.value for t in SourceType)
         return {"success": False, "error": f"Invalid source_type: {source_type!r}. Valid: {valid}"}
 
-    # --- Generate summary (async LLM call, safe to run outside the lock) ---
-    summary = await kb_manager.generate_summary(content, title=title)
+    # --- Generate sidecar payload via async LLM call (outside lock) ---
+    payload = await kb_manager.generate_sidecar_payload(content, title=title)
 
     # --- Ingest ---
     try:
@@ -375,7 +357,8 @@ async def _ingest_document_with_kb(
             metadata=meta or None,
             file_bytes=file_bytes,
             file_extension=file_extension,
-            summary=summary,
+            summary=payload["summary"] or None,
+            sidecar_payload=payload,
         )
     except Exception as e:
         return {"success": False, "error": f"Ingestion failed: {e}"}
@@ -389,38 +372,79 @@ async def _ingest_document_with_kb(
     }
 
 
-def _read_document_from_kbs(
+async def _read_document_from_kbs(
     kb_manager,
     user_kb_manager,
     doc_id_or_title: str,
+    full: bool = False,
     max_chars: int = READ_DOCUMENT_MAX_CHARS,
 ) -> dict[str, Any]:
-    """Shared implementation for read_document."""
-    doc, source_kb = _find_doc_in_kbs(kb_manager, user_kb_manager, doc_id_or_title)
+    """Shared implementation for kb_read.
 
+    Default returns the sidecar payload (summary + claims + entities).
+    With ``full=True``, returns the raw extracted text up to ``max_chars``.
+    Lazily generates a missing sidecar via the manager's per-doc lock.
+    """
+    doc, source_kb = _find_doc_in_kbs(kb_manager, user_kb_manager, doc_id_or_title)
     if doc is None:
         return {"success": False, "error": f"Document not found: {doc_id_or_title}"}
 
-    content = doc.content
+    if full:
+        content = doc.content
+        if not content and doc.file_path:
+            file_path = source_kb.get_file_path(doc.id)
+            if file_path and str(file_path).endswith(".pdf"):
+                from agentic_cli.knowledge_base.manager import KnowledgeBaseManager
+                content = KnowledgeBaseManager.extract_text_from_pdf(file_path)
+        truncated = len(content) > max_chars
+        if truncated:
+            content = content[:max_chars]
+        return {
+            "success": True,
+            "full": True,
+            "document_id": doc.id,
+            "title": doc.title,
+            "scope": "user" if user_kb_manager is not None and source_kb is user_kb_manager else "project",
+            "content": content,
+            "truncated": truncated,
+            "source_type": doc.source_type.value,
+        }
 
-    # If no content, try extracting from stored file
-    if not content and doc.file_path:
-        file_path = source_kb.get_file_path(doc.id)
-        if file_path and str(file_path).endswith(".pdf"):
-            from agentic_cli.knowledge_base.manager import KnowledgeBaseManager
-            content = KnowledgeBaseManager.extract_text_from_pdf(file_path)
+    # Sidecar mode (default). Lazily generate if missing.
+    sidecar_path = source_kb._sidecar_path(doc.id)
+    if not sidecar_path.exists():
+        import asyncio as _asyncio
+        lock = source_kb._sidecar_locks.setdefault(doc.id, _asyncio.Lock())
+        async with lock:
+            if not sidecar_path.exists():
+                # Resolve content the same way full=True does — extract from
+                # PDF when in-memory content is empty. Avoids caching a
+                # useless empty sidecar for legacy PDFs.
+                content_for_payload = doc.content
+                if not content_for_payload and doc.file_path:
+                    file_path = source_kb.get_file_path(doc.id)
+                    if file_path and str(file_path).endswith(".pdf"):
+                        from agentic_cli.knowledge_base.manager import (
+                            KnowledgeBaseManager,
+                        )
+                        content_for_payload = (
+                            KnowledgeBaseManager.extract_text_from_pdf(file_path)
+                        )
+                payload = await source_kb.generate_sidecar_payload(
+                    content_for_payload, title=doc.title
+                )
+                source_kb._write_sidecar(doc, payload)
 
-    truncated = len(content) > max_chars
-    if truncated:
-        content = content[:max_chars]
-
+    sidecar_text = sidecar_path.read_text()
     return {
         "success": True,
+        "full": False,
         "document_id": doc.id,
         "title": doc.title,
-        "content": content,
-        "truncated": truncated,
         "source_type": doc.source_type.value,
+        "scope": "user" if user_kb_manager is not None and source_kb is user_kb_manager else "project",
+        "summary": doc.summary,
+        "sidecar": sidecar_text,
     }
 
 
@@ -431,7 +455,7 @@ def _list_documents_in_kbs(
     source_type: str = "",
     limit: int = 20,
 ) -> dict[str, Any]:
-    """Shared implementation for list_documents."""
+    """Shared implementation for kb_list."""
     from agentic_cli.knowledge_base.models import SourceType as ST
 
     # Parse source_type filter
@@ -484,81 +508,6 @@ def _list_documents_in_kbs(
     }
 
 
-def _open_document_in_kbs(
-    kb_manager,
-    user_kb_manager,
-    doc_id_or_title: str,
-) -> dict[str, Any]:
-    """Shared implementation for open_document."""
-    doc, source_kb = _find_doc_in_kbs(kb_manager, user_kb_manager, doc_id_or_title)
-
-    if doc is None:
-        return {"success": False, "error": f"Document not found: {doc_id_or_title}"}
-
-    file_path = source_kb.get_file_path(doc.id)
-    if file_path is None:
-        return {"success": False, "error": f"No file stored for document: {doc.title}"}
-
-    ext = file_path.suffix.lower()
-    if ext not in SAFE_OPEN_EXTENSIONS:
-        logger.warning(
-            "open_document_blocked_extension",
-            file_path=str(file_path),
-            title=doc.title,
-            extension=ext,
-        )
-        return {
-            "success": False,
-            "error": f"File type '{ext}' is not allowed. Supported: documents, images, and office files.",
-        }
-
-    system = platform.system()
-    try:
-        if system == "Darwin":
-            cmd = ["open", str(file_path)]
-        elif system == "Linux":
-            cmd = ["xdg-open", str(file_path)]
-        elif system == "Windows":
-            cmd = ["start", "", str(file_path)]
-        else:
-            return {"success": False, "error": f"Unsupported platform: {system}"}
-
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=10,
-            shell=(system == "Windows"),
-        )
-        if result.returncode != 0:
-            stderr = result.stderr.strip()
-            logger.warning(
-                "open_document_failed",
-                file_path=str(file_path),
-                returncode=result.returncode,
-                stderr=stderr,
-            )
-            return {"success": False, "error": f"Failed to open file: {stderr or 'unknown error'}"}
-    except subprocess.TimeoutExpired:
-        # open/xdg-open may block if viewer takes time — treat as success
-        pass
-    except OSError as e:
-        return {"success": False, "error": f"Failed to open file: {e}"}
-
-    logger.info(
-        "open_document_success",
-        file_path=str(file_path),
-        title=doc.title,
-        extension=ext,
-    )
-    return {
-        "success": True,
-        "title": doc.title,
-        "file_path": str(file_path),
-        "message": f"Opened: {doc.title}",
-    }
-
-
 # ---------------------------------------------------------------------------
 # Registry-bound helper (back-compat for tests/callers that don't have
 # explicit KB handles)
@@ -589,7 +538,7 @@ def _find_document_in_kbs(doc_id_or_title: str) -> tuple:
     permission_level=PermissionLevel.SAFE,
     description="Search the local knowledge base for relevant documents using semantic similarity. Use this when you need to find previously ingested papers, notes, or documents.",
 )
-def search_knowledge_base(
+def kb_search(
     query: str,
     filters: str = "",
     top_k: int = 10,
@@ -621,7 +570,7 @@ def search_knowledge_base(
         "Valid source_type values: arxiv, ssrn, web, internal, user, local."
     ),
 )
-async def ingest_document(
+async def kb_ingest(
     content: str = "",
     url_or_path: str = "",
     title: str = "",
@@ -673,26 +622,29 @@ async def ingest_document(
 @register_tool(
     category=ToolCategory.KNOWLEDGE,
     permission_level=PermissionLevel.SAFE,
-    description="Read and return the text content of a stored document by ID or title. Returns full text (up to max_chars limit).",
+    description=(
+        "Read a stored document by ID or title. Returns the per-document "
+        "sidecar (summary, key claims, entities) by default. Pass full=True "
+        "to get the raw extracted text up to max_chars."
+    ),
 )
-def read_document(
+async def kb_read(
     doc_id_or_title: str,
+    full: bool = False,
     max_chars: int = READ_DOCUMENT_MAX_CHARS,
 ) -> dict[str, Any]:
-    """Extract and return text from a stored document.
+    """Read a stored document.
 
     Args:
         doc_id_or_title: Document ID or title substring.
-        max_chars: Maximum characters to return (default 30K).
-
-    Returns:
-        Dictionary with document text and metadata.
+        full: If True, return raw text. Default returns the sidecar payload.
+        max_chars: Maximum characters of raw text to return when full=True.
     """
     kb = get_service(KB_MANAGER)
     if kb is None:
         return {"success": False, "error": f"Document not found: {doc_id_or_title}"}
     user_kb = get_service(USER_KB_MANAGER)
-    return _read_document_from_kbs(kb, user_kb, doc_id_or_title, max_chars)
+    return await _read_document_from_kbs(kb, user_kb, doc_id_or_title, full, max_chars)
 
 
 @register_tool(
@@ -700,7 +652,7 @@ def read_document(
     permission_level=PermissionLevel.SAFE,
     description="List documents in the knowledge base with summaries. Filter by query or source type. Returns summaries, not full content.",
 )
-def list_documents(
+def kb_list(
     query: str = "",
     source_type: str = "",
     limit: int = 20,
@@ -722,152 +674,3 @@ def list_documents(
     return _list_documents_in_kbs(kb, user_kb, query, source_type, limit)
 
 
-@register_tool(
-    category=ToolCategory.KNOWLEDGE,
-    permission_level=PermissionLevel.DANGEROUS,
-    description="Open a document's stored file (e.g. PDF) in the system default viewer. Provide a document ID or title.",
-)
-def open_document(
-    doc_id_or_title: str,
-) -> dict[str, Any]:
-    """Open a document's file in the system viewer.
-
-    Args:
-        doc_id_or_title: Document ID or title substring.
-
-    Returns:
-        Dictionary with result.
-    """
-    kb = get_service(KB_MANAGER)
-    if kb is None:
-        return {"success": False, "error": f"Document not found: {doc_id_or_title}"}
-    user_kb = get_service(USER_KB_MANAGER)
-    return _open_document_in_kbs(kb, user_kb, doc_id_or_title)
-
-
-@register_tool(
-    category=ToolCategory.MEMORY,
-    permission_level=PermissionLevel.SAFE,
-    description="Search across knowledge base and memory simultaneously",
-)
-def unified_search(
-    query: str,
-    sources: list[str] | None = None,
-    top_k: int = 10,
-    filters: str | None = None,
-) -> dict[str, Any]:
-    """Search across knowledge base and memory, returning merged results.
-
-    Args:
-        query: The search query.
-        sources: Which sources to search. Options: "kb", "memory". Default: both.
-        top_k: Maximum total results to return.
-        filters: Optional JSON filters (passed to KB search).
-
-    Returns:
-        Dict with merged results tagged by source.
-    """
-    import json as _json
-
-    if sources is None:
-        sources = ["kb", "memory"]
-
-    kb_ranked: list[tuple[str, dict]] = []
-    memory_ranked: list[tuple[str, dict]] = []
-
-    # KB search
-    if "kb" in sources:
-        kb = get_service(KB_MANAGER)
-        if kb is not None:
-            try:
-                parsed_filters = None
-                if filters:
-                    try:
-                        parsed_filters = _json.loads(filters)
-                    except _json.JSONDecodeError:
-                        pass
-                search_result = kb.search(query, filters=parsed_filters, top_k=top_k * 2)
-                for r in search_result.get("results", []):
-                    kb_ranked.append((
-                        r.get("chunk_id", r.get("document_id", "")),
-                        {
-                            "source": "kb",
-                            "content": r.get("highlight", truncate(r.get("chunk_content", ""), 200)),
-                            "score": r.get("score", 0),
-                            "document_title": r.get("document_title", ""),
-                            "document_id": r.get("document_id", ""),
-                        },
-                    ))
-            except Exception:
-                logger.debug("unified_search_kb_failed", exc_info=True)
-
-        # Also check user KB
-        user_kb = get_service(USER_KB_MANAGER)
-        if user_kb is not None and user_kb is not kb:
-            try:
-                parsed_filters = None
-                if filters:
-                    try:
-                        parsed_filters = _json.loads(filters)
-                    except _json.JSONDecodeError:
-                        pass
-                for r in user_kb.search(query, filters=parsed_filters, top_k=top_k).get("results", []):
-                    kb_ranked.append((
-                        r.get("chunk_id", r.get("document_id", "")),
-                        {
-                            "source": "kb",
-                            "content": r.get("highlight", truncate(r.get("chunk_content", ""), 200)),
-                            "score": r.get("score", 0),
-                            "document_title": r.get("document_title", ""),
-                            "document_id": r.get("document_id", ""),
-                        },
-                    ))
-            except Exception:
-                logger.debug("unified_search_kb_failed", exc_info=True)
-
-    # Memory search
-    if "memory" in sources:
-        store = get_service(MEMORY_STORE)
-        if store is not None:
-            try:
-                mem_results = store.search(query, limit=top_k * 2)
-                for item in mem_results:
-                    memory_ranked.append((
-                        item.id,
-                        {
-                            "source": "memory",
-                            "content": item.content,
-                            "score": 0.0,
-                            "tags": item.tags,
-                            "memory_id": item.id,
-                        },
-                    ))
-            except Exception:
-                logger.debug("unified_search_memory_failed", exc_info=True)
-
-    # RRF fusion across sources
-    k = 60
-    fused_scores: dict[str, float] = {}
-    fused_data: dict[str, dict] = {}
-    for rank, (rid, data) in enumerate(kb_ranked):
-        fused_scores[rid] = fused_scores.get(rid, 0) + 1.0 / (k + rank + 1)
-        fused_data[rid] = data
-    for rank, (rid, data) in enumerate(memory_ranked):
-        fused_scores[rid] = fused_scores.get(rid, 0) + 1.0 / (k + rank + 1)
-        fused_data[rid] = data
-
-    sorted_ids = sorted(fused_scores.keys(), key=lambda x: fused_scores[x], reverse=True)
-    results = []
-    for rid in sorted_ids[:top_k]:
-        entry = fused_data[rid]
-        entry["score"] = round(fused_scores[rid], 4)
-        results.append(entry)
-
-    kb_count = sum(1 for r in results if r["source"] == "kb")
-    mem_count = sum(1 for r in results if r["source"] == "memory")
-
-    return {
-        "success": True,
-        "results": results,
-        "counts": {"kb": kb_count, "memory": mem_count},
-    }

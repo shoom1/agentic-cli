@@ -153,6 +153,17 @@ class WorkflowSettingsMixin:
         description="Batch size for embedding generation",
         json_schema_extra={"ui_order": 151},
     )
+    embedding_device: str = Field(
+        default="auto",
+        title="Embedding Device",
+        description=(
+            "Device for sentence-transformers: 'auto' picks cuda → "
+            "mps (Apple Silicon only) → cpu. Force 'cpu' on Intel Macs "
+            "with discrete AMD GPUs (MPS command-buffer failures). "
+            "Valid values: auto, cpu, mps, cuda."
+        ),
+        json_schema_extra={"ui_order": 152},
+    )
     knowledge_base_use_mock: bool = Field(
         default=False,
         title="Use Mock Knowledge Base",

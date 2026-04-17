@@ -265,12 +265,10 @@ class BaseWorkflowManager(ABC):
         "search_memory": "memory_store",
         "update_memory": "memory_store",
         "delete_memory": "memory_store",
-        "search_knowledge_base": "kb_manager",
-        "ingest_document": "kb_manager",
-        "read_document": "kb_manager",
-        "list_documents": "kb_manager",
-        "open_document": "kb_manager",
-        "unified_search": "memory_store",
+        "kb_search": "kb_manager",
+        "kb_ingest": "kb_manager",
+        "kb_read": "kb_manager",
+        "kb_list": "kb_manager",
         "web_fetch": "llm_summarizer",
         "sandbox_execute": "sandbox_manager",
         "save_reflection": "reflection_store",
@@ -318,6 +316,7 @@ class BaseWorkflowManager(ABC):
                     embedding_service = EmbeddingService(
                         model_name=self._settings.embedding_model,
                         batch_size=self._settings.embedding_batch_size,
+                        device=self._settings.embedding_device,
                     )
             else:
                 from agentic_cli.knowledge_base._mocks import MockEmbeddingService
@@ -374,7 +373,7 @@ class BaseWorkflowManager(ABC):
         Returns:
             Summarized text response.
         """
-        return await self.generate_simple(prompt, max_tokens=2000)
+        return await self.generate_simple(prompt, max_tokens=12000)
 
     async def on_session_end(self, messages: list[dict] | None = None) -> list[str]:
         """Hook called when a session ends. Optionally extracts facts.

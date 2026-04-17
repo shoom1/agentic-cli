@@ -136,7 +136,7 @@ def _ingest_document(r: dict) -> str:
     return f"Ingested '{truncate(title, 40)}' ({chunks} chunks)"
 
 
-def _read_document(r: dict) -> str:
+def _kb_read(r: dict) -> str:
     title = r["title"]
     trunc = " (truncated)" if r.get("truncated") else ""
     return f"{truncate(title, 70)}{trunc}"
@@ -145,11 +145,6 @@ def _read_document(r: dict) -> str:
 def _list_documents(r: dict) -> str:
     count = r["count"]
     return f"{count} document{'s' if count != 1 else ''}"
-
-
-def _open_document(r: dict) -> str:
-    title = r.get("title", "")
-    return f"Opened: {truncate(title, 80)}"
 
 
 _TOOL_FORMATTERS: dict[str, Callable[[dict[str, Any]], str]] = {
@@ -169,10 +164,9 @@ _TOOL_FORMATTERS: dict[str, Callable[[dict[str, Any]], str]] = {
     "web_search": _web_search,
     "search_arxiv": _search_arxiv,
     "fetch_arxiv_paper": _fetch_arxiv_paper,
-    "ingest_document": _ingest_document,
-    "read_document": _read_document,
-    "list_documents": _list_documents,
-    "open_document": _open_document,
+    "kb_ingest": _ingest_document,
+    "kb_read": _kb_read,
+    "kb_list": _list_documents,
 }
 
 

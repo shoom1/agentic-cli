@@ -1343,11 +1343,10 @@ class TestToolRegistryConsistency:
             "web_search",
             "web_fetch",
             # Knowledge base (unified document store)
-            "search_knowledge_base",
-            "ingest_document",
-            "read_document",
-            "list_documents",
-            "open_document",
+            "kb_search",
+            "kb_ingest",
+            "kb_read",
+            "kb_list",
             # ArXiv (metadata only)
             "search_arxiv",
             "fetch_arxiv_paper",
@@ -1375,7 +1374,7 @@ class TestToolRegistryConsistency:
 
         registry = get_registry()
 
-        dangerous_tools = ["shell_executor", "execute_python", "open_document"]
+        dangerous_tools = ["shell_executor", "execute_python"]
         for tool_name in dangerous_tools:
             tool = registry.get(tool_name)
             if tool:
@@ -1389,7 +1388,7 @@ class TestToolRegistryConsistency:
 
         registry = get_registry()
 
-        caution_tools = ["write_file", "edit_file", "ingest_document"]
+        caution_tools = ["write_file", "edit_file", "kb_ingest"]
 
         for tool_name in caution_tools:
             tool = registry.get(tool_name)
@@ -1406,8 +1405,8 @@ class TestToolRegistryConsistency:
 
         safe_tools = [
             "read_file", "diff_compare", "grep", "glob", "list_dir",
-            "web_search", "web_fetch", "search_knowledge_base",
-            "read_document", "list_documents",
+            "web_search", "web_fetch", "kb_search",
+            "kb_read", "kb_list",
             "search_arxiv", "fetch_arxiv_paper",
             "ask_clarification",
             "save_memory", "search_memory",
@@ -1497,7 +1496,7 @@ class TestToolRegistryConsistency:
 
         # File ops: 7 (read_file, diff_compare, grep, glob, list_dir, write_file, edit_file)
         # Web/Network: 2 (web_search, web_fetch)
-        # Knowledge: 8 (search_kb, ingest_document, read_document, list_documents, open_document, search_arxiv, fetch_arxiv_paper, ingest_arxiv_paper)
+        # Knowledge: 7 (kb_search, kb_ingest, kb_read, kb_list, search_arxiv, fetch_arxiv_paper, ingest_arxiv_paper)
         # Execution: 2 (execute_python, shell_executor)
         # Interaction: 1 (ask_clarification)
         # Memory: 2 (save_memory, search_memory)

@@ -28,13 +28,14 @@ from agentic_cli.tools.glob_tool import glob, list_dir
 from agentic_cli.tools.file_write import write_file, edit_file
 
 from agentic_cli.tools.knowledge_tools import (
-    search_knowledge_base,
-    ingest_document,
-    read_document,
-    list_documents,
-    open_document,
-    unified_search,
+    kb_search,
+    kb_ingest,
+    kb_read,
+    kb_list,
 )
+
+KB_READER_TOOLS = [kb_search, kb_read, kb_list]
+KB_WRITER_TOOLS = [*KB_READER_TOOLS, kb_ingest]
 from agentic_cli.tools.arxiv_tools import (
     search_arxiv,
     fetch_arxiv_paper,
@@ -86,12 +87,12 @@ __all__ = [
     # Search (ADK built-in - note: can't mix with function calling)
     "google_search_tool",
     # Standard tool functions (ready to use with agents)
-    "search_knowledge_base",
-    "ingest_document",
-    "read_document",
-    "list_documents",
-    "open_document",
-    "unified_search",
+    "kb_search",
+    "kb_ingest",
+    "kb_read",
+    "kb_list",
+    "KB_READER_TOOLS",
+    "KB_WRITER_TOOLS",
     "search_arxiv",
     "fetch_arxiv_paper",
     "execute_python",
