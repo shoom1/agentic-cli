@@ -117,6 +117,8 @@ class KnowledgeBaseManager:
             vector_store: Optional pre-configured vector store.
         """
         self._lock = threading.Lock()
+        import asyncio as _asyncio
+        self._sidecar_locks: dict[str, _asyncio.Lock] = {}
         self._settings = settings
         self._use_mock = use_mock
 
@@ -949,3 +951,25 @@ class KnowledgeBaseManager:
             self._vector_store.clear()
             self._save_metadata()
             self._vector_store.save()
+
+    async def backfill_sidecars(self) -> int:
+        """Generate missing sidecars for all documents in the KB.
+
+        Iterates the in-memory document set, generates a sidecar payload
+        via the registered LLM summarizer for any doc that doesn't have a
+        sidecar file, and writes it. Returns the count of sidecars written.
+        Existing sidecars are not touched.
+
+        Skips ingest_log/index updates — they're already current; only
+        the sidecar files are out of date.
+        """
+        written = 0
+        for doc in list(self._documents.values()):
+            if self._sidecar_path(doc.id).exists():
+                continue
+            payload = await self.generate_sidecar_payload(
+                doc.content, title=doc.title
+            )
+            self._write_sidecar(doc, payload)
+            written += 1
+        return written
