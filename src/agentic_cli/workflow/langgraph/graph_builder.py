@@ -12,7 +12,7 @@ from collections import deque
 from typing import Any, Callable, TYPE_CHECKING
 
 from agentic_cli.workflow.config import AgentConfig
-from agentic_cli.workflow.adk.plugins import is_dangerous, request_tool_confirmation
+from agentic_cli.workflow.confirmation import is_dangerous, request_tool_confirmation
 from agentic_cli.logging import Loggers
 
 if TYPE_CHECKING:

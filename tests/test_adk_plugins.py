@@ -36,7 +36,7 @@ class TestIsDangerous:
             permission_level=PermissionLevel.DANGEROUS,
         )
 
-        with patch("agentic_cli.workflow.adk.plugins.get_registry", return_value=mock_registry):
+        with patch("agentic_cli.workflow.confirmation.get_registry", return_value=mock_registry):
             result = is_dangerous("risky_tool")
             assert result is True
 
@@ -51,7 +51,7 @@ class TestIsDangerous:
             permission_level=PermissionLevel.SAFE,
         )
 
-        with patch("agentic_cli.workflow.adk.plugins.get_registry", return_value=mock_registry):
+        with patch("agentic_cli.workflow.confirmation.get_registry", return_value=mock_registry):
             result = is_dangerous("safe_tool")
             assert result is False
 
@@ -61,7 +61,7 @@ class TestIsDangerous:
 
         mock_registry = ToolRegistry()
 
-        with patch("agentic_cli.workflow.adk.plugins.get_registry", return_value=mock_registry):
+        with patch("agentic_cli.workflow.confirmation.get_registry", return_value=mock_registry):
             result = is_dangerous("unknown_tool")
             assert result is False
 
@@ -97,7 +97,7 @@ class TestConfirmationPlugin:
 
         with (
             patch("agentic_cli.workflow.adk.plugins.is_dangerous", return_value=True),
-            patch("agentic_cli.workflow.adk.plugins.get_service", return_value=mock_workflow),
+            patch("agentic_cli.workflow.confirmation.get_service", return_value=mock_workflow),
         ):
             result = await plugin.before_tool_callback(
                 tool=tool,
@@ -123,7 +123,7 @@ class TestConfirmationPlugin:
 
         with (
             patch("agentic_cli.workflow.adk.plugins.is_dangerous", return_value=True),
-            patch("agentic_cli.workflow.adk.plugins.get_service", return_value=mock_workflow),
+            patch("agentic_cli.workflow.confirmation.get_service", return_value=mock_workflow),
         ):
             result = await plugin.before_tool_callback(
                 tool=tool,
@@ -143,7 +143,7 @@ class TestConfirmationPlugin:
 
         with (
             patch("agentic_cli.workflow.adk.plugins.is_dangerous", return_value=True),
-            patch("agentic_cli.workflow.adk.plugins.get_service", return_value=None),
+            patch("agentic_cli.workflow.confirmation.get_service", return_value=None),
         ):
             result = await plugin.before_tool_callback(
                 tool=tool,
@@ -165,7 +165,7 @@ class TestConfirmationPlugin:
 
         with (
             patch("agentic_cli.workflow.adk.plugins.is_dangerous", return_value=True),
-            patch("agentic_cli.workflow.adk.plugins.get_service", return_value=mock_workflow),
+            patch("agentic_cli.workflow.confirmation.get_service", return_value=mock_workflow),
         ):
             result = await plugin.before_tool_callback(
                 tool=tool,
@@ -186,7 +186,7 @@ class TestConfirmationPlugin:
 
             with (
                 patch("agentic_cli.workflow.adk.plugins.is_dangerous", return_value=True),
-                patch("agentic_cli.workflow.adk.plugins.get_service", return_value=mock_workflow),
+                patch("agentic_cli.workflow.confirmation.get_service", return_value=mock_workflow),
             ):
                 result = await plugin.before_tool_callback(
                     tool=tool,
@@ -213,7 +213,7 @@ class TestConfirmationPlugin:
 
         with (
             patch("agentic_cli.workflow.adk.plugins.is_dangerous", return_value=True),
-            patch("agentic_cli.workflow.adk.plugins.get_service", return_value=mock_workflow),
+            patch("agentic_cli.workflow.confirmation.get_service", return_value=mock_workflow),
         ):
             result = await plugin.before_tool_callback(
                 tool=tool,

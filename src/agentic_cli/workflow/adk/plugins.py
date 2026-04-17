@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import time
-import uuid
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,9 +16,11 @@ from typing import Any, TYPE_CHECKING
 
 from google.adk.plugins.base_plugin import BasePlugin
 
-from agentic_cli.tools.registry import get_registry, PermissionLevel
-from agentic_cli.workflow.service_registry import get_service, WORKFLOW
-from agentic_cli.workflow.events import WorkflowEvent, UserInputRequest, InputType
+from agentic_cli.workflow.confirmation import (
+    is_dangerous,
+    request_tool_confirmation,
+)
+from agentic_cli.workflow.events import WorkflowEvent
 from agentic_cli.logging import Loggers
 
 if TYPE_CHECKING:
@@ -29,55 +30,6 @@ if TYPE_CHECKING:
     from google.adk.tools.tool_context import ToolContext
 
 logger = Loggers.workflow()
-
-_APPROVED_RESPONSES = ("yes", "y", "approve", "true")
-
-
-def is_dangerous(tool_name: str) -> bool:
-    """Check if a tool is registered as DANGEROUS permission level.
-
-    Uses the ToolRegistry's O(1) lookup directly — no caching needed.
-    """
-    defn = get_registry().get(tool_name)
-    if defn is None:
-        return False
-    return defn.permission_level == PermissionLevel.DANGEROUS
-
-
-async def request_tool_confirmation(
-    tool_name: str, tool_args: dict[str, Any]
-) -> bool | None:
-    """Prompt user for confirmation of a dangerous tool call.
-
-    Shared by ConfirmationPlugin (ADK) and _wrap_for_confirmation (LangGraph).
-
-    Returns:
-        True if approved, False if denied, None if no workflow/callback available.
-    """
-    workflow = get_service(WORKFLOW)
-    if workflow is None:
-        return None
-
-    arg_summary = ", ".join(
-        f"{k}={repr(v)[:50]}" for k, v in list(tool_args.items())[:3]
-    )
-    request = UserInputRequest(
-        request_id=str(uuid.uuid4())[:8],
-        tool_name=tool_name,
-        prompt=(
-            f"Tool requires approval: {tool_name}({arg_summary})\n\n"
-            f"Allow this operation? (yes/no)"
-        ),
-        input_type=InputType.CONFIRM,
-        default="no",
-    )
-
-    try:
-        response = await workflow.request_user_input(request)
-    except RuntimeError:
-        return None
-
-    return response.strip().lower() in _APPROVED_RESPONSES
 
 
 class ConfirmationPlugin(BasePlugin):
