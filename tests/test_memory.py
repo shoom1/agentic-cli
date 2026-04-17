@@ -377,6 +377,89 @@ class TestMemoryToolFunctions:
         assert result["success"] is True
 
 
+class TestMemoryToolParity:
+    """The @register_tool wrappers in memory_tools.py and the closures
+    returned by make_memory_tools() must produce identical results for
+    identical inputs — both delegate to the same _with_store helpers,
+    and this test locks that invariant in place.
+    """
+
+    def _ctx(self, mock_context):
+        """Build both entry-point variants on top of one fresh MemoryStore."""
+        from agentic_cli.tools.memory_tools import MemoryStore
+        from agentic_cli.tools.factories import make_memory_tools
+        from agentic_cli.tools import memory_tools as mt
+        from agentic_cli.workflow.service_registry import set_service_registry
+
+        store = MemoryStore(mock_context.settings)
+        factory_tools = make_memory_tools(store)
+        token = set_service_registry({"memory_store": store})
+        return store, factory_tools, mt, token
+
+    def test_save_output_parity(self, mock_context):
+        store, factory_tools, mt, token = self._ctx(mock_context)
+        try:
+            registry_out = mt.save_memory(content="fact A", tags=["x"], importance=7)
+            factory_out = factory_tools[0](content="fact A", tags=["x"], importance=7)
+        finally:
+            token.var.reset(token)
+        # IDs differ (fresh UUIDs), so compare the contract-bearing keys only.
+        assert registry_out.keys() == factory_out.keys()
+        for k in ("success", "message"):
+            assert registry_out[k] == factory_out[k]
+
+    def test_search_output_parity(self, mock_context):
+        store, factory_tools, mt, token = self._ctx(mock_context)
+        try:
+            mt.save_memory(content="alpha beta", tags=["t"], importance=6)
+            mt.save_memory(content="gamma delta")
+            registry_out = mt.search_memory(query="alpha", limit=5)
+            factory_out = factory_tools[1](query="alpha", limit=5)
+        finally:
+            token.var.reset(token)
+        assert registry_out == factory_out
+
+    def test_update_output_parity_tags_unchanged(self, mock_context):
+        store, factory_tools, mt, token = self._ctx(mock_context)
+        try:
+            r = mt.save_memory(content="orig", tags=["keep"])
+            item_id = r["item_id"]
+            # Neither caller passes tags — both must leave them alone.
+            registry_out = mt.update_memory(item_id=item_id, content="new1")
+            assert store._items[item_id].tags == ["keep"]
+            factory_out = factory_tools[2](item_id=item_id, content="new2")
+            assert store._items[item_id].tags == ["keep"]
+        finally:
+            token.var.reset(token)
+        assert registry_out == factory_out == {"success": True, "updated": True}
+
+    def test_update_output_parity_tags_cleared_with_none(self, mock_context):
+        store, factory_tools, mt, token = self._ctx(mock_context)
+        try:
+            r = mt.save_memory(content="orig", tags=["clear-me"])
+            item_id = r["item_id"]
+            # Both entry points must clear tags when explicitly passed None.
+            mt.update_memory(item_id=item_id, tags=None)
+            assert store._items[item_id].tags is None
+
+            r2 = mt.save_memory(content="orig2", tags=["clear-me-2"])
+            factory_tools[2](item_id=r2["item_id"], tags=None)
+            assert store._items[r2["item_id"]].tags is None
+        finally:
+            token.var.reset(token)
+
+    def test_delete_output_parity(self, mock_context):
+        store, factory_tools, mt, token = self._ctx(mock_context)
+        try:
+            r1 = mt.save_memory(content="one")
+            r2 = mt.save_memory(content="two")
+            registry_out = mt.delete_memory(item_id=r1["item_id"])
+            factory_out = factory_tools[3](item_id=r2["item_id"])
+        finally:
+            token.var.reset(token)
+        assert registry_out == factory_out == {"success": True, "deleted": True}
+
+
 class TestMemorySemanticSearch:
     """Tests for semantic search in MemoryStore."""
 
