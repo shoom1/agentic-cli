@@ -49,7 +49,7 @@ agentic-cli/
 │   ├── tools/
 │   │   ├── registry.py       # ToolRegistry, @register_tool, ToolCategory, PermissionLevel
 │   │   ├── executor.py       # SafePythonExecutor
-│   │   ├── knowledge_tools.py # search_knowledge_base, ingest_to_knowledge_base
+│   │   ├── knowledge_tools.py # kb_search, kb_ingest, kb_list, read_document, open_document
 │   │   ├── arxiv_tools.py    # search_arxiv, fetch_arxiv_paper, analyze_arxiv_paper
 │   │   ├── execution_tools.py # execute_python
 │   │   ├── interaction_tools.py # ask_clarification
