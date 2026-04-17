@@ -131,3 +131,16 @@ class TestConceptStoreWrite:
         store = ConceptStore(base)
         store.write(title="X", body="b", sources=["a"], slug="x")
         assert (base / "x.md").exists()
+
+    def test_failure_returns_uniform_dict_shape(self, tmp_path):
+        """Failure path must include slug/path/action keys for safe access."""
+        from agentic_cli.knowledge_base.concepts import ConceptStore
+
+        store = ConceptStore(tmp_path / "concepts")
+        result = store.write(title="X", body="b", sources=[])
+
+        assert result["success"] is False
+        assert result["slug"] == ""
+        assert result["path"] == ""
+        assert result["action"] == "failed"
+        assert "error" in result

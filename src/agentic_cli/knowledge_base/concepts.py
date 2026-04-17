@@ -8,9 +8,12 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+from agentic_cli.file_utils import atomic_write_text
 
 
 _SLUG_INVALID_CHARS = re.compile(r"[^a-z0-9\s-]")
@@ -124,7 +127,7 @@ class ConceptStore:
         body: str,
         sources: list[str],
         slug: str = "",
-        valid_ids_check: "Any | None" = None,
+        valid_ids_check: Callable[[str], bool] | None = None,
     ) -> dict[str, Any]:
         """Create or overwrite a concept page.
 
@@ -147,13 +150,14 @@ class ConceptStore:
             Dict with keys ``success``, ``slug``, ``path``, ``action``
             (``"created"`` or ``"updated"``), and ``invalid_sources``.
         """
-        from agentic_cli.file_utils import atomic_write_text
-
         valid_sources, invalid = _partition_sources(sources, valid_ids_check)
 
         if not valid_sources:
             return {
                 "success": False,
+                "slug": "",
+                "path": "",
+                "action": "failed",
                 "error": (
                     "concept page requires at least one valid source "
                     "document id; got none"
@@ -226,7 +230,7 @@ class ConceptStore:
 
 def _partition_sources(
     sources: list[str],
-    valid_ids_check: "Any | None",
+    valid_ids_check: Callable[[str], bool] | None,
 ) -> tuple[list[str], list[str]]:
     """Split a sources list into (valid, invalid) using the check callable.
 
