@@ -15,11 +15,8 @@ from agentic_cli.tools import (
     web_fetch,
     search_arxiv,
     fetch_arxiv_paper,
-    search_knowledge_base,
-    ingest_document,
-    read_document,
-    list_documents,
-    open_document,
+    KB_READER_TOOLS,
+    KB_WRITER_TOOLS,
     execute_python,
     ask_clarification,
     read_file,
@@ -42,13 +39,13 @@ ARXIV_SPECIALIST_PROMPT = """You are an arXiv paper research specialist. You fin
 When asked to research papers on a topic:
 1. Search arXiv for relevant papers. If a search returns `success: false`, report the error instead of retrying with simpler queries.
 2. Fetch metadata for papers of interest.
-3. Ingest papers into the knowledge base by passing an arXiv PDF URL to `ingest_document` — this auto-fetches metadata, downloads the PDF, extracts text, and embeds in one call.
+3. Ingest papers into the knowledge base by passing an arXiv PDF URL to `kb_ingest` — this auto-fetches metadata, downloads the PDF, extracts text, and embeds in one call.
 4. Read the full text of ingested papers for analysis.
 5. Save detailed per-paper analyses via `write_file`.
 
 ## Per-Paper Analysis
 
-After ingesting a paper, **always read its full text** with `read_document` — do not rely solely on metadata or abstracts.
+After ingesting a paper, **always read its full text** with `kb_read` — do not rely solely on metadata or abstracts.
 
 For each paper, save a detailed analysis via `write_file` with this structure:
 
@@ -97,7 +94,7 @@ After completing each task:
 ## Workflow Guidelines
 
 When the user asks you to research something:
-1. Search the knowledge base with `search_knowledge_base` for existing documents
+1. Search the knowledge base with `kb_search` for existing documents
 2. Check memory with `search_memory` for prior learnings
 3. Create a task plan with `save_plan(content)` using markdown checkboxes
 4. **IMMEDIATELY show the plan** to the user in your response
@@ -130,7 +127,7 @@ After all research tasks are complete, write a comprehensive report:
 
 ### Report Process
 1. Read all per-paper analyses from the findings directory
-2. Use `read_document` to revisit paper full text for specific evidence
+2. Use `kb_read` to revisit paper full text for specific evidence
 3. Draft the report and use `ask_clarification` to check with the user before finalizing
 4. Save the final report via `write_file` to the findings directory
 
@@ -154,11 +151,8 @@ AGENT_CONFIGS = [
             # arXiv (2 tools)
             search_arxiv,
             fetch_arxiv_paper,
-            # Document store (4 tools)
-            search_knowledge_base,
-            ingest_document,
-            list_documents,
-            read_document,
+            # KB writer bundle (4 tools)
+            *KB_WRITER_TOOLS,
             # Deep reading (1 tool)
             web_fetch,
             # Output (1 tool)
@@ -174,11 +168,8 @@ AGENT_CONFIGS = [
             # Memory (2 tools)
             memory_tools.save_memory,
             memory_tools.search_memory,
-            # Knowledge base (4 tools)
-            search_knowledge_base,
-            list_documents,
-            read_document,
-            open_document,
+            # KB reader bundle (3 tools)
+            *KB_READER_TOOLS,
             # Web (2 tools)
             web_search,
             web_fetch,
