@@ -280,6 +280,20 @@ class KnowledgeBaseManager:
         if path.exists():
             path.unlink()
 
+    def _index_md_path(self) -> Path:
+        return self.kb_dir / "index.md"
+
+    def _rebuild_index_md(self) -> None:
+        """Rebuild index.md from current in-memory documents."""
+        from agentic_cli.knowledge_base.sidecar import render_index_md
+        from agentic_cli.file_utils import atomic_write_text
+
+        text = render_index_md(
+            list(self._documents.values()),
+            updated_at_iso=datetime.now().isoformat(),
+        )
+        atomic_write_text(self._index_md_path(), text)
+
     def _load_metadata(self) -> None:
         """Load document metadata from disk.
 
@@ -325,6 +339,10 @@ class KnowledgeBaseManager:
                     for doc in self._documents.values():
                         self._save_document_content(doc)
                 self._save_metadata()
+
+            # Ensure index.md exists for legacy KBs (no extra cost; ~ms)
+            if self._documents and not self._index_md_path().exists():
+                self._rebuild_index_md()
 
         except (json.JSONDecodeError, KeyError) as e:
             # Log error but continue with empty state
@@ -653,6 +671,7 @@ class KnowledgeBaseManager:
             # Persist (content in per-doc file, headers in metadata index)
             self._save_document_content(doc)
             self._write_sidecar(doc, sidecar_payload)
+            self._rebuild_index_md()
             self._save_metadata()
             self._vector_store.save()
 
@@ -856,6 +875,7 @@ class KnowledgeBaseManager:
             # Persist
             self._delete_document_content(doc_id)
             self._delete_sidecar(doc_id)
+            self._rebuild_index_md()
             self._save_metadata()
             self._vector_store.save()
 
