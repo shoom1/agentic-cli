@@ -33,7 +33,6 @@ from agentic_cli.tools.knowledge_tools import (
     kb_read,
     kb_list,
     open_document,
-    unified_search,
 )
 from agentic_cli.tools.arxiv_tools import (
     search_arxiv,
@@ -91,7 +90,6 @@ __all__ = [
     "kb_read",
     "kb_list",
     "open_document",
-    "unified_search",
     "search_arxiv",
     "fetch_arxiv_paper",
     "execute_python",

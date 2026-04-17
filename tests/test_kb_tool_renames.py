@@ -35,3 +35,8 @@ def test_kb_read_exported():
 def test_old_read_name_gone():
     import agentic_cli.tools as t
     assert not hasattr(t, "read_document")
+
+
+def test_unified_search_dropped():
+    import agentic_cli.tools as t
+    assert not hasattr(t, "unified_search")
