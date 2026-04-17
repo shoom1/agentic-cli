@@ -263,27 +263,25 @@ class TestBackfillSidecars:
     def kb(self, tmp_path):
         return _make_kb(tmp_path)
 
-    def test_backfill_writes_missing_sidecars(self, kb):
+    async def test_backfill_writes_missing_sidecars(self, kb):
         d1 = kb.ingest_document(content="a", title="One", source_type=SourceType.USER)
         d2 = kb.ingest_document(content="b", title="Two", source_type=SourceType.USER)
         kb._sidecar_path(d1.id).unlink()
         kb._sidecar_path(d2.id).unlink()
 
-        import asyncio
-        n = asyncio.run(kb.backfill_sidecars())
+        n = await kb.backfill_sidecars()
 
         assert n == 2
         assert kb._sidecar_path(d1.id).exists()
         assert kb._sidecar_path(d2.id).exists()
 
-    def test_backfill_skips_existing(self, kb):
+    async def test_backfill_skips_existing(self, kb):
         d1 = kb.ingest_document(content="a", title="Has Sidecar", source_type=SourceType.USER)
         # Mtime sentinel
         sidecar = kb._sidecar_path(d1.id)
         original = sidecar.read_text()
 
-        import asyncio
-        n = asyncio.run(kb.backfill_sidecars())
+        n = await kb.backfill_sidecars()
 
         assert n == 0
         assert sidecar.read_text() == original
