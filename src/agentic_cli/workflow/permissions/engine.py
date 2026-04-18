@@ -164,5 +164,32 @@ class PermissionEngine:
         resolved: list[ResolvedCapability],
         outcomes: list[tuple[ResolvedCapability, Rule | None]],
     ) -> CheckResult:
-        """Placeholder for Task 16."""
-        raise NotImplementedError
+        from agentic_cli.workflow.permissions.prompt import build_request, parse_response
+        from agentic_cli.workflow.permissions.store import append_project_rule
+
+        unmatched = [cap for cap, r in outcomes if r is None]
+        async with self._ask_lock:
+            request = build_request(tool_name, resolved)
+            response = await self._workflow.request_user_input(request)
+            scope = parse_response(response)
+
+        if scope is AskScope.DENY:
+            logger.info(
+                "permission_denied_by_user",
+                tool=tool_name,
+                capabilities=[(c.name, c.target) for c in resolved],
+            )
+            return CheckResult(False, "no rule + user denied")
+
+        if scope is AskScope.ONCE:
+            return CheckResult(True, "no rule + user allowed (once)")
+
+        source = RuleSource.SESSION if scope is AskScope.SESSION else RuleSource.PROJECT
+        for cap in unmatched:
+            rule = Rule(cap.name, cap.target, Effect.ALLOW, source)
+            self._session_rules.append(rule)
+            if source is RuleSource.PROJECT:
+                append_project_rule(self._settings.app_name, rule)
+
+        label = "session" if source is RuleSource.SESSION else "always, saved to project"
+        return CheckResult(True, f"no rule + user allowed ({label})")

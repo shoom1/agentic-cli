@@ -146,3 +146,101 @@ class TestEngineRuleBased:
             {"code": "print('hi')"},
         )
         assert result.allowed is True
+
+
+class TestEngineAskFlow:
+    @pytest.mark.asyncio
+    async def test_user_allow_once_no_rule_installed(self, ctx, tmp_path):
+        w = _stub_workflow()
+        w.request_user_input = AsyncMock(return_value="Allow once")
+        engine = PermissionEngine(settings=_stub_settings(), workflow=w, ctx=ctx)
+
+        result = await engine.check(
+            "web_fetch",
+            [Capability("http.read", target_arg="url")],
+            {"url": "https://example.com/"},
+        )
+        assert result.allowed is True
+        assert "once" in result.reason
+        assert not any(r.source is RuleSource.SESSION for r in engine.rules)
+
+    @pytest.mark.asyncio
+    async def test_user_allow_session_installs_session_rule(self, ctx, tmp_path):
+        w = _stub_workflow()
+        w.request_user_input = AsyncMock(return_value="Allow for this session")
+        engine = PermissionEngine(settings=_stub_settings(), workflow=w, ctx=ctx)
+
+        result = await engine.check(
+            "web_fetch",
+            [Capability("http.read", target_arg="url")],
+            {"url": "https://example.com/x"},
+        )
+        assert result.allowed is True
+        session = [r for r in engine.rules if r.source is RuleSource.SESSION]
+        assert any(r.capability == "http.read" and "example.com" in r.target for r in session)
+
+        # Second call for the same target → no new prompt.
+        w.request_user_input.reset_mock()
+        result2 = await engine.check(
+            "web_fetch",
+            [Capability("http.read", target_arg="url")],
+            {"url": "https://example.com/x"},
+        )
+        assert result2.allowed is True
+        w.request_user_input.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_user_allow_always_writes_project_file(self, ctx, tmp_path, monkeypatch):
+        import json
+        monkeypatch.chdir(tmp_path)
+        w = _stub_workflow()
+        w.request_user_input = AsyncMock(return_value="Allow always (save to project)")
+        engine = PermissionEngine(settings=_stub_settings(), workflow=w, ctx=ctx)
+
+        result = await engine.check(
+            "web_fetch",
+            [Capability("http.read", target_arg="url")],
+            {"url": "https://example.com/x"},
+        )
+        assert result.allowed is True
+
+        data = json.loads((tmp_path / ".agentic/settings.json").read_text())
+        allow = data["permissions"]["allow"]
+        assert len(allow) == 1
+        assert allow[0]["capability"] == "http.read"
+        assert "example.com" in allow[0]["target"]
+
+    @pytest.mark.asyncio
+    async def test_user_denies(self, ctx):
+        w = _stub_workflow()
+        w.request_user_input = AsyncMock(return_value="Deny")
+        engine = PermissionEngine(settings=_stub_settings(), workflow=w, ctx=ctx)
+
+        result = await engine.check(
+            "web_fetch",
+            [Capability("http.read", target_arg="url")],
+            {"url": "https://example.com/x"},
+        )
+        assert result.allowed is False
+        assert "denied" in result.reason.lower()
+
+    @pytest.mark.asyncio
+    async def test_only_unmatched_capabilities_become_session_rules(self, ctx, tmp_path):
+        """copy_file with src inside workdir (allowed by builtin) and dest outside.
+        Only the write rule should be synthesised."""
+        w = _stub_workflow()
+        w.request_user_input = AsyncMock(return_value="Allow for this session")
+        engine = PermissionEngine(settings=_stub_settings(), workflow=w, ctx=ctx)
+
+        result = await engine.check(
+            "copy_file",
+            [
+                Capability("filesystem.read", target_arg="src"),
+                Capability("filesystem.write", target_arg="dest"),
+            ],
+            {"src": str(tmp_path / "a"), "dest": str(tmp_path / "out")},
+        )
+        assert result.allowed is True
+        session = [r for r in engine.rules if r.source is RuleSource.SESSION]
+        assert len(session) == 1
+        assert session[0].capability == "filesystem.write"
