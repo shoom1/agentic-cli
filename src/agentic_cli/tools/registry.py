@@ -57,17 +57,6 @@ class ToolCategory(Enum):
     OTHER = "other"
 
 
-class PermissionLevel(Enum):
-    """Permission levels for tool safety classification.
-
-    Used to determine whether user confirmation is needed before tool execution.
-    """
-
-    SAFE = "safe"  # No confirmation needed (read operations)
-    CAUTION = "caution"  # May need allowlisting (write operations)
-    DANGEROUS = "dangerous"  # Always requires confirmation (delete, shell)
-
-
 @dataclass
 class ToolDefinition:
     """Metadata-rich tool definition.
@@ -76,7 +65,7 @@ class ToolDefinition:
         name: Tool name (defaults to function name)
         description: Human-readable description
         category: Tool category for organization (READ, WRITE, NETWORK, etc.)
-        permission_level: Safety classification (SAFE, CAUTION, DANGEROUS)
+        capabilities: Capability declarations for the permission engine
         is_async: Whether the tool is async
         func: The actual tool function
     """
@@ -84,9 +73,8 @@ class ToolDefinition:
     name: str
     description: str
     func: Callable[..., Any]
-    capabilities: CapabilitiesSpec = field(default_factory=lambda: EXEMPT)
+    capabilities: CapabilitiesSpec
     category: ToolCategory = ToolCategory.OTHER
-    permission_level: PermissionLevel = PermissionLevel.SAFE
     is_async: bool = False
 
     def __post_init__(self):
@@ -143,18 +131,17 @@ class ToolRegistry:
         name: str | None = None,
         description: str | None = None,
         category: ToolCategory = ToolCategory.OTHER,
-        permission_level: PermissionLevel = PermissionLevel.SAFE,
-        capabilities: CapabilitiesSpec = EXEMPT,
+        capabilities: CapabilitiesSpec,
     ) -> Callable[..., Any]:
         """Register a tool function.
 
         Can be used as a decorator:
-            @registry.register(category=ToolCategory.READ, permission_level=PermissionLevel.SAFE)
+            @registry.register(category=ToolCategory.READ, capabilities=[Capability(...)])
             def my_tool(query: str) -> dict:
                 ...
 
         Or called directly:
-            registry.register(my_tool, category=ToolCategory.READ)
+            registry.register(my_tool, category=ToolCategory.READ, capabilities=EXEMPT)
         """
 
         def decorator(f: Callable[..., Any]) -> Callable[..., Any]:
@@ -168,7 +155,6 @@ class ToolRegistry:
                 func=f,
                 capabilities=validated_caps,
                 category=category,
-                permission_level=permission_level,
             )
 
             self._tools[tool_name] = definition
@@ -216,14 +202,13 @@ def register_tool(
     name: str | None = None,
     description: str | None = None,
     category: ToolCategory = ToolCategory.OTHER,
-    permission_level: PermissionLevel = PermissionLevel.SAFE,
-    capabilities: CapabilitiesSpec = EXEMPT,
+    capabilities: CapabilitiesSpec,
 ) -> Callable[..., Any]:
     """Register a tool with the default registry.
 
-    DANGEROUS tools are no longer wrapped at registration time. Instead,
-    confirmation is handled at the framework level by ADK ConfirmationPlugin
-    and LangGraph's _wrap_for_confirmation wrapper.
+    ``capabilities`` is a required keyword argument. Pass ``EXEMPT`` to opt out
+    of the permission engine, or a list of ``Capability`` instances to declare
+    the resources this tool accesses.
     """
 
     def _outer(f: Callable[..., Any]) -> Callable[..., Any]:
@@ -232,12 +217,9 @@ def register_tool(
             name=name,
             description=description,
             category=category,
-            permission_level=permission_level,
             capabilities=capabilities,
         )
 
     if func is not None:
         return _outer(func)
     return _outer
-
-

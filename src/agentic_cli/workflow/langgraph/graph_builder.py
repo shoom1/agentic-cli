@@ -6,13 +6,10 @@ and LLM factory logic from the runtime process loop.
 
 from __future__ import annotations
 
-import asyncio
-import functools
 from collections import deque
 from typing import Any, Callable, TYPE_CHECKING
 
 from agentic_cli.workflow.config import AgentConfig
-from agentic_cli.workflow.confirmation import is_dangerous, request_tool_confirmation
 from agentic_cli.workflow.langgraph.permission_wrap import wrap_tool_for_permission
 from agentic_cli.logging import Loggers
 
@@ -302,45 +299,6 @@ class LangGraphBuilder:
             initial_interval=self._settings.retry_initial_delay,
             backoff_factor=self._settings.retry_backoff_factor,
         )
-
-    @staticmethod
-    def _wrap_for_confirmation(tool: Callable) -> Callable:
-        """Wrap a DANGEROUS tool with user confirmation logic.
-
-        Safe tools are returned as-is. DANGEROUS tools get an async wrapper
-        that uses the workflow manager's request_user_input callback to prompt
-        the user before executing.
-
-        The wrapper is always async regardless of the original tool, because
-        the confirmation prompt requires awaiting request_user_input(). This
-        is safe because LangGraph's ToolNode calls ainvoke() for all tools.
-
-        Args:
-            tool: The tool function to potentially wrap.
-
-        Returns:
-            The original function (if safe) or a confirmation-wrapped version.
-        """
-        tool_name = getattr(tool, "__name__", str(tool))
-        if not is_dangerous(tool_name):
-            return tool
-
-        is_async = asyncio.iscoroutinefunction(tool)
-
-        @functools.wraps(tool)
-        async def _confirmed(*args: Any, **kwargs: Any) -> Any:
-            approved = await request_tool_confirmation(tool_name, kwargs)
-            if approved is False:
-                return {
-                    "success": False,
-                    "error": f"User denied approval for {tool_name}",
-                }
-            # approved is True or None (no workflow/callback) → proceed
-            if is_async:
-                return await tool(*args, **kwargs)
-            return tool(*args, **kwargs)
-
-        return _confirmed
 
     def _create_agent_node(
         self, config: AgentConfig, default_model: str, tools: list | None = None,

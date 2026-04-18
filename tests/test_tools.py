@@ -426,10 +426,13 @@ class TestToolDefinition:
         def my_tool(query: str) -> dict:
             return {"result": query}
 
+        from agentic_cli.workflow.permissions import EXEMPT
+
         definition = ToolDefinition(
             name="my_tool",
             description="A test tool",
             func=my_tool,
+            capabilities=EXEMPT,
         )
 
         assert definition.name == "my_tool"
@@ -440,6 +443,7 @@ class TestToolDefinition:
 
     def test_definition_async_detection(self):
         """Test async function detection."""
+        from agentic_cli.workflow.permissions import EXEMPT
 
         async def async_tool(query: str) -> dict:
             return {"result": query}
@@ -448,12 +452,14 @@ class TestToolDefinition:
             name="async_tool",
             description="An async tool",
             func=async_tool,
+            capabilities=EXEMPT,
         )
 
         assert definition.is_async is True
 
     def test_definition_with_category(self):
         """Test definition with category."""
+        from agentic_cli.workflow.permissions import EXEMPT
 
         def search(query: str) -> dict:
             return {}
@@ -462,6 +468,7 @@ class TestToolDefinition:
             name="search",
             description="Search tool",
             func=search,
+            capabilities=EXEMPT,
             category=ToolCategory.NETWORK,
         )
 
@@ -481,13 +488,15 @@ class TestToolRegistry:
 
     def test_registry_register_direct(self):
         """Test direct registration."""
+        from agentic_cli.workflow.permissions import EXEMPT
+
         registry = ToolRegistry()
 
         def my_tool(x: int) -> int:
             """Multiply by two."""
             return x * 2
 
-        registry.register(my_tool, category=ToolCategory.KNOWLEDGE)
+        registry.register(my_tool, category=ToolCategory.KNOWLEDGE, capabilities=EXEMPT)
 
         assert len(registry) == 1
         assert "my_tool" in registry
@@ -498,9 +507,11 @@ class TestToolRegistry:
 
     def test_registry_register_decorator(self):
         """Test decorator registration."""
+        from agentic_cli.workflow.permissions import EXEMPT
+
         registry = ToolRegistry()
 
-        @registry.register(category=ToolCategory.NETWORK)
+        @registry.register(category=ToolCategory.NETWORK, capabilities=EXEMPT)
         def search_tool(query: str) -> dict:
             """Search for things."""
             return {"results": []}
@@ -511,9 +522,11 @@ class TestToolRegistry:
 
     def test_registry_custom_name(self):
         """Test registration with custom name."""
+        from agentic_cli.workflow.permissions import EXEMPT
+
         registry = ToolRegistry()
 
-        @registry.register(name="custom_search", description="Custom search")
+        @registry.register(name="custom_search", description="Custom search", capabilities=EXEMPT)
         def internal_search(q: str) -> dict:
             return {}
 
@@ -523,6 +536,8 @@ class TestToolRegistry:
 
     def test_registry_get_functions(self):
         """Test getting all functions."""
+        from agentic_cli.workflow.permissions import EXEMPT
+
         registry = ToolRegistry()
 
         def tool_a():
@@ -531,8 +546,8 @@ class TestToolRegistry:
         def tool_b():
             pass
 
-        registry.register(tool_a)
-        registry.register(tool_b)
+        registry.register(tool_a, capabilities=EXEMPT)
+        registry.register(tool_b, capabilities=EXEMPT)
 
         functions = registry.get_functions()
         assert len(functions) == 2
@@ -541,17 +556,19 @@ class TestToolRegistry:
 
     def test_registry_list_by_category(self):
         """Test listing tools by category."""
+        from agentic_cli.workflow.permissions import EXEMPT
+
         registry = ToolRegistry()
 
-        @registry.register(category=ToolCategory.NETWORK)
+        @registry.register(category=ToolCategory.NETWORK, capabilities=EXEMPT)
         def search1():
             pass
 
-        @registry.register(category=ToolCategory.NETWORK)
+        @registry.register(category=ToolCategory.NETWORK, capabilities=EXEMPT)
         def search2():
             pass
 
-        @registry.register(category=ToolCategory.EXECUTION)
+        @registry.register(category=ToolCategory.EXECUTION, capabilities=EXEMPT)
         def execute():
             pass
 
@@ -1294,19 +1311,6 @@ class TestToolRegistryConsistency:
             assert tool.category is not None, f"Tool '{tool.name}' has no category"
             assert tool.category.value is not None, f"Tool '{tool.name}' has invalid category"
 
-    def test_all_registered_tools_have_permission_level(self):
-        """Test that all registered tools have a permission level defined."""
-        from agentic_cli.tools import get_registry, PermissionLevel
-
-        registry = get_registry()
-        tools = registry.list_tools()
-
-        for tool in tools:
-            assert tool.permission_level is not None, f"Tool '{tool.name}' has no permission_level"
-            assert isinstance(tool.permission_level, PermissionLevel), (
-                f"Tool '{tool.name}' has invalid permission_level type"
-            )
-
     def test_expected_tools_are_registered(self):
         """Test that all expected tools are in the registry."""
         from agentic_cli.tools import get_registry
@@ -1323,7 +1327,6 @@ class TestToolRegistryConsistency:
         import agentic_cli.tools.interaction_tools  # noqa: F401
         import agentic_cli.tools.webfetch_tool  # noqa: F401
         import agentic_cli.tools.memory_tools  # noqa: F401
-        import agentic_cli.tools.hitl_tools  # noqa: F401
         import agentic_cli.tools.shell.executor  # noqa: F401
 
         registry = get_registry()
@@ -1368,58 +1371,6 @@ class TestToolRegistryConsistency:
                 f"Registered tools: {sorted(registered_names)}"
             )
 
-    def test_dangerous_tools_have_correct_permission(self):
-        """Test that dangerous tools are properly marked."""
-        from agentic_cli.tools import get_registry, PermissionLevel
-
-        registry = get_registry()
-
-        dangerous_tools = ["shell_executor", "execute_python"]
-        for tool_name in dangerous_tools:
-            tool = registry.get(tool_name)
-            if tool:
-                assert tool.permission_level == PermissionLevel.DANGEROUS, (
-                    f"{tool_name} should be DANGEROUS, got {tool.permission_level}"
-                )
-
-    def test_caution_tools_have_correct_permission(self):
-        """Test that caution-level tools are properly marked."""
-        from agentic_cli.tools import get_registry, PermissionLevel
-
-        registry = get_registry()
-
-        caution_tools = ["write_file", "edit_file", "kb_ingest"]
-
-        for tool_name in caution_tools:
-            tool = registry.get(tool_name)
-            if tool:
-                assert tool.permission_level == PermissionLevel.CAUTION, (
-                    f"{tool_name} should be CAUTION, got {tool.permission_level}"
-                )
-
-    def test_safe_tools_have_correct_permission(self):
-        """Test that safe tools are properly marked."""
-        from agentic_cli.tools import get_registry, PermissionLevel
-
-        registry = get_registry()
-
-        safe_tools = [
-            "read_file", "diff_compare", "grep", "glob", "list_dir",
-            "web_search", "web_fetch", "kb_search",
-            "kb_read", "kb_list",
-            "search_arxiv", "fetch_arxiv_paper",
-            "ask_clarification",
-            "save_memory", "search_memory",
-            "save_plan", "get_plan",
-        ]
-
-        for tool_name in safe_tools:
-            tool = registry.get(tool_name)
-            if tool:
-                assert tool.permission_level == PermissionLevel.SAFE, (
-                    f"{tool_name} should be SAFE, got {tool.permission_level}"
-                )
-
     def test_tools_by_category(self):
         """Test that tools are properly categorized."""
         from agentic_cli.tools import get_registry, ToolCategory
@@ -1436,7 +1387,6 @@ class TestToolRegistryConsistency:
         import agentic_cli.tools.interaction_tools  # noqa: F401
         import agentic_cli.tools.webfetch_tool  # noqa: F401
         import agentic_cli.tools.memory_tools  # noqa: F401
-        import agentic_cli.tools.hitl_tools  # noqa: F401
         import agentic_cli.tools.shell.executor  # noqa: F401
 
         registry = get_registry()
@@ -1488,7 +1438,6 @@ class TestToolRegistryConsistency:
         import agentic_cli.tools.interaction_tools  # noqa: F401
         import agentic_cli.tools.webfetch_tool  # noqa: F401
         import agentic_cli.tools.memory_tools  # noqa: F401
-        import agentic_cli.tools.hitl_tools  # noqa: F401
         import agentic_cli.tools.shell.executor  # noqa: F401
 
         registry = get_registry()
@@ -1507,10 +1456,10 @@ class TestToolRegistryConsistency:
 
 
 class TestDangerousToolDirectExecution:
-    """Tests that DANGEROUS tools execute directly (no registry-level wrapping).
+    """Tests that tools execute directly (no registry-level wrapping).
 
-    Confirmation is now handled at the framework level by ADK ConfirmationPlugin
-    and LangGraph's _wrap_for_confirmation wrapper.
+    Permission checks are now handled at the framework level by the
+    capability-based permission engine.
     """
 
     def test_dangerous_tool_not_wrapped(self):
@@ -1544,11 +1493,4 @@ class TestDangerousToolDirectExecution:
                 tok.var.reset(tok)
                 mgr.cleanup()
 
-    def test_dangerous_tool_has_correct_permission_level(self):
-        """DANGEROUS tools should still be registered with DANGEROUS permission."""
-        from agentic_cli.tools import get_registry, PermissionLevel
 
-        registry = get_registry()
-        tool = registry.get("sandbox_execute")
-        if tool:
-            assert tool.permission_level == PermissionLevel.DANGEROUS

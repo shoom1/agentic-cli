@@ -1,8 +1,4 @@
-"""Tests for permissions settings additions.
-
-Adds ``permissions`` (nested) and ``permissions_enabled`` to settings;
-``hitl_enabled`` remains for now (removed in final cleanup task).
-"""
+"""Tests for permissions settings."""
 
 from agentic_cli.config import BaseSettings
 
@@ -17,10 +13,10 @@ class TestPermissionsSettings:
         assert s.permissions.allow == []
         assert s.permissions.deny == []
 
-    def test_hitl_enabled_still_present(self):
-        """Old kwarg still accessible during the migration window."""
+    def test_hitl_enabled_removed(self):
+        """hitl_enabled should no longer exist."""
         s = BaseSettings()
-        assert hasattr(s, "hitl_enabled")
+        assert not hasattr(s, "hitl_enabled")
 
     def test_permissions_accepts_allow_and_deny(self):
         from agentic_cli.workflow.settings import (

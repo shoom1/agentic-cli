@@ -299,15 +299,7 @@ class WorkflowSettingsMixin:
         json_schema_extra={"ui_order": 132},
     )
 
-    # HITL (Human-in-the-Loop) settings
-    hitl_enabled: bool = Field(
-        default=True,
-        title="HITL Enabled",
-        description="Enable human-in-the-loop features (approvals)",
-        json_schema_extra={"ui_order": 135},
-    )
-
-    # Permissions (new in phase 2)
+    # Permissions
     permissions: PermissionsConfig = Field(
         default_factory=PermissionsConfig,
         title="Permissions",

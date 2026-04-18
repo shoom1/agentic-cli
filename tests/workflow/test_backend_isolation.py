@@ -2,7 +2,7 @@
 
 ADK and LangGraph are pluggable orchestrators behind BaseWorkflowManager.
 Neither backend should depend on the other — shared logic lives in
-workflow.* (e.g. workflow.confirmation, workflow.events, workflow.service_registry).
+workflow.* (e.g. workflow.events, workflow.service_registry, workflow.permissions).
 If one backend imports from the other, adding a third orchestrator would
 drag the dependency along.
 """

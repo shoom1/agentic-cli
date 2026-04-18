@@ -10,7 +10,6 @@ Tool System:
 
 Framework Tools:
     - memory_tools: Working and long-term memory tools
-    - hitl_tools: Human-in-the-loop approval tools
     - web_search: Web search with pluggable backends (Tavily, Brave)
 
 For resilience patterns, use tenacity, pybreaker, aiolimiter directly.
@@ -48,7 +47,6 @@ from agentic_cli.tools.search import web_search
 from agentic_cli.tools.webfetch_tool import web_fetch
 from agentic_cli.tools.registry import (
     ToolCategory,
-    PermissionLevel,
     ToolDefinition,
     ToolRegistry,
     get_registry,
@@ -61,7 +59,6 @@ from google.adk.tools import google_search as google_search_tool
 __all__ = [
     # Registry classes
     "ToolCategory",
-    "PermissionLevel",
     "ToolDefinition",
     "ToolRegistry",
     "get_registry",
@@ -103,7 +100,6 @@ __all__ = [
     "ask_clarification",
     # Framework tool modules (lazy loaded)
     "memory_tools",
-    "hitl_tools",
     "sandbox_tools",
     "reflection_tools",
 ]
@@ -112,7 +108,6 @@ __all__ = [
 # Lazy loading for framework tool modules
 _lazy_tool_modules = {
     "memory_tools": "agentic_cli.tools.memory_tools",
-    "hitl_tools": "agentic_cli.tools.hitl_tools",
     "sandbox_tools": "agentic_cli.tools.sandbox",
     "reflection_tools": "agentic_cli.tools.reflection_tools",
 }

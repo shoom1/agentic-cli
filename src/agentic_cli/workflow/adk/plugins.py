@@ -1,7 +1,6 @@
 """ADK Plugins for agentic-cli.
 
 Provides framework-level cross-cutting concerns as ADK Plugins:
-- ConfirmationPlugin: HITL confirmation for DANGEROUS tools
 - LLMLoggingPlugin: Raw LLM traffic logging for debugging
 """
 
@@ -16,61 +15,14 @@ from typing import Any, TYPE_CHECKING
 
 from google.adk.plugins.base_plugin import BasePlugin
 
-from agentic_cli.workflow.confirmation import (
-    is_dangerous,
-    request_tool_confirmation,
-)
 from agentic_cli.workflow.events import WorkflowEvent
 from agentic_cli.logging import Loggers
 
 if TYPE_CHECKING:
     from google.adk.agents.callback_context import CallbackContext
     from google.adk.models import LlmRequest, LlmResponse
-    from google.adk.tools import BaseTool
-    from google.adk.tools.tool_context import ToolContext
 
 logger = Loggers.workflow()
-
-
-class ConfirmationPlugin(BasePlugin):
-    """ADK Plugin that requires user confirmation for DANGEROUS tools.
-
-    Uses the workflow manager's request_user_input callback to prompt
-    the user before executing any tool with PermissionLevel.DANGEROUS.
-
-    Replaces the old _wrap_dangerous decorator pattern with a single
-    framework-level hook that applies to all agents globally.
-    """
-
-    def __init__(self) -> None:
-        super().__init__(name="confirmation")
-
-    async def before_tool_callback(
-        self,
-        *,
-        tool: "BaseTool",
-        tool_args: dict[str, Any],
-        tool_context: "ToolContext",
-    ) -> dict | None:
-        """Intercept DANGEROUS tool calls and request user confirmation."""
-        if not is_dangerous(tool.name):
-            return None
-
-        approved = await request_tool_confirmation(tool.name, tool_args)
-
-        if approved is None:
-            logger.warning("confirmation_plugin.no_workflow_or_callback", tool=tool.name)
-            return None
-
-        if approved:
-            logger.debug("confirmation_plugin.approved", tool=tool.name)
-            return None
-
-        logger.info("confirmation_plugin.denied", tool=tool.name)
-        return {
-            "success": False,
-            "error": f"User denied approval for {tool.name}",
-        }
 
 
 class LLMLoggingPlugin(BasePlugin):

@@ -4,7 +4,6 @@ Provides tools for file system modifications:
 - write_file: Write content to a file (creates or overwrites)
 - edit_file: Replace text in a file (sed-like operation)
 
-All tools in this module have PermissionLevel.CAUTION.
 Delete, move, and copy operations should use the shell tool.
 """
 
@@ -15,7 +14,6 @@ from typing import Any
 from agentic_cli.file_utils import atomic_write_text
 from agentic_cli.tools.registry import (
     ToolCategory,
-    PermissionLevel,
     register_tool,
 )
 from agentic_cli.workflow.permissions import Capability
@@ -23,7 +21,6 @@ from agentic_cli.workflow.permissions import Capability
 
 @register_tool(
     category=ToolCategory.WRITE,
-    permission_level=PermissionLevel.CAUTION,
     capabilities=[Capability("filesystem.write", target_arg="path")],
     description="Write content to a file (creates or overwrites). Use this to create new files or replace entire file contents. For partial modifications use edit_file instead.",
 )
@@ -89,7 +86,6 @@ def write_file(
 
 @register_tool(
     category=ToolCategory.WRITE,
-    permission_level=PermissionLevel.CAUTION,
     capabilities=[Capability("filesystem.read", target_arg="path"), Capability("filesystem.write", target_arg="path")],
     description="Replace specific text in an existing file. Use this for targeted edits (find-and-replace). For creating or fully rewriting files use write_file instead.",
 )

@@ -20,7 +20,6 @@ from agentic_cli.tools.pdf_utils import extract_pdf_text
 from agentic_cli.tools.registry import (
     register_tool,
     ToolCategory,
-    PermissionLevel,
 )
 from agentic_cli.workflow.permissions import Capability
 from agentic_cli.workflow.service_registry import (
@@ -123,7 +122,7 @@ async def _fetch_arxiv_paper_with_source(source, arxiv_id: str) -> dict[str, Any
 
 @register_tool(
     category=ToolCategory.KNOWLEDGE,
-    permission_level=PermissionLevel.SAFE,
+
     capabilities=[Capability("http.read")],
     description="Search arXiv for academic papers by query, category, or date range. Use this to find research papers on a topic.",
 )
@@ -172,7 +171,7 @@ def search_arxiv(
 
 @register_tool(
     category=ToolCategory.KNOWLEDGE,
-    permission_level=PermissionLevel.SAFE,
+
     capabilities=[Capability("http.read")],
     description="Fetch metadata for a specific arXiv paper by ID or URL. Returns title, authors, abstract, categories, and PDF URL.",
 )
@@ -299,7 +298,7 @@ async def _ingest_arxiv_paper_with_services(
 
 @register_tool(
     category=ToolCategory.KNOWLEDGE,
-    permission_level=PermissionLevel.SAFE,
+
     capabilities=[Capability("http.read"), Capability("kb.write")],
     description="Download an arXiv paper's PDF, extract text, and ingest it into the knowledge base. Use this to add a specific arXiv paper to long-term storage so it can be searched later.",
 )

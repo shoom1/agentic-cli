@@ -31,7 +31,6 @@ logger = get_logger("agentic_cli.tools.memory")
 from agentic_cli.tools.registry import (
     register_tool,
     ToolCategory,
-    PermissionLevel,
 )
 from agentic_cli.workflow.permissions import Capability
 from agentic_cli.workflow.service_registry import require_service, MEMORY_STORE
@@ -506,7 +505,6 @@ def _delete_memory_with_store(
 
 @register_tool(
     category=ToolCategory.MEMORY,
-    permission_level=PermissionLevel.SAFE,
     capabilities=[Capability("memory.write")],
     description="Save information to persistent memory that survives across sessions. Use this to remember user preferences, important facts, or learnings for future conversations.",
 )
@@ -530,7 +528,6 @@ def save_memory(
 
 @register_tool(
     category=ToolCategory.MEMORY,
-    permission_level=PermissionLevel.SAFE,
     capabilities=[Capability("memory.read")],
     description="Search persistent memory by keyword/substring. Use this to recall previously saved facts, preferences, or learnings.",
 )
@@ -554,7 +551,6 @@ def search_memory(
 
 @register_tool(
     category=ToolCategory.MEMORY,
-    permission_level=PermissionLevel.SAFE,
     capabilities=[Capability("memory.write")],
     description="Update an existing memory item",
 )
@@ -578,7 +574,6 @@ def update_memory(
 
 @register_tool(
     category=ToolCategory.MEMORY,
-    permission_level=PermissionLevel.CAUTION,
     capabilities=[Capability("memory.write")],
     description="Delete a memory item",
 )

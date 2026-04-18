@@ -47,7 +47,7 @@ agentic-cli/
 │   │       ├── persistence/  # Checkpointers, stores
 │   │       └── tools/        # LangChain-compatible wrappers
 │   ├── tools/
-│   │   ├── registry.py       # ToolRegistry, @register_tool, ToolCategory, PermissionLevel
+│   │   ├── registry.py       # ToolRegistry, @register_tool, ToolCategory
 │   │   ├── executor.py       # SafePythonExecutor
 │   │   ├── knowledge_tools.py # kb_search, kb_ingest, kb_list, kb_read
 │   │   ├── arxiv_tools.py    # search_arxiv, fetch_arxiv_paper, analyze_arxiv_paper
@@ -62,7 +62,7 @@ agentic-cli/
 │   │   ├── memory_tools.py   # save_memory, search_memory + MemoryStore
 │   │   ├── planning_tools.py # save_plan, get_plan + PlanStore
 │   │   ├── task_tools.py     # save_tasks, get_tasks + TaskStore
-│   │   ├── hitl_tools.py     # request_approval + ApprovalManager, HITLConfig
+│   │   ├── reflection_tools.py # save_reflection + ToolReflectionStore
 │   │   ├── shell/            # 8-layer shell security
 │   │   └── webfetch/         # Fetcher, converter, validator, robots
 │   ├── knowledge_base/

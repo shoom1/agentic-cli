@@ -320,11 +320,12 @@ configs = [coordinator, researcher, analyst]
 Tools are regular Python functions with type hints and docstrings. **All tools return `{"success": bool, ...}` dicts** — never raise exceptions.
 
 ```python
-from agentic_cli.tools import register_tool, ToolCategory, PermissionLevel
+from agentic_cli.tools import register_tool, ToolCategory
+from agentic_cli.workflow.permissions import Capability, EXEMPT
 
 @register_tool(
-    category=ToolCategory.DATA,
-    permission_level=PermissionLevel.SAFE,
+    category=ToolCategory.NETWORK,
+    capabilities=[Capability("http.read")],
     description="Search the database for matching records.",
 )
 def search_database(query: str, limit: int = 10) -> dict:
@@ -726,7 +727,7 @@ agentic-cli/
 │   │       ├── state.py
 │   │       └── persistence/              # Checkpointers and stores
 │   ├── tools/
-│   │   ├── registry.py           # ToolRegistry, ToolCategory, PermissionLevel
+│   │   ├── registry.py           # ToolRegistry, ToolCategory, register_tool
 │   │   ├── factories.py          # Backend-aware tool factories
 │   │   ├── executor.py           # SafePythonExecutor
 │   │   ├── arxiv_tools.py        # search_arxiv, fetch_arxiv_paper, ingest_arxiv_paper
@@ -744,7 +745,6 @@ agentic-cli/
 │   │   ├── pdf_utils.py          # PDF text extraction helpers
 │   │   ├── memory_tools.py       # save/search/update/delete + MemoryStore
 │   │   ├── reflection_tools.py   # save_reflection + ToolReflectionStore
-│   │   ├── hitl_tools.py         # request_approval
 │   │   ├── _core/                # Shared planning/task logic
 │   │   │   ├── planning.py
 │   │   │   └── tasks.py
