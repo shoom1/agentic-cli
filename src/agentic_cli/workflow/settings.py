@@ -10,7 +10,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Literal, TYPE_CHECKING
 
-from pydantic import Field
+from pydantic import BaseModel, Field
 
 from agentic_cli.workflow.models import ModelFamily, ModelRegistry
 
@@ -19,6 +19,20 @@ if TYPE_CHECKING:
 
 # Thinking effort levels (module-level constant for backward compatibility)
 THINKING_EFFORT_LEVELS = ModelRegistry.THINKING_EFFORT_LEVELS
+
+
+class PermissionRuleConfig(BaseModel):
+    """A single permission rule — serialised to settings.json as JSON."""
+
+    capability: str
+    target: str
+
+
+class PermissionsConfig(BaseModel):
+    """Nested settings section holding user-editable permission rules."""
+
+    allow: list[PermissionRuleConfig] = []
+    deny: list[PermissionRuleConfig] = []
 
 
 class OrchestratorType(str, Enum):
@@ -291,6 +305,20 @@ class WorkflowSettingsMixin:
         title="HITL Enabled",
         description="Enable human-in-the-loop features (approvals)",
         json_schema_extra={"ui_order": 135},
+    )
+
+    # Permissions (new in phase 2)
+    permissions: PermissionsConfig = Field(
+        default_factory=PermissionsConfig,
+        title="Permissions",
+        description="Declarative allow/deny rules for tool capabilities.",
+        json_schema_extra={"ui_order": 135},
+    )
+    permissions_enabled: bool = Field(
+        default=True,
+        title="Permissions Enabled",
+        description="Master switch; when False, all tool calls are allowed.",
+        json_schema_extra={"ui_order": 136},
     )
 
     # Persistence settings (LangGraph)
