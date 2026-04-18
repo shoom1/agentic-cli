@@ -11,6 +11,8 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from agentic_cli.file_utils import atomic_write_text
+from agentic_cli.settings_persistence import get_project_config_path
 from agentic_cli.workflow.permissions.rules import Effect, Rule, RuleSource
 
 
@@ -78,3 +80,30 @@ def load_rules(path: Path, source: RuleSource, ctx: PermissionContext) -> list[R
             target = get_matcher(cap).canonicalize(target_raw, ctx)
             rules.append(Rule(cap, target, effect, source))
     return rules
+
+
+def append_project_rule(app_name: str, rule: Rule) -> None:
+    """Append ``rule`` to the project ``settings.json`` permissions section.
+
+    Creates the file (and its parent directory) if absent; preserves every
+    other settings key; dedupes by exact ``(capability, target)``. Atomic
+    rewrite via ``file_utils.atomic_write_text``.
+
+    Only ``Rule`` instances with ``source == RuleSource.PROJECT`` should be
+    passed here — this helper doesn't validate (engine enforces the
+    invariant).
+    """
+    path = get_project_config_path(app_name)
+    try:
+        data = json.loads(path.read_text()) if path.exists() else {}
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Malformed JSON in {path}: {exc}") from exc
+
+    key = "allow" if rule.effect is Effect.ALLOW else "deny"
+    section = data.setdefault("permissions", {}).setdefault(key, [])
+    entry = {"capability": rule.capability, "target": rule.target}
+    if entry not in section:
+        section.append(entry)
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(path, json.dumps(data, indent=2))
