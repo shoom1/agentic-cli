@@ -42,6 +42,9 @@ class TestBuiltinRules:
 
         # Reads within workdir allowed:
         assert any(r.capability == "filesystem.read" and "${workdir}" in r.target for r in allows)
+        # Memory + KB: agent-internal stores allowed by default.
+        assert any(r.capability == "memory.*" and r.target == "*" for r in allows)
+        assert any(r.capability == "kb.*" and r.target == "*" for r in allows)
         # System dirs denied:
         system_targets = {r.target for r in denies if r.capability == "filesystem.write"}
         for path in ("/etc/**", "/usr/**", "/bin/**", "/sbin/**", "/boot/**", "/System/**"):

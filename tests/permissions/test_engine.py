@@ -327,6 +327,21 @@ class TestTargetlessAllowAlwaysRegression:
         assert w.request_user_input.await_count == 1
 
     @pytest.mark.asyncio
+    async def test_memory_and_kb_allowed_by_builtin(self, ctx, tmp_path):
+        """Memory and KB capabilities should be allowed without prompting."""
+        w = _stub_workflow()
+        engine = PermissionEngine(settings=_stub_settings(), workflow=w, ctx=ctx)
+
+        for cap_name in ("memory.read", "memory.write", "kb.read", "kb.write"):
+            result = await engine.check(
+                f"tool_using_{cap_name}",
+                [Capability(cap_name)],
+                {},
+            )
+            assert result.allowed is True, f"{cap_name} should be allowed by builtin"
+        w.request_user_input.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_reloaded_wildcard_rule_still_matches(self, ctx, tmp_path, monkeypatch):
         """After the project JSON is reloaded (simulating next process run),
         a rule stored with target='*' must still match a targetless capability."""

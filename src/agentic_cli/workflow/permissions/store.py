@@ -40,6 +40,11 @@ BUILTIN_RULES: list[Rule] = [
     # Routine reads inside workdir: allowed without prompt.
     Rule("filesystem.read", "${workdir}/**", Effect.ALLOW, RuleSource.BUILTIN),
 
+    # Agent-internal stores — reads and writes to the user's own knowledge base
+    # and memory are routine workflow activity, not external side effects.
+    Rule("memory.*", "*", Effect.ALLOW, RuleSource.BUILTIN),
+    Rule("kb.*",     "*", Effect.ALLOW, RuleSource.BUILTIN),
+
     # System locations — writes always denied.
     Rule("filesystem.write", "/etc/**",    Effect.DENY, RuleSource.BUILTIN),
     Rule("filesystem.write", "/usr/**",    Effect.DENY, RuleSource.BUILTIN),
