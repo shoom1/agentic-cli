@@ -12,15 +12,27 @@ from agentic_cli.workflow.permissions.capabilities import (
     EXEMPT,
     ResolvedCapability,
 )
-from agentic_cli.workflow.permissions.engine import PermissionEngine
-from agentic_cli.workflow.permissions.rules import (
-    AskScope,
-    CheckResult,
-    Effect,
-    Rule,
-    RuleSource,
-)
-from agentic_cli.workflow.permissions.store import PermissionContext
+
+try:
+    from agentic_cli.workflow.permissions.engine import PermissionEngine
+except ImportError:  # not yet implemented
+    PermissionEngine = None  # type: ignore[assignment,misc]
+
+try:
+    from agentic_cli.workflow.permissions.rules import (
+        AskScope,
+        CheckResult,
+        Effect,
+        Rule,
+        RuleSource,
+    )
+except ImportError:  # not yet implemented
+    AskScope = CheckResult = Effect = Rule = RuleSource = None  # type: ignore[assignment,misc]
+
+try:
+    from agentic_cli.workflow.permissions.store import PermissionContext
+except ImportError:  # not yet implemented
+    PermissionContext = None  # type: ignore[assignment,misc]
 
 __all__ = [
     "AskScope",
