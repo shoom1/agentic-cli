@@ -5,10 +5,17 @@ Provides:
 - ToolRegistry: Registry for tool discovery and management
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable
 import inspect
+
+from agentic_cli.workflow.permissions.capabilities import (
+    Capability,
+    CapabilitiesSpec,
+    EXEMPT,
+)
+from agentic_cli.workflow.permissions.capabilities import _CapabilityExempt
 
 
 class ToolCategory(Enum):
@@ -77,6 +84,7 @@ class ToolDefinition:
     name: str
     description: str
     func: Callable[..., Any]
+    capabilities: CapabilitiesSpec = field(default_factory=lambda: EXEMPT)
     category: ToolCategory = ToolCategory.OTHER
     permission_level: PermissionLevel = PermissionLevel.SAFE
     is_async: bool = False
@@ -85,6 +93,35 @@ class ToolDefinition:
         """Infer is_async from function."""
         if inspect.iscoroutinefunction(self.func):
             self.is_async = True
+
+
+def _validate_capabilities(caps: Any, tool_name: str) -> CapabilitiesSpec:
+    """Validate and return a capabilities value for a tool registration.
+
+    - ``EXEMPT`` (or any ``_CapabilityExempt`` instance) passes through unchanged.
+    - A non-empty ``list`` of ``Capability`` instances is returned as-is.
+    - An empty list raises ``ValueError`` (use ``EXEMPT`` to opt out explicitly).
+    - Any other type raises ``TypeError``.
+    """
+    if isinstance(caps, _CapabilityExempt):
+        return caps
+    if isinstance(caps, list):
+        if not caps:
+            raise ValueError(
+                f"Tool {tool_name!r}: capabilities=[] is not allowed. "
+                "Use capabilities=EXEMPT to opt out explicitly."
+            )
+        for item in caps:
+            if not isinstance(item, Capability):
+                raise TypeError(
+                    f"Tool {tool_name!r}: capabilities list items must be "
+                    f"Capability instances, got {type(item)!r}."
+                )
+        return caps
+    raise TypeError(
+        f"Tool {tool_name!r}: capabilities must be EXEMPT or a list of Capability "
+        f"instances, got {type(caps)!r}."
+    )
 
 
 class ToolRegistry:
@@ -107,6 +144,7 @@ class ToolRegistry:
         description: str | None = None,
         category: ToolCategory = ToolCategory.OTHER,
         permission_level: PermissionLevel = PermissionLevel.SAFE,
+        capabilities: CapabilitiesSpec = EXEMPT,
     ) -> Callable[..., Any]:
         """Register a tool function.
 
@@ -122,11 +160,13 @@ class ToolRegistry:
         def decorator(f: Callable[..., Any]) -> Callable[..., Any]:
             tool_name = name or f.__name__
             tool_desc = description or (f.__doc__ or "").split("\n")[0].strip()
+            validated_caps = _validate_capabilities(capabilities, tool_name)
 
             definition = ToolDefinition(
                 name=tool_name,
                 description=tool_desc,
                 func=f,
+                capabilities=validated_caps,
                 category=category,
                 permission_level=permission_level,
             )
@@ -177,6 +217,7 @@ def register_tool(
     description: str | None = None,
     category: ToolCategory = ToolCategory.OTHER,
     permission_level: PermissionLevel = PermissionLevel.SAFE,
+    capabilities: CapabilitiesSpec = EXEMPT,
 ) -> Callable[..., Any]:
     """Register a tool with the default registry.
 
@@ -192,6 +233,7 @@ def register_tool(
             description=description,
             category=category,
             permission_level=permission_level,
+            capabilities=capabilities,
         )
 
     if func is not None:
