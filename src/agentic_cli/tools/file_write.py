@@ -18,11 +18,13 @@ from agentic_cli.tools.registry import (
     PermissionLevel,
     register_tool,
 )
+from agentic_cli.workflow.permissions import Capability
 
 
 @register_tool(
     category=ToolCategory.WRITE,
     permission_level=PermissionLevel.CAUTION,
+    capabilities=[Capability("filesystem.write", target_arg="path")],
     description="Write content to a file (creates or overwrites). Use this to create new files or replace entire file contents. For partial modifications use edit_file instead.",
 )
 def write_file(
@@ -88,6 +90,7 @@ def write_file(
 @register_tool(
     category=ToolCategory.WRITE,
     permission_level=PermissionLevel.CAUTION,
+    capabilities=[Capability("filesystem.read", target_arg="path"), Capability("filesystem.write", target_arg="path")],
     description="Replace specific text in an existing file. Use this for targeted edits (find-and-replace). For creating or fully rewriting files use write_file instead.",
 )
 def edit_file(

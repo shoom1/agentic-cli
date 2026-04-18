@@ -15,6 +15,7 @@ from typing import Any, TYPE_CHECKING
 from agentic_cli.file_utils import atomic_write_json
 from agentic_cli.logging import get_logger
 from agentic_cli.tools.registry import PermissionLevel, ToolCategory, register_tool
+from agentic_cli.workflow.permissions import EXEMPT
 from agentic_cli.workflow.service_registry import require_service
 
 if TYPE_CHECKING:
@@ -117,6 +118,7 @@ class ReflectionStore:
 @register_tool(
     category=ToolCategory.MEMORY,
     permission_level=PermissionLevel.SAFE,
+    capabilities=EXEMPT,
     description="Save a learned heuristic from a tool failure",
 )
 def save_reflection(

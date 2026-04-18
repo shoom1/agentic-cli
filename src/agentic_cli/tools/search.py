@@ -28,6 +28,7 @@ from agentic_cli.tools.registry import (
     ToolCategory,
     PermissionLevel,
 )
+from agentic_cli.workflow.permissions import Capability
 
 
 @dataclass
@@ -199,6 +200,7 @@ def _get_backend(settings: Any) -> SearchBackend:
 @register_tool(
     category=ToolCategory.NETWORK,
     permission_level=PermissionLevel.SAFE,
+    capabilities=[Capability("http.read")],
     description="Search the web for current information using the configured backend (Tavily or Brave). Use this for questions about recent events, documentation, or facts not in your training data.",
 )
 async def web_search(

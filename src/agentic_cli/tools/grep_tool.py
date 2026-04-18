@@ -17,11 +17,13 @@ from agentic_cli.tools.registry import (
     PermissionLevel,
     register_tool,
 )
+from agentic_cli.workflow.permissions import Capability
 
 
 @register_tool(
     category=ToolCategory.READ,
     permission_level=PermissionLevel.SAFE,
+    capabilities=[Capability("filesystem.read", target_arg="path")],
     description="Search for text patterns inside file contents (regex or literal). Use this to find code references, function definitions, or any text across files. For finding files by name, use glob instead.",
 )
 def grep(

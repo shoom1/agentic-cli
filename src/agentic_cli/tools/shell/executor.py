@@ -24,6 +24,7 @@ from agentic_cli.tools.registry import (
     ToolCategory,
     PermissionLevel,
 )
+from agentic_cli.workflow.permissions import Capability
 
 # =============================================================================
 # SHELL TOOL DISABLED
@@ -203,6 +204,7 @@ def _execute_command(
 @register_tool(
     category=ToolCategory.EXECUTION,
     permission_level=PermissionLevel.DANGEROUS,
+    capabilities=[Capability("shell.exec", target_arg="command")],
     description="Execute a shell command with layered security and HITL approval",
 )
 def shell_executor(

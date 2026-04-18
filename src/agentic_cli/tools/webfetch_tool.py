@@ -10,6 +10,7 @@ from typing import Any
 
 from agentic_cli.config import get_settings
 from agentic_cli.tools.registry import register_tool, ToolCategory, PermissionLevel
+from agentic_cli.workflow.permissions import Capability
 from agentic_cli.tools.webfetch import (
     ContentFetcher,
     URLValidator,
@@ -76,6 +77,7 @@ def get_or_create_fetcher(settings=None) -> ContentFetcher:
 @register_tool(
     category=ToolCategory.NETWORK,
     permission_level=PermissionLevel.SAFE,
+    capabilities=[Capability("http.read", target_arg="url")],
     description="Fetch a web page, convert it to markdown, and summarize it using an LLM based on your prompt. Use this to extract specific information from a URL (e.g., documentation, articles).",
 )
 async def web_fetch(url: str, prompt: str, timeout: int = 30) -> dict[str, Any]:

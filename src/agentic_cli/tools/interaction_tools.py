@@ -10,11 +10,13 @@ from agentic_cli.tools.registry import (
     ToolCategory,
     PermissionLevel,
 )
+from agentic_cli.workflow.permissions import EXEMPT
 
 
 @register_tool(
     category=ToolCategory.INTERACTION,
     permission_level=PermissionLevel.SAFE,
+    capabilities=EXEMPT,
     description="Ask the user a clarifying question and wait for their response. Use this when requirements are ambiguous or you need user input to proceed.",
 )
 async def ask_clarification(

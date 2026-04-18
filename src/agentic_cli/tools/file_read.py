@@ -16,11 +16,13 @@ from agentic_cli.tools.registry import (
     PermissionLevel,
     register_tool,
 )
+from agentic_cli.workflow.permissions import Capability
 
 
 @register_tool(
     category=ToolCategory.READ,
     permission_level=PermissionLevel.SAFE,
+    capabilities=[Capability("filesystem.read", target_arg="path")],
     description="Read the contents of a file at the given path. Use this to examine source code, config files, or any text file. For finding files by name pattern use glob instead; for searching file contents use grep.",
 )
 def read_file(
@@ -111,6 +113,7 @@ def read_file(
 @register_tool(
     category=ToolCategory.READ,
     permission_level=PermissionLevel.SAFE,
+    capabilities=[Capability("filesystem.read", target_arg="source_a"), Capability("filesystem.read", target_arg="source_b")],
     description="Compare two text sources (files or strings) and show differences. Use this to see what changed between two versions of content.",
 )
 def diff_compare(
