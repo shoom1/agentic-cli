@@ -3,7 +3,7 @@
 This submodule contains ADK-specific components:
 - manager.py: GoogleADKWorkflowManager
 - event_processor.py: ADKEventProcessor
-- plugins.py: ADK plugins (ConfirmationPlugin, LLMLoggingPlugin)
+- plugins.py: ADK plugins (LLMLoggingPlugin)
 
 Note: GoogleADKWorkflowManager is NOT re-exported here to avoid circular
 imports. Import it directly from agentic_cli.workflow.adk.manager.

@@ -2,8 +2,6 @@
 
 Provides file discovery using glob patterns:
 - glob: Find files matching a pattern (also serves as directory listing)
-
-This is a read-only tool with PermissionLevel.SAFE.
 """
 
 import os
@@ -13,14 +11,14 @@ from typing import Any, Literal
 
 from agentic_cli.tools.registry import (
     ToolCategory,
-    PermissionLevel,
     register_tool,
 )
+from agentic_cli.workflow.permissions import Capability
 
 
 @register_tool(
     category=ToolCategory.READ,
-    permission_level=PermissionLevel.SAFE,
+    capabilities=[Capability("filesystem.read", target_arg="path")],
     description="Find files by name pattern (e.g. '**/*.py'). Use this to discover files in a directory tree. For searching inside file contents, use grep instead.",
 )
 def glob(
@@ -137,7 +135,7 @@ def glob(
 
 @register_tool(
     category=ToolCategory.READ,
-    permission_level=PermissionLevel.SAFE,
+    capabilities=[Capability("filesystem.read", target_arg="path")],
     description="List directory contents organized by type (directories first, then files). Use this when you need a structured overview of a directory; for pattern-based file search use glob.",
 )
 def list_dir(
