@@ -142,3 +142,13 @@ class URLMatcher:
         if pp.query and not fnmatch.fnmatchcase(tt.query, pp.query):
             return False
         return True
+
+
+class ShellMatcher:
+    """Matcher for ``shell.*`` capabilities."""
+
+    def canonicalize(self, s: str, ctx: PermissionContext) -> str:
+        return ctx.substitute(s).strip()
+
+    def matches(self, pattern: str, target: str) -> bool:
+        return fnmatch.fnmatchcase(target, pattern)

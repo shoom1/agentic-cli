@@ -123,3 +123,23 @@ class TestURLMatcher:
         m = URLMatcher()
         assert m.matches("https://api.github.com/repos/**", "https://api.github.com/repos/owner/repo")
         assert not m.matches("https://api.github.com/repos/**", "https://api.github.com/gists/1")
+
+
+class TestShellMatcher:
+    def test_canonicalize_trims_and_substitutes(self, ctx):
+        from agentic_cli.workflow.permissions.matchers import ShellMatcher
+        m = ShellMatcher()
+        assert m.canonicalize("  ls ${workdir}  ", ctx) == f"ls {ctx.workdir}"
+
+    def test_matches_whole_command_glob(self, ctx):
+        from agentic_cli.workflow.permissions.matchers import ShellMatcher
+        m = ShellMatcher()
+        assert m.matches("git *", "git status")
+        assert m.matches("git commit*", "git commit -m 'x'")
+        assert not m.matches("git *", "svn up")
+
+    def test_matches_does_not_tokenize(self, ctx):
+        """Shell matcher is intentionally naive; risk assessor handles semantics."""
+        from agentic_cli.workflow.permissions.matchers import ShellMatcher
+        m = ShellMatcher()
+        assert m.matches("git *", "git rm -rf /")  # permission matcher allows
