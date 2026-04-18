@@ -7,7 +7,7 @@ import pytest
 
 from agentic_cli.workflow.permissions.capabilities import Capability
 from agentic_cli.workflow.permissions.engine import PermissionEngine
-from agentic_cli.workflow.permissions.rules import Effect, RuleSource
+from agentic_cli.workflow.permissions.rules import Effect, Rule, RuleSource
 from agentic_cli.workflow.permissions.store import PermissionContext
 
 
@@ -72,3 +72,77 @@ class TestEngineDisabled:
         )
         assert result.allowed is True
         assert "disabled" in result.reason.lower()
+
+
+class TestEngineRuleBased:
+    @pytest.mark.asyncio
+    async def test_builtin_allow_reads_in_workdir(self, ctx, tmp_path):
+        engine = PermissionEngine(settings=_stub_settings(), workflow=_stub_workflow(), ctx=ctx)
+        result = await engine.check(
+            "read_file",
+            [Capability("filesystem.read", target_arg="path")],
+            {"path": str(tmp_path / "foo.py")},
+        )
+        assert result.allowed is True
+        assert "builtin" in result.reason and "allow" in result.reason
+
+    @pytest.mark.asyncio
+    async def test_builtin_deny_writes_to_etc(self, ctx):
+        engine = PermissionEngine(settings=_stub_settings(), workflow=_stub_workflow(), ctx=ctx)
+        result = await engine.check(
+            "write_file",
+            [Capability("filesystem.write", target_arg="path")],
+            {"path": "/etc/passwd"},
+        )
+        assert result.allowed is False
+        assert "deny" in result.reason.lower()
+
+    @pytest.mark.asyncio
+    async def test_deny_wins_across_capabilities(self, ctx, tmp_path):
+        """copy_file-style: one cap allowed, one denied → overall deny."""
+        engine = PermissionEngine(settings=_stub_settings(), workflow=_stub_workflow(), ctx=ctx)
+        result = await engine.check(
+            "copy_file",
+            [
+                Capability("filesystem.read", target_arg="src"),   # inside workdir: allow
+                Capability("filesystem.write", target_arg="dest"), # /etc: deny
+            ],
+            {"src": str(tmp_path / "a"), "dest": "/etc/out"},
+        )
+        assert result.allowed is False
+
+    @pytest.mark.asyncio
+    async def test_deny_wins_across_sources(self, ctx, tmp_path, monkeypatch):
+        """Add a session allow for filesystem.write → still blocked by builtin deny."""
+        monkeypatch.chdir(tmp_path)
+        engine = PermissionEngine(settings=_stub_settings(), workflow=_stub_workflow(), ctx=ctx)
+        # Inject a session ALLOW for /etc/** — canonicalised so it matches on macOS
+        from agentic_cli.workflow.permissions.matchers import get_matcher
+        engine._session_rules.append(
+            Rule(
+                "filesystem.write",
+                get_matcher("filesystem.write").canonicalize("/etc/**", ctx),
+                Effect.ALLOW,
+                RuleSource.SESSION,
+            )
+        )
+        result = await engine.check(
+            "write_file",
+            [Capability("filesystem.write", target_arg="path")],
+            {"path": "/etc/x"},
+        )
+        assert result.allowed is False  # DENY wins
+
+    @pytest.mark.asyncio
+    async def test_targetless_capability_uses_star(self, ctx):
+        """A rule with target='*' matches any invocation of a targetless capability."""
+        engine = PermissionEngine(settings=_stub_settings(), workflow=_stub_workflow(), ctx=ctx)
+        engine._session_rules.append(
+            Rule("python.exec", "*", Effect.ALLOW, RuleSource.SESSION)
+        )
+        result = await engine.check(
+            "execute_python",
+            [Capability("python.exec")],  # no target_arg
+            {"code": "print('hi')"},
+        )
+        assert result.allowed is True
