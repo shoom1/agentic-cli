@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from agentic_cli.workflow.permissions import Capability, EXEMPT
+from agentic_cli.workflow.service_registry import PERMISSION_ENGINE
 
 
 @pytest.fixture
@@ -23,7 +24,7 @@ class TestPermissionPluginUnit:
 
         monkeypatch.setattr(
             "agentic_cli.workflow.adk.permission_plugin.get_service",
-            lambda k: stub_engine if k == "permission_engine" else None,
+            lambda k: stub_engine if k == PERMISSION_ENGINE else None,
         )
         reg = get_registry()
 
@@ -44,7 +45,7 @@ class TestPermissionPluginUnit:
 
         monkeypatch.setattr(
             "agentic_cli.workflow.adk.permission_plugin.get_service",
-            lambda k: stub_engine if k == "permission_engine" else None,
+            lambda k: stub_engine if k == PERMISSION_ENGINE else None,
         )
         plugin = PermissionPlugin()
         result = await plugin.before_tool_callback(
@@ -64,7 +65,7 @@ class TestPermissionPluginUnit:
 
         monkeypatch.setattr(
             "agentic_cli.workflow.adk.permission_plugin.get_service",
-            lambda k: stub_engine if k == "permission_engine" else None,
+            lambda k: stub_engine if k == PERMISSION_ENGINE else None,
         )
         reg = get_registry()
 
@@ -94,7 +95,7 @@ class TestPermissionPluginUnit:
         denying_engine.check = AsyncMock(return_value=CheckResult(False, "rule: builtin/deny"))
         monkeypatch.setattr(
             "agentic_cli.workflow.adk.permission_plugin.get_service",
-            lambda k: denying_engine if k == "permission_engine" else None,
+            lambda k: denying_engine if k == PERMISSION_ENGINE else None,
         )
         reg = get_registry()
 

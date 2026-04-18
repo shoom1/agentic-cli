@@ -22,13 +22,14 @@ from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.models import ModelRegistry
 from agentic_cli.workflow.service_registry import (
     set_service_registry,
+    ARXIV_SOURCE,
     KB_MANAGER,
-    USER_KB_MANAGER,
-    SANDBOX_MANAGER,
     LLM_SUMMARIZER,
     MEMORY_STORE,
+    PERMISSION_ENGINE,
     REFLECTION_STORE,
-    ARXIV_SOURCE,
+    SANDBOX_MANAGER,
+    USER_KB_MANAGER,
     WORKFLOW,
 )
 from agentic_cli.logging import Loggers
@@ -363,6 +364,15 @@ class BaseWorkflowManager(ABC):
         if "arxiv_source" in self._required_managers and ARXIV_SOURCE not in s:
             from agentic_cli.tools.arxiv_source import ArxivSearchSource
             s[ARXIV_SOURCE] = ArxivSearchSource()
+
+        # Always construct the PermissionEngine (all agents may need it)
+        if PERMISSION_ENGINE not in s:
+            from pathlib import Path
+            from agentic_cli.workflow.permissions import PermissionContext, PermissionEngine
+            ctx = PermissionContext(workdir=Path.cwd(), home=Path.home())
+            s[PERMISSION_ENGINE] = PermissionEngine(
+                settings=self._settings, workflow=self, ctx=ctx,
+            )
 
         # Always ensure workflow reference is available
         s[WORKFLOW] = self

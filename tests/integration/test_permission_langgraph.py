@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from agentic_cli.workflow.permissions import Capability, EXEMPT
+from agentic_cli.workflow.service_registry import PERMISSION_ENGINE
 
 
 class TestWrapToolForPermissionUnit:
@@ -44,7 +45,7 @@ class TestWrapToolForPermissionUnit:
         engine.check = AsyncMock(return_value=CheckResult(True, "rule: test/allow"))
         monkeypatch.setattr(
             "agentic_cli.workflow.langgraph.permission_wrap.get_service",
-            lambda k: engine if k == "permission_engine" else None,
+            lambda k: engine if k == PERMISSION_ENGINE else None,
         )
 
         reg = get_registry()
@@ -70,7 +71,7 @@ class TestWrapToolForPermissionUnit:
         engine.check = AsyncMock(return_value=CheckResult(False, "rule: builtin/deny"))
         monkeypatch.setattr(
             "agentic_cli.workflow.langgraph.permission_wrap.get_service",
-            lambda k: engine if k == "permission_engine" else None,
+            lambda k: engine if k == PERMISSION_ENGINE else None,
         )
 
         reg = get_registry()

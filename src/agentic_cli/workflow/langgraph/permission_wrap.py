@@ -20,9 +20,7 @@ from typing import Any, Callable
 from agentic_cli.logging import Loggers
 from agentic_cli.tools.registry import get_registry
 from agentic_cli.workflow.permissions.capabilities import _CapabilityExempt
-from agentic_cli.workflow.service_registry import get_service
-
-_PERMISSION_ENGINE_KEY = "permission_engine"
+from agentic_cli.workflow.service_registry import PERMISSION_ENGINE, get_service
 
 logger = Loggers.workflow()
 
@@ -51,7 +49,7 @@ def wrap_tool_for_permission(tool: Callable[..., Any]) -> Callable[..., Any]:
                 "success": False,
                 "error": "Permission denied: tool has no capability declaration",
             }
-        engine = get_service(_PERMISSION_ENGINE_KEY)
+        engine = get_service(PERMISSION_ENGINE)
         if engine is not None:
             result = await engine.check(name, caps, kwargs)
             if not result.allowed:

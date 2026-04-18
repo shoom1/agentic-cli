@@ -20,12 +20,7 @@ from google.adk.plugins.base_plugin import BasePlugin
 from agentic_cli.logging import Loggers
 from agentic_cli.tools.registry import get_registry
 from agentic_cli.workflow.permissions.capabilities import _CapabilityExempt
-from agentic_cli.workflow.service_registry import get_service
-
-# NOTE: the ``PERMISSION_ENGINE`` constant is added to service_registry in
-# Task 22. For now we look the engine up by the string literal matching the
-# constant we'll define there.
-_PERMISSION_ENGINE_KEY = "permission_engine"
+from agentic_cli.workflow.service_registry import PERMISSION_ENGINE, get_service
 
 if TYPE_CHECKING:
     from google.adk.tools import BaseTool
@@ -59,7 +54,7 @@ class PermissionPlugin(BasePlugin):
                 "error": "Permission denied: tool has no capability declaration",
             }
 
-        engine = get_service(_PERMISSION_ENGINE_KEY)
+        engine = get_service(PERMISSION_ENGINE)
         if engine is None:
             return None  # test/dev fallback
 
