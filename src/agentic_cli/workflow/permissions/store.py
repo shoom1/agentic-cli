@@ -10,6 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from agentic_cli.workflow.permissions.rules import Effect, Rule, RuleSource
+
 
 @dataclass(frozen=True)
 class PermissionContext:
@@ -29,3 +31,22 @@ class PermissionContext:
             s.replace("${workdir}", str(self.workdir))
              .replace("${home}", str(self.home))
         )
+
+
+BUILTIN_RULES: list[Rule] = [
+    # Routine reads inside workdir: allowed without prompt.
+    Rule("filesystem.read", "${workdir}/**", Effect.ALLOW, RuleSource.BUILTIN),
+
+    # System locations — writes always denied.
+    Rule("filesystem.write", "/etc/**",    Effect.DENY, RuleSource.BUILTIN),
+    Rule("filesystem.write", "/usr/**",    Effect.DENY, RuleSource.BUILTIN),
+    Rule("filesystem.write", "/bin/**",    Effect.DENY, RuleSource.BUILTIN),
+    Rule("filesystem.write", "/sbin/**",   Effect.DENY, RuleSource.BUILTIN),
+    Rule("filesystem.write", "/boot/**",   Effect.DENY, RuleSource.BUILTIN),
+    Rule("filesystem.write", "/System/**", Effect.DENY, RuleSource.BUILTIN),  # macOS
+
+    # Credential directories.
+    Rule("filesystem.write", "${home}/.ssh/**",   Effect.DENY, RuleSource.BUILTIN),
+    Rule("filesystem.write", "${home}/.aws/**",   Effect.DENY, RuleSource.BUILTIN),
+    Rule("filesystem.write", "${home}/.gnupg/**", Effect.DENY, RuleSource.BUILTIN),
+]
