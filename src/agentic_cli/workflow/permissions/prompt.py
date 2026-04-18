@@ -25,10 +25,15 @@ _CHOICE_TO_SCOPE = {
 def build_request(tool_name: str, capabilities: list[ResolvedCapability]) -> UserInputRequest:
     """Construct a ``UserInputRequest`` (CHOICE) describing the pending grant."""
     lines = [f"Tool `{tool_name}` wants:"]
+    has_filesystem = False
     for cap in capabilities:
         target = cap.target if cap.target else "*"
         lines.append(f"  • {cap.name} → {target}")
+        if cap.name.startswith("filesystem.") and target not in ("*", ""):
+            has_filesystem = True
     lines.append("")
+    if has_filesystem:
+        lines.append("(Session/Always grants apply to the parent directory.)")
     lines.append("Allow?")
     prompt = "\n".join(lines)
 

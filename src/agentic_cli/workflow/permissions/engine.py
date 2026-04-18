@@ -158,6 +158,28 @@ class PermissionEngine:
     def _fmt_rule_reason(rule: Rule, cap: ResolvedCapability) -> str:
         return f"rule: {rule.source.value}/{rule.effect.value} {cap.name} {rule.target}"
 
+    @staticmethod
+    def _broaden_target_for_grant(cap: ResolvedCapability) -> str:
+        """Widen a resolved target before synthesising a session/persistent rule.
+
+        For ``filesystem.*`` capabilities we broaden to the parent directory
+        (glob) so one grant covers every file the agent writes/reads there —
+        otherwise each new file in the same directory would prompt again.
+        Other namespaces keep the exact resolved target (URL, command, etc.),
+        and the wildcard sentinel ``"*"`` passes through unchanged.
+        """
+        if cap.target == "*":
+            return "*"
+        if cap.name.startswith("filesystem."):
+            from pathlib import Path
+
+            p = Path(cap.target)
+            # Don't widen root or already-rootless targets.
+            if str(p) == str(p.parent):
+                return cap.target
+            return f"{p.parent}/**"
+        return cap.target
+
     async def _ask_and_apply(
         self,
         tool_name: str,
@@ -186,7 +208,8 @@ class PermissionEngine:
 
         source = RuleSource.SESSION if scope is AskScope.SESSION else RuleSource.PROJECT
         for cap in unmatched:
-            rule = Rule(cap.name, cap.target, Effect.ALLOW, source)
+            target = self._broaden_target_for_grant(cap)
+            rule = Rule(cap.name, target, Effect.ALLOW, source)
             self._session_rules.append(rule)
             if source is RuleSource.PROJECT:
                 append_project_rule(self._settings.app_name, rule)

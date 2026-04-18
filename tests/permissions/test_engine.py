@@ -327,6 +327,75 @@ class TestTargetlessAllowAlwaysRegression:
         assert w.request_user_input.await_count == 1
 
     @pytest.mark.asyncio
+    async def test_filesystem_grant_broadens_to_parent_directory(
+        self, ctx, tmp_path, monkeypatch
+    ):
+        """When user picks 'Allow always' for filesystem.write to /foo/bar.txt,
+        the rule covers /foo/** — subsequent writes to /foo/baz.txt must not re-prompt."""
+        monkeypatch.chdir(tmp_path)
+        outside = tmp_path / "out"
+        outside.mkdir()
+
+        w = _stub_workflow()
+        w.request_user_input = AsyncMock(return_value="Allow always (save to project)")
+        engine = PermissionEngine(settings=_stub_settings(), workflow=w, ctx=ctx)
+
+        # First write → prompts → allow always.
+        result1 = await engine.check(
+            "write_file",
+            [Capability("filesystem.write", target_arg="path")],
+            {"path": str(outside / "bar.txt")},
+        )
+        assert result1.allowed is True
+        assert w.request_user_input.await_count == 1
+
+        # The stored session rule should target the parent with ** glob.
+        session_write_rules = [
+            r for r in engine.rules
+            if r.capability == "filesystem.write" and str(outside) in r.target
+        ]
+        assert any(r.target.endswith("/**") for r in session_write_rules)
+
+        # Second write to a DIFFERENT file in the same directory → no prompt.
+        result2 = await engine.check(
+            "write_file",
+            [Capability("filesystem.write", target_arg="path")],
+            {"path": str(outside / "baz.txt")},
+        )
+        assert result2.allowed is True
+        assert w.request_user_input.await_count == 1
+
+        # Write to a nested subdir also matches.
+        sub = outside / "sub"
+        sub.mkdir()
+        result3 = await engine.check(
+            "write_file",
+            [Capability("filesystem.write", target_arg="path")],
+            {"path": str(sub / "deep.txt")},
+        )
+        assert result3.allowed is True
+        assert w.request_user_input.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_filesystem_broaden_preserves_other_namespaces(self, ctx, tmp_path, monkeypatch):
+        """Non-filesystem capabilities keep their exact resolved target."""
+        monkeypatch.chdir(tmp_path)
+        w = _stub_workflow()
+        w.request_user_input = AsyncMock(return_value="Allow for this session")
+        engine = PermissionEngine(settings=_stub_settings(), workflow=w, ctx=ctx)
+
+        await engine.check(
+            "web_fetch",
+            [Capability("http.read", target_arg="url")],
+            {"url": "https://example.com/a"},
+        )
+
+        http_session = [r for r in engine.rules if r.capability == "http.read" and r.source is RuleSource.SESSION]
+        assert http_session
+        # URL stays exact (host + path), NOT broadened.
+        assert all(r.target == "https://example.com/a" for r in http_session)
+
+    @pytest.mark.asyncio
     async def test_memory_and_kb_allowed_by_builtin(self, ctx, tmp_path):
         """Memory and KB capabilities should be allowed without prompting."""
         w = _stub_workflow()
