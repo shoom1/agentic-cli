@@ -279,3 +279,73 @@ class TestEngineConcurrency:
             ),
         )
         assert ask_peak == 1  # never two asks in flight simultaneously
+
+
+class TestTargetlessAllowAlwaysRegression:
+    """Regression: after 'Allow always' on a targetless capability (target_arg=None),
+    subsequent calls must not re-prompt.
+
+    Bug: matchers that canonicalise targets (URLMatcher, PathMatcher) were mangling
+    the ``"*"`` sentinel, so the just-installed rule didn't match the next
+    invocation's resolved target (also ``"*"``). Fix short-circuits ``"*"`` in
+    ``canonicalize`` and in ``matches``.
+    """
+
+    @pytest.mark.asyncio
+    async def test_http_read_allow_always_matches_next_call(self, ctx, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        w = _stub_workflow()
+        w.request_user_input = AsyncMock(return_value="Allow always (save to project)")
+        engine = PermissionEngine(settings=_stub_settings(), workflow=w, ctx=ctx)
+
+        # First call: no rule → ask → allow always (saves session + project rule)
+        result1 = await engine.check(
+            "web_search",
+            [Capability("http.read")],  # targetless
+            {"query": "test"},
+        )
+        assert result1.allowed is True
+        assert w.request_user_input.await_count == 1
+
+        # Second call must match the session rule and NOT re-prompt.
+        result2 = await engine.check(
+            "web_search",
+            [Capability("http.read")],
+            {"query": "different query"},
+        )
+        assert result2.allowed is True
+        assert w.request_user_input.await_count == 1
+
+        # Third call with a DIFFERENT tool that declares the same capability
+        # is also covered — same cap, still target=='*'.
+        result3 = await engine.check(
+            "search_arxiv",
+            [Capability("http.read")],
+            {"query": "papers"},
+        )
+        assert result3.allowed is True
+        assert w.request_user_input.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_reloaded_wildcard_rule_still_matches(self, ctx, tmp_path, monkeypatch):
+        """After the project JSON is reloaded (simulating next process run),
+        a rule stored with target='*' must still match a targetless capability."""
+        monkeypatch.chdir(tmp_path)
+
+        # Round 1: grant "allow always" so the rule is persisted.
+        w1 = _stub_workflow()
+        w1.request_user_input = AsyncMock(return_value="Allow always (save to project)")
+        engine1 = PermissionEngine(settings=_stub_settings(), workflow=w1, ctx=ctx)
+        await engine1.check("web_search", [Capability("http.read")], {"query": "x"})
+
+        # Round 2: fresh engine reads rules from disk.
+        w2 = _stub_workflow()
+        w2.request_user_input = AsyncMock(return_value="Deny")  # would deny if re-asked
+        engine2 = PermissionEngine(settings=_stub_settings(), workflow=w2, ctx=ctx)
+        result = await engine2.check(
+            "web_search",
+            [Capability("http.read")],
+            {"query": "y"},
+        )
+        assert result.allowed is True
+        w2.request_user_input.assert_not_called()

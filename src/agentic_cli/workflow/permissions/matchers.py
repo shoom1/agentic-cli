@@ -31,9 +31,13 @@ class StringGlobMatcher:
     """Default fallback: ``${...}`` substitution + ``fnmatch``."""
 
     def canonicalize(self, s: str, ctx: PermissionContext) -> str:
+        if s == "*":
+            return "*"
         return ctx.substitute(s).strip()
 
     def matches(self, pattern: str, target: str) -> bool:
+        if pattern == "*":
+            return True
         return fnmatch.fnmatchcase(target, pattern)
 
 
@@ -96,6 +100,8 @@ class PathMatcher:
     """Matcher for ``filesystem.*`` capabilities."""
 
     def canonicalize(self, s: str, ctx: PermissionContext) -> str:
+        if s == "*":
+            return "*"
         s = ctx.substitute(s)
         p = Path(s).expanduser()
         if not p.is_absolute():
@@ -103,6 +109,8 @@ class PathMatcher:
         return str(Path(p).resolve(strict=False))
 
     def matches(self, pattern: str, target: str) -> bool:
+        if pattern == "*":
+            return True
         return bool(_glob_to_regex(pattern).match(target))
 
 
@@ -112,6 +120,8 @@ class URLMatcher:
     _DEFAULT_PORTS = {"http": 80, "https": 443}
 
     def canonicalize(self, s: str, ctx: PermissionContext) -> str:
+        if s == "*":
+            return "*"
         s = ctx.substitute(s)
         parts = urlsplit(s if "://" in s else f"https://{s}")
         scheme = parts.scheme.lower() or "https"
@@ -129,6 +139,8 @@ class URLMatcher:
         return urlunsplit((scheme, netloc, path, query, ""))
 
     def matches(self, pattern: str, target: str) -> bool:
+        if pattern == "*":
+            return True
         pp = urlsplit(pattern if "://" in pattern else f"https://{pattern}")
         tt = urlsplit(target)
         if pp.scheme.lower() != tt.scheme.lower():
@@ -148,9 +160,13 @@ class ShellMatcher:
     """Matcher for ``shell.*`` capabilities."""
 
     def canonicalize(self, s: str, ctx: PermissionContext) -> str:
+        if s == "*":
+            return "*"
         return ctx.substitute(s).strip()
 
     def matches(self, pattern: str, target: str) -> bool:
+        if pattern == "*":
+            return True
         return fnmatch.fnmatchcase(target, pattern)
 
 
