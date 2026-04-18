@@ -12,6 +12,7 @@ the full decision flow. This file implements:
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from agentic_cli.logging import Loggers
@@ -39,6 +40,34 @@ if TYPE_CHECKING:
     from agentic_cli.workflow.base_manager import BaseWorkflowManager
 
 logger = Loggers.workflow()
+
+
+def broaden_target_for_grant(cap: ResolvedCapability) -> str:
+    """Widen a resolved target before synthesising a session/persistent rule.
+
+    For ``filesystem.*`` capabilities we broaden to the parent directory
+    (glob) so one grant covers every file the agent writes/reads there —
+    otherwise each new file in the same directory would prompt again.
+    Other namespaces keep the exact resolved target (URL, command, etc.),
+    and the wildcard sentinel ``"*"`` passes through unchanged.
+
+    Used by both the engine (when installing a rule) and the prompt
+    builder (when describing the pending grant) so the displayed scope
+    always matches what will actually be stored.
+    """
+    if cap.target == "*":
+        return "*"
+    if cap.name.startswith("filesystem."):
+        p = Path(cap.target)
+        parent = p.parent
+        # Already at the root: nothing to widen to.
+        if str(p) == str(parent):
+            return cap.target
+        # Avoid "//**" when the parent is the filesystem root.
+        if str(parent) == "/":
+            return "/**"
+        return f"{parent}/**"
+    return cap.target
 
 
 class PermissionEngine:
@@ -158,27 +187,6 @@ class PermissionEngine:
     def _fmt_rule_reason(rule: Rule, cap: ResolvedCapability) -> str:
         return f"rule: {rule.source.value}/{rule.effect.value} {cap.name} {rule.target}"
 
-    @staticmethod
-    def _broaden_target_for_grant(cap: ResolvedCapability) -> str:
-        """Widen a resolved target before synthesising a session/persistent rule.
-
-        For ``filesystem.*`` capabilities we broaden to the parent directory
-        (glob) so one grant covers every file the agent writes/reads there —
-        otherwise each new file in the same directory would prompt again.
-        Other namespaces keep the exact resolved target (URL, command, etc.),
-        and the wildcard sentinel ``"*"`` passes through unchanged.
-        """
-        if cap.target == "*":
-            return "*"
-        if cap.name.startswith("filesystem."):
-            from pathlib import Path
-
-            p = Path(cap.target)
-            # Don't widen root or already-rootless targets.
-            if str(p) == str(p.parent):
-                return cap.target
-            return f"{p.parent}/**"
-        return cap.target
 
     async def _ask_and_apply(
         self,
@@ -208,7 +216,7 @@ class PermissionEngine:
 
         source = RuleSource.SESSION if scope is AskScope.SESSION else RuleSource.PROJECT
         for cap in unmatched:
-            target = self._broaden_target_for_grant(cap)
+            target = broaden_target_for_grant(cap)
             rule = Rule(cap.name, target, Effect.ALLOW, source)
             self._session_rules.append(rule)
             if source is RuleSource.PROJECT:

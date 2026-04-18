@@ -28,16 +28,44 @@ class TestBuildRequest:
         ]
 
     def test_prompt_mentions_tool_and_capabilities(self):
+        """For filesystem.* the prompt shows the broadened (parent-directory)
+        scope — matching what an Allow Session/Always would actually store."""
         req = build_request(
             "copy_file",
             [
-                ResolvedCapability("filesystem.read", "/a"),
-                ResolvedCapability("filesystem.write", "/b"),
+                ResolvedCapability("filesystem.read", "/src/file_a.txt"),
+                ResolvedCapability("filesystem.write", "/dst/file_b.txt"),
             ],
         )
         assert "copy_file" in req.prompt
-        assert "filesystem.read" in req.prompt and "/a" in req.prompt
-        assert "filesystem.write" in req.prompt and "/b" in req.prompt
+        # Both entries show the parent-directory glob, not the exact file.
+        assert "filesystem.read → /src/**" in req.prompt
+        assert "filesystem.write → /dst/**" in req.prompt
+        # The exact filenames do NOT appear — the scope the user will actually
+        # grant is the directory.
+        assert "file_a.txt" not in req.prompt
+        assert "file_b.txt" not in req.prompt
+        # And a hint explaining the widening:
+        assert "parent directory" in req.prompt
+
+    def test_prompt_preserves_exact_http_target(self):
+        """Non-filesystem capabilities keep their exact display target."""
+        req = build_request(
+            "web_fetch",
+            [ResolvedCapability("http.read", "https://example.com/path")],
+        )
+        assert "https://example.com/path" in req.prompt
+        # No broadening hint when no filesystem capability is involved.
+        assert "parent directory" not in req.prompt
+
+    def test_prompt_handles_root_parent(self):
+        """A file directly under /: broadening collapses '//**' to '/**'."""
+        req = build_request(
+            "write_file",
+            [ResolvedCapability("filesystem.write", "/hello.txt")],
+        )
+        assert "filesystem.write → /**" in req.prompt
+        assert "//**" not in req.prompt
 
     def test_request_id_has_perm_prefix(self):
         req = build_request("x", [])
