@@ -13,6 +13,7 @@ from typing import Any, Callable, TYPE_CHECKING
 
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.confirmation import is_dangerous, request_tool_confirmation
+from agentic_cli.workflow.langgraph.permission_wrap import wrap_tool_for_permission
 from agentic_cli.logging import Loggers
 
 if TYPE_CHECKING:
@@ -122,9 +123,7 @@ class LangGraphBuilder:
             if tools:
                 tool_node_name = f"{config.name}_tools"
                 tool_map[config.name] = tool_node_name
-                wrapped_tools = [
-                    self._wrap_for_confirmation(t) for t in tools
-                ]
+                wrapped_tools = [wrap_tool_for_permission(t) for t in tools]
                 tool_node = ToolNode(
                     wrapped_tools, name=tool_node_name, handle_tool_errors=True,
                 )
