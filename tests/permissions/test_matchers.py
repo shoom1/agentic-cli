@@ -143,3 +143,33 @@ class TestShellMatcher:
         from agentic_cli.workflow.permissions.matchers import ShellMatcher
         m = ShellMatcher()
         assert m.matches("git *", "git rm -rf /")  # permission matcher allows
+
+
+class TestMatcherRegistry:
+    def test_get_matcher_dispatches_by_namespace(self):
+        from agentic_cli.workflow.permissions.matchers import (
+            PathMatcher, URLMatcher, ShellMatcher, StringGlobMatcher, get_matcher,
+        )
+        assert isinstance(get_matcher("filesystem.read"), PathMatcher)
+        assert isinstance(get_matcher("http.read"), URLMatcher)
+        assert isinstance(get_matcher("shell.exec"), ShellMatcher)
+        assert isinstance(get_matcher("python.exec"), StringGlobMatcher)  # fallback
+        assert isinstance(get_matcher("kb.read"), StringGlobMatcher)
+
+
+class TestCapMatches:
+    def test_exact(self):
+        from agentic_cli.workflow.permissions.matchers import _cap_matches
+        assert _cap_matches("filesystem.read", "filesystem.read")
+        assert not _cap_matches("filesystem.read", "filesystem.write")
+
+    def test_namespace_glob(self):
+        from agentic_cli.workflow.permissions.matchers import _cap_matches
+        assert _cap_matches("filesystem.*", "filesystem.read")
+        assert _cap_matches("filesystem.*", "filesystem.write")
+        assert not _cap_matches("filesystem.*", "http.read")
+
+    def test_star_matches_everything(self):
+        from agentic_cli.workflow.permissions.matchers import _cap_matches
+        assert _cap_matches("*", "filesystem.read")
+        assert _cap_matches("*", "anything")

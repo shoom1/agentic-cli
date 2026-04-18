@@ -152,3 +152,26 @@ class ShellMatcher:
 
     def matches(self, pattern: str, target: str) -> bool:
         return fnmatch.fnmatchcase(target, pattern)
+
+
+_MATCHERS: dict[str, Matcher] = {
+    "filesystem": PathMatcher(),
+    "http": URLMatcher(),
+    "shell": ShellMatcher(),
+}
+_FALLBACK: Matcher = StringGlobMatcher()
+
+
+def get_matcher(capability: str) -> Matcher:
+    """Return the matcher for a capability name, or the string-glob fallback."""
+    ns = capability.split(".", 1)[0]
+    return _MATCHERS.get(ns, _FALLBACK)
+
+
+def _cap_matches(rule_cap: str, target_cap: str) -> bool:
+    """Capability-name glob: exact / ``ns.*`` / ``*``."""
+    if rule_cap == "*" or rule_cap == target_cap:
+        return True
+    if rule_cap.endswith(".*"):
+        return target_cap.startswith(rule_cap[:-1])
+    return False
