@@ -244,3 +244,38 @@ class TestEngineAskFlow:
         session = [r for r in engine.rules if r.source is RuleSource.SESSION]
         assert len(session) == 1
         assert session[0].capability == "filesystem.write"
+
+
+class TestEngineConcurrency:
+    @pytest.mark.asyncio
+    async def test_ask_is_serialised(self, ctx):
+        """Two simultaneous calls that both need to ask → one prompt at a time."""
+        import asyncio
+
+        ask_active = 0
+        ask_peak = 0
+
+        async def fake_input(request):
+            nonlocal ask_active, ask_peak
+            ask_active += 1
+            ask_peak = max(ask_peak, ask_active)
+            # Simulate think time
+            await asyncio.sleep(0.01)
+            ask_active -= 1
+            return "Allow once"
+
+        w = MagicMock()
+        w.request_user_input = fake_input
+        engine = PermissionEngine(settings=_stub_settings(), workflow=w, ctx=ctx)
+
+        await asyncio.gather(
+            engine.check(
+                "web_fetch", [Capability("http.read", target_arg="url")],
+                {"url": "https://a.test/"},
+            ),
+            engine.check(
+                "web_fetch", [Capability("http.read", target_arg="url")],
+                {"url": "https://b.test/"},
+            ),
+        )
+        assert ask_peak == 1  # never two asks in flight simultaneously
