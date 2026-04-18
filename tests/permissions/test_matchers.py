@@ -88,3 +88,38 @@ class TestPathMatcher:
         from agentic_cli.workflow.permissions.matchers import PathMatcher
         m = PathMatcher()
         assert not m.matches("/A/b", "/a/b")
+
+
+class TestURLMatcher:
+    def test_canonicalize_lowercases_scheme_and_host(self, ctx):
+        from agentic_cli.workflow.permissions.matchers import URLMatcher
+        m = URLMatcher()
+        assert m.canonicalize("HTTPS://API.GitHub.com/repos", ctx) == "https://api.github.com/repos"
+
+    def test_canonicalize_strips_default_port(self, ctx):
+        from agentic_cli.workflow.permissions.matchers import URLMatcher
+        m = URLMatcher()
+        assert m.canonicalize("https://example.com:443/x", ctx) == "https://example.com/x"
+        assert m.canonicalize("http://example.com:80/x", ctx) == "http://example.com/x"
+
+    def test_canonicalize_defaults_to_https(self, ctx):
+        from agentic_cli.workflow.permissions.matchers import URLMatcher
+        m = URLMatcher()
+        assert m.canonicalize("api.github.com/x", ctx) == "https://api.github.com/x"
+
+    def test_canonicalize_drops_fragment(self, ctx):
+        from agentic_cli.workflow.permissions.matchers import URLMatcher
+        m = URLMatcher()
+        assert m.canonicalize("https://example.com/x#frag", ctx) == "https://example.com/x"
+
+    def test_matches_host_exact(self, ctx):
+        from agentic_cli.workflow.permissions.matchers import URLMatcher
+        m = URLMatcher()
+        assert m.matches("https://api.github.com/**", "https://api.github.com/repos/foo")
+        assert not m.matches("https://api.github.com/**", "https://pypi.org/x")
+
+    def test_matches_path_glob(self, ctx):
+        from agentic_cli.workflow.permissions.matchers import URLMatcher
+        m = URLMatcher()
+        assert m.matches("https://api.github.com/repos/**", "https://api.github.com/repos/owner/repo")
+        assert not m.matches("https://api.github.com/repos/**", "https://api.github.com/gists/1")

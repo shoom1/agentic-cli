@@ -13,6 +13,7 @@ import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Protocol, runtime_checkable
+from urllib.parse import urlsplit, urlunsplit
 
 from agentic_cli.workflow.permissions.store import PermissionContext
 
@@ -103,3 +104,41 @@ class PathMatcher:
 
     def matches(self, pattern: str, target: str) -> bool:
         return bool(_glob_to_regex(pattern).match(target))
+
+
+class URLMatcher:
+    """Matcher for ``http.*`` capabilities."""
+
+    _DEFAULT_PORTS = {"http": 80, "https": 443}
+
+    def canonicalize(self, s: str, ctx: PermissionContext) -> str:
+        s = ctx.substitute(s)
+        parts = urlsplit(s if "://" in s else f"https://{s}")
+        scheme = parts.scheme.lower() or "https"
+        host = (parts.hostname or "").lower()
+        port = parts.port
+        if port is not None and port == self._DEFAULT_PORTS.get(scheme):
+            netloc = host
+        elif port is not None:
+            netloc = f"{host}:{port}"
+        else:
+            netloc = host
+        path = parts.path
+        query = parts.query
+        # Drop fragment; reassemble
+        return urlunsplit((scheme, netloc, path, query, ""))
+
+    def matches(self, pattern: str, target: str) -> bool:
+        pp = urlsplit(pattern if "://" in pattern else f"https://{pattern}")
+        tt = urlsplit(target)
+        if pp.scheme.lower() != tt.scheme.lower():
+            return False
+        if (pp.hostname or "").lower() != (tt.hostname or "").lower():
+            return False
+        if pp.port and pp.port != tt.port:
+            return False
+        if not _glob_to_regex(pp.path or "/").match(tt.path or "/"):
+            return False
+        if pp.query and not fnmatch.fnmatchcase(tt.query, pp.query):
+            return False
+        return True
