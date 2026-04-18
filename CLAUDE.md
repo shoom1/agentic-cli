@@ -133,7 +133,8 @@ Workflow:
 
 ### Key Design Patterns
 - **Tool error handling**: All tools return `{"success": bool, ...}` dicts. Never raise `ToolError`.
-- **Tool registration**: Use `@register_tool(category=..., permission_level=..., description=...)` decorator. Tools are auto-discovered via the global `ToolRegistry`.
+- **Tool registration**: Use `@register_tool(category=..., capabilities=..., description=...)` decorator. `capabilities=` is required — pass `EXEMPT` for tools that need no permission check or a list of `Capability(name, target_arg=...)` tuples the engine matches against rules. Tools are auto-discovered via the global `ToolRegistry`.
+- **Permissions**: `workflow/permissions/` holds a framework-independent engine that evaluates declared capabilities against rules from four sources (builtin, user `~/.{app_name}/settings.json`, project `./.{app_name}/settings.json`, in-memory session). ADK + LangGraph gate tool calls via `workflow/adk/permission_plugin.py::PermissionPlugin` and `workflow/langgraph/permission_wrap.py::wrap_tool_for_permission`. See `docs/superpowers/specs/2026-04-18-permissions-system-design.md`.
 - **Service registry**: Tools access services and shared state via `get_service(key)` from `workflow.service_registry`. A single ContextVar holds a `dict[str, Any]` set by the workflow manager during processing. Complex services (KBManager, SandboxManager, MemoryStore) are lazily created; simple state (plan string, task list) lives directly in the registry dict.
 - **Manager detection**: Tools decorated with `@requires("kb_manager")` etc. are scanned by `BaseWorkflowManager._detect_required_managers()` which lazily creates only the needed services.
 - **Atomic writes**: Use `atomic_write_json`/`atomic_write_text` from `persistence/_utils.py` for file persistence.
