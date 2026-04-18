@@ -55,3 +55,58 @@ class TestBuiltinRules:
         from agentic_cli.workflow.permissions.store import BUILTIN_RULES
         for rule in BUILTIN_RULES:
             assert rule.source is RuleSource.BUILTIN
+
+
+class TestLoadRules:
+    def test_missing_file_returns_empty(self, tmp_path: Path):
+        from agentic_cli.workflow.permissions.rules import RuleSource
+        from agentic_cli.workflow.permissions.store import PermissionContext, load_rules
+
+        ctx = PermissionContext(workdir=tmp_path, home=Path("/fake/home"))
+        rules = load_rules(tmp_path / "missing.json", RuleSource.USER, ctx)
+        assert rules == []
+
+    def test_missing_permissions_section_returns_empty(self, tmp_path: Path):
+        import json
+        from agentic_cli.workflow.permissions.rules import RuleSource
+        from agentic_cli.workflow.permissions.store import PermissionContext, load_rules
+
+        path = tmp_path / "settings.json"
+        path.write_text(json.dumps({"default_model": "gpt-4"}))
+        ctx = PermissionContext(workdir=tmp_path, home=Path("/fake/home"))
+        assert load_rules(path, RuleSource.USER, ctx) == []
+
+    def test_parses_allow_and_deny(self, tmp_path: Path):
+        import json
+        from agentic_cli.workflow.permissions.rules import Effect, RuleSource
+        from agentic_cli.workflow.permissions.store import PermissionContext, load_rules
+
+        path = tmp_path / "settings.json"
+        path.write_text(json.dumps({
+            "permissions": {
+                "allow": [{"capability": "filesystem.read", "target": "${workdir}/**"}],
+                "deny":  [{"capability": "filesystem.write", "target": "/etc/**"}],
+            }
+        }))
+        ctx = PermissionContext(workdir=tmp_path, home=Path("/fake/home"))
+        rules = load_rules(path, RuleSource.PROJECT, ctx)
+
+        assert len(rules) == 2
+        allow = next(r for r in rules if r.effect is Effect.ALLOW)
+        deny = next(r for r in rules if r.effect is Effect.DENY)
+        assert allow.capability == "filesystem.read"
+        # PathMatcher canonicalises ${workdir} to the absolute path + /**
+        assert str(tmp_path) in allow.target and allow.target.endswith("/**")
+        assert allow.source is RuleSource.PROJECT
+        # PathMatcher resolves the path (resolves symlinks on macOS /etc -> /private/etc)
+        assert deny.target == str(Path("/etc/**").resolve(strict=False))
+
+    def test_malformed_json_raises(self, tmp_path: Path):
+        from agentic_cli.workflow.permissions.rules import RuleSource
+        from agentic_cli.workflow.permissions.store import PermissionContext, load_rules
+
+        path = tmp_path / "settings.json"
+        path.write_text("{not json")
+        ctx = PermissionContext(workdir=tmp_path, home=Path("/fake/home"))
+        with pytest.raises(ValueError):
+            load_rules(path, RuleSource.USER, ctx)
