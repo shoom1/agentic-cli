@@ -1,9 +1,5 @@
 """ADK plugin that gates tool calls via PermissionEngine.
 
-Replaces the old ConfirmationPlugin once Task 24 swaps the registration in
-GoogleADKWorkflowManager. For now the old plugin continues to run alongside
-this one until we're ready to cut over.
-
 Adapter check order (mirrors LangGraph wrapper for consistency):
 1. EXEMPT tool → allow, no engine call.
 2. Tool has no capability declaration → deny (author error, loud).
@@ -30,7 +26,7 @@ logger = Loggers.workflow()
 
 
 class PermissionPlugin(BasePlugin):
-    """Replaces the old ConfirmationPlugin with capability-based checks."""
+    """ADK plugin: gates every tool call through :class:`PermissionEngine`."""
 
     def __init__(self) -> None:
         super().__init__(name="permission")

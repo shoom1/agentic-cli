@@ -6,9 +6,6 @@ Adapter check order matches ADK's PermissionPlugin:
 2. Tool has no capability declaration → wrapper returns deny dict at call time.
 3. Engine absent from service registry → wrapper runs the original tool (fallback).
 4. Otherwise call engine.check(); return on allow, deny dict on deny.
-
-Replaces LangGraphBuilder._wrap_for_confirmation once Task 25 swaps the
-call site.
 """
 
 from __future__ import annotations
