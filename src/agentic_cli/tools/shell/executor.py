@@ -22,8 +22,8 @@ from pathlib import Path
 from agentic_cli.tools.registry import (
     register_tool,
     ToolCategory,
-    PermissionLevel,
 )
+from agentic_cli.workflow.permissions import Capability
 
 # =============================================================================
 # SHELL TOOL DISABLED
@@ -202,7 +202,7 @@ def _execute_command(
 
 @register_tool(
     category=ToolCategory.EXECUTION,
-    permission_level=PermissionLevel.DANGEROUS,
+    capabilities=[Capability("shell.exec", target_arg="command")],
     description="Execute a shell command with layered security and HITL approval",
 )
 def shell_executor(
@@ -390,7 +390,7 @@ def shell_executor(
             "command": command,
             "risk_level": risk.overall_risk.value,
             "risk_factors": risk.risk_factors,
-            "message": "Command requires approval but no ApprovalManager configured",
+            "message": "Command requires approval but no approval manager configured",
             "error": None,
         }
 

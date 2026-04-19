@@ -9,13 +9,13 @@ from agentic_cli.config import get_settings
 from agentic_cli.tools.registry import (
     register_tool,
     ToolCategory,
-    PermissionLevel,
 )
+from agentic_cli.workflow.permissions import Capability
 
 
 @register_tool(
     category=ToolCategory.EXECUTION,
-    permission_level=PermissionLevel.DANGEROUS,
+    capabilities=[Capability("python.exec")],
     description="Stateless Python scratchpad for quick calculations, formula checks, and mathematical reasoning. Each call starts fresh — no state persists. Only whitelisted modules (math, numpy, pandas, json, etc.) are available. Use sandbox_execute instead for stateful work.",
 )
 def execute_python(

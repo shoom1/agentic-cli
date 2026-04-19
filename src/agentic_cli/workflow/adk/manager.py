@@ -24,7 +24,8 @@ from agentic_cli.workflow.base_manager import BaseWorkflowManager
 from agentic_cli.workflow.events import WorkflowEvent, EventType
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.adk.event_processor import ADKEventProcessor
-from agentic_cli.workflow.adk.plugins import ConfirmationPlugin, LLMLoggingPlugin
+from agentic_cli.workflow.adk.permission_plugin import PermissionPlugin
+from agentic_cli.workflow.adk.plugins import LLMLoggingPlugin
 
 from agentic_cli.config import (
     BaseSettings,
@@ -400,7 +401,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         """
         from agentic_cli.workflow.adk.task_progress_plugin import TaskProgressPlugin
 
-        plugins: list = [ConfirmationPlugin()]
+        plugins: list = [PermissionPlugin()]
 
         # Task progress tracking via ToolContext.state
         self._task_progress_plugin = TaskProgressPlugin()

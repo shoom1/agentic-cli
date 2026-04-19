@@ -25,6 +25,11 @@ from typing import Any, Callable
 def make_memory_tools(memory_store, embedding_service=None) -> list[Callable]:
     """Create memory tools bound to a MemoryStore.
 
+    Thin closure-bound wrappers around the shared helpers in
+    ``tools.memory_tools``. The helpers take the store as an explicit arg
+    so the closure-bound and module-level (registry-bound) tool versions
+    stay in lockstep.
+
     Args:
         memory_store: A MemoryStore instance.
         embedding_service: Optional EmbeddingService (unused, kept for interface compat).
@@ -32,108 +37,55 @@ def make_memory_tools(memory_store, embedding_service=None) -> list[Callable]:
     Returns:
         [save_memory, search_memory, update_memory, delete_memory]
     """
+    from agentic_cli.tools.memory_tools import (
+        _SENTINEL,
+        _delete_memory_with_store,
+        _save_memory_with_store,
+        _search_memory_with_store,
+        _update_memory_with_store,
+        save_memory as _orig_save,
+        search_memory as _orig_search,
+        update_memory as _orig_update,
+        delete_memory as _orig_delete,
+    )
 
     def save_memory(
         content: str,
         tags: list[str] | None = None,
         importance: int = 5,
     ) -> dict[str, Any]:
-        """Save information to persistent memory.
-
-        Use this to remember important facts, preferences, or learnings
-        that should persist across sessions.
-
-        Args:
-            content: The content to store.
-            tags: Optional tags for categorization.
-            importance: Importance rating 1-10 (default 5). Higher = more important.
-
-        Returns:
-            A dict with the stored item ID and any similar existing memories.
-        """
-        result = memory_store.store_with_similarity_check(content, tags=tags, importance=importance)
-        return {
-            "success": True,
-            "item_id": result["item_id"],
-            "message": "Saved to persistent memory",
-            "similar_existing": result["similar_existing"],
-        }
+        return _save_memory_with_store(memory_store, content, tags, importance)
 
     def search_memory(
         query: str,
         limit: int = 10,
         include_archived: bool = False,
     ) -> dict[str, Any]:
-        """Search persistent memory for stored information.
-
-        Args:
-            query: The search query.
-            limit: Maximum number of results to return.
-            include_archived: If True, include archived (soft-deleted) memories.
-
-        Returns:
-            A dict with matching memory items.
-        """
-        results = memory_store.search(query, limit=limit, include_archived=include_archived)
-        items = [
-            {
-                "id": item.id,
-                "content": item.content,
-                "tags": item.tags,
-                "importance": item.importance,
-            }
-            for item in results
-        ]
-        return {
-            "success": True,
-            "query": query,
-            "items": items,
-            "count": len(items),
-        }
+        return _search_memory_with_store(
+            memory_store, query, limit, include_archived
+        )
 
     def update_memory(
         item_id: str,
         content: str | None = None,
-        tags: list[str] | None = None,
+        tags: list[str] | None = _SENTINEL,
     ) -> dict[str, Any]:
-        """Update an existing memory item.
-
-        Args:
-            item_id: ID of the memory to update.
-            content: New content (optional).
-            tags: New tags (optional). Pass explicitly to update; omit (None) to leave unchanged.
-
-        Returns:
-            A dict indicating success.
-        """
-        # Don't forward tags to store.update() unless explicitly provided,
-        # since the store's sentinel default means "leave unchanged" but None means "clear tags".
-        if tags is None:
-            updated = memory_store.update(item_id, content=content)
-        else:
-            updated = memory_store.update(item_id, content=content, tags=tags)
-        return {"success": True, "updated": updated}
+        return _update_memory_with_store(memory_store, item_id, content, tags)
 
     def delete_memory(
         item_id: str,
         purge: bool = False,
     ) -> dict[str, Any]:
-        """Delete a memory item (soft-delete by default).
-
-        Args:
-            item_id: ID of the memory to delete.
-            purge: If True, permanently remove. If False, archive.
-
-        Returns:
-            A dict indicating success.
-        """
-        deleted = memory_store.delete(item_id, purge=purge)
-        return {"success": True, "deleted": deleted}
+        return _delete_memory_with_store(memory_store, item_id, purge)
 
     save_memory.__name__ = "save_memory"
+    save_memory.__doc__ = _orig_save.__doc__
     search_memory.__name__ = "search_memory"
+    search_memory.__doc__ = _orig_search.__doc__
     update_memory.__name__ = "update_memory"
+    update_memory.__doc__ = _orig_update.__doc__
     delete_memory.__name__ = "delete_memory"
+    delete_memory.__doc__ = _orig_delete.__doc__
 
     return [save_memory, search_memory, update_memory, delete_memory]
 

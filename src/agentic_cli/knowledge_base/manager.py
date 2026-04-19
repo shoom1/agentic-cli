@@ -96,6 +96,26 @@ class KnowledgeBaseManager:
     """Main interface for knowledge base operations.
 
     Provides document ingestion, semantic search, and document management.
+
+    Concurrency model
+    -----------------
+    Two lock surfaces with different semantics:
+
+    * ``_lock`` (``threading.Lock``) — guards every mutation to the
+      in-memory document/chunk/vector/BM25 state and the check-and-set
+      of ``_backfill_running``. The sync mutation API
+      (``ingest_document``, ``search``, ``delete_document``, ``clear``)
+      is safe to call from any thread.
+    * ``_sidecar_locks`` (``dict[str, asyncio.Lock]``) — per-doc locks
+      that serialize concurrent LLM-backed sidecar generation for the
+      same document. Always obtain these through
+      :meth:`get_or_create_sidecar_lock`; never index the dict directly.
+
+    The async sidecar path (``backfill_sidecars`` and the lazy
+    ``kb_read`` fallback in ``tools/knowledge_tools``) is safe within a
+    single asyncio event loop. Sharing a manager across multiple event
+    loops is NOT supported — the per-doc ``asyncio.Lock`` is bound to
+    the loop it was created on.
     """
 
     def __init__(
@@ -301,6 +321,23 @@ class KnowledgeBaseManager:
         path = self._sidecar_path(doc_id)
         if path.exists():
             path.unlink()
+
+    def get_or_create_sidecar_lock(self, doc_id: str) -> asyncio.Lock:
+        """Return the per-doc async lock used to serialize sidecar writes.
+
+        Same lock is returned for the same ``doc_id`` across repeat calls,
+        so ``backfill_sidecars`` and the lazy ``kb_read`` fallback cannot
+        double-generate a sidecar for the same document.
+
+        The dict insert is guarded by ``_lock`` so two threads racing to
+        create the lock for a new doc will not produce two distinct
+        ``asyncio.Lock`` instances.
+        """
+        existing = self._sidecar_locks.get(doc_id)
+        if existing is not None:
+            return existing
+        with self._lock:
+            return self._sidecar_locks.setdefault(doc_id, asyncio.Lock())
 
     def _index_md_path(self) -> Path:
         return self.kb_dir / "index.md"
@@ -1028,35 +1065,40 @@ class KnowledgeBaseManager:
         Returns:
             Number of sidecars written this call.
         """
-        if self._backfill_running:
-            raise BackfillAlreadyRunning(
-                "backfill_sidecars is already running on this KB"
-            )
-        self._backfill_running = True
-        try:
-            written = 0
-            # Snapshot the docs that need backfilling up front so the
-            # progress denominator is stable even if ingest/delete runs
-            # concurrently.
+        # Check-and-set the running flag and snapshot the work list under
+        # one lock acquisition so a second thread cannot slip past the
+        # guard between the read and the write.
+        with self._lock:
+            if self._backfill_running:
+                raise BackfillAlreadyRunning(
+                    "backfill_sidecars is already running on this KB"
+                )
+            self._backfill_running = True
             todo = [
                 doc
-                for doc in list(self._documents.values())
+                for doc in self._documents.values()
                 if not self._sidecar_path(doc.id).exists()
             ]
+        try:
+            written = 0
             total = len(todo)
             for i, doc in enumerate(todo):
                 # Guard against delete-during-backfill — doc may have
-                # been removed since the snapshot was taken.
-                if doc.id not in self._documents:
-                    continue
-                lock = self._sidecar_locks.setdefault(doc.id, asyncio.Lock())
+                # been removed since the snapshot was taken. Checked
+                # under the lock so a concurrent delete_document cannot
+                # interleave between the check and use.
+                with self._lock:
+                    if doc.id not in self._documents:
+                        continue
+                lock = self.get_or_create_sidecar_lock(doc.id)
                 async with lock:
                     # Double-check inside the lock — another task may
                     # have written it (e.g. lazy kb_read fallback).
                     if self._sidecar_path(doc.id).exists():
                         continue
-                    if doc.id not in self._documents:
-                        continue
+                    with self._lock:
+                        if doc.id not in self._documents:
+                            continue
                     if progress_cb is not None:
                         progress_cb(i, total, doc)
                     payload = await self.generate_sidecar_payload(
@@ -1066,7 +1108,8 @@ class KnowledgeBaseManager:
                     written += 1
             return written
         finally:
-            self._backfill_running = False
+            with self._lock:
+                self._backfill_running = False
 
 
 class BackfillAlreadyRunning(RuntimeError):

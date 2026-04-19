@@ -31,8 +31,8 @@ logger = get_logger("agentic_cli.tools.memory")
 from agentic_cli.tools.registry import (
     register_tool,
     ToolCategory,
-    PermissionLevel,
 )
+from agentic_cli.workflow.permissions import Capability
 from agentic_cli.workflow.service_registry import require_service, MEMORY_STORE
 
 
@@ -428,9 +428,84 @@ class MemoryStore:
         }
 
 
+# ---------------------------------------------------------------------------
+# Shared helpers — the single source of truth for tool behavior.
+#
+# Both the @register_tool wrappers below (service-registry bound) and the
+# make_memory_tools() closures in tools/factories.py delegate to these
+# helpers, so the two entry points cannot drift.
+# ---------------------------------------------------------------------------
+
+
+def _save_memory_with_store(
+    store: "MemoryStore",
+    content: str,
+    tags: list[str] | None,
+    importance: int,
+) -> dict[str, Any]:
+    result = store.store_with_similarity_check(
+        content, tags=tags, importance=importance
+    )
+    return {
+        "success": True,
+        "item_id": result["item_id"],
+        "message": "Saved to persistent memory",
+        "similar_existing": result["similar_existing"],
+    }
+
+
+def _search_memory_with_store(
+    store: "MemoryStore",
+    query: str,
+    limit: int,
+    include_archived: bool,
+) -> dict[str, Any]:
+    results = store.search(query, limit=limit, include_archived=include_archived)
+    items = [
+        {
+            "id": item.id,
+            "content": item.content,
+            "tags": item.tags,
+            "importance": item.importance,
+        }
+        for item in results
+    ]
+    return {
+        "success": True,
+        "query": query,
+        "items": items,
+        "count": len(items),
+    }
+
+
+def _update_memory_with_store(
+    store: "MemoryStore",
+    item_id: str,
+    content: str | None,
+    tags: list[str] | None | object,
+) -> dict[str, Any]:
+    updated = store.update(item_id, content=content, tags=tags)
+    return {"success": True, "updated": updated}
+
+
+def _delete_memory_with_store(
+    store: "MemoryStore",
+    item_id: str,
+    purge: bool,
+) -> dict[str, Any]:
+    deleted = store.delete(item_id, purge=purge)
+    return {"success": True, "deleted": deleted}
+
+
+# ---------------------------------------------------------------------------
+# Registry-bound tool functions (@register_tool) — thin wrappers that resolve
+# the store through the service registry and delegate to the helpers above.
+# ---------------------------------------------------------------------------
+
+
 @register_tool(
     category=ToolCategory.MEMORY,
-    permission_level=PermissionLevel.SAFE,
+    capabilities=[Capability("memory.write")],
     description="Save information to persistent memory that survives across sessions. Use this to remember user preferences, important facts, or learnings for future conversations.",
 )
 def save_memory(
@@ -440,71 +515,43 @@ def save_memory(
 ) -> dict[str, Any]:
     """Save information to persistent memory.
 
-    Use this to remember important facts, preferences, or learnings
-    that should persist across sessions.
-
     Args:
         content: The content to store.
         tags: Optional tags for categorization.
         importance: Importance rating 1-10 (default 5).
-
-    Returns:
-        A dict with the stored item ID.
     """
     store = require_service(MEMORY_STORE)
     if isinstance(store, dict):
         return store
-    result = store.store_with_similarity_check(content, tags=tags, importance=importance)
-    return {
-        "success": True,
-        "item_id": result["item_id"],
-        "message": "Saved to persistent memory",
-        "similar_existing": result["similar_existing"],
-    }
+    return _save_memory_with_store(store, content, tags, importance)
 
 
 @register_tool(
     category=ToolCategory.MEMORY,
-    permission_level=PermissionLevel.SAFE,
+    capabilities=[Capability("memory.read")],
     description="Search persistent memory by keyword/substring. Use this to recall previously saved facts, preferences, or learnings.",
 )
 def search_memory(
     query: str,
     limit: int = 10,
+    include_archived: bool = False,
 ) -> dict[str, Any]:
     """Search persistent memory for stored information.
 
     Args:
         query: The search query (substring match, case-insensitive).
         limit: Maximum number of results to return.
-
-    Returns:
-        A dict with matching memory items.
+        include_archived: If True, include archived (soft-deleted) memories.
     """
     store = require_service(MEMORY_STORE)
     if isinstance(store, dict):
         return store
-    results = store.search(query, limit=limit)
-    items = [
-        {
-            "id": item.id,
-            "content": item.content,
-            "tags": item.tags,
-        }
-        for item in results
-    ]
-
-    return {
-        "success": True,
-        "query": query,
-        "items": items,
-        "count": len(items),
-    }
+    return _search_memory_with_store(store, query, limit, include_archived)
 
 
 @register_tool(
     category=ToolCategory.MEMORY,
-    permission_level=PermissionLevel.SAFE,
+    capabilities=[Capability("memory.write")],
     description="Update an existing memory item",
 )
 def update_memory(
@@ -517,21 +564,17 @@ def update_memory(
     Args:
         item_id: ID of the memory to update.
         content: New content (optional).
-        tags: New tags (optional). Pass explicitly to update; omit to leave unchanged.
-
-    Returns:
-        A dict indicating success.
+        tags: New tags. Omit to leave unchanged; pass None to clear.
     """
     store = require_service(MEMORY_STORE)
     if isinstance(store, dict):
         return store
-    updated = store.update(item_id, content=content, tags=tags)
-    return {"success": True, "updated": updated}
+    return _update_memory_with_store(store, item_id, content, tags)
 
 
 @register_tool(
     category=ToolCategory.MEMORY,
-    permission_level=PermissionLevel.CAUTION,
+    capabilities=[Capability("memory.write")],
     description="Delete a memory item",
 )
 def delete_memory(
@@ -543,12 +586,8 @@ def delete_memory(
     Args:
         item_id: ID of the memory to delete.
         purge: If True, permanently remove. If False, archive.
-
-    Returns:
-        A dict indicating success.
     """
     store = require_service(MEMORY_STORE)
     if isinstance(store, dict):
         return store
-    deleted = store.delete(item_id, purge=purge)
-    return {"success": True, "deleted": deleted}
+    return _delete_memory_with_store(store, item_id, purge)

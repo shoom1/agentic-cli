@@ -38,7 +38,7 @@ Agentic CLI provides the core infrastructure for building interactive CLI applic
 ├─────────────────────────────┬───────────────────────────────────────┤
 │   GoogleADKWorkflowManager  │     LangGraphWorkflowManager          │
 │   (default)                 │     (optional: langgraph extra)       │
-│   + ConfirmationPlugin      │     + confirmation tool wrapper       │
+│   + PermissionPlugin        │     + wrap_tool_for_permission        │
 │   + LLMLoggingPlugin        │     + native ToolNode                 │
 │   + TaskProgressPlugin      │                                       │
 └─────────────────────────────┴───────────────────────────────────────┘
@@ -145,7 +145,7 @@ manager = GoogleADKWorkflowManager(
 ```
 
 ADK integrations:
-- **ConfirmationPlugin** — intercepts `DANGEROUS` tools and prompts the user for approval
+- **PermissionPlugin** — evaluates each tool's declared capabilities against the permission engine and prompts the user when no rule matches
 - **LLMLoggingPlugin** — structured logging of LLM requests/responses
 - **TaskProgressPlugin** — streams the task checklist into its own thinking box
 
@@ -171,7 +171,7 @@ Features:
 - **Explicit provider support**: Uses `langchain-google-genai` for Gemini (not VertexAI)
 - **Thinking mode**: Native support for Claude and Gemini thinking/reasoning
 - **Retry policies**: Automatic retry with exponential backoff
-- **Confirmation wrapper**: Wraps `DANGEROUS` tools to request HITL approval
+- **Permission wrapper**: Wraps each tool to gate execution through the permission engine
 - **Event streaming**: Real-time workflow events via `WorkflowEvent`
 
 Requires: `pip install agentic-cli[langgraph]`
@@ -186,7 +186,7 @@ Requires: `pip install agentic-cli[langgraph]`
 | State persistence | In-memory | Memory, PostgreSQL, or SQLite |
 | Thinking support | Native (Gemini) | Native (Claude & Gemini) |
 | Retry handling | Built-in | Built-in with backoff |
-| HITL confirmation | ConfirmationPlugin | Tool wrapper |
+| Permission gate | PermissionPlugin | wrap_tool_for_permission |
 | Context trimming | Native | Native |
 
 ### Auto-selection via Settings
@@ -320,11 +320,12 @@ configs = [coordinator, researcher, analyst]
 Tools are regular Python functions with type hints and docstrings. **All tools return `{"success": bool, ...}` dicts** — never raise exceptions.
 
 ```python
-from agentic_cli.tools import register_tool, ToolCategory, PermissionLevel
+from agentic_cli.tools import register_tool, ToolCategory
+from agentic_cli.workflow.permissions import Capability, EXEMPT
 
 @register_tool(
-    category=ToolCategory.DATA,
-    permission_level=PermissionLevel.SAFE,
+    category=ToolCategory.NETWORK,
+    capabilities=[Capability("http.read")],
     description="Search the database for matching records.",
 )
 def search_database(query: str, limit: int = 10) -> dict:
@@ -341,15 +342,14 @@ def search_database(query: str, limit: int = 10) -> dict:
     return {"success": True, "results": results, "count": len(results)}
 ```
 
-Registering via `@register_tool` is optional — you can pass raw callables into `AgentConfig.tools`. Registering gives the tool metadata for the registry, permission-aware HITL wrapping, and tool-summary formatting.
+Registering via `@register_tool` is optional — you can pass raw callables into `AgentConfig.tools`. Registering gives the tool metadata for the registry, capability-aware permission gating, and tool-summary formatting.
 
-### Permission Levels
+### Capabilities
 
-| Level | Behavior |
-|-------|----------|
-| `SAFE` | Runs silently |
-| `CAUTION` | Runs; result is surfaced prominently |
-| `DANGEROUS` | Intercepted by HITL — user must approve before execution |
+Tool access is gated by the **permission engine** (see the HITL section below). Each registered tool declares what it touches via `capabilities=`:
+
+- **`Capability("namespace.action", target_arg="...")`** — e.g. `Capability("filesystem.write", target_arg="path")`, `Capability("http.read", target_arg="url")`, `Capability("shell.exec", target_arg="command")`. The engine resolves `target_arg` against the actual tool-call arguments and matches against rules.
+- **`EXEMPT`** — opts the tool out of the engine entirely. Reserved for backend-internal tools (e.g. ADK `transfer_to_agent`, backend state tools).
 
 ### Built-in Tools
 
@@ -430,7 +430,7 @@ list_dir("src/", include_hidden=False)
 diff_compare(source_a="old.txt", source_b="new.txt")
 ```
 
-**WRITE tools (caution)**
+**WRITE tools**
 
 ```python
 from agentic_cli.tools import write_file, edit_file
@@ -534,15 +534,9 @@ Each tool keeps at most N reflections (FIFO eviction). Reflections can be inject
 
 #### HITL (Human-in-the-Loop)
 
-Two mechanisms:
+Tool calls are gated by the **permission engine** (`workflow/permissions/`). Each tool declares a list of capabilities (e.g. `filesystem.write(path=...)`); the engine evaluates them against rules from four sources (builtin defaults, user `~/.{app_name}/settings.json`, project `./.{app_name}/settings.json`, in-memory session). When no rule matches, the user is prompted with `Allow once / Allow for session / Allow always (save to project) / Deny`. Always-grants persist into the project settings file so the next run picks them up automatically.
 
-1. **Automatic confirmation for `DANGEROUS` tools** — handled by ADK's `ConfirmationPlugin` and LangGraph's tool wrapper. No code changes needed; just mark the tool `DANGEROUS`.
-2. **Explicit `request_approval` tool** — for domain-level checkpoints:
-
-   ```python
-   from agentic_cli.tools import hitl_tools
-   # request_approval(message, options) -> {"success": True, "choice": "..."}
-   ```
+See `docs/superpowers/specs/2026-04-18-permissions-system-design.md` for the full design.
 
 ## CLI Commands
 
@@ -718,15 +712,24 @@ agentic-cli/
 │   │   ├── adk/
 │   │   │   ├── manager.py                # GoogleADKWorkflowManager
 │   │   │   ├── event_processor.py
-│   │   │   ├── plugins.py                # ConfirmationPlugin, LLMLoggingPlugin
+│   │   │   ├── plugins.py                # LLMLoggingPlugin
+│   │   │   ├── permission_plugin.py      # PermissionPlugin (capability gating)
 │   │   │   └── task_progress_plugin.py
-│   │   └── langgraph/
-│   │       ├── manager.py                # LangGraphWorkflowManager
-│   │       ├── graph_builder.py
-│   │       ├── state.py
-│   │       └── persistence/              # Checkpointers and stores
+│   │   ├── langgraph/
+│   │   │   ├── manager.py                # LangGraphWorkflowManager
+│   │   │   ├── graph_builder.py
+│   │   │   ├── permission_wrap.py        # wrap_tool_for_permission
+│   │   │   ├── state.py
+│   │   │   └── persistence/              # Checkpointers and stores
+│   │   └── permissions/                  # Framework-independent permission engine
+│   │       ├── capabilities.py           # Capability, ResolvedCapability, EXEMPT
+│   │       ├── rules.py                  # Rule, Effect, RuleSource, CheckResult, AskScope
+│   │       ├── matchers.py               # Path/URL/Shell/StringGlob matchers
+│   │       ├── store.py                  # PermissionContext, BUILTIN_RULES, JSON load/save
+│   │       ├── prompt.py                 # build_request + parse_response
+│   │       └── engine.py                 # PermissionEngine
 │   ├── tools/
-│   │   ├── registry.py           # ToolRegistry, ToolCategory, PermissionLevel
+│   │   ├── registry.py           # ToolRegistry, ToolCategory, register_tool
 │   │   ├── factories.py          # Backend-aware tool factories
 │   │   ├── executor.py           # SafePythonExecutor
 │   │   ├── arxiv_tools.py        # search_arxiv, fetch_arxiv_paper, ingest_arxiv_paper
@@ -744,7 +747,6 @@ agentic-cli/
 │   │   ├── pdf_utils.py          # PDF text extraction helpers
 │   │   ├── memory_tools.py       # save/search/update/delete + MemoryStore
 │   │   ├── reflection_tools.py   # save_reflection + ToolReflectionStore
-│   │   ├── hitl_tools.py         # request_approval
 │   │   ├── _core/                # Shared planning/task logic
 │   │   │   ├── planning.py
 │   │   │   └── tasks.py

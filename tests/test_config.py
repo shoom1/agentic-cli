@@ -417,14 +417,10 @@ def test_package_exports_new_modules():
     # Memory
     from agentic_cli.tools.memory_tools import MemoryStore, MemoryItem
 
-    # HITL
-    from agentic_cli.tools.hitl_tools import ApprovalManager
-
     # Tools
     from agentic_cli.tools import shell_executor, read_file, write_file, diff_compare
 
     # All imports should succeed
     assert MemoryStore is not None
     assert MemoryItem is not None
-    assert ApprovalManager is not None
     assert shell_executor is not None

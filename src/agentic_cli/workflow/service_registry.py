@@ -13,13 +13,14 @@ from typing import Any
 
 # ---- Well-known registry keys ----
 
+ARXIV_SOURCE = "arxiv_source"
 KB_MANAGER = "kb_manager"
-USER_KB_MANAGER = "user_kb_manager"
-SANDBOX_MANAGER = "sandbox_manager"
 LLM_SUMMARIZER = "llm_summarizer"
 MEMORY_STORE = "memory_store"
+PERMISSION_ENGINE = "permission_engine"
 REFLECTION_STORE = "reflection_store"
-ARXIV_SOURCE = "arxiv_source"
+SANDBOX_MANAGER = "sandbox_manager"
+USER_KB_MANAGER = "user_kb_manager"
 WORKFLOW = "workflow"
 
 

@@ -29,8 +29,8 @@ from agentic_cli.constants import truncate
 from agentic_cli.tools.registry import (
     register_tool,
     ToolCategory,
-    PermissionLevel,
 )
+from agentic_cli.workflow.permissions import Capability
 from agentic_cli.workflow.service_registry import (
     get_service,
     require_service,
@@ -413,8 +413,7 @@ async def _read_document_from_kbs(
     # Sidecar mode (default). Lazily generate if missing.
     sidecar_path = source_kb._sidecar_path(doc.id)
     if not sidecar_path.exists():
-        import asyncio as _asyncio
-        lock = source_kb._sidecar_locks.setdefault(doc.id, _asyncio.Lock())
+        lock = source_kb.get_or_create_sidecar_lock(doc.id)
         async with lock:
             if not sidecar_path.exists():
                 # Resolve content the same way full=True does — extract from
@@ -599,7 +598,7 @@ def _find_document_in_kbs(doc_id_or_title: str) -> tuple:
 
 @register_tool(
     category=ToolCategory.KNOWLEDGE,
-    permission_level=PermissionLevel.SAFE,
+    capabilities=[Capability("kb.read")],
     description="Search the local knowledge base for relevant documents using semantic similarity. Use this when you need to find previously ingested papers, notes, or documents.",
 )
 def kb_search(
@@ -626,7 +625,7 @@ def kb_search(
 
 @register_tool(
     category=ToolCategory.KNOWLEDGE,
-    permission_level=PermissionLevel.CAUTION,
+    capabilities=[Capability("kb.write")],
     description=(
         "Ingest a document into the knowledge base. "
         "REQUIRED: provide either 'content' (text) or 'url_or_path' (file path or URL). "
@@ -685,7 +684,7 @@ async def kb_ingest(
 
 @register_tool(
     category=ToolCategory.KNOWLEDGE,
-    permission_level=PermissionLevel.SAFE,
+    capabilities=[Capability("kb.read")],
     description=(
         "Read a stored document by ID or title. Returns the per-document "
         "sidecar (summary, key claims, entities) by default. Pass full=True "
@@ -713,7 +712,7 @@ async def kb_read(
 
 @register_tool(
     category=ToolCategory.KNOWLEDGE,
-    permission_level=PermissionLevel.SAFE,
+    capabilities=[Capability("kb.read")],
     description="List documents in the knowledge base with summaries. Filter by query or source type. Returns summaries, not full content.",
 )
 def kb_list(
@@ -740,7 +739,7 @@ def kb_list(
 
 @register_tool(
     category=ToolCategory.KNOWLEDGE,
-    permission_level=PermissionLevel.CAUTION,
+    capabilities=[Capability("kb.write")],
     description=(
         "Save an agent-curated concept page summarizing what the KB "
         "knows about a topic. Pages live at concepts/{slug}.md and are "
@@ -778,7 +777,7 @@ async def kb_write_concept(
 
 @register_tool(
     category=ToolCategory.KNOWLEDGE,
-    permission_level=PermissionLevel.SAFE,
+    capabilities=[Capability("kb.read")],
     description=(
         "Search concept pages (agent-curated synthesis notes). "
         "Case-insensitive substring match; title hits rank above body "
