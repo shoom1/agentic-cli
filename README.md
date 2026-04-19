@@ -342,15 +342,14 @@ def search_database(query: str, limit: int = 10) -> dict:
     return {"success": True, "results": results, "count": len(results)}
 ```
 
-Registering via `@register_tool` is optional — you can pass raw callables into `AgentConfig.tools`. Registering gives the tool metadata for the registry, permission-aware HITL wrapping, and tool-summary formatting.
+Registering via `@register_tool` is optional — you can pass raw callables into `AgentConfig.tools`. Registering gives the tool metadata for the registry, capability-aware permission gating, and tool-summary formatting.
 
-### Permission Levels
+### Capabilities
 
-| Level | Behavior |
-|-------|----------|
-| `SAFE` | Runs silently |
-| `CAUTION` | Runs; result is surfaced prominently |
-| `DANGEROUS` | Intercepted by HITL — user must approve before execution |
+Tool access is gated by the **permission engine** (see the HITL section below). Each registered tool declares what it touches via `capabilities=`:
+
+- **`Capability("namespace.action", target_arg="...")`** — e.g. `Capability("filesystem.write", target_arg="path")`, `Capability("http.read", target_arg="url")`, `Capability("shell.exec", target_arg="command")`. The engine resolves `target_arg` against the actual tool-call arguments and matches against rules.
+- **`EXEMPT`** — opts the tool out of the engine entirely. Reserved for backend-internal tools (e.g. ADK `transfer_to_agent`, backend state tools).
 
 ### Built-in Tools
 
@@ -431,7 +430,7 @@ list_dir("src/", include_hidden=False)
 diff_compare(source_a="old.txt", source_b="new.txt")
 ```
 
-**WRITE tools (caution)**
+**WRITE tools**
 
 ```python
 from agentic_cli.tools import write_file, edit_file

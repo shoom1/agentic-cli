@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1] - 2026-04-18
+
+### Added
+- **Capability-based permission engine** (PR #72): Framework-independent engine that replaces the ConfirmationPlugin-based HITL. Tools declare capabilities (e.g. `filesystem.write(path=...)`, `http.read`, `shell.exec`) via `@register_tool(capabilities=...)`. Rules are evaluated from four sources — builtin defaults, user `~/.{app_name}/settings.json`, project `./.{app_name}/settings.json`, and in-memory session. When no rule matches, the user is prompted with `Allow once / for session / always (save to project) / Deny`; "always" grants persist into project settings.
+- **Matchers**: `PathMatcher` (with `**` glob), `URLMatcher`, `ShellMatcher`, and `StringGlobMatcher`.
+- **ADK `PermissionPlugin`**: capability gating for ADK agents.
+- **LangGraph `wrap_tool_for_permission`**: per-tool permission wrapping for LangGraph `ToolNode`.
+- **`permissions` and `permissions_enabled` settings** for runtime control.
+- **`EXEMPT` sentinel**: opts a tool out of the permission engine (used for backend state tools and ADK `transfer_to_agent`).
+- **Real BM25 backends**: `bm25s` (preferred) and `rank_bm25` fallback.
+
+### Changed
+- **`@register_tool`** now requires the `capabilities=` kwarg.
+- **Default grants broadened**: `filesystem.*` auto-extends to the parent directory; `memory.*` and `kb.*` are allowed by default.
+- **Ask prompt** now shows the directory-scope target.
+- **Workflow init**: `_ensure_managers_initialized` runs in a worker thread to avoid blocking the event loop.
+- **HITL confirmation** extracted into a backend-neutral module during the permissions migration.
+- **Memory tools**: deduped registry-bound and factory-bound entry points.
+
+### Fixed
+- Matcher canonicalize/matches preserves the `*` wildcard.
+- `KnowledgeBaseManager` concurrency contract tightened.
+
+### Removed
+- **`PermissionLevel`** (SAFE / CAUTION / DANGEROUS), `ConfirmationPlugin`, `_wrap_for_confirmation`, `hitl_tools`, and the `hitl_enabled` setting — superseded by the permission engine.
+
 ## [0.5.0] - 2026-04-17
 
 ### Added
