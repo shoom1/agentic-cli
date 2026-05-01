@@ -1347,7 +1347,9 @@ class TestToolRegistryConsistency:
             "web_fetch",
             # Knowledge base (unified document store)
             "kb_search",
-            "kb_ingest",
+            "kb_ingest_text",
+            "kb_ingest_file",
+            "kb_ingest_url",
             "kb_read",
             "kb_list",
             # ArXiv (metadata only)
@@ -1445,13 +1447,14 @@ class TestToolRegistryConsistency:
 
         # File ops: 7 (read_file, diff_compare, grep, glob, list_dir, write_file, edit_file)
         # Web/Network: 2 (web_search, web_fetch)
-        # Knowledge: 7 (kb_search, kb_ingest, kb_read, kb_list, search_arxiv, fetch_arxiv_paper, ingest_arxiv_paper)
+        # Knowledge: 9 (kb_search, kb_ingest_text/file/url, kb_read, kb_list,
+        #              search_arxiv, fetch_arxiv_paper, ingest_arxiv_paper)
         # Execution: 2 (execute_python, shell_executor)
         # Interaction: 1 (ask_clarification)
         # Memory: 2 (save_memory, search_memory)
         # Sandbox: 1 (sandbox_execute)
         # Plan/task state tools are backend-specific (not in global registry)
-        # Total: ~23 tools
+        # Total: ~25 tools
         assert tool_count >= 20, f"Expected at least 20 registered tools, got {tool_count}"
 
 

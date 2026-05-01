@@ -317,9 +317,12 @@ class TestFetchArxivPaper:
         assert len(summary) <= 103  # 100 + "..."
 
 class TestIngestDocument:
-    def test_basic(self):
+    @pytest.mark.parametrize(
+        "tool_name", ["kb_ingest_text", "kb_ingest_file", "kb_ingest_url"]
+    )
+    def test_basic(self, tool_name):
         result = {"success": True, "document_id": "abc", "title": "Paper", "chunks_created": 5}
-        assert format_tool_summary("kb_ingest", result) == "Ingested 'Paper' (5 chunks)"
+        assert format_tool_summary(tool_name, result) == "Ingested 'Paper' (5 chunks)"
 
 
 class TestKbRead:

@@ -253,7 +253,7 @@ class TestSidecarWrittenOnIngest:
             set_service_registry,
             LLM_SUMMARIZER,
         )
-        from agentic_cli.tools.knowledge_tools import _ingest_document_with_kb
+        from agentic_cli.tools.knowledge_tools import _ingest_text_with_kb
 
         class FakeSummarizer:
             async def summarize(self, content: str, prompt: str) -> str:
@@ -265,7 +265,7 @@ class TestSidecarWrittenOnIngest:
 
         token = set_service_registry({LLM_SUMMARIZER: FakeSummarizer()})
         try:
-            result = await _ingest_document_with_kb(
+            result = await _ingest_text_with_kb(
                 kb, content="body", title="Test", source_type="user",
             )
         finally:
@@ -301,7 +301,7 @@ class TestSidecarWrittenOnIngest:
             set_service_registry,
             LLM_SUMMARIZER,
         )
-        from agentic_cli.tools.knowledge_tools import _ingest_document_with_kb
+        from agentic_cli.tools.knowledge_tools import _ingest_text_with_kb
 
         class ClaimsOnlySummarizer:
             async def summarize(self, content: str, prompt: str) -> str:
@@ -309,7 +309,7 @@ class TestSidecarWrittenOnIngest:
 
         token = set_service_registry({LLM_SUMMARIZER: ClaimsOnlySummarizer()})
         try:
-            result = await _ingest_document_with_kb(
+            result = await _ingest_text_with_kb(
                 kb, content="raw body for fallback", title="X", source_type="user",
             )
         finally:

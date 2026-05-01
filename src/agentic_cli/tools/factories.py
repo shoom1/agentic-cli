@@ -107,18 +107,22 @@ def make_kb_tools(kb_manager, user_kb_manager=None) -> list[Callable]:
         user_kb_manager: Optional user-scoped KnowledgeBaseManager.
 
     Returns:
-        [kb_search, kb_ingest, kb_read, kb_list, kb_write_concept, kb_search_concepts]
-        (six tools — the concept pages pair was added in Phase 2.)
+        [kb_search, kb_ingest_text, kb_ingest_file, kb_ingest_url,
+         kb_read, kb_list, kb_write_concept, kb_search_concepts]
     """
     from agentic_cli.tools.knowledge_tools import (
         READ_DOCUMENT_MAX_CHARS,
-        _ingest_document_with_kb,
+        _ingest_file_with_kb,
+        _ingest_text_with_kb,
+        _ingest_url_with_kb,
         _list_documents_in_kbs,
         _read_document_from_kbs,
         _search_concepts_with_kb,
         _search_kbs,
         _write_concept_with_kb,
-        kb_ingest as _orig_ingest,
+        kb_ingest_file as _orig_ingest_file,
+        kb_ingest_text as _orig_ingest_text,
+        kb_ingest_url as _orig_ingest_url,
         kb_list as _orig_list,
         kb_read as _orig_read,
         kb_search as _orig_search,
@@ -133,9 +137,8 @@ def make_kb_tools(kb_manager, user_kb_manager=None) -> list[Callable]:
     ) -> dict[str, Any]:
         return _search_kbs(kb_manager, user_kb_manager, query, filters, top_k)
 
-    async def kb_ingest(
-        content: str = "",
-        url_or_path: str = "",
+    async def kb_ingest_text(
+        content: str,
         title: str = "",
         source_type: str = "user",
         source_url: str | None = None,
@@ -143,10 +146,49 @@ def make_kb_tools(kb_manager, user_kb_manager=None) -> list[Callable]:
         abstract: str = "",
         tags: list[str] | None = None,
     ) -> dict[str, Any]:
-        return await _ingest_document_with_kb(
+        return await _ingest_text_with_kb(
             kb_manager,
             content=content,
-            url_or_path=url_or_path,
+            title=title,
+            source_type=source_type,
+            source_url=source_url,
+            authors=authors,
+            abstract=abstract,
+            tags=tags,
+        )
+
+    async def kb_ingest_file(
+        path: str,
+        title: str = "",
+        source_type: str = "local",
+        source_url: str | None = None,
+        authors: list[str] | None = None,
+        abstract: str = "",
+        tags: list[str] | None = None,
+    ) -> dict[str, Any]:
+        return await _ingest_file_with_kb(
+            kb_manager,
+            path=path,
+            title=title,
+            source_type=source_type,
+            source_url=source_url,
+            authors=authors,
+            abstract=abstract,
+            tags=tags,
+        )
+
+    async def kb_ingest_url(
+        url: str,
+        title: str = "",
+        source_type: str = "web",
+        source_url: str | None = None,
+        authors: list[str] | None = None,
+        abstract: str = "",
+        tags: list[str] | None = None,
+    ) -> dict[str, Any]:
+        return await _ingest_url_with_kb(
+            kb_manager,
+            url=url,
             title=title,
             source_type=source_type,
             source_url=source_url,
@@ -194,8 +236,12 @@ def make_kb_tools(kb_manager, user_kb_manager=None) -> list[Callable]:
 
     kb_search.__name__ = "kb_search"
     kb_search.__doc__ = _orig_search.__doc__
-    kb_ingest.__name__ = "kb_ingest"
-    kb_ingest.__doc__ = _orig_ingest.__doc__
+    kb_ingest_text.__name__ = "kb_ingest_text"
+    kb_ingest_text.__doc__ = _orig_ingest_text.__doc__
+    kb_ingest_file.__name__ = "kb_ingest_file"
+    kb_ingest_file.__doc__ = _orig_ingest_file.__doc__
+    kb_ingest_url.__name__ = "kb_ingest_url"
+    kb_ingest_url.__doc__ = _orig_ingest_url.__doc__
     kb_read.__name__ = "kb_read"
     kb_read.__doc__ = _orig_read.__doc__
     kb_list.__name__ = "kb_list"
@@ -207,7 +253,9 @@ def make_kb_tools(kb_manager, user_kb_manager=None) -> list[Callable]:
 
     return [
         kb_search,
-        kb_ingest,
+        kb_ingest_text,
+        kb_ingest_file,
+        kb_ingest_url,
         kb_read,
         kb_list,
         kb_write_concept,

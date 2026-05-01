@@ -437,7 +437,7 @@ class TestKBSummaryGeneration:
             set_service_registry,
             LLM_SUMMARIZER,
         )
-        from agentic_cli.tools.knowledge_tools import _ingest_document_with_kb
+        from agentic_cli.tools.knowledge_tools import _ingest_text_with_kb
 
         received: dict = {}
 
@@ -450,7 +450,7 @@ class TestKBSummaryGeneration:
         token = set_service_registry({LLM_SUMMARIZER: FakeSummarizer()})
         try:
             long_content = "This is a lengthy body. " * 50
-            result = await _ingest_document_with_kb(
+            result = await _ingest_text_with_kb(
                 kb,
                 content=long_content,
                 title="Test Paper",
@@ -475,7 +475,7 @@ class TestKBSummaryGeneration:
             set_service_registry,
             LLM_SUMMARIZER,
         )
-        from agentic_cli.tools.knowledge_tools import _ingest_document_with_kb
+        from agentic_cli.tools.knowledge_tools import _ingest_text_with_kb
 
         class BrokenSummarizer:
             async def summarize(self, content: str, prompt: str) -> str:
@@ -484,7 +484,7 @@ class TestKBSummaryGeneration:
         token = set_service_registry({LLM_SUMMARIZER: BrokenSummarizer()})
         try:
             content = "Fallback test content that should survive summarizer errors."
-            result = await _ingest_document_with_kb(
+            result = await _ingest_text_with_kb(
                 kb,
                 content=content,
                 title="Fallback Test",
@@ -549,19 +549,19 @@ class TestSearchKnowledgeBaseTool:
 
 
 class TestIngestDocumentTool:
-    """Tests for kb_ingest error handling."""
+    """Tests for kb_ingest_text / kb_ingest_file error handling."""
 
     @pytest.mark.asyncio
     async def test_invalid_source_type_returns_error(self):
         """Invalid source_type returns error dict."""
         from agentic_cli.workflow.service_registry import set_service_registry
-        from agentic_cli.tools.knowledge_tools import kb_ingest
+        from agentic_cli.tools.knowledge_tools import kb_ingest_text
 
         with tempfile.TemporaryDirectory() as tmp:
             kb = _make_kb(Path(tmp))
             token = set_service_registry({"kb_manager": kb})
             try:
-                result = await kb_ingest(
+                result = await kb_ingest_text(
                     content="Test",
                     title="Test",
                     source_type="invalid_type",
@@ -575,13 +575,13 @@ class TestIngestDocumentTool:
     async def test_valid_ingest_returns_success(self):
         """Valid ingestion returns success=True with document info."""
         from agentic_cli.workflow.service_registry import set_service_registry
-        from agentic_cli.tools.knowledge_tools import kb_ingest
+        from agentic_cli.tools.knowledge_tools import kb_ingest_text
 
         with tempfile.TemporaryDirectory() as tmp:
             kb = _make_kb(Path(tmp))
             token = set_service_registry({"kb_manager": kb})
             try:
-                result = await kb_ingest(
+                result = await kb_ingest_text(
                     content="Test content for ingestion.",
                     title="Test Document",
                     source_type="user",
@@ -596,13 +596,13 @@ class TestIngestDocumentTool:
 
     @pytest.mark.asyncio
     async def test_no_context_returns_error(self):
-        """kb_ingest returns error when KB context is not set."""
+        """kb_ingest_text returns error when KB context is not set."""
         from agentic_cli.workflow.service_registry import set_service_registry
-        from agentic_cli.tools.knowledge_tools import kb_ingest
+        from agentic_cli.tools.knowledge_tools import kb_ingest_text
 
         token = set_service_registry({})
         try:
-            result = await kb_ingest(
+            result = await kb_ingest_text(
                 content="Test",
                 title="Test",
             )
@@ -612,16 +612,16 @@ class TestIngestDocumentTool:
             token.var.reset(token)
 
     @pytest.mark.asyncio
-    async def test_no_content_or_file_returns_error(self):
-        """Providing neither content nor url_or_path returns error."""
+    async def test_no_content_returns_error(self):
+        """Empty text content returns error."""
         from agentic_cli.workflow.service_registry import set_service_registry
-        from agentic_cli.tools.knowledge_tools import kb_ingest
+        from agentic_cli.tools.knowledge_tools import kb_ingest_text
 
         with tempfile.TemporaryDirectory() as tmp:
             kb = _make_kb(Path(tmp))
             token = set_service_registry({"kb_manager": kb})
             try:
-                result = await kb_ingest(title="Empty")
+                result = await kb_ingest_text(content="", title="Empty")
                 assert result["success"] is False
                 assert "No content" in result["error"]
             finally:
@@ -631,7 +631,7 @@ class TestIngestDocumentTool:
     async def test_ingest_local_file(self):
         """Ingesting a local PDF copies and extracts text."""
         from agentic_cli.workflow.service_registry import set_service_registry
-        from agentic_cli.tools.knowledge_tools import kb_ingest
+        from agentic_cli.tools.knowledge_tools import kb_ingest_file
 
         with tempfile.TemporaryDirectory() as tmp:
             kb = _make_kb(Path(tmp))
@@ -641,8 +641,8 @@ class TestIngestDocumentTool:
                 pdf_path = Path(tmp) / "test.pdf"
                 pdf_path.write_bytes(b"%PDF-1.4 fake content")
 
-                result = await kb_ingest(
-                    url_or_path=str(pdf_path),
+                result = await kb_ingest_file(
+                    path=str(pdf_path),
                     title="Local PDF",
                 )
                 assert result["success"] is True
@@ -654,17 +654,70 @@ class TestIngestDocumentTool:
     async def test_ingest_local_file_not_found(self):
         """Ingesting a nonexistent file returns error."""
         from agentic_cli.workflow.service_registry import set_service_registry
-        from agentic_cli.tools.knowledge_tools import kb_ingest
+        from agentic_cli.tools.knowledge_tools import kb_ingest_file
 
         with tempfile.TemporaryDirectory() as tmp:
             kb = _make_kb(Path(tmp))
             token = set_service_registry({"kb_manager": kb})
             try:
-                result = await kb_ingest(
-                    url_or_path="/nonexistent/file.pdf",
+                result = await kb_ingest_file(
+                    path="/nonexistent/file.pdf",
                 )
                 assert result["success"] is False
                 assert "not found" in result["error"].lower()
+            finally:
+                token.var.reset(token)
+
+    @pytest.mark.asyncio
+    async def test_ingest_url_routes_through_hardened_fetcher(self, monkeypatch):
+        """kb_ingest_url uses ContentFetcher (SSRF protection) instead of raw httpx."""
+        from agentic_cli.workflow.service_registry import set_service_registry
+        from agentic_cli.tools.knowledge_tools import kb_ingest_url
+        from agentic_cli.tools.webfetch.fetcher import FetchResult
+
+        called_urls: list[str] = []
+
+        class _StubFetcher:
+            async def fetch(self, url, timeout=30):
+                called_urls.append(url)
+                return FetchResult(
+                    success=True,
+                    content="<html>Hi</html>",
+                    content_type="text/html",
+                )
+
+        monkeypatch.setattr(
+            "agentic_cli.tools.knowledge_tools.get_or_create_fetcher",
+            lambda: _StubFetcher(),
+            raising=False,
+        )
+        # The import inside the helper happens lazily; patch the source too.
+        import agentic_cli.tools.webfetch_tool as wft
+        monkeypatch.setattr(wft, "get_or_create_fetcher", lambda: _StubFetcher())
+
+        with tempfile.TemporaryDirectory() as tmp:
+            kb = _make_kb(Path(tmp))
+            token = set_service_registry({"kb_manager": kb})
+            try:
+                result = await kb_ingest_url(url="https://example.com/article")
+                assert result["success"] is True
+                assert called_urls == ["https://example.com/article"]
+            finally:
+                token.var.reset(token)
+
+    @pytest.mark.asyncio
+    async def test_ingest_url_rejects_non_http_scheme(self):
+        """kb_ingest_url refuses file:// and other non-http(s) schemes."""
+        from agentic_cli.workflow.service_registry import set_service_registry
+        from agentic_cli.tools.knowledge_tools import kb_ingest_url
+
+        with tempfile.TemporaryDirectory() as tmp:
+            kb = _make_kb(Path(tmp))
+            token = set_service_registry({"kb_manager": kb})
+            try:
+                result = await kb_ingest_url(url="file:///etc/passwd")
+                assert result["success"] is False
+                assert "http" in result["error"].lower()
             finally:
                 token.var.reset(token)
 
@@ -972,14 +1025,14 @@ class TestTwoTierKnowledgeBase:
     @pytest.mark.asyncio
     async def test_ingest_writes_to_project_only(self, project_kb, user_kb):
         """Ingestion only writes to project KB, not user KB."""
-        from agentic_cli.tools.knowledge_tools import kb_ingest
+        from agentic_cli.tools.knowledge_tools import kb_ingest_text
 
         token = self._set_both_contexts(project_kb, user_kb)
         try:
             user_count_before = len(user_kb._documents)
             project_count_before = len(project_kb._documents)
 
-            result = await kb_ingest(
+            result = await kb_ingest_text(
                 content="New ingested document.",
                 title="New Doc",
                 source_type="user",

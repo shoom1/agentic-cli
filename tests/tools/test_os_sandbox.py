@@ -421,11 +421,12 @@ class TestExecutionSandboxIntegration:
         popen_cmd = mock_popen.call_args[0][0]
         assert "sandbox-exec" in popen_cmd
 
-    def test_enabled_policy_wrap_failure_falls_back(self, tmp_path: Path):
+    def test_enabled_policy_wrap_failure_fails_closed(self, tmp_path: Path):
         policy = OSSandboxPolicy(enabled=True)
         sandbox = ExecutionSandbox(os_sandbox_policy=policy)
 
         mock_os_sandbox = MagicMock()
+        mock_os_sandbox.sandbox_type = "seatbelt"
         mock_os_sandbox.wrap_shell_command.return_value = OSSandboxResult(
             command="echo hello",
             sandbox_type="seatbelt",
@@ -442,10 +443,32 @@ class TestExecutionSandboxIntegration:
         ):
             result = sandbox.execute("echo hello", working_dir=tmp_path)
 
-        assert result.success is True
-        # Popen still ran with the original command
-        popen_cmd = mock_popen.call_args[0][0]
-        assert "echo hello" in popen_cmd
+        # Wrap failure must fail closed instead of dropping back to plain subprocess.
+        assert result.success is False
+        assert "sandbox" in (result.error or "").lower()
+        mock_popen.assert_not_called()
+
+    def test_enabled_policy_no_real_sandbox_fails_closed(self, tmp_path: Path):
+        policy = OSSandboxPolicy(enabled=True)
+        sandbox = ExecutionSandbox(os_sandbox_policy=policy)
+
+        mock_os_sandbox = MagicMock()
+        mock_os_sandbox.sandbox_type = "none"
+        mock_popen = self._make_mock_popen()
+
+        with patch(
+            "agentic_cli.tools.shell.sandbox.subprocess.Popen", mock_popen
+        ), patch(
+            "agentic_cli.tools.shell.os_sandbox.get_os_sandbox",
+            return_value=mock_os_sandbox,
+        ):
+            result = sandbox.execute("echo hello", working_dir=tmp_path)
+
+        assert result.success is False
+        assert "sandbox" in (result.error or "").lower()
+        # We refused to run, so wrap and Popen must not have been called.
+        mock_os_sandbox.wrap_shell_command.assert_not_called()
+        mock_popen.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -506,11 +529,12 @@ class TestSafePythonExecutorIntegration:
         # subprocess.run was called with shell=True (wrapped command)
         assert mock_run.call_args.kwargs.get("shell") is True
 
-    def test_enabled_policy_wrap_failure_falls_back(self):
+    def test_enabled_policy_wrap_failure_fails_closed(self):
         policy = OSSandboxPolicy(enabled=True)
         executor = SafePythonExecutor(os_sandbox_policy=policy)
 
         mock_os_sandbox = MagicMock()
+        mock_os_sandbox.sandbox_type = "seatbelt"
         mock_os_sandbox.wrap_python_command.return_value = OSSandboxResult(
             command="",
             sandbox_type="seatbelt",
@@ -518,23 +542,35 @@ class TestSafePythonExecutorIntegration:
             error="sandbox-exec not found",
         )
 
-        mock_proc = MagicMock()
-        mock_proc.stdout = (
-            "\n__AGENTIC_EXECUTOR_RESULT_SENTINEL__\n"
-            '{"success": true, "output": "", "result": null, '
-            '"error": "", "execution_time_ms": 0}'
-        )
-        mock_proc.stderr = ""
-        mock_proc.returncode = 0
-
         with patch(
-            "agentic_cli.tools.executor.subprocess.run", return_value=mock_proc
+            "agentic_cli.tools.executor.subprocess.run"
         ) as mock_run, patch(
             "agentic_cli.tools.shell.os_sandbox.get_os_sandbox",
             return_value=mock_os_sandbox,
         ):
             result = executor.execute("1 + 1")
 
-        assert result["success"] is True
-        # Fell back to non-shell subprocess.run (list args, not shell=True)
-        assert mock_run.call_args.kwargs.get("shell") is not True
+        # Wrap failure must fail closed rather than running unwrapped.
+        assert result["success"] is False
+        assert "sandbox" in (result.get("error") or "").lower()
+        mock_run.assert_not_called()
+
+    def test_enabled_policy_no_real_sandbox_fails_closed(self):
+        policy = OSSandboxPolicy(enabled=True)
+        executor = SafePythonExecutor(os_sandbox_policy=policy)
+
+        mock_os_sandbox = MagicMock()
+        mock_os_sandbox.sandbox_type = "none"
+
+        with patch(
+            "agentic_cli.tools.executor.subprocess.run"
+        ) as mock_run, patch(
+            "agentic_cli.tools.shell.os_sandbox.get_os_sandbox",
+            return_value=mock_os_sandbox,
+        ):
+            result = executor.execute("1 + 1")
+
+        assert result["success"] is False
+        assert "sandbox" in (result.get("error") or "").lower()
+        mock_os_sandbox.wrap_python_command.assert_not_called()
+        mock_run.assert_not_called()

@@ -21,7 +21,26 @@ _SLUG_WHITESPACE = re.compile(r"[\s_]+")
 _SLUG_DASH_RUN = re.compile(r"-+")
 _FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n?(.*)", re.DOTALL)
 
+# Strict allowlist for explicit slugs. Auto-generated slugs from
+# slug_from_title() already conform; explicit slugs from callers must be
+# checked against this pattern to prevent path traversal (``../escape``)
+# and unsafe filenames.
+_SAFE_SLUG_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$")
+
 MAX_SLUG_LENGTH = 80
+
+
+def _is_safe_explicit_slug(slug: str) -> bool:
+    """Return True iff ``slug`` is safe to use as a concept filename.
+
+    Rejects empty strings, anything containing path separators, ``..``,
+    leading/trailing dashes, uppercase letters, or characters outside the
+    ``[a-z0-9-]`` set. This protects ``ConceptStore`` from writes outside
+    its base directory regardless of where ``slug`` originated.
+    """
+    if not slug or len(slug) > MAX_SLUG_LENGTH:
+        return False
+    return bool(_SAFE_SLUG_RE.match(slug))
 
 
 def slug_from_title(title: str) -> str:
@@ -119,7 +138,17 @@ class ConceptStore:
         self.base_dir = Path(base_dir)
 
     def _concept_path(self, slug: str) -> Path:
-        return self.base_dir / f"{slug}.md"
+        # Defense in depth: even if a caller bypasses the explicit-slug
+        # validation, refuse to compose a path that escapes base_dir.
+        candidate = (self.base_dir / f"{slug}.md").resolve()
+        base_resolved = self.base_dir.resolve()
+        try:
+            candidate.relative_to(base_resolved)
+        except ValueError as exc:
+            raise ValueError(
+                f"Refusing to compose concept path outside base_dir: {slug!r}"
+            ) from exc
+        return candidate
 
     def write(
         self,
@@ -150,6 +179,19 @@ class ConceptStore:
             Dict with keys ``success``, ``slug``, ``path``, ``action``
             (``"created"`` or ``"updated"``), and ``invalid_sources``.
         """
+        if slug and not _is_safe_explicit_slug(slug):
+            return {
+                "success": False,
+                "slug": "",
+                "path": "",
+                "action": "failed",
+                "error": (
+                    f"invalid slug {slug!r}: must match [a-z0-9-]+, no path "
+                    f"separators, max {MAX_SLUG_LENGTH} chars"
+                ),
+                "invalid_sources": [],
+            }
+
         valid_sources, invalid = _partition_sources(sources, valid_ids_check)
 
         if not valid_sources:

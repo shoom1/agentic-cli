@@ -247,6 +247,28 @@ class SafePythonExecutor:
                 from agentic_cli.tools.shell.os_sandbox import get_os_sandbox
 
                 sandbox = get_os_sandbox()
+                # Fail closed when sandboxing was requested but no real
+                # isolation is available — silently dropping back to a plain
+                # subprocess would defeat the user's opt-in.
+                if sandbox.sandbox_type == "none":
+                    logger.error(
+                        "python_executor.os_sandbox_required_but_unavailable",
+                        sandbox_type=sandbox.sandbox_type,
+                    )
+                    elapsed = (time.time() - start_time) * 1000
+                    return {
+                        "success": False,
+                        "output": "",
+                        "result": None,
+                        "error": (
+                            "OS sandbox is required (os_sandbox_enabled=True) "
+                            "but no supported sandbox tool is available on "
+                            "this system (install sandbox-exec on macOS or "
+                            "bwrap on Linux). Refusing to execute without "
+                            "isolation."
+                        ),
+                        "execution_time_ms": round(elapsed, 2),
+                    }
                 wrap_result = sandbox.wrap_python_command(
                     [sys.executable, "-c", script],
                     Path.cwd(),
@@ -266,17 +288,22 @@ class SafePythonExecutor:
                         timeout=timeout,
                     )
                 else:
-                    logger.warning(
+                    logger.error(
                         "python_executor.os_sandbox_wrap_failed",
                         error=wrap_result.error,
                     )
-                    proc = subprocess.run(
-                        [sys.executable, "-c", script],
-                        input=code,
-                        capture_output=True,
-                        text=True,
-                        timeout=timeout,
-                    )
+                    elapsed = (time.time() - start_time) * 1000
+                    return {
+                        "success": False,
+                        "output": "",
+                        "result": None,
+                        "error": (
+                            f"OS sandbox wrap failed "
+                            f"({wrap_result.sandbox_type}): {wrap_result.error}. "
+                            f"Refusing to execute without isolation."
+                        ),
+                        "execution_time_ms": round(elapsed, 2),
+                    }
             else:
                 proc = subprocess.run(
                     [sys.executable, "-c", script],
