@@ -322,21 +322,18 @@ class TestContentFetcher:
         assert "robots" in result.error.lower()
 
     @pytest.mark.asyncio
-    async def test_fetch_cross_host_redirect(self, fetcher):
-        """Test cross-host redirect returns redirect info."""
+    async def test_fetch_cross_host_redirect_blocks_before_second_request(self, fetcher):
+        """A 3xx redirect to a different host must be reported as a cross-host
+        redirect WITHOUT issuing the next GET. The user's permission grant
+        covers the original host only, so contacting another origin is an
+        unapproved side effect."""
+        redirect_response = AsyncMock()
+        redirect_response.status_code = 302
+        redirect_response.headers = {"location": "https://other.com/page"}
+        redirect_response.url = httpx.URL("https://example.com/page")
+
         with patch("httpx.AsyncClient.get", new_callable=AsyncMock) as mock_get:
-            mock_response = AsyncMock()
-            mock_response.status_code = 200
-            mock_response.text = "Content"
-            mock_response.headers = {"content-type": "text/html"}
-            mock_response.url = httpx.URL("https://other.com/page")
-
-            redirect_response = AsyncMock()
-            redirect_response.url = httpx.URL("https://example.com/page")
-            mock_response.history = [redirect_response]
-
-            mock_get.return_value = mock_response
-
+            mock_get.return_value = redirect_response
             with patch.object(fetcher._robots, "can_fetch", new_callable=AsyncMock) as mock_robots:
                 mock_robots.return_value = True
                 with patch.object(fetcher._validator, "validate") as mock_validate:
@@ -347,6 +344,97 @@ class TestContentFetcher:
         assert result.success is False
         assert result.redirect is not None
         assert result.redirect.to_host == "other.com"
+        # Only the original GET should have been issued.
+        assert mock_get.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_fetch_same_host_redirect_blocked_by_robots(self, fetcher):
+        """A same-host redirect whose target is disallowed by robots.txt
+        must not be fetched, even though the original URL was allowed."""
+        redirect_response = AsyncMock()
+        redirect_response.status_code = 302
+        redirect_response.headers = {"location": "/private/page"}
+        redirect_response.url = httpx.URL("https://example.com/public")
+
+        robots_calls: list[str] = []
+
+        async def fake_can_fetch(u):
+            robots_calls.append(u)
+            return "/private" not in u
+
+        with patch("httpx.AsyncClient.get", new_callable=AsyncMock) as mock_get:
+            mock_get.return_value = redirect_response
+            with patch.object(fetcher._robots, "can_fetch", side_effect=fake_can_fetch):
+                with patch.object(fetcher._validator, "validate") as mock_validate:
+                    from agentic_cli.tools.webfetch.validator import ValidationResult
+                    mock_validate.return_value = ValidationResult(valid=True, resolved_ip="1.2.3.4")
+                    result = await fetcher.fetch("https://example.com/public")
+
+        assert result.success is False
+        assert "robots" in (result.error or "").lower()
+        # Only the original GET should have fired; redirected URL was blocked
+        # before its request.
+        assert mock_get.call_count == 1
+        # robots.txt was consulted for both the original and the redirect target.
+        assert any("/public" in u for u in robots_calls)
+        assert any("/private/page" in u for u in robots_calls)
+
+    @pytest.mark.asyncio
+    async def test_fetch_redirect_to_internal_ip_blocked_before_request(self, fetcher):
+        """A redirect Location pointing at a private IP is blocked without issuing the next request."""
+        redirect_response = AsyncMock()
+        redirect_response.status_code = 302
+        redirect_response.headers = {"location": "http://169.254.169.254/latest/meta-data/"}
+        redirect_response.url = httpx.URL("https://example.com/page")
+
+        with patch("httpx.AsyncClient.get", new_callable=AsyncMock) as mock_get:
+            mock_get.return_value = redirect_response
+            with patch.object(fetcher._robots, "can_fetch", new_callable=AsyncMock) as mock_robots:
+                mock_robots.return_value = True
+                # First validate() call (original URL) passes; the second
+                # call (redirect target) is the real one — we let the real
+                # validator catch the private IP.
+                from agentic_cli.tools.webfetch.validator import ValidationResult, URLValidator
+                real_validator = URLValidator()
+                with patch.object(
+                    fetcher._validator, "validate",
+                    side_effect=[
+                        ValidationResult(valid=True, resolved_ip="1.2.3.4"),
+                        real_validator.validate("http://169.254.169.254/latest/meta-data/"),
+                    ],
+                ):
+                    result = await fetcher.fetch("https://example.com/page")
+
+        assert result.success is False
+        assert "redirect" in (result.error or "").lower()
+        # Only the first GET (the original URL) should have been issued.
+        assert mock_get.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_fetch_too_many_redirects(self, fetcher):
+        """A redirect loop longer than MAX_REDIRECTS is rejected."""
+        from agentic_cli.tools.webfetch.fetcher import ContentFetcher
+
+        def make_redirect(i: int):
+            r = AsyncMock()
+            r.status_code = 302
+            r.headers = {"location": f"https://example.com/hop{i + 1}"}
+            r.url = httpx.URL(f"https://example.com/hop{i}")
+            return r
+
+        responses = [make_redirect(i) for i in range(ContentFetcher.MAX_REDIRECTS + 1)]
+
+        with patch("httpx.AsyncClient.get", new_callable=AsyncMock) as mock_get:
+            mock_get.side_effect = responses
+            with patch.object(fetcher._robots, "can_fetch", new_callable=AsyncMock) as mock_robots:
+                mock_robots.return_value = True
+                with patch.object(fetcher._validator, "validate") as mock_validate:
+                    from agentic_cli.tools.webfetch.validator import ValidationResult
+                    mock_validate.return_value = ValidationResult(valid=True, resolved_ip="1.2.3.4")
+                    result = await fetcher.fetch("https://example.com/hop0")
+
+        assert result.success is False
+        assert "redirect" in (result.error or "").lower()
 
     @pytest.mark.asyncio
     async def test_fetch_caching(self, fetcher):

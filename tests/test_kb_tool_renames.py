@@ -9,8 +9,20 @@ def test_kb_list_exported():
     from agentic_cli.tools import kb_list  # noqa: F401
 
 
-def test_kb_ingest_exported():
-    from agentic_cli.tools import kb_ingest  # noqa: F401
+def test_kb_ingest_split_exports():
+    from agentic_cli.tools import (
+        kb_ingest_text,
+        kb_ingest_file,
+        kb_ingest_url,
+    )  # noqa: F401
+
+
+def test_legacy_unified_kb_ingest_gone():
+    import agentic_cli.tools as t
+    # The single kb_ingest tool was split into three typed entry points
+    # so the permissions engine can gate filesystem.read / http.read at
+    # the right moment.
+    assert not hasattr(t, "kb_ingest")
 
 
 def test_old_search_name_gone():
@@ -66,11 +78,19 @@ def test_reader_bundle_includes_search_concepts():
     assert KB_READER_TOOLS == [kb_search, kb_read, kb_list, kb_search_concepts]
 
 
-def test_writer_bundle_includes_write_concept():
+def test_writer_bundle_includes_split_ingest_and_write_concept():
     from agentic_cli.tools import (
         KB_WRITER_TOOLS,
         KB_READER_TOOLS,
-        kb_ingest,
+        kb_ingest_text,
+        kb_ingest_file,
+        kb_ingest_url,
         kb_write_concept,
     )
-    assert KB_WRITER_TOOLS == [*KB_READER_TOOLS, kb_ingest, kb_write_concept]
+    assert KB_WRITER_TOOLS == [
+        *KB_READER_TOOLS,
+        kb_ingest_text,
+        kb_ingest_file,
+        kb_ingest_url,
+        kb_write_concept,
+    ]

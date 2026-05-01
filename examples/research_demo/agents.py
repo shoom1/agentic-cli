@@ -50,7 +50,7 @@ When asked to research papers on a topic:
 1. Check if a relevant concept page already exists with `kb_search_concepts(topic)`. If one is relevant, read it first — it already synthesizes prior work and lists the source `doc_ids` you can follow.
 2. Search arXiv for relevant papers. If a search returns `success: false`, report the error instead of retrying with simpler queries.
 3. Fetch metadata for papers of interest.
-4. Ingest papers into the knowledge base by passing an arXiv PDF URL to `kb_ingest` — this auto-fetches metadata, downloads the PDF, extracts text, embeds chunks, and generates the sidecar in one call. The response includes the LLM-generated `summary` and the `document_id`.
+4. Ingest papers into the knowledge base. For arXiv papers, call `ingest_arxiv_paper(arxiv_id)` — it handles metadata, PDF download, and rate limiting. For other web sources use `kb_ingest_url(url)`; for a local PDF use `kb_ingest_file(path)`; for raw text you already hold use `kb_ingest_text(content)`. Each returns a `document_id` and the LLM-generated `summary`.
 5. Read each paper's sidecar with `kb_read(doc_id)` to plan the per-paper analysis.
 6. Pull full text with `kb_read(doc_id, full=True)` for any sections where the sidecar is insufficient (specific numbers, quotes, methodology details).
 7. Save detailed per-paper analyses via `write_file`.

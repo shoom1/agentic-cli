@@ -412,7 +412,7 @@ results = search_arxiv("transformer attention", max_results=10, categories=["cs.
 paper = fetch_arxiv_paper("1706.03762")  # "Attention Is All You Need"
 ```
 
-The `ArxivSearchSource` (in `knowledge_base/sources.py`) is cached via the service registry and reused across tools, including `kb_ingest` for arXiv URLs.
+The `ArxivSearchSource` (in `knowledge_base/sources.py`) is cached via the service registry and reused across tools. To pull a paper into the KB, use `ingest_arxiv_paper(arxiv_id)` — it composes the arxiv source with `kb_manager`.
 
 #### File Operations
 
@@ -465,7 +465,8 @@ Renamed tools and a new concept-pages subsystem:
 
 ```python
 from agentic_cli.tools import (
-    kb_search, kb_ingest, kb_read, kb_list,
+    kb_search, kb_ingest_text, kb_ingest_file, kb_ingest_url,
+    kb_read, kb_list,
     kb_write_concept, kb_search_concepts,
     KB_READER_TOOLS, KB_WRITER_TOOLS,
 )
@@ -474,11 +475,15 @@ from agentic_cli.tools import (
 | Tool | Purpose |
 |------|---------|
 | `kb_search` | Hybrid BM25 + vector search with RRF fusion, filters by source/date |
-| `kb_ingest` | Ingest content or URL (arXiv URLs auto-fetch metadata + PDF) |
+| `kb_ingest_text` | Ingest in-memory text content (no FS or network access) |
+| `kb_ingest_file` | Ingest a local file; declares `filesystem.read(path)` for the permission engine |
+| `kb_ingest_url` | Ingest content from an http(s) URL; routed through the hardened `ContentFetcher` and declares `http.read(url)` |
 | `kb_read` | Return the per-document markdown sidecar (lazy-generated on first read) |
 | `kb_list` | List documents, optionally filtered |
 | `kb_write_concept` | Agent-authored concept/summary page (slugged, merged on overwrite) |
 | `kb_search_concepts` | Search concept pages (title-weighted, case-insensitive) |
+
+The single `kb_ingest` tool was split in 0.5.2 so each entry point declares the right capability — text-only stays under `kb.write`, while file and URL ingestion correctly trip `filesystem.read` / `http.read` checks. For arXiv papers, prefer `ingest_arxiv_paper(arxiv_id)`.
 
 Bundle convenience:
 
@@ -736,7 +741,8 @@ agentic-cli/
 │   │   ├── arxiv_source.py       # ArxivSearchSource (service-registered)
 │   │   ├── execution_tools.py    # execute_python
 │   │   ├── interaction_tools.py  # ask_clarification
-│   │   ├── knowledge_tools.py    # kb_search / kb_ingest / kb_read / kb_list /
+│   │   ├── knowledge_tools.py    # kb_search / kb_ingest_text / kb_ingest_file /
+│   │   │                         #   kb_ingest_url / kb_read / kb_list /
 │   │   │                         #   kb_write_concept / kb_search_concepts
 │   │   ├── file_read.py          # read_file, diff_compare
 │   │   ├── file_write.py         # write_file, edit_file (atomic)

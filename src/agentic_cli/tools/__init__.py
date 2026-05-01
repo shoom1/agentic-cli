@@ -28,7 +28,9 @@ from agentic_cli.tools.file_write import write_file, edit_file
 
 from agentic_cli.tools.knowledge_tools import (
     kb_search,
-    kb_ingest,
+    kb_ingest_text,
+    kb_ingest_file,
+    kb_ingest_url,
     kb_read,
     kb_list,
     kb_write_concept,
@@ -36,7 +38,13 @@ from agentic_cli.tools.knowledge_tools import (
 )
 
 KB_READER_TOOLS = [kb_search, kb_read, kb_list, kb_search_concepts]
-KB_WRITER_TOOLS = [*KB_READER_TOOLS, kb_ingest, kb_write_concept]
+KB_WRITER_TOOLS = [
+    *KB_READER_TOOLS,
+    kb_ingest_text,
+    kb_ingest_file,
+    kb_ingest_url,
+    kb_write_concept,
+]
 from agentic_cli.tools.arxiv_tools import (
     search_arxiv,
     fetch_arxiv_paper,
@@ -87,7 +95,9 @@ __all__ = [
     "google_search_tool",
     # Standard tool functions (ready to use with agents)
     "kb_search",
-    "kb_ingest",
+    "kb_ingest_text",
+    "kb_ingest_file",
+    "kb_ingest_url",
     "kb_read",
     "kb_list",
     "kb_write_concept",

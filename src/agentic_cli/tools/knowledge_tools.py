@@ -1,7 +1,10 @@
 """Knowledge base tools for agentic workflows.
 
 Provides tools for managing documents in the unified knowledge base:
-- kb_ingest: Ingest text, files, or URLs into KB
+- kb_ingest_text / kb_ingest_file / kb_ingest_url: Ingest content into KB.
+  Three separate tools so each declares the right capability for the
+  permissions engine — text-only (kb.write), local file (kb.write +
+  filesystem.read), and URL (kb.write + http.read, hardened fetcher).
 - kb_search: Semantic search across all documents
 - kb_read: Read a stored document (sidecar by default, full text with full=True)
 - kb_list: List documents with summaries
@@ -13,7 +16,8 @@ Each tool comes in two flavors that share a single implementation:
 - The closure-bound versions in ``tools.factories.make_kb_tools`` capture
   the KB managers in a closure and call the same helpers.
 
-The helpers (``_search_kbs``, ``_ingest_document_with_kb``,
+The helpers (``_search_kbs``, ``_ingest_text_with_kb`` /
+``_ingest_file_with_kb`` / ``_ingest_url_with_kb``,
 ``_read_document_from_kbs``, ``_list_documents_in_kbs``) take the KB
 managers as explicit args so both call paths stay in sync.
 """
@@ -235,26 +239,11 @@ def _search_kbs(
         return {"success": False, "error": f"Search failed: {e}"}
 
 
-async def _ingest_document_with_kb(
-    kb_manager,
-    content: str = "",
-    url_or_path: str = "",
-    title: str = "",
-    source_type: str = "user",
-    source_url: str | None = None,
-    authors: list[str] | None = None,
-    abstract: str = "",
-    tags: list[str] | None = None,
+def _build_meta(
+    authors: list[str] | None,
+    abstract: str,
+    tags: list[str] | None,
 ) -> dict[str, Any]:
-    """Shared implementation for kb_ingest.
-
-    Handles all three input modes (text content, local file, remote URL),
-    PDF text extraction, source type auto-detection, and ingestion into
-    the supplied ``kb_manager``.
-    """
-    from agentic_cli.knowledge_base.models import SourceType
-
-    # Build metadata dict from optional fields
     meta: dict[str, Any] = {}
     if authors:
         meta["authors"] = authors
@@ -262,74 +251,33 @@ async def _ingest_document_with_kb(
         meta["abstract"] = abstract
     if tags:
         meta["tags"] = tags
+    return meta
 
-    file_bytes: bytes | None = None
-    file_extension = ".pdf"
 
-    # --- URL / file path mode ---
-    if url_or_path:
-        # Auto-detect source type
-        if url_or_path.startswith(("http://", "https://")) and source_type == "user":
-            source_type = "web"
-        elif not url_or_path.startswith(("http://", "https://")) and source_type == "user":
-            source_type = "local"
+async def _finalize_ingest(
+    kb_manager,
+    *,
+    content: str,
+    title: str,
+    source_type: str,
+    source_url: str | None,
+    meta: dict[str, Any],
+    file_bytes: bytes | None,
+    file_extension: str,
+) -> dict[str, Any]:
+    """Validate, generate sidecar, and persist into the supplied ``kb_manager``.
 
-        source_url = source_url or url_or_path
+    Shared tail used by all three ingest entry points (text/file/url).
+    """
+    from agentic_cli.knowledge_base.models import SourceType
 
-        if url_or_path.startswith(("http://", "https://")):
-            # Generic URL download
-            try:
-                import httpx
-            except ImportError:
-                return {"success": False, "error": "httpx not installed, cannot download URLs"}
-
-            try:
-                async with httpx.AsyncClient(follow_redirects=True, timeout=60.0) as client:
-                    response = await client.get(url_or_path)
-                    response.raise_for_status()
-                    file_bytes = response.content
-            except httpx.HTTPStatusError as e:
-                return {"success": False, "error": f"HTTP {e.response.status_code} downloading file"}
-            except httpx.RequestError as e:
-                return {"success": False, "error": f"Failed to download: {e}"}
-
-            # Detect extension from Content-Type header, fall back to URL
-            content_type = response.headers.get("content-type", "")
-            file_extension = _detect_extension(url_or_path, content_type)
-
-            # Extract text if PDF
-            if file_extension == ".pdf" and file_bytes:
-                content = _extract_text_from_bytes(file_bytes)
-
-            if not title:
-                title = url_or_path.split("/")[-1] or url_or_path
-
-        else:
-            # Local file
-            source_path = Path(url_or_path).expanduser().resolve()
-            if not source_path.exists():
-                return {"success": False, "error": f"File not found: {url_or_path}"}
-
-            file_bytes = source_path.read_bytes()
-            file_extension = source_path.suffix.lower() or ".bin"
-
-            # Extract text if PDF
-            if file_extension == ".pdf":
-                from agentic_cli.knowledge_base.manager import KnowledgeBaseManager
-                content = KnowledgeBaseManager.extract_text_from_pdf(source_path)
-
-            if not title:
-                title = source_path.stem
-
-            meta["file_size_bytes"] = len(file_bytes)
-
-    # --- Validate ---
     if not content and not file_bytes:
         return {
             "success": False,
             "error": (
                 "No content or file provided. "
-                "You must supply either 'content' (text string) or 'url_or_path' (URL or file path). "
+                "Pass non-empty content (kb_ingest_text), a readable file "
+                "(kb_ingest_file), or a fetchable URL (kb_ingest_url). "
                 "For ArXiv papers, use ingest_arxiv_paper instead."
             ),
         }
@@ -337,17 +285,14 @@ async def _ingest_document_with_kb(
     if not title:
         title = truncate(content, 80)
 
-    # Validate source_type
     try:
         source = SourceType(source_type)
     except ValueError:
         valid = ", ".join(t.value for t in SourceType)
         return {"success": False, "error": f"Invalid source_type: {source_type!r}. Valid: {valid}"}
 
-    # --- Generate sidecar payload via async LLM call (outside lock) ---
     payload = await kb_manager.generate_sidecar_payload(content, title=title)
 
-    # --- Ingest ---
     try:
         doc = kb_manager.ingest_document(
             content=content,
@@ -370,6 +315,141 @@ async def _ingest_document_with_kb(
         "chunks_created": len(doc.chunks),
         "summary": doc.summary,
     }
+
+
+async def _ingest_text_with_kb(
+    kb_manager,
+    content: str,
+    title: str = "",
+    source_type: str = "user",
+    source_url: str | None = None,
+    authors: list[str] | None = None,
+    abstract: str = "",
+    tags: list[str] | None = None,
+) -> dict[str, Any]:
+    """Ingest a plain text document — no filesystem or network access."""
+    return await _finalize_ingest(
+        kb_manager,
+        content=content,
+        title=title,
+        source_type=source_type,
+        source_url=source_url,
+        meta=_build_meta(authors, abstract, tags),
+        file_bytes=None,
+        file_extension=".txt",
+    )
+
+
+async def _ingest_file_with_kb(
+    kb_manager,
+    path: str,
+    title: str = "",
+    source_type: str = "local",
+    source_url: str | None = None,
+    authors: list[str] | None = None,
+    abstract: str = "",
+    tags: list[str] | None = None,
+) -> dict[str, Any]:
+    """Ingest a local file. Caller's permissions engine has already gated
+    ``filesystem.read`` for ``path``."""
+    if not path:
+        return {"success": False, "error": "path is required"}
+
+    source_path = Path(path).expanduser().resolve()
+    if not source_path.exists() or not source_path.is_file():
+        return {"success": False, "error": f"File not found: {path}"}
+
+    file_bytes = source_path.read_bytes()
+    file_extension = source_path.suffix.lower() or ".bin"
+
+    content = ""
+    if file_extension == ".pdf":
+        from agentic_cli.knowledge_base.manager import KnowledgeBaseManager
+        content = KnowledgeBaseManager.extract_text_from_pdf(source_path)
+
+    meta = _build_meta(authors, abstract, tags)
+    meta["file_size_bytes"] = len(file_bytes)
+
+    return await _finalize_ingest(
+        kb_manager,
+        content=content,
+        title=title or source_path.stem,
+        source_type=source_type,
+        source_url=source_url or str(source_path),
+        meta=meta,
+        file_bytes=file_bytes,
+        file_extension=file_extension,
+    )
+
+
+async def _ingest_url_with_kb(
+    kb_manager,
+    url: str,
+    title: str = "",
+    source_type: str = "web",
+    source_url: str | None = None,
+    authors: list[str] | None = None,
+    abstract: str = "",
+    tags: list[str] | None = None,
+) -> dict[str, Any]:
+    """Ingest a remote URL through the hardened ``ContentFetcher``.
+
+    Routes the download through ``ContentFetcher`` (URLValidator + manual
+    redirect validation + DNS-rebinding revalidation + cross-host detection)
+    instead of an unvalidated httpx call. Caller's permissions engine has
+    already gated ``http.read`` for ``url``."""
+    if not url or not url.startswith(("http://", "https://")):
+        return {
+            "success": False,
+            "error": "url must be an http:// or https:// URL",
+        }
+
+    from agentic_cli.tools.webfetch_tool import get_or_create_fetcher
+
+    fetcher = get_or_create_fetcher()
+    fetch_result = await fetcher.fetch(url, timeout=60)
+    if not fetch_result.success:
+        if fetch_result.redirect is not None:
+            return {
+                "success": False,
+                "error": (
+                    f"Cross-host redirect blocked: "
+                    f"{fetch_result.redirect.from_url} -> "
+                    f"{fetch_result.redirect.to_url}"
+                ),
+                "redirect": True,
+                "redirect_url": fetch_result.redirect.to_url,
+                "redirect_host": fetch_result.redirect.to_host,
+            }
+        return {"success": False, "error": fetch_result.error or "fetch failed"}
+
+    content_bytes_or_str = fetch_result.content
+    content_type = fetch_result.content_type or ""
+    file_extension = _detect_extension(url, content_type)
+
+    if isinstance(content_bytes_or_str, bytes):
+        file_bytes: bytes | None = content_bytes_or_str
+        if file_extension == ".pdf":
+            content = _extract_text_from_bytes(file_bytes)
+        else:
+            try:
+                content = file_bytes.decode("utf-8", errors="replace")
+            except Exception:
+                content = ""
+    else:
+        file_bytes = None
+        content = content_bytes_or_str or ""
+
+    return await _finalize_ingest(
+        kb_manager,
+        content=content,
+        title=title or (url.split("/")[-1] or url),
+        source_type=source_type,
+        source_url=source_url or url,
+        meta=_build_meta(authors, abstract, tags),
+        file_bytes=file_bytes,
+        file_extension=file_extension,
+    )
 
 
 async def _read_document_from_kbs(
@@ -627,15 +707,13 @@ def kb_search(
     category=ToolCategory.KNOWLEDGE,
     capabilities=[Capability("kb.write")],
     description=(
-        "Ingest a document into the knowledge base. "
-        "REQUIRED: provide either 'content' (text) or 'url_or_path' (file path or URL). "
-        "ArXiv URLs auto-fetch metadata and PDF. "
-        "Valid source_type values: arxiv, ssrn, web, internal, user, local."
+        "Ingest text content into the knowledge base. Use this for content "
+        "you already have in memory; use kb_ingest_file for local files and "
+        "kb_ingest_url for remote URLs."
     ),
 )
-async def kb_ingest(
-    content: str = "",
-    url_or_path: str = "",
+async def kb_ingest_text(
+    content: str,
     title: str = "",
     source_type: str = "user",
     source_url: str | None = None,
@@ -643,36 +721,119 @@ async def kb_ingest(
     abstract: str = "",
     tags: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Ingest a document into the knowledge base.
-
-    You MUST provide at least one of `content` or `url_or_path`:
-    1. Text content: provide `content` directly
-    2. Local file: provide `url_or_path` pointing to a local file
-    3. URL: provide `url_or_path` with an HTTP(S) URL
-
-    For arXiv papers, use `ingest_arxiv_paper` instead — it handles
-    metadata, PDF download, and rate limiting automatically.
+    """Ingest text content into the knowledge base.
 
     Args:
-        content: Document text content (REQUIRED if url_or_path not given)
-        url_or_path: URL or local file path (REQUIRED if content not given)
-        title: Document title
-        source_type: Source type (ssrn, web, internal, user, local)
-        source_url: Optional URL of the source
-        authors: Optional list of author names
-        abstract: Optional paper abstract
-        tags: Optional tags for categorization
-
-    Returns:
-        Dictionary with ingestion result
+        content: Document text content (required, non-empty).
+        title: Document title.
+        source_type: Source type (ssrn, web, internal, user, local).
+        source_url: Optional URL of the source.
+        authors: Optional list of author names.
+        abstract: Optional paper abstract.
+        tags: Optional tags for categorization.
     """
     kb = get_service(KB_MANAGER)
     if kb is None:
         return {"success": False, "error": "kb manager not available"}
-    return await _ingest_document_with_kb(
+    return await _ingest_text_with_kb(
         kb,
         content=content,
-        url_or_path=url_or_path,
+        title=title,
+        source_type=source_type,
+        source_url=source_url,
+        authors=authors,
+        abstract=abstract,
+        tags=tags,
+    )
+
+
+@register_tool(
+    category=ToolCategory.KNOWLEDGE,
+    capabilities=[
+        Capability("kb.write"),
+        Capability("filesystem.read", target_arg="path"),
+    ],
+    description=(
+        "Ingest a local file into the knowledge base. PDFs have their text "
+        "extracted automatically. Triggers a filesystem.read permission "
+        "check for the supplied path."
+    ),
+)
+async def kb_ingest_file(
+    path: str,
+    title: str = "",
+    source_type: str = "local",
+    source_url: str | None = None,
+    authors: list[str] | None = None,
+    abstract: str = "",
+    tags: list[str] | None = None,
+) -> dict[str, Any]:
+    """Ingest a local file into the knowledge base.
+
+    Args:
+        path: Absolute or relative path to a local file.
+        title: Document title (defaults to file stem).
+        source_type: Source type (defaults to ``local``).
+        source_url: Optional URL of the source.
+        authors: Optional list of author names.
+        abstract: Optional paper abstract.
+        tags: Optional tags for categorization.
+    """
+    kb = get_service(KB_MANAGER)
+    if kb is None:
+        return {"success": False, "error": "kb manager not available"}
+    return await _ingest_file_with_kb(
+        kb,
+        path=path,
+        title=title,
+        source_type=source_type,
+        source_url=source_url,
+        authors=authors,
+        abstract=abstract,
+        tags=tags,
+    )
+
+
+@register_tool(
+    category=ToolCategory.KNOWLEDGE,
+    capabilities=[
+        Capability("kb.write"),
+        Capability("http.read", target_arg="url"),
+    ],
+    description=(
+        "Ingest content fetched from an http(s) URL into the knowledge "
+        "base. Routed through the hardened web fetcher (SSRF protection, "
+        "redirect revalidation, DNS-rebinding mitigation). For arXiv "
+        "papers, prefer ingest_arxiv_paper. Triggers an http.read "
+        "permission check for the supplied URL."
+    ),
+)
+async def kb_ingest_url(
+    url: str,
+    title: str = "",
+    source_type: str = "web",
+    source_url: str | None = None,
+    authors: list[str] | None = None,
+    abstract: str = "",
+    tags: list[str] | None = None,
+) -> dict[str, Any]:
+    """Ingest a remote URL into the knowledge base.
+
+    Args:
+        url: An ``http://`` or ``https://`` URL.
+        title: Document title (defaults to the URL's last path segment).
+        source_type: Source type (defaults to ``web``).
+        source_url: Optional URL of the source (defaults to ``url``).
+        authors: Optional list of author names.
+        abstract: Optional paper abstract.
+        tags: Optional tags for categorization.
+    """
+    kb = get_service(KB_MANAGER)
+    if kb is None:
+        return {"success": False, "error": "kb manager not available"}
+    return await _ingest_url_with_kb(
+        kb,
+        url=url,
         title=title,
         source_type=source_type,
         source_url=source_url,

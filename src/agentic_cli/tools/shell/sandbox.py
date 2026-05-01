@@ -127,6 +127,27 @@ class ExecutionSandbox:
             from agentic_cli.tools.shell.os_sandbox import get_os_sandbox
 
             sandbox = get_os_sandbox()
+            # Fail closed: the user enabled OS sandboxing, so refuse to run
+            # if no real isolation is available rather than silently falling
+            # back to plain ulimit.
+            if sandbox.sandbox_type == "none":
+                logger.error(
+                    "os_sandbox.required_but_unavailable",
+                    sandbox_type=sandbox.sandbox_type,
+                )
+                return ExecutionResult(
+                    success=False,
+                    stdout="",
+                    stderr="",
+                    return_code=-1,
+                    duration_ms=0,
+                    error=(
+                        "OS sandbox is required (os_sandbox_enabled=True) but no "
+                        "supported sandbox tool is available on this system "
+                        "(install sandbox-exec on macOS or bwrap on Linux). "
+                        "Refusing to execute without isolation."
+                    ),
+                )
             result = sandbox.wrap_shell_command(
                 command,
                 Path(working_dir).resolve() if working_dir else Path.cwd(),
@@ -140,10 +161,21 @@ class ExecutionSandbox:
                     sandbox_type=result.sandbox_type,
                 )
             else:
-                logger.warning(
+                logger.error(
                     "os_sandbox.wrap_failed",
                     error=result.error,
                     sandbox_type=result.sandbox_type,
+                )
+                return ExecutionResult(
+                    success=False,
+                    stdout="",
+                    stderr="",
+                    return_code=-1,
+                    duration_ms=0,
+                    error=(
+                        f"OS sandbox wrap failed ({result.sandbox_type}): "
+                        f"{result.error}. Refusing to execute without isolation."
+                    ),
                 )
 
         return self._execute_with_ulimit(command, working_dir, env)

@@ -193,11 +193,11 @@ class TestMakeMemoryTools:
 class TestMakeKBTools:
     """Tests for make_kb_tools factory."""
 
-    def test_returns_six_functions(self):
-        """With concept tools added in Phase 2, make_kb_tools returns 6."""
+    def test_returns_eight_functions(self):
+        """make_kb_tools returns 8 tools (kb_ingest split into text/file/url)."""
         from agentic_cli.tools.factories import make_kb_tools
         tools = make_kb_tools(kb_manager=object())
-        assert len(tools) == 6
+        assert len(tools) == 8
         names = [t.__name__ for t in tools]
         assert "kb_write_concept" in names
         assert "kb_search_concepts" in names
@@ -207,7 +207,9 @@ class TestMakeKBTools:
         names = [t.__name__ for t in tools]
         assert names == [
             "kb_search",
-            "kb_ingest",
+            "kb_ingest_text",
+            "kb_ingest_file",
+            "kb_ingest_url",
             "kb_read",
             "kb_list",
             "kb_write_concept",

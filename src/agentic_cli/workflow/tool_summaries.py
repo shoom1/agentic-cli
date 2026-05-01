@@ -164,7 +164,9 @@ _TOOL_FORMATTERS: dict[str, Callable[[dict[str, Any]], str]] = {
     "web_search": _web_search,
     "search_arxiv": _search_arxiv,
     "fetch_arxiv_paper": _fetch_arxiv_paper,
-    "kb_ingest": _ingest_document,
+    "kb_ingest_text": _ingest_document,
+    "kb_ingest_file": _ingest_document,
+    "kb_ingest_url": _ingest_document,
     "kb_read": _kb_read,
     "kb_list": _list_documents,
 }

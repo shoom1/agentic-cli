@@ -21,7 +21,7 @@ class TestKbResearchFlow:
             LLM_SUMMARIZER,
         )
         from agentic_cli.tools.knowledge_tools import (
-            _ingest_document_with_kb,
+            _ingest_text_with_kb,
             _read_document_from_kbs,
             _write_concept_with_kb,
             _search_concepts_with_kb,
@@ -45,7 +45,7 @@ class TestKbResearchFlow:
         token = set_service_registry({LLM_SUMMARIZER: FakeSummarizer()})
         try:
             # Ingest a document — sidecar written eagerly
-            ingest_result = await _ingest_document_with_kb(
+            ingest_result = await _ingest_text_with_kb(
                 kb,
                 content="A paper on diffusion models for chip placement.",
                 title="DiffPlace",

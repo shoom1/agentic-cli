@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.2] - 2026-05-01
+
+### Security
+- **`kb_ingest` split into `kb_ingest_text` / `kb_ingest_file` / `kb_ingest_url`**: the previous unified tool declared only `kb.write` (auto-allowed by the builtin `kb.*` rule) while internally reading arbitrary local paths and fetching arbitrary URLs. The split lets the permission engine gate `filesystem.read` and `http.read` at the right entry point, and the URL path now flows through the hardened `ContentFetcher` (URLValidator + manual redirect revalidation + DNS-rebinding mitigation).
+- **Concept-page slug traversal blocked** (`ConceptStore`): explicit slugs are validated against a strict `[a-z0-9-]+` allowlist, and `_concept_path` asserts the resolved path stays under `base_dir`. A slug like `../../etc/passwd` is now rejected before any filesystem write.
+- **Webfetch redirect handling rewritten**: `ContentFetcher.fetch` no longer follows redirects via httpx. Each `Location` is revalidated through `URLValidator` *before* the next GET, cross-host redirects are reported without contacting the new origin, same-host redirects re-check `robots.txt`, and the redirect chain is capped at 5.
+- **`os_sandbox_enabled=True` now fails closed**: when shell or Python execution is requested with sandboxing on, both executors refuse to run if the resolved sandbox is `NoOpSandbox` or wrap fails — instead of silently dropping back to plain subprocess/ulimit.
+
+### Changed
+- **`kb_ingest` tool removed** in favor of the three split entry points; `KB_WRITER_TOOLS` and `make_kb_tools` updated. Internal helper renamed: `_ingest_document_with_kb` → `_ingest_text_with_kb` / `_ingest_file_with_kb` / `_ingest_url_with_kb`.
+- **research_demo agent guide** updated to direct ingestion at `ingest_arxiv_paper` for arXiv papers and at the typed `kb_ingest_*` tools for everything else.
+
 ## [0.5.1] - 2026-04-18
 
 ### Added

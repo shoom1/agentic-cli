@@ -162,6 +162,43 @@ class TestConceptStoreWrite:
         assert result["action"] == "failed"
         assert "error" in result
 
+    @pytest.mark.parametrize(
+        "bad_slug",
+        [
+            "../escape",
+            "../../etc/passwd",
+            "/abs/path",
+            "sub/dir",
+            "back\\slash",
+            "..",
+            ".",
+            "WithUpper",
+            "trailing-dash-",
+            "-leading-dash",
+            "spaces here",
+            "x" * 81,  # exceeds MAX_SLUG_LENGTH
+        ],
+    )
+    def test_explicit_slug_traversal_is_rejected(self, tmp_path, bad_slug):
+        """Explicit slugs that could escape base_dir or otherwise look unsafe
+        must be rejected — agents writing concept pages should not be able to
+        clobber files outside the concepts directory."""
+        from agentic_cli.knowledge_base.concepts import ConceptStore
+
+        base = tmp_path / "concepts"
+        store = ConceptStore(base)
+        result = store.write(
+            title="X", body="b", sources=["doc-a"], slug=bad_slug,
+        )
+
+        assert result["success"] is False
+        assert result["action"] == "failed"
+        assert "slug" in result["error"].lower()
+        # Make sure nothing got written outside the concepts directory.
+        for p in tmp_path.rglob("*"):
+            if p.is_file():
+                assert base in p.parents
+
 
 class TestConceptStoreSlugCollisions:
     def test_auto_slug_collision_appends_suffix(self, tmp_path):
