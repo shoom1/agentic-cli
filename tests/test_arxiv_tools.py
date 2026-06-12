@@ -710,63 +710,69 @@ class TestArxivDownloadPdf:
 
     @pytest.mark.asyncio
     async def test_returns_pdf_bytes_on_success(self):
-        """download_pdf returns response.content from a successful GET."""
+        """download_pdf returns the bytes fetched via the hardened ContentFetcher."""
         from agentic_cli.tools.arxiv_source import ArxivSearchSource
+        from agentic_cli.tools.webfetch.fetcher import FetchResult
 
         source = ArxivSearchSource()
         fake_bytes = b"%PDF-1.4 fake content"
 
-        with patch("httpx.AsyncClient") as mock_client_cls, \
-             patch("agentic_cli.tools.arxiv_source.asyncio.sleep", new=AsyncMock()):
-            mock_response = MagicMock()
-            mock_response.content = fake_bytes
-            mock_response.raise_for_status = MagicMock()
+        fake_fetcher = MagicMock()
+        fake_fetcher.fetch = AsyncMock(
+            return_value=FetchResult(success=True, content=fake_bytes)
+        )
 
-            mock_client = MagicMock()
-            mock_client.get = AsyncMock(return_value=mock_response)
-            mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
-            mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=None)
-
+        with patch(
+            "agentic_cli.tools.webfetch_tool.get_or_create_fetcher",
+            return_value=fake_fetcher,
+        ), patch("agentic_cli.tools.arxiv_source.asyncio.sleep", new=AsyncMock()):
             result = await source.download_pdf("https://arxiv.org/pdf/1706.03762")
 
         assert result == fake_bytes
-        mock_client.get.assert_called_once_with("https://arxiv.org/pdf/1706.03762")
+        fake_fetcher.fetch.assert_awaited_once()
+        assert fake_fetcher.fetch.await_args.args[0] == "https://arxiv.org/pdf/1706.03762"
 
     @pytest.mark.asyncio
-    async def test_propagates_http_error(self):
-        """download_pdf re-raises errors from the HTTP layer."""
+    async def test_raises_when_fetch_blocked_or_fails(self):
+        """download_pdf raises RuntimeError when the hardened fetch is rejected.
+
+        The SSRF guard / byte cap surfaces as FetchResult(success=False); the
+        caller catches RuntimeError and falls back to the abstract.
+        """
         from agentic_cli.tools.arxiv_source import ArxivSearchSource
+        from agentic_cli.tools.webfetch.fetcher import FetchResult
 
         source = ArxivSearchSource()
+        fake_fetcher = MagicMock()
+        fake_fetcher.fetch = AsyncMock(
+            return_value=FetchResult(success=False, error="boom")
+        )
 
-        with patch("httpx.AsyncClient") as mock_client_cls, \
-             patch("agentic_cli.tools.arxiv_source.asyncio.sleep", new=AsyncMock()):
-            mock_client = MagicMock()
-            mock_client.get = AsyncMock(side_effect=RuntimeError("boom"))
-            mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
-            mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=None)
-
-            with pytest.raises(RuntimeError, match="boom"):
+        with patch(
+            "agentic_cli.tools.webfetch_tool.get_or_create_fetcher",
+            return_value=fake_fetcher,
+        ), patch("agentic_cli.tools.arxiv_source.asyncio.sleep", new=AsyncMock()):
+            with pytest.raises(RuntimeError, match="blocked or failed"):
                 await source.download_pdf("https://arxiv.org/pdf/1706.03762")
 
     @pytest.mark.asyncio
     async def test_waits_for_rate_limit(self):
-        """download_pdf calls _wait_for_rate_limit_async before the GET."""
+        """download_pdf calls _wait_for_rate_limit_async before fetching."""
         from agentic_cli.tools.arxiv_source import ArxivSearchSource
+        from agentic_cli.tools.webfetch.fetcher import FetchResult
 
         source = ArxivSearchSource()
         rate_wait = AsyncMock()
+        fake_fetcher = MagicMock()
+        fake_fetcher.fetch = AsyncMock(
+            return_value=FetchResult(success=True, content=b"x")
+        )
 
         with patch.object(source, "_wait_for_rate_limit_async", rate_wait), \
-             patch("httpx.AsyncClient") as mock_client_cls:
-            mock_response = MagicMock()
-            mock_response.content = b"x"
-            mock_response.raise_for_status = MagicMock()
-            mock_client = MagicMock()
-            mock_client.get = AsyncMock(return_value=mock_response)
-            mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
-            mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=None)
-
+             patch(
+                 "agentic_cli.tools.webfetch_tool.get_or_create_fetcher",
+                 return_value=fake_fetcher,
+             ):
             await source.download_pdf("https://arxiv.org/pdf/1706.03762")
 
         rate_wait.assert_awaited_once()
@@ -858,18 +864,18 @@ class TestIngestArxivPaper:
 
         fake_pdf_bytes = b"%PDF-fake-bytes"
 
-        with patch("httpx.AsyncClient") as mock_client_cls, \
-             patch("agentic_cli.tools.arxiv_tools.extract_pdf_text") as mock_extract, \
+        from agentic_cli.tools.webfetch.fetcher import FetchResult
+
+        fake_fetcher = MagicMock()
+        fake_fetcher.fetch = AsyncMock(
+            return_value=FetchResult(success=True, content=fake_pdf_bytes)
+        )
+
+        with patch(
+            "agentic_cli.tools.webfetch_tool.get_or_create_fetcher",
+            return_value=fake_fetcher,
+        ), patch("agentic_cli.tools.arxiv_tools.extract_pdf_text") as mock_extract, \
              patch("agentic_cli.tools.arxiv_source.asyncio.sleep", new=AsyncMock()):
-            mock_response = MagicMock()
-            mock_response.content = fake_pdf_bytes
-            mock_response.raise_for_status = MagicMock()
-
-            mock_client = MagicMock()
-            mock_client.get = AsyncMock(return_value=mock_response)
-            mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
-            mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=None)
-
             mock_extract.return_value = "Extracted PDF text content"
 
             result = await ingest_arxiv_paper("1706.03762", tags=["transformer"])
@@ -893,8 +899,10 @@ class TestIngestArxivPaper:
         assert call["metadata"]["tags"] == ["transformer"]
         assert call["metadata"]["authors"] == ["Vaswani"]
 
-        # Verify the PDF was downloaded from the cached pdf_url, not synthesized
-        mock_client.get.assert_called_once_with("https://arxiv.org/pdf/1706.03762")
+        # Verify the PDF was fetched from the cached pdf_url, not synthesized,
+        # and that it went through the hardened fetcher.
+        fake_fetcher.fetch.assert_awaited_once()
+        assert fake_fetcher.fetch.await_args.args[0] == "https://arxiv.org/pdf/1706.03762"
 
     @pytest.mark.asyncio
     async def test_falls_back_to_abstract_on_pdf_download_failure(self, ingest_ctx):

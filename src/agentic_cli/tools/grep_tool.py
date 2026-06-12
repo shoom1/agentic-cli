@@ -138,7 +138,11 @@ def _grep_with_ripgrep(
         cmd.extend(["--glob", file_pattern])
 
     cmd.extend(["--max-count", str(max_results * 10)])  # Get more, then trim
-    cmd.append(pattern)
+    # Pass the pattern via -e and terminate option parsing with "--" so that a
+    # pattern or path beginning with "-" can never be interpreted as a ripgrep
+    # flag (e.g. --pre=<cmd> would run an arbitrary program per file).
+    cmd.extend(["-e", pattern])
+    cmd.append("--")
     cmd.append(str(path))
 
     try:
