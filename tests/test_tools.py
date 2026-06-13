@@ -243,16 +243,18 @@ class TestAllowedOperations:
         """Create executor instance for tests."""
         return SafePythonExecutor()
 
-    def test_numpy_available(self, executor: SafePythonExecutor):
-        """Test numpy is available if installed."""
+    def test_numpy_blocked_without_os_sandbox(self, executor: SafePythonExecutor):
+        """numpy is file/pickle-capable, so it is gated off without OS isolation.
+
+        Allowing it without a real sandbox is an escape from the in-process
+        restrictions (e.g. numpy.DataSource().open(), numpy.load(allow_pickle)).
+        With os_sandbox enabled it becomes importable again (covered in
+        tests/test_executor_security.py).
+        """
         result = executor.execute("import numpy as np; int(np.array([1,2,3]).sum())")
 
-        # May fail if numpy not installed, but should not be blocked
-        if result["success"]:
-            assert result["result"] == "6"
-        else:
-            # Should fail due to numpy not installed, not security
-            assert "not allowed" not in result["error"]
+        assert result["success"] is False
+        assert "not allowed" in result["error"]
 
     def test_json_available(self, executor: SafePythonExecutor):
         """Test json module is available."""

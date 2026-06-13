@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Security
+- **`grep` ripgrep argument injection fixed** (`tools/grep_tool.py`): the LLM-supplied `pattern` was passed to ripgrep as a bare positional, so a value like `--pre=<cmd>` was parsed as a flag and could run an arbitrary program per searched file — remote code execution holding only `filesystem.read`. The pattern is now passed via `-e` and option parsing is terminated with `--` before the path, so neither can be interpreted as a flag.
+- **`execute_python` library escape closed** (`tools/executor.py`): the AST/name allow-list cannot neutralize `numpy`/`pandas`/`scipy`/`sklearn`/`matplotlib`, which re-expose file, network, and pickle I/O through public APIs (e.g. `numpy.DataSource().open()`, `pandas.read_pickle(url)`) — an escape from the in-process restrictions (arbitrary file read, pickle-based code execution) when no OS sandbox is active. These `SANDBOXED_MODULES` are now importable **only when `os_sandbox_enabled=True`**; without it, only the pure-computation `CORE_MODULES` are available. The class docstring now states that the AST validation is defense-in-depth, not a security boundary.
+- **arXiv PDF download SSRF fixed** (`tools/arxiv_source.py`): `download_pdf` issued a raw `httpx.get(follow_redirects=True)` with no URL validation or size cap on a `pdf_url` taken from a remote Atom feed — bypassing the hardened `ContentFetcher`. It now routes through `get_or_create_fetcher().fetch()`, inheriting SSRF validation (private-IP/redirect blocking), DNS-rebinding checks, and the byte cap. The arXiv API endpoints were also switched from plaintext HTTP to HTTPS to remove the on-path feed-rewrite vector.
+
+### Changed
+- **`execute_python` no longer exposes `numpy`/`pandas` (etc.) by default.** Enabling them requires `os_sandbox_enabled=True` (with `sandbox-exec` on macOS or `bwrap` on Linux). This is a deliberate, user-visible reduction of the default capability surface.
+
+### Fixed
+- Test suite is collectable in the default dev env again: `pytest.importorskip` guards added to `test_context_window.py`, `test_langgraph_state_tools.py`, and `test_backend_isolation.py`, which imported `langgraph`/`langchain_core`/`google.genai` unconditionally.
+
 ## [0.5.2] - 2026-05-01
 
 ### Security
