@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-06-14
+
 ### Added
 - **Session fact extraction now runs on exit** (`auto_extract_session_facts`): `BaseWorkflowManager.on_session_end()` is invoked from the CLI shutdown path (`BaseCLIApp._extract_session_facts_on_exit`), extracting key facts/preferences from the conversation into memory. Previously the hook had no call site. `on_session_end()` now also sources the session messages itself (from the live backend session) when called with no arguments; it remains a safe no-op without a memory store, and never blocks shutdown.
 
