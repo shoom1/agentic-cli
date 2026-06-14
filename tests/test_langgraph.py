@@ -250,6 +250,25 @@ class TestLangGraphWorkflowManagerLifecycle:
                 mock_cleanup.assert_called_once()
 
 
+class TestLangGraphBuilder:
+    """Tests for LangGraph graph construction."""
+
+    def test_build_minimal_graph(self):
+        """A single-agent graph can be built and compiled."""
+        from agentic_cli.workflow.langgraph.graph_builder import LangGraphBuilder
+
+        settings = BaseSettings(google_api_key="test-key")
+        builder = LangGraphBuilder(settings)
+
+        graph = builder.build(
+            [AgentConfig(name="test_agent", prompt="Test prompt")],
+            "gemini-2.5-flash",
+        )
+
+        assert graph is not None
+        assert graph.compile() is not None
+
+
 class TestOrchestratorSelection:
     """Tests for orchestrator selection via settings."""
 
