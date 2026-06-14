@@ -27,7 +27,6 @@ from agentic_cli.workflow.service_registry import (
     LLM_SUMMARIZER,
     MEMORY_STORE,
     PERMISSION_ENGINE,
-    REFLECTION_STORE,
     SANDBOX_MANAGER,
     USER_KB_MANAGER,
     WORKFLOW,
@@ -276,7 +275,6 @@ class BaseWorkflowManager(ABC):
         "kb_search_concepts": "kb_manager",
         "web_fetch": "llm_summarizer",
         "sandbox_execute": "sandbox_manager",
-        "save_reflection": "reflection_store",
         "search_arxiv": "arxiv_source",
         "fetch_arxiv_paper": "arxiv_source",
         "ingest_arxiv_paper": ("arxiv_source", "kb_manager"),
@@ -359,10 +357,6 @@ class BaseWorkflowManager(ABC):
             from agentic_cli.tools.sandbox.manager import SandboxManager
             s[SANDBOX_MANAGER] = SandboxManager(self._settings)
 
-        if "reflection_store" in self._required_managers and REFLECTION_STORE not in s:
-            from agentic_cli.tools.reflection_tools import ReflectionStore
-            s[REFLECTION_STORE] = ReflectionStore(self._settings)
-
         if "arxiv_source" in self._required_managers and ARXIV_SOURCE not in s:
             from agentic_cli.tools.arxiv_source import ArxivSearchSource
             s[ARXIV_SOURCE] = ArxivSearchSource()
@@ -402,11 +396,23 @@ class BaseWorkflowManager(ABC):
         """
         if not getattr(self._settings, "auto_extract_session_facts", False):
             return []
-        if not messages:
-            return []
 
         store = self._services.get(MEMORY_STORE)
         if store is None:
+            return []
+
+        # When the caller doesn't supply messages, pull them from the live
+        # backend session (same source/sid save_session uses) so the CLI can
+        # invoke this with no arguments on exit.
+        if messages is None:
+            sid = getattr(self, "session_id", "default_session")
+            try:
+                messages, _ = await self._extract_session_data(sid)
+            except Exception:
+                logger.debug("session_fact_extraction_extract_failed", exc_info=True)
+                return []
+
+        if not messages:
             return []
 
         prompt = (
