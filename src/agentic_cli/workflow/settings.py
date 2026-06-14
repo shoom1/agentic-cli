@@ -306,6 +306,13 @@ class WorkflowSettingsMixin:
         description="Master switch; when False, all tool calls are allowed.",
         json_schema_extra={"ui_order": 136},
     )
+    max_concurrent_jobs: int = Field(
+        default=4,
+        ge=1,
+        title="Max Concurrent Jobs",
+        description="Maximum long-running jobs running at once; excess are queued.",
+        json_schema_extra={"ui_order": 137},
+    )
 
     # Persistence settings (LangGraph)
     postgres_uri: str | None = Field(

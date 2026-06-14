@@ -76,6 +76,7 @@ class ToolDefinition:
     capabilities: CapabilitiesSpec
     category: ToolCategory = ToolCategory.OTHER
     is_async: bool = False
+    long_running: bool = False  # tool starts a background job; see tools/jobs/
 
     def __post_init__(self):
         """Infer is_async from function."""
@@ -132,6 +133,7 @@ class ToolRegistry:
         description: str | None = None,
         category: ToolCategory = ToolCategory.OTHER,
         capabilities: CapabilitiesSpec,
+        long_running: bool = False,
     ) -> Callable[..., Any]:
         """Register a tool function.
 
@@ -142,6 +144,9 @@ class ToolRegistry:
 
         Or called directly:
             registry.register(my_tool, category=ToolCategory.READ, capabilities=EXEMPT)
+
+        ``long_running=True`` marks a tool that starts a background job (it should
+        return a ``job_id`` and delegate to ``JobManager``); see ``tools/jobs/``.
         """
 
         def decorator(f: Callable[..., Any]) -> Callable[..., Any]:
@@ -155,6 +160,7 @@ class ToolRegistry:
                 func=f,
                 capabilities=validated_caps,
                 category=category,
+                long_running=long_running,
             )
 
             self._tools[tool_name] = definition
@@ -203,12 +209,14 @@ def register_tool(
     description: str | None = None,
     category: ToolCategory = ToolCategory.OTHER,
     capabilities: CapabilitiesSpec,
+    long_running: bool = False,
 ) -> Callable[..., Any]:
     """Register a tool with the default registry.
 
     ``capabilities`` is a required keyword argument. Pass ``EXEMPT`` to opt out
     of the permission engine, or a list of ``Capability`` instances to declare
-    the resources this tool accesses.
+    the resources this tool accesses. ``long_running=True`` marks a tool that
+    starts a background job (see ``tools/jobs/``).
     """
 
     def _outer(f: Callable[..., Any]) -> Callable[..., Any]:
@@ -218,6 +226,7 @@ def register_tool(
             description=description,
             category=category,
             capabilities=capabilities,
+            long_running=long_running,
         )
 
     if func is not None:

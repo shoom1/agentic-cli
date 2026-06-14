@@ -51,6 +51,18 @@ from agentic_cli.tools.arxiv_tools import (
 )
 from agentic_cli.tools.execution_tools import execute_python
 from agentic_cli.tools.interaction_tools import ask_clarification
+
+# Long-running job tools (reference long-running tool + observe-only management)
+from agentic_cli.tools.jobs import (
+    run_shell_job,
+    job_status,
+    job_result,
+    job_logs,
+    job_cancel,
+    job_list,
+)
+
+JOB_TOOLS = [job_status, job_result, job_logs, job_cancel, job_list]
 from agentic_cli.tools.search import web_search
 from agentic_cli.tools.webfetch_tool import web_fetch
 from agentic_cli.tools.registry import (
@@ -108,6 +120,14 @@ __all__ = [
     "fetch_arxiv_paper",
     "execute_python",
     "ask_clarification",
+    # Long-running jobs
+    "run_shell_job",
+    "job_status",
+    "job_result",
+    "job_logs",
+    "job_cancel",
+    "job_list",
+    "JOB_TOOLS",
     # Framework tool modules (lazy loaded)
     "memory_tools",
     "sandbox_tools",

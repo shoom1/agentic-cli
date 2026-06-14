@@ -347,6 +347,7 @@ class BaseCLIApp:
             ExitCommand,
             StatusCommand,
             SandboxCommand,
+            JobsCommand,
             PapersCommand,
             SessionsCommand,
         )
@@ -357,6 +358,7 @@ class BaseCLIApp:
         self.command_registry.register(ExitCommand())
         self.command_registry.register(StatusCommand())
         self.command_registry.register(SandboxCommand())
+        self.command_registry.register(JobsCommand())
         self.command_registry.register(SettingsCommand())
         self.command_registry.register(PapersCommand())
         self.command_registry.register(SessionsCommand())
