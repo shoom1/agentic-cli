@@ -90,7 +90,7 @@ class LangGraphBuilder:
             node_fn = self._create_agent_node(
                 config, default_model, tools=_get_tools(config) or None,
             )
-            graph.add_node(config.name, node_fn, retry=retry_policy)
+            graph.add_node(config.name, node_fn, retry_policy=retry_policy)
 
         # Determine entry point (root agent)
         root_agent = None
