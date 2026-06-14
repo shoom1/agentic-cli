@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Session fact extraction now runs on exit** (`auto_extract_session_facts`): `BaseWorkflowManager.on_session_end()` is invoked from the CLI shutdown path (`BaseCLIApp._extract_session_facts_on_exit`), extracting key facts/preferences from the conversation into memory. Previously the hook had no call site. `on_session_end()` now also sources the session messages itself (from the live backend session) when called with no arguments; it remains a safe no-op without a memory store, and never blocks shutdown.
+
+### Removed
+- **Tool Reflection Store removed** (`save_reflection` tool, `ReflectionStore`, `REFLECTION_STORE`, and the `enable_tool_reflections` setting). Introduced in v0.5.0 as a "cross-session learning primitive," it shipped only as a standalone store + tool — the planned injection and session-end wiring were never completed, so it was inert from v0.5.0 through v0.5.2 (the v0.5.0 changelog's "wired via session-end hook" was inaccurate). The design also conflated mechanical failure-capture with LLM heuristic synthesis in a single opportunistic tool the model had to remember to call. Removed rather than finished; tool-failure heuristics, if wanted later, are better served by automatic capture + session-end synthesis (mirroring `auto_extract_session_facts`) or by tagged entries in the existing memory store.
+
 ### Security
 - **`grep` ripgrep argument injection fixed** (`tools/grep_tool.py`): the LLM-supplied `pattern` was passed to ripgrep as a bare positional, so a value like `--pre=<cmd>` was parsed as a flag and could run an arbitrary program per searched file — remote code execution holding only `filesystem.read`. The pattern is now passed via `-e` and option parsing is terminated with `--` before the path, so neither can be interpreted as a flag.
 - **`execute_python` library escape closed** (`tools/executor.py`): the AST/name allow-list cannot neutralize `numpy`/`pandas`/`scipy`/`sklearn`/`matplotlib`, which re-expose file, network, and pickle I/O through public APIs (e.g. `numpy.DataSource().open()`, `pandas.read_pickle(url)`) — an escape from the in-process restrictions (arbitrary file read, pickle-based code execution) when no OS sandbox is active. These `SANDBOXED_MODULES` are now importable **only when `os_sandbox_enabled=True`**; without it, only the pure-computation `CORE_MODULES` are available. The class docstring now states that the AST validation is defense-in-depth, not a security boundary.

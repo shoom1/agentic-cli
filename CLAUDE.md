@@ -77,7 +77,6 @@ agentic-cli/
 │   │   ├── search.py         # web_search (Tavily/Brave backends)
 │   │   ├── webfetch_tool.py  # web_fetch + get_or_create_fetcher (orchestrator)
 │   │   ├── memory_tools.py   # save_memory, search_memory, update_memory, delete_memory + MemoryStore
-│   │   ├── reflection_tools.py # save_reflection + ReflectionStore
 │   │   ├── _core/           # Backend-neutral tool logic
 │   │   │   ├── planning.py  # save_plan/get_plan core (+ checkbox parsing)
 │   │   │   └── tasks.py     # save_tasks/get_tasks core (+ progress parsing)

@@ -456,6 +456,29 @@ class BaseCLIApp:
         else:
             logger.error("session_save_on_exit_failed", error=result.get("error"))
 
+    async def _extract_session_facts_on_exit(self) -> None:
+        """Extract key facts from the session into memory on exit (if enabled).
+
+        Gated by the ``auto_extract_session_facts`` setting; a no-op when the
+        workflow isn't ready or has no memory store. Never raises — fact
+        extraction must not block a clean shutdown.
+        """
+        if not getattr(self._settings, "auto_extract_session_facts", False):
+            return
+
+        if not self._workflow_controller.is_ready:
+            return
+
+        workflow = self._workflow_controller.workflow
+        try:
+            facts = await workflow.on_session_end()
+        except Exception:
+            logger.debug("session_fact_extraction_on_exit_failed", exc_info=True)
+            return
+
+        if facts:
+            logger.info("session_facts_extracted", count=len(facts))
+
     async def run(self) -> None:
         """Run the main application loop."""
         logger.info("repl_starting")
@@ -473,6 +496,9 @@ class BaseCLIApp:
 
             # Run the session - user sees prompt immediately!
             await self.session.run_async()
+
+        # Extract session facts into memory on exit (if enabled)
+        await self._extract_session_facts_on_exit()
 
         # Save persistent session on exit
         if self._session_id:
