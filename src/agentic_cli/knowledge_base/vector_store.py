@@ -6,6 +6,8 @@ Provides FAISS-based vector storage and similarity search.
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -207,7 +209,16 @@ class VectorStore:
         self._next_id = len(new_id_map)
 
     def save(self) -> None:
-        """Persist index and mappings to disk."""
+        """Persist index and mappings to disk.
+
+        Both files are written atomically (temp file + ``os.replace``) so a
+        crash mid-write can never leave a truncated ``index.faiss`` — a torn
+        index is fatal because ``faiss.read_index`` raises on load, which would
+        brick the whole knowledge base. The index is committed before the
+        mappings: each file is always complete on its own, and a crash in the
+        brief window between the two replaces leaves a complete (if slightly
+        stale) pair rather than a corrupt index.
+        """
         with self._lock:
             if self._index is None:
                 return
@@ -217,9 +228,24 @@ class VectorStore:
             # Ensure directory exists
             self.index_path.parent.mkdir(parents=True, exist_ok=True)
 
-            # Save mappings first (atomic) — if we crash after this but
-            # before the index write, the mappings are still valid and
-            # the old index can be loaded safely.
+            # Write the FAISS index atomically: faiss.write_index() takes a
+            # path and writes in place (non-atomic), so write to a temp file in
+            # the same directory and os.replace() it into position.
+            fd, tmp_name = tempfile.mkstemp(
+                dir=str(self.index_path.parent),
+                prefix=f".{self.index_path.name}.",
+                suffix=".tmp",
+            )
+            os.close(fd)  # faiss writes by path, not file descriptor
+            tmp_path = Path(tmp_name)
+            try:
+                faiss.write_index(self._index, str(tmp_path))
+                os.replace(tmp_path, self.index_path)
+            except BaseException:
+                tmp_path.unlink(missing_ok=True)
+                raise
+
+            # Mappings written after the index (also atomically).
             mappings_path = self.index_path.with_suffix(".mappings.json")
             mappings = {
                 "id_map": {str(k): v for k, v in self._id_map.items()},
@@ -227,9 +253,6 @@ class VectorStore:
                 "next_id": self._next_id,
             }
             atomic_write_json(mappings_path, mappings)
-
-            # Save FAISS index
-            faiss.write_index(self._index, str(self.index_path))
 
     def load(self) -> None:
         """Load index and mappings from disk."""

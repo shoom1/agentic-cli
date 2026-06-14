@@ -93,8 +93,12 @@ import asyncio
 from agentic_cli import BaseCLIApp, BaseSettings
 from agentic_cli.cli import AppInfo
 from agentic_cli.workflow import AgentConfig
+from agentic_cli.tools import register_tool, ToolCategory
+from agentic_cli.workflow.permissions import EXEMPT
 
-# Define your tools
+# Define your tools. Tools are permission-gated, so register each one with
+# the capabilities it needs (EXEMPT = a pure function that touches nothing).
+@register_tool(category=ToolCategory.OTHER, capabilities=EXEMPT)
 def greet(name: str) -> dict:
     """Greet a person by name."""
     return {"success": True, "greeting": f"Hello, {name}!"}
@@ -342,14 +346,14 @@ def search_database(query: str, limit: int = 10) -> dict:
     return {"success": True, "results": results, "count": len(results)}
 ```
 
-Registering via `@register_tool` is optional — you can pass raw callables into `AgentConfig.tools`. Registering gives the tool metadata for the registry, capability-aware permission gating, and tool-summary formatting.
+**Registration is required for a tool to run.** The permission engine is on by default, and any tool without a capability declaration is denied at call time (fail-closed) on both the ADK and LangGraph backends. You can still pass raw callables into `AgentConfig.tools`, but unless they are registered with `@register_tool` they will be blocked — register every tool with `capabilities=` (or `EXEMPT` for pure, side-effect-free functions). Registration also gives the tool registry metadata and tool-summary formatting.
 
 ### Capabilities
 
 Tool access is gated by the **permission engine** (see the HITL section below). Each registered tool declares what it touches via `capabilities=`:
 
 - **`Capability("namespace.action", target_arg="...")`** — e.g. `Capability("filesystem.write", target_arg="path")`, `Capability("http.read", target_arg="url")`, `Capability("shell.exec", target_arg="command")`. The engine resolves `target_arg` against the actual tool-call arguments and matches against rules.
-- **`EXEMPT`** — opts the tool out of the engine entirely. Reserved for backend-internal tools (e.g. ADK `transfer_to_agent`, backend state tools).
+- **`EXEMPT`** — opts the tool out of the engine entirely. Use for tools that need no permission check: pure functions with no side effects, and backend-internal tools (e.g. ADK `transfer_to_agent`, backend state tools).
 
 ### Built-in Tools
 
