@@ -91,13 +91,20 @@ class SessionPersistence:
             Dict mapping session_id to metadata dict.
         """
         index_path = self._get_sessions_index_path()
-        if index_path.exists():
-            try:
-                data = json.loads(index_path.read_text())
-                return data.get("sessions", {})
-            except (json.JSONDecodeError, KeyError) as exc:
-                logger.warning("sessions_index_load_failed", error=str(exc))
-        return {}
+        if not index_path.exists():
+            return {}
+        try:
+            data = json.loads(index_path.read_text())
+            if not isinstance(data, dict):
+                raise ValueError("sessions index is not a JSON object")
+            return data.get("sessions", {})
+        except (json.JSONDecodeError, ValueError, KeyError, OSError) as exc:
+            # A corrupt index would otherwise read as empty, and the next save
+            # would reset it to a single entry — permanently hiding every other
+            # session whose file still exists. Rebuild from the session files
+            # instead of silently dropping them.
+            logger.warning("sessions_index_corrupt_rebuilding", error=str(exc))
+            return self._rebuild_sessions_index()
 
     def _save_sessions_index(self, index: dict[str, dict]) -> None:
         """Save sessions index to disk."""
@@ -137,7 +144,7 @@ class SessionPersistence:
                     "saved_at": data["saved_at"],
                     "message_count": len(data["messages"]),
                 }
-            except (json.JSONDecodeError, KeyError):
+            except (json.JSONDecodeError, KeyError, TypeError, OSError):
                 continue
         self._save_sessions_index(index)
         return index

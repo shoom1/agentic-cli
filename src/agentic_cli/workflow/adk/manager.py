@@ -19,6 +19,7 @@ from google.adk import Runner
 from google.adk.agents import LlmAgent, Agent
 from google.adk.planners import BuiltInPlanner
 from google.adk.sessions import InMemorySessionService, BaseSessionService, Session
+from google.adk.events import Event
 
 from agentic_cli.workflow.base_manager import BaseWorkflowManager
 from agentic_cli.workflow.events import WorkflowEvent, EventType
@@ -32,21 +33,6 @@ from agentic_cli.config import (
     get_settings,
 )
 from agentic_cli.logging import Loggers, bind_context
-
-
-class _SessionEvent:
-    """Lightweight shim for injecting normalized messages into ADK sessions.
-
-    ADK expects event objects with ``content`` and ``author`` attributes.
-    This named class replaces the fragile ``type("Event", (), {...})()``
-    pattern used previously.
-    """
-
-    __slots__ = ("content", "author")
-
-    def __init__(self, content, author: str = "") -> None:
-        self.content = content
-        self.author = author
 
 
 logger = Loggers.workflow()
@@ -678,7 +664,13 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         messages: list[dict],
         current_agent: str | None = None,
     ) -> None:
-        """Inject normalized messages into ADK session as events."""
+        """Inject normalized messages into the ADK session as real events.
+
+        Uses ``append_event`` so events land in the *stored* session.
+        ``create_session`` returns a copy of the stored session, so the old
+        approach of appending to that copy left the stored session empty and
+        silently lost the restored history on resume.
+        """
         if not self._session_service:
             raise RuntimeError("Session service not initialized")
 
@@ -689,6 +681,11 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             session_id=session_id,
         )
 
+        async def _add(content: types.Content, author: str) -> None:
+            await self._session_service.append_event(
+                session, Event(author=author or "user", content=content)
+            )
+
         for msg in messages:
             role = msg["role"]
 
@@ -697,9 +694,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     role="user",
                     parts=[types.Part.from_text(text=msg["content"])],
                 )
-                session.events.append(
-                    _SessionEvent(content, current_agent or "")
-                )
+                await _add(content, "user")
 
             elif role == "assistant":
                 parts = []
@@ -711,9 +706,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                         args=tc.get("args", {}),
                     ))
                 content = types.Content(role="model", parts=parts)
-                session.events.append(
-                    _SessionEvent(content, current_agent or "")
-                )
+                await _add(content, current_agent or "model")
 
             elif role == "tool":
                 try:
@@ -725,6 +718,4 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     response=response,
                 )]
                 content = types.Content(role="user", parts=parts)
-                session.events.append(
-                    _SessionEvent(content, current_agent or "")
-                )
+                await _add(content, current_agent or "user")
