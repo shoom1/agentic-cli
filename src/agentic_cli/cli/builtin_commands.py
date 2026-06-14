@@ -197,6 +197,102 @@ class SandboxCommand(Command):
             app.session.add_rich(table)
 
 
+class JobsCommand(Command):
+    """List and manage long-running jobs."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            name="jobs",
+            description="List and manage long-running jobs",
+            usage="/jobs [all | <id> | cancel <id> | clean]",
+            examples=["/jobs", "/jobs all", "/jobs <id>", "/jobs cancel <id>", "/jobs clean"],
+            category=CommandCategory.WORKFLOW,
+        )
+
+    async def execute(self, args: str, app: Any) -> None:
+        """List running jobs, show one job, cancel, or clean completed jobs."""
+        try:
+            manager = getattr(app.workflow, "job_manager", None)
+        except (RuntimeError, AttributeError):
+            manager = None
+
+        if manager is None:
+            app.session.add_warning(
+                "Jobs not available. Add job tools (e.g. run_shell_job) to your agent config to enable them."
+            )
+            return
+
+        parts = self.parse_args(args).positional.split()
+
+        if parts and parts[0] == "cancel":
+            if len(parts) < 2:
+                app.session.add_warning("Usage: /jobs cancel <id>")
+                return
+            rec = manager.cancel(parts[1])
+            if rec is None:
+                app.session.add_warning(f"No such job: {parts[1]}")
+            else:
+                app.session.add_success(f"Job '{parts[1]}' → {rec.state.value}.")
+            return
+
+        if parts and parts[0] == "clean":
+            n = manager.clean()
+            app.session.add_success(f"Removed {n} completed job(s).")
+            return
+
+        # A bare id → details + recent logs for that one job.
+        if parts and parts[0] != "all":
+            rec = manager.get(parts[0])
+            if rec is None:
+                app.session.add_warning(f"No such job: {parts[0]}")
+                return
+            self._render_detail(app, manager, rec)
+            return
+
+        # Otherwise list: running+queued by default, everything with "all".
+        jobs = manager.list() if parts and parts[0] == "all" else manager.list(active_only=True)
+        if not jobs:
+            scope = "" if (parts and parts[0] == "all") else "running "
+            app.session.add_message("system", f"No {scope}jobs.")
+            return
+
+        table = Table(title="Jobs", show_lines=False, padding=(0, 1))
+        table.add_column("ID", style="bold cyan", no_wrap=True)
+        table.add_column("Name", style="white")
+        table.add_column("Backend", style="dim", no_wrap=True)
+        table.add_column("State", no_wrap=True)
+        table.add_column("Elapsed", style="dim", no_wrap=True, justify="right")
+        table.add_column("Exit", style="dim", no_wrap=True, justify="right")
+        for r in jobs:
+            table.add_row(
+                r.job_id,
+                r.name,
+                r.backend,
+                r.state.value,
+                f"{r.elapsed_s():.0f}s",
+                "" if r.exit_code is None else str(r.exit_code),
+            )
+        app.session.add_rich(table)
+
+    def _render_detail(self, app: Any, manager: Any, rec: Any) -> None:
+        lines = [
+            f"id:       {rec.job_id}",
+            f"tool:     {rec.tool}",
+            f"name:     {rec.name}",
+            f"backend:  {rec.backend}",
+            f"state:    {rec.state.value}",
+            f"elapsed:  {rec.elapsed_s():.0f}s",
+            f"exit:     {rec.exit_code if rec.exit_code is not None else '-'}",
+        ]
+        if rec.error:
+            lines.append(f"error:    {rec.error}")
+        tail = manager.tail(rec.job_id, 15, "stdout")
+        body = "\n".join(lines)
+        if tail:
+            body += "\n\n-- last stdout --\n" + "\n".join(tail)
+        app.session.add_rich(Panel(body, title=f"Job {rec.job_id}", expand=False))
+
+
 class PapersCommand(Command):
     """List documents in the knowledge base."""
 

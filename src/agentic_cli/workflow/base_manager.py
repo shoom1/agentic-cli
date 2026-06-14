@@ -23,6 +23,7 @@ from agentic_cli.workflow.models import ModelRegistry
 from agentic_cli.workflow.service_registry import (
     set_service_registry,
     ARXIV_SOURCE,
+    JOB_MANAGER,
     KB_MANAGER,
     LLM_SUMMARIZER,
     MEMORY_STORE,
@@ -179,6 +180,11 @@ class BaseWorkflowManager(ABC):
         """Get the sandbox manager (if required by tools)."""
         return self._services.get(SANDBOX_MANAGER)
 
+    @property
+    def job_manager(self):
+        """Get the long-running-job manager (if required by tools)."""
+        return self._services.get(JOB_MANAGER)
+
     # ------------------------------------------------------------------
     # Tool assembly
     # ------------------------------------------------------------------
@@ -278,6 +284,14 @@ class BaseWorkflowManager(ABC):
         "search_arxiv": "arxiv_source",
         "fetch_arxiv_paper": "arxiv_source",
         "ingest_arxiv_paper": ("arxiv_source", "kb_manager"),
+        # Long-running jobs: the observe-only tools and the reference
+        # long-running tool all need the JobManager service.
+        "run_shell_job": "job_manager",
+        "job_status": "job_manager",
+        "job_result": "job_manager",
+        "job_logs": "job_manager",
+        "job_cancel": "job_manager",
+        "job_list": "job_manager",
     }
 
     def _detect_required_managers(self) -> set[str]:
@@ -356,6 +370,18 @@ class BaseWorkflowManager(ABC):
         if "sandbox_manager" in self._required_managers and SANDBOX_MANAGER not in s:
             from agentic_cli.tools.sandbox.manager import SandboxManager
             s[SANDBOX_MANAGER] = SandboxManager(self._settings)
+
+        if "job_manager" in self._required_managers and JOB_MANAGER not in s:
+            from pathlib import Path
+            from agentic_cli.tools.jobs import JobManager
+
+            # User-scoped so long jobs persist across projects and CLI restarts.
+            jobs_dir = Path.home() / f".{self._settings.app_name}" / "jobs"
+            s[JOB_MANAGER] = JobManager(
+                self._settings,
+                base_dir=jobs_dir,
+                max_concurrent=getattr(self._settings, "max_concurrent_jobs", 4),
+            )
 
         if "arxiv_source" in self._required_managers and ARXIV_SOURCE not in s:
             from agentic_cli.tools.arxiv_source import ArxivSearchSource
