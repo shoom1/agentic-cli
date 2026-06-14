@@ -230,7 +230,14 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         )
 
     def _get_planner(self) -> BuiltInPlanner | None:
-        """Get planner with thinking configuration."""
+        """Get planner with thinking configuration.
+
+        Gemini 3 models take a discrete ``thinking_level``; Gemini 2.5 models
+        only understand a numeric ``thinking_budget`` and reject ``thinking_level``
+        outright (HTTP 400 "Thinking level is not supported for this model").
+        We therefore choose the field that matches the model generation —
+        sending ``thinking_level`` to a 2.5 model breaks every request.
+        """
         thinking_effort = self._settings.thinking_effort
 
         if thinking_effort == "none":
@@ -244,17 +251,32 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             )
             return None
 
-        # Gemini 3 Pro only supports LOW and HIGH thinking levels
-        # Gemini 3 Flash supports MINIMAL, LOW, MEDIUM, HIGH
-        is_gemini_3_pro = "gemini-3" in self.model and "pro" in self.model
+        if "gemini-3" in self.model:
+            thinking_config = self._gemini3_thinking_config(thinking_effort)
+        else:
+            thinking_config = self._gemini25_thinking_config(thinking_effort)
 
-        thinking_level = None
+        logger.debug(
+            "planner_created",
+            model=self.model,
+            effort=thinking_effort,
+        )
+
+        return BuiltInPlanner(thinking_config=thinking_config)
+
+    def _gemini3_thinking_config(self, thinking_effort: str) -> "types.ThinkingConfig":
+        """Build a Gemini 3 thinking config using the discrete ``thinking_level``.
+
+        Gemini 3 Pro supports only LOW and HIGH (MEDIUM falls back to HIGH);
+        Gemini 3 Flash additionally supports MINIMAL/MEDIUM.
+        """
+        is_pro = "pro" in self.model
+
         if thinking_effort == "low":
-            thinking_level = types.ThinkingLevel.LOW
+            level = types.ThinkingLevel.LOW
         elif thinking_effort == "medium":
-            if is_gemini_3_pro:
-                # Gemini 3 Pro doesn't support MEDIUM, fall back to HIGH
-                thinking_level = types.ThinkingLevel.HIGH
+            if is_pro:
+                level = types.ThinkingLevel.HIGH
                 logger.debug(
                     "thinking_level_fallback",
                     model=self.model,
@@ -263,22 +285,21 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     reason="Gemini 3 Pro only supports LOW and HIGH",
                 )
             else:
-                thinking_level = types.ThinkingLevel.MEDIUM
-        elif thinking_effort == "high":
-            thinking_level = types.ThinkingLevel.HIGH
+                level = types.ThinkingLevel.MEDIUM
+        else:  # high
+            level = types.ThinkingLevel.HIGH
 
-        thinking_config = types.ThinkingConfig(
-            include_thoughts=True,
-            thinking_level=thinking_level,
-        )
+        return types.ThinkingConfig(include_thoughts=True, thinking_level=level)
 
-        logger.debug(
-            "planner_created",
-            effort=thinking_effort,
-            level=thinking_level,
-        )
+    def _gemini25_thinking_config(self, thinking_effort: str) -> "types.ThinkingConfig":
+        """Build a Gemini 2.5 thinking config using the numeric ``thinking_budget``.
 
-        return BuiltInPlanner(thinking_config=thinking_config)
+        2.5 models reject ``thinking_level``. Budgets are chosen within the
+        range valid across the 2.5 family (Flash/Pro/Flash-Lite all accept
+        4096–24576 tokens).
+        """
+        budget = {"low": 4096, "medium": 12288, "high": 24576}[thinking_effort]
+        return types.ThinkingConfig(include_thoughts=True, thinking_budget=budget)
 
     def _get_generate_content_config(self) -> types.GenerateContentConfig:
         """Build GenerateContentConfig with retry-enabled HTTP options.
