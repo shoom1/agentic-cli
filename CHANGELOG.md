@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`execute_python` no longer exposes `numpy`/`pandas` (etc.) by default.** Enabling them requires `os_sandbox_enabled=True` (with `sandbox-exec` on macOS or `bwrap` on Linux). This is a deliberate, user-visible reduction of the default capability surface.
 
 ### Fixed
+- **LangGraph graph construction was completely broken** (`workflow/langgraph/graph_builder.py`): `build()` called the local `_get_tools(config)` helper in the agent-node loop before it was defined further down the function, so Python treated `_get_tools` as an unbound local and every graph build raised `UnboundLocalError`. The helper (and `_overrides`) are now defined before first use. This went unnoticed because the dev env had no `langgraph` installed, so the build tests were skipped.
 - Test suite is collectable in the default dev env again: `pytest.importorskip` guards added to `test_context_window.py`, `test_langgraph_state_tools.py`, and `test_backend_isolation.py`, which imported `langgraph`/`langchain_core`/`google.genai` unconditionally.
 
 ## [0.5.2] - 2026-05-01
