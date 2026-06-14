@@ -17,6 +17,7 @@ Example:
 
 import json
 import math
+import threading
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
@@ -123,6 +124,10 @@ class MemoryStore:
         self._path = mem_dir / "memories.json"
         self._embeddings_path = mem_dir / "memories_embeddings.json"
         self._items: dict[str, MemoryItem] = {}
+        # Guards self._items and _save() — LangGraph's ToolNode runs sync tools
+        # concurrently in executor threads, so store/update/delete/search (and
+        # the full-file rewrite in _save) must not interleave.
+        self._lock = threading.Lock()
         self._load()
         if self._embedding_service:
             self._ensure_embeddings()
@@ -197,10 +202,13 @@ class MemoryStore:
             access_count=0,
             importance=max(1, min(10, importance)),
         )
+        # Embed outside the lock — it can be slow (model/network) and doesn't
+        # touch shared state.
         if self._embedding_service:
             item.embedding = self._embedding_service.embed_text(content)
-        self._items[item.id] = item
-        self._save()
+        with self._lock:
+            self._items[item.id] = item
+            self._save()
         return item.id
 
     def update(self, item_id: str, content: str | None = None, tags: list[str] | None = _SENTINEL) -> bool:
@@ -214,19 +222,20 @@ class MemoryStore:
         Returns:
             True if updated, False if item not found.
         """
-        item = self._items.get(item_id)
-        if item is None:
-            return False
-        if content is not None:
-            item.content = content
-        if tags is not _SENTINEL:
-            item.tags = tags
-        item.updated_at = datetime.now().isoformat()
-        item.embedding = None  # invalidate cached embedding
-        if content is not None and self._embedding_service:
-            item.embedding = self._embedding_service.embed_text(item.content)
-        self._save()
-        return True
+        with self._lock:
+            item = self._items.get(item_id)
+            if item is None:
+                return False
+            if content is not None:
+                item.content = content
+            if tags is not _SENTINEL:
+                item.tags = tags
+            item.updated_at = datetime.now().isoformat()
+            item.embedding = None  # invalidate cached embedding
+            if content is not None and self._embedding_service:
+                item.embedding = self._embedding_service.embed_text(item.content)
+            self._save()
+            return True
 
     def delete(self, item_id: str, purge: bool = False) -> bool:
         """Delete or archive a memory item.
@@ -238,15 +247,16 @@ class MemoryStore:
         Returns:
             True if deleted/archived, False if item not found.
         """
-        item = self._items.get(item_id)
-        if item is None:
-            return False
-        if purge:
-            del self._items[item_id]
-        else:
-            item.archived = True
-        self._save()
-        return True
+        with self._lock:
+            item = self._items.get(item_id)
+            if item is None:
+                return False
+            if purge:
+                del self._items[item_id]
+            else:
+                item.archived = True
+            self._save()
+            return True
 
     def search(self, query: str, limit: int = 10, include_archived: bool = False) -> list[MemoryItem]:
         """Search memories by substring or semantic similarity.
@@ -263,23 +273,24 @@ class MemoryStore:
         Returns:
             List of matching MemoryItem objects.
         """
-        candidates = [
-            item for item in self._items.values()
-            if include_archived or not item.archived
-        ]
-        if not candidates:
-            return []
-        if self._embedding_service and any(item.embedding for item in candidates):
-            results = self._semantic_search(query, candidates, limit)
-        else:
-            results = self._substring_search(query, candidates, limit)
-        # Update access tracking
-        now = datetime.now().isoformat()
-        for item in results:
-            item.access_count += 1
-            item.last_accessed_at = now
-        self._save()
-        return results
+        with self._lock:
+            candidates = [
+                item for item in self._items.values()
+                if include_archived or not item.archived
+            ]
+            if not candidates:
+                return []
+            if self._embedding_service and any(item.embedding for item in candidates):
+                results = self._semantic_search(query, candidates, limit)
+            else:
+                results = self._substring_search(query, candidates, limit)
+            # Update access tracking (search is a writer)
+            now = datetime.now().isoformat()
+            for item in results:
+                item.access_count += 1
+                item.last_accessed_at = now
+            self._save()
+            return results
 
     def _substring_search(self, query: str, candidates: list[MemoryItem], limit: int) -> list[MemoryItem]:
         """Case-insensitive substring search."""
