@@ -22,6 +22,46 @@ from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.events import WorkflowEvent
 
 
+def _load_live_test_env() -> None:
+    """Load real API keys from a dotenv file for ``@pytest.mark.llm`` live tests.
+
+    Keys are read from a file at runtime — never hardcoded. Search order:
+
+    1. ``$AGENTIC_TEST_ENV_FILE`` if set,
+    2. research_demo's own key file (``~/.research_demo/.env``).
+
+    The first existing file wins. Variables already in the environment are
+    never overridden (a key exported in the shell takes precedence), and this
+    is a no-op when no file is found. It runs at import time so the
+    module-level ``skipif`` gates in ``test_live.py`` /
+    ``test_research_scenarios.py`` observe the keys during collection.
+    """
+    candidates: list[Path] = []
+    explicit = os.environ.get("AGENTIC_TEST_ENV_FILE")
+    if explicit:
+        candidates.append(Path(explicit))
+    candidates.append(Path.home() / ".research_demo" / ".env")
+
+    for path in candidates:
+        if not path.is_file():
+            continue
+        for raw in path.read_text().splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            if key.startswith("export "):
+                key = key[len("export ") :].strip()
+            value = value.strip().strip('"').strip("'")
+            if key:
+                os.environ.setdefault(key, value)
+        break
+
+
+_load_live_test_env()
+
+
 @pytest.fixture
 def integration_workspace(tmp_path: Path) -> Path:
     """Temporary workspace directory for integration tests."""
