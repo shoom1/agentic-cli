@@ -56,14 +56,19 @@ pytestmark = [
 
 
 @pytest.fixture
-def research_settings(tmp_path: Path) -> BaseSettings:
+def research_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> BaseSettings:
     """Settings for live runs: real keys, temp workspace, permission gate off.
 
     The permission gate is disabled so tool calls run headlessly without a
     prompt UI — these tests exercise agent behavior, not the permission UX.
+
+    The project knowledge base and the permission workdir are resolved relative
+    to ``cwd`` (``./.{app_name}/...``), so we chdir into the temp workspace to
+    keep those writes out of the repo.
     """
     workspace = tmp_path / "research_ws"
     workspace.mkdir(parents=True)
+    monkeypatch.chdir(workspace)
     settings = BaseSettings(workspace_dir=workspace, permissions_enabled=False)
     set_settings(settings)
     return settings
