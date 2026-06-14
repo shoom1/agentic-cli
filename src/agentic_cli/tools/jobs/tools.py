@@ -6,9 +6,13 @@ Two kinds, per the design:
   the LLM only ever sees these. ``run_shell_job`` is the milestone-1 reference
   (subprocess-backed). They declare ``long_running=True`` and a
   ``longrunning.<toolname>`` capability (default-ASK → user verification).
-- **Observe-only generic tools** (``job_status``/``job_result``/``job_logs``/
-  ``job_cancel``/``job_list``) read/manage existing jobs but never start one
-  (capability ``jobs.manage``).
+- **Observe-only generic tools** read/manage existing jobs but never start one
+  (capability ``jobs.manage``). To keep the agent's tool surface small,
+  ``job_status`` is the *recommended* companion to a long-running tool — it
+  returns state, a stdout tail, and the result once finished, so most agents
+  need only it. ``job_result``/``job_logs``/``job_cancel``/``job_list`` remain
+  available as opt-in extras (and power the ``/jobs`` command), but are not in
+  the default bundle.
 
 ``JobManager`` itself is never exposed to the LLM — tools reach it via the
 service registry.
@@ -74,10 +78,17 @@ def run_shell_job(command: str, name: str = "", cwd: str = "") -> dict:
 @register_tool(
     category=ToolCategory.EXECUTION,
     capabilities=[Capability("jobs.manage")],
-    description="Get the status of a background job by id.",
+    description="Check a background job: state, exit code, a stdout tail, and the result once finished.",
 )
 def job_status(job_id: str) -> dict:
-    """Return state, elapsed time, exit code, and a short stdout tail."""
+    """One-stop check for a background job.
+
+    Returns state, elapsed time, exit code, and a short stdout tail; once the
+    job is finished it also includes ``result``. This is the only job tool most
+    agents need alongside the long-running tool that started the job.
+    """
+    from agentic_cli.tools.jobs.backends import TERMINAL_STATES
+
     jm = _manager()
     if isinstance(jm, dict):
         return jm
@@ -87,6 +98,8 @@ def job_status(job_id: str) -> dict:
     out = rec.summary()
     out["success"] = True
     out["stdout_tail"] = jm.tail(job_id, 10, "stdout")
+    if rec.state in TERMINAL_STATES:
+        out["result"] = jm.result(job_id)
     return out
 
 

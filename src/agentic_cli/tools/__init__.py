@@ -62,7 +62,13 @@ from agentic_cli.tools.jobs import (
     job_list,
 )
 
-JOB_TOOLS = [job_status, job_result, job_logs, job_cancel, job_list]
+# Minimal companion to a typed long-running tool: job_status alone returns
+# state + stdout tail + result-when-finished, keeping the agent's tool surface
+# small (tool-selection quality drops past ~15-20 tools). Apps that want the
+# LLM to also enumerate/cancel jobs can use JOB_MANAGEMENT_TOOLS instead — but
+# listing/cancelling is usually a human job via the /jobs command.
+JOB_TOOLS = [job_status]
+JOB_MANAGEMENT_TOOLS = [job_status, job_result, job_logs, job_cancel, job_list]
 from agentic_cli.tools.search import web_search
 from agentic_cli.tools.webfetch_tool import web_fetch
 from agentic_cli.tools.registry import (
@@ -128,6 +134,7 @@ __all__ = [
     "job_cancel",
     "job_list",
     "JOB_TOOLS",
+    "JOB_MANAGEMENT_TOOLS",
     # Framework tool modules (lazy loaded)
     "memory_tools",
     "sandbox_tools",

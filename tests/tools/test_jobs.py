@@ -181,12 +181,22 @@ class TestRegistryAndTools:
                 time.sleep(0.05)
             assert st["success"] is True
             assert st["state"] == "succeeded"
+            # job_status returns the result once finished, so the agent needs no
+            # separate job_result call (minimal tool surface).
+            assert "result" in st
+            assert st["result"]["exit_code"] == 0
 
             listing = job_list()
             assert listing["success"] is True
             assert any(j["job_id"] == job_id for j in listing["jobs"])
         finally:
             token.var.reset(token)
+
+    def test_minimal_bundle_is_just_job_status(self):
+        from agentic_cli.tools import JOB_MANAGEMENT_TOOLS, JOB_TOOLS, job_status
+
+        assert JOB_TOOLS == [job_status]
+        assert len(JOB_MANAGEMENT_TOOLS) == 5
 
     def test_tools_error_without_manager(self):
         from agentic_cli.tools.jobs import job_status
