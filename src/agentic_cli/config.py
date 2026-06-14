@@ -119,7 +119,12 @@ class BaseSettings(WorkflowSettingsMixin, AppSettingsMixin, CLISettingsMixin, Py
         elif key == "thinking_effort":
             self.set_thinking_effort(value)
         else:
-            object.__setattr__(self, key, value)
+            # Validate through Pydantic instead of object.__setattr__ so the
+            # value is type-checked and constraint-checked before it lands on
+            # the instance (and is later persisted to settings.json). An
+            # invalid value or unknown key raises ValidationError, which is a
+            # subclass of ValueError — exactly what callers already handle.
+            self.__pydantic_validator__.validate_assignment(self, key, value)
 
     @classmethod
     def settings_customise_sources(

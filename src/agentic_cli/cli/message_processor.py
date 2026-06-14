@@ -7,6 +7,7 @@ This module provides:
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, ClassVar
 
@@ -74,6 +75,10 @@ class _EventProcessingState:
     workflow_controller: "WorkflowController | None" = field(default=None, repr=False)
     status_line: str = "Processing..."
     thinking_started: bool = False
+    # True while a HITL dialog is on screen: during that window there are no
+    # active thinking boxes, so the Ctrl+C watcher must not mistake the absence
+    # of boxes for a cancel request.
+    in_hitl: bool = False
     thinking_content: list[str] = field(default_factory=list)
     response_content: list[str] = field(default_factory=list)
     # Prevents double-counting when LangGraph emits both CONTEXT_TRIMMED and LLM_USAGE
@@ -189,16 +194,21 @@ class MessageProcessor:
         # deadlocking the workflow runner.
         async def _handle_input(request: "UserInputRequest") -> str:
             nonlocal events_ctx
-            if state.thinking_started and events_ctx is not None:
-                events_ctx.finish(add_to_history=False)
-                state.thinking_started = False
+            # Mark the HITL window before tearing down the events box so the
+            # cancel watcher doesn't read "no active boxes" as a Ctrl+C.
+            state.in_hitl = True
+            try:
+                if state.thinking_started and events_ctx is not None:
+                    events_ctx.finish(add_to_history=False)
+                    state.thinking_started = False
 
-            response = await self._prompt_user_input(request, ui)
-
-            events_ctx = ui.start_thinking(
-                state.get_status, content_format="ansi"
-            )
-            state.thinking_started = True
+                response = await self._prompt_user_input(request, ui)
+            finally:
+                events_ctx = ui.start_thinking(
+                    state.get_status, content_format="ansi"
+                )
+                state.thinking_started = True
+                state.in_hitl = False
             return response
 
         workflow.set_input_callback(_handle_input)
@@ -210,13 +220,33 @@ class MessageProcessor:
                     )
                     state.thinking_started = True
 
-                    async for event in workflow.process(
-                        message=message,
-                        user_id=settings.default_user,
-                    ):
-                        handler = dispatch.get(event.type)
-                        if handler is not None:
-                            await handler(self, event, state, ui, settings, workflow)
+                    # Consume the event stream in a cancellable task so Ctrl+C
+                    # can abort an in-flight run. thinking_prompt's Ctrl+C
+                    # binding finishes all thinking boxes (so ui.is_thinking
+                    # flips False) but never cancels our coroutine, so we watch
+                    # for that and cancel the task ourselves.
+                    async def _consume() -> None:
+                        async for event in workflow.process(
+                            message=message,
+                            user_id=settings.default_user,
+                        ):
+                            handler = dispatch.get(event.type)
+                            if handler is not None:
+                                await handler(
+                                    self, event, state, ui, settings, workflow
+                                )
+
+                    proc_task = asyncio.create_task(_consume())
+                    if await self._watch_for_cancel(proc_task, ui, state):
+                        # Ctrl+C already finished every active box; just drop
+                        # our now-dead references so the next turn starts clean.
+                        state.thinking_started = False
+                        self._task_box = None
+                        self._last_task_content = None
+                        ui.add_warning("Cancelled.")
+                        workflow_controller.update_status_bar(ui)
+                        logger.info("message_cancelled_by_user")
+                        break
 
                     # Finish events box only (don't add status to history)
                     if state.thinking_started and events_ctx is not None:
@@ -261,6 +291,42 @@ class MessageProcessor:
             self._last_task_progress = (
                 self._last_task_content if self._task_box else None
             )
+
+    async def _watch_for_cancel(
+        self,
+        proc_task: "asyncio.Task[None]",
+        ui: "ThinkingPromptSession",
+        state: _EventProcessingState,
+    ) -> bool:
+        """Watch a running workflow task and cancel it on Ctrl+C.
+
+        thinking_prompt's Ctrl+C binding finishes all active thinking boxes
+        (so ``ui.is_thinking`` becomes False) but does not cancel the coroutine
+        driving the workflow. We poll for that transition — ignoring the HITL
+        window, when boxes are legitimately absent — and cancel the task when
+        it happens.
+
+        Args:
+            proc_task: Task consuming the workflow event stream.
+            ui: UI session (provides the public ``is_thinking`` box state).
+            state: Shared processing state (``in_hitl`` guards the dialog window).
+
+        Returns:
+            True if the task was cancelled by the user. Otherwise False, after
+            re-raising any exception the task raised.
+        """
+        while True:
+            done, _ = await asyncio.wait({proc_task}, timeout=0.1)
+            if proc_task in done:
+                break
+            if not state.in_hitl and not ui.is_thinking:
+                proc_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await proc_task
+                return True
+        # Task completed on its own — surface its result/exception.
+        proc_task.result()
+        return False
 
     async def _prompt_user_input(
         self,
