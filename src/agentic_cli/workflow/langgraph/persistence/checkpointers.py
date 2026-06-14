@@ -1,19 +1,27 @@
 """Checkpointer factory for LangGraph state persistence.
 
-Provides factory function to create appropriate checkpointer based on
-configuration. Supports memory, PostgreSQL, and SQLite backends.
+Supports memory, SQLite, and PostgreSQL backends.
+
+The SQLite/PostgreSQL savers are async and are obtained from async context
+managers (``AsyncSqliteSaver``/``AsyncPostgresSaver.from_conn_string``), so
+``create_checkpointer`` is async and returns both the saver and the context
+manager that owns its connection. The caller must close that context manager on
+shutdown (``await cm.__aexit__(None, None, None)``). For ``memory``/``None`` the
+context manager is ``None`` (nothing to close).
+
+The previous implementation returned ``Saver.from_conn_string(...)`` directly —
+in current ``langgraph-checkpoint-*`` that is a context manager, not a saver, so
+``graph.compile(checkpointer=...)`` received the wrong object and broke. It also
+used the sync savers, which cannot serve the async ``astream_events`` path.
 
 Example:
-    from agentic_cli.workflow.langgraph.persistence import create_checkpointer
-
-    # Memory checkpointer (default, no persistence)
-    checkpointer = create_checkpointer("memory", settings)
-
-    # PostgreSQL checkpointer (persistent)
-    checkpointer = create_checkpointer("postgres", settings)
-
-    # SQLite checkpointer (file-based persistence)
-    checkpointer = create_checkpointer("sqlite", settings)
+    checkpointer, cm = await create_checkpointer("sqlite", settings)
+    try:
+        graph = builder.compile(checkpointer=checkpointer)
+        ...
+    finally:
+        if cm is not None:
+            await cm.__aexit__(None, None, None)
 """
 
 from __future__ import annotations
@@ -31,22 +39,20 @@ logger = Loggers.workflow()
 CheckpointerType = Literal["memory", "postgres", "sqlite"] | None
 
 
-def create_checkpointer(
+async def create_checkpointer(
     checkpointer_type: CheckpointerType,
     settings: "BaseSettings",
-) -> Any | None:
+) -> tuple[Any | None, Any | None]:
     """Create a checkpointer based on the specified type.
 
     Args:
-        checkpointer_type: Type of checkpointer to create.
-            - "memory": In-memory checkpointer (no persistence, fast)
-            - "postgres": PostgreSQL-based checkpointer (requires langgraph-checkpoint-postgres)
-            - "sqlite": SQLite-based checkpointer (requires langgraph-checkpoint-sqlite)
-            - None: No checkpointing
+        checkpointer_type: "memory", "postgres", "sqlite", or None.
         settings: Application settings containing connection URIs.
 
     Returns:
-        Checkpointer instance, or None if checkpointing is disabled.
+        A ``(checkpointer, context_manager)`` tuple. ``context_manager`` owns
+        the saver's connection for the sqlite/postgres backends and must be
+        closed on shutdown; it is ``None`` for ``memory``/``None``.
 
     Raises:
         ImportError: If required dependencies are not installed.
@@ -54,10 +60,10 @@ def create_checkpointer(
     """
     if checkpointer_type is None:
         logger.debug("checkpointer_disabled")
-        return None
+        return None, None
 
     if checkpointer_type == "memory":
-        return _create_memory_checkpointer()
+        return _create_memory_checkpointer(), None
 
     elif checkpointer_type == "postgres":
         postgres_uri = getattr(settings, "postgres_uri", None)
@@ -66,7 +72,7 @@ def create_checkpointer(
                 "PostgreSQL checkpointer requires 'postgres_uri' in settings. "
                 "Set AGENTIC_POSTGRES_URI environment variable or add postgres_uri to settings."
             )
-        return _create_postgres_checkpointer(postgres_uri)
+        return await _create_postgres_checkpointer(postgres_uri)
 
     elif checkpointer_type == "sqlite":
         sqlite_uri = getattr(settings, "sqlite_uri", None)
@@ -74,7 +80,7 @@ def create_checkpointer(
             # Use default path in workspace
             sqlite_uri = str(settings.workspace_dir / "checkpoints.db")
             logger.debug("sqlite_uri_defaulted", path=sqlite_uri)
-        return _create_sqlite_checkpointer(sqlite_uri)
+        return await _create_sqlite_checkpointer(sqlite_uri)
 
     else:
         raise ValueError(
@@ -84,14 +90,7 @@ def create_checkpointer(
 
 
 def _create_memory_checkpointer():
-    """Create an in-memory checkpointer.
-
-    Returns:
-        MemorySaver instance.
-
-    Raises:
-        ImportError: If LangGraph is not installed.
-    """
+    """Create an in-memory checkpointer (no external connection)."""
     try:
         from langgraph.checkpoint.memory import MemorySaver
 
@@ -104,49 +103,43 @@ def _create_memory_checkpointer():
         ) from e
 
 
-def _create_postgres_checkpointer(connection_string: str):
-    """Create a PostgreSQL checkpointer.
+async def _create_sqlite_checkpointer(connection_string: str):
+    """Create an async SQLite checkpointer and enter its connection context.
 
-    Args:
-        connection_string: PostgreSQL connection URI.
-
-    Returns:
-        PostgresSaver instance.
-
-    Raises:
-        ImportError: If langgraph-checkpoint-postgres is not installed.
+    Returns ``(saver, context_manager)``; close the context manager to release
+    the connection.
     """
     try:
-        from langgraph.checkpoint.postgres import PostgresSaver
+        from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+    except ImportError as e:
+        raise ImportError(
+            "SQLite checkpointer requires langgraph-checkpoint-sqlite. "
+            "Install with: pip install langgraph-checkpoint-sqlite"
+        ) from e
 
-        logger.debug("postgres_checkpointer_creating", uri_masked="***")
-        return PostgresSaver.from_conn_string(connection_string)
+    cm = AsyncSqliteSaver.from_conn_string(connection_string)
+    saver = await cm.__aenter__()
+    await saver.setup()
+    logger.debug("sqlite_checkpointer_created", path=connection_string)
+    return saver, cm
+
+
+async def _create_postgres_checkpointer(connection_string: str):
+    """Create an async PostgreSQL checkpointer and enter its connection context.
+
+    Returns ``(saver, context_manager)``; close the context manager to release
+    the connection.
+    """
+    try:
+        from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
     except ImportError as e:
         raise ImportError(
             "PostgreSQL checkpointer requires langgraph-checkpoint-postgres. "
             "Install with: pip install langgraph-checkpoint-postgres"
         ) from e
 
-
-def _create_sqlite_checkpointer(connection_string: str):
-    """Create a SQLite checkpointer.
-
-    Args:
-        connection_string: SQLite connection URI or file path.
-
-    Returns:
-        SqliteSaver instance.
-
-    Raises:
-        ImportError: If langgraph-checkpoint-sqlite is not installed.
-    """
-    try:
-        from langgraph.checkpoint.sqlite import SqliteSaver
-
-        logger.debug("sqlite_checkpointer_creating", path=connection_string)
-        return SqliteSaver.from_conn_string(connection_string)
-    except ImportError as e:
-        raise ImportError(
-            "SQLite checkpointer requires langgraph-checkpoint-sqlite. "
-            "Install with: pip install langgraph-checkpoint-sqlite"
-        ) from e
+    cm = AsyncPostgresSaver.from_conn_string(connection_string)
+    saver = await cm.__aenter__()
+    await saver.setup()
+    logger.debug("postgres_checkpointer_created")
+    return saver, cm

@@ -9,6 +9,14 @@ Mock services (MockEmbeddingService, MockVectorStore) are in tests/mocks.py.
 """
 
 import os
+
+# torch (the `kb` extra) ships libiomp5 while faiss-cpu ships libomp; loading
+# both OpenMP runtimes in one process aborts the interpreter (SIGABRT) when the
+# real-FAISS and torch-backed tests run together in the full suite. Allow the
+# duplicate load — safe for CPU faiss + torch. Must be set before either is
+# imported, so it lives at the very top of conftest.
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+
 import tempfile
 from pathlib import Path
 from typing import Generator

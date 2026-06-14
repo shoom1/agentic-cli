@@ -100,6 +100,9 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
         self._graph = None
         self._compiled_graph = None
         self._checkpointer = None
+        # Async context manager owning the sqlite/postgres connection (None for
+        # the memory checkpointer); closed in cleanup().
+        self._checkpointer_cm = None
         self._store = None
         self._llm = None
 
@@ -133,11 +136,17 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
         # Create checkpointer and store
         from agentic_cli.workflow.langgraph.persistence import create_checkpointer, create_store
 
-        # Reuse preserved checkpointer from reinitialize, or create new one
+        # Reuse preserved checkpointer from reinitialize, or create new one.
+        # A preserved checkpointer is only the in-memory saver (file/db-backed
+        # checkpointers reconnect to the same store on re-init), so it owns no
+        # context manager to close.
         if getattr(self, '_preserved_checkpointer', None) is not None:
             self._checkpointer = self._preserved_checkpointer
+            self._checkpointer_cm = None
         else:
-            self._checkpointer = create_checkpointer(self._checkpointer_type, self._settings)
+            self._checkpointer, self._checkpointer_cm = await create_checkpointer(
+                self._checkpointer_type, self._settings
+            )
         store_type = getattr(self._settings, "store_type", "memory")
         self._store = create_store(store_type, self._settings)
 
@@ -180,6 +189,14 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
         """Clean up LangGraph resources."""
         logger.debug("cleaning_up_langgraph_workflow_manager")
 
+        # Release the sqlite/postgres connection if one was opened.
+        if getattr(self, '_checkpointer_cm', None) is not None:
+            try:
+                await self._checkpointer_cm.__aexit__(None, None, None)
+            except Exception:
+                logger.debug("checkpointer_close_failed", exc_info=True)
+            self._checkpointer_cm = None
+
         self._graph = None
         self._compiled_graph = None
         self._checkpointer = None
@@ -204,7 +221,14 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
             preserve_sessions=preserve_sessions,
         )
 
-        old_checkpointer = self._checkpointer if preserve_sessions else None
+        # Only the in-memory saver needs preserving across reinit; file/db
+        # checkpointers own a connection (cleanup closes it) and simply
+        # reconnect to the same store when re-created, so don't carry them over.
+        old_checkpointer = (
+            self._checkpointer
+            if preserve_sessions and getattr(self, '_checkpointer_cm', None) is None
+            else None
+        )
 
         await self.cleanup()
 
