@@ -22,6 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`execute_python` no longer exposes `numpy`/`pandas` (etc.) by default.** Enabling them requires `os_sandbox_enabled=True` (with `sandbox-exec` on macOS or `bwrap` on Linux). This is a deliberate, user-visible reduction of the default capability surface.
 
 ### Fixed
+- **ADK session resume was a silent no-op** (`workflow/adk/manager.py`): `_inject_session_messages` appended events to the copy returned by `create_session`, so the stored session stayed empty and "Session resumed" restored nothing on the ADK backend. Now uses `append_event` with real `google.adk.events.Event` objects so events land in the stored session.
+- **Corrupt sessions index no longer hides every session** (`persistence/session.py`): a corrupt or non-dict `_sessions_index.json` read as empty, so the next save reset it to a single entry and all other sessions vanished from `list_sessions()`. The index now rebuilds from the session files on any parse/shape error (and a non-dict payload no longer raises `AttributeError`).
+- **`MemoryStore` is now thread-safe** (`tools/memory_tools.py`): added a lock around `store`/`update`/`delete`/`search` and the full-file `_save` (note `search` is a writer — it bumps access counters). Prevents "dictionary changed size during iteration" and lost writes when LangGraph's `ToolNode` runs tools concurrently in executor threads.
+- **Atomic writes are now durable** (`file_utils.py::_atomic_write`): fsync before the rename (so a crash can't persist the rename ahead of the data and destroy the previously-good file), a unique temp filename (two concurrent writers no longer truncate a shared `.tmp`), and explicit UTF-8 (no locale-dependent `UnicodeEncodeError`). Applies to all persistence consumers (settings, sessions, memory).
 - Test suite is collectable in the default dev env again: `pytest.importorskip` guards added to `test_context_window.py`, `test_langgraph_state_tools.py`, and `test_backend_isolation.py`, which imported `langgraph`/`langchain_core`/`google.genai` unconditionally.
 
 ## [0.5.2] - 2026-05-01
