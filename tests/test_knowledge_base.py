@@ -1086,6 +1086,9 @@ class TestHybridSearch:
         assert kb._bm25_index.size > 0
 
     def test_hybrid_search_finds_exact_match(self, tmp_path):
+        # Searching builds the real BM25 model (bm25s), unlike the other
+        # TestHybridSearch cases which don't search or null out the index.
+        pytest.importorskip("bm25s")
         kb = _make_mock_kb(tmp_path)
         kb.ingest_document(
             title="Config Doc",

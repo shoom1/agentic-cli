@@ -7,6 +7,9 @@ import json
 
 import pytest
 
+pytest.importorskip("langgraph")
+pytest.importorskip("langchain_core")
+
 from langgraph.types import Command
 from langchain_core.messages import ToolMessage
 

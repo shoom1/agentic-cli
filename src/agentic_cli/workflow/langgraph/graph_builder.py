@@ -80,12 +80,17 @@ class LangGraphBuilder:
         # Get retry policy for nodes
         retry_policy = self.get_retry_policy()
 
+        _overrides = tool_overrides or {}
+
+        def _get_tools(config: AgentConfig) -> list:
+            return _overrides.get(config.name, config.tools or [])
+
         # Create nodes for each agent with retry policy
         for config in agent_configs:
             node_fn = self._create_agent_node(
                 config, default_model, tools=_get_tools(config) or None,
             )
-            graph.add_node(config.name, node_fn, retry=retry_policy)
+            graph.add_node(config.name, node_fn, retry_policy=retry_policy)
 
         # Determine entry point (root agent)
         root_agent = None
@@ -105,11 +110,6 @@ class LangGraphBuilder:
 
         # Add tool execution nodes for agents that have tools
         from langgraph.prebuilt import ToolNode
-
-        _overrides = tool_overrides or {}
-
-        def _get_tools(config: AgentConfig) -> list:
-            return _overrides.get(config.name, config.tools or [])
 
         agents_with_tools = {
             config.name for config in agent_configs if _get_tools(config)

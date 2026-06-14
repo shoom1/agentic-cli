@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agentic-cli"
-version = "0.5.2"
+version = "0.5.3"
 description = "A framework for building domain-specific agentic CLI applications"
 readme = "README.md"
 license = "MIT"
@@ -56,6 +56,10 @@ langgraph = [
     "langchain-openai>=0.2.0",
     "langchain-anthropic>=0.2.0",
     "langchain-google-genai>=2.0.0",
+    # Persistent checkpointer backends (sqlite/postgres store_type). The async
+    # savers are required because the manager streams via astream_events.
+    "langgraph-checkpoint-sqlite>=2.0",
+    "langgraph-checkpoint-postgres>=2.0",
 ]
 
 [project.scripts]

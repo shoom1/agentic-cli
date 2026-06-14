@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 import pytest
@@ -170,3 +171,42 @@ class TestVectorStoreWithFAISS:
 
         results = store2.search([1.0, 0.0, 0.0, 0.0], top_k=1)
         assert results[0][0] == "chunk-a"
+
+    def test_save_is_atomic_on_write_failure(self, store, tmp_path: Path):
+        """A crash mid-write must not corrupt the existing index or leak temps.
+
+        The previous implementation wrote the index in place, so a failure
+        during faiss.write_index could leave a truncated index.faiss that
+        bricks the KB on the next load. The atomic temp+replace must instead
+        preserve the last good index and clean up the temp file.
+        """
+        import faiss
+
+        # First, persist a good 2-vector index.
+        store.add_embeddings(
+            ["chunk-a", "chunk-b"],
+            [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]],
+        )
+        store.save()
+        index_path = tmp_path / "index.faiss"
+        good_bytes = index_path.read_bytes()
+
+        # Now add a third vector and attempt to save, but make the faiss write
+        # blow up partway through.
+        store.add_embeddings(["chunk-c"], [[0.0, 0.0, 1.0, 0.0]])
+        with mock.patch.object(
+            faiss, "write_index", side_effect=RuntimeError("disk full")
+        ):
+            with pytest.raises(RuntimeError):
+                store.save()
+
+        # The on-disk index is untouched (still the last good 2-vector index)...
+        assert index_path.read_bytes() == good_bytes
+        # ...and no leftover temp files remain in the directory.
+        leftovers = [p.name for p in tmp_path.iterdir() if p.name.endswith(".tmp")]
+        assert leftovers == []
+
+        # And the surviving index still loads cleanly.
+        from agentic_cli.knowledge_base.vector_store import VectorStore
+        reloaded = VectorStore(index_path=index_path, embedding_dim=4)
+        assert reloaded.size == 2

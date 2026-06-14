@@ -111,7 +111,6 @@ __all__ = [
     # Framework tool modules (lazy loaded)
     "memory_tools",
     "sandbox_tools",
-    "reflection_tools",
 ]
 
 
@@ -119,7 +118,6 @@ __all__ = [
 _lazy_tool_modules = {
     "memory_tools": "agentic_cli.tools.memory_tools",
     "sandbox_tools": "agentic_cli.tools.sandbox",
-    "reflection_tools": "agentic_cli.tools.reflection_tools",
 }
 
 

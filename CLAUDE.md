@@ -19,66 +19,89 @@ agentic-cli/
 ├── src/agentic_cli/
 │   ├── __init__.py           # Package exports, lazy imports
 │   ├── config.py             # BaseSettings (pydantic-settings)
+│   ├── settings_mixins.py    # Composable settings field groups
+│   ├── settings_persistence.py # save_settings() (excludes SECRET_FIELDS)
 │   ├── constants.py          # Shared constants, truncate()
-│   ├── settings_persistence.py
+│   ├── file_utils.py         # atomic_write_json / atomic_write_text
 │   ├── logging.py
 │   ├── cli/
 │   │   ├── app.py            # BaseCLIApp
 │   │   ├── commands.py       # Command, CommandRegistry
 │   │   ├── builtin_commands.py
-│   │   ├── workflow_controller.py  # WorkflowController, factory
-│   │   ├── message_processor.py
-│   │   └── settings*.py      # Settings UI (introspection, dialog)
+│   │   ├── workflow_controller.py  # WorkflowController (lazy/background init, orchestrator swap)
+│   │   ├── message_processor.py    # WorkflowEvent → ThinkingPromptSession rendering
+│   │   ├── settings_command.py     # /settings command
+│   │   ├── settings_introspection.py # Pydantic field → UI item introspection
+│   │   └── usage_tracker.py        # Token usage / status bar
 │   ├── workflow/
-│   │   ├── base_manager.py   # BaseWorkflowManager (abstract)
-│   │   ├── task_progress.py  # build_task_progress_event(), parse_plan_progress()
+│   │   ├── base_manager.py   # BaseWorkflowManager (abstract; service detection, tool assembly)
+│   │   ├── factory.py        # create_workflow_manager_from_settings (ADK vs LangGraph routing)
+│   │   ├── service_registry.py # get_service/require_service + ContextVar registry
 │   │   ├── events.py         # WorkflowEvent, EventType
-│   │   ├── thinking.py       # ThinkingDetector
 │   │   ├── config.py         # AgentConfig
-│   │   ├── context.py        # ContextVars for tool access (get_context_*())
+│   │   ├── models.py
+│   │   ├── settings.py       # Workflow/tool settings schema
+│   │   ├── retry.py          # Rate-limit retry helpers
+│   │   ├── tool_summaries.py
+│   │   ├── permissions/      # Framework-independent capability engine
+│   │   │   ├── engine.py     # PermissionEngine (deny-wins, default-ASK)
+│   │   │   ├── capabilities.py # Capability, EXEMPT
+│   │   │   ├── matchers.py   # PathMatcher, URLMatcher, ShellMatcher, StringGlobMatcher
+│   │   │   └── rules.py, store.py, prompt.py
 │   │   ├── adk/              # ADK orchestrator
 │   │   │   ├── manager.py    # GoogleADKWorkflowManager
 │   │   │   ├── event_processor.py  # ADKEventProcessor
-│   │   │   └── llm_event_logger.py # LLM traffic logging
+│   │   │   ├── permission_plugin.py # PermissionPlugin (gates tool calls)
+│   │   │   ├── task_progress_plugin.py # Emits TASK_PROGRESS events
+│   │   │   └── plugins.py    # LLM traffic logging (raw_llm_logging)
 │   │   └── langgraph/        # LangGraph orchestrator
 │   │       ├── manager.py    # LangGraphWorkflowManager
 │   │       ├── graph_builder.py # LangGraphBuilder (graph + LLM factory)
 │   │       ├── state.py
-│   │       ├── persistence/  # Checkpointers, stores
-│   │       └── tools/        # LangChain-compatible wrappers
+│   │       ├── permission_wrap.py # wrap_tool_for_permission
+│   │       └── persistence/  # Checkpointers, stores
 │   ├── tools/
 │   │   ├── registry.py       # ToolRegistry, @register_tool, ToolCategory
-│   │   ├── executor.py       # SafePythonExecutor
-│   │   ├── knowledge_tools.py # kb_search, kb_ingest, kb_list, kb_read
-│   │   ├── arxiv_tools.py    # search_arxiv, fetch_arxiv_paper, analyze_arxiv_paper
+│   │   ├── factories.py      # Service-bound tool builders (per-manager flavors)
+│   │   ├── executor.py       # SafePythonExecutor (CORE_MODULES; SANDBOXED_MODULES gated on OS sandbox)
 │   │   ├── execution_tools.py # execute_python
+│   │   ├── knowledge_tools.py # kb_search, kb_ingest_{text,file,url}, kb_list, kb_read, kb_write_concept, kb_search_concepts
+│   │   ├── arxiv_tools.py    # search_arxiv, fetch_arxiv_paper, ingest_arxiv_paper
+│   │   ├── arxiv_source.py   # ArxivSearchSource (feed fetch, download_pdf)
+│   │   ├── pdf_utils.py      # extract_pdf_text
 │   │   ├── interaction_tools.py # ask_clarification
 │   │   ├── file_read.py      # read_file, diff_compare
 │   │   ├── file_write.py     # write_file, edit_file
 │   │   ├── glob_tool.py      # glob
 │   │   ├── grep_tool.py      # grep
 │   │   ├── search.py         # web_search (Tavily/Brave backends)
-│   │   ├── webfetch_tool.py  # web_fetch (orchestrator)
-│   │   ├── memory_tools.py   # save_memory, search_memory + MemoryStore
-│   │   ├── planning_tools.py # save_plan, get_plan + PlanStore
-│   │   ├── task_tools.py     # save_tasks, get_tasks + TaskStore
-│   │   ├── reflection_tools.py # save_reflection + ToolReflectionStore
-│   │   ├── shell/            # 8-layer shell security
-│   │   └── webfetch/         # Fetcher, converter, validator, robots
+│   │   ├── webfetch_tool.py  # web_fetch + get_or_create_fetcher (orchestrator)
+│   │   ├── memory_tools.py   # save_memory, search_memory, update_memory, delete_memory + MemoryStore
+│   │   ├── _core/           # Backend-neutral tool logic
+│   │   │   ├── planning.py  # save_plan/get_plan core (+ checkbox parsing)
+│   │   │   └── tasks.py     # save_tasks/get_tasks core (+ progress parsing)
+│   │   ├── adk/state_tools.py       # ADK-native plan/task tools (ToolContext.state)
+│   │   ├── langgraph/state_tools.py # LangGraph-native plan/task tools (Command/InjectedState)
+│   │   ├── sandbox/         # Stateful code-execution sandbox (sandbox_execute)
+│   │   ├── shell/           # 8-layer shell security (+ os_sandbox/)
+│   │   └── webfetch/        # Fetcher, converter, validator, robots, summarizer
 │   ├── knowledge_base/
 │   │   ├── models.py         # Document, SearchResult
 │   │   ├── embeddings.py     # EmbeddingService
 │   │   ├── vector_store.py   # VectorStore (FAISS)
-│   │   ├── _mocks.py         # MockEmbeddingService, MockVectorStore
+│   │   ├── bm25_index.py     # BM25 index (+ _bm25_backends.py: bm25s / rank_bm25)
+│   │   ├── concepts.py       # ConceptStore (concept pages)
+│   │   ├── sidecar.py        # Markdown sidecar rendering
+│   │   ├── sources.py
+│   │   ├── _mocks.py         # MockEmbeddingService, MockVectorStore (+ _mock_bm25.py)
 │   │   └── manager.py        # KnowledgeBaseManager
 │   └── persistence/
-│       ├── session.py        # SessionPersistence
-│       ├── artifacts.py      # ArtifactManager
-│       └── _utils.py         # Atomic write utilities
+│       └── session.py        # SessionPersistence
 ├── tests/
 │   ├── conftest.py           # MockContext, shared fixtures
 │   ├── test_*.py             # Unit tests
 │   ├── tools/                # Tool-specific tests
+│   ├── workflow/             # Backend-isolation / workflow tests
 │   └── integration/          # ADK & LangGraph pipeline tests
 └── examples/                 # Demo scripts
 ```
@@ -134,10 +157,10 @@ Workflow:
 ### Key Design Patterns
 - **Tool error handling**: All tools return `{"success": bool, ...}` dicts. Never raise `ToolError`.
 - **Tool registration**: Use `@register_tool(category=..., capabilities=..., description=...)` decorator. `capabilities=` is required — pass `EXEMPT` for tools that need no permission check or a list of `Capability(name, target_arg=...)` tuples the engine matches against rules. Tools are auto-discovered via the global `ToolRegistry`.
-- **Permissions**: `workflow/permissions/` holds a framework-independent engine that evaluates declared capabilities against rules from four sources (builtin, user `~/.{app_name}/settings.json`, project `./.{app_name}/settings.json`, in-memory session). ADK + LangGraph gate tool calls via `workflow/adk/permission_plugin.py::PermissionPlugin` and `workflow/langgraph/permission_wrap.py::wrap_tool_for_permission`. See `docs/superpowers/specs/2026-04-18-permissions-system-design.md`.
+- **Permissions**: `workflow/permissions/` holds a framework-independent engine that evaluates declared capabilities against rules from four sources (builtin, user `~/.{app_name}/settings.json`, project `./.{app_name}/settings.json`, in-memory session). ADK + LangGraph gate tool calls via `workflow/adk/permission_plugin.py::PermissionPlugin` and `workflow/langgraph/permission_wrap.py::wrap_tool_for_permission`.
 - **Service registry**: Tools access services and shared state via `get_service(key)` from `workflow.service_registry`. A single ContextVar holds a `dict[str, Any]` set by the workflow manager during processing. Complex services (KBManager, SandboxManager, MemoryStore) are lazily created; simple state (plan string, task list) lives directly in the registry dict.
-- **Manager detection**: Tools decorated with `@requires("kb_manager")` etc. are scanned by `BaseWorkflowManager._detect_required_managers()` which lazily creates only the needed services.
-- **Atomic writes**: Use `atomic_write_json`/`atomic_write_text` from `persistence/_utils.py` for file persistence.
+- **Manager detection**: `BaseWorkflowManager._detect_required_managers()` scans each agent's tool names against the `_TOOL_SERVICE_MAP` (name → service key, in `base_manager.py`); `_ensure_managers_initialized()` then lazily instantiates only the services actually needed (KBManager, SandboxManager, MemoryStore, …). Adding a new service-backed tool means adding its name → service entry to `_TOOL_SERVICE_MAP`. (There is no `@requires` decorator.)
+- **Atomic writes**: Use `atomic_write_json`/`atomic_write_text` from `file_utils.py` for file persistence.
 
 ### Console Output
 All console output must go through `ThinkingPromptSession` methods. Never use `rich.Console` or `print()` directly.

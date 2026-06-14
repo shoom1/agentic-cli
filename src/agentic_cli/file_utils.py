@@ -2,6 +2,8 @@
 
 import fcntl
 import json
+import os
+import tempfile
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -58,11 +60,31 @@ def sanitize_filename(name: str) -> str:
 
 
 def _atomic_write(path: Path, content: str) -> None:
-    """Write content to a file atomically (write tmp, then rename)."""
+    """Write content to a file atomically and durably.
+
+    Writes to a uniquely-named temp file in the same directory, flushes and
+    fsyncs it, then atomically renames it over the target. Notes:
+    - Unique temp name (tempfile.mkstemp) so two concurrent writers can't
+      truncate each other's temp file the way a fixed ``.tmp`` name allows.
+    - fsync before the rename so a crash can't persist the rename ahead of the
+      data and leave a torn/empty file in place of the previously-good one.
+    - Explicit UTF-8 so output doesn't depend on the locale (a C/POSIX locale
+      would otherwise raise UnicodeEncodeError on non-ASCII content).
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    tmp_path.write_text(content)
-    tmp_path.replace(path)
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp"
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
 
 
 def atomic_write_json(path: Path, data: Any, indent: int = 2) -> None:

@@ -47,21 +47,39 @@ class SafePythonExecutor:
     - Execution timeout (cross-platform via subprocess.run)
     - Memory limits (resource.setrlimit on Unix)
     - Output capture with sentinel protocol
+
+    The AST validation and restricted builtins are defense-in-depth, not a hard
+    security boundary: a determined caller can still reach the host through
+    library I/O or string-format tricks. The OS sandbox (``os_sandbox_policy``)
+    is the real isolation layer. Without it, only the pure-computation
+    ``CORE_MODULES`` are importable; file/network/pickle-capable libraries
+    (``SANDBOXED_MODULES``) are disabled to avoid trivial escapes.
     """
 
-    # Modules allowed for import (top-level package names)
-    ALLOWED_MODULES = {
-        # Core math/science
+    # Modules that expose file, network, or pickle I/O through public,
+    # non-underscore APIs (e.g. numpy.DataSource().open(), numpy.load(...,
+    # allow_pickle=True), pandas.read_pickle(url)). The AST/name allow-list
+    # cannot neutralize these — they re-expose exactly the capabilities the
+    # restricted builtins remove — so they are an escape from the in-process
+    # restrictions (arbitrary file read, pickle-based code execution) unless a
+    # real OS sandbox contains them. They are therefore permitted only when
+    # os_sandbox_policy is enabled.
+    SANDBOXED_MODULES = {
         "numpy",
         "pandas",
         "scipy",
+        "sklearn",
+        "matplotlib",
+    }
+
+    # Modules safe to import without OS isolation: pure computation and stdlib
+    # data handling with no file/network/deserialization surface.
+    CORE_MODULES = {
+        # Math / science
         "sympy",
         "math",
         "statistics",
         "cmath",
-        # ML / visualization
-        "sklearn",
-        "matplotlib",
         # Collections and utilities
         "collections",
         "itertools",
@@ -76,6 +94,11 @@ class SafePythonExecutor:
         # Random (for simulations)
         "random",
     }
+
+    # Upper bound of importable modules. The effective set actually enforced is
+    # computed per-instance in __init__ (CORE_MODULES only, unless the OS
+    # sandbox is enabled — see effective_allowed_modules).
+    ALLOWED_MODULES = CORE_MODULES | SANDBOXED_MODULES
 
     # Builtins that are blocked
     BLOCKED_BUILTINS = {
@@ -132,6 +155,13 @@ class SafePythonExecutor:
         self.max_memory_mb = max_memory_mb
         self.os_sandbox_policy = os_sandbox_policy
 
+        # File/network/pickle-capable libraries are only safe behind real OS
+        # isolation. Without it, restrict imports to the pure-computation core.
+        sandbox_on = bool(os_sandbox_policy and os_sandbox_policy.enabled)
+        self.effective_allowed_modules = (
+            self.ALLOWED_MODULES if sandbox_on else self.CORE_MODULES
+        )
+
     def validate_code(self, code: str) -> tuple[bool, str]:
         """Validate code for safety.
 
@@ -154,7 +184,7 @@ class SafePythonExecutor:
                     # Check if importing allowed modules
                     if isinstance(node, ast.Import):
                         for alias in node.names:
-                            if alias.name.split(".")[0] not in self.ALLOWED_MODULES:
+                            if alias.name.split(".")[0] not in self.effective_allowed_modules:
                                 return (
                                     False,
                                     f"Import of '{alias.name}' is not allowed",
@@ -162,7 +192,7 @@ class SafePythonExecutor:
                     elif isinstance(node, ast.ImportFrom):
                         if (
                             node.module
-                            and node.module.split(".")[0] not in self.ALLOWED_MODULES
+                            and node.module.split(".")[0] not in self.effective_allowed_modules
                         ):
                             return (
                                 False,
@@ -391,7 +421,7 @@ class SafePythonExecutor:
             Python source code string for the runner script.
         """
         context_repr = repr(context) if context else "None"
-        allowed_modules_repr = repr(self.ALLOWED_MODULES)
+        allowed_modules_repr = repr(self.effective_allowed_modules)
         blocked_builtins_repr = repr(self.BLOCKED_BUILTINS)
         max_memory_bytes = self.max_memory_mb * 1024 * 1024
 
@@ -445,8 +475,12 @@ class SafePythonExecutor:
                         ns[mod_name] = __import__(mod_name)
                     except ImportError:
                         pass
-                # Try numpy/pandas
+                # Pre-bind numpy/pandas as np/pd, but only when they are in the
+                # effective allow-list. Otherwise they would be reachable without
+                # an import statement, bypassing the import check entirely.
                 for mod_name, alias in [("numpy", "np"), ("pandas", "pd")]:
+                    if mod_name not in ALLOWED_MODULES:
+                        continue
                     try:
                         m = __import__(mod_name)
                         ns[mod_name] = m

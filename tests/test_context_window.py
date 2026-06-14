@@ -1,5 +1,10 @@
 """Tests for context window management integration."""
 
+import pytest
+
+pytest.importorskip("google.genai")
+pytest.importorskip("langchain_core")
+
 from google.genai.types import ContextWindowCompressionConfig, SlidingWindow
 from langchain_core.messages import HumanMessage, AIMessage, trim_messages
 

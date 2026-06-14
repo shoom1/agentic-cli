@@ -12,6 +12,10 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
+
+pytest.importorskip("langgraph")
+
 import agentic_cli.workflow.langgraph
 import agentic_cli.workflow.adk
 

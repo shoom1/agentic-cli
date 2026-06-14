@@ -250,6 +250,25 @@ class TestLangGraphWorkflowManagerLifecycle:
                 mock_cleanup.assert_called_once()
 
 
+class TestLangGraphBuilder:
+    """Tests for LangGraph graph construction."""
+
+    def test_build_minimal_graph(self):
+        """A single-agent graph can be built and compiled."""
+        from agentic_cli.workflow.langgraph.graph_builder import LangGraphBuilder
+
+        settings = BaseSettings(google_api_key="test-key")
+        builder = LangGraphBuilder(settings)
+
+        graph = builder.build(
+            [AgentConfig(name="test_agent", prompt="Test prompt")],
+            "gemini-2.5-flash",
+        )
+
+        assert graph is not None
+        assert graph.compile() is not None
+
+
 class TestOrchestratorSelection:
     """Tests for orchestrator selection via settings."""
 
@@ -441,23 +460,45 @@ class TestBackwardCompatibility:
 class TestPersistenceLayer:
     """Tests for the persistence layer factories."""
 
-    def test_create_checkpointer_memory(self):
-        """Test creating memory checkpointer."""
+    async def test_create_checkpointer_memory(self):
+        """Test creating memory checkpointer (no connection to close)."""
         from agentic_cli.workflow.langgraph.persistence import create_checkpointer
 
         settings = BaseSettings(google_api_key="test-key")
-        checkpointer = create_checkpointer("memory", settings)
+        checkpointer, cm = await create_checkpointer("memory", settings)
 
         assert checkpointer is not None
+        assert cm is None
 
-    def test_create_checkpointer_none(self):
+    async def test_create_checkpointer_none(self):
         """Test disabling checkpointer."""
         from agentic_cli.workflow.langgraph.persistence import create_checkpointer
 
         settings = BaseSettings(google_api_key="test-key")
-        checkpointer = create_checkpointer(None, settings)
+        checkpointer, cm = await create_checkpointer(None, settings)
 
         assert checkpointer is None
+        assert cm is None
+
+    async def test_create_checkpointer_sqlite_returns_real_saver(self, tmp_path):
+        """sqlite checkpointer returns a usable AsyncSqliteSaver, not the
+        context manager (the old bug), and provides a cm to close."""
+        pytest.importorskip("langgraph.checkpoint.sqlite.aio")
+        from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+        from langgraph.checkpoint.base import BaseCheckpointSaver
+        from agentic_cli.workflow.langgraph.persistence import create_checkpointer
+
+        settings = BaseSettings(workspace_dir=tmp_path, google_api_key="test-key")
+        checkpointer, cm = await create_checkpointer("sqlite", settings)
+        try:
+            # A real saver — previously this was an _AsyncGeneratorContextManager.
+            assert isinstance(checkpointer, AsyncSqliteSaver)
+            assert isinstance(checkpointer, BaseCheckpointSaver)
+            assert cm is not None  # owns the connection; must be closed
+            # setup() ran, so the db file exists at the default workspace path.
+            assert (tmp_path / "checkpoints.db").exists()
+        finally:
+            await cm.__aexit__(None, None, None)
 
     def test_create_store_memory(self):
         """Test creating memory store."""

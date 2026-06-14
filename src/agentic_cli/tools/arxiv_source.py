@@ -237,23 +237,28 @@ class ArxivSearchSource(SearchSource):
             Raw PDF bytes.
 
         Raises:
-            RuntimeError: If httpx is not installed.
-            httpx.HTTPError: For network failures or non-2xx responses
-                (callers typically catch broadly and fall back).
+            RuntimeError: If the fetch is blocked or fails. The ``pdf_url`` is
+                taken from a remote Atom feed, so it is attacker-influenceable;
+                routing the download through the shared ``ContentFetcher`` reuses
+                the SSRF guard (private-IP/redirect validation), the byte cap,
+                and DNS-rebinding checks rather than issuing a raw, unvalidated
+                GET that follows redirects to arbitrary hosts.
         """
-        try:
-            import httpx
-        except ImportError as exc:
-            raise RuntimeError("httpx not installed, cannot download PDF") from exc
+        from agentic_cli.tools.webfetch_tool import get_or_create_fetcher
 
         await self._wait_for_rate_limit_async()
 
-        async with httpx.AsyncClient(follow_redirects=True, timeout=timeout) as client:
-            response = await client.get(pdf_url)
-            response.raise_for_status()
-            return response.content
+        fetcher = get_or_create_fetcher()
+        result = await fetcher.fetch(pdf_url, timeout=int(timeout))
+        if not result.success:
+            raise RuntimeError(f"PDF fetch blocked or failed: {result.error}")
 
-    _API_BASE_URL = "http://export.arxiv.org/api/query"
+        content = result.content
+        if content is None:
+            raise RuntimeError("PDF fetch returned no content")
+        return content if isinstance(content, bytes) else content.encode("utf-8", "replace")
+
+    _API_BASE_URL = "https://export.arxiv.org/api/query"
 
     @staticmethod
     def _extract_arxiv_id_from_entry(entry: Any) -> str:
@@ -418,7 +423,7 @@ class ArxivSearchSource(SearchSource):
         # Enforce rate limiting
         self.wait_for_rate_limit()
 
-        base_url = "http://export.arxiv.org/api/query?"
+        base_url = "https://export.arxiv.org/api/query?"
 
         # Build search query
         query_parts = [f"all:{query}"]
