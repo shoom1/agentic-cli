@@ -155,22 +155,39 @@ class TestManagerGuards:
 
 class TestRegistryAndTools:
     def test_long_running_flag(self):
-        from agentic_cli.tools.registry import get_registry
+        # The framework no longer ships a long-running *starter* tool (those are
+        # app-provided), so register a throwaway one to prove the flag threads
+        # through @register_tool. Observe-only tools default to long_running=False.
+        from agentic_cli.tools.registry import ToolCategory, get_registry, register_tool
+        from agentic_cli.workflow.permissions import EXEMPT
+
+        @register_tool(
+            category=ToolCategory.OTHER,
+            capabilities=EXEMPT,
+            long_running=True,
+            description="probe long-running tool for tests",
+        )
+        def _jobs_test_long_running_probe() -> dict:
+            return {"success": True}
 
         reg = get_registry()
-        assert reg.get("run_shell_job").long_running is True
+        assert reg.get("_jobs_test_long_running_probe").long_running is True
         assert reg.get("job_status").long_running is False
 
     def test_tools_via_service_registry(self, tmp_path: Path):
-        from agentic_cli.tools.jobs import job_list, job_status, run_shell_job
+        # Exercise the observe-only tools against a job submitted directly via
+        # the JobManager (the starter tool is app-provided, not imported here).
+        from agentic_cli.tools.jobs import job_list, job_status
         from agentic_cli.workflow.service_registry import JOB_MANAGER, set_service_registry
 
         jm = JobManager(base_dir=tmp_path / "jobs", max_concurrent=2)
         token = set_service_registry({JOB_MANAGER: jm})
         try:
-            started = run_shell_job("echo hi", name="greet")
-            assert started["success"] is True
-            job_id = started["job_id"]
+            rec = jm.submit(
+                tool="run_shell_job", backend="subprocess",
+                spec={"command": "echo hi"}, name="greet",
+            )
+            job_id = rec.job_id
 
             # Poll the public tool until terminal.
             end = time.time() + 5

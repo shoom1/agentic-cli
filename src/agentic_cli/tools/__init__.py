@@ -52,9 +52,10 @@ from agentic_cli.tools.arxiv_tools import (
 from agentic_cli.tools.execution_tools import execute_python
 from agentic_cli.tools.interaction_tools import ask_clarification
 
-# Long-running job tools (reference long-running tool + observe-only management)
+# Long-running job tools (generic observe-only management). Typed long-running
+# tools that *start* work (e.g. run_shell_job) are application-provided — see
+# examples/jobs_demo.py — because they choose what runs and how.
 from agentic_cli.tools.jobs import (
-    run_shell_job,
     job_status,
     job_result,
     job_logs,
@@ -126,8 +127,7 @@ __all__ = [
     "fetch_arxiv_paper",
     "execute_python",
     "ask_clarification",
-    # Long-running jobs
-    "run_shell_job",
+    # Long-running jobs (observe-only; typed starters are app-provided)
     "job_status",
     "job_result",
     "job_logs",

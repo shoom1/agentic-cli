@@ -34,8 +34,52 @@ from rich.text import Text
 
 from agentic_cli import BaseCLIApp, BaseSettings
 from agentic_cli.cli import AppInfo
-from agentic_cli.tools import JOB_MANAGEMENT_TOOLS, run_shell_job
+from agentic_cli.tools import JOB_MANAGEMENT_TOOLS
+from agentic_cli.tools.registry import ToolCategory, register_tool
 from agentic_cli.workflow import AgentConfig
+from agentic_cli.workflow.permissions import Capability
+from agentic_cli.workflow.service_registry import JOB_MANAGER, get_service
+
+
+# =============================================================================
+# Typed long-running tool (demo-only)
+# =============================================================================
+#
+# This is the "starter" half of the job substrate: a typed long-running tool
+# that launches work and returns a job_id immediately. The framework ships the
+# generic JobManager + observe-only job_* tools, but NOT a starter like this —
+# a starter decides what runs and how, which is an application concern.
+#
+# SECURITY: this runs the command via the subprocess backend (``sh -c``) and
+# does NOT go through the hardened shell tool (``tools/shell/``) — no command
+# classifier, no blocked-pattern checks. It is gated only by its default-ASK
+# ``longrunning.run_shell_job`` capability. That's acceptable for a local demo
+# but is why it is NOT a framework built-in. A production shell-job tool should
+# route through the shell security layers (or an OS sandbox) first.
+
+
+@register_tool(
+    category=ToolCategory.EXECUTION,
+    capabilities=[Capability("longrunning.run_shell_job")],
+    long_running=True,
+    description="Run a shell command as a detached background job; returns a job_id immediately.",
+)
+def run_shell_job(command: str, name: str = "", cwd: str = "") -> dict:
+    """Start ``command`` as a background job and return its ``job_id``.
+
+    Use the ``job_*`` tools to check status, read logs, fetch the result, or
+    cancel. The job keeps running across turns and survives a CLI restart.
+    """
+    jm = get_service(JOB_MANAGER)
+    if jm is None:
+        return {"success": False, "error": "job manager not available"}
+    rec = jm.submit(
+        tool="run_shell_job",
+        backend="subprocess",
+        spec={"command": command, "cwd": cwd or None},
+        name=name or None,
+    )
+    return {"success": True, "job_id": rec.job_id, "state": rec.state.value}
 
 
 # =============================================================================
