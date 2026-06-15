@@ -1,18 +1,22 @@
-"""Job tools.
+"""Generic, observe-only job tools.
 
-Two kinds, per the design:
+The framework ships only the **observe-only** side of the job substrate here
+(capability ``jobs.manage``): tools that read/manage existing jobs but never
+*start* one. To keep the agent's tool surface small, ``job_status`` is the
+*recommended* companion to a long-running tool — it returns state, a stdout
+tail, and the result once finished, so most agents need only it.
+``job_result``/``job_logs``/``job_cancel``/``job_list`` remain available as
+opt-in extras (and power the ``/jobs`` command), but are not in the default
+bundle.
 
-- **Typed long-running tools** start work and return a ``job_id`` immediately;
-  the LLM only ever sees these. ``run_shell_job`` is the milestone-1 reference
-  (subprocess-backed). They declare ``long_running=True`` and a
-  ``longrunning.<toolname>`` capability (default-ASK → user verification).
-- **Observe-only generic tools** read/manage existing jobs but never start one
-  (capability ``jobs.manage``). To keep the agent's tool surface small,
-  ``job_status`` is the *recommended* companion to a long-running tool — it
-  returns state, a stdout tail, and the result once finished, so most agents
-  need only it. ``job_result``/``job_logs``/``job_cancel``/``job_list`` remain
-  available as opt-in extras (and power the ``/jobs`` command), but are not in
-  the default bundle.
+The other half — **typed long-running tools** that actually start work and
+return a ``job_id`` (declaring ``long_running=True`` and a
+``longrunning.<toolname>`` capability) — is intentionally **not** shipped by
+the framework. Such a tool decides *what* runs and *how* (which execution
+backend, and any safety checks on its input), so it belongs to the application.
+A subprocess-backed ``run_shell_job`` lives in ``examples/jobs_demo.py`` as a
+reference: note it runs the command via ``sh -c`` and does **not** go through
+the hardened shell tool (``tools/shell/``), so it is a demo, not a built-in.
 
 ``JobManager`` itself is never exposed to the LLM — tools reach it via the
 service registry.
@@ -31,43 +35,6 @@ def _manager():
     if jm is None:
         return {"success": False, "error": "job manager not available"}
     return jm
-
-
-# ---------------------------------------------------------------------------
-# Reference long-running tool (subprocess-backed)
-# ---------------------------------------------------------------------------
-
-
-@register_tool(
-    category=ToolCategory.EXECUTION,
-    capabilities=[Capability("longrunning.run_shell_job")],
-    long_running=True,
-    description="Run a shell command as a detached background job; returns a job_id immediately.",
-)
-def run_shell_job(command: str, name: str = "", cwd: str = "") -> dict:
-    """Start ``command`` as a background job and return its ``job_id``.
-
-    Use the ``job_*`` tools to check status, read logs, fetch the result, or
-    cancel. The job keeps running across turns and survives a CLI restart.
-
-    Args:
-        command: Shell command to run.
-        name: Optional human-friendly name.
-        cwd: Optional working directory.
-
-    Returns:
-        Dict with ``job_id`` and initial ``state``.
-    """
-    jm = _manager()
-    if isinstance(jm, dict):
-        return jm
-    rec = jm.submit(
-        tool="run_shell_job",
-        backend="subprocess",
-        spec={"command": command, "cwd": cwd or None},
-        name=name or None,
-    )
-    return {"success": True, "job_id": rec.job_id, "state": rec.state.value}
 
 
 # ---------------------------------------------------------------------------

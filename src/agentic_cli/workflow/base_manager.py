@@ -284,8 +284,10 @@ class BaseWorkflowManager(ABC):
         "search_arxiv": "arxiv_source",
         "fetch_arxiv_paper": "arxiv_source",
         "ingest_arxiv_paper": ("arxiv_source", "kb_manager"),
-        # Long-running jobs: the observe-only tools and the reference
-        # long-running tool all need the JobManager service.
+        # Long-running jobs: the observe-only tools need the JobManager service.
+        # ``run_shell_job`` is an application-provided typed starter (see
+        # examples/jobs_demo.py), not a framework tool — its name is mapped here
+        # by convention so an app can add it without also adding observe tools.
         "run_shell_job": "job_manager",
         "job_status": "job_manager",
         "job_result": "job_manager",

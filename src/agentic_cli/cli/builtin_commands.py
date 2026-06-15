@@ -218,7 +218,8 @@ class JobsCommand(Command):
 
         if manager is None:
             app.session.add_warning(
-                "Jobs not available. Add job tools (e.g. run_shell_job) to your agent config to enable them."
+                "Jobs not available. Add a long-running job tool (and the job_* tools) "
+                "to your agent config to enable them."
             )
             return
 

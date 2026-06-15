@@ -485,6 +485,10 @@ class BaseCLIApp:
         """Run the main application loop."""
         logger.info("repl_starting")
 
+        from agentic_cli.cli.job_monitor import JobMonitor
+
+        job_monitor = JobMonitor(self.session, self._workflow_controller)
+
         async with self._workflow_controller.background_init(self.session):
             if self._session_id:
                 await self._load_session_on_startup()
@@ -496,8 +500,11 @@ class BaseCLIApp:
                     return
                 await self.process_input(text)
 
-            # Run the session - user sees prompt immediately!
-            await self.session.run_async()
+            # Keep long-running jobs visible in the status bar while the
+            # session runs, independent of the agent loop.
+            async with job_monitor.running():
+                # Run the session - user sees prompt immediately!
+                await self.session.run_async()
 
         # Extract session facts into memory on exit (if enabled)
         await self._extract_session_facts_on_exit()
