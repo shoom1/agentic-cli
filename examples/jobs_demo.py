@@ -20,15 +20,14 @@ Things to try once it's up (watch the status bar, bottom of the screen):
     > /jobs all
     > /jobs <id>
 
-API keys are read from standard environment variables (GOOGLE_API_KEY or
-ANTHROPIC_API_KEY) and from ``~/.jobs_demo/.env`` if present.
+API keys are read from ``~/.research_demo/.env`` (shared with the research
+demo) or from standard environment variables (GOOGLE_API_KEY / ANTHROPIC_API_KEY).
 """
 
 import asyncio
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field
 from pydantic_settings import SettingsConfigDict
 from rich.panel import Panel
 from rich.text import Text
@@ -45,19 +44,27 @@ from agentic_cli.workflow import AgentConfig
 
 
 class Settings(BaseSettings):
-    """Settings for the Jobs demo."""
+    """Settings for the Jobs demo.
+
+    Reuses the research demo's ``.env`` (``~/.research_demo/.env``) so API keys
+    only have to live in one place. API keys may also be set via standard
+    environment variables (GOOGLE_API_KEY / ANTHROPIC_API_KEY).
+    """
 
     model_config = SettingsConfigDict(
-        env_file=str(Path.home() / ".jobs_demo" / ".env"),
+        env_file=str(Path.home() / ".research_demo" / ".env"),
         extra="ignore",
     )
-    app_name: str = Field(default="jobs_demo")
-    workspace_dir: Path = Field(default=Path.home() / ".jobs_demo")
-    # Cap concurrent jobs low so the queue is easy to observe in the demo.
-    max_concurrent_jobs: int = Field(default=2)
-    # Permissions off for a frictionless demo — every run_shell_job would
-    # otherwise prompt for approval (it declares a default-ASK capability).
-    permissions_enabled: bool = Field(default=False)
+
+    def __init__(self, **kwargs):
+        kwargs.setdefault("app_name", "jobs_demo")
+        kwargs.setdefault("workspace_dir", Path.home() / ".jobs_demo")
+        # Cap concurrent jobs low so the queue is easy to observe in the demo.
+        kwargs.setdefault("max_concurrent_jobs", 2)
+        # Permissions off for a frictionless demo — every run_shell_job would
+        # otherwise prompt for approval (it declares a default-ASK capability).
+        kwargs.setdefault("permissions_enabled", False)
+        super().__init__(**kwargs)
 
 
 @lru_cache
