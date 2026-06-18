@@ -313,6 +313,16 @@ class WorkflowSettingsMixin:
         description="Maximum long-running jobs running at once; excess are queued.",
         json_schema_extra={"ui_order": 137},
     )
+    job_auto_resume: bool = Field(
+        default=False,
+        title="Auto-resume Finished Jobs",
+        description=(
+            "When True, a finished long-running job that opted in "
+            "(resume_on_complete) automatically resumes the agent with its "
+            "result at the next turn boundary (or via /resume)."
+        ),
+        json_schema_extra={"ui_order": 138},
+    )
 
     # Persistence settings (LangGraph)
     postgres_uri: str | None = Field(

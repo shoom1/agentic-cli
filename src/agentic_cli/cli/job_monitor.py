@@ -62,11 +62,13 @@ class JobMonitor:
         ui: "ThinkingPromptSession",
         controller: "WorkflowController",
         *,
+        settings: Any = None,
         interval: float = _DEFAULT_INTERVAL,
         note_ticks: int = _DEFAULT_NOTE_TICKS,
     ) -> None:
         self._ui = ui
         self._controller = controller
+        self._settings = settings
         self._interval = interval
         self._note_ticks = note_ticks
         self._task: asyncio.Task[None] | None = None
@@ -155,8 +157,9 @@ class JobMonitor:
         from agentic_cli.tools.jobs.backends import TERMINAL_STATES
 
         terminal_vals = {s.value for s in TERMINAL_STATES}
-        running = queued = 0
+        running = queued = pending_resume = 0
         seen: set[str] = set()
+        auto_resume = bool(getattr(self._settings, "job_auto_resume", False))
 
         for rec in recs:
             seen.add(rec.job_id)
@@ -165,6 +168,13 @@ class JobMonitor:
                 running += 1
             elif state == "queued":
                 queued += 1
+            if (
+                auto_resume
+                and getattr(rec, "resume_on_complete", False)
+                and not getattr(rec, "resumed", False)
+                and state in terminal_vals
+            ):
+                pending_resume += 1
             prev = self._states.get(rec.job_id)
             # Announce a job that we previously saw active and is now terminal.
             if state in terminal_vals and prev is not None and prev not in terminal_vals:
@@ -190,6 +200,8 @@ class JobMonitor:
         if active:
             parts.append("jobs: " + ", ".join(active))
         parts.extend(label for label, _ in self._notes)
+        if pending_resume:
+            parts.append(f"↻{pending_resume} to resume")
         return " · ".join(parts) if parts else None
 
     @staticmethod

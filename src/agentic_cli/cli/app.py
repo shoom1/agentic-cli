@@ -8,6 +8,7 @@ This module provides the base CLI application that:
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Any
 
 from prompt_toolkit.completion import Completer, Completion
@@ -143,6 +144,10 @@ class BaseCLIApp:
         )
         self._workflow_controller.usage_tracker = self._usage_tracker
         self._message_processor = MessageProcessor()
+
+        # Serializes turns: a user turn and a background-job resume turn must
+        # never overlap (shared session + thinking boxes).
+        self._turn_lock = asyncio.Lock()
 
         # === UI: ThinkingPromptSession ===
         completer = SlashCommandCompleter(self.command_registry.get_completions())
@@ -348,6 +353,7 @@ class BaseCLIApp:
             StatusCommand,
             SandboxCommand,
             JobsCommand,
+            ResumeCommand,
             PapersCommand,
             SessionsCommand,
         )
@@ -359,6 +365,7 @@ class BaseCLIApp:
         self.command_registry.register(StatusCommand())
         self.command_registry.register(SandboxCommand())
         self.command_registry.register(JobsCommand())
+        self.command_registry.register(ResumeCommand())
         self.command_registry.register(SettingsCommand())
         self.command_registry.register(PapersCommand())
         self.command_registry.register(SessionsCommand())
@@ -418,14 +425,48 @@ class BaseCLIApp:
         # Echo user input for regular messages
         self.session.add_message("user", message)
 
-        # Delegate to message processor
-        await self._message_processor.process(
-            message=message,
-            workflow_controller=self._workflow_controller,
-            ui=self.session,
-            settings=self._settings,
-            usage_tracker=self._usage_tracker,
-        )
+        # Delegate to message processor (one turn at a time).
+        async with self._turn_lock:
+            await self._message_processor.process(
+                message=message,
+                workflow_controller=self._workflow_controller,
+                ui=self.session,
+                settings=self._settings,
+                usage_tracker=self._usage_tracker,
+            )
+
+        # At the turn boundary, auto-resume any finished background jobs that
+        # opted in (gated by the job_auto_resume setting).
+        if getattr(self._settings, "job_auto_resume", False):
+            await self.resume_finished_jobs()
+
+    async def resume_finished_jobs(self) -> int:
+        """Resume the agent for each finished, resume-flagged background job.
+
+        Each resume is a serialized turn (via the turn lock) so it never
+        overlaps a user turn or another resume. Returns the number resumed.
+        Used at turn boundaries (auto, gated) and by the /resume command
+        (explicit, ungated).
+        """
+        if not self._workflow_controller.is_ready:
+            return 0
+        jm = getattr(self._workflow_controller.workflow, "job_manager", None)
+        if jm is None:
+            return 0
+
+        records = jm.awaiting_resume()
+        for record in records:
+            # Mark before running so a crash mid-resume can't double-fire.
+            jm.mark_resumed(record.job_id)
+            async with self._turn_lock:
+                await self._message_processor.process_resume(
+                    record=record,
+                    workflow_controller=self._workflow_controller,
+                    ui=self.session,
+                    settings=self._settings,
+                    usage_tracker=self._usage_tracker,
+                )
+        return len(records)
 
     async def _load_session_on_startup(self) -> None:
         """Load a saved session after workflow initialization."""
@@ -487,7 +528,9 @@ class BaseCLIApp:
 
         from agentic_cli.cli.job_monitor import JobMonitor
 
-        job_monitor = JobMonitor(self.session, self._workflow_controller)
+        job_monitor = JobMonitor(
+            self.session, self._workflow_controller, settings=self._settings
+        )
 
         async with self._workflow_controller.background_init(self.session):
             if self._session_id:

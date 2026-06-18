@@ -117,6 +117,8 @@ class Settings(BaseSettings):
         # Permissions off for a frictionless demo — every run_shell_job would
         # otherwise prompt for approval (it declares a default-ASK capability).
         kwargs.setdefault("permissions_enabled", False)
+        # Auto-resume the agent when a background job finishes (phase-2 demo).
+        kwargs.setdefault("job_auto_resume", True)
         super().__init__(**kwargs)
 
 
