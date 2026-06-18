@@ -533,7 +533,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         self._event_processor.model = self.model
 
         # Context setup
-        with self._workflow_context():
+        with self._workflow_context(session_id=current_session_id, user_id=user_id):
             # Session handling
             session = await self._get_or_create_session(user_id, current_session_id)
 

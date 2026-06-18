@@ -59,6 +59,13 @@ class JobRecord:
     started_at: float | None = None
     finished_at: float | None = None
     error: str | None = None
+    # --- Resume association (phase 2 push/resume; unset = fire-and-forget) ---
+    session_id: str | None = None      # conversation that launched the job
+    user_id: str | None = None
+    resume_on_complete: bool = False   # wake the agent with the result when terminal
+    call_id: str | None = None         # ADK function_call_id / LangGraph tool_call_id
+    call_name: str | None = None       # function name to answer on resume
+    resumed: bool = False              # guard against double-resume
 
     def elapsed_s(self) -> float:
         start = self.started_at or self.submitted_at
@@ -140,12 +147,26 @@ class JobManager:
         spec: dict,
         name: str | None = None,
         tags: list[str] | None = None,
+        resume_on_complete: bool = False,
+        call_id: str | None = None,
+        call_name: str | None = None,
+        session_id: str | None = None,
+        user_id: str | None = None,
     ) -> JobRecord:
-        """Create a job; start it now if under the cap, else queue it."""
+        """Create a job; start it now if under the cap, else queue it.
+
+        When ``resume_on_complete`` is set the job is flagged so the harness can
+        auto-resume the agent with the result once it finishes (phase 2). The
+        originating ``session_id``/``user_id`` are auto-filled from the active
+        workflow turn when not supplied; ``call_id``/``call_name`` (which only
+        the calling tool knows) identify the pending tool call to answer.
+        """
         if backend not in self._backends:
             raise ValueError(
                 f"unknown job backend {backend!r}; have {sorted(self._backends)}"
             )
+        if resume_on_complete and (session_id is None or user_id is None):
+            session_id, user_id = self._fill_turn_context(session_id, user_id)
         with self._lock:
             job_id = uuid.uuid4().hex[:12]
             rec = JobRecord(
@@ -156,12 +177,41 @@ class JobManager:
                 state=JobState.QUEUED,
                 spec=dict(spec),
                 tags=list(tags or []),
+                resume_on_complete=resume_on_complete,
+                call_id=call_id,
+                call_name=call_name or (tool if resume_on_complete else None),
+                session_id=session_id,
+                user_id=user_id,
             )
             self._records[job_id] = rec
             self._job_dir(job_id).mkdir(parents=True, exist_ok=True)
             self._persist(rec)
             self._maybe_start_queued()
             return rec
+
+    @staticmethod
+    def _fill_turn_context(
+        session_id: str | None, user_id: str | None
+    ) -> tuple[str | None, str | None]:
+        """Best-effort fill session/user from the active workflow turn.
+
+        Reads the ``WORKFLOW`` service from the registry (live during a tool
+        call). Missing context is non-fatal: the job still runs, but it won't be
+        resumable, so we warn.
+        """
+        from agentic_cli.workflow.service_registry import WORKFLOW, get_service
+
+        wf = get_service(WORKFLOW)
+        if wf is not None:
+            session_id = session_id or getattr(wf, "active_session_id", None)
+            user_id = user_id or getattr(wf, "active_user_id", None)
+        if session_id is None or user_id is None:
+            logger.warning(
+                "job_resume_context_missing",
+                have_session=session_id is not None,
+                have_user=user_id is not None,
+            )
+        return session_id, user_id
 
     def get(self, job_id: str) -> JobRecord | None:
         with self._lock:
@@ -244,6 +294,29 @@ class JobManager:
     def running_count(self) -> int:
         with self._lock:
             return sum(1 for r in self._records.values() if r.state == JobState.RUNNING)
+
+    def awaiting_resume(self) -> list[JobRecord]:
+        """Terminal jobs flagged for resume that haven't been resumed yet.
+
+        Reconciles first so freshly-finished jobs are included; sorted
+        oldest-finished-first so the coordinator drains in completion order.
+        """
+        with self._lock:
+            self.reconcile()
+            recs = [
+                r
+                for r in self._records.values()
+                if r.resume_on_complete and not r.resumed and r.state in TERMINAL_STATES
+            ]
+        return sorted(recs, key=lambda r: r.finished_at or r.submitted_at)
+
+    def mark_resumed(self, job_id: str) -> None:
+        """Mark a job as resumed (durably) so it is never resumed twice."""
+        with self._lock:
+            rec = self._records.get(job_id)
+            if rec is not None and not rec.resumed:
+                rec.resumed = True
+                self._persist(rec)
 
     # ------------------------------------------------------------------
     # Internals
