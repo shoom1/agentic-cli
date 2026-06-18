@@ -195,18 +195,30 @@ class MessageProcessor:
             return
 
         workflow = workflow_controller.workflow
-        if not hasattr(workflow, "resume_with_job_result"):
-            logger.debug(
-                "resume_unsupported_backend",
+        bind_context(user_id=settings.default_user)
+        icon = "✓" if record.state.value == "succeeded" else "✗"
+
+        # Resume only if the backend supports it AND the originating conversation
+        # is still available (after a restart the in-memory ADK session is gone).
+        # Otherwise surface a notice — the result stays reachable by job id.
+        resumable = hasattr(
+            workflow, "resume_with_job_result"
+        ) and await workflow.can_resume(record)
+        if not resumable:
+            logger.info(
+                "job_resume_not_resumable",
+                job_id=record.job_id,
                 backend=getattr(workflow, "backend_type", "?"),
-                job_id=getattr(record, "job_id", None),
+            )
+            ui.add_message(
+                "system",
+                f"{icon} Background job '{record.name}' finished "
+                f"({record.state.value}) while its conversation was unavailable "
+                f"— fetch the result with /jobs {record.job_id}.",
             )
             return
 
-        bind_context(user_id=settings.default_user)
         logger.info("resuming_job", job_id=record.job_id, state=record.state.value)
-
-        icon = "✓" if record.state.value == "succeeded" else "✗"
         ui.add_message(
             "system",
             f"↻ Background job '{record.name}' finished ({icon} {record.state.value}) "

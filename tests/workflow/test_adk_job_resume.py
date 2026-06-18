@@ -153,3 +153,36 @@ async def test_resume_missing_session_yields_nothing():
     events = [ev async for ev in mgr.resume_with_job_result(_record(), result="x")]
     assert events == []
     assert runner.calls == []
+
+
+# --- can_resume ----------------------------------------------------------------
+
+
+class _SessionSvc:
+    def __init__(self, present: bool) -> None:
+        self._present = present
+
+    async def get_session(self, *, app_name, user_id, session_id):
+        return object() if self._present else None
+
+
+def _can_resume_manager(present: bool) -> GoogleADKWorkflowManager:
+    mgr = GoogleADKWorkflowManager.__new__(GoogleADKWorkflowManager)
+    mgr._app_name = "test"
+    mgr._session_service = _SessionSvc(present)
+    return mgr
+
+
+async def test_can_resume_true_when_session_present():
+    assert await _can_resume_manager(True).can_resume(_record()) is True
+
+
+async def test_can_resume_false_when_session_missing():
+    # After a restart the in-memory session is gone → not resumable.
+    assert await _can_resume_manager(False).can_resume(_record()) is False
+
+
+async def test_can_resume_false_when_ids_missing():
+    mgr = _can_resume_manager(True)
+    assert await mgr.can_resume(_record(call_id=None)) is False
+    assert await mgr.can_resume(_record(session_id=None)) is False

@@ -679,6 +679,22 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
 
         logger.info("message_processed", event_count=event_count)
 
+    async def can_resume(self, record) -> bool:
+        """True iff the originating ADK session still exists to resume into.
+
+        Requires the resume ids and a live session holding the pending call.
+        After a CLI restart the in-memory session is gone, so this returns
+        False and the harness surfaces a notice instead of a dead resume turn.
+        """
+        if not (record.session_id and record.user_id and record.call_id):
+            return False
+        if self._session_service is None:
+            return False
+        session = await self._session_service.get_session(
+            app_name=self.app_name, user_id=record.user_id, session_id=record.session_id,
+        )
+        return session is not None
+
     async def resume_with_job_result(
         self, record, result: Any = None
     ) -> AsyncGenerator[WorkflowEvent, None]:

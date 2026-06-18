@@ -481,6 +481,18 @@ class BaseWorkflowManager(ABC):
         """User id of the in-flight ``process()`` call, or None when idle."""
         return self._active_user_id
 
+    async def can_resume(self, record) -> bool:
+        """Whether a finished job can be resumed into its conversation now.
+
+        Base default: False (no resume support). Backends that implement
+        ``resume_with_job_result`` override this to report whether the
+        originating conversation is still available — e.g. the ADK session that
+        holds the pending call. Used by the harness to resume vs. surface a
+        "finished while its conversation was unavailable" notice (after a CLI
+        restart the default in-memory session is gone).
+        """
+        return False
+
     @contextlib.contextmanager
     def _workflow_context(
         self, session_id: str | None = None, user_id: str | None = None
