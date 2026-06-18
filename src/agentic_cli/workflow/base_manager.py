@@ -99,6 +99,12 @@ class BaseWorkflowManager(ABC):
         # User input handling (callback-only)
         self._user_input_callback: Callable[[UserInputRequest], Awaitable[str]] | None = None
 
+        # Active turn — set per process() call via _workflow_context(); read by
+        # JobManager to associate a long-running job with the session/user that
+        # launched it (phase 2 push/resume). None when no turn is in flight.
+        self._active_session_id: str | None = None
+        self._active_user_id: str | None = None
+
         # Model registry
         self._model_registry = ModelRegistry()
 
@@ -465,20 +471,38 @@ class BaseWorkflowManager(ABC):
             store.store(fact, tags=["auto-extracted", "session"])
         return facts
 
+    @property
+    def active_session_id(self) -> str | None:
+        """Session id of the in-flight ``process()`` call, or None when idle."""
+        return self._active_session_id
+
+    @property
+    def active_user_id(self) -> str | None:
+        """User id of the in-flight ``process()`` call, or None when idle."""
+        return self._active_user_id
+
     @contextlib.contextmanager
-    def _workflow_context(self) -> Iterator[None]:
+    def _workflow_context(
+        self, session_id: str | None = None, user_id: str | None = None
+    ) -> Iterator[None]:
         """Context manager that exposes the service registry to tools.
 
         Sets a single ContextVar (the service registry) so tools can
-        call ``get_service(key)`` during execution.
+        call ``get_service(key)`` during execution, and records the active
+        session/user for the duration of the turn so JobManager can associate
+        a launched job with the conversation that started it.
         """
         from agentic_cli.config import set_context_settings
 
         settings_token = set_context_settings(self._settings)
         registry_token = set_service_registry(self._services)
+        self._active_session_id = session_id
+        self._active_user_id = user_id
         try:
             yield
         finally:
+            self._active_session_id = None
+            self._active_user_id = None
             registry_token.var.reset(registry_token)
             settings_token.var.reset(settings_token)
 

@@ -226,3 +226,92 @@ class TestRegistryAndTools:
             assert "not available" in res["error"]
         finally:
             token.var.reset(token)
+
+
+class TestResumeMetadata:
+    """Phase-2 association layer: resume metadata on jobs (no behavior change)."""
+
+    def test_defaults_are_fire_and_forget(self, jm: JobManager):
+        rec = jm.submit(tool="t", backend="subprocess", spec={"command": "echo x"})
+        assert rec.resume_on_complete is False
+        assert rec.session_id is None and rec.user_id is None
+        assert rec.call_id is None and rec.resumed is False
+        _wait(jm, rec.job_id)
+        # A non-resume job never shows up as awaiting resume.
+        assert jm.awaiting_resume() == []
+
+    def test_submit_stores_explicit_metadata_and_persists(self, tmp_path: Path):
+        base = tmp_path / "jobs"
+        jm = JobManager(base_dir=base, max_concurrent=2)
+        rec = jm.submit(
+            tool="run_shell_job", backend="subprocess", spec={"command": "echo x"},
+            resume_on_complete=True, call_id="fc-123", call_name="run_shell_job",
+            session_id="sess-1", user_id="user-1",
+        )
+        assert rec.resume_on_complete is True
+        assert rec.call_id == "fc-123"
+        assert rec.call_name == "run_shell_job"
+        assert rec.session_id == "sess-1" and rec.user_id == "user-1"
+        # Survives a reload (persisted in meta.json).
+        jm2 = JobManager(base_dir=base)
+        reloaded = jm2.get(rec.job_id)
+        assert reloaded is not None
+        assert reloaded.resume_on_complete is True
+        assert reloaded.call_id == "fc-123"
+        assert reloaded.session_id == "sess-1"
+
+    def test_autofills_session_user_from_workflow_service(self, jm: JobManager):
+        from types import SimpleNamespace
+
+        from agentic_cli.workflow.service_registry import WORKFLOW, set_service_registry
+
+        fake_wf = SimpleNamespace(active_session_id="sess-A", active_user_id="user-A")
+        token = set_service_registry({WORKFLOW: fake_wf})
+        try:
+            rec = jm.submit(
+                tool="run_shell_job", backend="subprocess", spec={"command": "echo x"},
+                resume_on_complete=True, call_id="fc-1",
+            )
+        finally:
+            token.var.reset(token)
+        assert rec.session_id == "sess-A"
+        assert rec.user_id == "user-A"
+        # call_name defaults to the tool name when resume is requested.
+        assert rec.call_name == "run_shell_job"
+
+    def test_missing_context_is_nonfatal(self, jm: JobManager):
+        from agentic_cli.workflow.service_registry import clear_service_registry
+
+        token = clear_service_registry()
+        try:
+            # No workflow service → can't fill session/user, but the job still runs.
+            rec = jm.submit(
+                tool="t", backend="subprocess", spec={"command": "echo x"},
+                resume_on_complete=True, call_id="fc-1",
+            )
+        finally:
+            token.var.reset(token)
+        assert rec.resume_on_complete is True
+        assert rec.session_id is None and rec.user_id is None
+
+    def test_awaiting_resume_and_mark_resumed(self, tmp_path: Path):
+        base = tmp_path / "jobs"
+        jm = JobManager(base_dir=base, max_concurrent=2)
+        rec = jm.submit(
+            tool="run_shell_job", backend="subprocess", spec={"command": "echo x"},
+            resume_on_complete=True, call_id="fc-1", session_id="s", user_id="u",
+        )
+        # Also submit a fire-and-forget job that must never appear.
+        other = jm.submit(tool="t", backend="subprocess", spec={"command": "echo y"})
+        _wait(jm, rec.job_id)
+        _wait(jm, other.job_id)
+
+        awaiting = jm.awaiting_resume()
+        assert [r.job_id for r in awaiting] == [rec.job_id]
+
+        # Marking it resumed (durably) drops it from the list.
+        jm.mark_resumed(rec.job_id)
+        assert jm.awaiting_resume() == []
+        jm_reloaded = JobManager(base_dir=base)
+        assert jm_reloaded.get(rec.job_id).resumed is True  # type: ignore[union-attr]
+        assert jm_reloaded.awaiting_resume() == []

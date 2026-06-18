@@ -278,7 +278,7 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
         logger.info("processing_message_langgraph", message_length=len(message))
 
         # Context setup
-        with self._workflow_context():
+        with self._workflow_context(session_id=current_session_id, user_id=user_id):
             # Prepare initial state
             initial_state = {
                 "messages": [{"role": "user", "content": message}],
