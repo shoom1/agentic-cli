@@ -64,11 +64,17 @@ from agentic_cli.workflow.service_registry import JOB_MANAGER, get_service
     long_running=True,
     description="Run a shell command as a detached background job; returns a job_id immediately.",
 )
-def run_shell_job(command: str, name: str = "", cwd: str = "") -> dict:
+def run_shell_job(command: str, name: str = "", cwd: str = "", tool_context=None) -> dict:
     """Start ``command`` as a background job and return its ``job_id``.
 
     Use the ``job_*`` tools to check status, read logs, fetch the result, or
     cancel. The job keeps running across turns and survives a CLI restart.
+
+    Because this is marked ``long_running``, ADK wraps it as a
+    ``LongRunningFunctionTool`` and injects ``tool_context``; we capture its
+    ``function_call_id`` so the harness can later deliver the result back to
+    *this* call and auto-resume the agent (phase-2 push/resume). Session/user
+    are auto-filled from the active turn by ``JobManager.submit``.
     """
     jm = get_service(JOB_MANAGER)
     if jm is None:
@@ -78,6 +84,9 @@ def run_shell_job(command: str, name: str = "", cwd: str = "") -> dict:
         backend="subprocess",
         spec={"command": command, "cwd": cwd or None},
         name=name or None,
+        resume_on_complete=True,
+        call_id=getattr(tool_context, "function_call_id", None),
+        call_name="run_shell_job",
     )
     return {"success": True, "job_id": rec.job_id, "state": rec.state.value}
 

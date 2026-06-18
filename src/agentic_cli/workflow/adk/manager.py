@@ -20,6 +20,7 @@ from google.adk.agents import LlmAgent, Agent
 from google.adk.planners import BuiltInPlanner
 from google.adk.sessions import InMemorySessionService, BaseSessionService, Session
 from google.adk.events import Event
+from google.adk.tools import LongRunningFunctionTool
 
 from agentic_cli.workflow.base_manager import BaseWorkflowManager
 from agentic_cli.workflow.events import WorkflowEvent, EventType
@@ -27,6 +28,7 @@ from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.adk.event_processor import ADKEventProcessor
 from agentic_cli.workflow.adk.permission_plugin import PermissionPlugin
 from agentic_cli.workflow.adk.plugins import LLMLoggingPlugin
+from agentic_cli.workflow.service_registry import JOB_MANAGER
 
 from agentic_cli.config import (
     BaseSettings,
@@ -40,6 +42,22 @@ logger = Loggers.workflow()
 # Suppress Google GenAI SDK warning about non-text parts (function_call) in
 # mixed responses. We already handle all part types individually in process_part.
 logging.getLogger("google_genai.types").setLevel(logging.ERROR)
+
+_RESULT_SUMMARY_LIMIT = 1000
+
+
+def _summarize_result(result: Any) -> str | None:
+    """Render a job result as a short string for the resume payload.
+
+    Truncates to keep the resumed turn's context lean; the agent pulls the full
+    result via the ``job_result`` tool when it needs it.
+    """
+    if result is None:
+        return None
+    text = result if isinstance(result, str) else repr(result)
+    if len(text) > _RESULT_SUMMARY_LIMIT:
+        return text[:_RESULT_SUMMARY_LIMIT] + f"… (+{len(text) - _RESULT_SUMMARY_LIMIT} chars)"
+    return text
 
 
 class GoogleADKWorkflowManager(BaseWorkflowManager):
@@ -324,6 +342,35 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         )
         return [save_plan, get_plan, save_tasks, get_tasks]
 
+    def _wrap_long_running(self, tools: list[Callable]) -> list:
+        """Wrap tools flagged ``long_running`` as ADK ``LongRunningFunctionTool``.
+
+        A long-running tool returns a ``job_id`` immediately and the model is
+        instructed not to re-call it while pending; the eventual result is
+        delivered later as a ``FunctionResponse`` (see ``resume_with_job_result``).
+        Detection is by registered tool name; non-long-running tools and any
+        already-wrapped tools pass through unchanged. Permission gating is
+        unaffected — ADK gates via ``PermissionPlugin`` (by name), not by
+        wrapping the callable.
+        """
+        from agentic_cli.tools.registry import get_registry
+
+        reg = get_registry()
+        wrapped: list = []
+        for tool in tools:
+            name = getattr(tool, "__name__", "")
+            defn = reg.get(name) if name else None
+            if (
+                defn is not None
+                and defn.long_running
+                and not isinstance(tool, LongRunningFunctionTool)
+            ):
+                wrapped.append(LongRunningFunctionTool(func=tool))
+                logger.debug("long_running_tool_wrapped", tool=name)
+            else:
+                wrapped.append(tool)
+        return wrapped
+
     def _create_agents(self) -> Agent:
         """Create agent hierarchy from configs.
 
@@ -346,7 +393,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     name=config.name,
                     model=config.model or self.model,
                     instruction=config.get_prompt(),
-                    tools=self._build_tools(config, service_map),
+                    tools=self._wrap_long_running(self._build_tools(config, service_map)),
                     description=config.description or None,
                     planner=planner,
                     generate_content_config=generate_config,
@@ -371,7 +418,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     name=config.name,
                     model=config.model or self.model,
                     instruction=config.get_prompt(),
-                    tools=self._build_tools(config, service_map),
+                    tools=self._wrap_long_running(self._build_tools(config, service_map)),
                     description=config.description or None,
                     sub_agents=sub_agent_instances,
                     planner=planner,
@@ -535,7 +582,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         # Context setup
         with self._workflow_context(session_id=current_session_id, user_id=user_id):
             # Session handling
-            session = await self._get_or_create_session(user_id, current_session_id)
+            await self._get_or_create_session(user_id, current_session_id)
 
             # Create message
             new_message = types.Content(
@@ -543,63 +590,54 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                 parts=[types.Part.from_text(text=message)],
             )
 
-            event_count = 0
-
-            # Build run_config with context window compression if enabled
-            run_config = None
-            if self._settings.context_window_enabled:
-                from google.genai.types import ContextWindowCompressionConfig, SlidingWindow
-                from google.adk.agents import RunConfig
-
-                run_config = RunConfig(
-                    context_window_compression=ContextWindowCompressionConfig(
-                        trigger_tokens=self._settings.context_window_trigger_tokens,
-                        sliding_window=SlidingWindow(
-                            target_tokens=self._settings.context_window_target_tokens,
-                        ),
-                    )
-                )
-
-            # Process ADK events directly - retry is handled by HttpRetryOptions
-            async for adk_event in self._runner.run_async(
+            async for event in self._run_and_stream(
                 session_id=current_session_id,
                 user_id=user_id,
                 new_message=new_message,
-                run_config=run_config,
+                run_config=self._build_run_config(),
             ):
-                # Yield LLM events from plugin first (raw capture)
-                if self._llm_logging_plugin:
-                    for llm_event in self._llm_logging_plugin.drain_events():
-                        llm_event = self._apply_event_hook(llm_event)
-                        if llm_event:
-                            event_count += 1
-                            yield llm_event
+                yield event
 
-                # Process ADK event into workflow events
-                async for workflow_event in self._event_processor.process_event(
-                    adk_event,
-                    current_session_id,
-                ):
-                    event_count += 1
-                    yield workflow_event
+    def _build_run_config(self):
+        """Build a RunConfig with context-window compression if enabled."""
+        if not self._settings.context_window_enabled:
+            return None
+        from google.genai.types import ContextWindowCompressionConfig, SlidingWindow
+        from google.adk.agents import RunConfig
 
-                    # Drain task progress events buffered by the plugin
-                    if workflow_event.type == EventType.TOOL_RESULT and self._task_progress_plugin:
-                        for progress_event in self._task_progress_plugin.drain_events():
-                            progress_event = self._apply_event_hook(progress_event)
-                            if progress_event:
-                                event_count += 1
-                                yield progress_event
+        return RunConfig(
+            context_window_compression=ContextWindowCompressionConfig(
+                trigger_tokens=self._settings.context_window_trigger_tokens,
+                sliding_window=SlidingWindow(
+                    target_tokens=self._settings.context_window_target_tokens,
+                ),
+            )
+        )
 
-            # Final drain — catches progress from the last tool call
-            if self._task_progress_plugin:
-                for progress_event in self._task_progress_plugin.drain_events():
-                    progress_event = self._apply_event_hook(progress_event)
-                    if progress_event:
-                        event_count += 1
-                        yield progress_event
+    async def _run_and_stream(
+        self,
+        *,
+        session_id: str,
+        user_id: str,
+        new_message: "types.Content",
+        run_config,
+    ) -> AsyncGenerator[WorkflowEvent, None]:
+        """Run the ADK runner for one invocation and stream WorkflowEvents.
 
-            # Drain any remaining LLM events after processing completes
+        Shared by ``process()`` (user message) and ``resume_with_job_result()``
+        (function response). The caller must already be inside
+        ``_workflow_context`` with the session prepared.
+        """
+        event_count = 0
+
+        # Process ADK events directly - retry is handled by HttpRetryOptions
+        async for adk_event in self._runner.run_async(
+            session_id=session_id,
+            user_id=user_id,
+            new_message=new_message,
+            run_config=run_config,
+        ):
+            # Yield LLM events from plugin first (raw capture)
             if self._llm_logging_plugin:
                 for llm_event in self._llm_logging_plugin.drain_events():
                     llm_event = self._apply_event_hook(llm_event)
@@ -607,7 +645,132 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                         event_count += 1
                         yield llm_event
 
-            logger.info("message_processed", event_count=event_count)
+            # Process ADK event into workflow events
+            async for workflow_event in self._event_processor.process_event(
+                adk_event,
+                session_id,
+            ):
+                event_count += 1
+                yield workflow_event
+
+                # Drain task progress events buffered by the plugin
+                if workflow_event.type == EventType.TOOL_RESULT and self._task_progress_plugin:
+                    for progress_event in self._task_progress_plugin.drain_events():
+                        progress_event = self._apply_event_hook(progress_event)
+                        if progress_event:
+                            event_count += 1
+                            yield progress_event
+
+        # Final drain — catches progress from the last tool call
+        if self._task_progress_plugin:
+            for progress_event in self._task_progress_plugin.drain_events():
+                progress_event = self._apply_event_hook(progress_event)
+                if progress_event:
+                    event_count += 1
+                    yield progress_event
+
+        # Drain any remaining LLM events after processing completes
+        if self._llm_logging_plugin:
+            for llm_event in self._llm_logging_plugin.drain_events():
+                llm_event = self._apply_event_hook(llm_event)
+                if llm_event:
+                    event_count += 1
+                    yield llm_event
+
+        logger.info("message_processed", event_count=event_count)
+
+    async def resume_with_job_result(
+        self, record, result: Any = None
+    ) -> AsyncGenerator[WorkflowEvent, None]:
+        """Resume the agent with a finished long-running job's result.
+
+        Delivers the result to the pending long-running tool call as an ADK
+        ``FunctionResponse`` (matching ``record.call_id``) and re-invokes the
+        runner, streaming the follow-up turn's events. The originating session
+        must still contain the pending call (it is persisted); if it's gone or
+        the record lacks the ids needed to resume, this yields nothing.
+
+        Args:
+            record: The terminal ``JobRecord`` to resume from.
+            result: The job's result; fetched from the JobManager if omitted.
+        """
+        await self._ensure_initialized()
+
+        session_id = record.session_id
+        user_id = record.user_id
+        if not session_id or not user_id or not record.call_id:
+            logger.warning(
+                "job_resume_missing_ids",
+                job_id=getattr(record, "job_id", None),
+                have_session=bool(session_id),
+                have_user=bool(user_id),
+                have_call_id=bool(record.call_id),
+            )
+            return
+
+        bind_context(session_id=session_id, user_id=user_id)
+        self._event_processor.model = self.model
+
+        with self._workflow_context(session_id=session_id, user_id=user_id):
+            # The pending call lives in the existing session; don't create a new
+            # empty one (that would have no call to answer).
+            session = await self._session_service.get_session(
+                app_name=self.app_name, user_id=user_id, session_id=session_id,
+            )
+            if session is None:
+                logger.warning("job_resume_session_missing", job_id=record.job_id,
+                               session_id=session_id)
+                return
+
+            if result is None:
+                jm = self._services.get(JOB_MANAGER)
+                if jm is not None:
+                    result = jm.result(record.job_id)
+
+            function_response = types.FunctionResponse(
+                id=record.call_id,
+                name=record.call_name or record.tool,
+                response=self._job_result_payload(record, result),
+            )
+            new_message = types.Content(
+                role="user",
+                parts=[types.Part(function_response=function_response)],
+            )
+
+            logger.info("job_resume_started", job_id=record.job_id,
+                        call_id=record.call_id, state=record.state.value)
+            async for event in self._run_and_stream(
+                session_id=session_id,
+                user_id=user_id,
+                new_message=new_message,
+                run_config=self._build_run_config(),
+            ):
+                yield event
+
+    @staticmethod
+    def _job_result_payload(record, result: Any) -> dict:
+        """Build the FunctionResponse payload — a summary + pointer, not raw data.
+
+        Keeps the resumed turn's context lean; the agent can pull the full
+        result/logs via ``job_result``/``job_logs`` using the job_id.
+        """
+        payload: dict[str, Any] = {
+            "job_id": record.job_id,
+            "tool": record.tool,
+            "state": record.state.value,
+        }
+        if record.exit_code is not None:
+            payload["exit_code"] = record.exit_code
+        if record.error:
+            payload["error"] = record.error
+        summary = _summarize_result(result)
+        if summary is not None:
+            payload["result_summary"] = summary
+        payload["hint"] = (
+            f"Full result via job_result('{record.job_id}'); "
+            f"logs via job_logs('{record.job_id}')."
+        )
+        return payload
 
     # -------------------------------------------------------------------------
     # Session save/resume hooks
