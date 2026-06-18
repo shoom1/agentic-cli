@@ -206,12 +206,6 @@ class WorkflowSettingsMixin:
         description="Workflow orchestrator backend",
         json_schema_extra={"ui_order": 100},  # Advanced setting
     )
-    langgraph_checkpointer: Literal["memory", "postgres"] | None = Field(
-        default="memory",
-        title="LangGraph Checkpointer",
-        description="LangGraph state persistence type",
-        json_schema_extra={"ui_order": 101},
-    )
 
     # Retry configuration
     retry_max_attempts: int = Field(

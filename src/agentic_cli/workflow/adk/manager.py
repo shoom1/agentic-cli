@@ -10,7 +10,6 @@ For alternative orchestration backends (e.g., LangGraph), see the base_manager m
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import AsyncGenerator, Any, Callable
 
@@ -19,7 +18,6 @@ from google.adk import Runner
 from google.adk.agents import LlmAgent, Agent
 from google.adk.planners import BuiltInPlanner
 from google.adk.sessions import InMemorySessionService, BaseSessionService, Session
-from google.adk.events import Event
 from google.adk.tools import LongRunningFunctionTool
 
 from agentic_cli.workflow.base_manager import BaseWorkflowManager
