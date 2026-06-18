@@ -60,11 +60,16 @@ class ResearchDemoApp(BaseCLIApp):
       knowledge base ingestion (incl. PDF full-text extraction)
     """
 
-    def __init__(self, settings: ResearchDemoSettings | None = None) -> None:
+    def __init__(
+        self,
+        settings: ResearchDemoSettings | None = None,
+        session_id: str | None = None,
+    ) -> None:
         super().__init__(
             app_info=_create_app_info(),
             agent_configs=AGENT_CONFIGS,
             settings=settings or ResearchDemoSettings(),
+            session_id=session_id,
         )
 
     def register_commands(self) -> None:

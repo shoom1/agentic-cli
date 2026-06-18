@@ -10,7 +10,6 @@ For alternative orchestration backends (e.g., LangGraph), see the base_manager m
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import AsyncGenerator, Any, Callable
 
@@ -19,7 +18,6 @@ from google.adk import Runner
 from google.adk.agents import LlmAgent, Agent
 from google.adk.planners import BuiltInPlanner
 from google.adk.sessions import InMemorySessionService, BaseSessionService, Session
-from google.adk.events import Event
 from google.adk.tools import LongRunningFunctionTool
 
 from agentic_cli.workflow.base_manager import BaseWorkflowManager
@@ -475,13 +473,38 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
 
         return plugins
 
+    def _make_session_service(self) -> BaseSessionService:
+        """Build the ADK session service from ``session_store`` settings.
+
+        ``memory`` → ephemeral ``InMemorySessionService``; ``sqlite``/``postgres``
+        → native ``DatabaseSessionService`` (durable across restarts, full event
+        fidelity). The sqlite parent dir is created so the engine can open it.
+        """
+        db_url = self._settings.session_db_url()
+        if db_url is None:
+            logger.debug("using_in_memory_session_service")
+            return InMemorySessionService()
+
+        if db_url.startswith("sqlite"):
+            # sqlite+aiosqlite:///<path> — ensure the directory exists.
+            from pathlib import Path
+
+            path = db_url.split(":///", 1)[-1]
+            if path:
+                Path(path).parent.mkdir(parents=True, exist_ok=True)
+
+        from google.adk.sessions import DatabaseSessionService
+
+        logger.info("using_database_session_service", store=self._settings.session_store)
+        return DatabaseSessionService(db_url=db_url)
+
     async def _do_initialize(self) -> None:
         """ADK-specific initialization: session service, agents, runner."""
         logger.info("initializing_services", app_name=self.app_name)
 
-        # Create session service
-        self._session_service = InMemorySessionService()
-        logger.debug("using_in_memory_session_service")
+        # Create session service (durable DatabaseSessionService by default;
+        # InMemory only when session_store='memory').
+        self._session_service = self._make_session_service()
 
         # Create agent hierarchy from configs
         self._root_agent = self._create_agents()
@@ -789,133 +812,72 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         return payload
 
     # -------------------------------------------------------------------------
-    # Session save/resume hooks
+    # Sessions (native — DatabaseSessionService persists events continuously)
     # -------------------------------------------------------------------------
 
-    async def _extract_session_data(self, session_id: str) -> tuple[list[dict], str | None]:
-        """Extract normalized messages and current agent from ADK session.
-
-        Returns:
-            Tuple of (messages list, current agent name or None).
-        """
+    async def session_exists(self, session_id: str) -> bool:
+        """True if the store holds this session with any events."""
         if not self._session_service:
-            return [], None
-
+            return False
         session = await self._session_service.get_session(
             app_name=self.app_name,
             user_id=self._settings.default_user,
             session_id=session_id,
         )
-        if session is None or not session.events:
-            return [], None
+        return session is not None and bool(getattr(session, "events", None))
 
-        messages: list[dict] = []
-        for event in session.events:
-            content = getattr(event, "content", None)
-            if content is None:
-                continue
-
-            role = getattr(content, "role", None)
-            parts = getattr(content, "parts", None) or []
-
-            for part in parts:
-                # Text part
-                if hasattr(part, "text") and part.text:
-                    if role == "user":
-                        messages.append({"role": "user", "content": part.text})
-                    elif role == "model":
-                        messages.append({"role": "assistant", "content": part.text})
-
-                # Function call part
-                elif hasattr(part, "function_call") and part.function_call:
-                    fc = part.function_call
-                    tool_call = {
-                        "id": getattr(fc, "id", fc.name),
-                        "name": fc.name,
-                        "args": dict(fc.args) if fc.args else {},
-                    }
-                    # Attach to preceding assistant message or create one
-                    if messages and messages[-1]["role"] == "assistant":
-                        messages[-1].setdefault("tool_calls", []).append(tool_call)
-                    else:
-                        messages.append({
-                            "role": "assistant",
-                            "content": "",
-                            "tool_calls": [tool_call],
-                        })
-
-                # Function response part
-                elif hasattr(part, "function_response") and part.function_response:
-                    fr = part.function_response
-                    response_content = json.dumps(fr.response) if isinstance(fr.response, dict) else str(fr.response)
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": getattr(fr, "id", fr.name),
-                        "name": fr.name,
-                        "content": response_content,
-                    })
-
-        current_agent = getattr(session.events[-1], "author", None)
-        return messages, current_agent
-
-    async def _inject_session_messages(
-        self,
-        session_id: str,
-        messages: list[dict],
-        current_agent: str | None = None,
-    ) -> None:
-        """Inject normalized messages into the ADK session as real events.
-
-        Uses ``append_event`` so events land in the *stored* session.
-        ``create_session`` returns a copy of the stored session, so the old
-        approach of appending to that copy left the stored session empty and
-        silently lost the restored history on resume.
-        """
+    async def list_sessions(self) -> list[dict]:
+        """List persisted sessions for the current user (most recent first)."""
         if not self._session_service:
-            raise RuntimeError("Session service not initialized")
+            return []
+        resp = await self._session_service.list_sessions(
+            app_name=self.app_name, user_id=self._settings.default_user,
+        )
+        sessions = [
+            {
+                "session_id": s.id,
+                "last_update": getattr(s, "last_update_time", None),
+                "message_count": len(getattr(s, "events", None) or []),
+            }
+            for s in getattr(resp, "sessions", [])
+        ]
+        sessions.sort(key=lambda x: x["last_update"] or 0, reverse=True)
+        return sessions
 
-        # Create a fresh session for the restored conversation
-        session = await self._session_service.create_session(
+    async def delete_session(self, session_id: str) -> bool:
+        """Delete a persisted session from the store."""
+        if not self._session_service:
+            return False
+        await self._session_service.delete_session(
             app_name=self.app_name,
             user_id=self._settings.default_user,
             session_id=session_id,
         )
+        return True
 
-        async def _add(content: types.Content, author: str) -> None:
-            await self._session_service.append_event(
-                session, Event(author=author or "user", content=content)
+    async def recent_messages(self, session_id: str, limit: int = 20) -> list[dict]:
+        """Recent text messages from the stored session (for fact extraction)."""
+        if not self._session_service:
+            return []
+        session = await self._session_service.get_session(
+            app_name=self.app_name,
+            user_id=self._settings.default_user,
+            session_id=session_id,
+        )
+        if session is None or not getattr(session, "events", None):
+            return []
+        out: list[dict] = []
+        for event in session.events:
+            content = getattr(event, "content", None)
+            if content is None:
+                continue
+            role = getattr(content, "role", None)
+            text = " ".join(
+                p.text for p in (getattr(content, "parts", None) or [])
+                if getattr(p, "text", None)
             )
-
-        for msg in messages:
-            role = msg["role"]
-
-            if role == "user":
-                content = types.Content(
-                    role="user",
-                    parts=[types.Part.from_text(text=msg["content"])],
+            if text:
+                out.append(
+                    {"role": "user" if role == "user" else "assistant", "content": text}
                 )
-                await _add(content, "user")
-
-            elif role == "assistant":
-                parts = []
-                if msg.get("content"):
-                    parts.append(types.Part.from_text(text=msg["content"]))
-                for tc in msg.get("tool_calls", []):
-                    parts.append(types.Part.from_function_call(
-                        name=tc["name"],
-                        args=tc.get("args", {}),
-                    ))
-                content = types.Content(role="model", parts=parts)
-                await _add(content, current_agent or "model")
-
-            elif role == "tool":
-                try:
-                    response = json.loads(msg["content"])
-                except (json.JSONDecodeError, TypeError):
-                    response = {"result": msg["content"]}
-                parts = [types.Part.from_function_response(
-                    name=msg.get("name", "unknown"),
-                    response=response,
-                )]
-                content = types.Content(role="user", parts=parts)
-                await _add(content, current_agent or "user")
+        return out[-limit:]

@@ -33,7 +33,7 @@ def _make_settings(orchestrator=OrchestratorType.ADK, default_model=None, **extr
     settings.orchestrator = orchestrator
     settings.default_model = default_model
     settings.app_name = "test-app"
-    settings.langgraph_checkpointer = "memory"
+    settings.session_store = "memory"
     for k, v in extra.items():
         setattr(settings, k, v)
     return settings

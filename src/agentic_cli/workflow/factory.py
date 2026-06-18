@@ -84,7 +84,10 @@ def create_workflow_manager_from_settings(
         try:
             from agentic_cli.workflow.langgraph import LangGraphWorkflowManager
 
-            checkpointer = getattr(settings, "langgraph_checkpointer", "memory")
+            # Durable sessions: the unified session_store (sqlite by default)
+            # selects the checkpointer so LangGraph persists like ADK, keyed by
+            # thread_id == session_id. "memory" stays ephemeral.
+            checkpointer = getattr(settings, "session_store", "memory")
             return LangGraphWorkflowManager(
                 agent_configs=agent_configs,
                 settings=settings,

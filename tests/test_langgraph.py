@@ -112,7 +112,7 @@ class TestLangGraphWorkflowManagerCreation:
         return BaseSettings(
             google_api_key="test-key",
             orchestrator="langgraph",
-            langgraph_checkpointer="memory",
+            session_store="memory",
         )
 
     @pytest.fixture
@@ -285,13 +285,13 @@ class TestOrchestratorSelection:
         )
         assert settings.orchestrator == "langgraph"
 
-    def test_settings_langgraph_checkpointer(self):
-        """Test LangGraph checkpointer setting."""
+    def test_settings_session_store(self):
+        """The unified session_store drives LangGraph persistence."""
         settings = BaseSettings(
             google_api_key="test-key",
-            langgraph_checkpointer="postgres",
+            session_store="postgres",
         )
-        assert settings.langgraph_checkpointer == "postgres"
+        assert settings.session_store == "postgres"
 
 
 class TestLangGraphThinkingConfig:

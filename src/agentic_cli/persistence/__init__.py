@@ -1,11 +1,7 @@
-"""Persistence module for agentic CLI applications."""
+"""Persistence package.
 
-from agentic_cli.persistence.session import (
-    SessionPersistence,
-    SessionSnapshot,
-)
-
-__all__ = [
-    "SessionPersistence",
-    "SessionSnapshot",
-]
+Session state is now persisted natively by each orchestrator's store (ADK
+``DatabaseSessionService`` / LangGraph checkpointer), keyed by session id — see
+``BaseWorkflowManager`` session methods. The legacy JSON ``SessionPersistence``
+snapshot layer was removed in favor of those durable, full-fidelity stores.
+"""

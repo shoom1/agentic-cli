@@ -536,83 +536,52 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
             return None
         return state.values
 
-    async def _extract_session_data(
-        self, session_id: str
-    ) -> tuple[list[dict], str | None]:
-        """Extract normalized messages and current agent from LangGraph state."""
+    async def session_exists(self, session_id: str) -> bool:
+        """True if the checkpointer holds state for this thread."""
+        return self._get_state_values(session_id) is not None
+
+    async def list_sessions(self) -> list[dict]:
+        """List persisted threads (session ids) from the checkpointer."""
+        if not self._checkpointer:
+            return []
+        seen: dict[str, Any] = {}
+        try:
+            async for cp in self._checkpointer.alist(None):
+                tid = (getattr(cp, "config", None) or {}).get("configurable", {}).get(
+                    "thread_id"
+                )
+                if tid and tid not in seen:
+                    seen[tid] = cp
+        except Exception:
+            logger.debug("langgraph_list_sessions_failed", exc_info=True)
+            return []
+        return [{"session_id": tid, "message_count": None} for tid in seen]
+
+    async def delete_session(self, session_id: str) -> bool:
+        """Delete a thread's persisted state from the checkpointer."""
+        if not self._checkpointer:
+            return False
+        try:
+            await self._checkpointer.adelete_thread(session_id)
+            return True
+        except Exception:
+            logger.debug("langgraph_delete_thread_failed", exc_info=True)
+            return False
+
+    async def recent_messages(self, session_id: str, limit: int = 20) -> list[dict]:
+        """Recent text messages from the thread state (for fact extraction)."""
         values = self._get_state_values(session_id)
         if not values:
-            return [], None
-
-        current_agent = values.get("current_agent")
-        raw_messages = values.get("messages", [])
-        messages: list[dict] = []
-
-        for msg in raw_messages:
+            return []
+        out: list[dict] = []
+        for msg in values.get("messages", []):
             msg_type = getattr(msg, "type", "")
-
+            content = getattr(msg, "content", "")
             if msg_type == "human":
-                messages.append({"role": "user", "content": msg.content})
-
-            elif msg_type == "ai":
-                entry: dict = {"role": "assistant", "content": msg.content or ""}
-                tool_calls = getattr(msg, "tool_calls", None)
-                if tool_calls:
-                    entry["tool_calls"] = [
-                        {
-                            "id": tc.get("id", tc.get("name", "")),
-                            "name": tc["name"],
-                            "args": tc.get("args", {}),
-                        }
-                        for tc in tool_calls
-                    ]
-                messages.append(entry)
-
-            elif msg_type == "tool":
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": getattr(msg, "tool_call_id", ""),
-                    "name": getattr(msg, "name", "unknown"),
-                    "content": msg.content if isinstance(msg.content, str) else str(msg.content),
-                })
-
-        return messages, current_agent
-
-    async def _inject_session_messages(
-        self,
-        session_id: str,
-        messages: list[dict],
-        current_agent: str | None = None,
-    ) -> None:
-        """Inject normalized messages into LangGraph state."""
-        if not self._compiled_graph:
-            raise RuntimeError("LangGraph workflow not initialized")
-
-        from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
-
-        lc_messages = []
-        for msg in messages:
-            role = msg["role"]
-            if role == "user":
-                lc_messages.append(HumanMessage(content=msg["content"]))
-            elif role == "assistant":
-                kwargs: dict = {"content": msg.get("content", "")}
-                if msg.get("tool_calls"):
-                    kwargs["tool_calls"] = msg["tool_calls"]
-                lc_messages.append(AIMessage(**kwargs))
-            elif role == "tool":
-                lc_messages.append(ToolMessage(
-                    content=msg["content"],
-                    tool_call_id=msg.get("tool_call_id", ""),
-                    name=msg.get("name", "unknown"),
-                ))
-
-        config = {"configurable": {"thread_id": session_id}}
-        update = {"messages": lc_messages}
-        if current_agent is not None:
-            update["current_agent"] = current_agent
-
-        self._compiled_graph.update_state(config, update)
+                out.append({"role": "user", "content": content})
+            elif msg_type == "ai" and content:
+                out.append({"role": "assistant", "content": content})
+        return out[-limit:]
 
 
 # Alias for convenience

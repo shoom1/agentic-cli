@@ -425,22 +425,28 @@ class SessionsCommand(Command):
         )
 
     async def execute(self, args: str, app: Any) -> None:
-        """Display saved sessions or delete one."""
-        from agentic_cli.persistence.session import SessionPersistence
+        """Display persisted sessions (from the native store) or delete one."""
+        from datetime import datetime
 
         parsed = self.parse_args(args)
         delete_id = parsed.get_option("delete", "", str) or ""
 
-        persistence = SessionPersistence(app.settings)
+        try:
+            workflow = app.workflow
+        except (RuntimeError, AttributeError):
+            workflow = None
+        if workflow is None:
+            app.session.add_warning("Sessions not available yet — workflow is initializing.")
+            return
 
         if delete_id:
-            if persistence.delete_session(delete_id):
+            if await workflow.delete_session(delete_id):
                 app.session.add_success(f"Session '{delete_id}' deleted.")
             else:
                 app.session.add_error(f"Session '{delete_id}' not found.")
             return
 
-        sessions = persistence.list_sessions()
+        sessions = await workflow.list_sessions()
         if not sessions:
             app.session.add_message("system", "No saved sessions.")
             return
@@ -448,21 +454,19 @@ class SessionsCommand(Command):
         table = Table(title="Saved Sessions", show_lines=False, padding=(0, 1))
         table.add_column("Session ID", style="bold cyan")
         table.add_column("Messages", style="dim", justify="right")
-        table.add_column("Last Saved", style="dim")
-        table.add_column("Created", style="dim")
+        table.add_column("Last Update", style="dim")
 
         current_sid = app.session_id
 
         for s in sessions:
             sid = s["session_id"]
             label = f"* {sid}" if sid == current_sid else sid
-            saved_at = s.get("saved_at", "")[:19].replace("T", " ")
-            created_at = s.get("created_at", "")[:10]
-            table.add_row(
-                label,
-                str(s.get("message_count", 0)),
-                saved_at,
-                created_at,
-            )
+            last = s.get("last_update")
+            if isinstance(last, (int, float)):
+                last_str = datetime.fromtimestamp(last).strftime("%Y-%m-%d %H:%M")
+            else:
+                last_str = ""
+            mc = s.get("message_count")
+            table.add_row(label, "" if mc is None else str(mc), last_str)
 
         app.session.add_rich(table)

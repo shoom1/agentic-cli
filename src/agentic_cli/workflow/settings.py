@@ -206,12 +206,6 @@ class WorkflowSettingsMixin:
         description="Workflow orchestrator backend",
         json_schema_extra={"ui_order": 100},  # Advanced setting
     )
-    langgraph_checkpointer: Literal["memory", "postgres"] | None = Field(
-        default="memory",
-        title="LangGraph Checkpointer",
-        description="LangGraph state persistence type",
-        json_schema_extra={"ui_order": 101},
-    )
 
     # Retry configuration
     retry_max_attempts: int = Field(
@@ -324,6 +318,19 @@ class WorkflowSettingsMixin:
         json_schema_extra={"ui_order": 138},
     )
 
+    # Session persistence — durable conversations across restarts.
+    # Drives BOTH backends: ADK uses DatabaseSessionService, LangGraph uses a
+    # persistent checkpointer (both keyed by session_id). "memory" = ephemeral.
+    session_store: Literal["memory", "sqlite", "postgres"] = Field(
+        default="sqlite",
+        title="Session Store",
+        description=(
+            "Where conversations are persisted: sqlite (default, a single file), "
+            "postgres (shared/multi-instance via Postgres URI), or memory (ephemeral)."
+        ),
+        json_schema_extra={"ui_order": 144},
+    )
+
     # Persistence settings (LangGraph)
     postgres_uri: str | None = Field(
         default=None,
@@ -343,6 +350,27 @@ class WorkflowSettingsMixin:
         description="Store type for long-term memory (memory or postgres)",
         json_schema_extra={"ui_order": 147},
     )
+
+    def session_db_url(self) -> str | None:
+        """Async SQLAlchemy URL for the session store, or None when ephemeral.
+
+        Shared by both backends so ADK's DatabaseSessionService and LangGraph's
+        checkpointer persist to the same place. SQLite is the zero-config
+        default (``{workspace}/sessions/sessions.db``); Postgres via uri.
+        """
+        store = getattr(self, "session_store", "sqlite")
+        if store == "memory":
+            return None
+        if store == "postgres":
+            uri = self.postgres_uri
+            if not uri:
+                raise ValueError("session_store='postgres' requires postgres_uri")
+            return uri.replace("postgresql://", "postgresql+asyncpg://", 1)
+        # sqlite (default)
+        if self.sqlite_uri:
+            return self.sqlite_uri.replace("sqlite:///", "sqlite+aiosqlite:///", 1)
+        path = self.sessions_dir / "sessions.db"
+        return f"sqlite+aiosqlite:///{path}"
 
     # Shell execution settings (for shell middleware)
     shell_sandbox_type: Literal["host", "docker"] = Field(
