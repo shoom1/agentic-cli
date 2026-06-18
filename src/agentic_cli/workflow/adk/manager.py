@@ -475,13 +475,38 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
 
         return plugins
 
+    def _make_session_service(self) -> BaseSessionService:
+        """Build the ADK session service from ``session_store`` settings.
+
+        ``memory`` → ephemeral ``InMemorySessionService``; ``sqlite``/``postgres``
+        → native ``DatabaseSessionService`` (durable across restarts, full event
+        fidelity). The sqlite parent dir is created so the engine can open it.
+        """
+        db_url = self._settings.session_db_url()
+        if db_url is None:
+            logger.debug("using_in_memory_session_service")
+            return InMemorySessionService()
+
+        if db_url.startswith("sqlite"):
+            # sqlite+aiosqlite:///<path> — ensure the directory exists.
+            from pathlib import Path
+
+            path = db_url.split(":///", 1)[-1]
+            if path:
+                Path(path).parent.mkdir(parents=True, exist_ok=True)
+
+        from google.adk.sessions import DatabaseSessionService
+
+        logger.info("using_database_session_service", store=self._settings.session_store)
+        return DatabaseSessionService(db_url=db_url)
+
     async def _do_initialize(self) -> None:
         """ADK-specific initialization: session service, agents, runner."""
         logger.info("initializing_services", app_name=self.app_name)
 
-        # Create session service
-        self._session_service = InMemorySessionService()
-        logger.debug("using_in_memory_session_service")
+        # Create session service (durable DatabaseSessionService by default;
+        # InMemory only when session_store='memory').
+        self._session_service = self._make_session_service()
 
         # Create agent hierarchy from configs
         self._root_agent = self._create_agents()
