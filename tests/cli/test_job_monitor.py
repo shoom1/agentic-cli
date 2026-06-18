@@ -120,6 +120,47 @@ class TestSegmentLogic:
         assert JobMonitor._short("x" * 40, limit=10) == "x" * 9 + "…"
         assert JobMonitor._short("", ) == "job"
 
+    def test_pending_resume_cue_when_enabled(self, jm: JobManager):
+        from agentic_cli.tools.jobs import JobRecord
+
+        ui = FakeUI()
+        mon = JobMonitor(
+            ui, FakeController(ui, jm), settings=SimpleNamespace(job_auto_resume=True)
+        )
+        rec = JobRecord(
+            job_id="j1", tool="run_shell_job", backend="subprocess", name="build",
+            state=JobState.SUCCEEDED, resume_on_complete=True, call_id="c1",
+        )
+        seg = mon._build_segment([rec])
+        assert seg is not None and "↻1 to resume" in seg
+
+    def test_no_resume_cue_when_disabled(self, jm: JobManager):
+        from agentic_cli.tools.jobs import JobRecord
+
+        ui = FakeUI()
+        mon = JobMonitor(
+            ui, FakeController(ui, jm), settings=SimpleNamespace(job_auto_resume=False)
+        )
+        rec = JobRecord(
+            job_id="j1", tool="run_shell_job", backend="subprocess", name="build",
+            state=JobState.SUCCEEDED, resume_on_complete=True, call_id="c1",
+        )
+        # First-sight terminal job → no ✓ note, and the cue is gated off → None.
+        assert mon._build_segment([rec]) is None
+
+    def test_no_resume_cue_for_already_resumed(self, jm: JobManager):
+        from agentic_cli.tools.jobs import JobRecord
+
+        ui = FakeUI()
+        mon = JobMonitor(
+            ui, FakeController(ui, jm), settings=SimpleNamespace(job_auto_resume=True)
+        )
+        rec = JobRecord(
+            job_id="j1", tool="run_shell_job", backend="subprocess", name="build",
+            state=JobState.SUCCEEDED, resume_on_complete=True, call_id="c1", resumed=True,
+        )
+        assert mon._build_segment([rec]) is None
+
 
 # --- poll_once publishes + refreshes -------------------------------------------
 

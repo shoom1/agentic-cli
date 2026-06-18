@@ -294,6 +294,29 @@ class JobsCommand(Command):
         app.session.add_rich(Panel(body, title=f"Job {rec.job_id}", expand=False))
 
 
+class ResumeCommand(Command):
+    """Resume the agent with finished background-job results."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            name="resume",
+            description="Resume the agent with results from finished background jobs",
+            usage="/resume",
+            examples=["/resume"],
+            category=CommandCategory.WORKFLOW,
+        )
+
+    async def execute(self, args: str, app: Any) -> None:
+        """Drain any finished resume-flagged jobs through resume turns."""
+        resume = getattr(app, "resume_finished_jobs", None)
+        if resume is None:
+            app.session.add_warning("Resume is not supported by this app.")
+            return
+        n = await resume()
+        if n == 0:
+            app.session.add_message("system", "No finished background jobs to resume.")
+
+
 class PapersCommand(Command):
     """List documents in the knowledge base."""
 

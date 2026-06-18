@@ -18,10 +18,12 @@ only, so it requires GOOGLE_API_KEY:
 
 from __future__ import annotations
 
+import asyncio
 import os
 import shutil
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -176,3 +178,66 @@ async def test_long_running_tool_then_resume(live_settings, return_none: bool):
     finally:
         manager.clear_input_callback()
         await manager.cleanup()
+
+
+async def test_full_resume_loop_via_coordinator(live_settings):
+    """End-to-end: the harness coordinator drains a finished job into a resume turn.
+
+    Exercises the whole milestone-3 path live: awaiting_resume → mark_resumed →
+    MessageProcessor.process_resume → _run_turn → resume_with_job_result →
+    model reply, rendered into a RecordingSession.
+    """
+    from agentic_cli.cli.app import BaseCLIApp
+    from agentic_cli.cli.message_processor import MessageProcessor
+    from tests.event_replay import RecordingSession
+
+    _SHAPE["return_none"] = False  # informative pending dict (validated shape)
+
+    manager = create_workflow_manager_from_settings(
+        agent_configs=[_AGENT], settings=live_settings
+    )
+
+    async def _auto_input(request) -> str:  # noqa: ANN001
+        return "yes, proceed"
+
+    manager.set_input_callback(_auto_input)
+    try:
+        async for _ in manager.process(
+            message="Start a background job now.", user_id="tester", session_id="loop-1"
+        ):
+            pass
+
+        jm = manager.job_manager
+        flagged = [r for r in jm.list() if r.resume_on_complete]
+        assert len(flagged) == 1, f"expected one resume-flagged job, got {flagged}"
+        _wait_terminal(jm, flagged[0].job_id)
+
+        # Drive the real harness coordinator with a recording session.
+        session = RecordingSession()  # is_thinking=True → cancel watcher won't fire
+        app = BaseCLIApp.__new__(BaseCLIApp)
+        app._workflow_controller = SimpleNamespace(
+            is_ready=True,
+            workflow=manager,
+            ensure_initialized=lambda ui=None: _true(),
+            update_status_bar=lambda ui: None,
+        )
+        app._turn_lock = asyncio.Lock()
+        app._message_processor = MessageProcessor()
+        app.session = session
+        app._settings = live_settings
+        app._usage_tracker = None
+
+        n = await app.resume_finished_jobs()
+
+        assert n == 1
+        assert jm.get(flagged[0].job_id).resumed is True
+        assert session.responses(), (
+            f"coordinator resume produced no model response; recorded: {session.kinds()}"
+        )
+    finally:
+        manager.clear_input_callback()
+        await manager.cleanup()
+
+
+async def _true() -> bool:
+    return True
