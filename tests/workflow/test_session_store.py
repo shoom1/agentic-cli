@@ -70,3 +70,70 @@ class TestAdkSessionServiceSelection:
         svc = mgr._make_session_service()
         assert isinstance(svc, DatabaseSessionService)
         assert (tmp_path / "sessions").is_dir()
+
+
+class TestAdkNativeSessions:
+    """Native session query/manage against a real sqlite DatabaseSessionService."""
+
+    @pytest.fixture(autouse=True)
+    def _require_adk(self):
+        pytest.importorskip("google.adk")
+
+    def _manager(self, tmp_path: Path):
+        from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager
+
+        settings = _settings(tmp_path, session_store="sqlite")
+        mgr = GoogleADKWorkflowManager.__new__(GoogleADKWorkflowManager)
+        mgr._settings = settings
+        mgr._app_name = "test_app"
+        mgr.session_id = "default_session"
+        mgr._session_service = mgr._make_session_service()
+        return mgr, settings
+
+    async def _seed(self, mgr, settings, sid: str, text: str):
+        from google.adk.events import Event
+        from google.genai import types
+
+        s = await mgr._session_service.create_session(
+            app_name=mgr.app_name, user_id=settings.default_user, session_id=sid
+        )
+        await mgr._session_service.append_event(
+            session=s,
+            event=Event(
+                author="user",
+                content=types.Content(role="user", parts=[types.Part.from_text(text=text)]),
+            ),
+        )
+
+    async def test_exists_list_recent_delete(self, tmp_path: Path):
+        mgr, settings = self._manager(tmp_path)
+        await self._seed(mgr, settings, "sess-x", "remember the alpha value")
+
+        assert await mgr.session_exists("sess-x") is True
+        assert await mgr.session_exists("missing") is False
+
+        listed = await mgr.list_sessions()
+        assert any(s["session_id"] == "sess-x" for s in listed)
+
+        recent = await mgr.recent_messages("sess-x")
+        assert recent and recent[-1]["content"] == "remember the alpha value"
+
+        assert await mgr.delete_session("sess-x") is True
+        assert await mgr.session_exists("sess-x") is False
+
+    async def test_load_session_reports_resume(self, tmp_path: Path):
+        mgr, settings = self._manager(tmp_path)
+        await self._seed(mgr, settings, "sess-y", "hi")
+        # Existing session → resumed=True and id adopted.
+        assert await mgr.load_session("sess-y") is True
+        assert mgr.session_id == "sess-y"
+        # Unknown session → new (False) but still adopted.
+        assert await mgr.load_session("brand-new") is False
+        assert mgr.session_id == "brand-new"
+
+    async def test_persists_across_fresh_manager(self, tmp_path: Path):
+        mgr, settings = self._manager(tmp_path)
+        await self._seed(mgr, settings, "sess-z", "durable")
+        # A second manager over the same sqlite file sees the session.
+        mgr2, _ = self._manager(tmp_path)
+        assert await mgr2.session_exists("sess-z") is True

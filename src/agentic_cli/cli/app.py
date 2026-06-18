@@ -123,7 +123,13 @@ class BaseCLIApp:
             session_id: Optional session ID for save/resume. If provided,
                        the session will be loaded on startup and saved on exit.
         """
-        self._session_id = session_id
+        # Sessions are durable by default: a fresh id is generated when none is
+        # given (resumable later via /sessions or --session); an explicit id
+        # requests a resume.
+        import uuid
+
+        self._resume_requested = session_id is not None
+        self._session_id = session_id or uuid.uuid4().hex[:12]
         # === Configuration ===
         self._app_info = app_info
         self._settings = settings
@@ -468,36 +474,18 @@ class BaseCLIApp:
                 )
         return len(records)
 
-    async def _load_session_on_startup(self) -> None:
-        """Load a saved session after workflow initialization."""
-        if not self._session_id:
-            return
-
+    async def _resume_session_on_startup(self) -> None:
+        """Adopt the requested session id; native stores already hold its state."""
         if not await self._workflow_controller.ensure_initialized(self.session):
-            self.session.add_warning("Cannot load session — workflow not initialized.")
+            self.session.add_warning("Cannot resume session — workflow not initialized.")
             return
 
         workflow = self._workflow_controller.workflow
-        loaded = await workflow.load_session(self._session_id)
-        if loaded:
+        resumed = await workflow.load_session(self._session_id)
+        if resumed:
             self.session.add_success(f"Session '{self._session_id}' resumed.")
         else:
             self.session.add_message("system", f"New session '{self._session_id}'.")
-
-    async def _save_session_on_exit(self) -> None:
-        """Save the current session on exit."""
-        if not self._session_id:
-            return
-
-        if not self._workflow_controller.is_ready:
-            return
-
-        workflow = self._workflow_controller.workflow
-        result = await workflow.save_session(self._session_id)
-        if result.get("success"):
-            logger.info("session_saved_on_exit", session_id=self._session_id)
-        else:
-            logger.error("session_save_on_exit_failed", error=result.get("error"))
 
     async def _extract_session_facts_on_exit(self) -> None:
         """Extract key facts from the session into memory on exit (if enabled).
@@ -533,8 +521,10 @@ class BaseCLIApp:
         )
 
         async with self._workflow_controller.background_init(self.session):
-            if self._session_id:
-                await self._load_session_on_startup()
+            # Only an explicit --session asks to resume a prior conversation;
+            # a fresh auto-generated id just starts a new (durable) session.
+            if self._resume_requested:
+                await self._resume_session_on_startup()
 
             # Register input handler
             @self.session.on_input
@@ -551,10 +541,7 @@ class BaseCLIApp:
 
         # Extract session facts into memory on exit (if enabled)
         await self._extract_session_facts_on_exit()
-
-        # Save persistent session on exit
-        if self._session_id:
-            await self._save_session_on_exit()
+        # No save-on-exit: durable session stores persist continuously per turn.
 
         logger.info("app_ending")
         self.session.add_message("system", "Goodbye!")

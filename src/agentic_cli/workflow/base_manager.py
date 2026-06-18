@@ -441,7 +441,7 @@ class BaseWorkflowManager(ABC):
         if messages is None:
             sid = getattr(self, "session_id", "default_session")
             try:
-                messages, _ = await self._extract_session_data(sid)
+                messages = await self.recent_messages(sid)
             except Exception:
                 logger.debug("session_fact_extraction_extract_failed", exc_info=True)
                 return []
@@ -741,131 +741,53 @@ class BaseWorkflowManager(ABC):
     # Session save/resume
     # -------------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Sessions (native, durable). The backend store (ADK
+    # DatabaseSessionService / LangGraph checkpointer) persists conversation
+    # state continuously, keyed by session_id; there is no separate snapshot.
+    # ------------------------------------------------------------------
+
     async def save_session(self, session_id: str | None = None) -> dict:
-        """Save current session state to disk.
+        """No-op flush — durable stores persist as the turn runs.
 
-        Extracts messages and current agent from the backend via abstract
-        hooks, then persists via SessionPersistence.save_snapshot().
-
-        Args:
-            session_id: Session ID to save under. Uses backend session_id if None.
-
-        Returns:
-            Dict with success status and path.
+        Kept for API compatibility / explicit "checkpoint now" intent. Returns
+        the session id that is (already) persisted.
         """
-        from datetime import datetime
-        from agentic_cli.persistence.session import SessionPersistence, SessionSnapshot
-
         sid = session_id or getattr(self, "session_id", "default_session")
-
-        try:
-            messages, current_agent = await self._extract_session_data(sid)
-
-            metadata: dict[str, Any] = {
-                "model": self.model,
-                "backend_type": self.backend_type,
-                "app_name": self._app_name,
-            }
-            if current_agent:
-                metadata["current_agent"] = current_agent
-
-            now = datetime.now()
-            snapshot = SessionSnapshot(
-                session_id=sid,
-                created_at=now,
-                saved_at=now,
-                messages=messages,
-                metadata=metadata,
-            )
-
-            persistence = SessionPersistence(self._settings)
-            path = persistence.save_snapshot(snapshot)
-
-            logger.info("session_saved", session_id=sid, message_count=len(messages))
-            return {"success": True, "session_id": sid, "path": str(path), "message_count": len(messages)}
-
-        except Exception as exc:
-            logger.error("session_save_failed", session_id=sid, error=str(exc))
-            return {"success": False, "error": str(exc)}
+        return {"success": True, "session_id": sid}
 
     async def load_session(self, session_id: str) -> bool:
-        """Load a saved session and inject it into the backend.
+        """Adopt ``session_id`` for resume; the native store already holds it.
 
-        Args:
-            session_id: Session ID to load.
-
-        Returns:
-            True if session was loaded successfully, False otherwise.
+        Returns True if that session already has content (i.e. a real resume),
+        False if it's new — but the id is adopted either way so the next turn
+        continues it.
         """
-        from agentic_cli.persistence.session import SessionPersistence
+        if hasattr(self, "session_id"):
+            self.session_id = session_id
+        exists = await self.session_exists(session_id)
+        logger.info("session_adopted", session_id=session_id, resumed=exists)
+        return exists
 
-        persistence = SessionPersistence(self._settings)
-        snapshot = persistence.load_session(session_id)
+    # ---- Backend hooks (override in ADK / LangGraph managers) ----
 
-        if snapshot is None:
-            logger.debug("session_not_found_for_load", session_id=session_id)
-            return False
+    async def session_exists(self, session_id: str) -> bool:
+        """Whether the native store already holds this session's state."""
+        return False
 
-        # Warn on backend mismatch (but still load — format is normalized)
-        saved_backend = snapshot.metadata.get("backend_type")
-        if saved_backend and saved_backend != self.backend_type:
-            logger.warning(
-                "session_backend_mismatch",
-                saved_backend=saved_backend,
-                current_backend=self.backend_type,
-                session_id=session_id,
-            )
+    async def recent_messages(self, session_id: str, limit: int = 20) -> list[dict]:
+        """Recent ``{role, content}`` text messages from the native session.
 
-        current_agent = snapshot.metadata.get("current_agent")
-
-        try:
-            await self._inject_session_messages(session_id, snapshot.messages, current_agent)
-            if hasattr(self, "session_id"):
-                self.session_id = session_id
-            logger.info(
-                "session_loaded",
-                session_id=session_id,
-                message_count=len(snapshot.messages),
-            )
-            return True
-        except Exception as exc:
-            logger.error("session_load_failed", session_id=session_id, error=str(exc))
-            return False
-
-    def list_sessions(self) -> list[dict]:
-        """List all saved sessions.
-
-        Returns:
-            List of session summary dicts.
+        Used for session-end fact extraction; text-only (no tool-call fidelity).
         """
-        from agentic_cli.persistence.session import SessionPersistence
+        return []
 
-        persistence = SessionPersistence(self._settings)
-        return persistence.list_sessions()
+    async def list_sessions(self) -> list[dict]:
+        """List persisted sessions from the native store (most recent first)."""
+        return []
 
-    @abstractmethod
-    async def _extract_session_data(
-        self, session_id: str
-    ) -> tuple[list[dict], str | None]:
-        """Extract normalized messages and current agent from backend session.
-
-        Returns:
-            Tuple of (messages, current_agent_name).
-            Messages use normalized format:
-            - {"role": "user", "content": "..."}
-            - {"role": "assistant", "content": "...", "tool_calls": [...]}
-            - {"role": "tool", "tool_call_id": "...", "name": "...", "content": "..."}
-        """
-        ...
-
-    @abstractmethod
-    async def _inject_session_messages(
-        self,
-        session_id: str,
-        messages: list[dict],
-        current_agent: str | None = None,
-    ) -> None:
-        """Inject normalized messages into the backend session."""
-        ...
+    async def delete_session(self, session_id: str) -> bool:
+        """Delete a persisted session from the native store."""
+        return False
 
 
