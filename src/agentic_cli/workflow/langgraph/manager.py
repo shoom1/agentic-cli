@@ -416,7 +416,7 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
                         yield transformed
 
                     # Emit task progress after tool results
-                    progress_event = self._build_task_progress(current_session_id)
+                    progress_event = await self._build_task_progress(current_session_id)
                     if progress_event:
                         transformed = self._apply_event_hook(progress_event)
                         if transformed:
@@ -424,7 +424,7 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
 
 
             # Final progress check
-            progress_event = self._build_task_progress(current_session_id)
+            progress_event = await self._build_task_progress(current_session_id)
             if progress_event:
                 transformed = self._apply_event_hook(progress_event)
                 if transformed:
@@ -432,18 +432,12 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
 
             logger.info("message_processed_langgraph")
 
-    def _build_task_progress(self, session_id: str) -> "WorkflowEvent | None":
-        """Build task progress from graph state."""
+    async def _build_task_progress(self, session_id: str) -> "WorkflowEvent | None":
+        """Build task progress from graph state (async — see _get_state_values)."""
         from agentic_cli.tools._core.tasks import task_progress_data
 
-        if not self._compiled_graph:
-            return None
-        try:
-            config = {"configurable": {"thread_id": session_id}}
-            state = self._compiled_graph.get_state(config)
-            tasks_data = state.values.get("tasks", []) if state and state.values else []
-        except Exception:
-            return None
+        values = await self._get_state_values(session_id)
+        tasks_data = values.get("tasks", []) if values else []
         if not tasks_data:
             return None
 
@@ -523,13 +517,17 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
     # Session save/resume hooks
     # -------------------------------------------------------------------------
 
-    def _get_state_values(self, session_id: str) -> dict | None:
-        """Get state values from LangGraph, or None on failure."""
+    async def _get_state_values(self, session_id: str) -> dict | None:
+        """Get state values from LangGraph, or None on failure.
+
+        Uses the async ``aget_state`` — the persistent checkpointers
+        (AsyncSqliteSaver/AsyncPostgresSaver) don't implement the sync path.
+        """
         if not self._compiled_graph:
             return None
         config = {"configurable": {"thread_id": session_id}}
         try:
-            state = self._compiled_graph.get_state(config)
+            state = await self._compiled_graph.aget_state(config)
         except Exception:
             return None
         if not state or not state.values:
@@ -538,7 +536,7 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
 
     async def session_exists(self, session_id: str) -> bool:
         """True if the checkpointer holds state for this thread."""
-        return self._get_state_values(session_id) is not None
+        return await self._get_state_values(session_id) is not None
 
     async def list_sessions(self) -> list[dict]:
         """List persisted threads (session ids) from the checkpointer."""
@@ -570,7 +568,7 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
 
     async def recent_messages(self, session_id: str, limit: int = 20) -> list[dict]:
         """Recent text messages from the thread state (for fact extraction)."""
-        values = self._get_state_values(session_id)
+        values = await self._get_state_values(session_id)
         if not values:
             return []
         out: list[dict] = []

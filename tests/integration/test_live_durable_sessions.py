@@ -71,3 +71,43 @@ async def test_session_survives_a_fresh_manager(tmp_path: Path, monkeypatch):
         assert "BANANA77" in answer, f"model did not recall across restart: {answer!r}"
     finally:
         await m2.cleanup()
+
+
+@pytest.mark.skipif(
+    not os.environ.get("ANTHROPIC_API_KEY"), reason="LangGraph durability test uses Claude"
+)
+async def test_langgraph_session_survives_a_fresh_manager(tmp_path: Path, monkeypatch):
+    """Same durability check on the LangGraph backend (persistent checkpointer).
+
+    Uses a Claude model — LangGraph's native path (Claude auto-routes to
+    LangGraph) — to sidestep the unrelated gemini-on-LangGraph thinking-config
+    issue and isolate session durability.
+    """
+    pytest.importorskip("langgraph")
+    pytest.importorskip("langchain_anthropic")
+    pytest.importorskip("langgraph.checkpoint.sqlite.aio")
+
+    monkeypatch.chdir(tmp_path)
+    settings = BaseSettings(
+        workspace_dir=tmp_path,
+        session_store="sqlite",
+        permissions_enabled=False,
+        default_model="claude-sonnet-4-5",  # Claude → LangGraph backend
+    )
+    set_settings(settings)
+    sid = "lg-durable-codeword"
+    user = settings.default_user
+
+    m1 = create_workflow_manager_from_settings(agent_configs=[_AGENT], settings=settings)
+    assert m1.backend_type == "langgraph"
+    await _run(m1, "Remember this codeword exactly: BANANA77. Just acknowledge.", sid, user)
+    await m1.cleanup()
+
+    m2 = create_workflow_manager_from_settings(agent_configs=[_AGENT], settings=settings)
+    await m2.initialize_services()
+    try:
+        assert await m2.session_exists(sid) is True
+        answer = await _run(m2, "What codeword did I ask you to remember?", sid, user)
+        assert "BANANA77" in answer, f"langgraph did not recall across restart: {answer!r}"
+    finally:
+        await m2.cleanup()
