@@ -73,18 +73,14 @@ async def test_session_survives_a_fresh_manager(tmp_path: Path, monkeypatch):
         await m2.cleanup()
 
 
-@pytest.mark.skipif(
-    not os.environ.get("ANTHROPIC_API_KEY"), reason="LangGraph durability test uses Claude"
-)
 async def test_langgraph_session_survives_a_fresh_manager(tmp_path: Path, monkeypatch):
     """Same durability check on the LangGraph backend (persistent checkpointer).
 
-    Uses a Claude model — LangGraph's native path (Claude auto-routes to
-    LangGraph) — to sidestep the unrelated gemini-on-LangGraph thinking-config
-    issue and isolate session durability.
+    Forces gemini onto LangGraph (orchestrator=langgraph) — which also exercises
+    the gemini-2.5 thinking_budget fix on the LangGraph LLM path.
     """
     pytest.importorskip("langgraph")
-    pytest.importorskip("langchain_anthropic")
+    pytest.importorskip("langchain_google_genai")
     pytest.importorskip("langgraph.checkpoint.sqlite.aio")
 
     monkeypatch.chdir(tmp_path)
@@ -92,7 +88,7 @@ async def test_langgraph_session_survives_a_fresh_manager(tmp_path: Path, monkey
         workspace_dir=tmp_path,
         session_store="sqlite",
         permissions_enabled=False,
-        default_model="claude-sonnet-4-5",  # Claude → LangGraph backend
+        orchestrator="langgraph",  # force LangGraph for the gemini default
     )
     set_settings(settings)
     sid = "lg-durable-codeword"

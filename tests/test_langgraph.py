@@ -391,7 +391,9 @@ class TestLangGraphThinkingConfig:
         assert config is not None
         assert config["provider"] == "google"
         assert config["include_thoughts"] is True
-        assert config["thinking_level"] == "high"
+        # 2.5 uses a numeric budget, NOT thinking_level (which it rejects, 400).
+        assert config["thinking_budget"] == 24576
+        assert "thinking_level" not in config
 
     def test_thinking_config_google_medium(self, agent_configs):
         """Test _get_thinking_config with medium effort for Google."""
