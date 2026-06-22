@@ -14,6 +14,10 @@ from agentic_cli.workflow.events import WorkflowEvent, EventType, UserInputReque
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.model_settings import ModelSettings, ThinkingSettings
 from agentic_cli.workflow.factory import create_workflow_manager_from_settings
+from agentic_cli.workflow.agent_loader import (
+    load_agents_from_yaml,
+    create_workflow_manager_from_yaml,
+)
 from agentic_cli.workflow.settings import WorkflowSettingsMixin
 from agentic_cli.workflow.models import ModelFamily, ModelInfo, ModelRegistry
 from agentic_cli.workflow.service_registry import get_service, get_service_registry
@@ -53,6 +57,8 @@ __all__ = [
     "UserInputRequest",
     # Factory
     "create_workflow_manager_from_settings",
+    "create_workflow_manager_from_yaml",
+    "load_agents_from_yaml",
     # Config
     "AgentConfig",
     "ModelSettings",
