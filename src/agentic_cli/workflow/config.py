@@ -5,6 +5,7 @@ from typing import Callable, Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from agentic_cli.workflow.model_settings import ModelSettings
+    from agentic_cli.workflow.mcp import MCPServerConfig
 
 
 @dataclass
@@ -26,6 +27,8 @@ class AgentConfig:
         model: Optional model override (defaults to manager's model)
         model_settings: Optional per-agent generation parameters (temperature,
             thinking, etc.). Currently consumed by the ADK backend only.
+        mcp_servers: Optional MCP servers whose tools are exposed to this agent.
+            Currently consumed by the ADK backend only.
         include_state_tools: Whether to auto-inject plan/task state tools (default True)
     """
 
@@ -36,6 +39,7 @@ class AgentConfig:
     description: str = ""
     model: str | None = None
     model_settings: "ModelSettings | None" = None
+    mcp_servers: "list[MCPServerConfig]" = field(default_factory=list)
     include_state_tools: bool = True
 
     def get_prompt(self) -> str:

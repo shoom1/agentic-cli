@@ -34,6 +34,7 @@ import yaml
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 from agentic_cli.workflow.config import AgentConfig
+from agentic_cli.workflow.mcp import MCPServerConfig
 from agentic_cli.workflow.model_settings import ModelSettings
 
 
@@ -53,6 +54,7 @@ class AgentSpec(BaseModel):
     model: str | None = None
     model_settings: ModelSettings | None = None
     tools: list[str] = Field(default_factory=list)
+    mcp_servers: list[MCPServerConfig] = Field(default_factory=list)
     sub_agents: list[str] = Field(default_factory=list)
     include_state_tools: bool = True
 
@@ -118,6 +120,7 @@ def load_agents_from_yaml(path: str | Path) -> list[AgentConfig]:
                 description=spec.description,
                 model=spec.model,
                 model_settings=spec.model_settings,
+                mcp_servers=list(spec.mcp_servers),
                 include_state_tools=spec.include_state_tools,
             )
         )

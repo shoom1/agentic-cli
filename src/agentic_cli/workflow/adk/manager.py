@@ -392,6 +392,27 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         )
         return [save_plan, get_plan, save_tasks, get_tasks]
 
+    def _assemble_agent_tools(
+        self, config: "AgentConfig", service_map: dict
+    ) -> list:
+        """Build an agent's tools: framework tools + state tools + MCP toolsets.
+
+        MCP servers declared on the config are materialized into ADK
+        ``MCPToolset`` objects (ADK connects lazily) and appended after the
+        regular tools.
+        """
+        tools = self._build_tools(config, service_map)
+        mcp_servers = getattr(config, "mcp_servers", None) or []
+        if mcp_servers:
+            from agentic_cli.workflow.mcp import to_adk_toolset
+
+            for server in mcp_servers:
+                tools.append(to_adk_toolset(server))
+                logger.debug(
+                    "mcp_toolset_attached", agent=config.name, server=server.name
+                )
+        return tools
+
     def _create_agents(self) -> Agent:
         """Create agent hierarchy from configs.
 
@@ -412,7 +433,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     name=config.name,
                     model=config.model or self.model,
                     instruction=config.get_prompt(),
-                    tools=self._build_tools(config, service_map),
+                    tools=self._assemble_agent_tools(config, service_map),
                     description=config.description or None,
                     planner=self._get_planner(config),
                     generate_content_config=self._get_generate_content_config(config),
@@ -437,7 +458,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     name=config.name,
                     model=config.model or self.model,
                     instruction=config.get_prompt(),
-                    tools=self._build_tools(config, service_map),
+                    tools=self._assemble_agent_tools(config, service_map),
                     description=config.description or None,
                     sub_agents=sub_agent_instances,
                     planner=self._get_planner(config),
