@@ -162,12 +162,89 @@ class MessageProcessor:
             )
             return
 
-        # Import WorkflowEvent here (workflow module is now loaded)
-        from agentic_cli.workflow import WorkflowEvent
-
         bind_context(user_id=settings.default_user)
         logger.info("handling_message", message_length=len(message))
 
+        def _source(workflow):
+            return workflow.process(message=message, user_id=settings.default_user)
+
+        await self._run_turn(_source, workflow_controller, ui, settings, usage_tracker)
+
+    async def process_resume(
+        self,
+        record,
+        workflow_controller: "WorkflowController",
+        ui: "ThinkingPromptSession",
+        settings: "BaseSettings",
+        usage_tracker: "UsageTracker | None" = None,
+    ) -> None:
+        """Resume the agent with a finished long-running job's result.
+
+        Streams ``workflow.resume_with_job_result(record)`` through the exact
+        same rendering path as a user turn (events box, tool results, token
+        accounting, Ctrl+C). A no-op if the backend can't resume.
+
+        Args:
+            record: The terminal JobRecord to resume from.
+            workflow_controller: Controller managing workflow lifecycle.
+            ui: UI session for output.
+            settings: Application settings.
+            usage_tracker: Optional tracker for accumulating LLM token usage.
+        """
+        if not await workflow_controller.ensure_initialized(ui):
+            return
+
+        workflow = workflow_controller.workflow
+        bind_context(user_id=settings.default_user)
+        icon = "✓" if record.state.value == "succeeded" else "✗"
+
+        # Resume only if the backend supports it AND the originating conversation
+        # is still available (after a restart the in-memory ADK session is gone).
+        # Otherwise surface a notice — the result stays reachable by job id.
+        resumable = hasattr(
+            workflow, "resume_with_job_result"
+        ) and await workflow.can_resume(record)
+        if not resumable:
+            logger.info(
+                "job_resume_not_resumable",
+                job_id=record.job_id,
+                backend=getattr(workflow, "backend_type", "?"),
+            )
+            ui.add_message(
+                "system",
+                f"{icon} Background job '{record.name}' finished "
+                f"({record.state.value}) while its conversation was unavailable "
+                f"— fetch the result with /jobs {record.job_id}.",
+            )
+            return
+
+        logger.info("resuming_job", job_id=record.job_id, state=record.state.value)
+        ui.add_message(
+            "system",
+            f"↻ Background job '{record.name}' finished ({icon} {record.state.value}) "
+            "— resuming.",
+        )
+
+        def _source(wf):
+            return wf.resume_with_job_result(record)
+
+        await self._run_turn(_source, workflow_controller, ui, settings, usage_tracker)
+
+    async def _run_turn(
+        self,
+        source_factory,
+        workflow_controller: "WorkflowController",
+        ui: "ThinkingPromptSession",
+        settings: "BaseSettings",
+        usage_tracker: "UsageTracker | None" = None,
+    ) -> None:
+        """Drive one turn from an event-source factory through the UI.
+
+        Shared by ``process`` (user message) and ``process_resume`` (job
+        result). ``source_factory(workflow)`` returns the WorkflowEvent async
+        generator to consume; everything else (events box, HITL callback,
+        Ctrl+C cancel, rate-limit retry, token accounting) is identical.
+        """
         state = _EventProcessingState(
             usage_tracker=usage_tracker,
             workflow_controller=workflow_controller,
@@ -226,10 +303,7 @@ class MessageProcessor:
                     # flips False) but never cancels our coroutine, so we watch
                     # for that and cancel the task ourselves.
                     async def _consume() -> None:
-                        async for event in workflow.process(
-                            message=message,
-                            user_id=settings.default_user,
-                        ):
+                        async for event in source_factory(workflow):
                             handler = dispatch.get(event.type)
                             if handler is not None:
                                 await handler(

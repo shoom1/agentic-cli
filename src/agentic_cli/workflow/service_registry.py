@@ -14,6 +14,7 @@ from typing import Any
 # ---- Well-known registry keys ----
 
 ARXIV_SOURCE = "arxiv_source"
+JOB_MANAGER = "job_manager"
 KB_MANAGER = "kb_manager"
 LLM_SUMMARIZER = "llm_summarizer"
 MEMORY_STORE = "memory_store"

@@ -93,6 +93,8 @@ class WorkflowController:
         self._init_task: asyncio.Task[None] | None = None
         self._init_error: Exception | None = None
         self.usage_tracker: "UsageTracker | None" = None
+        # Status-bar jobs segment, published by JobMonitor; None when idle.
+        self.jobs_status_segment: str | None = None
 
     @property
     def workflow(self) -> "BaseWorkflowManager":
@@ -274,6 +276,8 @@ class WorkflowController:
                 token_summary = self.usage_tracker.format_status_bar()
                 if token_summary:
                     parts.append(token_summary)
+            if self.jobs_status_segment:
+                parts.append(self.jobs_status_segment)
             parts.extend(["Ctrl+C: cancel", "/help: commands"])
             ui.set_status(" | ".join(parts))
         # If still initializing, leave status bar unchanged

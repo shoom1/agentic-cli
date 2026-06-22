@@ -23,6 +23,7 @@ from agentic_cli.workflow.models import ModelRegistry
 from agentic_cli.workflow.service_registry import (
     set_service_registry,
     ARXIV_SOURCE,
+    JOB_MANAGER,
     KB_MANAGER,
     LLM_SUMMARIZER,
     MEMORY_STORE,
@@ -97,6 +98,12 @@ class BaseWorkflowManager(ABC):
 
         # User input handling (callback-only)
         self._user_input_callback: Callable[[UserInputRequest], Awaitable[str]] | None = None
+
+        # Active turn — set per process() call via _workflow_context(); read by
+        # JobManager to associate a long-running job with the session/user that
+        # launched it (phase 2 push/resume). None when no turn is in flight.
+        self._active_session_id: str | None = None
+        self._active_user_id: str | None = None
 
         # Model registry
         self._model_registry = ModelRegistry()
@@ -182,6 +189,11 @@ class BaseWorkflowManager(ABC):
     def sandbox_manager(self) -> "SandboxManager | None":
         """Get the sandbox manager (if required by tools)."""
         return self._services.get(SANDBOX_MANAGER)
+
+    @property
+    def job_manager(self):
+        """Get the long-running-job manager (if required by tools)."""
+        return self._services.get(JOB_MANAGER)
 
     # ------------------------------------------------------------------
     # Tool assembly
@@ -282,6 +294,16 @@ class BaseWorkflowManager(ABC):
         "search_arxiv": "arxiv_source",
         "fetch_arxiv_paper": "arxiv_source",
         "ingest_arxiv_paper": ("arxiv_source", "kb_manager"),
+        # Long-running jobs: the observe-only tools need the JobManager service.
+        # ``run_shell_job`` is an application-provided typed starter (see
+        # examples/jobs_demo.py), not a framework tool — its name is mapped here
+        # by convention so an app can add it without also adding observe tools.
+        "run_shell_job": "job_manager",
+        "job_status": "job_manager",
+        "job_result": "job_manager",
+        "job_logs": "job_manager",
+        "job_cancel": "job_manager",
+        "job_list": "job_manager",
     }
 
     def _resolve_config_tool_refs(self) -> None:
@@ -376,6 +398,18 @@ class BaseWorkflowManager(ABC):
             from agentic_cli.tools.sandbox.manager import SandboxManager
             s[SANDBOX_MANAGER] = SandboxManager(self._settings)
 
+        if "job_manager" in self._required_managers and JOB_MANAGER not in s:
+            from pathlib import Path
+            from agentic_cli.tools.jobs import JobManager
+
+            # User-scoped so long jobs persist across projects and CLI restarts.
+            jobs_dir = Path.home() / f".{self._settings.app_name}" / "jobs"
+            s[JOB_MANAGER] = JobManager(
+                self._settings,
+                base_dir=jobs_dir,
+                max_concurrent=getattr(self._settings, "max_concurrent_jobs", 4),
+            )
+
         if "arxiv_source" in self._required_managers and ARXIV_SOURCE not in s:
             from agentic_cli.tools.arxiv_source import ArxivSearchSource
             s[ARXIV_SOURCE] = ArxivSearchSource()
@@ -426,7 +460,7 @@ class BaseWorkflowManager(ABC):
         if messages is None:
             sid = getattr(self, "session_id", "default_session")
             try:
-                messages, _ = await self._extract_session_data(sid)
+                messages = await self.recent_messages(sid)
             except Exception:
                 logger.debug("session_fact_extraction_extract_failed", exc_info=True)
                 return []
@@ -456,20 +490,50 @@ class BaseWorkflowManager(ABC):
             store.store(fact, tags=["auto-extracted", "session"])
         return facts
 
+    @property
+    def active_session_id(self) -> str | None:
+        """Session id of the in-flight ``process()`` call, or None when idle."""
+        return self._active_session_id
+
+    @property
+    def active_user_id(self) -> str | None:
+        """User id of the in-flight ``process()`` call, or None when idle."""
+        return self._active_user_id
+
+    async def can_resume(self, record) -> bool:
+        """Whether a finished job can be resumed into its conversation now.
+
+        Base default: False (no resume support). Backends that implement
+        ``resume_with_job_result`` override this to report whether the
+        originating conversation is still available — e.g. the ADK session that
+        holds the pending call. Used by the harness to resume vs. surface a
+        "finished while its conversation was unavailable" notice (after a CLI
+        restart the default in-memory session is gone).
+        """
+        return False
+
     @contextlib.contextmanager
-    def _workflow_context(self) -> Iterator[None]:
+    def _workflow_context(
+        self, session_id: str | None = None, user_id: str | None = None
+    ) -> Iterator[None]:
         """Context manager that exposes the service registry to tools.
 
         Sets a single ContextVar (the service registry) so tools can
-        call ``get_service(key)`` during execution.
+        call ``get_service(key)`` during execution, and records the active
+        session/user for the duration of the turn so JobManager can associate
+        a launched job with the conversation that started it.
         """
         from agentic_cli.config import set_context_settings
 
         settings_token = set_context_settings(self._settings)
         registry_token = set_service_registry(self._services)
+        self._active_session_id = session_id
+        self._active_user_id = user_id
         try:
             yield
         finally:
+            self._active_session_id = None
+            self._active_user_id = None
             registry_token.var.reset(registry_token)
             settings_token.var.reset(settings_token)
 
@@ -696,131 +760,53 @@ class BaseWorkflowManager(ABC):
     # Session save/resume
     # -------------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Sessions (native, durable). The backend store (ADK
+    # DatabaseSessionService / LangGraph checkpointer) persists conversation
+    # state continuously, keyed by session_id; there is no separate snapshot.
+    # ------------------------------------------------------------------
+
     async def save_session(self, session_id: str | None = None) -> dict:
-        """Save current session state to disk.
+        """No-op flush — durable stores persist as the turn runs.
 
-        Extracts messages and current agent from the backend via abstract
-        hooks, then persists via SessionPersistence.save_snapshot().
-
-        Args:
-            session_id: Session ID to save under. Uses backend session_id if None.
-
-        Returns:
-            Dict with success status and path.
+        Kept for API compatibility / explicit "checkpoint now" intent. Returns
+        the session id that is (already) persisted.
         """
-        from datetime import datetime
-        from agentic_cli.persistence.session import SessionPersistence, SessionSnapshot
-
         sid = session_id or getattr(self, "session_id", "default_session")
-
-        try:
-            messages, current_agent = await self._extract_session_data(sid)
-
-            metadata: dict[str, Any] = {
-                "model": self.model,
-                "backend_type": self.backend_type,
-                "app_name": self._app_name,
-            }
-            if current_agent:
-                metadata["current_agent"] = current_agent
-
-            now = datetime.now()
-            snapshot = SessionSnapshot(
-                session_id=sid,
-                created_at=now,
-                saved_at=now,
-                messages=messages,
-                metadata=metadata,
-            )
-
-            persistence = SessionPersistence(self._settings)
-            path = persistence.save_snapshot(snapshot)
-
-            logger.info("session_saved", session_id=sid, message_count=len(messages))
-            return {"success": True, "session_id": sid, "path": str(path), "message_count": len(messages)}
-
-        except Exception as exc:
-            logger.error("session_save_failed", session_id=sid, error=str(exc))
-            return {"success": False, "error": str(exc)}
+        return {"success": True, "session_id": sid}
 
     async def load_session(self, session_id: str) -> bool:
-        """Load a saved session and inject it into the backend.
+        """Adopt ``session_id`` for resume; the native store already holds it.
 
-        Args:
-            session_id: Session ID to load.
-
-        Returns:
-            True if session was loaded successfully, False otherwise.
+        Returns True if that session already has content (i.e. a real resume),
+        False if it's new — but the id is adopted either way so the next turn
+        continues it.
         """
-        from agentic_cli.persistence.session import SessionPersistence
+        if hasattr(self, "session_id"):
+            self.session_id = session_id
+        exists = await self.session_exists(session_id)
+        logger.info("session_adopted", session_id=session_id, resumed=exists)
+        return exists
 
-        persistence = SessionPersistence(self._settings)
-        snapshot = persistence.load_session(session_id)
+    # ---- Backend hooks (override in ADK / LangGraph managers) ----
 
-        if snapshot is None:
-            logger.debug("session_not_found_for_load", session_id=session_id)
-            return False
+    async def session_exists(self, session_id: str) -> bool:
+        """Whether the native store already holds this session's state."""
+        return False
 
-        # Warn on backend mismatch (but still load — format is normalized)
-        saved_backend = snapshot.metadata.get("backend_type")
-        if saved_backend and saved_backend != self.backend_type:
-            logger.warning(
-                "session_backend_mismatch",
-                saved_backend=saved_backend,
-                current_backend=self.backend_type,
-                session_id=session_id,
-            )
+    async def recent_messages(self, session_id: str, limit: int = 20) -> list[dict]:
+        """Recent ``{role, content}`` text messages from the native session.
 
-        current_agent = snapshot.metadata.get("current_agent")
-
-        try:
-            await self._inject_session_messages(session_id, snapshot.messages, current_agent)
-            if hasattr(self, "session_id"):
-                self.session_id = session_id
-            logger.info(
-                "session_loaded",
-                session_id=session_id,
-                message_count=len(snapshot.messages),
-            )
-            return True
-        except Exception as exc:
-            logger.error("session_load_failed", session_id=session_id, error=str(exc))
-            return False
-
-    def list_sessions(self) -> list[dict]:
-        """List all saved sessions.
-
-        Returns:
-            List of session summary dicts.
+        Used for session-end fact extraction; text-only (no tool-call fidelity).
         """
-        from agentic_cli.persistence.session import SessionPersistence
+        return []
 
-        persistence = SessionPersistence(self._settings)
-        return persistence.list_sessions()
+    async def list_sessions(self) -> list[dict]:
+        """List persisted sessions from the native store (most recent first)."""
+        return []
 
-    @abstractmethod
-    async def _extract_session_data(
-        self, session_id: str
-    ) -> tuple[list[dict], str | None]:
-        """Extract normalized messages and current agent from backend session.
-
-        Returns:
-            Tuple of (messages, current_agent_name).
-            Messages use normalized format:
-            - {"role": "user", "content": "..."}
-            - {"role": "assistant", "content": "...", "tool_calls": [...]}
-            - {"role": "tool", "tool_call_id": "...", "name": "...", "content": "..."}
-        """
-        ...
-
-    @abstractmethod
-    async def _inject_session_messages(
-        self,
-        session_id: str,
-        messages: list[dict],
-        current_agent: str | None = None,
-    ) -> None:
-        """Inject normalized messages into the backend session."""
-        ...
+    async def delete_session(self, session_id: str) -> bool:
+        """Delete a persisted session from the native store."""
+        return False
 
 

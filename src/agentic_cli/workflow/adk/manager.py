@@ -10,7 +10,6 @@ For alternative orchestration backends (e.g., LangGraph), see the base_manager m
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import AsyncGenerator, Any, Callable
 
@@ -19,7 +18,7 @@ from google.adk import Runner
 from google.adk.agents import LlmAgent, Agent
 from google.adk.planners import BuiltInPlanner
 from google.adk.sessions import InMemorySessionService, BaseSessionService, Session
-from google.adk.events import Event
+from google.adk.tools import LongRunningFunctionTool
 
 from agentic_cli.workflow.base_manager import BaseWorkflowManager
 from agentic_cli.workflow.events import WorkflowEvent, EventType
@@ -28,6 +27,7 @@ from agentic_cli.workflow.model_settings import ModelSettings, ThinkingSettings
 from agentic_cli.workflow.adk.event_processor import ADKEventProcessor
 from agentic_cli.workflow.adk.permission_plugin import PermissionPlugin
 from agentic_cli.workflow.adk.plugins import LLMLoggingPlugin
+from agentic_cli.workflow.service_registry import JOB_MANAGER
 
 from agentic_cli.config import (
     BaseSettings,
@@ -41,6 +41,22 @@ logger = Loggers.workflow()
 # Suppress Google GenAI SDK warning about non-text parts (function_call) in
 # mixed responses. We already handle all part types individually in process_part.
 logging.getLogger("google_genai.types").setLevel(logging.ERROR)
+
+_RESULT_SUMMARY_LIMIT = 1000
+
+
+def _summarize_result(result: Any) -> str | None:
+    """Render a job result as a short string for the resume payload.
+
+    Truncates to keep the resumed turn's context lean; the agent pulls the full
+    result via the ``job_result`` tool when it needs it.
+    """
+    if result is None:
+        return None
+    text = result if isinstance(result, str) else repr(result)
+    if len(text) > _RESULT_SUMMARY_LIMIT:
+        return text[:_RESULT_SUMMARY_LIMIT] + f"… (+{len(text) - _RESULT_SUMMARY_LIMIT} chars)"
+    return text
 
 
 class GoogleADKWorkflowManager(BaseWorkflowManager):
@@ -405,7 +421,8 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
 
         MCP servers declared on the config are materialized into ADK
         ``MCPToolset`` objects (ADK connects lazily) and appended after the
-        regular tools.
+        regular tools. Skills are appended as a ``SkillToolset``. The caller is
+        responsible for ``_wrap_long_running`` over the result.
         """
         tools = self._build_tools(config, service_map)
         mcp_servers = getattr(config, "mcp_servers", None) or []
@@ -442,6 +459,35 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         scripts_enabled = getattr(self._settings, "skill_scripts_enabled", False)
         return make_skill_toolset(skills, scripts_enabled=scripts_enabled)
 
+    def _wrap_long_running(self, tools: list[Callable]) -> list:
+        """Wrap tools flagged ``long_running`` as ADK ``LongRunningFunctionTool``.
+
+        A long-running tool returns a ``job_id`` immediately and the model is
+        instructed not to re-call it while pending; the eventual result is
+        delivered later as a ``FunctionResponse`` (see ``resume_with_job_result``).
+        Detection is by registered tool name; non-long-running tools and any
+        already-wrapped tools (including toolset objects) pass through unchanged.
+        Permission gating is unaffected — ADK gates via ``PermissionPlugin`` (by
+        name), not by wrapping the callable.
+        """
+        from agentic_cli.tools.registry import get_registry
+
+        reg = get_registry()
+        wrapped: list = []
+        for tool in tools:
+            name = getattr(tool, "__name__", "")
+            defn = reg.get(name) if name else None
+            if (
+                defn is not None
+                and defn.long_running
+                and not isinstance(tool, LongRunningFunctionTool)
+            ):
+                wrapped.append(LongRunningFunctionTool(func=tool))
+                logger.debug("long_running_tool_wrapped", tool=name)
+            else:
+                wrapped.append(tool)
+        return wrapped
+
     def _create_agents(self) -> Agent:
         """Create agent hierarchy from configs.
 
@@ -462,7 +508,9 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     name=config.name,
                     model=config.model or self.model,
                     instruction=config.get_prompt(),
-                    tools=self._assemble_agent_tools(config, service_map),
+                    tools=self._wrap_long_running(
+                        self._assemble_agent_tools(config, service_map)
+                    ),
                     description=config.description or None,
                     planner=self._get_planner(config),
                     generate_content_config=self._get_generate_content_config(config),
@@ -487,7 +535,9 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     name=config.name,
                     model=config.model or self.model,
                     instruction=config.get_prompt(),
-                    tools=self._assemble_agent_tools(config, service_map),
+                    tools=self._wrap_long_running(
+                        self._assemble_agent_tools(config, service_map)
+                    ),
                     description=config.description or None,
                     sub_agents=sub_agent_instances,
                     planner=self._get_planner(config),
@@ -544,13 +594,38 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
 
         return plugins
 
+    def _make_session_service(self) -> BaseSessionService:
+        """Build the ADK session service from ``session_store`` settings.
+
+        ``memory`` → ephemeral ``InMemorySessionService``; ``sqlite``/``postgres``
+        → native ``DatabaseSessionService`` (durable across restarts, full event
+        fidelity). The sqlite parent dir is created so the engine can open it.
+        """
+        db_url = self._settings.session_db_url()
+        if db_url is None:
+            logger.debug("using_in_memory_session_service")
+            return InMemorySessionService()
+
+        if db_url.startswith("sqlite"):
+            # sqlite+aiosqlite:///<path> — ensure the directory exists.
+            from pathlib import Path
+
+            path = db_url.split(":///", 1)[-1]
+            if path:
+                Path(path).parent.mkdir(parents=True, exist_ok=True)
+
+        from google.adk.sessions import DatabaseSessionService
+
+        logger.info("using_database_session_service", store=self._settings.session_store)
+        return DatabaseSessionService(db_url=db_url)
+
     async def _do_initialize(self) -> None:
         """ADK-specific initialization: session service, agents, runner."""
         logger.info("initializing_services", app_name=self.app_name)
 
-        # Create session service
-        self._session_service = InMemorySessionService()
-        logger.debug("using_in_memory_session_service")
+        # Create session service (durable DatabaseSessionService by default;
+        # InMemory only when session_store='memory').
+        self._session_service = self._make_session_service()
 
         # Create agent hierarchy — natively from an ADK config, or from configs.
         if self._adk_config_path:
@@ -655,9 +730,9 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         self._event_processor.model = self.model
 
         # Context setup
-        with self._workflow_context():
+        with self._workflow_context(session_id=current_session_id, user_id=user_id):
             # Session handling
-            session = await self._get_or_create_session(user_id, current_session_id)
+            await self._get_or_create_session(user_id, current_session_id)
 
             # Create message
             new_message = types.Content(
@@ -665,63 +740,54 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                 parts=[types.Part.from_text(text=message)],
             )
 
-            event_count = 0
-
-            # Build run_config with context window compression if enabled
-            run_config = None
-            if self._settings.context_window_enabled:
-                from google.genai.types import ContextWindowCompressionConfig, SlidingWindow
-                from google.adk.agents import RunConfig
-
-                run_config = RunConfig(
-                    context_window_compression=ContextWindowCompressionConfig(
-                        trigger_tokens=self._settings.context_window_trigger_tokens,
-                        sliding_window=SlidingWindow(
-                            target_tokens=self._settings.context_window_target_tokens,
-                        ),
-                    )
-                )
-
-            # Process ADK events directly - retry is handled by HttpRetryOptions
-            async for adk_event in self._runner.run_async(
+            async for event in self._run_and_stream(
                 session_id=current_session_id,
                 user_id=user_id,
                 new_message=new_message,
-                run_config=run_config,
+                run_config=self._build_run_config(),
             ):
-                # Yield LLM events from plugin first (raw capture)
-                if self._llm_logging_plugin:
-                    for llm_event in self._llm_logging_plugin.drain_events():
-                        llm_event = self._apply_event_hook(llm_event)
-                        if llm_event:
-                            event_count += 1
-                            yield llm_event
+                yield event
 
-                # Process ADK event into workflow events
-                async for workflow_event in self._event_processor.process_event(
-                    adk_event,
-                    current_session_id,
-                ):
-                    event_count += 1
-                    yield workflow_event
+    def _build_run_config(self):
+        """Build a RunConfig with context-window compression if enabled."""
+        if not self._settings.context_window_enabled:
+            return None
+        from google.genai.types import ContextWindowCompressionConfig, SlidingWindow
+        from google.adk.agents import RunConfig
 
-                    # Drain task progress events buffered by the plugin
-                    if workflow_event.type == EventType.TOOL_RESULT and self._task_progress_plugin:
-                        for progress_event in self._task_progress_plugin.drain_events():
-                            progress_event = self._apply_event_hook(progress_event)
-                            if progress_event:
-                                event_count += 1
-                                yield progress_event
+        return RunConfig(
+            context_window_compression=ContextWindowCompressionConfig(
+                trigger_tokens=self._settings.context_window_trigger_tokens,
+                sliding_window=SlidingWindow(
+                    target_tokens=self._settings.context_window_target_tokens,
+                ),
+            )
+        )
 
-            # Final drain — catches progress from the last tool call
-            if self._task_progress_plugin:
-                for progress_event in self._task_progress_plugin.drain_events():
-                    progress_event = self._apply_event_hook(progress_event)
-                    if progress_event:
-                        event_count += 1
-                        yield progress_event
+    async def _run_and_stream(
+        self,
+        *,
+        session_id: str,
+        user_id: str,
+        new_message: "types.Content",
+        run_config,
+    ) -> AsyncGenerator[WorkflowEvent, None]:
+        """Run the ADK runner for one invocation and stream WorkflowEvents.
 
-            # Drain any remaining LLM events after processing completes
+        Shared by ``process()`` (user message) and ``resume_with_job_result()``
+        (function response). The caller must already be inside
+        ``_workflow_context`` with the session prepared.
+        """
+        event_count = 0
+
+        # Process ADK events directly - retry is handled by HttpRetryOptions
+        async for adk_event in self._runner.run_async(
+            session_id=session_id,
+            user_id=user_id,
+            new_message=new_message,
+            run_config=run_config,
+        ):
+            # Yield LLM events from plugin first (raw capture)
             if self._llm_logging_plugin:
                 for llm_event in self._llm_logging_plugin.drain_events():
                     llm_event = self._apply_event_hook(llm_event)
@@ -729,136 +795,216 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                         event_count += 1
                         yield llm_event
 
-            logger.info("message_processed", event_count=event_count)
+            # Process ADK event into workflow events
+            async for workflow_event in self._event_processor.process_event(
+                adk_event,
+                session_id,
+            ):
+                event_count += 1
+                yield workflow_event
 
-    # -------------------------------------------------------------------------
-    # Session save/resume hooks
-    # -------------------------------------------------------------------------
+                # Drain task progress events buffered by the plugin
+                if workflow_event.type == EventType.TOOL_RESULT and self._task_progress_plugin:
+                    for progress_event in self._task_progress_plugin.drain_events():
+                        progress_event = self._apply_event_hook(progress_event)
+                        if progress_event:
+                            event_count += 1
+                            yield progress_event
 
-    async def _extract_session_data(self, session_id: str) -> tuple[list[dict], str | None]:
-        """Extract normalized messages and current agent from ADK session.
+        # Final drain — catches progress from the last tool call
+        if self._task_progress_plugin:
+            for progress_event in self._task_progress_plugin.drain_events():
+                progress_event = self._apply_event_hook(progress_event)
+                if progress_event:
+                    event_count += 1
+                    yield progress_event
 
-        Returns:
-            Tuple of (messages list, current agent name or None).
+        # Drain any remaining LLM events after processing completes
+        if self._llm_logging_plugin:
+            for llm_event in self._llm_logging_plugin.drain_events():
+                llm_event = self._apply_event_hook(llm_event)
+                if llm_event:
+                    event_count += 1
+                    yield llm_event
+
+        logger.info("message_processed", event_count=event_count)
+
+    async def can_resume(self, record) -> bool:
+        """True iff the originating ADK session still exists to resume into.
+
+        Requires the resume ids and a live session holding the pending call.
+        After a CLI restart the in-memory session is gone, so this returns
+        False and the harness surfaces a notice instead of a dead resume turn.
         """
-        if not self._session_service:
-            return [], None
+        if not (record.session_id and record.user_id and record.call_id):
+            return False
+        if self._session_service is None:
+            return False
+        session = await self._session_service.get_session(
+            app_name=self.app_name, user_id=record.user_id, session_id=record.session_id,
+        )
+        return session is not None
 
+    async def resume_with_job_result(
+        self, record, result: Any = None
+    ) -> AsyncGenerator[WorkflowEvent, None]:
+        """Resume the agent with a finished long-running job's result.
+
+        Delivers the result to the pending long-running tool call as an ADK
+        ``FunctionResponse`` (matching ``record.call_id``) and re-invokes the
+        runner, streaming the follow-up turn's events. The originating session
+        must still contain the pending call (it is persisted); if it's gone or
+        the record lacks the ids needed to resume, this yields nothing.
+
+        Args:
+            record: The terminal ``JobRecord`` to resume from.
+            result: The job's result; fetched from the JobManager if omitted.
+        """
+        await self._ensure_initialized()
+
+        session_id = record.session_id
+        user_id = record.user_id
+        if not session_id or not user_id or not record.call_id:
+            logger.warning(
+                "job_resume_missing_ids",
+                job_id=getattr(record, "job_id", None),
+                have_session=bool(session_id),
+                have_user=bool(user_id),
+                have_call_id=bool(record.call_id),
+            )
+            return
+
+        bind_context(session_id=session_id, user_id=user_id)
+        self._event_processor.model = self.model
+
+        with self._workflow_context(session_id=session_id, user_id=user_id):
+            # The pending call lives in the existing session; don't create a new
+            # empty one (that would have no call to answer).
+            session = await self._session_service.get_session(
+                app_name=self.app_name, user_id=user_id, session_id=session_id,
+            )
+            if session is None:
+                logger.warning("job_resume_session_missing", job_id=record.job_id,
+                               session_id=session_id)
+                return
+
+            if result is None:
+                jm = self._services.get(JOB_MANAGER)
+                if jm is not None:
+                    result = jm.result(record.job_id)
+
+            function_response = types.FunctionResponse(
+                id=record.call_id,
+                name=record.call_name or record.tool,
+                response=self._job_result_payload(record, result),
+            )
+            new_message = types.Content(
+                role="user",
+                parts=[types.Part(function_response=function_response)],
+            )
+
+            logger.info("job_resume_started", job_id=record.job_id,
+                        call_id=record.call_id, state=record.state.value)
+            async for event in self._run_and_stream(
+                session_id=session_id,
+                user_id=user_id,
+                new_message=new_message,
+                run_config=self._build_run_config(),
+            ):
+                yield event
+
+    @staticmethod
+    def _job_result_payload(record, result: Any) -> dict:
+        """Build the FunctionResponse payload — a summary + pointer, not raw data.
+
+        Keeps the resumed turn's context lean; the agent can pull the full
+        result/logs via ``job_result``/``job_logs`` using the job_id.
+        """
+        payload: dict[str, Any] = {
+            "job_id": record.job_id,
+            "tool": record.tool,
+            "state": record.state.value,
+        }
+        if record.exit_code is not None:
+            payload["exit_code"] = record.exit_code
+        if record.error:
+            payload["error"] = record.error
+        summary = _summarize_result(result)
+        if summary is not None:
+            payload["result_summary"] = summary
+        payload["hint"] = (
+            f"Full result via job_result('{record.job_id}'); "
+            f"logs via job_logs('{record.job_id}')."
+        )
+        return payload
+
+    # -------------------------------------------------------------------------
+    # Sessions (native — DatabaseSessionService persists events continuously)
+    # -------------------------------------------------------------------------
+
+    async def session_exists(self, session_id: str) -> bool:
+        """True if the store holds this session with any events."""
+        if not self._session_service:
+            return False
         session = await self._session_service.get_session(
             app_name=self.app_name,
             user_id=self._settings.default_user,
             session_id=session_id,
         )
-        if session is None or not session.events:
-            return [], None
+        return session is not None and bool(getattr(session, "events", None))
 
-        messages: list[dict] = []
-        for event in session.events:
-            content = getattr(event, "content", None)
-            if content is None:
-                continue
-
-            role = getattr(content, "role", None)
-            parts = getattr(content, "parts", None) or []
-
-            for part in parts:
-                # Text part
-                if hasattr(part, "text") and part.text:
-                    if role == "user":
-                        messages.append({"role": "user", "content": part.text})
-                    elif role == "model":
-                        messages.append({"role": "assistant", "content": part.text})
-
-                # Function call part
-                elif hasattr(part, "function_call") and part.function_call:
-                    fc = part.function_call
-                    tool_call = {
-                        "id": getattr(fc, "id", fc.name),
-                        "name": fc.name,
-                        "args": dict(fc.args) if fc.args else {},
-                    }
-                    # Attach to preceding assistant message or create one
-                    if messages and messages[-1]["role"] == "assistant":
-                        messages[-1].setdefault("tool_calls", []).append(tool_call)
-                    else:
-                        messages.append({
-                            "role": "assistant",
-                            "content": "",
-                            "tool_calls": [tool_call],
-                        })
-
-                # Function response part
-                elif hasattr(part, "function_response") and part.function_response:
-                    fr = part.function_response
-                    response_content = json.dumps(fr.response) if isinstance(fr.response, dict) else str(fr.response)
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": getattr(fr, "id", fr.name),
-                        "name": fr.name,
-                        "content": response_content,
-                    })
-
-        current_agent = getattr(session.events[-1], "author", None)
-        return messages, current_agent
-
-    async def _inject_session_messages(
-        self,
-        session_id: str,
-        messages: list[dict],
-        current_agent: str | None = None,
-    ) -> None:
-        """Inject normalized messages into the ADK session as real events.
-
-        Uses ``append_event`` so events land in the *stored* session.
-        ``create_session`` returns a copy of the stored session, so the old
-        approach of appending to that copy left the stored session empty and
-        silently lost the restored history on resume.
-        """
+    async def list_sessions(self) -> list[dict]:
+        """List persisted sessions for the current user (most recent first)."""
         if not self._session_service:
-            raise RuntimeError("Session service not initialized")
+            return []
+        resp = await self._session_service.list_sessions(
+            app_name=self.app_name, user_id=self._settings.default_user,
+        )
+        sessions = [
+            {
+                "session_id": s.id,
+                "last_update": getattr(s, "last_update_time", None),
+                "message_count": len(getattr(s, "events", None) or []),
+            }
+            for s in getattr(resp, "sessions", [])
+        ]
+        sessions.sort(key=lambda x: x["last_update"] or 0, reverse=True)
+        return sessions
 
-        # Create a fresh session for the restored conversation
-        session = await self._session_service.create_session(
+    async def delete_session(self, session_id: str) -> bool:
+        """Delete a persisted session from the store."""
+        if not self._session_service:
+            return False
+        await self._session_service.delete_session(
             app_name=self.app_name,
             user_id=self._settings.default_user,
             session_id=session_id,
         )
+        return True
 
-        async def _add(content: types.Content, author: str) -> None:
-            await self._session_service.append_event(
-                session, Event(author=author or "user", content=content)
+    async def recent_messages(self, session_id: str, limit: int = 20) -> list[dict]:
+        """Recent text messages from the stored session (for fact extraction)."""
+        if not self._session_service:
+            return []
+        session = await self._session_service.get_session(
+            app_name=self.app_name,
+            user_id=self._settings.default_user,
+            session_id=session_id,
+        )
+        if session is None or not getattr(session, "events", None):
+            return []
+        out: list[dict] = []
+        for event in session.events:
+            content = getattr(event, "content", None)
+            if content is None:
+                continue
+            role = getattr(content, "role", None)
+            text = " ".join(
+                p.text for p in (getattr(content, "parts", None) or [])
+                if getattr(p, "text", None)
             )
-
-        for msg in messages:
-            role = msg["role"]
-
-            if role == "user":
-                content = types.Content(
-                    role="user",
-                    parts=[types.Part.from_text(text=msg["content"])],
+            if text:
+                out.append(
+                    {"role": "user" if role == "user" else "assistant", "content": text}
                 )
-                await _add(content, "user")
-
-            elif role == "assistant":
-                parts = []
-                if msg.get("content"):
-                    parts.append(types.Part.from_text(text=msg["content"]))
-                for tc in msg.get("tool_calls", []):
-                    parts.append(types.Part.from_function_call(
-                        name=tc["name"],
-                        args=tc.get("args", {}),
-                    ))
-                content = types.Content(role="model", parts=parts)
-                await _add(content, current_agent or "model")
-
-            elif role == "tool":
-                try:
-                    response = json.loads(msg["content"])
-                except (json.JSONDecodeError, TypeError):
-                    response = {"result": msg["content"]}
-                parts = [types.Part.from_function_response(
-                    name=msg.get("name", "unknown"),
-                    response=response,
-                )]
-                content = types.Content(role="user", parts=parts)
-                await _add(content, current_agent or "user")
+        return out[-limit:]

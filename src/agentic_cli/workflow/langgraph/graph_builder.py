@@ -220,7 +220,11 @@ class LangGraphBuilder:
                 kwargs = {"model": model}
                 if thinking and thinking["provider"] == "google":
                     kwargs["include_thoughts"] = thinking.get("include_thoughts", True)
-                    kwargs["thinking_level"] = thinking.get("thinking_level")
+                    # 2.5 → thinking_budget, 3 → thinking_level (see get_thinking_config)
+                    if thinking.get("thinking_budget") is not None:
+                        kwargs["thinking_budget"] = thinking["thinking_budget"]
+                    elif thinking.get("thinking_level") is not None:
+                        kwargs["thinking_level"] = thinking["thinking_level"]
                 return ChatGoogleGenerativeAI(**kwargs)
             except ImportError:
                 raise ImportError(
@@ -275,13 +279,22 @@ class LangGraphBuilder:
             }
 
         if model.startswith("gemini-"):
-            # Gemini 3 Pro only supports "low" and "high", not "medium"
-            is_gemini_3_pro = "gemini-3" in model and "pro" in model
-            level = "high" if (effort == "medium" and is_gemini_3_pro) else effort
+            # Gemini 3 takes a discrete thinking_level; Gemini 2.5 only accepts a
+            # numeric thinking_budget and rejects thinking_level (400). Mirrors
+            # the ADK split in GoogleADKWorkflowManager._get_planner.
+            if "gemini-3" in model:
+                is_gemini_3_pro = "pro" in model  # 3 Pro lacks "medium"
+                level = "high" if (effort == "medium" and is_gemini_3_pro) else effort
+                return {
+                    "provider": "google",
+                    "include_thoughts": True,
+                    "thinking_level": level,
+                }
+            budget = {"low": 4096, "medium": 12288, "high": 24576}.get(effort, 12288)
             return {
                 "provider": "google",
                 "include_thoughts": True,
-                "thinking_level": level,
+                "thinking_budget": budget,
             }
 
         return None
