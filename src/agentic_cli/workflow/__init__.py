@@ -12,6 +12,7 @@ Submodules:
 # Light imports - always available (fast)
 from agentic_cli.workflow.events import WorkflowEvent, EventType, UserInputRequest
 from agentic_cli.workflow.config import AgentConfig
+from agentic_cli.workflow.model_settings import ModelSettings, ThinkingSettings
 from agentic_cli.workflow.factory import create_workflow_manager_from_settings
 from agentic_cli.workflow.settings import WorkflowSettingsMixin
 from agentic_cli.workflow.models import ModelFamily, ModelInfo, ModelRegistry
@@ -54,6 +55,8 @@ __all__ = [
     "create_workflow_manager_from_settings",
     # Config
     "AgentConfig",
+    "ModelSettings",
+    "ThinkingSettings",
     # Settings mixin
     "WorkflowSettingsMixin",
     # Model registry

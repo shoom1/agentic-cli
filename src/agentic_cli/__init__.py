@@ -26,6 +26,7 @@ from agentic_cli.cli.app import BaseCLIApp
 from agentic_cli.workflow.factory import create_workflow_manager_from_settings
 from agentic_cli.cli.commands import Command, CommandRegistry
 from agentic_cli.workflow.config import AgentConfig
+from agentic_cli.workflow.model_settings import ModelSettings, ThinkingSettings
 from agentic_cli.workflow.events import WorkflowEvent, EventType
 from agentic_cli.config import (
     BaseSettings,
@@ -73,6 +74,8 @@ __all__ = [
     "GoogleADKWorkflowManager",  # lazy (Google ADK)
     "LangGraphWorkflowManager",  # lazy (requires langgraph extra)
     "AgentConfig",
+    "ModelSettings",
+    "ThinkingSettings",
     "WorkflowEvent",
     "EventType",
     # Settings
