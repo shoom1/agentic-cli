@@ -331,6 +331,20 @@ class WorkflowSettingsMixin:
         json_schema_extra={"ui_order": 144},
     )
 
+    # Skills (Agent Skills / SKILL.md folders)
+    skills_dirs: list[str] = Field(
+        default_factory=list,
+        title="Skills Directories",
+        description="Directories searched for named skills (Agent Skills / SKILL.md folders)",
+        json_schema_extra={"ui_order": 138},
+    )
+    skill_scripts_enabled: bool = Field(
+        default=False,
+        title="Skill Scripts Enabled",
+        description="Allow executing scripts bundled with skills (requires a code executor; disabled by default)",
+        json_schema_extra={"ui_order": 139},
+    )
+
     # Persistence settings (LangGraph)
     postgres_uri: str | None = Field(
         default=None,

@@ -23,6 +23,7 @@ from google.adk.tools import LongRunningFunctionTool
 from agentic_cli.workflow.base_manager import BaseWorkflowManager
 from agentic_cli.workflow.events import WorkflowEvent, EventType
 from agentic_cli.workflow.config import AgentConfig
+from agentic_cli.workflow.model_settings import ModelSettings, ThinkingSettings
 from agentic_cli.workflow.adk.event_processor import ADKEventProcessor
 from agentic_cli.workflow.adk.permission_plugin import PermissionPlugin
 from agentic_cli.workflow.adk.plugins import LLMLoggingPlugin
@@ -96,6 +97,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         app_name: str | None = None,
         model: str | None = None,
         on_event: Callable[[WorkflowEvent], WorkflowEvent | None] | None = None,
+        adk_config_path: str | None = None,
     ) -> None:
         """Initialize the workflow manager.
 
@@ -106,6 +108,10 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             app_name: Application name for services (uses settings.app_name if not provided)
             model: Model override (auto-detected from API keys if not provided)
             on_event: Optional hook to transform/filter events before yielding
+            adk_config_path: Optional path to a native ADK ``root_agent.yaml``.
+                When set, the agent tree is built via ADK ``from_config`` instead
+                of from ``agent_configs`` (full ADK fidelity; framework service /
+                state tool injection does not apply).
         """
         super().__init__(
             agent_configs=agent_configs,
@@ -115,6 +121,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             on_event=on_event,
         )
         self.session_id = "default_session"
+        self._adk_config_path = adk_config_path
 
         self._session_service: BaseSessionService | None = None
         self._root_agent: Agent | None = None
@@ -245,8 +252,35 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             sessions_preserved=preserve_sessions,
         )
 
-    def _get_planner(self) -> BuiltInPlanner | None:
-        """Get planner with thinking configuration.
+    def _resolve_model_for_config(self, config: "AgentConfig | None") -> str:
+        """Return the effective model for an agent (per-config override or default)."""
+        if config is not None and config.model:
+            return config.model
+        return self.model
+
+    def _resolve_thinking(
+        self, config: "AgentConfig | None"
+    ) -> ThinkingSettings | None:
+        """Resolve thinking settings: per-agent override, else global effort.
+
+        Returns None when thinking is disabled (no per-agent setting and the
+        global ``thinking_effort`` is ``"none"``).
+        """
+        ms = config.model_settings if config is not None else None
+        if ms is not None and ms.thinking is not None:
+            return ms.thinking
+        global_effort = self._settings.thinking_effort
+        if global_effort == "none":
+            return None
+        return ThinkingSettings(mode=global_effort)
+
+    def _get_planner(
+        self, config: "AgentConfig | None" = None
+    ) -> BuiltInPlanner | None:
+        """Get planner with thinking configuration for an agent.
+
+        Thinking is resolved per-agent (``config.model_settings.thinking``) with
+        a fallback to the global ``settings.thinking_effort``.
 
         Gemini 3 models take a discrete ``thinking_level``; Gemini 2.5 models
         only understand a numeric ``thinking_budget`` and reject ``thinking_level``
@@ -254,48 +288,49 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         We therefore choose the field that matches the model generation —
         sending ``thinking_level`` to a 2.5 model breaks every request.
         """
-        thinking_effort = self._settings.thinking_effort
-
-        if thinking_effort == "none":
+        thinking = self._resolve_thinking(config)
+        if thinking is None or thinking.mode == "none":
             return None
 
-        if not self._settings.supports_thinking_effort(self.model):
-            logger.debug(
-                "thinking_not_supported",
-                model=self.model,
-                effort=thinking_effort,
+        model = self._resolve_model_for_config(config)
+
+        if not self._settings.supports_thinking_effort(model):
+            logger.debug("thinking_not_supported", model=model, mode=thinking.mode)
+            return None
+
+        if thinking.mode == "budget":
+            budget = (
+                thinking.budget_tokens if thinking.budget_tokens is not None else 12288
             )
-            return None
-
-        if "gemini-3" in self.model:
-            thinking_config = self._gemini3_thinking_config(thinking_effort)
+            thinking_config = types.ThinkingConfig(
+                include_thoughts=True, thinking_budget=budget
+            )
+        elif "gemini-3" in model:
+            thinking_config = self._gemini3_thinking_config(thinking.mode, model)
         else:
-            thinking_config = self._gemini25_thinking_config(thinking_effort)
+            thinking_config = self._gemini25_thinking_config(thinking.mode)
 
-        logger.debug(
-            "planner_created",
-            model=self.model,
-            effort=thinking_effort,
-        )
-
+        logger.debug("planner_created", model=model, mode=thinking.mode)
         return BuiltInPlanner(thinking_config=thinking_config)
 
-    def _gemini3_thinking_config(self, thinking_effort: str) -> "types.ThinkingConfig":
+    def _gemini3_thinking_config(
+        self, effort: str, model: str
+    ) -> "types.ThinkingConfig":
         """Build a Gemini 3 thinking config using the discrete ``thinking_level``.
 
         Gemini 3 Pro supports only LOW and HIGH (MEDIUM falls back to HIGH);
         Gemini 3 Flash additionally supports MINIMAL/MEDIUM.
         """
-        is_pro = "pro" in self.model
+        is_pro = "pro" in model
 
-        if thinking_effort == "low":
+        if effort == "low":
             level = types.ThinkingLevel.LOW
-        elif thinking_effort == "medium":
+        elif effort == "medium":
             if is_pro:
                 level = types.ThinkingLevel.HIGH
                 logger.debug(
                     "thinking_level_fallback",
-                    model=self.model,
+                    model=model,
                     requested="medium",
                     actual="high",
                     reason="Gemini 3 Pro only supports LOW and HIGH",
@@ -307,21 +342,27 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
 
         return types.ThinkingConfig(include_thoughts=True, thinking_level=level)
 
-    def _gemini25_thinking_config(self, thinking_effort: str) -> "types.ThinkingConfig":
+    def _gemini25_thinking_config(self, effort: str) -> "types.ThinkingConfig":
         """Build a Gemini 2.5 thinking config using the numeric ``thinking_budget``.
 
         2.5 models reject ``thinking_level``. Budgets are chosen within the
         range valid across the 2.5 family (Flash/Pro/Flash-Lite all accept
         4096–24576 tokens).
         """
-        budget = {"low": 4096, "medium": 12288, "high": 24576}[thinking_effort]
+        budget = {"low": 4096, "medium": 12288, "high": 24576}[effort]
         return types.ThinkingConfig(include_thoughts=True, thinking_budget=budget)
 
-    def _get_generate_content_config(self) -> types.GenerateContentConfig:
-        """Build GenerateContentConfig with retry-enabled HTTP options.
+    def _get_generate_content_config(
+        self, config: "AgentConfig | None" = None
+    ) -> types.GenerateContentConfig:
+        """Build GenerateContentConfig with retry HTTP options and per-agent params.
+
+        Args:
+            config: Agent config whose ``model_settings`` (if any) supply
+                generation params merged on top of the retry options.
 
         Returns:
-            GenerateContentConfig with HttpRetryOptions configured from settings.
+            GenerateContentConfig with HttpRetryOptions plus any per-agent params.
         """
         http_options = types.HttpOptions(
             retry_options=types.HttpRetryOptions(
@@ -331,7 +372,40 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                 http_status_codes=[500, 502, 503, 504],  # Don't auto-retry 429
             )
         )
-        return types.GenerateContentConfig(http_options=http_options)
+        kwargs: dict[str, Any] = {"http_options": http_options}
+        ms = config.model_settings if config is not None else None
+        if ms is not None:
+            kwargs.update(self._generate_config_kwargs_from_settings(ms))
+        return types.GenerateContentConfig(**kwargs)
+
+    def _generate_config_kwargs_from_settings(
+        self, ms: ModelSettings
+    ) -> dict[str, Any]:
+        """Translate neutral ModelSettings into GenerateContentConfig kwargs.
+
+        Maps neutral field names (``max_tokens`` -> ``max_output_tokens``) and
+        passes ``extra`` through, filtered to valid GenerateContentConfig fields
+        (unknown keys are logged and dropped). Thinking is handled by the planner.
+        """
+        out: dict[str, Any] = {}
+        if ms.temperature is not None:
+            out["temperature"] = ms.temperature
+        if ms.top_p is not None:
+            out["top_p"] = ms.top_p
+        if ms.top_k is not None:
+            out["top_k"] = ms.top_k
+        if ms.max_tokens is not None:
+            out["max_output_tokens"] = ms.max_tokens
+        if ms.stop_sequences is not None:
+            out["stop_sequences"] = ms.stop_sequences
+        if ms.extra:
+            valid = set(types.GenerateContentConfig.model_fields)
+            for key, value in ms.extra.items():
+                if key in valid:
+                    out[key] = value
+                else:
+                    logger.warning("model_settings_extra_ignored", key=key)
+        return out
 
     def _get_state_tools(self) -> list:
         """Return ADK-native state tools using ToolContext.state."""
@@ -340,6 +414,51 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         )
         return [save_plan, get_plan, save_tasks, get_tasks]
 
+    def _assemble_agent_tools(
+        self, config: "AgentConfig", service_map: dict
+    ) -> list:
+        """Build an agent's tools: framework tools + state tools + MCP toolsets.
+
+        MCP servers declared on the config are materialized into ADK
+        ``MCPToolset`` objects (ADK connects lazily) and appended after the
+        regular tools. Skills are appended as a ``SkillToolset``. The caller is
+        responsible for ``_wrap_long_running`` over the result.
+        """
+        tools = self._build_tools(config, service_map)
+        mcp_servers = getattr(config, "mcp_servers", None) or []
+        if mcp_servers:
+            from agentic_cli.workflow.mcp import to_adk_toolset
+
+            for server in mcp_servers:
+                tools.append(to_adk_toolset(server))
+                logger.debug(
+                    "mcp_toolset_attached", agent=config.name, server=server.name
+                )
+
+        skill_refs = getattr(config, "skills", None) or []
+        if skill_refs:
+            toolset = self._build_skill_toolset(skill_refs)
+            if toolset is not None:
+                tools.append(toolset)
+                logger.debug("skill_toolset_attached", agent=config.name)
+        return tools
+
+    def _build_skill_toolset(self, skill_refs: list[str]):
+        """Resolve skill refs and build an ADK SkillToolset (scripts gated).
+
+        Script execution is disabled unless ``settings.skill_scripts_enabled``
+        is True (and a code executor is wired — a future enhancement), so by
+        default only discovery/read tools are exposed.
+        """
+        from agentic_cli.tools.skills import SkillStore, make_skill_toolset
+
+        store = SkillStore(getattr(self._settings, "skills_dirs", []) or [])
+        skills = store.resolve(skill_refs)
+        if not skills:
+            return None
+        scripts_enabled = getattr(self._settings, "skill_scripts_enabled", False)
+        return make_skill_toolset(skills, scripts_enabled=scripts_enabled)
+
     def _wrap_long_running(self, tools: list[Callable]) -> list:
         """Wrap tools flagged ``long_running`` as ADK ``LongRunningFunctionTool``.
 
@@ -347,9 +466,9 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         instructed not to re-call it while pending; the eventual result is
         delivered later as a ``FunctionResponse`` (see ``resume_with_job_result``).
         Detection is by registered tool name; non-long-running tools and any
-        already-wrapped tools pass through unchanged. Permission gating is
-        unaffected — ADK gates via ``PermissionPlugin`` (by name), not by
-        wrapping the callable.
+        already-wrapped tools (including toolset objects) pass through unchanged.
+        Permission gating is unaffected — ADK gates via ``PermissionPlugin`` (by
+        name), not by wrapping the callable.
         """
         from agentic_cli.tools.registry import get_registry
 
@@ -380,8 +499,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
 
         # Build agents (non-coordinators first, then coordinators)
         agent_map: dict[str, Agent] = {}
-        planner = self._get_planner()
-        generate_config = self._get_generate_content_config()
         service_map = self._get_service_tool_map()
 
         # First pass: create agents without sub_agents (leaf agents)
@@ -391,10 +508,12 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     name=config.name,
                     model=config.model or self.model,
                     instruction=config.get_prompt(),
-                    tools=self._wrap_long_running(self._build_tools(config, service_map)),
+                    tools=self._wrap_long_running(
+                        self._assemble_agent_tools(config, service_map)
+                    ),
                     description=config.description or None,
-                    planner=planner,
-                    generate_content_config=generate_config,
+                    planner=self._get_planner(config),
+                    generate_content_config=self._get_generate_content_config(config),
                 )
                 logger.debug("agent_created", name=config.name, type="leaf")
 
@@ -416,11 +535,13 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     name=config.name,
                     model=config.model or self.model,
                     instruction=config.get_prompt(),
-                    tools=self._wrap_long_running(self._build_tools(config, service_map)),
+                    tools=self._wrap_long_running(
+                        self._assemble_agent_tools(config, service_map)
+                    ),
                     description=config.description or None,
                     sub_agents=sub_agent_instances,
-                    planner=planner,
-                    generate_content_config=generate_config,
+                    planner=self._get_planner(config),
+                    generate_content_config=self._get_generate_content_config(config),
                 )
                 logger.debug(
                     "agent_created",
@@ -506,8 +627,14 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         # InMemory only when session_store='memory').
         self._session_service = self._make_session_service()
 
-        # Create agent hierarchy from configs
-        self._root_agent = self._create_agents()
+        # Create agent hierarchy — natively from an ADK config, or from configs.
+        if self._adk_config_path:
+            from agentic_cli.workflow.adk_config_bridge import load_adk_agent_native
+
+            self._root_agent = load_adk_agent_native(self._adk_config_path)
+            logger.info("adk_native_config_loaded", path=self._adk_config_path)
+        else:
+            self._root_agent = self._create_agents()
 
         # Create runner with plugins
         self._runner = Runner(
