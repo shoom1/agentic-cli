@@ -101,6 +101,10 @@ class BaseWorkflowManager(ABC):
         # Model registry
         self._model_registry = ModelRegistry()
 
+        # Resolve string / dotted-path tool refs to callables BEFORE manager
+        # detection and tool assembly (both key on ``tool.__name__``).
+        self._resolve_config_tool_refs()
+
         # Auto-detect required managers from tools
         self._required_managers = self._detect_required_managers()
 
@@ -279,6 +283,21 @@ class BaseWorkflowManager(ABC):
         "fetch_arxiv_paper": "arxiv_source",
         "ingest_arxiv_paper": ("arxiv_source", "kb_manager"),
     }
+
+    def _resolve_config_tool_refs(self) -> None:
+        """Resolve string/dotted-path tool refs in configs to callables.
+
+        Each ``config.tools`` entry may be a callable, a registered tool name,
+        or a dotted import path. This rewrites every config's ``tools`` list in
+        place so subsequent service-detection and tool assembly (which key on
+        ``tool.__name__``) operate on real callables. Callables pass through
+        unchanged, so the call is idempotent.
+        """
+        from agentic_cli.tools.tool_resolver import resolve_tools
+
+        for config in self._agent_configs:
+            if config.tools:
+                config.tools = resolve_tools(config.tools)
 
     def _detect_required_managers(self) -> set[str]:
         """Detect which services are needed by scanning tool names.

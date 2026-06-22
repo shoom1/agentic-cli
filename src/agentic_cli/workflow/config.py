@@ -17,7 +17,10 @@ class AgentConfig:
     Attributes:
         name: Unique identifier for the agent
         prompt: System instruction - either a string or a callable that returns one
-        tools: List of tool functions the agent can use
+        tools: Tools the agent can use. Each entry is a callable, a registered
+            tool name (e.g. "kb_search"), or a dotted import path
+            (e.g. "my_pkg.tools.my_tool"). String refs are resolved to callables
+            when the workflow manager is constructed.
         sub_agents: Names of agents that this agent can delegate to
         description: Short description for routing/logging
         model: Optional model override (defaults to manager's model)
@@ -28,7 +31,7 @@ class AgentConfig:
 
     name: str
     prompt: str | Callable[[], str]
-    tools: list[Callable[..., Any]] = field(default_factory=list)
+    tools: list[Callable[..., Any] | str] = field(default_factory=list)
     sub_agents: list[str] = field(default_factory=list)
     description: str = ""
     model: str | None = None
