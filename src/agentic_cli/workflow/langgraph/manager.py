@@ -27,6 +27,25 @@ if TYPE_CHECKING:
 
 logger = Loggers.workflow()
 
+# AgentConfig fields the LangGraph backend does not (yet) consume.
+_ADK_ONLY_FIELDS = ("model_settings", "mcp_servers", "skills")
+
+
+def _ignored_adk_only_fields(
+    agent_configs: list[AgentConfig],
+) -> list[tuple[str, list[str]]]:
+    """Return [(agent_name, [field, ...])] for ADK-only fields set on configs.
+
+    Used to warn that ``model_settings``/``mcp_servers``/``skills`` are ignored
+    on the LangGraph backend.
+    """
+    affected: list[tuple[str, list[str]]] = []
+    for cfg in agent_configs:
+        present = [f for f in _ADK_ONLY_FIELDS if getattr(cfg, f, None)]
+        if present:
+            affected.append((cfg.name, present))
+    return affected
+
 
 class LangGraphWorkflowManager(BaseWorkflowManager):
     """LangGraph-based workflow manager for agentic applications.
@@ -90,6 +109,16 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
             model=model,
             on_event=on_event,
         )
+
+        # These AgentConfig fields are consumed by the ADK backend only; warn
+        # once if an app set them while running on (or routed to) LangGraph.
+        ignored = _ignored_adk_only_fields(self._agent_configs)
+        if ignored:
+            logger.warning(
+                "langgraph_ignoring_adk_only_fields",
+                agents=ignored,
+                note="model_settings/mcp_servers/skills are consumed by the ADK backend only",
+            )
 
         self._checkpointer_type = checkpointer
 
