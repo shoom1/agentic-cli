@@ -411,7 +411,30 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                 logger.debug(
                     "mcp_toolset_attached", agent=config.name, server=server.name
                 )
+
+        skill_refs = getattr(config, "skills", None) or []
+        if skill_refs:
+            toolset = self._build_skill_toolset(skill_refs)
+            if toolset is not None:
+                tools.append(toolset)
+                logger.debug("skill_toolset_attached", agent=config.name)
         return tools
+
+    def _build_skill_toolset(self, skill_refs: list[str]):
+        """Resolve skill refs and build an ADK SkillToolset (scripts gated).
+
+        Script execution is disabled unless ``settings.skill_scripts_enabled``
+        is True (and a code executor is wired — a future enhancement), so by
+        default only discovery/read tools are exposed.
+        """
+        from agentic_cli.tools.skills import SkillStore, make_skill_toolset
+
+        store = SkillStore(getattr(self._settings, "skills_dirs", []) or [])
+        skills = store.resolve(skill_refs)
+        if not skills:
+            return None
+        scripts_enabled = getattr(self._settings, "skill_scripts_enabled", False)
+        return make_skill_toolset(skills, scripts_enabled=scripts_enabled)
 
     def _create_agents(self) -> Agent:
         """Create agent hierarchy from configs.

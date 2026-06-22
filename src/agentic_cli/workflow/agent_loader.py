@@ -55,6 +55,7 @@ class AgentSpec(BaseModel):
     model_settings: ModelSettings | None = None
     tools: list[str] = Field(default_factory=list)
     mcp_servers: list[MCPServerConfig] = Field(default_factory=list)
+    skills: list[str] = Field(default_factory=list)
     sub_agents: list[str] = Field(default_factory=list)
     include_state_tools: bool = True
 
@@ -121,6 +122,7 @@ def load_agents_from_yaml(path: str | Path) -> list[AgentConfig]:
                 model=spec.model,
                 model_settings=spec.model_settings,
                 mcp_servers=list(spec.mcp_servers),
+                skills=list(spec.skills),
                 include_state_tools=spec.include_state_tools,
             )
         )

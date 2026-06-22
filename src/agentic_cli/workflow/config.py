@@ -29,6 +29,9 @@ class AgentConfig:
             thinking, etc.). Currently consumed by the ADK backend only.
         mcp_servers: Optional MCP servers whose tools are exposed to this agent.
             Currently consumed by the ADK backend only.
+        skills: Optional skill references (Agent Skills / SKILL.md folders) —
+            each a path to a skill directory or a name resolved under
+            ``settings.skills_dirs``. Currently consumed by the ADK backend only.
         include_state_tools: Whether to auto-inject plan/task state tools (default True)
     """
 
@@ -40,6 +43,7 @@ class AgentConfig:
     model: str | None = None
     model_settings: "ModelSettings | None" = None
     mcp_servers: "list[MCPServerConfig]" = field(default_factory=list)
+    skills: list[str] = field(default_factory=list)
     include_state_tools: bool = True
 
     def get_prompt(self) -> str:
