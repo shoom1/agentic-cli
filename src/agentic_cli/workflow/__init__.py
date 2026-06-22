@@ -19,6 +19,10 @@ from agentic_cli.workflow.agent_loader import (
     load_agents_from_yaml,
     create_workflow_manager_from_yaml,
 )
+from agentic_cli.workflow.adk_config_bridge import (
+    load_adk_agent_native,
+    translate_adk_yaml,
+)
 from agentic_cli.workflow.settings import WorkflowSettingsMixin
 from agentic_cli.workflow.models import ModelFamily, ModelInfo, ModelRegistry
 from agentic_cli.workflow.service_registry import get_service, get_service_registry
@@ -60,6 +64,8 @@ __all__ = [
     "create_workflow_manager_from_settings",
     "create_workflow_manager_from_yaml",
     "load_agents_from_yaml",
+    "load_adk_agent_native",
+    "translate_adk_yaml",
     # Config
     "AgentConfig",
     "ModelSettings",

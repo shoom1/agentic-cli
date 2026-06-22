@@ -81,6 +81,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         app_name: str | None = None,
         model: str | None = None,
         on_event: Callable[[WorkflowEvent], WorkflowEvent | None] | None = None,
+        adk_config_path: str | None = None,
     ) -> None:
         """Initialize the workflow manager.
 
@@ -91,6 +92,10 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             app_name: Application name for services (uses settings.app_name if not provided)
             model: Model override (auto-detected from API keys if not provided)
             on_event: Optional hook to transform/filter events before yielding
+            adk_config_path: Optional path to a native ADK ``root_agent.yaml``.
+                When set, the agent tree is built via ADK ``from_config`` instead
+                of from ``agent_configs`` (full ADK fidelity; framework service /
+                state tool injection does not apply).
         """
         super().__init__(
             agent_configs=agent_configs,
@@ -100,6 +105,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             on_event=on_event,
         )
         self.session_id = "default_session"
+        self._adk_config_path = adk_config_path
 
         self._session_service: BaseSessionService | None = None
         self._root_agent: Agent | None = None
@@ -546,8 +552,14 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         self._session_service = InMemorySessionService()
         logger.debug("using_in_memory_session_service")
 
-        # Create agent hierarchy from configs
-        self._root_agent = self._create_agents()
+        # Create agent hierarchy — natively from an ADK config, or from configs.
+        if self._adk_config_path:
+            from agentic_cli.workflow.adk_config_bridge import load_adk_agent_native
+
+            self._root_agent = load_adk_agent_native(self._adk_config_path)
+            logger.info("adk_native_config_loaded", path=self._adk_config_path)
+        else:
+            self._root_agent = self._create_agents()
 
         # Create runner with plugins
         self._runner = Runner(

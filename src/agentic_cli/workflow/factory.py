@@ -38,6 +38,8 @@ def create_workflow_manager_from_settings(
     settings: "BaseSettings",
     app_name: str | None = None,
     model: str | None = None,
+    adk_config_path: str | None = None,
+    adk_config_mode: str = "native",
     **kwargs,
 ) -> "BaseWorkflowManager":
     """Factory function to create the appropriate workflow manager based on settings.
@@ -66,6 +68,32 @@ def create_workflow_manager_from_settings(
         manager = create_workflow_manager_from_settings(configs, settings)
     """
     from agentic_cli.workflow.settings import OrchestratorType
+
+    # Reuse an existing native ADK config, if provided.
+    if adk_config_path:
+        if adk_config_mode == "translate":
+            from agentic_cli.workflow.adk_config_bridge import translate_adk_yaml
+
+            agent_configs = translate_adk_yaml(adk_config_path)
+            # fall through to normal routing with the translated configs
+        else:  # native passthrough — ADK backend only
+            from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager
+
+            if getattr(settings, "orchestrator", OrchestratorType.ADK) == (
+                OrchestratorType.LANGGRAPH
+            ):
+                logger.warning(
+                    "adk_native_config_forces_adk",
+                    reason="native ADK config requires the ADK backend",
+                )
+            return GoogleADKWorkflowManager(
+                agent_configs=agent_configs,
+                settings=settings,
+                app_name=app_name,
+                model=model,
+                adk_config_path=adk_config_path,
+                **kwargs,
+            )
 
     orchestrator = getattr(settings, "orchestrator", OrchestratorType.ADK)
     effective_model = _resolve_effective_model(model, settings)
