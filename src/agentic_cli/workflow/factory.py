@@ -45,9 +45,9 @@ def create_workflow_manager_from_settings(
     """Factory function to create the appropriate workflow manager based on settings.
 
     Creates either a GoogleADKWorkflowManager or LangGraphWorkflowManager
-    based on the settings.orchestrator configuration. Claude models are
-    automatically routed to LangGraph because ADK's LiteLLM adapter has
-    critical issues with tool calling, thinking, and streaming.
+    based purely on the settings.orchestrator configuration. The backend is
+    model-agnostic: ADK runs Claude natively via the direct-API ``AnthropicLlm``
+    (no LiteLLM), so Claude no longer forces a LangGraph swap.
 
     Args:
         agent_configs: List of agent configurations.
@@ -96,17 +96,7 @@ def create_workflow_manager_from_settings(
             )
 
     orchestrator = getattr(settings, "orchestrator", OrchestratorType.ADK)
-    effective_model = _resolve_effective_model(model, settings)
-    use_langgraph = orchestrator == OrchestratorType.LANGGRAPH or _is_claude_model(
-        effective_model
-    )
-
-    if use_langgraph and _is_claude_model(effective_model) and orchestrator != OrchestratorType.LANGGRAPH:
-        logger.info(
-            "auto_switching_to_langgraph",
-            model=effective_model,
-            reason="Claude models require LangGraph orchestrator (ADK LiteLLM adapter has critical issues)",
-        )
+    use_langgraph = orchestrator == OrchestratorType.LANGGRAPH
 
     if use_langgraph:
         try:

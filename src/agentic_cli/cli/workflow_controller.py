@@ -200,11 +200,14 @@ class WorkflowController:
         return self._workflow is not None
 
     def _needs_orchestrator_swap(self, new_model: str | None) -> bool:
-        """Check if switching to new_model requires a different orchestrator.
+        """Check if the current manager type still matches the orchestrator setting.
 
-        Returns True when the model family changes (e.g. Gemini → Claude or
-        Claude → Gemini) and the current manager type doesn't match what the
-        factory would create for the new model.
+        The backend is chosen purely by ``settings.orchestrator`` and is
+        model-agnostic (ADK runs Claude natively via ``AnthropicLlm``), so a model
+        change alone never forces a swap. A swap is only needed when the existing
+        manager's type no longer matches the configured orchestrator — e.g. the
+        orchestrator setting was changed, leaving a LangGraph manager in place
+        while ADK is now selected.
         """
         if new_model is None or self._workflow is None:
             return False
@@ -213,7 +216,7 @@ class WorkflowController:
         from agentic_cli.workflow.langgraph.manager import LangGraphWorkflowManager
 
         orchestrator = getattr(self._settings, "orchestrator", OrchestratorType.ADK)
-        new_needs_langgraph = orchestrator == OrchestratorType.LANGGRAPH or _is_claude_model(new_model)
+        new_needs_langgraph = orchestrator == OrchestratorType.LANGGRAPH
 
         current_is_langgraph = isinstance(self._workflow, LangGraphWorkflowManager)
 

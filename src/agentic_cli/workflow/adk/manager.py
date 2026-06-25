@@ -44,6 +44,22 @@ logging.getLogger("google_genai.types").setLevel(logging.ERROR)
 
 _RESULT_SUMMARY_LIMIT = 1000
 
+# Anthropic/Claude thinking on ADK (native AnthropicLlm, direct API).
+# Effort → thinking budget in tokens (mirrors the LangGraph Claude budgets).
+_CLAUDE_THINKING_BUDGETS = {"low": 4096, "medium": 10000, "high": 32000}
+# Anthropic requires budget_tokens >= 1024 when thinking is enabled.
+_ANTHROPIC_MIN_THINKING_BUDGET = 1024
+# Default max_tokens when no ModelSettings.max_tokens is given.
+_DEFAULT_ANTHROPIC_MAX_TOKENS = 8192
+# Output headroom reserved above the thinking budget (Anthropic counts thinking
+# tokens toward max_tokens and requires max_tokens > budget_tokens).
+_ANTHROPIC_OUTPUT_HEADROOM = 8192
+
+
+def _is_anthropic_model(model: str | None) -> bool:
+    """True for Claude/Anthropic model ids (string check, no settings needed)."""
+    return bool(model) and model.startswith("claude")
+
 
 def _summarize_result(result: Any) -> str | None:
     """Render a job result as a short string for the resume payload.
@@ -137,6 +153,12 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         self._llm_logging_plugin: LLMLoggingPlugin | None = None
         self._task_progress_plugin: "TaskProgressPlugin | None" = None
 
+        # Resolve bare ``claude-*`` strings (e.g. from agent YAML / native ADK
+        # configs) to the direct-API DirectAnthropicLlm instead of Vertex Claude.
+        from agentic_cli.workflow.adk.anthropic_llm import register_direct_anthropic
+
+        register_direct_anthropic()
+
         logger.debug(
             "workflow_manager_created",
             app_name=self.app_name,
@@ -163,6 +185,23 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             Generated text response
         """
         await self._ensure_initialized()
+
+        # Claude models are not served by the genai client — use the Anthropic
+        # SDK directly (ANTHROPIC_API_KEY is exported during initialization).
+        if _is_anthropic_model(self.model):
+            from anthropic import AsyncAnthropic
+
+            client = AsyncAnthropic()
+            message = await client.messages.create(
+                model=self.model,
+                max_tokens=max_tokens,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return "".join(
+                block.text
+                for block in message.content
+                if getattr(block, "type", None) == "text"
+            )
 
         from google import genai
 
@@ -282,11 +321,10 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         Thinking is resolved per-agent (``config.model_settings.thinking``) with
         a fallback to the global ``settings.thinking_effort``.
 
-        Gemini 3 models take a discrete ``thinking_level``; Gemini 2.5 models
-        only understand a numeric ``thinking_budget`` and reject ``thinking_level``
-        outright (HTTP 400 "Thinking level is not supported for this model").
-        We therefore choose the field that matches the model generation —
-        sending ``thinking_level`` to a 2.5 model breaks every request.
+        Anthropic/Claude and Gemini 2.5 are budget-based (numeric
+        ``thinking_budget``); Gemini 3 takes a discrete ``thinking_level`` and
+        Gemini 2.5 rejects ``thinking_level`` outright (HTTP 400). We therefore
+        choose the field that matches the model family.
         """
         thinking = self._resolve_thinking(config)
         if thinking is None or thinking.mode == "none":
@@ -298,7 +336,15 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             logger.debug("thinking_not_supported", model=model, mode=thinking.mode)
             return None
 
-        if thinking.mode == "budget":
+        if _is_anthropic_model(model):
+            # Claude maps to Anthropic's budget_tokens (>= 1024). The same budget
+            # sizes the agent's max_tokens in _anthropic_max_tokens, since
+            # Anthropic requires max_tokens > thinking budget.
+            thinking_config = types.ThinkingConfig(
+                include_thoughts=True,
+                thinking_budget=self._anthropic_thinking_budget(config),
+            )
+        elif thinking.mode == "budget":
             budget = (
                 thinking.budget_tokens if thinking.budget_tokens is not None else 12288
             )
@@ -351,6 +397,57 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         """
         budget = {"low": 4096, "medium": 12288, "high": 24576}[effort]
         return types.ThinkingConfig(include_thoughts=True, thinking_budget=budget)
+
+    def _anthropic_thinking_budget(self, config: "AgentConfig | None") -> int:
+        """Resolved Anthropic thinking budget in tokens for an agent.
+
+        Mirrors the LangGraph Claude budgets; ``budget`` mode passes the explicit
+        value through. Floored at Anthropic's minimum (1024). Returns 0 when
+        thinking is disabled. The same number sizes the agent's ``max_tokens``.
+        """
+        thinking = self._resolve_thinking(config)
+        if thinking is None or thinking.mode == "none":
+            return 0
+        if thinking.mode == "budget":
+            budget = thinking.budget_tokens if thinking.budget_tokens is not None else 12288
+        else:
+            budget = _CLAUDE_THINKING_BUDGETS.get(thinking.mode, 10000)
+        return max(budget, _ANTHROPIC_MIN_THINKING_BUDGET)
+
+    def _anthropic_max_tokens(self, config: "AgentConfig | None") -> int:
+        """``max_tokens`` for an Anthropic agent, kept above the thinking budget.
+
+        ADK's ``AnthropicLlm`` reads ``max_tokens`` from the model instance (not
+        ``GenerateContentConfig``), and Anthropic counts thinking tokens toward
+        ``max_tokens`` and requires ``max_tokens > budget_tokens``. We honour an
+        explicit ``ModelSettings.max_tokens`` floor, then ensure room for output
+        on top of the thinking budget.
+        """
+        ms = config.model_settings if config is not None else None
+        base = ms.max_tokens if (ms is not None and ms.max_tokens) else _DEFAULT_ANTHROPIC_MAX_TOKENS
+        budget = self._anthropic_thinking_budget(config)
+        if budget:
+            return max(base, budget + _ANTHROPIC_OUTPUT_HEADROOM)
+        return base
+
+    def _build_model_arg(self, config: "AgentConfig | None"):
+        """Resolve the ``model`` argument for an ``LlmAgent``.
+
+        Anthropic/Claude models are returned as a direct-API ``AnthropicLlm``
+        instance: passing the bare ``claude-*`` string would make ADK's
+        ``LLMRegistry`` resolve it to the Vertex ``Claude`` class (which needs
+        GOOGLE_CLOUD_PROJECT/LOCATION). The instance also carries the coordinated
+        ``max_tokens`` (see ``_anthropic_max_tokens``). Gemini/Gemma pass through
+        as plain strings for native registry resolution.
+        """
+        model = self._resolve_model_for_config(config)
+        if not _is_anthropic_model(model):
+            return model
+        from agentic_cli.workflow.adk.anthropic_llm import DirectAnthropicLlm
+
+        return DirectAnthropicLlm(
+            model=model, max_tokens=self._anthropic_max_tokens(config)
+        )
 
     def _get_generate_content_config(
         self, config: "AgentConfig | None" = None
@@ -506,7 +603,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             if not config.sub_agents:
                 agent_map[config.name] = LlmAgent(
                     name=config.name,
-                    model=config.model or self.model,
+                    model=self._build_model_arg(config),
                     instruction=config.get_prompt(),
                     tools=self._wrap_long_running(
                         self._assemble_agent_tools(config, service_map)
@@ -533,7 +630,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
 
                 agent_map[config.name] = LlmAgent(
                     name=config.name,
-                    model=config.model or self.model,
+                    model=self._build_model_arg(config),
                     instruction=config.get_prompt(),
                     tools=self._wrap_long_running(
                         self._assemble_agent_tools(config, service_map)

@@ -181,3 +181,14 @@ Available session methods:
 - **MockVectorStore** and **MockEmbeddingService**: In `knowledge_base/_mocks.py` for testing without ML dependencies
 - **FAISS tests**: Guard with `pytest.importorskip("faiss")` since FAISS is not installed in dev env
 - **Integration tests**: `tests/integration/` covers ADK and LangGraph pipeline tests
+
+### Live LLM tests (real API calls)
+
+Tests that hit real provider APIs use the existing framework — **don't invent new gating or key handling.**
+
+- **Marker**: `@pytest.mark.llm`; modules set `pytestmark = [pytest.mark.llm, pytest.mark.skipif(<no key>, ...)]`.
+- **Key loading is handled by the live-test framework** (`tests/integration/conftest.py`) — keys are not
+  plain shell env vars, so go through pytest rather than re-deriving it.
+- **Run**: `-m llm` (live; needs network — disable the Bash sandbox) or `-m 'not llm'` (offline).
+  A bare `pytest` run makes real API calls when keys are available.
+- **Example**: `tests/integration/test_adk_claude_live.py`.
