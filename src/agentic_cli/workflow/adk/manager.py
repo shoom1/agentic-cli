@@ -61,6 +61,25 @@ def _is_anthropic_model(model: str | None) -> bool:
     return bool(model) and model.startswith("claude")
 
 
+# Claude >= 4.6 deprecates/removes ``budget_tokens`` (400 on 4.7+/Fable); those
+# use adaptive thinking + ``output_config.effort``. <= 4.5 keep the legacy
+# numeric-budget path (effort also unsupported on Sonnet 4.5 / Haiku 4.5).
+_ANTHROPIC_ADAPTIVE_MIN = (4, 6)
+# Generic thinking level -> Anthropic effort. ``xhigh``/``max`` are not exposed
+# via the generic knob; use a per-agent native override for those.
+_GENERIC_TO_EFFORT = {"low": "low", "medium": "medium", "high": "high"}
+
+
+def _claude_version(model: str) -> tuple[int, ...]:
+    """Numeric version tuple from a Claude id (``claude-opus-4-8`` -> ``(4, 8)``)."""
+    return tuple(int(p) for p in model.split("-") if p.isdigit())
+
+
+def _anthropic_uses_adaptive(model: str | None) -> bool:
+    """True for Claude models that require adaptive thinking (>= 4.6)."""
+    return _is_anthropic_model(model) and _claude_version(model) >= _ANTHROPIC_ADAPTIVE_MIN
+
+
 def _summarize_result(result: Any) -> str | None:
     """Render a job result as a short string for the resume payload.
 
@@ -321,10 +340,9 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         Thinking is resolved per-agent (``config.model_settings.thinking``) with
         a fallback to the global ``settings.thinking_effort``.
 
-        Anthropic/Claude and Gemini 2.5 are budget-based (numeric
-        ``thinking_budget``); Gemini 3 takes a discrete ``thinking_level`` and
-        Gemini 2.5 rejects ``thinking_level`` outright (HTTP 400). We therefore
-        choose the field that matches the model family.
+        Per family: Claude >= 4.6 uses adaptive thinking (negative budget) +
+        effort; Claude <= 4.5 and Gemini 2.5 are numeric-budget-based; Gemini 3
+        takes a discrete ``thinking_level`` (Gemini 2.5 rejects it with a 400).
         """
         thinking = self._resolve_thinking(config)
         if thinking is None or thinking.mode == "none":
@@ -337,13 +355,20 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             return None
 
         if _is_anthropic_model(model):
-            # Claude maps to Anthropic's budget_tokens (>= 1024). The same budget
-            # sizes the agent's max_tokens in _anthropic_max_tokens, since
-            # Anthropic requires max_tokens > thinking budget.
-            thinking_config = types.ThinkingConfig(
-                include_thoughts=True,
-                thinking_budget=self._anthropic_thinking_budget(config),
-            )
+            if _anthropic_uses_adaptive(model):
+                # Claude >= 4.6 rejects budget_tokens; use adaptive thinking. ADK
+                # (>= 1.34) maps a negative thinking_budget to {type:"adaptive"}.
+                # Depth is controlled by output_config.effort, set on the model
+                # instance (see _anthropic_effort / DirectAnthropicLlm).
+                thinking_config = types.ThinkingConfig(thinking_budget=-1)
+            else:
+                # Legacy Claude (<= 4.5): numeric budget_tokens (>= 1024). The same
+                # budget sizes max_tokens in _anthropic_max_tokens (Anthropic
+                # requires max_tokens > budget).
+                thinking_config = types.ThinkingConfig(
+                    include_thoughts=True,
+                    thinking_budget=self._anthropic_thinking_budget(config),
+                )
         elif thinking.mode == "budget":
             budget = (
                 thinking.budget_tokens if thinking.budget_tokens is not None else 12288
@@ -414,17 +439,34 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             budget = _CLAUDE_THINKING_BUDGETS.get(thinking.mode, 10000)
         return max(budget, _ANTHROPIC_MIN_THINKING_BUDGET)
 
+    def _anthropic_effort(self, config: "AgentConfig | None") -> str | None:
+        """Anthropic ``output_config.effort`` for an agent, or ``None``.
+
+        Only adaptive-capable Claude (>= 4.6) takes effort; older models reject
+        it and stay on the budget path. Maps the generic ``low/medium/high``
+        level; ``none``/``budget`` modes yield no effort (disabled / pure
+        adaptive — the model picks the depth).
+        """
+        if not _anthropic_uses_adaptive(self._resolve_model_for_config(config)):
+            return None
+        thinking = self._resolve_thinking(config)
+        if thinking is None or thinking.mode in ("none", "budget"):
+            return None
+        return _GENERIC_TO_EFFORT.get(thinking.mode)
+
     def _anthropic_max_tokens(self, config: "AgentConfig | None") -> int:
-        """``max_tokens`` for an Anthropic agent, kept above the thinking budget.
+        """``max_tokens`` for an Anthropic agent.
 
         ADK's ``AnthropicLlm`` reads ``max_tokens`` from the model instance (not
-        ``GenerateContentConfig``), and Anthropic counts thinking tokens toward
-        ``max_tokens`` and requires ``max_tokens > budget_tokens``. We honour an
-        explicit ``ModelSettings.max_tokens`` floor, then ensure room for output
-        on top of the thinking budget.
+        ``GenerateContentConfig``). On the legacy budget path Anthropic counts
+        thinking tokens toward ``max_tokens`` and requires ``max_tokens > budget``,
+        so we size it above the budget. Adaptive thinking has no fixed budget, so
+        we just honour the ``ModelSettings.max_tokens`` floor (or the default).
         """
         ms = config.model_settings if config is not None else None
         base = ms.max_tokens if (ms is not None and ms.max_tokens) else _DEFAULT_ANTHROPIC_MAX_TOKENS
+        if _anthropic_uses_adaptive(self._resolve_model_for_config(config)):
+            return base
         budget = self._anthropic_thinking_budget(config)
         if budget:
             return max(base, budget + _ANTHROPIC_OUTPUT_HEADROOM)
@@ -433,12 +475,12 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
     def _build_model_arg(self, config: "AgentConfig | None"):
         """Resolve the ``model`` argument for an ``LlmAgent``.
 
-        Anthropic/Claude models are returned as a direct-API ``AnthropicLlm``
+        Anthropic/Claude models are returned as a direct-API ``DirectAnthropicLlm``
         instance: passing the bare ``claude-*`` string would make ADK's
         ``LLMRegistry`` resolve it to the Vertex ``Claude`` class (which needs
-        GOOGLE_CLOUD_PROJECT/LOCATION). The instance also carries the coordinated
-        ``max_tokens`` (see ``_anthropic_max_tokens``). Gemini/Gemma pass through
-        as plain strings for native registry resolution.
+        GOOGLE_CLOUD_PROJECT/LOCATION). The instance carries the coordinated
+        ``max_tokens`` and, for adaptive models, ``effort``. Gemini/Gemma pass
+        through as plain strings for native registry resolution.
         """
         model = self._resolve_model_for_config(config)
         if not _is_anthropic_model(model):
@@ -446,7 +488,9 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         from agentic_cli.workflow.adk.anthropic_llm import DirectAnthropicLlm
 
         return DirectAnthropicLlm(
-            model=model, max_tokens=self._anthropic_max_tokens(config)
+            model=model,
+            max_tokens=self._anthropic_max_tokens(config),
+            effort=self._anthropic_effort(config),
         )
 
     def _get_generate_content_config(

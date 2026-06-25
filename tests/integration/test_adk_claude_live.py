@@ -160,6 +160,44 @@ class TestLiveEffort:
 
 
 # ---------------------------------------------------------------------------
+# Adaptive thinking + effort (ADK >= 1.34; negative budget -> {type:"adaptive"})
+# ---------------------------------------------------------------------------
+
+
+class TestLiveAdaptiveThinking:
+    async def test_adaptive_plus_effort(self):
+        llm = DirectAnthropicLlm(model=MODEL, max_tokens=2048, effort="high")
+        responses = await _collect(
+            llm, _request("What is 12 * 12? Think briefly.", thinking_budget=-1)
+        )
+        assert _text(responses).strip() or any(
+            getattr(p, "thought", None) for p in _all_parts(responses)
+        )
+
+
+@pytest.mark.skipif(
+    not MODEL_47PLUS,
+    reason="Set LIVE_CLAUDE_47PLUS_MODEL (e.g. claude-opus-4-8) to run the 4.7+ adaptive test.",
+)
+class TestLiveAdaptiveOn47Plus:
+    async def test_adaptive_succeeds_where_budget_400s(self):
+        # Same model that 400s on budget_tokens succeeds with adaptive + effort.
+        llm = DirectAnthropicLlm(model=MODEL_47PLUS, max_tokens=2048, effort="high")
+        req = LlmRequest(
+            model=MODEL_47PLUS,
+            contents=[types.Content(role="user", parts=[types.Part(text="Name one color.")])],
+            config=types.GenerateContentConfig(
+                system_instruction="You are a helpful, concise assistant.",
+                thinking_config=types.ThinkingConfig(thinking_budget=-1),
+            ),
+        )
+        responses = await _collect(llm, req)
+        assert _text(responses).strip() or any(
+            getattr(p, "thought", None) for p in _all_parts(responses)
+        )
+
+
+# ---------------------------------------------------------------------------
 # Confirm the limitation: budget thinking 400s on Opus 4.7+/Fable
 # ---------------------------------------------------------------------------
 

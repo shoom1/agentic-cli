@@ -22,7 +22,8 @@ classifiers = [
 ]
 dependencies = [
     "thinking-prompt>=0.3.0",
-    "google-adk[genai]>=0.4.0",
+    "google-adk>=1.34,<2",  # >=1.34: Anthropic adaptive thinking (negative budget)
+    "google-genai>=2.0,<3",  # imported directly (google.genai.types); was the adk[genai] extra
     "pydantic>=2.0.0",
     "pydantic-settings>=2.0.0",
     "PyYAML>=6.0",
