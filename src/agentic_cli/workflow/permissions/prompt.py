@@ -4,10 +4,15 @@ from __future__ import annotations
 
 import uuid
 
+from agentic_cli.constants import truncate
 from agentic_cli.workflow.events import InputType, UserInputRequest
 from agentic_cli.workflow.permissions.capabilities import ResolvedCapability
 from agentic_cli.workflow.permissions.engine import broaden_target_for_grant
 from agentic_cli.workflow.permissions.rules import AskScope
+
+# Args that carry executable payloads, shown in the prompt for *.exec grants.
+_CODE_ARGS = ("code", "command", "script")
+_CODE_PREVIEW_MAX = 1000
 
 # Strings kept module-level so the UI and parser stay in sync.
 ALLOW_ONCE_CHOICE = "Allow once"
@@ -23,13 +28,21 @@ _CHOICE_TO_SCOPE = {
 }
 
 
-def build_request(tool_name: str, capabilities: list[ResolvedCapability]) -> UserInputRequest:
+def build_request(
+    tool_name: str,
+    capabilities: list[ResolvedCapability],
+    args: dict | None = None,
+) -> UserInputRequest:
     """Construct a ``UserInputRequest`` (CHOICE) describing the pending grant.
 
     The displayed target is the **effective grant scope** — i.e. what will be
     stored as a rule if the user picks Session or Always. For ``filesystem.*``
     that's the parent directory (``/foo/**``) rather than the exact file, so
     one grant covers every sibling/nested file.
+
+    For code-execution capabilities (``*.exec``) the pending ``code``/``command``
+    payload is shown: the capability target is ``*`` (allow-any-code), so the
+    payload — not the target — is what the user is actually approving.
     """
     lines = [f"Tool `{tool_name}` wants:"]
     has_broadened_filesystem = False
@@ -43,6 +56,11 @@ def build_request(tool_name: str, capabilities: list[ResolvedCapability]) -> Use
     lines.append("")
     if has_broadened_filesystem:
         lines.append("(Grant scope widened to the parent directory.)")
+    code_preview = _code_preview(capabilities, args)
+    if code_preview:
+        lines.append("Code to execute:")
+        lines.append(code_preview)
+        lines.append("")
     lines.append("Allow?")
     prompt = "\n".join(lines)
 
@@ -59,6 +77,21 @@ def build_request(tool_name: str, capabilities: list[ResolvedCapability]) -> Use
         ],
         default=DENY_CHOICE,
     )
+
+
+def _code_preview(
+    capabilities: list[ResolvedCapability], args: dict | None
+) -> str:
+    """Truncated preview of the executable payload for ``*.exec`` grants, else ''."""
+    if not args:
+        return ""
+    if not any(cap.name.endswith(".exec") for cap in capabilities):
+        return ""
+    for key in _CODE_ARGS:
+        value = args.get(key)
+        if isinstance(value, str) and value.strip():
+            return truncate(value, _CODE_PREVIEW_MAX)
+    return ""
 
 
 def parse_response(text: str) -> AskScope:

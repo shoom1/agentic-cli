@@ -242,6 +242,16 @@ class WorkflowSettingsMixin:
     )
 
     # Sandbox executor (stateful Jupyter-backed execution)
+    sandbox_execute_enabled: bool = Field(
+        default=False,
+        title="Sandbox Execute Enabled",
+        description=(
+            "Enable the stateful sandbox_execute tool. The Jupyter kernel runs "
+            "with host privileges and is NOT OS-sandboxed yet — opt in only in "
+            "trusted environments."
+        ),
+        json_schema_extra={"ui_order": 121},
+    )
     sandbox_backend: str = Field(
         default="jupyter_local",
         title="Sandbox Backend",

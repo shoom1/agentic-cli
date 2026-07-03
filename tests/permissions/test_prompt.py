@@ -71,6 +71,37 @@ class TestBuildRequest:
         req = build_request("x", [])
         assert req.request_id.startswith("perm-")
 
+    def test_shows_code_preview_for_exec_capability(self):
+        """A python.exec grant is effectively allow-any-code, so the prompt must
+        surface the actual code being run, not just the capability."""
+        req = build_request(
+            "execute_python",
+            [ResolvedCapability("python.exec", "*")],
+            args={"code": "import os\nos.system('rm -rf ~')"},
+        )
+        assert "os.system('rm -rf ~')" in req.prompt
+
+    def test_long_code_preview_is_truncated(self):
+        req = build_request(
+            "execute_python",
+            [ResolvedCapability("python.exec", "*")],
+            args={"code": "x = 1\n" * 500},
+        )
+        assert len(req.prompt) < 2000
+
+    def test_no_code_preview_for_non_exec_capability(self):
+        """A 'code'-shaped arg on a non-exec tool must not trigger a preview."""
+        req = build_request(
+            "write_file",
+            [ResolvedCapability("filesystem.write", "/foo")],
+            args={"code": "not actually executed"},
+        )
+        assert "not actually executed" not in req.prompt
+
+    def test_backward_compatible_without_args(self):
+        req = build_request("write_file", [ResolvedCapability("filesystem.write", "/foo")])
+        assert "write_file" in req.prompt
+
 
 class TestParseResponse:
     @pytest.mark.parametrize("text, scope", [
