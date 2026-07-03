@@ -13,17 +13,18 @@ class TestSecretFields:
     """Tests for SECRET_FIELDS completeness (C1)."""
 
     def test_secret_fields_excludes_all_api_keys(self):
-        """All API key fields in BaseSettings are in SECRET_FIELDS."""
+        """Every credential-bearing field in BaseSettings is in SECRET_FIELDS."""
         expected = {
             "google_api_key",
             "anthropic_api_key",
             "tavily_api_key",
             "brave_api_key",
+            "postgres_uri",  # embeds user:password@host
         }
         assert SECRET_FIELDS == expected
 
     def test_save_excludes_secrets(self, tmp_path):
-        """API key values are never written to the JSON file."""
+        """Secret values are never written to the JSON file."""
         from agentic_cli.config import BaseSettings
 
         settings = BaseSettings(
@@ -31,6 +32,7 @@ class TestSecretFields:
             anthropic_api_key="secret-anthropic",
             tavily_api_key="secret-tavily",
             brave_api_key="secret-brave",
+            postgres_uri="postgresql://user:pass@host/db",
             search_backend="tavily",  # non-secret
         )
 

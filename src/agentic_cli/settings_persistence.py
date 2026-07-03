@@ -18,6 +18,7 @@ SECRET_FIELDS = frozenset({
     "anthropic_api_key",
     "tavily_api_key",
     "brave_api_key",
+    "postgres_uri",  # connection string embeds user:password@host
 })
 
 # Identity fields set by the application, not the user
