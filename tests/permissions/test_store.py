@@ -116,6 +116,11 @@ class TestLoadRules:
 
 
 class TestAppendProjectRule:
+    """Interactive grants are persisted to ./.{app}/permissions.local.json — a
+    trusted file separate from the repo-shippable settings.json (P0-2)."""
+
+    LOCAL = ".agentic/permissions.local.json"
+
     def test_creates_file_when_absent(self, tmp_path, monkeypatch):
         from agentic_cli.workflow.permissions.rules import Effect, Rule, RuleSource
         from agentic_cli.workflow.permissions.store import append_project_rule
@@ -125,12 +130,14 @@ class TestAppendProjectRule:
         append_project_rule("agentic", rule)
 
         import json
-        data = json.loads((tmp_path / ".agentic/settings.json").read_text())
+        data = json.loads((tmp_path / self.LOCAL).read_text())
         assert data["permissions"]["allow"] == [
             {"capability": "filesystem.write", "target": "/abs/foo"}
         ]
 
-    def test_preserves_other_settings_keys(self, tmp_path, monkeypatch):
+    def test_does_not_touch_settings_json(self, tmp_path, monkeypatch):
+        """Grants must NOT be written into settings.json (where a repo's rules
+        live) — the two files are kept separate."""
         import json
         from agentic_cli.workflow.permissions.rules import Effect, Rule, RuleSource
         from agentic_cli.workflow.permissions.store import append_project_rule
@@ -139,16 +146,15 @@ class TestAppendProjectRule:
         (tmp_path / ".agentic").mkdir()
         (tmp_path / ".agentic/settings.json").write_text(json.dumps({
             "default_model": "claude-sonnet-4",
-            "thinking_effort": "medium",
         }))
 
         rule = Rule("filesystem.write", "/abs/foo", Effect.ALLOW, RuleSource.PROJECT)
         append_project_rule("agentic", rule)
 
-        data = json.loads((tmp_path / ".agentic/settings.json").read_text())
-        assert data["default_model"] == "claude-sonnet-4"
-        assert data["thinking_effort"] == "medium"
-        assert data["permissions"]["allow"][0]["capability"] == "filesystem.write"
+        settings = json.loads((tmp_path / ".agentic/settings.json").read_text())
+        assert settings == {"default_model": "claude-sonnet-4"}
+        local = json.loads((tmp_path / self.LOCAL).read_text())
+        assert local["permissions"]["allow"][0]["capability"] == "filesystem.write"
 
     def test_deduplicates_identical_rules(self, tmp_path, monkeypatch):
         import json
@@ -160,7 +166,7 @@ class TestAppendProjectRule:
         append_project_rule("agentic", rule)
         append_project_rule("agentic", rule)
 
-        data = json.loads((tmp_path / ".agentic/settings.json").read_text())
+        data = json.loads((tmp_path / self.LOCAL).read_text())
         assert len(data["permissions"]["allow"]) == 1
 
     def test_writes_deny_section_for_deny_effect(self, tmp_path, monkeypatch):
@@ -172,7 +178,7 @@ class TestAppendProjectRule:
         rule = Rule("filesystem.write", "/etc/foo", Effect.DENY, RuleSource.PROJECT)
         append_project_rule("agentic", rule)
 
-        data = json.loads((tmp_path / ".agentic/settings.json").read_text())
+        data = json.loads((tmp_path / self.LOCAL).read_text())
         assert data["permissions"]["deny"] == [
             {"capability": "filesystem.write", "target": "/etc/foo"}
         ]

@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 from agentic_cli.logging import Loggers
 from agentic_cli.settings_persistence import (
     get_project_config_path,
+    get_project_local_permissions_path,
     get_user_config_path,
 )
 from agentic_cli.workflow.permissions.capabilities import Capability, ResolvedCapability
@@ -108,7 +109,21 @@ class PermissionEngine:
             )
         app = self._settings.app_name
         rules += load_rules(get_user_config_path(app), RuleSource.USER, self._ctx)
-        rules += load_rules(get_project_config_path(app), RuleSource.PROJECT, self._ctx)
+        # PROJECT settings.json is untrusted (a cloned repo can ship it): honor
+        # only deny-rules so a workspace can tighten but never loosen policy.
+        rules += load_rules(
+            get_project_config_path(app),
+            RuleSource.PROJECT,
+            self._ctx,
+            allowed_effects=frozenset({Effect.DENY}),
+        )
+        # Interactively-granted "Allow always" rules live in a separate local
+        # file the user (not a repo) authored — trusted, so allow+deny apply.
+        rules += load_rules(
+            get_project_local_permissions_path(app),
+            RuleSource.PROJECT,
+            self._ctx,
+        )
         return rules
 
     @property

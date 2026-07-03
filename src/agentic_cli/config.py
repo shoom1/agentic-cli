@@ -52,15 +52,26 @@ __all__ = [
 ]
 
 
+# Settings a PROJECT ./.{app}/settings.json must NOT be able to set: a cloned
+# repo could otherwise disable the permission engine. These remain settable via
+# env and user (~/.{app}) config. (Permission allow-rules are filtered
+# separately in the engine — see workflow/permissions/store.load_rules.)
+_UNTRUSTED_PROJECT_KEYS = frozenset({"permissions_enabled"})
+
+
 def _get_json_config_source(
     settings_cls: Type[PydanticBaseSettings],
     json_file: Path,
+    *,
+    untrusted: bool = False,
 ) -> PydanticBaseSettingsSource | None:
     """Create a JSON config source if the file exists.
 
     Args:
         settings_cls: The settings class
         json_file: Path to JSON config file
+        untrusted: When True (the project file), strip security-sensitive keys
+            so a cloned workspace cannot disable permission enforcement.
 
     Returns:
         JsonConfigSettingsSource if file exists, None otherwise
@@ -70,10 +81,21 @@ def _get_json_config_source(
 
     try:
         from pydantic_settings import JsonConfigSettingsSource
-        return JsonConfigSettingsSource(settings_cls, json_file=json_file)
     except ImportError:
         # Older pydantic-settings without JsonConfigSettingsSource
         return None
+
+    if not untrusted:
+        return JsonConfigSettingsSource(settings_cls, json_file=json_file)
+
+    class _UntrustedJsonConfigSource(JsonConfigSettingsSource):
+        """Drops security-sensitive keys the project file may not override."""
+
+        def __call__(self) -> dict[str, Any]:
+            data = super().__call__()
+            return {k: v for k, v in data.items() if k not in _UNTRUSTED_PROJECT_KEYS}
+
+    return _UntrustedJsonConfigSource(settings_cls, json_file=json_file)
 
 
 class BaseSettings(WorkflowSettingsMixin, AppSettingsMixin, CLISettingsMixin, PydanticBaseSettings):
@@ -164,10 +186,12 @@ class BaseSettings(WorkflowSettingsMixin, AppSettingsMixin, CLISettingsMixin, Py
 
         app_name = app_name or "agentic_cli"
 
-        # Add project-level JSON config (./.app_name/settings.json)
+        # Add project-level JSON config (./.app_name/settings.json). Untrusted:
+        # strip security-sensitive keys (a cloned repo can ship this file).
         project_json = _get_json_config_source(
             settings_cls,
             get_project_config_path(app_name),
+            untrusted=True,
         )
         if project_json:
             sources.append(project_json)
