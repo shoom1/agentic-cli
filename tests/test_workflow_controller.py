@@ -233,6 +233,27 @@ class TestWorkflowControllerOrchestratorSwap:
         controller = self._make_controller()
         assert controller._needs_orchestrator_swap("claude-sonnet-4-5") is False
 
+    def test_swap_when_model_none_but_backend_stale(self):
+        """A-3: changing the orchestrator alone (model unchanged) must still
+        swap a stale manager — model=None must not short-circuit the check."""
+        controller = self._make_controller(orchestrator=OrchestratorType.ADK)
+        controller._workflow = _FakeLangGraphWorkflow("gemini-2.5-pro")
+        assert controller._needs_orchestrator_swap(None) is True
+
+    def test_swap_check_does_not_import_langgraph(self, monkeypatch):
+        """A-2: the swap check must route on backend_type, not by importing the
+        LangGraph manager — else changing the model on an ADK-only install
+        (no `langgraph` extra) raises ImportError."""
+        import sys
+
+        monkeypatch.setitem(
+            sys.modules, "agentic_cli.workflow.langgraph.manager", None
+        )
+        controller = self._make_controller(orchestrator=OrchestratorType.ADK)
+        controller._workflow = _FakeADKWorkflow()
+        # Must not raise ImportError:
+        assert controller._needs_orchestrator_swap("claude-sonnet-4-5") is False
+
     async def test_reinitialize_claude_on_adk_reinits_in_place(self):
         """ADK manager + Claude model → no swap; reinitialize in place."""
         controller = self._make_controller()

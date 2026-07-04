@@ -325,7 +325,9 @@ class BaseCLIApp:
         needs_reinit = False
         new_model = changes.get("model")
 
-        reinit_settings = {"model", "thinking_effort"}
+        # `orchestrator` triggers a reinit too: the controller swaps the backend
+        # when it changes (otherwise the change only took effect on restart).
+        reinit_settings = {"model", "thinking_effort", "orchestrator"}
 
         for key, value in changes.items():
             try:

@@ -199,35 +199,35 @@ class WorkflowController:
 
         return self._workflow is not None
 
-    def _needs_orchestrator_swap(self, new_model: str | None) -> bool:
-        """Check if the current manager type still matches the orchestrator setting.
+    def _needs_orchestrator_swap(self, new_model: str | None = None) -> bool:
+        """Check if the current manager still matches the orchestrator setting.
 
         The backend is chosen purely by ``settings.orchestrator`` and is
         model-agnostic (ADK runs Claude natively via ``AnthropicLlm``), so a model
-        change alone never forces a swap. A swap is only needed when the existing
-        manager's type no longer matches the configured orchestrator — e.g. the
-        orchestrator setting was changed, leaving a LangGraph manager in place
-        while ADK is now selected.
+        change alone never forces a swap. A swap is needed when the live manager's
+        ``backend_type`` no longer matches the configured orchestrator — e.g. the
+        orchestrator setting was changed, leaving a stale manager in place. This
+        happens regardless of whether a new model was given.
+
+        Compares by ``backend_type`` string rather than importing a backend class,
+        so it never pulls in the optional ``langgraph`` extra on an ADK-only
+        install.
         """
-        if new_model is None or self._workflow is None:
+        if self._workflow is None:
             return False
 
         from agentic_cli.workflow.settings import OrchestratorType
-        from agentic_cli.workflow.langgraph.manager import LangGraphWorkflowManager
 
         orchestrator = getattr(self._settings, "orchestrator", OrchestratorType.ADK)
-        new_needs_langgraph = orchestrator == OrchestratorType.LANGGRAPH
-
-        current_is_langgraph = isinstance(self._workflow, LangGraphWorkflowManager)
-
-        return new_needs_langgraph != current_is_langgraph
+        target_backend = getattr(orchestrator, "value", str(orchestrator))
+        return getattr(self._workflow, "backend_type", None) != target_backend
 
     async def reinitialize(self, model: str | None = None) -> None:
         """Reinitialize the workflow with optional new model.
 
-        If the new model requires a different orchestrator (e.g. switching from
-        Gemini on ADK to Claude on LangGraph), the entire workflow manager is
-        replaced. Otherwise, the existing manager is reinitalized in place.
+        If the live manager's backend no longer matches ``settings.orchestrator``
+        (e.g. the orchestrator setting was changed), the entire workflow manager
+        is replaced. Otherwise, the existing manager is reinitialized in place.
 
         Args:
             model: Optional new model to use
