@@ -202,7 +202,7 @@ class TestSandboxManager:
 
 class TestSandboxTools:
     def test_sandbox_execute_success(self, tmp_path):
-        with MockContext() as ctx:
+        with MockContext(sandbox_execute_enabled=True) as ctx:
             from agentic_cli.workflow.service_registry import set_service_registry
 
             backend = MockSandboxBackend(
@@ -223,7 +223,7 @@ class TestSandboxTools:
                 mgr.cleanup()
 
     def test_sandbox_execute_no_manager(self, tmp_path):
-        with MockContext():
+        with MockContext(sandbox_execute_enabled=True):
             from agentic_cli.workflow.service_registry import set_service_registry
 
             token = set_service_registry({})
@@ -234,6 +234,25 @@ class TestSandboxTools:
                 assert "not available" in result["error"]
             finally:
                 token.var.reset(token)
+
+    def test_sandbox_execute_disabled_by_default(self, tmp_path):
+        """The Jupyter kernel is unsandboxed host RCE — it must be opt-in."""
+        with MockContext():
+            from agentic_cli.tools.sandbox import sandbox_execute
+            result = sandbox_execute("print('hi')")
+            assert result["success"] is False
+            assert "enabled" in result["error"].lower()
+
+    def test_description_makes_no_false_network_claim(self):
+        """The tool does NOT block network — the description must not claim it
+        does, since a false safety claim misleads both the model and the user."""
+        from agentic_cli.tools.registry import get_registry
+
+        definition = get_registry().get("sandbox_execute")
+        assert definition is not None
+        desc = definition.description.lower()
+        assert "blocked" not in desc
+        assert "host" in desc  # honest: runs with host privileges
 
 
 

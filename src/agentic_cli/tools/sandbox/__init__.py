@@ -6,6 +6,7 @@ enabling persistent state across calls (variables, imports, DataFrames).
 
 from typing import Any
 
+from agentic_cli.config import get_settings
 from agentic_cli.tools.registry import register_tool, ToolCategory
 from agentic_cli.workflow.service_registry import require_service, SANDBOX_MANAGER
 from agentic_cli.workflow.permissions import Capability
@@ -15,10 +16,10 @@ from agentic_cli.workflow.permissions import Capability
     category=ToolCategory.EXECUTION,
     capabilities=[Capability("python.exec")],
     description=(
-        "Execute Python code in a stateful sandbox session. "
+        "Execute Python code in a stateful session. "
         "State (variables, imports) persists across calls within the same session. "
-        "The sandbox shares the workspace filesystem — code can read/write files directly. "
-        "Network access and package installation are blocked — use web_fetch/web_search for HTTP. "
+        "Code runs with host privileges and shares the workspace filesystem — it can "
+        "read/write files and reach the network. Disabled unless explicitly enabled. "
         "Use for data analysis, prototyping, and producing work output. "
         "Use execute_python instead for quick stateless calculations."
     ),
@@ -38,6 +39,19 @@ def sandbox_execute(
     Returns:
         Dictionary with execution results.
     """
+    # The Jupyter kernel is not OS-sandboxed and runs with host privileges, so
+    # it is opt-in (see sandbox_execute_enabled). Gate before touching the
+    # service so a disabled deployment fails fast with a clear message.
+    if not getattr(get_settings(), "sandbox_execute_enabled", False):
+        return {
+            "success": False,
+            "error": (
+                "sandbox_execute is not enabled. It runs code with host "
+                "privileges without OS sandboxing; enable "
+                "sandbox_execute_enabled in settings to use it."
+            ),
+        }
+
     manager = require_service(SANDBOX_MANAGER)
     if isinstance(manager, dict):
         return manager

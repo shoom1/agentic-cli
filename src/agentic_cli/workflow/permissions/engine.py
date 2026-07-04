@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 from agentic_cli.logging import Loggers
 from agentic_cli.settings_persistence import (
     get_project_config_path,
+    get_project_local_permissions_path,
     get_user_config_path,
 )
 from agentic_cli.workflow.permissions.capabilities import Capability, ResolvedCapability
@@ -108,7 +109,21 @@ class PermissionEngine:
             )
         app = self._settings.app_name
         rules += load_rules(get_user_config_path(app), RuleSource.USER, self._ctx)
-        rules += load_rules(get_project_config_path(app), RuleSource.PROJECT, self._ctx)
+        # PROJECT settings.json is untrusted (a cloned repo can ship it): honor
+        # only deny-rules so a workspace can tighten but never loosen policy.
+        rules += load_rules(
+            get_project_config_path(app),
+            RuleSource.PROJECT,
+            self._ctx,
+            allowed_effects=frozenset({Effect.DENY}),
+        )
+        # Interactively-granted "Allow always" rules live in a separate local
+        # file the user (not a repo) authored — trusted, so allow+deny apply.
+        rules += load_rules(
+            get_project_local_permissions_path(app),
+            RuleSource.PROJECT,
+            self._ctx,
+        )
         return rules
 
     @property
@@ -145,7 +160,7 @@ class PermissionEngine:
             return CheckResult(True, self._fmt_rule_reason(any_r, any_c))
 
         # Ask flow lands in Task 16.
-        return await self._ask_and_apply(tool_name, resolved, outcomes)
+        return await self._ask_and_apply(tool_name, resolved, outcomes, args)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -193,13 +208,14 @@ class PermissionEngine:
         tool_name: str,
         resolved: list[ResolvedCapability],
         outcomes: list[tuple[ResolvedCapability, Rule | None]],
+        args: dict | None = None,
     ) -> CheckResult:
         from agentic_cli.workflow.permissions.prompt import build_request, parse_response
         from agentic_cli.workflow.permissions.store import append_project_rule
 
         unmatched = [cap for cap, r in outcomes if r is None]
         async with self._ask_lock:
-            request = build_request(tool_name, resolved)
+            request = build_request(tool_name, resolved, args)
             response = await self._workflow.request_user_input(request)
             scope = parse_response(response)
 

@@ -418,7 +418,11 @@ class BaseWorkflowManager(ABC):
         if PERMISSION_ENGINE not in s:
             from pathlib import Path
             from agentic_cli.workflow.permissions import PermissionContext, PermissionEngine
-            ctx = PermissionContext(workdir=Path.cwd(), home=Path.home())
+            ctx = PermissionContext(
+                workdir=Path.cwd(),
+                home=Path.home(),
+                app_name=self._settings.app_name,
+            )
             s[PERMISSION_ENGINE] = PermissionEngine(
                 settings=self._settings, workflow=self, ctx=ctx,
             )

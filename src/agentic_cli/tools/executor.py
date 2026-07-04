@@ -70,21 +70,27 @@ class SafePythonExecutor:
         "scipy",
         "sklearn",
         "matplotlib",
+        # sympy.sympify / parse_expr evaluate arbitrary expressions and can be
+        # coerced into Python code execution — a real OS sandbox must contain it.
+        "sympy",
     }
 
     # Modules safe to import without OS isolation: pure computation and stdlib
     # data handling with no file/network/deserialization surface.
+    #
+    # NOTE: ``operator`` and ``functools`` are deliberately excluded. Their
+    # attrgetter/methodcaller (and reduce) take attribute names as *runtime
+    # strings*, which bypasses the AST underscore-attribute filter and yields
+    # host RCE (object.__subclasses__ → __init__.__globals__ → os.system).
+    # Do not re-add them without the OS sandbox as the enforced boundary.
     CORE_MODULES = {
         # Math / science
-        "sympy",
         "math",
         "statistics",
         "cmath",
         # Collections and utilities
         "collections",
         "itertools",
-        "functools",
-        "operator",
         # Data handling
         "json",
         "re",
@@ -207,6 +213,17 @@ class SafePythonExecutor:
                         f"Access to private attribute '{node.attr}' is not allowed",
                     )
 
+            # Reject str.format()/format_map() field names that traverse private
+            # attributes (e.g. "{0.__class__}"). The attribute path lives inside
+            # the string literal, so the ast.Attribute check above never sees it.
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                if self._format_field_accesses_private(node.value):
+                    return (
+                        False,
+                        "Format string references a private attribute "
+                        "(potential sandbox escape via str.format)",
+                    )
+
             # Check for dangerous function calls
             if isinstance(node, ast.Call):
                 if isinstance(node.func, ast.Name):
@@ -214,6 +231,47 @@ class SafePythonExecutor:
                         return False, f"Call to '{node.func.id}' is not allowed"
 
         return True, ""
+
+    @staticmethod
+    def _format_field_accesses_private(format_string: str) -> bool:
+        """True if a ``str.format`` field references a ``_``-prefixed attribute.
+
+        e.g. ``"{0.__class__}"`` or ``"{a.__class__.__base__}"``. Such fields
+        traverse the object graph through the format machinery, bypassing the
+        AST attribute filter. Item access (``{0[key]}``) is not an
+        attribute-traversal vector and is left alone.
+        """
+        import string as _string
+
+        try:
+            parsed = list(_string.Formatter().parse(format_string))
+        except (ValueError, IndexError):
+            # Malformed format string: not our concern here — it will raise at
+            # runtime inside the subprocess, it cannot escape.
+            return False
+        for _literal, field_name, format_spec, _conv in parsed:
+            if field_name:
+                for part in field_name.replace("[", ".").split("."):
+                    if part.startswith("_"):
+                        return True
+            if format_spec and "{" in format_spec:
+                # Nested replacement field inside the format spec.
+                if SafePythonExecutor._format_field_accesses_private(format_spec):
+                    return True
+        return False
+
+    @staticmethod
+    def _subprocess_env() -> dict[str, str]:
+        """Parent environment with provider secrets removed.
+
+        The workflow manager exports API keys into ``os.environ``; a code
+        execution escape must not be able to read them from the child process.
+        """
+        import os as _os
+        import re as _re
+
+        secret = _re.compile(r"(API_KEY|TOKEN|SECRET|PASSWORD)$", _re.IGNORECASE)
+        return {k: v for k, v in _os.environ.items() if not secret.search(k)}
 
     def execute(
         self,
@@ -316,6 +374,7 @@ class SafePythonExecutor:
                         capture_output=True,
                         text=True,
                         timeout=timeout,
+                        env=self._subprocess_env(),
                     )
                 else:
                     logger.error(
@@ -341,6 +400,7 @@ class SafePythonExecutor:
                     capture_output=True,
                     text=True,
                     timeout=timeout,
+                    env=self._subprocess_env(),
                 )
         except subprocess.TimeoutExpired:
             elapsed = (time.time() - start_time) * 1000

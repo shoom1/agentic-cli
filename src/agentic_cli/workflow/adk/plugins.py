@@ -7,6 +7,7 @@ Provides framework-level cross-cutting concerns as ADK Plugins:
 from __future__ import annotations
 
 import json
+import re
 import time
 from collections import deque
 from datetime import datetime, timezone
@@ -23,6 +24,19 @@ if TYPE_CHECKING:
     from google.adk.models import LlmRequest, LlmResponse
 
 logger = Loggers.workflow()
+
+# Best-effort redaction of provider secrets before they hit the log file.
+_SECRET_RE = re.compile(
+    r"(sk-[A-Za-z0-9_\-]{16,}"      # Anthropic / OpenAI keys
+    r"|AIza[A-Za-z0-9_\-]{16,}"     # Google API keys
+    r"|Bearer\s+[A-Za-z0-9._\-]{10,})",  # bearer tokens
+    re.IGNORECASE,
+)
+
+
+def _redact_secrets(text: str) -> str:
+    """Mask obvious API-key/token patterns in a serialized log line."""
+    return _SECRET_RE.sub("[REDACTED]", text)
 
 
 class LLMLoggingPlugin(BasePlugin):
@@ -58,10 +72,21 @@ class LLMLoggingPlugin(BasePlugin):
         self._events: deque[WorkflowEvent] = deque(maxlen=max_events)
         self._request_timestamps: dict[str, float] = {}
 
-        # Initialize log file
-        log_dir = Path.cwd() / f".{self.app_name}" / "logs"
+        # Initialize log file under the user's home — NOT the (often
+        # git-tracked) project dir — since it holds full conversations.
+        log_dir = Path.home() / f".{self.app_name}" / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            log_dir.chmod(0o700)
+        except OSError:
+            pass
         self._log_file: Path = log_dir / "llm_events.jsonl"
+        # Create (or tighten) with owner-only perms before anything is written.
+        try:
+            self._log_file.touch(exist_ok=True)
+            self._log_file.chmod(0o600)
+        except OSError:
+            pass
 
     # ------------------------------------------------------------------
     # ADK Plugin callbacks
@@ -237,8 +262,9 @@ class LLMLoggingPlugin(BasePlugin):
         }
 
         try:
+            line = _redact_secrets(json.dumps(record, default=str))
             with open(self._log_file, "a", encoding="utf-8") as f:
-                f.write(json.dumps(record, default=str) + "\n")
+                f.write(line + "\n")
         except OSError:
             pass
 

@@ -204,7 +204,8 @@ class TestEngineAskFlow:
         )
         assert result.allowed is True
 
-        data = json.loads((tmp_path / ".agentic/settings.json").read_text())
+        # Interactive grants persist to the trusted local file, not settings.json.
+        data = json.loads((tmp_path / ".agentic/permissions.local.json").read_text())
         allow = data["permissions"]["allow"]
         assert len(allow) == 1
         assert allow[0]["capability"] == "http.read"
