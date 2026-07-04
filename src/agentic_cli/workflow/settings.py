@@ -226,6 +226,16 @@ class WorkflowSettingsMixin:
         description="Multiplier for exponential backoff between retries",
         json_schema_extra={"ui_order": 112},
     )
+    anthropic_request_timeout: float = Field(
+        default=900.0,
+        title="Anthropic Request Timeout",
+        description=(
+            "Overall timeout (seconds) for direct-API Claude requests. A "
+            "non-default value lets high-thinking (large max_tokens) requests "
+            "run without the SDK's streaming-required guard."
+        ),
+        json_schema_extra={"ui_order": 113},
+    )
 
     # Python executor
     python_executor_timeout: int = Field(

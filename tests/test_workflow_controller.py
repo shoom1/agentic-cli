@@ -1,7 +1,10 @@
 """Tests for workflow controller factory and orchestrator routing.
 
-Verifies that Claude models are automatically routed to the LangGraph
-orchestrator, while Gemini models use whichever orchestrator is configured.
+The backend is chosen purely by ``settings.orchestrator`` and is model-agnostic:
+ADK runs Claude natively via the direct-API ``AnthropicLlm`` (no LiteLLM), so
+Claude is no longer auto-routed to LangGraph. A model switch alone never forces an
+orchestrator swap; only an orchestrator-setting change (leaving a stale manager)
+does.
 """
 
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -63,7 +66,7 @@ def _FakeLangGraphWorkflow(model="claude-sonnet-4-5"):
     return wf
 
 
-# --- Unit tests for helpers ---
+# --- Unit tests for helpers (predicates retained for callers/back-compat) ---
 
 
 class TestIsClaudeModel:
@@ -94,11 +97,11 @@ class TestResolveEffectiveModel:
         assert _resolve_effective_model(None, settings) is None
 
 
-# --- Factory routing tests ---
+# --- Factory routing tests (backend = orchestrator setting only) ---
 
 
 class TestCreateWorkflowManagerRouting:
-    """Test that the factory routes Claude models to LangGraph."""
+    """The factory routes purely on ``settings.orchestrator`` (model-agnostic)."""
 
     def test_gemini_model_with_adk_returns_adk(self, agent_configs):
         """Gemini model + ADK orchestrator → ADK manager."""
@@ -112,28 +115,40 @@ class TestCreateWorkflowManagerRouting:
         mock_adk_cls.assert_called_once()
         assert result is mock_adk_cls.return_value
 
-    @patch("agentic_cli.workflow.langgraph.LangGraphWorkflowManager")
-    def test_claude_model_with_adk_returns_langgraph(
-        self, mock_lg_cls, agent_configs
-    ):
-        """Claude model + ADK orchestrator → auto-switches to LangGraph."""
+    def test_claude_model_with_adk_returns_adk(self, agent_configs):
+        """Claude model + ADK orchestrator → ADK manager (native AnthropicLlm)."""
         settings = _make_settings(orchestrator=OrchestratorType.ADK)
-        result = create_workflow_manager_from_settings(
-            agent_configs, settings, model="claude-sonnet-4-5"
-        )
-        mock_lg_cls.assert_called_once()
-        assert result is mock_lg_cls.return_value
+        with patch(
+            "agentic_cli.workflow.adk.manager.GoogleADKWorkflowManager"
+        ) as mock_adk_cls:
+            result = create_workflow_manager_from_settings(
+                agent_configs, settings, model="claude-sonnet-4-5"
+            )
+        mock_adk_cls.assert_called_once()
+        assert result is mock_adk_cls.return_value
 
-    @patch("agentic_cli.workflow.langgraph.LangGraphWorkflowManager")
-    def test_claude_model_in_settings_returns_langgraph(
-        self, mock_lg_cls, agent_configs
-    ):
-        """Claude model in settings.default_model → auto-switches to LangGraph."""
+    def test_claude_model_in_settings_returns_adk(self, agent_configs):
+        """Claude model in settings.default_model + ADK orchestrator → ADK manager."""
         settings = _make_settings(
             orchestrator=OrchestratorType.ADK,
             default_model="claude-opus-4",
         )
-        result = create_workflow_manager_from_settings(agent_configs, settings)
+        with patch(
+            "agentic_cli.workflow.adk.manager.GoogleADKWorkflowManager"
+        ) as mock_adk_cls:
+            result = create_workflow_manager_from_settings(agent_configs, settings)
+        mock_adk_cls.assert_called_once()
+        assert result is mock_adk_cls.return_value
+
+    @patch("agentic_cli.workflow.langgraph.LangGraphWorkflowManager")
+    def test_claude_model_with_langgraph_returns_langgraph(
+        self, mock_lg_cls, agent_configs
+    ):
+        """Claude still runs on LangGraph when that orchestrator is chosen."""
+        settings = _make_settings(orchestrator=OrchestratorType.LANGGRAPH)
+        result = create_workflow_manager_from_settings(
+            agent_configs, settings, model="claude-sonnet-4-5"
+        )
         mock_lg_cls.assert_called_once()
         assert result is mock_lg_cls.return_value
 
@@ -164,19 +179,19 @@ class TestCreateWorkflowManagerRouting:
 
 
 class TestWorkflowControllerOrchestratorSwap:
-    """Test runtime model switch triggers orchestrator swap when needed."""
+    """A swap happens only when the manager type no longer matches the setting."""
 
     def _make_controller(self, orchestrator=OrchestratorType.ADK):
         configs = [AgentConfig(name="test", prompt="Test")]
         settings = _make_settings(orchestrator=orchestrator)
         return WorkflowController(configs, settings)
 
-    def test_needs_swap_gemini_to_claude(self):
-        """ADK manager + Claude model → needs swap."""
+    def test_no_swap_gemini_to_claude_on_adk(self):
+        """ADK manager + Claude model → no swap (Claude runs on ADK natively)."""
         controller = self._make_controller()
         controller._workflow = _FakeADKWorkflow()
 
-        assert controller._needs_orchestrator_swap("claude-sonnet-4-5") is True
+        assert controller._needs_orchestrator_swap("claude-sonnet-4-5") is False
 
     def test_no_swap_gemini_to_gemini(self):
         """ADK manager + Gemini model → no swap needed."""
@@ -185,26 +200,26 @@ class TestWorkflowControllerOrchestratorSwap:
 
         assert controller._needs_orchestrator_swap("gemini-2.5-pro") is False
 
-    def test_no_swap_claude_to_claude(self):
-        """LangGraph manager (auto) + Claude model → no swap needed."""
+    def test_swap_stale_langgraph_manager_on_adk(self):
+        """ADK orchestrator + a stale LangGraph manager → swap back to ADK."""
         controller = self._make_controller()
         controller._workflow = _FakeLangGraphWorkflow("claude-sonnet-4-5")
 
-        assert controller._needs_orchestrator_swap("claude-opus-4") is False
+        assert controller._needs_orchestrator_swap("claude-opus-4") is True
 
-    def test_needs_swap_claude_to_gemini(self):
-        """LangGraph manager (auto) + Gemini model → needs swap back to ADK."""
-        controller = self._make_controller()
-        controller._workflow = _FakeLangGraphWorkflow("claude-sonnet-4-5")
-
-        assert controller._needs_orchestrator_swap("gemini-2.5-pro") is True
-
-    def test_no_swap_when_langgraph_orchestrator_and_gemini(self):
-        """LangGraph orchestrator + Gemini model → no swap (user chose LangGraph)."""
+    def test_no_swap_when_langgraph_orchestrator(self):
+        """LangGraph orchestrator + LangGraph manager → no swap (user chose it)."""
         controller = self._make_controller(orchestrator=OrchestratorType.LANGGRAPH)
         controller._workflow = _FakeLangGraphWorkflow("gemini-2.5-pro")
 
         assert controller._needs_orchestrator_swap("gemini-2.5-flash") is False
+
+    def test_swap_stale_adk_manager_on_langgraph(self):
+        """LangGraph orchestrator + a stale ADK manager → swap to LangGraph."""
+        controller = self._make_controller(orchestrator=OrchestratorType.LANGGRAPH)
+        controller._workflow = _FakeADKWorkflow("gemini-2.5-pro")
+
+        assert controller._needs_orchestrator_swap("gemini-2.5-flash") is True
 
     def test_no_swap_when_model_is_none(self):
         """No model specified → no swap."""
@@ -218,23 +233,18 @@ class TestWorkflowControllerOrchestratorSwap:
         controller = self._make_controller()
         assert controller._needs_orchestrator_swap("claude-sonnet-4-5") is False
 
-    @patch("agentic_cli.workflow.langgraph.LangGraphWorkflowManager")
-    async def test_reinitialize_swaps_orchestrator_for_claude(self, mock_lg_cls):
-        """Switching from Gemini (ADK) to Claude triggers full manager replacement."""
+    async def test_reinitialize_claude_on_adk_reinits_in_place(self):
+        """ADK manager + Claude model → no swap; reinitialize in place."""
         controller = self._make_controller()
-        old_workflow = _FakeADKWorkflow("gemini-2.5-pro")
-        controller._workflow = old_workflow
-
-        new_workflow = AsyncMock()
-        mock_lg_cls.return_value = new_workflow
+        workflow = _FakeADKWorkflow("gemini-2.5-pro")
+        controller._workflow = workflow
 
         await controller.reinitialize(model="claude-sonnet-4-5")
 
-        # Old workflow's reinitialize should NOT have been called
-        old_workflow.reinitialize.assert_not_called()
-        # New workflow should have been created and initialized
-        new_workflow.initialize_services.assert_awaited_once()
-        assert controller._workflow is new_workflow
+        workflow.reinitialize.assert_awaited_once_with(
+            model="claude-sonnet-4-5", preserve_sessions=True
+        )
+        assert controller._workflow is workflow
 
     async def test_reinitialize_same_family_calls_existing_reinitialize(self):
         """Switching Gemini → Gemini calls reinitialize on existing manager."""
@@ -266,8 +276,8 @@ class TestWorkflowControllerOrchestratorSwap:
         with pytest.raises(RuntimeError, match="Cannot reinitialize"):
             await controller.reinitialize(model="claude-sonnet-4-5")
 
-    async def test_swap_claude_to_gemini(self):
-        """Switching from Claude (LangGraph auto) back to Gemini (ADK) triggers swap."""
+    async def test_reinitialize_migrates_stale_langgraph_to_adk(self):
+        """A stale LangGraph manager under ADK orchestrator is replaced on reinit."""
         controller = self._make_controller()
         old_workflow = _FakeLangGraphWorkflow("claude-sonnet-4-5")
         controller._workflow = old_workflow
