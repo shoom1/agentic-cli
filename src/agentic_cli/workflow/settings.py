@@ -289,10 +289,25 @@ class WorkflowSettingsMixin:
 
     # OS-level sandboxing
     os_sandbox_enabled: bool = Field(
-        default=False,
+        default=True,
         title="OS Sandbox Enabled",
-        description="Enable OS-level sandboxing for shell and Python execution (requires sandbox-exec on macOS or bwrap on Linux)",
+        description=(
+            "Wrap Python execution in an OS-level sandbox when a backend is "
+            "available (sandbox-exec on macOS, bwrap on Linux). When no backend "
+            "is present, execution falls back to the restricted in-process "
+            "executor (see os_sandbox_strict) — only pure-computation modules "
+            "are importable in that case."
+        ),
         json_schema_extra={"ui_order": 130},
+    )
+    os_sandbox_strict: bool = Field(
+        default=False,
+        title="OS Sandbox Strict",
+        description=(
+            "Refuse to run code when OS sandboxing is enabled but no backend is "
+            "available, instead of falling back to the in-process executor."
+        ),
+        json_schema_extra={"ui_order": 133},
     )
     os_sandbox_writable_paths: list[str] = Field(
         default_factory=list,
