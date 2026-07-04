@@ -254,6 +254,25 @@ class TestSandboxTools:
         assert "blocked" not in desc
         assert "host" in desc  # honest: runs with host privileges
 
+    def test_capability_distinct_from_execute_python(self):
+        """sandbox_execute must NOT share python.exec with execute_python — else
+        an 'Allow always' for the safe stateless tool silently authorizes the
+        unsandboxed stateful kernel."""
+        from agentic_cli.tools.registry import get_registry
+        from agentic_cli.tools.execution_tools import execute_python  # noqa: F401
+        from agentic_cli.workflow.permissions.matchers import _cap_matches
+
+        reg = get_registry()
+        sandbox_caps = [c.name for c in reg.get("sandbox_execute").capabilities]
+        exec_caps = [c.name for c in reg.get("execute_python").capabilities]
+
+        assert exec_caps == ["python.exec"]
+        assert sandbox_caps == ["python.exec.stateful"]
+        # An execute_python grant (rule 'python.exec') must not cover it.
+        assert _cap_matches("python.exec", sandbox_caps[0]) is False
+        # A deliberate broad 'python.*' grant still covers both.
+        assert _cap_matches("python.*", sandbox_caps[0]) is True
+
 
 
 # ---------------------------------------------------------------------------
