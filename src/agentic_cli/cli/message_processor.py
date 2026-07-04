@@ -144,6 +144,7 @@ class MessageProcessor:
         ui: "ThinkingPromptSession",
         settings: "BaseSettings",
         usage_tracker: "UsageTracker | None" = None,
+        session_id: str | None = None,
     ) -> None:
         """Process a user message through the workflow.
 
@@ -153,6 +154,9 @@ class MessageProcessor:
             ui: UI session for output
             settings: Application settings
             usage_tracker: Optional tracker for accumulating LLM token usage
+            session_id: Session to run the turn in. Passed explicitly so every
+                turn targets the app's durable session rather than the manager's
+                fallback (which would collapse unnamed runs into one session).
         """
         # Wait for initialization if needed
         if not await workflow_controller.ensure_initialized(ui):
@@ -166,7 +170,11 @@ class MessageProcessor:
         logger.info("handling_message", message_length=len(message))
 
         def _source(workflow):
-            return workflow.process(message=message, user_id=settings.default_user)
+            return workflow.process(
+                message=message,
+                user_id=settings.default_user,
+                session_id=session_id,
+            )
 
         await self._run_turn(_source, workflow_controller, ui, settings, usage_tracker)
 
