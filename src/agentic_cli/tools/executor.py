@@ -162,11 +162,21 @@ class SafePythonExecutor:
         self.os_sandbox_policy = os_sandbox_policy
 
         # File/network/pickle-capable libraries are only safe behind real OS
-        # isolation. Without it, restrict imports to the pure-computation core.
+        # isolation. They are gated on *actual* sandbox availability, not just
+        # the setting: if the sandbox is requested but no backend exists (so
+        # execution falls back in-process), these must stay unavailable.
         sandbox_on = bool(os_sandbox_policy and os_sandbox_policy.enabled)
+        real_sandbox = sandbox_on and self._real_os_sandbox_available()
         self.effective_allowed_modules = (
-            self.ALLOWED_MODULES if sandbox_on else self.CORE_MODULES
+            self.ALLOWED_MODULES if real_sandbox else self.CORE_MODULES
         )
+
+    @staticmethod
+    def _real_os_sandbox_available() -> bool:
+        """True if a real OS sandbox backend (not the no-op) is present."""
+        from agentic_cli.tools.shell.os_sandbox import get_os_sandbox
+
+        return get_os_sandbox().sandbox_type != "none"
 
     def validate_code(self, code: str) -> tuple[bool, str]:
         """Validate code for safety.
@@ -305,6 +315,18 @@ class SafePythonExecutor:
 
         return self._execute_in_subprocess(code, context, timeout)
 
+    def _sandbox_refused(self, message: str, start_time: float) -> dict[str, Any]:
+        """Fail-closed result when strict sandboxing is required but unavailable."""
+        logger.error("python_executor.os_sandbox_refused", message=message)
+        elapsed = (time.time() - start_time) * 1000
+        return {
+            "success": False,
+            "output": "",
+            "result": None,
+            "error": message,
+            "execution_time_ms": round(elapsed, 2),
+        }
+
     def _execute_in_subprocess(
         self,
         code: str,
@@ -330,70 +352,66 @@ class SafePythonExecutor:
             max_memory_mb=self.max_memory_mb,
         )
 
+        strict = bool(
+            self.os_sandbox_policy and getattr(self.os_sandbox_policy, "strict", False)
+        )
+        proc = None
         try:
             if self.os_sandbox_policy and self.os_sandbox_policy.enabled:
                 from agentic_cli.tools.shell.os_sandbox import get_os_sandbox
 
                 sandbox = get_os_sandbox()
-                # Fail closed when sandboxing was requested but no real
-                # isolation is available — silently dropping back to a plain
-                # subprocess would defeat the user's opt-in.
                 if sandbox.sandbox_type == "none":
-                    logger.error(
-                        "python_executor.os_sandbox_required_but_unavailable",
+                    # Requested but no backend. Strict -> refuse; otherwise fall
+                    # back to the in-process executor (already restricted to the
+                    # pure-computation CORE_MODULES) with a warning.
+                    if strict:
+                        return self._sandbox_refused(
+                            "OS sandbox is required (os_sandbox_strict=True) but "
+                            "no supported sandbox tool is available (install "
+                            "sandbox-exec on macOS or bwrap on Linux). Refusing "
+                            "to execute without isolation.",
+                            start_time,
+                        )
+                    logger.warning(
+                        "python_executor.os_sandbox_unavailable_fallback",
                         sandbox_type=sandbox.sandbox_type,
                     )
-                    elapsed = (time.time() - start_time) * 1000
-                    return {
-                        "success": False,
-                        "output": "",
-                        "result": None,
-                        "error": (
-                            "OS sandbox is required (os_sandbox_enabled=True) "
-                            "but no supported sandbox tool is available on "
-                            "this system (install sandbox-exec on macOS or "
-                            "bwrap on Linux). Refusing to execute without "
-                            "isolation."
-                        ),
-                        "execution_time_ms": round(elapsed, 2),
-                    }
-                wrap_result = sandbox.wrap_python_command(
-                    [sys.executable, "-c", script],
-                    Path.cwd(),
-                    self.os_sandbox_policy,
-                )
-                if wrap_result.success:
-                    logger.debug(
-                        "python_executor.os_sandbox_wrapped",
-                        sandbox_type=wrap_result.sandbox_type,
-                    )
-                    proc = subprocess.run(
-                        wrap_result.command,
-                        shell=True,
-                        input=code,
-                        capture_output=True,
-                        text=True,
-                        timeout=timeout,
-                        env=self._subprocess_env(),
-                    )
                 else:
-                    logger.error(
-                        "python_executor.os_sandbox_wrap_failed",
-                        error=wrap_result.error,
+                    wrap_result = sandbox.wrap_python_command(
+                        [sys.executable, "-c", script],
+                        Path.cwd(),
+                        self.os_sandbox_policy,
                     )
-                    elapsed = (time.time() - start_time) * 1000
-                    return {
-                        "success": False,
-                        "output": "",
-                        "result": None,
-                        "error": (
+                    if wrap_result.success:
+                        logger.debug(
+                            "python_executor.os_sandbox_wrapped",
+                            sandbox_type=wrap_result.sandbox_type,
+                        )
+                        proc = subprocess.run(
+                            wrap_result.command,
+                            shell=True,
+                            input=code,
+                            capture_output=True,
+                            text=True,
+                            timeout=timeout,
+                            env=self._subprocess_env(),
+                        )
+                    elif strict:
+                        return self._sandbox_refused(
                             f"OS sandbox wrap failed "
                             f"({wrap_result.sandbox_type}): {wrap_result.error}. "
-                            f"Refusing to execute without isolation."
-                        ),
-                        "execution_time_ms": round(elapsed, 2),
-                    }
-            else:
+                            f"Refusing to execute without isolation.",
+                            start_time,
+                        )
+                    else:
+                        logger.warning(
+                            "python_executor.os_sandbox_wrap_failed_fallback",
+                            error=wrap_result.error,
+                        )
+
+            if proc is None:
+                # No sandbox policy, or a non-strict fallback from above.
                 proc = subprocess.run(
                     [sys.executable, "-c", script],
                     input=code,

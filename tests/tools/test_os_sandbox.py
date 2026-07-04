@@ -529,8 +529,9 @@ class TestSafePythonExecutorIntegration:
         # subprocess.run was called with shell=True (wrapped command)
         assert mock_run.call_args.kwargs.get("shell") is True
 
-    def test_enabled_policy_wrap_failure_fails_closed(self):
-        policy = OSSandboxPolicy(enabled=True)
+    def test_enabled_policy_wrap_failure_strict_fails_closed(self):
+        # strict=True: a wrap failure must refuse rather than run unwrapped.
+        policy = OSSandboxPolicy(enabled=True, strict=True)
         executor = SafePythonExecutor(os_sandbox_policy=policy)
 
         mock_os_sandbox = MagicMock()
@@ -550,13 +551,13 @@ class TestSafePythonExecutorIntegration:
         ):
             result = executor.execute("1 + 1")
 
-        # Wrap failure must fail closed rather than running unwrapped.
         assert result["success"] is False
         assert "sandbox" in (result.get("error") or "").lower()
         mock_run.assert_not_called()
 
-    def test_enabled_policy_no_real_sandbox_fails_closed(self):
-        policy = OSSandboxPolicy(enabled=True)
+    def test_enabled_policy_no_real_sandbox_strict_fails_closed(self):
+        # strict=True: no backend must refuse.
+        policy = OSSandboxPolicy(enabled=True, strict=True)
         executor = SafePythonExecutor(os_sandbox_policy=policy)
 
         mock_os_sandbox = MagicMock()
@@ -574,3 +575,35 @@ class TestSafePythonExecutorIntegration:
         assert "sandbox" in (result.get("error") or "").lower()
         mock_os_sandbox.wrap_python_command.assert_not_called()
         mock_run.assert_not_called()
+
+    def test_enabled_policy_no_real_sandbox_non_strict_falls_back(self):
+        # Default (non-strict): no backend falls back to the in-process executor
+        # (which is restricted to CORE_MODULES) rather than refusing.
+        policy = OSSandboxPolicy(enabled=True, strict=False)
+        executor = SafePythonExecutor(os_sandbox_policy=policy)
+
+        mock_os_sandbox = MagicMock()
+        mock_os_sandbox.sandbox_type = "none"
+
+        mock_proc = MagicMock()
+        mock_proc.stdout = (
+            "\n__AGENTIC_EXECUTOR_RESULT_SENTINEL__\n"
+            '{"success": true, "output": "", "result": "2", '
+            '"error": "", "execution_time_ms": 0}'
+        )
+        mock_proc.stderr = ""
+        mock_proc.returncode = 0
+
+        with patch(
+            "agentic_cli.tools.executor.subprocess.run", return_value=mock_proc
+        ) as mock_run, patch(
+            "agentic_cli.tools.shell.os_sandbox.get_os_sandbox",
+            return_value=mock_os_sandbox,
+        ):
+            result = executor.execute("1 + 1")
+
+        assert result["success"] is True
+        mock_os_sandbox.wrap_python_command.assert_not_called()
+        # Fell back to a plain (unwrapped) subprocess.
+        mock_run.assert_called_once()
+        assert mock_run.call_args.kwargs.get("shell") is not True
