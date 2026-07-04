@@ -14,7 +14,11 @@ from agentic_cli.workflow.permissions import Capability
 
 @register_tool(
     category=ToolCategory.EXECUTION,
-    capabilities=[Capability("python.exec")],
+    # Distinct from execute_python's ``python.exec`` on purpose: this kernel is
+    # unsandboxed and stateful, so an "Allow always" for the stateless scratchpad
+    # must NOT silently authorize it. A deliberate ``python.*`` grant still covers
+    # both.
+    capabilities=[Capability("python.exec.stateful")],
     description=(
         "Execute Python code in a stateful session. "
         "State (variables, imports) persists across calls within the same session. "

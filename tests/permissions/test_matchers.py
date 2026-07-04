@@ -33,6 +33,31 @@ class TestStringGlobMatcher:
         assert not m.matches("foo*", "barbaz")
 
 
+class TestCapMatches:
+    """Capability-name glob: exact / ``ns.*`` prefix / ``*``. This is what keeps
+    a grant for one tool from silently covering another (e.g. python.exec vs
+    python.exec.stateful)."""
+
+    def test_exact_and_star(self):
+        from agentic_cli.workflow.permissions.matchers import _cap_matches
+
+        assert _cap_matches("python.exec", "python.exec") is True
+        assert _cap_matches("*", "python.exec") is True
+
+    def test_suffix_capability_not_covered_by_exact_rule(self):
+        from agentic_cli.workflow.permissions.matchers import _cap_matches
+
+        # A grant of the exact 'python.exec' must NOT cover 'python.exec.stateful'.
+        assert _cap_matches("python.exec", "python.exec.stateful") is False
+
+    def test_namespace_glob_covers_children(self):
+        from agentic_cli.workflow.permissions.matchers import _cap_matches
+
+        assert _cap_matches("python.*", "python.exec") is True
+        assert _cap_matches("python.*", "python.exec.stateful") is True
+        assert _cap_matches("python.*", "shell.exec") is False
+
+
 class TestMatcherProtocol:
     def test_string_glob_matcher_satisfies_protocol(self):
         assert isinstance(StringGlobMatcher(), Matcher)
