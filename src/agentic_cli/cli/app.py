@@ -439,6 +439,7 @@ class BaseCLIApp:
                 ui=self.session,
                 settings=self._settings,
                 usage_tracker=self._usage_tracker,
+                session_id=self._session_id,
             )
 
         # At the turn boundary, auto-resume any finished background jobs that
@@ -474,17 +475,23 @@ class BaseCLIApp:
                 )
         return len(records)
 
-    async def _resume_session_on_startup(self) -> None:
-        """Adopt the requested session id; native stores already hold its state."""
+    async def _adopt_session_on_startup(self) -> None:
+        """Adopt this run's session id so the manager targets it from turn one.
+
+        Runs for every startup, not just ``--session``: a fresh auto-generated
+        id must be adopted too, otherwise turns fall back to the manager's
+        ``default_session`` and unnamed runs silently share one conversation.
+        """
         if not await self._workflow_controller.ensure_initialized(self.session):
-            self.session.add_warning("Cannot resume session — workflow not initialized.")
+            self.session.add_warning("Cannot adopt session — workflow not initialized.")
             return
 
         workflow = self._workflow_controller.workflow
         resumed = await workflow.load_session(self._session_id)
         if resumed:
             self.session.add_success(f"Session '{self._session_id}' resumed.")
-        else:
+        elif self._resume_requested:
+            # An explicit --session that didn't exist yet: tell the user it's new.
             self.session.add_message("system", f"New session '{self._session_id}'.")
 
     async def _extract_session_facts_on_exit(self) -> None:
@@ -521,10 +528,10 @@ class BaseCLIApp:
         )
 
         async with self._workflow_controller.background_init(self.session):
-            # Only an explicit --session asks to resume a prior conversation;
-            # a fresh auto-generated id just starts a new (durable) session.
-            if self._resume_requested:
-                await self._resume_session_on_startup()
+            # Adopt this run's session id (generated or --session) so every turn
+            # targets it; a fresh id starts a new durable session rather than
+            # falling back to the shared 'default_session'.
+            await self._adopt_session_on_startup()
 
             # Register input handler
             @self.session.on_input

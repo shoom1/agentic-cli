@@ -78,6 +78,23 @@ def _index_of(ui: RecordingSession, predicate) -> int:
     return -1
 
 
+class TestSessionThreading:
+    async def test_session_id_threaded_to_workflow(self):
+        """The app's session id must reach workflow.process so unnamed runs
+        don't collapse into the manager's fallback 'default_session' (A-1)."""
+        mp = MessageProcessor()
+        wf = ReplayWorkflow([WorkflowEvent.text("ok")])
+        ctrl = ReplayController(wf)
+        await mp.process(
+            message="hi",
+            workflow_controller=ctrl,
+            ui=RecordingSession(),
+            settings=_settings(),
+            session_id="sess-abc123",
+        )
+        assert wf.received_session_id == "sess-abc123"
+
+
 class TestRenderBasics:
     async def test_text_response_rendered_as_markdown(self):
         ui, _, _ = await _render([WorkflowEvent.text("hello **world**")])
