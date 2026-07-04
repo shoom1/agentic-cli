@@ -122,6 +122,44 @@ class TestAnthropicClientWiring:
         assert isinstance(llm._anthropic_client, _ExtraParamClient)
 
 
+class TestClientRequestOptions:
+    def test_client_receives_timeout_and_retries(self, monkeypatch):
+        import anthropic
+
+        captured: dict = {}
+
+        class _FakeAsyncAnthropic:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        monkeypatch.setattr(anthropic, "AsyncAnthropic", _FakeAsyncAnthropic)
+        llm = DirectAnthropicLlm(
+            model="claude-opus-4-8", request_timeout=900.0, max_retries=5
+        )
+        _ = llm._anthropic_client
+        assert captured["timeout"] == 900.0
+        assert captured["max_retries"] == 5
+
+    def test_large_max_tokens_skips_streaming_guard(self, monkeypatch):
+        """A non-default client timeout is exactly what makes messages.create
+        skip the 'streaming required' guard for max_tokens > ~21k (B-1)."""
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+        from anthropic._constants import DEFAULT_TIMEOUT
+
+        llm = DirectAnthropicLlm(
+            model="claude-sonnet-4-5", max_tokens=40000, request_timeout=900.0
+        )
+        assert llm._anthropic_client.timeout != DEFAULT_TIMEOUT
+
+    def test_defaults_leave_client_unchanged(self, monkeypatch):
+        """No options set → plain client with the SDK default timeout."""
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+        from anthropic._constants import DEFAULT_TIMEOUT
+
+        llm = DirectAnthropicLlm(model="claude-opus-4-8")
+        assert llm._anthropic_client.timeout == DEFAULT_TIMEOUT
+
+
 # ---------------------------------------------------------------------------
 # Registry: claude strings → DirectAnthropicLlm
 # ---------------------------------------------------------------------------

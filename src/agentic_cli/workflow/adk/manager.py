@@ -71,8 +71,13 @@ _GENERIC_TO_EFFORT = {"low": "low", "medium": "medium", "high": "high"}
 
 
 def _claude_version(model: str) -> tuple[int, ...]:
-    """Numeric version tuple from a Claude id (``claude-opus-4-8`` -> ``(4, 8)``)."""
-    return tuple(int(p) for p in model.split("-") if p.isdigit())
+    """Numeric version tuple from a Claude id (``claude-opus-4-8`` -> ``(4, 8)``).
+
+    Version components are 1-2 digits; longer numeric segments are date stamps
+    (``claude-opus-4-20250514``) and must be ignored, else the date would be
+    read as a minor version and push the model past the adaptive threshold.
+    """
+    return tuple(int(p) for p in model.split("-") if p.isdigit() and len(p) <= 2)
 
 
 def _anthropic_uses_adaptive(model: str | None) -> bool:
@@ -491,6 +496,10 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             model=model,
             max_tokens=self._anthropic_max_tokens(config),
             effort=self._anthropic_effort(config),
+            # An explicit (non-default) timeout keeps large-max_tokens requests
+            # off the SDK's streaming-required guard; retries honour settings.
+            request_timeout=getattr(self._settings, "anthropic_request_timeout", 900.0),
+            max_retries=getattr(self._settings, "retry_max_attempts", None),
         )
 
     def _get_generate_content_config(

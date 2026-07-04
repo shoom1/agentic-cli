@@ -54,6 +54,12 @@ class TestAdaptiveClassification:
             ("claude-sonnet-4", False),
             ("claude-3-5-sonnet", False),
             ("gemini-2.5-pro", False),
+            # Date-suffixed ids must parse to the version, not the date: a
+            # dated 4.0 id is < 4.6 (budget path), not adaptive.
+            ("claude-opus-4-20250514", False),
+            ("claude-sonnet-4-20250514", False),
+            ("claude-opus-4-1-20250805", False),
+            ("claude-haiku-4-5-20251001", False),
         ],
     )
     def test_uses_adaptive(self, model, adaptive):
@@ -131,3 +137,19 @@ class TestAdaptiveMaxTokens:
         mgr._settings.set_thinking_effort("high")
         arg = mgr._build_model_arg(_cfg(ModelSettings(max_tokens=20000)))
         assert arg.max_tokens == 20000
+
+
+class TestClaudeRequestOptions:
+    def test_legacy_high_effort_sets_request_timeout(self, mock_context):
+        """Legacy high effort inflates max_tokens past the SDK's non-streaming
+        ceiling (~21k), so a request_timeout must be set to avoid the guard."""
+        mgr = _manager(mock_context, LEGACY)
+        mgr._settings.set_thinking_effort("high")
+        arg = mgr._build_model_arg(_cfg())
+        assert arg.max_tokens > 21333
+        assert arg.request_timeout is not None
+
+    def test_max_retries_from_settings(self, mock_context):
+        mgr = _manager(mock_context, ADAPTIVE)
+        arg = mgr._build_model_arg(_cfg())
+        assert arg.max_retries == mock_context.settings.retry_max_attempts

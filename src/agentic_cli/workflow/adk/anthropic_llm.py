@@ -84,10 +84,18 @@ class DirectAnthropicLlm(AnthropicLlm):
         extra_params: Escape hatch merged into every ``messages.create`` call
             (e.g. ``{"service_tier": "..."}``). ADK's own per-call kwargs
             (model, messages, thinking, ...) always win over these.
+        request_timeout: Overall client timeout (seconds). Set to a non-default
+            value so ADK's non-streaming ``messages.create`` skips the SDK's
+            "streaming required" guard for ``max_tokens`` above ~21k (the guard
+            only fires when the client uses the default timeout).
+        max_retries: Client-level retry count (defaults to the anthropic SDK's
+            when ``None``); wire it from ``settings.retry_max_attempts``.
     """
 
     effort: str | None = None
     extra_params: dict[str, Any] = {}
+    request_timeout: float | None = None
+    max_retries: int | None = None
 
     @staticmethod
     def supported_models() -> list[str]:
@@ -106,7 +114,12 @@ class DirectAnthropicLlm(AnthropicLlm):
     def _anthropic_client(self):  # type: ignore[override]
         from anthropic import AsyncAnthropic
 
-        client = AsyncAnthropic()
+        client_kwargs: dict[str, Any] = {}
+        if self.request_timeout is not None:
+            client_kwargs["timeout"] = self.request_timeout
+        if self.max_retries is not None:
+            client_kwargs["max_retries"] = self.max_retries
+        client = AsyncAnthropic(**client_kwargs)
         extra = self._extra_create_params()
         if not extra:
             return client
