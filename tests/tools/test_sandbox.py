@@ -14,7 +14,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from agentic_cli.tools.sandbox.models import ExecutionResult
+from agentic_cli.tools.sandbox.models import ExecutionResult, SessionStatus
 from agentic_cli.tools.sandbox.backends.base import SandboxBackend
 from agentic_cli.tools.sandbox.manager import SandboxManager, SandboxSession
 from tests.conftest import MockContext
@@ -26,6 +26,8 @@ from tests.conftest import MockContext
 
 class MockSandboxBackend(SandboxBackend):
     """Test backend that returns configurable results."""
+
+    backend_name = "mock"
 
     def __init__(self, result: ExecutionResult | None = None) -> None:
         self._result = result or ExecutionResult(success=True, stdout="ok\n", result="42")
@@ -52,6 +54,34 @@ class MockSandboxBackend(SandboxBackend):
 
     def has_session(self, session_id):
         return session_id in self._sessions
+
+
+# ---------------------------------------------------------------------------
+# SessionStatus
+# ---------------------------------------------------------------------------
+
+class TestSessionStatus:
+    def test_default_backend_status_ready_when_session_exists(self, tmp_path):
+        backend = MockSandboxBackend()
+        backend._sessions.add("s1")
+        st = backend.session_status("s1")
+        assert isinstance(st, SessionStatus)
+        assert st.state == "ready"
+        assert st.backend == "mock"
+        assert st.session_id == "s1"
+
+    def test_default_backend_status_absent_when_missing(self):
+        backend = MockSandboxBackend()
+        assert backend.session_status("nope").state == "absent"
+
+    def test_list_sessions_includes_state(self):
+        with MockContext() as ctx:
+            backend = MockSandboxBackend()
+            mgr = SandboxManager(ctx.settings, backend=backend)
+            mgr.execute("x=1", session_id="s1")
+            rows = mgr.list_sessions()
+            assert rows[0]["session_id"] == "s1"
+            assert rows[0]["state"] == "ready"
 
 
 # ---------------------------------------------------------------------------

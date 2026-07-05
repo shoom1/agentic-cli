@@ -78,6 +78,8 @@ class JupyterLocalBackend(SandboxBackend):
     pair. State (variables, imports) persists across calls within a session.
     """
 
+    backend_name = "jupyter_local"
+
     def __init__(self) -> None:
         self._sessions: dict[str, tuple[KernelManager, BlockingKernelClient]] = {}
 

@@ -144,19 +144,20 @@ class SandboxManager:
         return was_active
 
     def list_sessions(self) -> list[dict[str, Any]]:
-        """List active sandbox sessions.
-
-        Returns:
-            List of session metadata dicts.
-        """
-        return [
-            {
+        """List active sandbox sessions with live backend status."""
+        if not self._sessions:
+            return []
+        backend = self._ensure_backend()
+        rows: list[dict[str, Any]] = []
+        for s in self._sessions.values():
+            status = backend.session_status(s.session_id)
+            rows.append({
                 "session_id": s.session_id,
                 "working_dir": str(s.working_dir),
                 "execution_count": s.execution_count,
-            }
-            for s in self._sessions.values()
-        ]
+                "state": status.state,
+            })
+        return rows
 
     def cleanup(self) -> None:
         """Clean up all sessions and the backend."""
