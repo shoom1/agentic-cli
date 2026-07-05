@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import queue
 import threading
 from pathlib import Path
@@ -202,6 +203,14 @@ class JupyterDockerBackend(SandboxBackend):
         )
 
     def _start_session(self, session_id: str, working_dir) -> ContainerSession:
+        # The container runs as a non-root user whose uid need not match the host
+        # user that owns the bind-mounted /workspace (the session dir). Make it
+        # writable so the container can write outputs/artifacts regardless of uid.
+        if working_dir is not None:
+            try:
+                os.chmod(working_dir, 0o777)
+            except OSError:
+                pass
         runtime = self._ensure_runtime()
         spec = self._build_spec(session_id, working_dir)
         handle = runtime.start(spec)
