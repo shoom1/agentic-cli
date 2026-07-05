@@ -309,6 +309,27 @@ class TestSandboxTools:
 # SandboxCommand
 # ---------------------------------------------------------------------------
 
+class TestBackendSelection:
+    def test_create_jupyter_docker_backend(self):
+        from agentic_cli.tools.sandbox.backends.jupyter_docker import JupyterDockerBackend
+        with MockContext(sandbox_backend="jupyter_docker") as ctx:
+            mgr = SandboxManager(ctx.settings)
+            backend = mgr._create_backend("jupyter_docker")
+            assert isinstance(backend, JupyterDockerBackend)
+
+    def test_unknown_backend_raises(self):
+        with MockContext() as ctx:
+            mgr = SandboxManager(ctx.settings)
+            with pytest.raises(ValueError):
+                mgr._create_backend("nope")
+
+    def test_description_mentions_backend_dependent_isolation(self):
+        from agentic_cli.tools.registry import get_registry
+        definition = get_registry().get("sandbox_execute")
+        desc = definition.description.lower()
+        assert "jupyter_docker" in desc or "backend" in desc
+
+
 class TestSandboxCommand:
     @pytest.fixture()
     def mock_app(self, tmp_path):

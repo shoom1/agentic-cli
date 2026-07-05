@@ -22,10 +22,11 @@ from agentic_cli.workflow.permissions import Capability
     description=(
         "Execute Python code in a stateful session. "
         "State (variables, imports) persists across calls within the same session. "
-        "Code runs with host privileges and shares the workspace filesystem — it can "
-        "read/write files and reach the network. Disabled unless explicitly enabled. "
-        "Use for data analysis, prototyping, and producing work output. "
-        "Use execute_python instead for quick stateless calculations."
+        "Isolation depends on sandbox_backend: 'jupyter_docker' runs in a "
+        "network-isolated container (no network egress, resource-capped); "
+        "'jupyter_local' runs with host privileges and shared filesystem. "
+        "Disabled unless explicitly enabled. Use for data analysis, prototyping, "
+        "and producing work output. Use execute_python for quick stateless calculations."
     ),
 )
 def sandbox_execute(

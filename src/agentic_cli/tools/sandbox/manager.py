@@ -63,6 +63,9 @@ class SandboxManager:
         if backend_name == "jupyter_local":
             from agentic_cli.tools.sandbox.backends.jupyter_local import JupyterLocalBackend
             return JupyterLocalBackend()
+        if backend_name == "jupyter_docker":
+            from agentic_cli.tools.sandbox.backends.jupyter_docker import JupyterDockerBackend
+            return JupyterDockerBackend(self._settings)
         raise ValueError(f"Unknown sandbox backend: {backend_name!r}")
 
     def _get_session_dir(self, session_id: str) -> Path:
