@@ -142,3 +142,25 @@ def test_start_oserror_returns_error_dict(tmp_path):
         assert "docker gone" in result.error or "failed" in result.error.lower()
     finally:
         ctx.__exit__(None, None, None)
+
+
+# CI-caught bug: the non-root container must be able to write the /workspace mount,
+# so the host session dir is made world-writable before the container starts.
+def test_workspace_dir_made_writable_for_container(tmp_path):
+    import os
+    import stat
+    backend, rt, ctx = _backend()
+    try:
+        orig = rt.start
+        def start_with_result(spec):
+            h = orig(spec)
+            h.stdout.feed(json.dumps({"type": "result", "success": True, "stdout": "", "stderr": "",
+                                      "result": None, "artifacts": [], "execution_time": 0.0, "error": ""}) + "\n")
+            return h
+        rt.start = start_with_result
+        wd = tmp_path / "sess"
+        wd.mkdir(mode=0o700)
+        backend.execute("x = 1", "s1", timeout_seconds=5, working_dir=wd)
+        assert stat.S_IMODE(os.stat(wd).st_mode) == 0o777
+    finally:
+        ctx.__exit__(None, None, None)

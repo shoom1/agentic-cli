@@ -87,7 +87,7 @@ class TestClaudeCacheControl:
         import asyncio
 
         state = {"messages": [{"role": "user", "content": "hello"}]}
-        asyncio.get_event_loop().run_until_complete(node_fn(state))
+        asyncio.run(node_fn(state))
 
         # Check the SystemMessage
         sys_msgs = [m for m in captured_messages if isinstance(m, SystemMessage)]
@@ -135,7 +135,7 @@ class TestClaudeCacheControl:
         import asyncio
 
         state = {"messages": [{"role": "user", "content": "hello"}]}
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             manager._builder._create_agent_node(agent_config, manager.model)(state)
         )
 
@@ -179,7 +179,7 @@ class TestClaudeCacheControl:
         import asyncio
 
         state = {"messages": [{"role": "user", "content": "hello"}]}
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             manager._builder._create_agent_node(agent_config, manager.model)(state)
         )
 

@@ -192,3 +192,15 @@ Tests that hit real provider APIs use the existing framework — **don't invent 
 - **Run**: `-m llm` (live; needs network — disable the Bash sandbox) or `-m 'not llm'` (offline).
   A bare `pytest` run makes real API calls when keys are available.
 - **Example**: `tests/integration/test_adk_claude_live.py`.
+
+### Live docker sandbox tests (real container runtime)
+
+The `jupyter_docker` backend's isolation boundary is verified against a real daemon.
+
+- **Marker**: `@pytest.mark.docker`; skipped unless docker/podman is available. The bulk of the
+  backend is tested offline via the faked `ContainerRuntime` seam (incl. an end-to-end run of the
+  real `driver.py` as a subprocess) — these live tests only cover what needs a real container.
+- **Run**: `-m docker` (needs a container runtime) or `-m 'not llm and not docker'` (offline CI).
+- **Fail-loud in CI**: set `SANDBOX_REQUIRE_DOCKER=1` so a missing/broken runtime FAILS instead of
+  silently skipping (a skip reads as green). CI: `.github/workflows/ci.yml` (offline + docker jobs).
+- **Example**: `tests/tools/test_sandbox_docker_live.py`.

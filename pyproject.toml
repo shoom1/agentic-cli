@@ -23,6 +23,10 @@ classifiers = [
 dependencies = [
     "thinking-prompt>=0.3.0",
     "google-adk>=1.34,<2",  # >=1.34: Anthropic adaptive thinking (negative budget)
+    # ADK's Claude path (google.adk.models.anthropic_llm) and our DirectAnthropicLlm
+    # import `anthropic` at module load; google-adk only pulls it via optional extras,
+    # so declare it directly (>=0.78 matches google-adk's own floor).
+    "anthropic>=0.78",
     "google-genai>=2.0,<3",  # imported directly (google.genai.types); was the adk[genai] extra
     "pydantic>=2.0.0",
     "pydantic-settings>=2.0.0",
@@ -84,6 +88,7 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 markers = [
     "llm: tests that require real LLM API calls (deselect with -m 'not llm')",
+    "docker: tests that require a real container runtime (select with -m docker; set SANDBOX_REQUIRE_DOCKER=1 to fail instead of skip when absent)",
 ]
 
 [tool.ruff]
