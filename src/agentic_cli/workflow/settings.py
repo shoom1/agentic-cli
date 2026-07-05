@@ -286,6 +286,54 @@ class WorkflowSettingsMixin:
         description="Additional pip packages to pre-install in sandbox sessions (informational for local backend, drives image build for Docker backend)",
         json_schema_extra={"ui_order": 125},
     )
+    sandbox_image: str = Field(
+        default="quay.io/jupyter/scipy-notebook:python-3.12",
+        title="Sandbox Image",
+        description="Container image for the jupyter_docker backend. Must contain ipykernel/jupyter_client. Pin to a digest in production.",
+        json_schema_extra={"ui_order": 126},
+    )
+    sandbox_memory_mb: int = Field(
+        default=2048,
+        title="Sandbox Memory (MB)",
+        description="Per-container memory cap for the docker backend; also disables swap.",
+        json_schema_extra={"ui_order": 127},
+    )
+    sandbox_cpus: float = Field(
+        default=2.0,
+        title="Sandbox CPUs",
+        description="Per-container CPU cap for the docker backend.",
+        json_schema_extra={"ui_order": 128},
+    )
+    sandbox_pids_limit: int = Field(
+        default=256,
+        title="Sandbox PID Limit",
+        description="Per-container process/thread cap for the docker backend.",
+        json_schema_extra={"ui_order": 129},
+    )
+    sandbox_network: str = Field(
+        default="none",
+        title="Sandbox Network",
+        description="Docker network mode for the docker backend. v1 supports 'none' only.",
+        json_schema_extra={"ui_order": 130},
+    )
+    sandbox_container_user: str = Field(
+        default="",
+        title="Sandbox Container User",
+        description="uid:gid to run the container as; empty uses the image default.",
+        json_schema_extra={"ui_order": 131},
+    )
+    sandbox_data_mounts: list[str] = Field(
+        default_factory=list,
+        title="Sandbox Data Mounts",
+        description="Read-only data staged into the container as 'host_path:mount_name' (mounted under /workspace/data/).",
+        json_schema_extra={"ui_order": 132},
+    )
+    sandbox_start_timeout: int = Field(
+        default=180,
+        title="Sandbox Start Timeout",
+        description="Seconds to wait for container start + image pull + kernel readiness (docker backend).",
+        json_schema_extra={"ui_order": 133},
+    )
 
     # OS-level sandboxing
     os_sandbox_enabled: bool = Field(
@@ -298,7 +346,7 @@ class WorkflowSettingsMixin:
             "executor (see os_sandbox_strict) — only pure-computation modules "
             "are importable in that case."
         ),
-        json_schema_extra={"ui_order": 130},
+        json_schema_extra={"ui_order": 134},
     )
     os_sandbox_strict: bool = Field(
         default=False,
@@ -307,19 +355,19 @@ class WorkflowSettingsMixin:
             "Refuse to run code when OS sandboxing is enabled but no backend is "
             "available, instead of falling back to the in-process executor."
         ),
-        json_schema_extra={"ui_order": 133},
+        json_schema_extra={"ui_order": 137},
     )
     os_sandbox_writable_paths: list[str] = Field(
         default_factory=list,
         title="OS Sandbox Writable Paths",
         description="Additional paths the sandboxed process can write to (working directory is always writable)",
-        json_schema_extra={"ui_order": 131},
+        json_schema_extra={"ui_order": 135},
     )
     os_sandbox_allow_network: bool = Field(
         default=False,
         title="OS Sandbox Allow Network",
         description="Allow network access from sandboxed processes",
-        json_schema_extra={"ui_order": 132},
+        json_schema_extra={"ui_order": 136},
     )
 
     # Permissions
@@ -327,20 +375,20 @@ class WorkflowSettingsMixin:
         default_factory=PermissionsConfig,
         title="Permissions",
         description="Declarative allow/deny rules for tool capabilities.",
-        json_schema_extra={"ui_order": 135},
+        json_schema_extra={"ui_order": 138},
     )
     permissions_enabled: bool = Field(
         default=True,
         title="Permissions Enabled",
         description="Master switch; when False, all tool calls are allowed.",
-        json_schema_extra={"ui_order": 136},
+        json_schema_extra={"ui_order": 139},
     )
     max_concurrent_jobs: int = Field(
         default=4,
         ge=1,
         title="Max Concurrent Jobs",
         description="Maximum long-running jobs running at once; excess are queued.",
-        json_schema_extra={"ui_order": 137},
+        json_schema_extra={"ui_order": 140},
     )
     job_auto_resume: bool = Field(
         default=False,
@@ -350,7 +398,7 @@ class WorkflowSettingsMixin:
             "(resume_on_complete) automatically resumes the agent with its "
             "result at the next turn boundary (or via /resume)."
         ),
-        json_schema_extra={"ui_order": 138},
+        json_schema_extra={"ui_order": 141},
     )
 
     # Session persistence — durable conversations across restarts.
@@ -363,7 +411,7 @@ class WorkflowSettingsMixin:
             "Where conversations are persisted: sqlite (default, a single file), "
             "postgres (shared/multi-instance via Postgres URI), or memory (ephemeral)."
         ),
-        json_schema_extra={"ui_order": 144},
+        json_schema_extra={"ui_order": 145},
     )
 
     # Skills (Agent Skills / SKILL.md folders)
@@ -371,13 +419,13 @@ class WorkflowSettingsMixin:
         default_factory=list,
         title="Skills Directories",
         description="Directories searched for named skills (Agent Skills / SKILL.md folders)",
-        json_schema_extra={"ui_order": 138},
+        json_schema_extra={"ui_order": 141},
     )
     skill_scripts_enabled: bool = Field(
         default=False,
         title="Skill Scripts Enabled",
         description="Allow executing scripts bundled with skills (requires a code executor; disabled by default)",
-        json_schema_extra={"ui_order": 139},
+        json_schema_extra={"ui_order": 142},
     )
 
     # Persistence settings (LangGraph)
@@ -385,19 +433,19 @@ class WorkflowSettingsMixin:
         default=None,
         title="PostgreSQL URI",
         description="PostgreSQL connection URI for persistent storage",
-        json_schema_extra={"ui_order": 145},
+        json_schema_extra={"ui_order": 146},
     )
     sqlite_uri: str | None = Field(
         default=None,
         title="SQLite URI",
         description="SQLite connection URI or file path for persistent storage",
-        json_schema_extra={"ui_order": 146},
+        json_schema_extra={"ui_order": 147},
     )
     store_type: Literal["memory", "postgres"] | None = Field(
         default="memory",
         title="Store Type",
         description="Store type for long-term memory (memory or postgres)",
-        json_schema_extra={"ui_order": 147},
+        json_schema_extra={"ui_order": 148},
     )
 
     def session_db_url(self) -> str | None:
@@ -426,19 +474,19 @@ class WorkflowSettingsMixin:
         default="host",
         title="Shell Sandbox Type",
         description="Execution environment for shell commands",
-        json_schema_extra={"ui_order": 148},
+        json_schema_extra={"ui_order": 149},
     )
     shell_docker_image: str = Field(
         default="python:3.12-slim",
         title="Shell Docker Image",
         description="Docker image to use for sandboxed shell execution",
-        json_schema_extra={"ui_order": 149},
+        json_schema_extra={"ui_order": 150},
     )
     shell_timeout: int = Field(
         default=60,
         title="Shell Timeout",
         description="Default timeout in seconds for shell commands",
-        json_schema_extra={"ui_order": 150},
+        json_schema_extra={"ui_order": 151},
     )
 
     # LLM debugging settings

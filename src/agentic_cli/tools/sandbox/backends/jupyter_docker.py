@@ -1,0 +1,265 @@
+"""Docker-backed stateful sandbox backend."""
+
+from __future__ import annotations
+
+import json
+import queue
+import threading
+from pathlib import Path
+
+from agentic_cli.logging import Loggers
+from agentic_cli.tools.sandbox.models import ExecutionResult, SessionStatus
+from agentic_cli.file_utils import sanitize_filename
+from agentic_cli.tools.sandbox.backends.base import SandboxBackend
+from agentic_cli.tools.sandbox.backends import kernel_exec
+from agentic_cli.tools.sandbox.backends.container_runtime import (
+    ContainerSpec, Mount, DockerContainerRuntime,
+)
+from agentic_cli.tools.sandbox.backends.detect import detect_docker
+
+logger = Loggers.tools()
+
+_EOF = object()
+
+
+class SandboxStartError(Exception):
+    """Raised when a container/kernel fails to become ready."""
+
+
+class ContainerSession:
+    """Owns one container: its stdio protocol, reader thread, and status."""
+
+    def __init__(self, session_id, handle, interrupt, kill, working_dir,
+                 start_timeout=180, interrupt_grace=10.0, backend_name="jupyter_docker"):
+        self._session_id = session_id
+        self._handle = handle
+        self._interrupt = interrupt
+        self._kill = kill
+        self._working_dir = working_dir
+        self._start_timeout = start_timeout
+        self._interrupt_grace = interrupt_grace
+        self._backend_name = backend_name
+        self._queue: queue.Queue = queue.Queue()
+        self._lock = threading.Lock()
+        self._status = "starting"
+        self._reader = threading.Thread(target=self._read_stdout, daemon=True)
+        self._reader.start()
+        self._stderr_reader = None
+        if getattr(handle, "stderr", None) is not None:
+            self._stderr_reader = threading.Thread(target=self._read_stderr, daemon=True)
+            self._stderr_reader.start()
+
+    @property
+    def status(self) -> str:
+        return self._status
+
+    @property
+    def container_id(self) -> str:
+        return getattr(self._handle, "name", "")
+
+    def _read_stdout(self) -> None:
+        try:
+            for line in self._handle.stdout:
+                self._queue.put(line)
+        finally:
+            self._queue.put(_EOF)
+
+    def _read_stderr(self) -> None:
+        try:
+            for line in self._handle.stderr:
+                logger.debug("sandbox_stderr", line=line.rstrip())
+        except Exception:
+            pass
+
+    def wait_ready(self) -> None:
+        try:
+            line = self._queue.get(timeout=self._start_timeout)
+        except queue.Empty:
+            self._kill()
+            self._status = "dead"
+            raise SandboxStartError(f"sandbox kernel not ready within {self._start_timeout}s")
+        if line is _EOF:
+            self._status = "dead"
+            raise SandboxStartError("sandbox container exited before becoming ready")
+        msg = json.loads(line)
+        if msg.get("type") != "ready":
+            self._status = "dead"
+            raise SandboxStartError(f"unexpected startup message: {msg!r}")
+        self._status = "ready"
+
+    def execute(self, code: str, timeout: float) -> ExecutionResult:
+        with self._lock:
+            if self._handle.poll() is not None:
+                self._status = "dead"
+                return ExecutionResult(success=False, error="sandbox container exited unexpectedly")
+            self._status = "busy"
+            try:
+                self._handle.stdin.write(json.dumps({"type": "execute", "code": code, "timeout": timeout}) + "\n")
+                self._handle.stdin.flush()
+
+                line = self._await(timeout)
+                if line is None:  # timed out -> cooperative interrupt, then hard kill
+                    self._interrupt()
+                    line = self._await(self._interrupt_grace)
+                    if line is None:
+                        self._kill()
+                        self._status = "dead"
+                        return ExecutionResult(success=False,
+                                               error=f"Execution timed out after {timeout}s; container killed")
+                if line is _EOF:
+                    self._status = "dead"
+                    return ExecutionResult(success=False, error="sandbox container exited unexpectedly")
+
+                data = json.loads(line)
+                self._status = "ready"
+                return self._to_result(data)
+            except Exception as exc:
+                self._status = "dead"
+                return ExecutionResult(success=False, error=f"sandbox execution failed: {exc}")
+
+    def _await(self, timeout: float):
+        try:
+            return self._queue.get(timeout=timeout)
+        except queue.Empty:
+            return None
+
+    def _to_result(self, data: dict) -> ExecutionResult:
+        artifacts = [self._translate(p) for p in data.get("artifacts", [])]
+        return ExecutionResult(
+            success=data.get("success", False),
+            stdout=data.get("stdout", ""),
+            stderr=data.get("stderr", ""),
+            result=data.get("result"),
+            artifacts=artifacts,
+            execution_time=data.get("execution_time", 0.0),
+            error=data.get("error", ""),
+        )
+
+    def _translate(self, container_path: str) -> str:
+        """Map an in-container /workspace path to the host session dir."""
+        prefix = "/workspace"
+        if self._working_dir is not None and container_path.startswith(prefix):
+            rel = container_path[len(prefix):].lstrip("/")
+            return str(Path(self._working_dir) / rel)
+        return container_path
+
+    def close(self) -> None:
+        try:
+            self._kill()
+        finally:
+            self._status = "dead"
+
+
+_DRIVER_DIR = "/opt/agentic_sandbox"
+
+
+class JupyterDockerBackend(SandboxBackend):
+    """Runs each session in its own network-isolated container."""
+
+    backend_name = "jupyter_docker"
+
+    def __init__(self, settings, runtime=None, detect_fn=None) -> None:
+        self._settings = settings
+        self._detect = detect_fn or detect_docker
+        self._runtime = runtime  # lazily created so detect can pick docker/podman
+        self._sessions: dict[str, ContainerSession] = {}
+
+    def _ensure_runtime(self):
+        if self._runtime is None:
+            avail = self._detect()
+            self._runtime = DockerContainerRuntime(avail.runtime or "docker")
+        return self._runtime
+
+    def _build_spec(self, session_id: str, working_dir) -> ContainerSpec:
+        s = self._settings
+        here = Path(__file__).parent
+        mounts = [
+            Mount(str(working_dir), "/workspace", read_only=False),
+            Mount(str(here / "driver.py"), f"{_DRIVER_DIR}/driver.py", read_only=True),
+            Mount(str(here / "kernel_exec.py"), f"{_DRIVER_DIR}/kernel_exec.py", read_only=True),
+        ]
+        for entry in s.sandbox_data_mounts:
+            host, _, name = entry.partition(":")
+            name = name or Path(host).name
+            mounts.append(Mount(host, f"/workspace/data/{name}", read_only=True))
+        env = {
+            "HOME": "/tmp", "MPLCONFIGDIR": "/tmp", "IPYTHONDIR": "/tmp",
+            "JUPYTER_RUNTIME_DIR": "/tmp", "PYTHONDONTWRITEBYTECODE": "1",
+            "AGENTIC_SANDBOX_WORKSPACE": "/workspace",
+        }
+        return ContainerSpec(
+            image=s.sandbox_image,
+            name=f"agentic-sbx-{sanitize_filename(session_id)}",
+            command=["python", f"{_DRIVER_DIR}/driver.py"],
+            network=s.sandbox_network,
+            memory_mb=s.sandbox_memory_mb,
+            cpus=s.sandbox_cpus,
+            pids_limit=s.sandbox_pids_limit,
+            user=s.sandbox_container_user,
+            env=env,
+            mounts=mounts,
+            labels={"agentic-sandbox": "1", "agentic-session": session_id},
+        )
+
+    def _start_session(self, session_id: str, working_dir) -> ContainerSession:
+        runtime = self._ensure_runtime()
+        spec = self._build_spec(session_id, working_dir)
+        handle = runtime.start(spec)
+        name = spec.name
+        session = ContainerSession(
+            session_id=session_id,
+            handle=handle,
+            interrupt=lambda: runtime.kill(name, "INT"),
+            kill=lambda: runtime.kill(name),
+            working_dir=working_dir,
+            start_timeout=self._settings.sandbox_start_timeout,
+            backend_name=self.backend_name,
+        )
+        try:
+            session.wait_ready()
+        except Exception:
+            session.close()
+            raise
+        self._sessions[session_id] = session
+        return session
+
+    def execute(self, code, session_id, timeout_seconds=120, working_dir=None) -> ExecutionResult:
+        avail = self._detect()
+        if not avail.available:
+            return ExecutionResult(
+                success=False,
+                error=(f"Docker sandbox backend unavailable ({avail.detail}). "
+                       "Refusing to fall back to an unsandboxed kernel."),
+            )
+        ok, msg = kernel_exec.validate_code(code)
+        if not ok:
+            return ExecutionResult(success=False, error=msg)
+        session = self._sessions.get(session_id)
+        if session is None or session.status == "dead":
+            try:
+                session = self._start_session(session_id, working_dir)
+            except Exception as exc:
+                return ExecutionResult(success=False, error=f"Failed to start sandbox: {exc}")
+        return session.execute(code, timeout_seconds)
+
+    def reset_session(self, session_id: str) -> None:
+        session = self._sessions.pop(session_id, None)
+        if session is not None:
+            session.close()
+
+    def cleanup(self) -> None:
+        for session_id in list(self._sessions):
+            self.reset_session(session_id)
+
+    def has_session(self, session_id: str) -> bool:
+        session = self._sessions.get(session_id)
+        return session is not None and session.status != "dead"
+
+    def session_status(self, session_id: str) -> SessionStatus:
+        session = self._sessions.get(session_id)
+        if session is None:
+            return SessionStatus(session_id=session_id, state="absent", backend=self.backend_name)
+        return SessionStatus(
+            session_id=session_id, state=session.status, backend=self.backend_name,
+            container_id=session.container_id,
+        )
