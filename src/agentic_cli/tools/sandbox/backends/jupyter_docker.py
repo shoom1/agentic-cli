@@ -197,7 +197,11 @@ class JupyterDockerBackend(SandboxBackend):
             start_timeout=self._settings.sandbox_start_timeout,
             backend_name=self.backend_name,
         )
-        session.wait_ready()
+        try:
+            session.wait_ready()
+        except Exception:
+            session.close()
+            raise
         self._sessions[session_id] = session
         return session
 

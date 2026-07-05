@@ -1,6 +1,5 @@
 """Tests for JupyterDockerBackend with a fake runtime + detect (no docker)."""
 
-import io
 import json
 
 import pytest
@@ -74,7 +73,10 @@ def test_execute_starts_container_with_isolation_spec(tmp_path):
         assert spec.image  # from settings
         assert any(m.container == "/workspace" and not m.read_only for m in spec.mounts)
         assert any(m.container.endswith("/driver.py") and m.read_only for m in spec.mounts)
+        assert any(m.container.endswith("/kernel_exec.py") and m.read_only for m in spec.mounts)
         assert spec.labels.get("agentic-session") == "s1"
+        assert spec.labels.get("agentic-sandbox") == "1"
+        assert spec.env.get("AGENTIC_SANDBOX_WORKSPACE") == "/workspace"
     finally:
         ctx.__exit__(None, None, None)
 
@@ -95,6 +97,25 @@ def test_reset_session_kills_container(tmp_path):
         backend.reset_session("s1")
         assert not backend.has_session("s1")
         assert any(name == "agentic-sbx-s1" for name, _ in rt.killed)
+    finally:
+        ctx.__exit__(None, None, None)
+
+
+def test_bad_startup_message_kills_container(tmp_path):
+    backend, rt, ctx = _backend()
+    try:
+        def start_bad(spec):
+            handle = FakeHandle()
+            handle.name = spec.name
+            rt._handles.append(handle)
+            rt.started.append(spec)
+            handle.stdout.feed(json.dumps({"type": "boom"}) + "\n")  # not "ready"
+            return handle
+        rt.start = start_bad
+        result = backend.execute("print(1)", "s1", timeout_seconds=5, working_dir=tmp_path)
+        assert result.success is False
+        assert any(name == "agentic-sbx-s1" for name, _ in rt.killed)  # cleaned up, not orphaned
+        assert not backend.has_session("s1")
     finally:
         ctx.__exit__(None, None, None)
 
