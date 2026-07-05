@@ -376,6 +376,20 @@ from agentic_cli.tools.sandbox import sandbox_execute
 
 The `/sandbox` CLI command lists and resets sandbox sessions.
 
+#### Docker-isolated sandbox
+
+`sandbox_execute` can run inside a network-isolated Docker container:
+
+1. Ensure Docker (or podman) is installed and running, and pull the image once:
+   `docker pull quay.io/jupyter/scipy-notebook:python-3.12`
+2. In settings: `sandbox_execute_enabled = true`, `sandbox_backend = "jupyter_docker"`.
+
+Each session runs in its own container with `--network none`, a read-only
+rootfs, dropped Linux capabilities, and memory/CPU/PID caps. Stage data as
+files via `sandbox_data_mounts` (`"/host/path:name"` → `/workspace/data/name`,
+read-only). Live network access, package installs, and S3 are not supported in
+this mode.
+
 #### Web Search
 
 Search the web using pluggable backends (Tavily or Brave):
