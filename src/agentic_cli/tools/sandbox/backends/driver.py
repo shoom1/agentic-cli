@@ -81,6 +81,9 @@ class KernelDriver:
         try:
             if self._kc is not None:
                 self._kc.stop_channels()
+        except Exception:
+            pass
+        try:
             if self._km is not None:
                 self._km.shutdown_kernel(now=True)
         except Exception:

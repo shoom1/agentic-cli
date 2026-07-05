@@ -128,3 +128,17 @@ def test_session_status_reports_backend(tmp_path):
         assert st.state == "absent"
     finally:
         ctx.__exit__(None, None, None)
+
+
+# Fix 2a: OSError from runtime.start must not propagate
+def test_start_oserror_returns_error_dict(tmp_path):
+    backend, rt, ctx = _backend()
+    try:
+        def raise_oserror(spec):
+            raise OSError("docker gone")
+        rt.start = raise_oserror
+        result = backend.execute("print(1)", "s1", timeout_seconds=5, working_dir=tmp_path)
+        assert result.success is False
+        assert "docker gone" in result.error or "failed" in result.error.lower()
+    finally:
+        ctx.__exit__(None, None, None)

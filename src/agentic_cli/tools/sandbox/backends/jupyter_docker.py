@@ -44,6 +44,10 @@ class ContainerSession:
         self._status = "starting"
         self._reader = threading.Thread(target=self._read_stdout, daemon=True)
         self._reader.start()
+        self._stderr_reader = None
+        if getattr(handle, "stderr", None) is not None:
+            self._stderr_reader = threading.Thread(target=self._read_stderr, daemon=True)
+            self._stderr_reader.start()
 
     @property
     def status(self) -> str:
@@ -59,6 +63,13 @@ class ContainerSession:
                 self._queue.put(line)
         finally:
             self._queue.put(_EOF)
+
+    def _read_stderr(self) -> None:
+        try:
+            for line in self._handle.stderr:
+                logger.debug("sandbox_stderr", line=line.rstrip())
+        except Exception:
+            pass
 
     def wait_ready(self) -> None:
         try:
@@ -78,26 +89,33 @@ class ContainerSession:
 
     def execute(self, code: str, timeout: float) -> ExecutionResult:
         with self._lock:
-            self._status = "busy"
-            self._handle.stdin.write(json.dumps({"type": "execute", "code": code, "timeout": timeout}) + "\n")
-            self._handle.stdin.flush()
-
-            line = self._await(timeout)
-            if line is None:  # timed out -> cooperative interrupt, then hard kill
-                self._interrupt()
-                line = self._await(self._interrupt_grace)
-                if line is None:
-                    self._kill()
-                    self._status = "dead"
-                    return ExecutionResult(success=False,
-                                           error=f"Execution timed out after {timeout}s; container killed")
-            if line is _EOF:
+            if self._handle.poll() is not None:
                 self._status = "dead"
                 return ExecutionResult(success=False, error="sandbox container exited unexpectedly")
+            self._status = "busy"
+            try:
+                self._handle.stdin.write(json.dumps({"type": "execute", "code": code, "timeout": timeout}) + "\n")
+                self._handle.stdin.flush()
 
-            data = json.loads(line)
-            self._status = "ready"
-            return self._to_result(data)
+                line = self._await(timeout)
+                if line is None:  # timed out -> cooperative interrupt, then hard kill
+                    self._interrupt()
+                    line = self._await(self._interrupt_grace)
+                    if line is None:
+                        self._kill()
+                        self._status = "dead"
+                        return ExecutionResult(success=False,
+                                               error=f"Execution timed out after {timeout}s; container killed")
+                if line is _EOF:
+                    self._status = "dead"
+                    return ExecutionResult(success=False, error="sandbox container exited unexpectedly")
+
+                data = json.loads(line)
+                self._status = "ready"
+                return self._to_result(data)
+            except Exception as exc:
+                self._status = "dead"
+                return ExecutionResult(success=False, error=f"sandbox execution failed: {exc}")
 
     def _await(self, timeout: float):
         try:
@@ -220,8 +238,8 @@ class JupyterDockerBackend(SandboxBackend):
         if session is None or session.status == "dead":
             try:
                 session = self._start_session(session_id, working_dir)
-            except SandboxStartError as exc:
-                return ExecutionResult(success=False, error=str(exc))
+            except Exception as exc:
+                return ExecutionResult(success=False, error=f"Failed to start sandbox: {exc}")
         return session.execute(code, timeout_seconds)
 
     def reset_session(self, session_id: str) -> None:

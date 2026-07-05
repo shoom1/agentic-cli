@@ -110,3 +110,37 @@ def test_execute_translates_workspace_artifact_paths(tmp_path):
                               "execution_time": 0.1, "error": ""}) + "\n")
     result = s.execute("plot()", timeout=5)
     assert result.artifacts == [str(tmp_path / "artifacts" / "plot_0.png")]
+
+
+# Fix 1: stderr drain thread
+def test_stderr_drain_thread_exists_and_drains():
+    h = FakeHandle()
+    s, _ = _session(h)
+    h.stdout.feed(json.dumps({"type": "ready"}) + "\n")
+    s.wait_ready()
+    # feed stderr lines, then close
+    h.stderr.feed("kernel warning 1\n")
+    h.stderr.feed("kernel warning 2\n")
+    h.stderr.feed("kernel warning 3\n")
+    h.stderr.eof()
+    # a _stderr_reader thread must exist
+    assert hasattr(s, "_stderr_reader") and s._stderr_reader is not None
+    # it must finish after EOF (bounded wait)
+    s._stderr_reader.join(timeout=2)
+    assert not s._stderr_reader.is_alive(), "stderr drain thread should stop after EOF"
+
+
+# Fix 2b: dead-container early poll() check
+def test_execute_on_dead_container_returns_error():
+    h = FakeHandle()
+    s, _ = _session(h)
+    h.stdout.feed(json.dumps({"type": "ready"}) + "\n")
+    s.wait_ready()
+    assert s.status == "ready"
+    # mark container dead before execute
+    h._dead = True
+    h.stdout.eof()
+    result = s.execute("print(1)", timeout=5)
+    assert result.success is False
+    assert "exited unexpectedly" in result.error.lower()
+    assert s.status == "dead"

@@ -60,11 +60,15 @@ class LocalDriverRuntime:
 @pytest.fixture
 def backend(tmp_path):
     with MockContext(sandbox_backend="jupyter_docker", sandbox_start_timeout=60) as ctx:
-        yield JupyterDockerBackend(
+        b = JupyterDockerBackend(
             ctx.settings,
             runtime=LocalDriverRuntime(),
             detect_fn=lambda: DockerAvailability(True, "docker", "local"),
         )
+        try:
+            yield b
+        finally:
+            b.cleanup()
 
 
 def test_stateful_execution_across_calls(backend, tmp_path):

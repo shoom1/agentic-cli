@@ -37,11 +37,14 @@ def test_run_emits_ready_then_result(tmp_path):
     stdin = io.StringIO(json.dumps({"type": "execute", "code": "print('hi')", "timeout": 30}) + "\n")
     stdout = io.StringIO()
     d = KernelDriver(stdin=stdin, stdout=stdout, workspace=str(tmp_path))
-    d.run()  # returns at stdin EOF
-    lines = [json.loads(l) for l in stdout.getvalue().splitlines() if l.strip()]
-    assert lines[0] == {"type": "ready"}
-    assert lines[1]["type"] == "result"
-    assert "hi" in lines[1]["stdout"]
+    try:
+        d.run()  # returns at stdin EOF
+        lines = [json.loads(l) for l in stdout.getvalue().splitlines() if l.strip()]
+        assert lines[0] == {"type": "ready"}
+        assert lines[1]["type"] == "result"
+        assert "hi" in lines[1]["stdout"]
+    finally:
+        d.close()
 
 
 def test_sigint_handler_interrupts_kernel(tmp_path):
