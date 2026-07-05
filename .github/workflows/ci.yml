@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [develop, main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  offline:
+    name: Offline tests (no Docker)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash -el {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up conda env (agenticcli)
+        uses: conda-incubator/setup-miniconda@v3
+        with:
+          miniforge-version: latest
+          environment-file: environment.yml
+          activate-environment: agenticcli
+
+      - name: Run offline test suite
+        run: conda run -n agenticcli python -m pytest -m 'not llm and not docker' -q
+
+  docker-isolation:
+    name: Docker isolation tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash -el {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up conda env (agenticcli)
+        uses: conda-incubator/setup-miniconda@v3
+        with:
+          miniforge-version: latest
+          environment-file: environment.yml
+          activate-environment: agenticcli
+
+      # Keep this tag in sync with settings.sandbox_image's default. Pre-pulling
+      # avoids first-run pull latency exceeding sandbox_start_timeout.
+      - name: Pre-pull sandbox image
+        run: docker pull quay.io/jupyter/scipy-notebook:python-3.12
+
+      - name: Run docker isolation tests (fail if runtime missing)
+        env:
+          SANDBOX_REQUIRE_DOCKER: "1"
+        run: conda run -n agenticcli python -m pytest -m docker -v
