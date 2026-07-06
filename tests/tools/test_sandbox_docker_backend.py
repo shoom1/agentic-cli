@@ -189,3 +189,26 @@ def test_explicit_container_user_overrides_host_uid(tmp_path):
         assert rt.started[0].user == "1234:5678"
     finally:
         ctx.__exit__(None, None, None)
+
+
+def test_data_mount_name_cannot_escape_workspace(tmp_path):
+    """A hostile data-mount name (traversal) must not remap the mount point
+    outside /workspace/data/ inside the container."""
+    import posixpath
+    ctx = MockContext(sandbox_backend="jupyter_docker",
+                      sandbox_data_mounts=[f"{tmp_path}:../../etc"]).__enter__()
+    rt = FakeRuntime()
+    backend = JupyterDockerBackend(
+        ctx.settings, runtime=rt,
+        detect_fn=lambda: DockerAvailability(True, "docker", "test"),
+    )
+    try:
+        _feed_result(rt)
+        backend.execute("x = 1", "s1", timeout_seconds=5, working_dir=tmp_path)
+        data = [m for m in rt.started[0].mounts if m.container.startswith("/workspace/data/")]
+        assert data, "expected a data mount under /workspace/data/"
+        for m in data:
+            assert ".." not in m.container
+            assert posixpath.normpath(m.container).startswith("/workspace/data/")
+    finally:
+        ctx.__exit__(None, None, None)

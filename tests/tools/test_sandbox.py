@@ -273,6 +273,19 @@ class TestSandboxTools:
             assert result["success"] is False
             assert "enabled" in result["error"].lower()
 
+    def test_disabled_message_is_backend_aware(self, tmp_path):
+        """The disabled-tool message must reflect the selected backend: the local
+        backend is host-privileged, but the docker backend is container-isolated
+        — claiming 'host privileges' there would be a false, misleading warning."""
+        from agentic_cli.tools.sandbox import sandbox_execute
+        with MockContext(sandbox_backend="jupyter_local"):
+            err = sandbox_execute("print('hi')")["error"].lower()
+            assert "host" in err  # honest for the unsandboxed local backend
+        with MockContext(sandbox_backend="jupyter_docker"):
+            err = sandbox_execute("print('hi')")["error"].lower()
+            assert ("container" in err or "isolat" in err)
+            assert "host privilege" not in err  # docker backend is NOT host-privileged
+
     def test_description_makes_no_false_network_claim(self):
         """The tool does NOT block network — the description must not claim it
         does, since a false safety claim misleads both the model and the user."""

@@ -92,10 +92,13 @@ class ContainerSession:
         with self._lock:
             if self._handle.poll() is not None:
                 self._status = "dead"
-                return ExecutionResult(success=False, error="sandbox container exited unexpectedly")
+                return ExecutionResult(success=False,
+                                       error=f"sandbox container exited unexpectedly ({self._exit_detail()})")
             self._status = "busy"
             try:
-                self._handle.stdin.write(json.dumps({"type": "execute", "code": code, "timeout": timeout}) + "\n")
+                # The host owns the timeout/interrupt/kill state machine; the
+                # driver blocks until idle, so the request carries only the code.
+                self._handle.stdin.write(json.dumps({"type": "execute", "code": code}) + "\n")
                 self._handle.stdin.flush()
 
                 line = self._await(timeout)
@@ -109,7 +112,8 @@ class ContainerSession:
                                                error=f"Execution timed out after {timeout}s; container killed")
                 if line is _EOF:
                     self._status = "dead"
-                    return ExecutionResult(success=False, error="sandbox container exited unexpectedly")
+                    return ExecutionResult(success=False,
+                                           error=f"sandbox container exited unexpectedly ({self._exit_detail()})")
 
                 data = json.loads(line)
                 self._status = "ready"
@@ -123,6 +127,15 @@ class ContainerSession:
             return self._queue.get(timeout=timeout)
         except queue.Empty:
             return None
+
+    def _exit_detail(self) -> str:
+        """Describe why the container process exited, from the docker-run exit
+        code (reliable even with --rm, which removes the container before it
+        could be inspected). 137 = 128+SIGKILL, the cgroup OOM-killer signature."""
+        code = self._handle.poll()
+        if code == 137:
+            return f"exit {code}; possibly out-of-memory (OOM-killed)"
+        return f"exit {code}"
 
     def _to_result(self, data: dict) -> ExecutionResult:
         artifacts = [self._translate(p) for p in data.get("artifacts", [])]
@@ -181,7 +194,10 @@ class JupyterDockerBackend(SandboxBackend):
         ]
         for entry in s.sandbox_data_mounts:
             host, _, name = entry.partition(":")
-            name = name or Path(host).name
+            # Sanitize the mount name so a hostile '..'/absolute value can't
+            # remap the mount outside /workspace/data/ (sanitize_filename maps
+            # '/' and '.' to '_').
+            name = sanitize_filename(name or Path(host).name) or "mount"
             mounts.append(Mount(host, f"/workspace/data/{name}", read_only=True))
         env = {
             "HOME": "/tmp", "MPLCONFIGDIR": "/tmp", "IPYTHONDIR": "/tmp",

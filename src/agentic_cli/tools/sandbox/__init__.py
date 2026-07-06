@@ -44,17 +44,22 @@ def sandbox_execute(
     Returns:
         Dictionary with execution results.
     """
-    # The Jupyter kernel is not OS-sandboxed and runs with host privileges, so
-    # it is opt-in (see sandbox_execute_enabled). Gate before touching the
-    # service so a disabled deployment fails fast with a clear message.
-    if not getattr(get_settings(), "sandbox_execute_enabled", False):
+    # Opt-in (see sandbox_execute_enabled). Gate before touching the service so a
+    # disabled deployment fails fast with a message accurate for the selected
+    # backend: jupyter_local is host-privileged; jupyter_docker is isolated.
+    settings = get_settings()
+    if not getattr(settings, "sandbox_execute_enabled", False):
+        backend = getattr(settings, "sandbox_backend", "jupyter_local")
+        if backend == "jupyter_docker":
+            detail = ("The 'jupyter_docker' backend runs it in a network-isolated, "
+                      "resource-capped container.")
+        else:
+            detail = (f"The '{backend}' backend runs Python with host privileges and "
+                      "no OS sandbox (use 'jupyter_docker' for isolation).")
         return {
             "success": False,
-            "error": (
-                "sandbox_execute is not enabled. It runs code with host "
-                "privileges without OS sandboxing; enable "
-                "sandbox_execute_enabled in settings to use it."
-            ),
+            "error": (f"sandbox_execute is not enabled. {detail} "
+                      "Enable sandbox_execute_enabled in settings to use it."),
         }
 
     manager = require_service(SANDBOX_MANAGER)

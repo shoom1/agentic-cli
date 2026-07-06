@@ -256,9 +256,10 @@ class WorkflowSettingsMixin:
         default=False,
         title="Sandbox Execute Enabled",
         description=(
-            "Enable the stateful sandbox_execute tool. The Jupyter kernel runs "
-            "with host privileges and is NOT OS-sandboxed yet — opt in only in "
-            "trusted environments."
+            "Enable the stateful sandbox_execute tool. The default 'jupyter_local' "
+            "backend runs Python with host privileges (NOT OS-sandboxed); the "
+            "'jupyter_docker' backend runs in a network-isolated container. Pick "
+            "the backend via sandbox_backend accordingly."
         ),
         json_schema_extra={"ui_order": 121},
     )

@@ -63,6 +63,9 @@ class DockerContainerRuntime:
 
     @staticmethod
     def build_run_argv(spec: ContainerSpec, exe: str) -> list[str]:
+        # Docker's default seccomp profile stays in effect (we never pass
+        # --privileged or --security-opt seccomp=unconfined), so dangerous
+        # syscalls remain blocked on top of the dropped capabilities.
         argv: list[str] = [
             exe, "run", "--rm", "-i",
             "--network", spec.network,

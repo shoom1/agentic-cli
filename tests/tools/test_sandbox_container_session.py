@@ -144,3 +144,17 @@ def test_execute_on_dead_container_returns_error():
     assert result.success is False
     assert "exited unexpectedly" in result.error.lower()
     assert s.status == "dead"
+
+
+def test_execute_reports_likely_oom_on_137_exit():
+    """Exit 137 (128+SIGKILL) is the cgroup OOM-killer signature; the error
+    should hint at OOM and include the code rather than a bare 'exited'."""
+    h = FakeHandle()  # FakeHandle.poll() returns 137 when dead
+    s, _ = _session(h)
+    h.stdout.feed(json.dumps({"type": "ready"}) + "\n")
+    s.wait_ready()
+    h._dead = True
+    h.stdout.eof()
+    result = s.execute("x = bytearray(10**10)", timeout=5)
+    assert result.success is False
+    assert "137" in result.error and "memory" in result.error.lower()
