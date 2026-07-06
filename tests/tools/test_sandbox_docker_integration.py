@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import signal as _signal
 import subprocess
 import sys
 from pathlib import Path
@@ -48,7 +49,10 @@ class LocalDriverRuntime:
     def kill(self, name: str, signal: str | None = None) -> None:
         proc = self._procs.get(name)
         if proc and proc.poll() is None:
-            proc.kill()
+            if signal == "INT":  # cooperative interrupt, like `docker kill --signal=INT`
+                proc.send_signal(_signal.SIGINT)
+            else:
+                proc.kill()
 
     def inspect(self, name: str) -> dict:
         return {}
@@ -84,4 +88,30 @@ def test_error_surfaces(backend, tmp_path):
     r = backend.execute("1/0", "s1", timeout_seconds=60, working_dir=tmp_path)
     assert r.success is False
     assert "ZeroDivisionError" in r.error
+    backend.cleanup()
+
+
+def test_interrupt_preserves_session_state(backend, tmp_path):
+    """A runaway cell is aborted by the host's cooperative interrupt, but the
+    session (kernel + prior state) survives and the next request runs cleanly.
+
+    Regression: the driver used to self-time-out on the host's per-cell deadline
+    and return a 'timed out' result while the cell kept running in the kernel.
+    The host then consumed that result WITHOUT interrupting, leaving the kernel
+    busy — so the next request wedged (empty/desynced output). The host must be
+    the sole timeout authority.
+    """
+    r0 = backend.execute("kept = 123", "s1", timeout_seconds=60, working_dir=tmp_path)
+    assert r0.success is True, r0.error
+
+    # Runs far longer than the per-cell timeout -> host sends a cooperative
+    # interrupt (kill --signal=INT) rather than killing the container.
+    r1 = backend.execute("import time\nfor _ in range(120):\n    time.sleep(1)",
+                         "s1", timeout_seconds=3, working_dir=tmp_path)
+    assert r1.success is False  # aborted
+
+    # Same session still alive with prior state intact.
+    r2 = backend.execute("print(kept)", "s1", timeout_seconds=60, working_dir=tmp_path)
+    assert r2.success is True, r2.error
+    assert "123" in r2.stdout
     backend.cleanup()

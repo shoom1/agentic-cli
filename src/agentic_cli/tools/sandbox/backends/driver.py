@@ -48,13 +48,21 @@ class KernelDriver:
 
     def handle_request(self, req: dict) -> dict:
         code = req.get("code", "")
-        timeout = req.get("timeout", 120)
         ok, msg = validate_code(code)
         if not ok:
             return {"type": "result", "success": False, "stdout": "", "stderr": "",
                     "result": None, "artifacts": [], "execution_time": 0.0, "error": msg}
         msg_id = self._kc.execute(code)
-        data = collect_execution(self._kc, msg_id, timeout, self._workspace)
+        # The HOST owns the timeout/interrupt/kill state machine: it waits the
+        # per-cell deadline, then sends a cooperative interrupt (SIGINT ->
+        # _on_sigint -> interrupt_kernel), then hard-kills the container if that
+        # fails. So the driver must block until the kernel actually goes idle
+        # (natural completion) or the interrupt aborts the cell. If the driver
+        # self-timed-out on the same deadline it would return a "timed out"
+        # result while the cell keeps running in the kernel — the host would
+        # consume that result WITHOUT interrupting, wedging the session for the
+        # next request. Passing timeout=None makes collect_execution block.
+        data = collect_execution(self._kc, msg_id, None, self._workspace)
         return {"type": "result", **data}
 
     def _write(self, obj: dict) -> None:
