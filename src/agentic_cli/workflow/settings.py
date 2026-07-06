@@ -10,7 +10,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Literal, TYPE_CHECKING
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from agentic_cli.workflow.models import ModelFamily, ModelRegistry
 
@@ -334,6 +334,20 @@ class WorkflowSettingsMixin:
         description="Seconds to wait for container start + image pull + kernel readiness (docker backend).",
         json_schema_extra={"ui_order": 133},
     )
+
+    @field_validator("sandbox_network")
+    @classmethod
+    def _validate_sandbox_network(cls, v: str) -> str:
+        """Fail closed: the docker backend's no-egress isolation depends on
+        --network none, so reject any other value rather than silently
+        weakening it. (v1 supports 'none' only.)"""
+        if v != "none":
+            raise ValueError(
+                f"sandbox_network must be 'none' (got {v!r}). The docker sandbox's "
+                "network-isolation guarantee depends on it; other modes are not "
+                "supported in v1."
+            )
+        return v
 
     # OS-level sandboxing
     os_sandbox_enabled: bool = Field(

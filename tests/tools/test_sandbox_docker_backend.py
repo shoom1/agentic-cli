@@ -144,23 +144,48 @@ def test_start_oserror_returns_error_dict(tmp_path):
         ctx.__exit__(None, None, None)
 
 
-# CI-caught bug: the non-root container must be able to write the /workspace mount,
-# so the host session dir is made world-writable before the container starts.
-def test_workspace_dir_made_writable_for_container(tmp_path):
+def _feed_result(rt):
+    """Make the fake runtime feed one successful result after 'ready'."""
+    orig = rt.start
+    def start_with_result(spec):
+        h = orig(spec)
+        h.stdout.feed(json.dumps({"type": "result", "success": True, "stdout": "", "stderr": "",
+                                  "result": None, "artifacts": [], "execution_time": 0.0, "error": ""}) + "\n")
+        return h
+    rt.start = start_with_result
+
+
+# The non-root container must be able to write the /workspace bind mount. Rather
+# than make the host session dir world-writable (chmod 0777 — a multi-user-host
+# exposure), run the container AS the host uid so files it writes are host-owned.
+@pytest.mark.skipif(not hasattr(__import__("os"), "getuid"), reason="POSIX uid only")
+def test_container_runs_as_host_uid_and_dir_not_world_writable(tmp_path):
     import os
     import stat
     backend, rt, ctx = _backend()
     try:
-        orig = rt.start
-        def start_with_result(spec):
-            h = orig(spec)
-            h.stdout.feed(json.dumps({"type": "result", "success": True, "stdout": "", "stderr": "",
-                                      "result": None, "artifacts": [], "execution_time": 0.0, "error": ""}) + "\n")
-            return h
-        rt.start = start_with_result
+        _feed_result(rt)
         wd = tmp_path / "sess"
         wd.mkdir(mode=0o700)
         backend.execute("x = 1", "s1", timeout_seconds=5, working_dir=wd)
-        assert stat.S_IMODE(os.stat(wd).st_mode) == 0o777
+        assert rt.started[0].user == f"{os.getuid()}:{os.getgid()}"
+        # session dir perms untouched — NOT made world-writable
+        assert stat.S_IMODE(os.stat(wd).st_mode) == 0o700
+    finally:
+        ctx.__exit__(None, None, None)
+
+
+def test_explicit_container_user_overrides_host_uid(tmp_path):
+    ctx = MockContext(sandbox_backend="jupyter_docker",
+                      sandbox_container_user="1234:5678").__enter__()
+    rt = FakeRuntime()
+    backend = JupyterDockerBackend(
+        ctx.settings, runtime=rt,
+        detect_fn=lambda: DockerAvailability(True, "docker", "test"),
+    )
+    try:
+        _feed_result(rt)
+        backend.execute("x = 1", "s1", timeout_seconds=5, working_dir=tmp_path)
+        assert rt.started[0].user == "1234:5678"
     finally:
         ctx.__exit__(None, None, None)

@@ -12,6 +12,26 @@ from typing import Any
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 _BLOCKED_MAGICS = frozenset({"pip", "system", "sx"})
 
+# Per-stream character cap. A runaway cell (e.g. an interruptible print loop)
+# would otherwise buffer output unbounded in-container, ship it all over stdio,
+# and bloat host memory / the LLM context. Truncate with a marker instead.
+MAX_STREAM_CHARS = 1_000_000
+
+
+def _append_capped(parts: list[str], current: int, text: str) -> int:
+    """Append `text` to `parts` up to MAX_STREAM_CHARS. Adds a one-time
+    truncation marker when the cap is first exceeded, then drops the rest.
+    Returns the updated character count."""
+    if current >= MAX_STREAM_CHARS:
+        return current
+    room = MAX_STREAM_CHARS - current
+    if len(text) <= room:
+        parts.append(text)
+        return current + len(text)
+    parts.append(text[:room])
+    parts.append(f"\n...[output truncated at {MAX_STREAM_CHARS} characters]...")
+    return MAX_STREAM_CHARS
+
 
 def validate_code(code: str) -> tuple[bool, str]:
     """Pre-scan code for blocked shell escapes and magics."""
@@ -32,6 +52,8 @@ def collect_execution(kc, msg_id: str, timeout: float, working_dir) -> dict:
     start = time.monotonic()
     stdout_parts: list[str] = []
     stderr_parts: list[str] = []
+    stdout_len = 0
+    stderr_len = 0
     result_value: str | None = None
     artifacts: list[str] = []
     error_text = ""
@@ -57,10 +79,11 @@ def collect_execution(kc, msg_id: str, timeout: float, working_dir) -> dict:
         content: dict[str, Any] = msg.get("content", {})
 
         if msg_type == "stream":
+            text = content.get("text", "")
             if content.get("name") == "stderr":
-                stderr_parts.append(content.get("text", ""))
+                stderr_len = _append_capped(stderr_parts, stderr_len, text)
             else:
-                stdout_parts.append(content.get("text", ""))
+                stdout_len = _append_capped(stdout_parts, stdout_len, text)
         elif msg_type == "execute_result":
             result_value = content.get("data", {}).get("text/plain", "")
         elif msg_type == "display_data":

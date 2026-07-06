@@ -1,5 +1,8 @@
 """Tests for docker sandbox settings defaults."""
 
+import pytest
+from pydantic import ValidationError
+
 from agentic_cli.config import BaseSettings
 
 
@@ -16,3 +19,12 @@ def test_docker_sandbox_defaults():
     # unchanged safety defaults
     assert s.sandbox_backend == "jupyter_local"
     assert s.sandbox_execute_enabled is False
+
+
+def test_sandbox_network_must_be_none():
+    """The docker backend's no-egress guarantee depends on --network none, so a
+    non-'none' value is rejected rather than silently weakening isolation."""
+    assert BaseSettings(sandbox_network="none").sandbox_network == "none"
+    for bad in ("host", "bridge", "my-net"):
+        with pytest.raises(ValidationError):
+            BaseSettings(sandbox_network=bad)

@@ -44,3 +44,14 @@ def test_collect_captures_error(kernel, tmp_path):
     out = kernel_exec.collect_execution(kernel, msg_id, timeout=30, working_dir=tmp_path)
     assert out["success"] is False
     assert "boom" in out["error"]
+
+
+def test_collect_caps_large_stdout(kernel, tmp_path):
+    """Runaway output is bounded (host memory / LLM context) with a truncation
+    marker, rather than accumulated unbounded."""
+    cap = kernel_exec.MAX_STREAM_CHARS
+    msg_id = kernel.execute(f"print('A' * {cap * 3})")
+    out = kernel_exec.collect_execution(kernel, msg_id, timeout=30, working_dir=tmp_path)
+    assert out["success"] is True
+    assert len(out["stdout"]) <= cap + 200  # cap plus the short marker
+    assert "truncated" in out["stdout"].lower()

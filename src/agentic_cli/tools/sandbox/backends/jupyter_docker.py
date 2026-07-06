@@ -188,6 +188,13 @@ class JupyterDockerBackend(SandboxBackend):
             "JUPYTER_RUNTIME_DIR": "/tmp", "PYTHONDONTWRITEBYTECODE": "1",
             "AGENTIC_SANDBOX_WORKSPACE": "/workspace",
         }
+        # Run as the host uid:gid by default so files the non-root kernel writes
+        # to the /workspace bind mount are owned by the host user — no
+        # world-writable chmod on the session dir needed. An explicit
+        # sandbox_container_user overrides.
+        user = s.sandbox_container_user
+        if not user and hasattr(os, "getuid"):
+            user = f"{os.getuid()}:{os.getgid()}"
         return ContainerSpec(
             image=s.sandbox_image,
             name=f"agentic-sbx-{sanitize_filename(session_id)}",
@@ -196,21 +203,16 @@ class JupyterDockerBackend(SandboxBackend):
             memory_mb=s.sandbox_memory_mb,
             cpus=s.sandbox_cpus,
             pids_limit=s.sandbox_pids_limit,
-            user=s.sandbox_container_user,
+            user=user,
             env=env,
             mounts=mounts,
             labels={"agentic-sandbox": "1", "agentic-session": session_id},
         )
 
     def _start_session(self, session_id: str, working_dir) -> ContainerSession:
-        # The container runs as a non-root user whose uid need not match the host
-        # user that owns the bind-mounted /workspace (the session dir). Make it
-        # writable so the container can write outputs/artifacts regardless of uid.
-        if working_dir is not None:
-            try:
-                os.chmod(working_dir, 0o777)
-            except OSError:
-                pass
+        # The container runs as the host uid:gid (see _build_spec), so the
+        # host-owned session dir is writable by the kernel without loosening its
+        # permissions. No chmod needed.
         runtime = self._ensure_runtime()
         spec = self._build_spec(session_id, working_dir)
         handle = runtime.start(spec)
