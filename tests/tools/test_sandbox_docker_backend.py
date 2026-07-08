@@ -203,14 +203,18 @@ def test_execute_stages_inputs_into_session_inputs_dir(tmp_path):
         ctx.__exit__(None, None, None)
 
 
-def test_build_spec_mounts_shared_outputs_dir(tmp_path):
+def test_build_spec_has_no_nested_outputs_mount(tmp_path):
+    """outputs/ must NOT be a separate bind mount nested inside /workspace.
+    That pattern causes macOS Docker Desktop ACL/xattr issues that make the
+    session dir un-removable at teardown."""
     backend, rt, ctx = _backend()
     try:
         _feed_result(rt)
         backend.execute("print(1)", "s1", timeout_seconds=5, working_dir=tmp_path)
         spec = rt.started[0]
-        outs = [m for m in spec.mounts if m.container == "/workspace/outputs"]
-        assert outs and outs[0].read_only is False
+        assert not any(m.container == "/workspace/outputs" for m in spec.mounts), (
+            "outputs/ must not be a nested bind mount inside /workspace"
+        )
     finally:
         ctx.__exit__(None, None, None)
 
@@ -228,6 +232,32 @@ def test_outputs_mountpoint_pre_created_as_host_user(tmp_path):
         backend.execute("x = 1", "s1", timeout_seconds=5, working_dir=wd)
         assert (wd / "outputs").exists(), "outputs/ mount-point must exist after execute"
         assert (wd / "outputs").is_dir(), "outputs/ must be a directory, not a file"
+    finally:
+        ctx.__exit__(None, None, None)
+
+
+def test_execute_copies_outputs_to_shared_dir(tmp_path):
+    """Files written to <working_dir>/outputs/ by the kernel must be copied to
+    the shared outputs dir after a successful execute, and the shared path (not
+    the session path) must appear in ExecutionResult.artifacts."""
+    backend, rt, ctx = _backend()
+    try:
+        _feed_result(rt)
+        wd = tmp_path / "sess"
+        wd.mkdir()
+        # Simulate what the kernel would write inside the container
+        (wd / "outputs").mkdir()
+        (wd / "outputs" / "result.csv").write_text("a,b\n1,2\n")
+
+        result = backend.execute("print(1)", "s1", timeout_seconds=5, working_dir=wd)
+
+        shared_dir = backend._outputs_dir()
+        shared_file = shared_dir / "result.csv"
+        assert shared_file.exists(), "file must have been copied to shared outputs dir"
+        assert shared_file.read_text() == "a,b\n1,2\n"
+        assert str(shared_file) in result.artifacts, (
+            "shared path must appear in ExecutionResult.artifacts"
+        )
     finally:
         ctx.__exit__(None, None, None)
 

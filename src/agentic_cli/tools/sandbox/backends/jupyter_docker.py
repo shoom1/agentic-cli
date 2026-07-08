@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import shutil
 import threading
 import time
 from pathlib import Path
@@ -230,7 +231,6 @@ class JupyterDockerBackend(SandboxBackend):
         # a hard limit should place workspace_dir on a quota'd filesystem.
         mounts = [
             Mount(str(working_dir), "/workspace", read_only=False),
-            Mount(str(self._outputs_dir()), "/workspace/outputs", read_only=False),
             Mount(str(here / "driver.py"), f"{_DRIVER_DIR}/driver.py", read_only=True),
             Mount(str(here / "kernel_exec.py"), f"{_DRIVER_DIR}/kernel_exec.py", read_only=True),
         ]
@@ -321,12 +321,18 @@ class JupyterDockerBackend(SandboxBackend):
             except Exception as exc:
                 return ExecutionResult(success=False, error=f"Failed to start sandbox: {exc}")
         result = session.execute(code, timeout_seconds)
-        if result.success:
-            outs = self._outputs_dir()
-            # NOTE: outputs/ is shared/session-independent; it accumulates across runs and sessions (v1 accepted simplification).
-            extra = [str(p) for p in sorted(outs.iterdir()) if p.is_file()]
-            if extra:
-                result.artifacts = list(result.artifacts) + extra
+        if result.success and working_dir is not None:
+            session_outs = Path(working_dir) / "outputs"
+            if session_outs.is_dir():
+                shared = self._outputs_dir()
+                extra: list[str] = []
+                for src in sorted(session_outs.iterdir()):
+                    if src.is_file():
+                        dst = shared / src.name
+                        shutil.copy2(src, dst)
+                        extra.append(str(dst))
+                if extra:
+                    result.artifacts = list(result.artifacts) + extra
         return result
 
     def reset_session(self, session_id: str) -> None:
