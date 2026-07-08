@@ -243,6 +243,21 @@ def test_pids_limit_caps_thread_bomb(tmp_path):
 # --------------------------------------------------------------------------
 
 @_requires_docker
+def test_outputs_dir_persists_to_shared_host_dir(tmp_path):
+    outdir = tmp_path / "shared_out"
+    with MockContext(stateful_executor_backend="docker", sandbox_outputs_dir=str(outdir)) as ctx:
+        b = JupyterDockerBackend(ctx.settings)
+        try:
+            r = b.execute("open('outputs/final.txt','w').write('done'); print('ok')",
+                          "out", timeout_seconds=60, working_dir=tmp_path)
+            assert r.success is True, r.error
+            assert (outdir / "final.txt").read_text() == "done"
+            assert any(a.endswith("final.txt") for a in r.artifacts)
+        finally:
+            b.cleanup()
+
+
+@_requires_docker
 def test_no_orphaned_containers_after_cleanup(tmp_path):
     runtime = detect_docker().runtime or "docker"
     with MockContext(stateful_executor_backend="docker") as ctx:

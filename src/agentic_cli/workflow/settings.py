@@ -329,6 +329,12 @@ class WorkflowSettingsMixin:
         description="Seconds to wait for container start + image pull + kernel readiness (docker backend).",
         json_schema_extra={"ui_order": 133},
     )
+    sandbox_outputs_dir: str = Field(
+        default="",
+        title="Sandbox Outputs Dir",
+        description="Shared host dir mounted at /workspace/outputs for FINAL deliverables (default: <workspace_dir>/artifacts).",
+        json_schema_extra={"ui_order": 134},
+    )
 
     @field_validator("sandbox_network")
     @classmethod

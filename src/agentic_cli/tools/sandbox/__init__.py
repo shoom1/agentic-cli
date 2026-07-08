@@ -28,7 +28,9 @@ from agentic_cli.workflow.permissions import Capability
         "Disabled unless explicitly enabled. Use for data analysis, prototyping, "
         "and producing work output. Use execute_python for quick stateless calculations. "
         "Each `inputs` file is copied to `inputs/<filename>` inside the session before "
-        "the code runs; load it by that relative path (e.g. open('inputs/data.csv'))."
+        "the code runs; load it by that relative path (e.g. open('inputs/data.csv')). "
+        "Write scratch/intermediate files to the working directory; write FINAL deliverables "
+        "(figures, tables) to `outputs/` — those persist and are shared with other agents."
     ),
 )
 def sandbox_execute(

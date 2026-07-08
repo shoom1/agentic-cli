@@ -203,6 +203,18 @@ def test_execute_stages_inputs_into_session_inputs_dir(tmp_path):
         ctx.__exit__(None, None, None)
 
 
+def test_build_spec_mounts_shared_outputs_dir(tmp_path):
+    backend, rt, ctx = _backend()
+    try:
+        _feed_result(rt)
+        backend.execute("print(1)", "s1", timeout_seconds=5, working_dir=tmp_path)
+        spec = rt.started[0]
+        outs = [m for m in spec.mounts if m.container == "/workspace/outputs"]
+        assert outs and outs[0].read_only is False
+    finally:
+        ctx.__exit__(None, None, None)
+
+
 def test_data_mount_name_cannot_escape_workspace(tmp_path):
     """A hostile data-mount name (traversal) must not remap the mount point
     outside /workspace/data/ inside the container."""

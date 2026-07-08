@@ -212,6 +212,16 @@ class JupyterDockerBackend(SandboxBackend):
             self._runtime = DockerContainerRuntime(avail.runtime or "docker")
         return self._runtime
 
+    def _outputs_dir(self) -> Path:
+        configured = getattr(self._settings, "sandbox_outputs_dir", "") or ""
+        base = Path(configured) if configured else Path(self._settings.workspace_dir) / "artifacts"
+        base.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(base, 0o777)  # container runs as host uid; keep writable across sessions
+        except OSError:
+            pass
+        return base
+
     def _build_spec(self, session_id: str, working_dir) -> ContainerSpec:
         s = self._settings
         here = Path(__file__).parent
@@ -220,6 +230,7 @@ class JupyterDockerBackend(SandboxBackend):
         # a hard limit should place workspace_dir on a quota'd filesystem.
         mounts = [
             Mount(str(working_dir), "/workspace", read_only=False),
+            Mount(str(self._outputs_dir()), "/workspace/outputs", read_only=False),
             Mount(str(here / "driver.py"), f"{_DRIVER_DIR}/driver.py", read_only=True),
             Mount(str(here / "kernel_exec.py"), f"{_DRIVER_DIR}/kernel_exec.py", read_only=True),
         ]
@@ -304,7 +315,14 @@ class JupyterDockerBackend(SandboxBackend):
                 session = self._start_session(session_id, working_dir)
             except Exception as exc:
                 return ExecutionResult(success=False, error=f"Failed to start sandbox: {exc}")
-        return session.execute(code, timeout_seconds)
+        result = session.execute(code, timeout_seconds)
+        if result.success:
+            outs = self._outputs_dir()
+            # NOTE: outputs/ is shared/session-independent; it accumulates across runs and sessions (v1 accepted simplification).
+            extra = [str(p) for p in sorted(outs.iterdir()) if p.is_file()]
+            if extra:
+                result.artifacts = list(result.artifacts) + extra
+        return result
 
     def reset_session(self, session_id: str) -> None:
         session = self._sessions.pop(session_id, None)
