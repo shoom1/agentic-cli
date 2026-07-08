@@ -7,6 +7,7 @@ Manages sandbox sessions and delegates execution to a pluggable backend
 from __future__ import annotations
 
 import atexit
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
@@ -20,6 +21,26 @@ if TYPE_CHECKING:
     from agentic_cli.tools.sandbox.backends.base import SandboxBackend
 
 logger = Loggers.tools()
+
+
+def stage_inputs(session_dir: Path, inputs: list[str]) -> None:
+    """Copy each host path into session_dir/inputs/<basename> (the in-sandbox
+    'inputs/<name>' contract). Raises ValueError on a missing file or a
+    basename collision (v1 does not support renaming)."""
+    if not inputs:
+        return
+    inputs_dir = Path(session_dir) / "inputs"
+    inputs_dir.mkdir(parents=True, exist_ok=True)
+    seen: set[str] = set()
+    for src in inputs:
+        p = Path(src).expanduser()
+        if not p.is_file():
+            raise ValueError(f"input file not found: {src}")
+        name = p.name
+        if name in seen:
+            raise ValueError(f"duplicate input basename {name!r}; rename one of the source files")
+        seen.add(name)
+        shutil.copy2(p, inputs_dir / name)
 
 
 def sandbox_disabled_reason(settings) -> str:
@@ -96,6 +117,7 @@ class SandboxManager:
         code: str,
         session_id: str = "default",
         timeout_seconds: int | None = None,
+        inputs: list[str] | None = None,
     ) -> ExecutionResult:
         """Execute code in a sandbox session.
 
@@ -103,6 +125,8 @@ class SandboxManager:
             code: Python code to execute.
             session_id: Session identifier (default: "default").
             timeout_seconds: Execution timeout (uses settings default if None).
+            inputs: Optional list of host file paths to stage into
+                inputs/<basename> inside the session before execution.
 
         Returns:
             ExecutionResult with output and metadata.
@@ -139,6 +163,7 @@ class SandboxManager:
             session_id=session_id,
             timeout_seconds=timeout_seconds,
             working_dir=session.working_dir,
+            inputs=inputs,
         )
 
         # A failed start (docker down, startup error) must not leave phantom

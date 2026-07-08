@@ -281,7 +281,7 @@ class JupyterDockerBackend(SandboxBackend):
         self._sessions[session_id] = session
         return session
 
-    def execute(self, code, session_id, timeout_seconds=120, working_dir=None) -> ExecutionResult:
+    def execute(self, code, session_id, timeout_seconds=120, working_dir=None, inputs=None) -> ExecutionResult:
         avail = self._detect()
         if not avail.available:
             return ExecutionResult(
@@ -292,6 +292,12 @@ class JupyterDockerBackend(SandboxBackend):
         ok, msg = kernel_exec.validate_code(code)
         if not ok:
             return ExecutionResult(success=False, error=msg)
+        if inputs:
+            from agentic_cli.tools.sandbox.manager import stage_inputs
+            try:
+                stage_inputs(working_dir, inputs)
+            except ValueError as exc:
+                return ExecutionResult(success=False, error=f"input staging failed: {exc}")
         session = self._sessions.get(session_id)
         if session is None or session.status == "dead":
             try:

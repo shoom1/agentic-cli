@@ -113,12 +113,20 @@ class JupyterLocalBackend(SandboxBackend):
         session_id: str,
         timeout_seconds: int = 120,
         working_dir: Path | None = None,
+        inputs: list[str] | None = None,
     ) -> ExecutionResult:
         """Execute code in a Jupyter kernel session."""
         # Pre-scan for blocked patterns
         valid, error = kernel_exec.validate_code(code)
         if not valid:
             return ExecutionResult(success=False, error=error)
+
+        if inputs:
+            from agentic_cli.tools.sandbox.manager import stage_inputs
+            try:
+                stage_inputs(working_dir, inputs)
+            except ValueError as exc:
+                return ExecutionResult(success=False, error=f"input staging failed: {exc}")
 
         _, kc = self._get_or_create_session(session_id, working_dir)
         msg_id = kc.execute(code)

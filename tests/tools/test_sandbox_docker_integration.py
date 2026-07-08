@@ -115,6 +115,16 @@ def test_user_code_cannot_forge_protocol_via_fd1(backend, tmp_path):
     backend.cleanup()
 
 
+def test_inputs_are_loadable_by_relative_path(backend, tmp_path):
+    """A staged input is available at inputs/<name> and loadable relatively."""
+    src = tmp_path.parent / "iris_like.csv"; src.write_text("a,b\n1,2\n3,4\n")
+    r = backend.execute("print(open('inputs/iris_like.csv').read().strip())",
+                        "s1", timeout_seconds=30, working_dir=tmp_path, inputs=[str(src)])
+    assert r.success is True, r.error
+    assert "1,2" in r.stdout
+    backend.cleanup()
+
+
 def test_interrupt_preserves_session_state(backend, tmp_path):
     """A runaway cell is aborted by the host's cooperative interrupt, but the
     session (kernel + prior state) survives and the next request runs cleanly.

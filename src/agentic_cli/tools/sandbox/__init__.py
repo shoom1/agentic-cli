@@ -26,13 +26,16 @@ from agentic_cli.workflow.permissions import Capability
         "network-isolated container (no network egress; memory/CPU/PID-capped, "
         "though disk is not); 'local' runs with host privileges and shared filesystem. "
         "Disabled unless explicitly enabled. Use for data analysis, prototyping, "
-        "and producing work output. Use execute_python for quick stateless calculations."
+        "and producing work output. Use execute_python for quick stateless calculations. "
+        "Each `inputs` file is copied to `inputs/<filename>` inside the session before "
+        "the code runs; load it by that relative path (e.g. open('inputs/data.csv'))."
     ),
 )
 def sandbox_execute(
     code: str,
     session_id: str = "default",
     timeout_seconds: int = 120,
+    inputs: list[str] | None = None,
 ) -> dict[str, Any]:
     """Execute Python code in a stateful sandbox.
 
@@ -40,6 +43,8 @@ def sandbox_execute(
         code: Python code to execute.
         session_id: Session identifier for state persistence (default: "default").
         timeout_seconds: Maximum execution time in seconds.
+        inputs: Optional list of host file paths to stage into
+            inputs/<basename> inside the session before execution.
 
     Returns:
         Dictionary with execution results.
@@ -61,6 +66,7 @@ def sandbox_execute(
         code=code,
         session_id=session_id,
         timeout_seconds=timeout_seconds,
+        inputs=inputs,
     )
     return {
         "success": result.success,

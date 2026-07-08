@@ -191,6 +191,18 @@ def test_explicit_container_user_overrides_host_uid(tmp_path):
         ctx.__exit__(None, None, None)
 
 
+def test_execute_stages_inputs_into_session_inputs_dir(tmp_path):
+    backend, rt, ctx = _backend()
+    try:
+        _feed_result(rt)
+        src = tmp_path / "sales.csv"; src.write_text("x\n1\n")
+        wd = tmp_path / "sess"; wd.mkdir()
+        backend.execute("print(1)", "s1", timeout_seconds=5, working_dir=wd, inputs=[str(src)])
+        assert (wd / "inputs" / "sales.csv").read_text() == "x\n1\n"
+    finally:
+        ctx.__exit__(None, None, None)
+
+
 def test_data_mount_name_cannot_escape_workspace(tmp_path):
     """A hostile data-mount name (traversal) must not remap the mount point
     outside /workspace/data/ inside the container."""

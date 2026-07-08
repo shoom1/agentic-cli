@@ -35,13 +35,14 @@ class MockSandboxBackend(SandboxBackend):
         self.execute_calls: list[dict] = []
         self.reset_calls: list[str] = []
 
-    def execute(self, code, session_id, timeout_seconds=120, working_dir=None):
+    def execute(self, code, session_id, timeout_seconds=120, working_dir=None, inputs=None):
         self._sessions.add(session_id)
         self.execute_calls.append({
             "code": code,
             "session_id": session_id,
             "timeout_seconds": timeout_seconds,
             "working_dir": working_dir,
+            "inputs": inputs,
         })
         return self._result
 
@@ -166,7 +167,7 @@ class TestSandboxManager:
         session metadata that fills sandbox_max_sessions with no real session."""
         class _FailingBackend(SandboxBackend):
             backend_name = "failing"
-            def execute(self, code, session_id, timeout_seconds=120, working_dir=None):
+            def execute(self, code, session_id, timeout_seconds=120, working_dir=None, inputs=None):
                 return ExecutionResult(success=False, error="Docker sandbox backend unavailable")
             def reset_session(self, session_id): pass
             def cleanup(self): pass
@@ -700,6 +701,29 @@ class TestSandboxRestrictions:
             assert "3.14" in result.stdout
         finally:
             backend.cleanup()
+
+
+class TestStageInputs:
+    def test_copies_to_inputs_subdir(self, tmp_path):
+        from agentic_cli.tools.sandbox.manager import stage_inputs
+        src = tmp_path / "sales.csv"; src.write_text("a,b\n1,2\n")
+        sess = tmp_path / "sess"; sess.mkdir()
+        stage_inputs(sess, [str(src)])
+        assert (sess / "inputs" / "sales.csv").read_text() == "a,b\n1,2\n"
+
+    def test_missing_file_raises(self, tmp_path):
+        from agentic_cli.tools.sandbox.manager import stage_inputs
+        sess = tmp_path / "sess"; sess.mkdir()
+        with pytest.raises(ValueError):
+            stage_inputs(sess, [str(tmp_path / "nope.csv")])
+
+    def test_basename_collision_raises(self, tmp_path):
+        from agentic_cli.tools.sandbox.manager import stage_inputs
+        (tmp_path / "a").mkdir(); (tmp_path / "b").mkdir()
+        (tmp_path / "a" / "x.csv").write_text("1"); (tmp_path / "b" / "x.csv").write_text("2")
+        sess = tmp_path / "sess"; sess.mkdir()
+        with pytest.raises(ValueError):
+            stage_inputs(sess, [str(tmp_path / "a" / "x.csv"), str(tmp_path / "b" / "x.csv")])
 
 
 class TestJupyterLocalBackend:
