@@ -17,6 +17,7 @@ import pytest
 
 from agentic_cli.tools.sandbox.backends.detect import detect_docker, docker_available
 from agentic_cli.tools.sandbox.backends.jupyter_docker import JupyterDockerBackend
+from agentic_cli.tools.sandbox.manager import SandboxManager
 from tests.conftest import MockContext
 
 # Every test in this module is a docker test (selectable via -m docker).
@@ -176,6 +177,33 @@ def test_sessions_are_isolated(backend, tmp_path):
     assert rb.success is True, rb.error
     assert "NO_VAR" in rb.stdout
     assert "NO_FILE" in rb.stdout
+
+
+# --------------------------------------------------------------------------
+# Stateful analysis: multi-call persistence
+# --------------------------------------------------------------------------
+
+@_requires_docker
+def test_analyst_flow_stage_analyze_output(tmp_path):
+    """Stage an input, run multi-step stateful analysis, write a figure to
+    outputs/, and confirm it appears on the shared host dir."""
+    from agentic_cli.tools.sandbox.manager import SandboxManager
+    outdir = tmp_path / "artifacts"
+    src = tmp_path / "rows.csv"; src.write_text("g,v\na,1\na,3\nb,10\n")
+    with MockContext(stateful_executor_backend="docker",
+                     sandbox_outputs_dir=str(outdir)) as ctx:
+        mgr = SandboxManager(ctx.settings)
+        try:
+            r1 = mgr.execute("import pandas as pd\ndf = pd.read_csv('inputs/rows.csv')\nprint(df.groupby('g').v.mean().to_dict())",
+                             session_id="an", inputs=[str(src)])
+            assert r1.success is True, r1.error
+            assert "'a': 2.0" in r1.stdout or '"a": 2.0' in r1.stdout
+            r2 = mgr.execute("df.groupby('g').v.mean().to_csv('outputs/means.csv'); print('wrote')",
+                             session_id="an")  # same session: df persists
+            assert r2.success is True, r2.error
+            assert (outdir / "means.csv").exists()
+        finally:
+            mgr.cleanup()
 
 
 # --------------------------------------------------------------------------
