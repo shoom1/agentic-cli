@@ -42,3 +42,8 @@ class ResearchDemoSettings(BaseSettings):
         """
         if "verbose_thinking" not in self.model_fields_set:
             object.__setattr__(self, "verbose_thinking", False)
+        if "sandbox_data_mounts" not in self.model_fields_set:
+            data_dir = Path(__file__).parent / "data"
+            object.__setattr__(self, "sandbox_data_mounts", [f"{data_dir}:samples"])
+        if "sandbox_outputs_dir" not in self.model_fields_set:
+            object.__setattr__(self, "sandbox_outputs_dir", str(Path(self.workspace_dir) / "artifacts"))

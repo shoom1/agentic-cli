@@ -1,0 +1,6 @@
+model,dataset,accuracy,params_millions,year
+resnet50,imagenet,76.1,25.6,2015
+vit_b16,imagenet,77.9,86.6,2020
+convnext_t,imagenet,82.1,28.6,2022
+efficientnet_b0,imagenet,77.1,5.3,2019
+swin_t,imagenet,81.3,28.3,2021

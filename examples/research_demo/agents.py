@@ -26,6 +26,7 @@ from agentic_cli.tools import (
     grep,
     glob,
 )
+from agentic_cli.tools.sandbox import sandbox_execute
 
 
 # ---------------------------------------------------------------------------
@@ -103,6 +104,27 @@ Updating an existing concept: call `kb_write_concept` with the same explicit `sl
 
 
 # ---------------------------------------------------------------------------
+# Data Analyst (leaf agent)
+# ---------------------------------------------------------------------------
+
+DATA_ANALYST_PROMPT = """You are a data-analysis specialist. You run multi-step Python analysis in a stateful, isolated executor (variables and DataFrames persist across calls).
+
+## Data
+- Pre-mounted sample datasets are read-only under `data/samples/` (e.g. `data/samples/benchmarks.csv`). Discover them with `os.listdir('data/samples')`.
+- Files handed to you by the coordinator arrive via the tool's `inputs` argument and appear at `inputs/<filename>`. Load them by that relative path — never by a host path.
+
+## Working style
+1. Explore first: `df = pd.read_csv('data/samples/benchmarks.csv'); print(df.info()); print(df.describe())`.
+2. Transform/aggregate step by step — the session remembers your DataFrames between calls.
+3. Plot with matplotlib (figures are captured automatically).
+4. Write FINAL deliverables (cleaned tables, key figures) to `outputs/` — those persist and are shared with other agents. Keep scratch in the working directory.
+5. Save a short narrative findings report with `write_file`.
+
+Report what you found with concrete numbers, and name the files you wrote to `outputs/`.
+"""
+
+
+# ---------------------------------------------------------------------------
 # Research Coordinator (root agent)
 # ---------------------------------------------------------------------------
 
@@ -154,6 +176,7 @@ When the user asks you to research something:
 6. **IMMEDIATELY show the plan** to the user in your response.
 7. **WAIT for user confirmation** before executing tasks.
 8. For arXiv paper research, **delegate to arxiv_specialist** (it has KB writer access and writes concept pages when 3+ related papers accumulate).
+- For multi-step data analysis (datasets, DataFrames, plots), delegate to **data_analyst**. Use `execute_python` only for quick one-off calculations.
 9. Execute ONE task at a time, updating the plan after each.
 10. Use `web_fetch` to extract information from specific URLs found during research.
 11. Use `execute_python` for quick calculations and data validation.
@@ -216,6 +239,14 @@ AGENT_CONFIGS = [
         ],
         description="arXiv paper research specialist: search, analyze, save, and catalog academic papers",
     ),
+    # Leaf agent: data analyst (must be listed before coordinator)
+    AgentConfig(
+        name="data_analyst",
+        prompt=DATA_ANALYST_PROMPT,
+        include_state_tools=False,
+        tools=[sandbox_execute, read_file, write_file, ask_clarification],
+        description="Stateful data-analysis specialist: loads datasets and runs multi-step pandas/plotting analysis in an isolated executor.",
+    ),
     # Root agent: research coordinator (owns workflow state, delegates arXiv work)
     AgentConfig(
         name="research_coordinator",
@@ -241,7 +272,7 @@ AGENT_CONFIGS = [
             grep,
             diff_compare,
         ],
-        sub_agents=["arxiv_specialist"],
+        sub_agents=["arxiv_specialist", "data_analyst"],
         description="Research coordinator with memory, planning, task management, knowledge base, and HITL capabilities",
     ),
 ]
