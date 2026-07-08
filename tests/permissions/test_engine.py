@@ -284,12 +284,13 @@ class TestEngineConcurrency:
 
 class TestResolveListTargetArg:
     def test_list_target_arg_resolves_per_item(self, ctx):
-        eng = PermissionEngine(settings=_stub_settings(), workflow=_stub_workflow(), ctx=ctx)
         from agentic_cli.workflow.permissions.capabilities import ResolvedCapability
+        eng = PermissionEngine(settings=_stub_settings(), workflow=_stub_workflow(), ctx=ctx)
         resolved = eng._resolve(
             [Capability("filesystem.read", target_arg="inputs")],
             {"inputs": ["/data/a.csv", "/data/b.csv"]},
         )
+        assert all(isinstance(rc, ResolvedCapability) for rc in resolved)
         targets = sorted(rc.target for rc in resolved)
         assert len(resolved) == 2
         assert any(t.endswith("a.csv") for t in targets)

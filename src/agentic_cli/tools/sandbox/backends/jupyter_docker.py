@@ -223,6 +223,22 @@ class JupyterDockerBackend(SandboxBackend):
             pass
         return base
 
+    def _parse_data_mounts(self) -> list[tuple[str, str]]:
+        """Parse sandbox_data_mounts into (host_path, sanitized_name) pairs.
+
+        Used by both _build_spec (to build Mount objects) and _start_session
+        (to pre-create host-side mount-point dirs before runtime.start).
+        """
+        result = []
+        for entry in self._settings.sandbox_data_mounts:
+            host, _, name = entry.partition(":")
+            # Sanitize the mount name so a hostile '..'/absolute value can't
+            # remap the mount outside /workspace/data/ (sanitize_filename maps
+            # '/' and '.' to '_').
+            name = sanitize_filename(name or Path(host).name) or "mount"
+            result.append((host, name))
+        return result
+
     def _build_spec(self, session_id: str, working_dir) -> ContainerSpec:
         s = self._settings
         here = Path(__file__).parent
@@ -234,12 +250,7 @@ class JupyterDockerBackend(SandboxBackend):
             Mount(str(here / "driver.py"), f"{_DRIVER_DIR}/driver.py", read_only=True),
             Mount(str(here / "kernel_exec.py"), f"{_DRIVER_DIR}/kernel_exec.py", read_only=True),
         ]
-        for entry in s.sandbox_data_mounts:
-            host, _, name = entry.partition(":")
-            # Sanitize the mount name so a hostile '..'/absolute value can't
-            # remap the mount outside /workspace/data/ (sanitize_filename maps
-            # '/' and '.' to '_').
-            name = sanitize_filename(name or Path(host).name) or "mount"
+        for host, name in self._parse_data_mounts():
             mounts.append(Mount(host, f"/workspace/data/{name}", read_only=True))
         env = {
             "HOME": "/tmp", "MPLCONFIGDIR": "/tmp", "IPYTHONDIR": "/tmp",
@@ -274,10 +285,22 @@ class JupyterDockerBackend(SandboxBackend):
         runtime = self._ensure_runtime()
         spec = self._build_spec(session_id, working_dir)
         if working_dir is not None:
+            wd = Path(working_dir)
             # Pre-create the /workspace/outputs mount point as the host user.
             # Docker would otherwise create this nested bind-mount target as root,
             # which pollutes the session dir and breaks host-side cleanup.
-            (Path(working_dir) / "outputs").mkdir(parents=True, exist_ok=True)
+            (wd / "outputs").mkdir(parents=True, exist_ok=True)
+            # Pre-create data-mount host-side mount points before runtime.start().
+            # Without this, Docker creates them as root inside the session dir,
+            # which breaks host-side cleanup and causes ACL issues on macOS.
+            for host, name in self._parse_data_mounts():
+                mount_point = wd / "data" / name
+                if Path(host).is_dir():
+                    mount_point.mkdir(parents=True, exist_ok=True)
+                else:
+                    mount_point.parent.mkdir(parents=True, exist_ok=True)
+                    if not mount_point.exists():
+                        mount_point.touch()
         handle = runtime.start(spec)
         name = spec.name
         session = ContainerSession(

@@ -82,10 +82,10 @@ class JupyterLocalBackend(SandboxBackend):
             return self._sessions[session_id]
 
         km = KernelManager()
+        start_kwargs: dict = {}
         if working_dir:
-            km.cwd = str(working_dir)
-
-        km.start_kernel()
+            start_kwargs["cwd"] = str(working_dir)
+        km.start_kernel(**start_kwargs)
         kc = km.blocking_client()
         kc.start_channels()
         kc.wait_for_ready(timeout=30)
@@ -120,6 +120,9 @@ class JupyterLocalBackend(SandboxBackend):
         valid, error = kernel_exec.validate_code(code)
         if not valid:
             return ExecutionResult(success=False, error=error)
+
+        if working_dir is not None:
+            (Path(working_dir) / "outputs").mkdir(parents=True, exist_ok=True)
 
         if inputs:
             from agentic_cli.tools.sandbox.manager import stage_inputs

@@ -725,6 +725,11 @@ class TestStageInputs:
         with pytest.raises(ValueError):
             stage_inputs(sess, [str(tmp_path / "nope.csv")])
 
+    def test_none_session_dir_raises_value_error(self, tmp_path):
+        from agentic_cli.tools.sandbox.manager import stage_inputs
+        with pytest.raises(ValueError, match="session_dir is required"):
+            stage_inputs(None, ["/x"])
+
     def test_basename_collision_raises(self, tmp_path):
         from agentic_cli.tools.sandbox.manager import stage_inputs
         (tmp_path / "a").mkdir(); (tmp_path / "b").mkdir()
@@ -805,5 +810,21 @@ class TestJupyterLocalBackend:
             assert backend.has_session("test") is True
             backend.reset_session("test")
             assert backend.has_session("test") is False
+        finally:
+            backend.cleanup()
+
+    def test_outputs_dir_pre_created(self, tmp_path):
+        """outputs/ must be pre-created so open('outputs/x','w') works."""
+        from agentic_cli.tools.sandbox.backends.jupyter_local import JupyterLocalBackend
+
+        backend = JupyterLocalBackend()
+        try:
+            result = backend.execute(
+                "open('outputs/t.txt','w').write('hi'); print('ok')",
+                session_id="test",
+                working_dir=tmp_path,
+            )
+            assert result.success is True
+            assert (tmp_path / "outputs" / "t.txt").exists()
         finally:
             backend.cleanup()

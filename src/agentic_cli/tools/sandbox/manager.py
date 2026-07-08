@@ -27,6 +27,8 @@ def stage_inputs(session_dir: Path, inputs: list[str]) -> None:
     """Copy each host path into session_dir/inputs/<basename> (the in-sandbox
     'inputs/<name>' contract). Raises ValueError on a missing file or a
     basename collision (v1 does not support renaming)."""
+    if session_dir is None:
+        raise ValueError("session_dir is required for staging inputs")
     if not inputs:
         return
     inputs_dir = Path(session_dir) / "inputs"

@@ -1,9 +1,10 @@
 """Agent configuration for the Research Demo application.
 
-Multi-agent architecture:
+Multi-agent architecture with three agents:
 - research_coordinator: Root agent that owns workflow state (planning, tasks, HITL)
-  and delegates academic paper research to the arXiv specialist.
+  and delegates to the arXiv specialist and data analyst.
 - arxiv_specialist: Leaf agent focused on arXiv paper search, analysis, and ingestion.
+- data_analyst: Leaf agent that runs multi-step data analysis in a stateful executor.
 
 Uses framework-provided tools exclusively — no app-specific tools needed.
 """

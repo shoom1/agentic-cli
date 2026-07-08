@@ -262,6 +262,29 @@ def test_execute_copies_outputs_to_shared_dir(tmp_path):
         ctx.__exit__(None, None, None)
 
 
+def test_data_mount_points_pre_created_host_owned(tmp_path):
+    """Data-mount target dirs under working_dir/data/ must be pre-created by the
+    host before runtime.start() so Docker does not create them as root."""
+    some_dir = tmp_path / "mydata"
+    some_dir.mkdir()
+    ctx = MockContext(stateful_executor_backend="docker",
+                      sandbox_data_mounts=[f"{some_dir}:samples"]).__enter__()
+    rt = FakeRuntime()
+    backend = JupyterDockerBackend(
+        ctx.settings, runtime=rt,
+        detect_fn=lambda: DockerAvailability(True, "docker", "test"),
+    )
+    try:
+        _feed_result(rt)
+        wd = tmp_path / "sess"
+        wd.mkdir()
+        backend.execute("x = 1", "s1", timeout_seconds=5, working_dir=wd)
+        assert (wd / "data" / "samples").exists(), "data/samples mount point must be pre-created"
+        assert (wd / "data" / "samples").is_dir(), "data/samples must be a directory"
+    finally:
+        ctx.__exit__(None, None, None)
+
+
 def test_data_mount_name_cannot_escape_workspace(tmp_path):
     """A hostile data-mount name (traversal) must not remap the mount point
     outside /workspace/data/ inside the container."""
