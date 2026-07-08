@@ -282,6 +282,40 @@ class TestEngineConcurrency:
         assert ask_peak == 1  # never two asks in flight simultaneously
 
 
+class TestResolveListTargetArg:
+    def test_list_target_arg_resolves_per_item(self, ctx):
+        eng = PermissionEngine(settings=_stub_settings(), workflow=_stub_workflow(), ctx=ctx)
+        from agentic_cli.workflow.permissions.capabilities import ResolvedCapability
+        resolved = eng._resolve(
+            [Capability("filesystem.read", target_arg="inputs")],
+            {"inputs": ["/data/a.csv", "/data/b.csv"]},
+        )
+        targets = sorted(rc.target for rc in resolved)
+        assert len(resolved) == 2
+        assert any(t.endswith("a.csv") for t in targets)
+        assert any(t.endswith("b.csv") for t in targets)
+
+    def test_scalar_target_arg_still_yields_single_resolved(self, ctx):
+        """No regression: a scalar value must still produce exactly one ResolvedCapability."""
+        eng = PermissionEngine(settings=_stub_settings(), workflow=_stub_workflow(), ctx=ctx)
+        resolved = eng._resolve(
+            [Capability("filesystem.read", target_arg="path")],
+            {"path": "/data/x.csv"},
+        )
+        assert len(resolved) == 1
+        assert resolved[0].target.endswith("x.csv")
+
+    def test_none_target_arg_still_yields_star(self, ctx):
+        """No regression: target_arg=None must still produce a single ResolvedCapability with target='*'."""
+        eng = PermissionEngine(settings=_stub_settings(), workflow=_stub_workflow(), ctx=ctx)
+        resolved = eng._resolve(
+            [Capability("python.exec.stateful")],
+            {"code": "x = 1"},
+        )
+        assert len(resolved) == 1
+        assert resolved[0].target == "*"
+
+
 class TestTargetlessAllowAlwaysRegression:
     """Regression: after 'Allow always' on a targetless capability (target_arg=None),
     subsequent calls must not re-prompt.

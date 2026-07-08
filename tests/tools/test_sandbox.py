@@ -374,15 +374,23 @@ class TestSandboxTools:
         from agentic_cli.workflow.permissions.matchers import _cap_matches
 
         reg = get_registry()
-        sandbox_caps = [c.name for c in reg.get("sandbox_execute").capabilities]
+        sandbox_cap_names = [c.name for c in reg.get("sandbox_execute").capabilities]
         exec_caps = [c.name for c in reg.get("execute_python").capabilities]
 
         assert exec_caps == ["python.exec"]
-        assert sandbox_caps == ["python.exec.stateful"]
+        assert "python.exec.stateful" in sandbox_cap_names
         # An execute_python grant (rule 'python.exec') must not cover it.
-        assert _cap_matches("python.exec", sandbox_caps[0]) is False
+        assert _cap_matches("python.exec", "python.exec.stateful") is False
         # A deliberate broad 'python.*' grant still covers both.
-        assert _cap_matches("python.*", sandbox_caps[0]) is True
+        assert _cap_matches("python.*", "python.exec.stateful") is True
+
+    def test_inputs_declares_filesystem_read(self):
+        """sandbox_execute must declare filesystem.read for its inputs arg,
+        so each staged file path is permission-checked identically to read_file."""
+        from agentic_cli.tools.registry import get_registry
+        caps = {(c.name, c.target_arg) for c in get_registry().get("sandbox_execute").capabilities}
+        assert ("python.exec.stateful", None) in caps
+        assert ("filesystem.read", "inputs") in caps
 
 
 
