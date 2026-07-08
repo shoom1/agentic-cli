@@ -63,7 +63,7 @@ class LocalDriverRuntime:
 
 @pytest.fixture
 def backend(tmp_path):
-    with MockContext(sandbox_backend="jupyter_docker", sandbox_start_timeout=60) as ctx:
+    with MockContext(stateful_executor_backend="docker", sandbox_start_timeout=60) as ctx:
         b = JupyterDockerBackend(
             ctx.settings,
             runtime=LocalDriverRuntime(),
@@ -112,6 +112,16 @@ def test_user_code_cannot_forge_protocol_via_fd1(backend, tmp_path):
     assert "legit" in r1.stdout
     assert r2.success is True, r2.error
     assert r2.stdout == "second\n"  # clean — no forged bytes / leftover bled in
+    backend.cleanup()
+
+
+def test_inputs_are_loadable_by_relative_path(backend, tmp_path):
+    """A staged input is available at inputs/<name> and loadable relatively."""
+    src = tmp_path.parent / "iris_like.csv"; src.write_text("a,b\n1,2\n3,4\n")
+    r = backend.execute("print(open('inputs/iris_like.csv').read().strip())",
+                        "s1", timeout_seconds=30, working_dir=tmp_path, inputs=[str(src)])
+    assert r.success is True, r.error
+    assert "1,2" in r.stdout
     backend.cleanup()
 
 

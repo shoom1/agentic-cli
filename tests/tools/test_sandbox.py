@@ -35,13 +35,14 @@ class MockSandboxBackend(SandboxBackend):
         self.execute_calls: list[dict] = []
         self.reset_calls: list[str] = []
 
-    def execute(self, code, session_id, timeout_seconds=120, working_dir=None):
+    def execute(self, code, session_id, timeout_seconds=120, working_dir=None, inputs=None):
         self._sessions.add(session_id)
         self.execute_calls.append({
             "code": code,
             "session_id": session_id,
             "timeout_seconds": timeout_seconds,
             "working_dir": working_dir,
+            "inputs": inputs,
         })
         return self._result
 
@@ -166,7 +167,7 @@ class TestSandboxManager:
         session metadata that fills sandbox_max_sessions with no real session."""
         class _FailingBackend(SandboxBackend):
             backend_name = "failing"
-            def execute(self, code, session_id, timeout_seconds=120, working_dir=None):
+            def execute(self, code, session_id, timeout_seconds=120, working_dir=None, inputs=None):
                 return ExecutionResult(success=False, error="Docker sandbox backend unavailable")
             def reset_session(self, session_id): pass
             def cleanup(self): pass
@@ -262,7 +263,7 @@ class TestSandboxManager:
 
 class TestSandboxTools:
     def test_sandbox_execute_success(self, tmp_path):
-        with MockContext(sandbox_execute_enabled=True) as ctx:
+        with MockContext(stateful_executor_backend="local") as ctx:
             from agentic_cli.workflow.service_registry import set_service_registry
 
             backend = MockSandboxBackend(
@@ -283,7 +284,7 @@ class TestSandboxTools:
                 mgr.cleanup()
 
     def test_sandbox_execute_no_manager(self, tmp_path):
-        with MockContext(sandbox_execute_enabled=True):
+        with MockContext(stateful_executor_backend="local"):
             from agentic_cli.workflow.service_registry import set_service_registry
 
             token = set_service_registry({})
@@ -301,23 +302,23 @@ class TestSandboxTools:
             from agentic_cli.tools.sandbox import sandbox_execute
             result = sandbox_execute("print('hi')")
             assert result["success"] is False
-            assert "enabled" in result["error"].lower()
+            assert "stateful" in result["error"].lower() or "backend" in result["error"].lower()
 
     def test_factory_tool_respects_enabled_flag(self, tmp_path):
         """CRITICAL regression: the workflow uses the factory-bound tool
         (base_manager wires make_sandbox_tool), which must honor the
-        sandbox_execute_enabled opt-in — not just the module-level tool."""
+        stateful_executor_backend opt-in — not just the module-level tool."""
         from agentic_cli.tools.factories import make_sandbox_tool
 
-        with MockContext(sandbox_execute_enabled=False) as ctx:
+        with MockContext(stateful_executor_backend="none") as ctx:
             mgr = SandboxManager(ctx.settings, backend=MockSandboxBackend())
             tool = make_sandbox_tool(mgr)
             r = tool(code="x = 1")
             assert r["success"] is False, "factory tool executed despite disabled flag"
-            assert "enabled" in r["error"].lower()
+            assert "stateful" in r["error"].lower() or "backend" in r["error"].lower()
             mgr.cleanup()
 
-        with MockContext(sandbox_execute_enabled=True) as ctx:
+        with MockContext(stateful_executor_backend="local") as ctx:
             mgr = SandboxManager(ctx.settings, backend=MockSandboxBackend())
             tool = make_sandbox_tool(mgr)
             r = tool(code="x = 1")
@@ -333,7 +334,7 @@ class TestSandboxTools:
         class _WF:
             active_session_id = "conv-abc"
 
-        with MockContext(sandbox_execute_enabled=True) as ctx:
+        with MockContext(stateful_executor_backend="local") as ctx:
             backend = MockSandboxBackend()
             mgr = SandboxManager(ctx.settings, backend=backend)
             tool = make_sandbox_tool(mgr, _WF())
@@ -347,17 +348,11 @@ class TestSandboxTools:
             mgr.cleanup()
 
     def test_disabled_message_is_backend_aware(self, tmp_path):
-        """The disabled-tool message must reflect the selected backend: the local
-        backend is host-privileged, but the docker backend is container-isolated
-        — claiming 'host privileges' there would be a false, misleading warning."""
+        """The disabled-tool message must reflect the selected backend."""
         from agentic_cli.tools.sandbox import sandbox_execute
-        with MockContext(sandbox_backend="jupyter_local"):
+        with MockContext(stateful_executor_backend="none"):
             err = sandbox_execute("print('hi')")["error"].lower()
-            assert "host" in err  # honest for the unsandboxed local backend
-        with MockContext(sandbox_backend="jupyter_docker"):
-            err = sandbox_execute("print('hi')")["error"].lower()
-            assert ("container" in err or "isolat" in err)
-            assert "host privilege" not in err  # docker backend is NOT host-privileged
+            assert "stateful_executor_backend" in err
 
     def test_description_makes_no_false_network_claim(self):
         """The tool does NOT block network — the description must not claim it
@@ -379,15 +374,23 @@ class TestSandboxTools:
         from agentic_cli.workflow.permissions.matchers import _cap_matches
 
         reg = get_registry()
-        sandbox_caps = [c.name for c in reg.get("sandbox_execute").capabilities]
+        sandbox_cap_names = [c.name for c in reg.get("sandbox_execute").capabilities]
         exec_caps = [c.name for c in reg.get("execute_python").capabilities]
 
         assert exec_caps == ["python.exec"]
-        assert sandbox_caps == ["python.exec.stateful"]
+        assert "python.exec.stateful" in sandbox_cap_names
         # An execute_python grant (rule 'python.exec') must not cover it.
-        assert _cap_matches("python.exec", sandbox_caps[0]) is False
+        assert _cap_matches("python.exec", "python.exec.stateful") is False
         # A deliberate broad 'python.*' grant still covers both.
-        assert _cap_matches("python.*", sandbox_caps[0]) is True
+        assert _cap_matches("python.*", "python.exec.stateful") is True
+
+    def test_inputs_declares_filesystem_read(self):
+        """sandbox_execute must declare filesystem.read for its inputs arg,
+        so each staged file path is permission-checked identically to read_file."""
+        from agentic_cli.tools.registry import get_registry
+        caps = {(c.name, c.target_arg) for c in get_registry().get("sandbox_execute").capabilities}
+        assert ("python.exec.stateful", None) in caps
+        assert ("filesystem.read", "inputs") in caps
 
 
 
@@ -398,9 +401,9 @@ class TestSandboxTools:
 class TestBackendSelection:
     def test_create_jupyter_docker_backend(self):
         from agentic_cli.tools.sandbox.backends.jupyter_docker import JupyterDockerBackend
-        with MockContext(sandbox_backend="jupyter_docker") as ctx:
+        with MockContext(stateful_executor_backend="docker") as ctx:
             mgr = SandboxManager(ctx.settings)
-            backend = mgr._create_backend("jupyter_docker")
+            backend = mgr._create_backend("docker")
             assert isinstance(backend, JupyterDockerBackend)
 
     def test_unknown_backend_raises(self):
@@ -708,6 +711,34 @@ class TestSandboxRestrictions:
             backend.cleanup()
 
 
+class TestStageInputs:
+    def test_copies_to_inputs_subdir(self, tmp_path):
+        from agentic_cli.tools.sandbox.manager import stage_inputs
+        src = tmp_path / "sales.csv"; src.write_text("a,b\n1,2\n")
+        sess = tmp_path / "sess"; sess.mkdir()
+        stage_inputs(sess, [str(src)])
+        assert (sess / "inputs" / "sales.csv").read_text() == "a,b\n1,2\n"
+
+    def test_missing_file_raises(self, tmp_path):
+        from agentic_cli.tools.sandbox.manager import stage_inputs
+        sess = tmp_path / "sess"; sess.mkdir()
+        with pytest.raises(ValueError):
+            stage_inputs(sess, [str(tmp_path / "nope.csv")])
+
+    def test_none_session_dir_raises_value_error(self, tmp_path):
+        from agentic_cli.tools.sandbox.manager import stage_inputs
+        with pytest.raises(ValueError, match="session_dir is required"):
+            stage_inputs(None, ["/x"])
+
+    def test_basename_collision_raises(self, tmp_path):
+        from agentic_cli.tools.sandbox.manager import stage_inputs
+        (tmp_path / "a").mkdir(); (tmp_path / "b").mkdir()
+        (tmp_path / "a" / "x.csv").write_text("1"); (tmp_path / "b" / "x.csv").write_text("2")
+        sess = tmp_path / "sess"; sess.mkdir()
+        with pytest.raises(ValueError):
+            stage_inputs(sess, [str(tmp_path / "a" / "x.csv"), str(tmp_path / "b" / "x.csv")])
+
+
 class TestJupyterLocalBackend:
     """Integration tests for JupyterLocalBackend."""
 
@@ -779,5 +810,21 @@ class TestJupyterLocalBackend:
             assert backend.has_session("test") is True
             backend.reset_session("test")
             assert backend.has_session("test") is False
+        finally:
+            backend.cleanup()
+
+    def test_outputs_dir_pre_created(self, tmp_path):
+        """outputs/ must be pre-created so open('outputs/x','w') works."""
+        from agentic_cli.tools.sandbox.backends.jupyter_local import JupyterLocalBackend
+
+        backend = JupyterLocalBackend()
+        try:
+            result = backend.execute(
+                "open('outputs/t.txt','w').write('hi'); print('ok')",
+                session_id="test",
+                working_dir=tmp_path,
+            )
+            assert result.success is True
+            assert (tmp_path / "outputs" / "t.txt").exists()
         finally:
             backend.cleanup()

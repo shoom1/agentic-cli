@@ -252,22 +252,16 @@ class WorkflowSettingsMixin:
     )
 
     # Sandbox executor (stateful Jupyter-backed execution)
-    sandbox_execute_enabled: bool = Field(
-        default=False,
-        title="Sandbox Execute Enabled",
+    stateful_executor_backend: Literal["none", "local", "docker"] = Field(
+        default="none",
+        title="Stateful Executor Backend",
         description=(
-            "Enable the stateful sandbox_execute tool. The default 'jupyter_local' "
-            "backend runs Python with host privileges (NOT OS-sandboxed); the "
-            "'jupyter_docker' backend runs in a network-isolated container. Pick "
-            "the backend via sandbox_backend accordingly."
+            "Backend for the stateful sandbox_execute tool. 'none' disables it; "
+            "'docker' runs in a network-isolated container (recommended); 'local' "
+            "runs a Jupyter kernel with host privileges (NOT OS-sandboxed). Future: "
+            "'modal', 'runpod'."
         ),
         json_schema_extra={"ui_order": 121},
-    )
-    sandbox_backend: str = Field(
-        default="jupyter_local",
-        title="Sandbox Backend",
-        description="Backend for stateful sandbox execution",
-        json_schema_extra={"ui_order": 122},
     )
     sandbox_timeout: int = Field(
         default=120,
@@ -334,6 +328,12 @@ class WorkflowSettingsMixin:
         title="Sandbox Start Timeout",
         description="Seconds to wait for container start + image pull + kernel readiness (docker backend).",
         json_schema_extra={"ui_order": 133},
+    )
+    sandbox_outputs_dir: str = Field(
+        default="",
+        title="Sandbox Outputs Dir",
+        description="Shared host dir mounted at /workspace/outputs for FINAL deliverables (default: <workspace_dir>/artifacts).",
+        json_schema_extra={"ui_order": 134},
     )
 
     @field_validator("sandbox_network")

@@ -18,6 +18,7 @@ class SandboxBackend(ABC):
         session_id: str,
         timeout_seconds: int = 120,
         working_dir: Path | None = None,
+        inputs: list[str] | None = None,
     ) -> ExecutionResult:
         """Execute code in the given session.
 

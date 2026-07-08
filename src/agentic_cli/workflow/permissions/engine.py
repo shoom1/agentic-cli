@@ -171,9 +171,14 @@ class PermissionEngine:
     ) -> list[ResolvedCapability]:
         resolved: list[ResolvedCapability] = []
         for cap in capabilities:
-            raw = "*" if cap.target_arg is None else str(args.get(cap.target_arg, ""))
-            target = "*" if cap.target_arg is None else get_matcher(cap.name).canonicalize(raw, self._ctx)
-            resolved.append(ResolvedCapability(cap.name, target))
+            if cap.target_arg is None:
+                resolved.append(ResolvedCapability(cap.name, "*"))
+                continue
+            value = args.get(cap.target_arg, "")
+            matcher = get_matcher(cap.name)
+            items = value if isinstance(value, (list, tuple)) else [value]
+            for item in items:
+                resolved.append(ResolvedCapability(cap.name, matcher.canonicalize(str(item), self._ctx)))
         return resolved
 
     def _evaluate(

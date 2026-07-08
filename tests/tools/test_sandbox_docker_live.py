@@ -17,6 +17,7 @@ import pytest
 
 from agentic_cli.tools.sandbox.backends.detect import detect_docker, docker_available
 from agentic_cli.tools.sandbox.backends.jupyter_docker import JupyterDockerBackend
+from agentic_cli.tools.sandbox.manager import SandboxManager
 from tests.conftest import MockContext
 
 # Every test in this module is a docker test (selectable via -m docker).
@@ -37,7 +38,7 @@ def test_docker_runtime_present_when_required():
 
 @pytest.fixture
 def backend(tmp_path):
-    with MockContext(sandbox_backend="jupyter_docker") as ctx:
+    with MockContext(stateful_executor_backend="docker") as ctx:
         b = JupyterDockerBackend(ctx.settings)
         try:
             yield b
@@ -179,6 +180,33 @@ def test_sessions_are_isolated(backend, tmp_path):
 
 
 # --------------------------------------------------------------------------
+# Stateful analysis: multi-call persistence
+# --------------------------------------------------------------------------
+
+@_requires_docker
+def test_analyst_flow_stage_analyze_output(tmp_path):
+    """Stage an input, run multi-step stateful analysis, write a figure to
+    outputs/, and confirm it appears on the shared host dir."""
+    from agentic_cli.tools.sandbox.manager import SandboxManager
+    outdir = tmp_path / "artifacts"
+    src = tmp_path / "rows.csv"; src.write_text("g,v\na,1\na,3\nb,10\n")
+    with MockContext(stateful_executor_backend="docker",
+                     sandbox_outputs_dir=str(outdir)) as ctx:
+        mgr = SandboxManager(ctx.settings)
+        try:
+            r1 = mgr.execute("import pandas as pd\ndf = pd.read_csv('inputs/rows.csv')\nprint(df.groupby('g').v.mean().to_dict())",
+                             session_id="an", inputs=[str(src)])
+            assert r1.success is True, r1.error
+            assert "'a': 2.0" in r1.stdout or '"a": 2.0' in r1.stdout
+            r2 = mgr.execute("df.groupby('g').v.mean().to_csv('outputs/means.csv'); print('wrote')",
+                             session_id="an")  # same session: df persists
+            assert r2.success is True, r2.error
+            assert (outdir / "means.csv").exists()
+        finally:
+            mgr.cleanup()
+
+
+# --------------------------------------------------------------------------
 # Cooperative interrupt: a runaway cell is aborted but the session survives
 # --------------------------------------------------------------------------
 
@@ -207,7 +235,7 @@ def test_interrupt_preserves_session_state(backend, tmp_path):
 def test_memory_cap_oom_kills(tmp_path):
     """A single allocation far past --memory (swap disabled) is OOM-killed;
     the backend surfaces failure rather than a clean success."""
-    with MockContext(sandbox_backend="jupyter_docker", sandbox_memory_mb=256) as ctx:
+    with MockContext(stateful_executor_backend="docker", sandbox_memory_mb=256) as ctx:
         b = JupyterDockerBackend(ctx.settings)
         try:
             r = b.execute("x = bytearray(1024 * 1024 * 1024)  # 1 GiB vs 256 MiB cap",
@@ -220,7 +248,7 @@ def test_memory_cap_oom_kills(tmp_path):
 @_requires_docker
 def test_pids_limit_caps_thread_bomb(tmp_path):
     """--pids-limit bounds the number of tasks; a thread bomb hits it."""
-    with MockContext(sandbox_backend="jupyter_docker", sandbox_pids_limit=128) as ctx:
+    with MockContext(stateful_executor_backend="docker", sandbox_pids_limit=128) as ctx:
         b = JupyterDockerBackend(ctx.settings)
         try:
             code = ("import threading, time\n"
@@ -243,9 +271,24 @@ def test_pids_limit_caps_thread_bomb(tmp_path):
 # --------------------------------------------------------------------------
 
 @_requires_docker
+def test_outputs_dir_persists_to_shared_host_dir(tmp_path):
+    outdir = tmp_path / "shared_out"
+    with MockContext(stateful_executor_backend="docker", sandbox_outputs_dir=str(outdir)) as ctx:
+        b = JupyterDockerBackend(ctx.settings)
+        try:
+            r = b.execute("open('outputs/final.txt','w').write('done'); print('ok')",
+                          "out", timeout_seconds=60, working_dir=tmp_path)
+            assert r.success is True, r.error
+            assert (outdir / "final.txt").read_text() == "done"
+            assert any(a.endswith("final.txt") for a in r.artifacts)
+        finally:
+            b.cleanup()
+
+
+@_requires_docker
 def test_no_orphaned_containers_after_cleanup(tmp_path):
     runtime = detect_docker().runtime or "docker"
-    with MockContext(sandbox_backend="jupyter_docker") as ctx:
+    with MockContext(stateful_executor_backend="docker") as ctx:
         b = JupyterDockerBackend(ctx.settings)
         b.execute("x = 1", "orphan1", timeout_seconds=60, working_dir=tmp_path)
         b.execute("y = 2", "orphan2", timeout_seconds=60, working_dir=tmp_path)

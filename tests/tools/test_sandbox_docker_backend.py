@@ -36,7 +36,7 @@ class FakeRuntime:
 
 
 def _backend(available=True):
-    ctx = MockContext(sandbox_backend="jupyter_docker").__enter__()
+    ctx = MockContext(stateful_executor_backend="docker").__enter__()
     rt = FakeRuntime()
     detect_fn = lambda: DockerAvailability(available, "docker" if available else "", "test")
     backend = JupyterDockerBackend(ctx.settings, runtime=rt, detect_fn=detect_fn)
@@ -176,7 +176,7 @@ def test_container_runs_as_host_uid_and_dir_not_world_writable(tmp_path):
 
 
 def test_explicit_container_user_overrides_host_uid(tmp_path):
-    ctx = MockContext(sandbox_backend="jupyter_docker",
+    ctx = MockContext(stateful_executor_backend="docker",
                       sandbox_container_user="1234:5678").__enter__()
     rt = FakeRuntime()
     backend = JupyterDockerBackend(
@@ -191,11 +191,105 @@ def test_explicit_container_user_overrides_host_uid(tmp_path):
         ctx.__exit__(None, None, None)
 
 
+def test_execute_stages_inputs_into_session_inputs_dir(tmp_path):
+    backend, rt, ctx = _backend()
+    try:
+        _feed_result(rt)
+        src = tmp_path / "sales.csv"; src.write_text("x\n1\n")
+        wd = tmp_path / "sess"; wd.mkdir()
+        backend.execute("print(1)", "s1", timeout_seconds=5, working_dir=wd, inputs=[str(src)])
+        assert (wd / "inputs" / "sales.csv").read_text() == "x\n1\n"
+    finally:
+        ctx.__exit__(None, None, None)
+
+
+def test_build_spec_has_no_nested_outputs_mount(tmp_path):
+    """outputs/ must NOT be a separate bind mount nested inside /workspace.
+    That pattern causes macOS Docker Desktop ACL/xattr issues that make the
+    session dir un-removable at teardown."""
+    backend, rt, ctx = _backend()
+    try:
+        _feed_result(rt)
+        backend.execute("print(1)", "s1", timeout_seconds=5, working_dir=tmp_path)
+        spec = rt.started[0]
+        assert not any(m.container == "/workspace/outputs" for m in spec.mounts), (
+            "outputs/ must not be a nested bind mount inside /workspace"
+        )
+    finally:
+        ctx.__exit__(None, None, None)
+
+
+def test_outputs_mountpoint_pre_created_as_host_user(tmp_path):
+    """Docker must not create /workspace/outputs as root.
+    The backend must pre-create <working_dir>/outputs before runtime.start() so
+    the mount-point directory is owned by the host user (not root), which allows
+    pytest teardown to remove it and keeps the session dir clean."""
+    backend, rt, ctx = _backend()
+    try:
+        _feed_result(rt)
+        wd = tmp_path / "sess"
+        wd.mkdir()
+        backend.execute("x = 1", "s1", timeout_seconds=5, working_dir=wd)
+        assert (wd / "outputs").exists(), "outputs/ mount-point must exist after execute"
+        assert (wd / "outputs").is_dir(), "outputs/ must be a directory, not a file"
+    finally:
+        ctx.__exit__(None, None, None)
+
+
+def test_execute_copies_outputs_to_shared_dir(tmp_path):
+    """Files written to <working_dir>/outputs/ by the kernel must be copied to
+    the shared outputs dir after a successful execute, and the shared path (not
+    the session path) must appear in ExecutionResult.artifacts."""
+    backend, rt, ctx = _backend()
+    try:
+        _feed_result(rt)
+        wd = tmp_path / "sess"
+        wd.mkdir()
+        # Simulate what the kernel would write inside the container
+        (wd / "outputs").mkdir()
+        (wd / "outputs" / "result.csv").write_text("a,b\n1,2\n")
+
+        result = backend.execute("print(1)", "s1", timeout_seconds=5, working_dir=wd)
+
+        shared_dir = backend._outputs_dir()
+        shared_file = shared_dir / "result.csv"
+        assert shared_file.exists(), "file must have been copied to shared outputs dir"
+        assert shared_file.read_text() == "a,b\n1,2\n"
+        assert str(shared_file) in result.artifacts, (
+            "shared path must appear in ExecutionResult.artifacts"
+        )
+    finally:
+        ctx.__exit__(None, None, None)
+
+
+def test_data_mount_points_pre_created_host_owned(tmp_path):
+    """Data-mount target dirs under working_dir/data/ must be pre-created by the
+    host before runtime.start() so Docker does not create them as root."""
+    some_dir = tmp_path / "mydata"
+    some_dir.mkdir()
+    ctx = MockContext(stateful_executor_backend="docker",
+                      sandbox_data_mounts=[f"{some_dir}:samples"]).__enter__()
+    rt = FakeRuntime()
+    backend = JupyterDockerBackend(
+        ctx.settings, runtime=rt,
+        detect_fn=lambda: DockerAvailability(True, "docker", "test"),
+    )
+    try:
+        _feed_result(rt)
+        wd = tmp_path / "sess"
+        wd.mkdir()
+        backend.execute("x = 1", "s1", timeout_seconds=5, working_dir=wd)
+        assert (wd / "data" / "samples").exists(), "data/samples mount point must be pre-created"
+        assert (wd / "data" / "samples").is_dir(), "data/samples must be a directory"
+    finally:
+        ctx.__exit__(None, None, None)
+
+
 def test_data_mount_name_cannot_escape_workspace(tmp_path):
     """A hostile data-mount name (traversal) must not remap the mount point
     outside /workspace/data/ inside the container."""
     import posixpath
-    ctx = MockContext(sandbox_backend="jupyter_docker",
+    ctx = MockContext(stateful_executor_backend="docker",
                       sandbox_data_mounts=[f"{tmp_path}:../../etc"]).__enter__()
     rt = FakeRuntime()
     backend = JupyterDockerBackend(

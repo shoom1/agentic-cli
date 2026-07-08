@@ -82,10 +82,10 @@ class JupyterLocalBackend(SandboxBackend):
             return self._sessions[session_id]
 
         km = KernelManager()
+        start_kwargs: dict = {}
         if working_dir:
-            km.cwd = str(working_dir)
-
-        km.start_kernel()
+            start_kwargs["cwd"] = str(working_dir)
+        km.start_kernel(**start_kwargs)
         kc = km.blocking_client()
         kc.start_channels()
         kc.wait_for_ready(timeout=30)
@@ -113,12 +113,23 @@ class JupyterLocalBackend(SandboxBackend):
         session_id: str,
         timeout_seconds: int = 120,
         working_dir: Path | None = None,
+        inputs: list[str] | None = None,
     ) -> ExecutionResult:
         """Execute code in a Jupyter kernel session."""
         # Pre-scan for blocked patterns
         valid, error = kernel_exec.validate_code(code)
         if not valid:
             return ExecutionResult(success=False, error=error)
+
+        if working_dir is not None:
+            (Path(working_dir) / "outputs").mkdir(parents=True, exist_ok=True)
+
+        if inputs:
+            from agentic_cli.tools.sandbox.manager import stage_inputs
+            try:
+                stage_inputs(working_dir, inputs)
+            except ValueError as exc:
+                return ExecutionResult(success=False, error=f"input staging failed: {exc}")
 
         _, kc = self._get_or_create_session(session_id, working_dir)
         msg_id = kc.execute(code)
