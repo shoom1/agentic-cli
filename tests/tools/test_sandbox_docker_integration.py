@@ -63,7 +63,7 @@ class LocalDriverRuntime:
 
 @pytest.fixture
 def backend(tmp_path):
-    with MockContext(sandbox_backend="jupyter_docker", sandbox_start_timeout=60) as ctx:
+    with MockContext(stateful_executor_backend="docker", sandbox_start_timeout=60) as ctx:
         b = JupyterDockerBackend(
             ctx.settings,
             runtime=LocalDriverRuntime(),

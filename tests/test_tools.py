@@ -1482,7 +1482,7 @@ class TestDangerousToolDirectExecution:
         from tests.conftest import MockContext
         from tests.tools.test_sandbox import MockSandboxBackend
 
-        with MockContext(sandbox_execute_enabled=True) as ctx:
+        with MockContext(stateful_executor_backend="local") as ctx:
             backend = MockSandboxBackend(
                 ExecutionResult(success=True, stdout="ok\n", result="1")
             )

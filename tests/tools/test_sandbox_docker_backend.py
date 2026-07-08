@@ -36,7 +36,7 @@ class FakeRuntime:
 
 
 def _backend(available=True):
-    ctx = MockContext(sandbox_backend="jupyter_docker").__enter__()
+    ctx = MockContext(stateful_executor_backend="docker").__enter__()
     rt = FakeRuntime()
     detect_fn = lambda: DockerAvailability(available, "docker" if available else "", "test")
     backend = JupyterDockerBackend(ctx.settings, runtime=rt, detect_fn=detect_fn)
@@ -176,7 +176,7 @@ def test_container_runs_as_host_uid_and_dir_not_world_writable(tmp_path):
 
 
 def test_explicit_container_user_overrides_host_uid(tmp_path):
-    ctx = MockContext(sandbox_backend="jupyter_docker",
+    ctx = MockContext(stateful_executor_backend="docker",
                       sandbox_container_user="1234:5678").__enter__()
     rt = FakeRuntime()
     backend = JupyterDockerBackend(
@@ -195,7 +195,7 @@ def test_data_mount_name_cannot_escape_workspace(tmp_path):
     """A hostile data-mount name (traversal) must not remap the mount point
     outside /workspace/data/ inside the container."""
     import posixpath
-    ctx = MockContext(sandbox_backend="jupyter_docker",
+    ctx = MockContext(stateful_executor_backend="docker",
                       sandbox_data_mounts=[f"{tmp_path}:../../etc"]).__enter__()
     rt = FakeRuntime()
     backend = JupyterDockerBackend(

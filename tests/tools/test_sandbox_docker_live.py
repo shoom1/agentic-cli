@@ -37,7 +37,7 @@ def test_docker_runtime_present_when_required():
 
 @pytest.fixture
 def backend(tmp_path):
-    with MockContext(sandbox_backend="jupyter_docker") as ctx:
+    with MockContext(stateful_executor_backend="docker") as ctx:
         b = JupyterDockerBackend(ctx.settings)
         try:
             yield b
@@ -207,7 +207,7 @@ def test_interrupt_preserves_session_state(backend, tmp_path):
 def test_memory_cap_oom_kills(tmp_path):
     """A single allocation far past --memory (swap disabled) is OOM-killed;
     the backend surfaces failure rather than a clean success."""
-    with MockContext(sandbox_backend="jupyter_docker", sandbox_memory_mb=256) as ctx:
+    with MockContext(stateful_executor_backend="docker", sandbox_memory_mb=256) as ctx:
         b = JupyterDockerBackend(ctx.settings)
         try:
             r = b.execute("x = bytearray(1024 * 1024 * 1024)  # 1 GiB vs 256 MiB cap",
@@ -220,7 +220,7 @@ def test_memory_cap_oom_kills(tmp_path):
 @_requires_docker
 def test_pids_limit_caps_thread_bomb(tmp_path):
     """--pids-limit bounds the number of tasks; a thread bomb hits it."""
-    with MockContext(sandbox_backend="jupyter_docker", sandbox_pids_limit=128) as ctx:
+    with MockContext(stateful_executor_backend="docker", sandbox_pids_limit=128) as ctx:
         b = JupyterDockerBackend(ctx.settings)
         try:
             code = ("import threading, time\n"
@@ -245,7 +245,7 @@ def test_pids_limit_caps_thread_bomb(tmp_path):
 @_requires_docker
 def test_no_orphaned_containers_after_cleanup(tmp_path):
     runtime = detect_docker().runtime or "docker"
-    with MockContext(sandbox_backend="jupyter_docker") as ctx:
+    with MockContext(stateful_executor_backend="docker") as ctx:
         b = JupyterDockerBackend(ctx.settings)
         b.execute("x = 1", "orphan1", timeout_seconds=60, working_dir=tmp_path)
         b.execute("y = 2", "orphan2", timeout_seconds=60, working_dir=tmp_path)

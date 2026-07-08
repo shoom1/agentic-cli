@@ -22,10 +22,9 @@ from agentic_cli.workflow.permissions import Capability
     description=(
         "Execute Python code in a stateful session. "
         "State (variables, imports) persists across calls within the same session. "
-        "Isolation depends on sandbox_backend: 'jupyter_docker' runs in a "
+        "Isolation depends on stateful_executor_backend: 'docker' runs in a "
         "network-isolated container (no network egress; memory/CPU/PID-capped, "
-        "though disk is not); "
-        "'jupyter_local' runs with host privileges and shared filesystem. "
+        "though disk is not); 'local' runs with host privileges and shared filesystem. "
         "Disabled unless explicitly enabled. Use for data analysis, prototyping, "
         "and producing work output. Use execute_python for quick stateless calculations."
     ),
@@ -45,14 +44,14 @@ def sandbox_execute(
     Returns:
         Dictionary with execution results.
     """
-    # Opt-in (see sandbox_execute_enabled). Gate before touching the service so a
-    # disabled deployment fails fast. NOTE: the workflow binds the factory tool
-    # (tools/factories.py), which gates identically — this gate covers the
-    # module-level tool used outside the workflow.
+    # Opt-in gate. Gate before touching the service so a disabled deployment
+    # fails fast. NOTE: the workflow binds the factory tool (tools/factories.py),
+    # which gates identically — this gate covers the module-level tool used
+    # outside the workflow.
     from agentic_cli.tools.sandbox.manager import sandbox_disabled_reason
 
     settings = get_settings()
-    if not getattr(settings, "sandbox_execute_enabled", False):
+    if getattr(settings, "stateful_executor_backend", "none") == "none":
         return {"success": False, "error": sandbox_disabled_reason(settings)}
 
     manager = require_service(SANDBOX_MANAGER)

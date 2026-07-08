@@ -26,15 +26,15 @@ def sandbox_disabled_reason(settings) -> str:
     """Backend-aware reason string for a disabled sandbox_execute. Shared by
     every entry point (module tool + factory tool) so the opt-in gate is
     applied consistently and worded accurately for the selected backend."""
-    backend = getattr(settings, "sandbox_backend", "jupyter_local")
-    if backend == "jupyter_docker":
-        detail = ("The 'jupyter_docker' backend runs it in a network-isolated, "
-                  "memory/CPU/PID-capped container.")
+    backend = getattr(settings, "stateful_executor_backend", "none")
+    if backend == "docker":
+        detail = "The 'docker' backend runs it in a network-isolated, memory/CPU/PID-capped container."
+    elif backend == "local":
+        detail = "The 'local' backend runs Python with host privileges and no OS sandbox."
     else:
-        detail = (f"The '{backend}' backend runs Python with host privileges and "
-                  "no OS sandbox (use 'jupyter_docker' for isolation).")
-    return (f"sandbox_execute is not enabled. {detail} "
-            "Enable sandbox_execute_enabled in settings to use it.")
+        detail = "No stateful executor is configured."
+    return (f"sandbox_execute is not available. {detail} "
+            "Set stateful_executor_backend to 'docker' (isolated) or 'local' (unsandboxed) to use it.")
 
 
 @dataclass
@@ -52,7 +52,7 @@ class SandboxManager:
     Args:
         settings: Application settings instance.
         backend: Optional backend for test injection. If None, created
-            lazily from settings.sandbox_backend.
+            lazily from settings.stateful_executor_backend.
     """
 
     def __init__(
@@ -70,18 +70,18 @@ class SandboxManager:
     def _ensure_backend(self) -> "SandboxBackend":
         """Lazily create the backend if not injected."""
         if self._backend is None:
-            self._backend = self._create_backend(self._settings.sandbox_backend)
+            self._backend = self._create_backend(self._settings.stateful_executor_backend)
         return self._backend
 
     def _create_backend(self, backend_name: str) -> "SandboxBackend":
         """Create a backend by name."""
-        if backend_name == "jupyter_local":
+        if backend_name == "local":
             from agentic_cli.tools.sandbox.backends.jupyter_local import JupyterLocalBackend
             return JupyterLocalBackend()
-        if backend_name == "jupyter_docker":
+        if backend_name == "docker":
             from agentic_cli.tools.sandbox.backends.jupyter_docker import JupyterDockerBackend
             return JupyterDockerBackend(self._settings)
-        raise ValueError(f"Unknown sandbox backend: {backend_name!r}")
+        raise ValueError(f"Unknown stateful_executor_backend: {backend_name!r}")
 
     def _get_session_dir(self, session_id: str) -> Path:
         """Get or create the working directory for a session."""

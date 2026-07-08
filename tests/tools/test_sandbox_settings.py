@@ -16,9 +16,17 @@ def test_docker_sandbox_defaults():
     assert s.sandbox_container_user == ""
     assert s.sandbox_data_mounts == []
     assert s.sandbox_start_timeout == 180
-    # unchanged safety defaults
-    assert s.sandbox_backend == "jupyter_local"
-    assert s.sandbox_execute_enabled is False
+    # unified backend config (replaces the old two-field enable+backend pattern)
+    assert s.stateful_executor_backend == "none"
+
+
+def test_stateful_executor_backend_default_and_values():
+    from pydantic import ValidationError
+    assert BaseSettings().stateful_executor_backend == "none"
+    assert BaseSettings(stateful_executor_backend="docker").stateful_executor_backend == "docker"
+    assert BaseSettings(stateful_executor_backend="local").stateful_executor_backend == "local"
+    with pytest.raises(ValidationError):
+        BaseSettings(stateful_executor_backend="bogus")
 
 
 def test_sandbox_network_must_be_none():

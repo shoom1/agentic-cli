@@ -378,11 +378,11 @@ def make_sandbox_tool(sandbox_manager, workflow_manager=None) -> Callable:
         """
         # Opt-in gate — the workflow binds THIS tool (base_manager), so the gate
         # must live here, not only on the module-level tool. Without it the
-        # sandbox_execute_enabled switch is inert in the real path.
+        # stateful_executor_backend setting is inert in the real path.
         from agentic_cli.config import get_settings
         from agentic_cli.tools.sandbox.manager import sandbox_disabled_reason
 
-        if not getattr(get_settings(), "sandbox_execute_enabled", False):
+        if getattr(get_settings(), "stateful_executor_backend", "none") == "none":
             return {"success": False, "error": sandbox_disabled_reason(get_settings())}
 
         # Namespace the default session to the active conversation so distinct

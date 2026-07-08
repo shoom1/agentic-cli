@@ -262,7 +262,7 @@ class TestSandboxManager:
 
 class TestSandboxTools:
     def test_sandbox_execute_success(self, tmp_path):
-        with MockContext(sandbox_execute_enabled=True) as ctx:
+        with MockContext(stateful_executor_backend="local") as ctx:
             from agentic_cli.workflow.service_registry import set_service_registry
 
             backend = MockSandboxBackend(
@@ -283,7 +283,7 @@ class TestSandboxTools:
                 mgr.cleanup()
 
     def test_sandbox_execute_no_manager(self, tmp_path):
-        with MockContext(sandbox_execute_enabled=True):
+        with MockContext(stateful_executor_backend="local"):
             from agentic_cli.workflow.service_registry import set_service_registry
 
             token = set_service_registry({})
@@ -301,23 +301,23 @@ class TestSandboxTools:
             from agentic_cli.tools.sandbox import sandbox_execute
             result = sandbox_execute("print('hi')")
             assert result["success"] is False
-            assert "enabled" in result["error"].lower()
+            assert "stateful" in result["error"].lower() or "backend" in result["error"].lower()
 
     def test_factory_tool_respects_enabled_flag(self, tmp_path):
         """CRITICAL regression: the workflow uses the factory-bound tool
         (base_manager wires make_sandbox_tool), which must honor the
-        sandbox_execute_enabled opt-in — not just the module-level tool."""
+        stateful_executor_backend opt-in — not just the module-level tool."""
         from agentic_cli.tools.factories import make_sandbox_tool
 
-        with MockContext(sandbox_execute_enabled=False) as ctx:
+        with MockContext(stateful_executor_backend="none") as ctx:
             mgr = SandboxManager(ctx.settings, backend=MockSandboxBackend())
             tool = make_sandbox_tool(mgr)
             r = tool(code="x = 1")
             assert r["success"] is False, "factory tool executed despite disabled flag"
-            assert "enabled" in r["error"].lower()
+            assert "stateful" in r["error"].lower() or "backend" in r["error"].lower()
             mgr.cleanup()
 
-        with MockContext(sandbox_execute_enabled=True) as ctx:
+        with MockContext(stateful_executor_backend="local") as ctx:
             mgr = SandboxManager(ctx.settings, backend=MockSandboxBackend())
             tool = make_sandbox_tool(mgr)
             r = tool(code="x = 1")
@@ -333,7 +333,7 @@ class TestSandboxTools:
         class _WF:
             active_session_id = "conv-abc"
 
-        with MockContext(sandbox_execute_enabled=True) as ctx:
+        with MockContext(stateful_executor_backend="local") as ctx:
             backend = MockSandboxBackend()
             mgr = SandboxManager(ctx.settings, backend=backend)
             tool = make_sandbox_tool(mgr, _WF())
@@ -347,17 +347,11 @@ class TestSandboxTools:
             mgr.cleanup()
 
     def test_disabled_message_is_backend_aware(self, tmp_path):
-        """The disabled-tool message must reflect the selected backend: the local
-        backend is host-privileged, but the docker backend is container-isolated
-        — claiming 'host privileges' there would be a false, misleading warning."""
+        """The disabled-tool message must reflect the selected backend."""
         from agentic_cli.tools.sandbox import sandbox_execute
-        with MockContext(sandbox_backend="jupyter_local"):
+        with MockContext(stateful_executor_backend="none"):
             err = sandbox_execute("print('hi')")["error"].lower()
-            assert "host" in err  # honest for the unsandboxed local backend
-        with MockContext(sandbox_backend="jupyter_docker"):
-            err = sandbox_execute("print('hi')")["error"].lower()
-            assert ("container" in err or "isolat" in err)
-            assert "host privilege" not in err  # docker backend is NOT host-privileged
+            assert "stateful_executor_backend" in err
 
     def test_description_makes_no_false_network_claim(self):
         """The tool does NOT block network — the description must not claim it
@@ -398,9 +392,9 @@ class TestSandboxTools:
 class TestBackendSelection:
     def test_create_jupyter_docker_backend(self):
         from agentic_cli.tools.sandbox.backends.jupyter_docker import JupyterDockerBackend
-        with MockContext(sandbox_backend="jupyter_docker") as ctx:
+        with MockContext(stateful_executor_backend="docker") as ctx:
             mgr = SandboxManager(ctx.settings)
-            backend = mgr._create_backend("jupyter_docker")
+            backend = mgr._create_backend("docker")
             assert isinstance(backend, JupyterDockerBackend)
 
     def test_unknown_backend_raises(self):
