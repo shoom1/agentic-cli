@@ -23,7 +23,8 @@ from agentic_cli.workflow.permissions import Capability
         "Execute Python code in a stateful session. "
         "State (variables, imports) persists across calls within the same session. "
         "Isolation depends on sandbox_backend: 'jupyter_docker' runs in a "
-        "network-isolated container (no network egress, resource-capped); "
+        "network-isolated container (no network egress; memory/CPU/PID-capped, "
+        "though disk is not); "
         "'jupyter_local' runs with host privileges and shared filesystem. "
         "Disabled unless explicitly enabled. Use for data analysis, prototyping, "
         "and producing work output. Use execute_python for quick stateless calculations."
@@ -45,22 +46,14 @@ def sandbox_execute(
         Dictionary with execution results.
     """
     # Opt-in (see sandbox_execute_enabled). Gate before touching the service so a
-    # disabled deployment fails fast with a message accurate for the selected
-    # backend: jupyter_local is host-privileged; jupyter_docker is isolated.
+    # disabled deployment fails fast. NOTE: the workflow binds the factory tool
+    # (tools/factories.py), which gates identically — this gate covers the
+    # module-level tool used outside the workflow.
+    from agentic_cli.tools.sandbox.manager import sandbox_disabled_reason
+
     settings = get_settings()
     if not getattr(settings, "sandbox_execute_enabled", False):
-        backend = getattr(settings, "sandbox_backend", "jupyter_local")
-        if backend == "jupyter_docker":
-            detail = ("The 'jupyter_docker' backend runs it in a network-isolated, "
-                      "resource-capped container.")
-        else:
-            detail = (f"The '{backend}' backend runs Python with host privileges and "
-                      "no OS sandbox (use 'jupyter_docker' for isolation).")
-        return {
-            "success": False,
-            "error": (f"sandbox_execute is not enabled. {detail} "
-                      "Enable sandbox_execute_enabled in settings to use it."),
-        }
+        return {"success": False, "error": sandbox_disabled_reason(settings)}
 
     manager = require_service(SANDBOX_MANAGER)
     if isinstance(manager, dict):

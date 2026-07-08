@@ -22,6 +22,21 @@ if TYPE_CHECKING:
 logger = Loggers.tools()
 
 
+def sandbox_disabled_reason(settings) -> str:
+    """Backend-aware reason string for a disabled sandbox_execute. Shared by
+    every entry point (module tool + factory tool) so the opt-in gate is
+    applied consistently and worded accurately for the selected backend."""
+    backend = getattr(settings, "sandbox_backend", "jupyter_local")
+    if backend == "jupyter_docker":
+        detail = ("The 'jupyter_docker' backend runs it in a network-isolated, "
+                  "memory/CPU/PID-capped container.")
+    else:
+        detail = (f"The '{backend}' backend runs Python with host privileges and "
+                  "no OS sandbox (use 'jupyter_docker' for isolation).")
+    return (f"sandbox_execute is not enabled. {detail} "
+            "Enable sandbox_execute_enabled in settings to use it.")
+
+
 @dataclass
 class SandboxSession:
     """Metadata for an active sandbox session."""
@@ -92,6 +107,12 @@ class SandboxManager:
         Returns:
             ExecutionResult with output and metadata.
         """
+        if timeout_seconds is not None and timeout_seconds <= 0:
+            return ExecutionResult(
+                success=False,
+                error=f"timeout_seconds must be a positive number (got {timeout_seconds!r}).",
+            )
+
         max_sessions = self._settings.sandbox_max_sessions
         if session_id not in self._sessions and len(self._sessions) >= max_sessions:
             return ExecutionResult(
@@ -119,6 +140,12 @@ class SandboxManager:
             timeout_seconds=timeout_seconds,
             working_dir=session.working_dir,
         )
+
+        # A failed start (docker down, startup error) must not leave phantom
+        # session metadata occupying a max_sessions slot with no backend session.
+        if not result.success and not backend.has_session(session_id):
+            self._sessions.pop(session_id, None)
+            return result
 
         session.execution_count += 1
         logger.debug(

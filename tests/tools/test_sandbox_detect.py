@@ -38,6 +38,24 @@ def test_unavailable_when_daemon_down(monkeypatch):
     assert "daemon" in a.detail.lower()
 
 
+def test_falls_through_to_podman_when_docker_daemon_down(monkeypatch):
+    """docker CLI present but daemon down must NOT stop the search — podman is
+    still probed (the 'docker, then podman' design)."""
+    monkeypatch.setattr(detect.shutil, "which", lambda exe: f"/usr/bin/{exe}")
+    monkeypatch.setattr(detect, "_probe_daemon", lambda exe: exe == "podman")
+    a = detect.detect_docker()
+    assert a.available is True
+    assert a.runtime == "podman"
+
+
+def test_combined_detail_when_all_runtimes_down(monkeypatch):
+    monkeypatch.setattr(detect.shutil, "which", lambda exe: f"/usr/bin/{exe}")
+    monkeypatch.setattr(detect, "_probe_daemon", lambda exe: False)
+    a = detect.detect_docker()
+    assert a.available is False
+    assert "docker" in a.detail and "podman" in a.detail
+
+
 def test_result_is_cached(monkeypatch):
     calls = []
     monkeypatch.setattr(detect.shutil, "which", lambda exe: "/usr/bin/docker" if exe == "docker" else None)

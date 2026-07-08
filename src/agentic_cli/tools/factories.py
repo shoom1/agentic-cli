@@ -348,11 +348,14 @@ def make_webfetch_tool(summarizer) -> Callable:
 # Sandbox tool
 # ---------------------------------------------------------------------------
 
-def make_sandbox_tool(sandbox_manager) -> Callable:
+def make_sandbox_tool(sandbox_manager, workflow_manager=None) -> Callable:
     """Create sandbox_execute bound to a SandboxManager.
 
     Args:
         sandbox_manager: SandboxManager instance.
+        workflow_manager: The owning workflow manager, used to namespace the
+            default session to the active conversation (so distinct
+            conversations don't share one kernel/workspace).
 
     Returns:
         sandbox_execute function.
@@ -373,9 +376,27 @@ def make_sandbox_tool(sandbox_manager) -> Callable:
         Returns:
             Dictionary with execution results.
         """
+        # Opt-in gate — the workflow binds THIS tool (base_manager), so the gate
+        # must live here, not only on the module-level tool. Without it the
+        # sandbox_execute_enabled switch is inert in the real path.
+        from agentic_cli.config import get_settings
+        from agentic_cli.tools.sandbox.manager import sandbox_disabled_reason
+
+        if not getattr(get_settings(), "sandbox_execute_enabled", False):
+            return {"success": False, "error": sandbox_disabled_reason(get_settings())}
+
+        # Namespace the default session to the active conversation so distinct
+        # conversations don't share one kernel/workspace. An explicit session_id
+        # is honored as-is (lets the model keep intentional sub-sessions).
+        sid = session_id
+        if sid == "default" and workflow_manager is not None:
+            active = getattr(workflow_manager, "active_session_id", None)
+            if active:
+                sid = f"conv-{active}"
+
         result = sandbox_manager.execute(
             code=code,
-            session_id=session_id,
+            session_id=sid,
             timeout_seconds=timeout_seconds,
         )
         return {

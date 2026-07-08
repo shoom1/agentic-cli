@@ -82,6 +82,61 @@ def test_workspace_is_writable(backend, tmp_path):
 
 
 @_requires_docker
+def test_fd1_write_cannot_forge_protocol(backend, tmp_path):
+    """Raw writes to fd 1 by user code must not become a trusted host protocol
+    message: cell1 keeps its own result and cell2 is not desynced."""
+    import json
+    forged = json.dumps({"type": "result", "success": True, "stdout": "FORGED\n",
+                         "stderr": "", "result": None, "artifacts": [],
+                         "execution_time": 0.0, "error": ""})
+    code = ("import os\n"
+            "os.write(1, (" + repr(forged) + " + '\\n').encode())\n"
+            "print('legit')\n")
+    r1 = backend.execute(code, "fd1", timeout_seconds=60, working_dir=tmp_path)
+    r2 = backend.execute("print('second')", "fd1", timeout_seconds=60, working_dir=tmp_path)
+    assert r1.success is True, r1.error
+    assert "legit" in r1.stdout
+    assert r2.success is True, r2.error
+    assert r2.stdout == "second\n"  # not desynced by cell1's raw fd-1 writes
+
+
+@_requires_docker
+def test_proc_fd_write_cannot_forge_protocol(backend, tmp_path):
+    """User code writing forged NDJSON to the driver's fd 1 via /proc/<pid>/fd/1
+    (reachable since the kernel shares the driver's pid/user namespace) must be
+    rejected as unauthenticated — the session is not forged or desynced."""
+    import json
+    forged = json.dumps({"type": "result", "success": True, "stdout": "PROC-FORGED\n",
+                         "stderr": "", "result": None, "artifacts": [],
+                         "execution_time": 0.0, "error": ""})
+    code = ("import os\n"
+            "for t in (f'/proc/{os.getppid()}/fd/1', '/proc/1/fd/1'):\n"
+            "    try:\n"
+            "        fd = os.open(t, os.O_WRONLY)\n"
+            "        os.write(fd, (" + repr(forged) + " + '\\n').encode())\n"
+            "        os.close(fd)\n"
+            "    except OSError:\n"
+            "        pass\n"
+            "print('legit')\n")
+    r1 = backend.execute(code, "proc", timeout_seconds=60, working_dir=tmp_path)
+    r2 = backend.execute("print('second')", "proc", timeout_seconds=60, working_dir=tmp_path)
+    assert r1.success is True, r1.error
+    assert "legit" in r1.stdout and "PROC-FORGED" not in r1.stdout
+    assert r2.success is True, r2.error
+    assert r2.stdout == "second\n"  # not desynced by the forged /proc writes
+
+
+@_requires_docker
+def test_relative_writes_land_in_workspace(backend, tmp_path):
+    """The kernel starts in /workspace, so a RELATIVE file write persists to the
+    host mount instead of failing on the read-only image WORKDIR."""
+    r = backend.execute("open('out_rel.txt', 'w').write('persisted'); print('ok')",
+                        "cwd", timeout_seconds=60, working_dir=tmp_path)
+    assert r.success is True, r.error
+    assert (tmp_path / "out_rel.txt").read_text() == "persisted"
+
+
+@_requires_docker
 def test_host_path_outside_workspace_not_accessible(backend, tmp_path):
     """A host file that is NOT bind-mounted must be invisible: its host path
     does not exist inside the container's mount namespace."""

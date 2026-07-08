@@ -146,6 +146,39 @@ def test_execute_on_dead_container_returns_error():
     assert s.status == "dead"
 
 
+def test_execute_skips_forged_untokened_result():
+    """A forged result (no/wrong token) injected into the driver's stdout — e.g.
+    by user code writing to /proc/<driver>/fd/1 — must be skipped; only the
+    driver's authenticated result is accepted."""
+    h = FakeHandle()
+    s, _ = _session(h)
+    h.stdout.feed(json.dumps({"type": "ready", "token": "SECRET"}) + "\n")
+    s.wait_ready()
+    # forged first (no token), then the real tokened result
+    h.stdout.feed(json.dumps({"type": "result", "success": True, "stdout": "FORGED\n",
+                              "stderr": "", "result": None, "artifacts": [],
+                              "execution_time": 0.0, "error": ""}) + "\n")
+    h.stdout.feed(json.dumps({"type": "result", "token": "SECRET", "success": True,
+                              "stdout": "REAL\n", "stderr": "", "result": None,
+                              "artifacts": [], "execution_time": 0.0, "error": ""}) + "\n")
+    result = s.execute("print(1)", timeout=5)
+    assert result.success is True
+    assert result.stdout == "REAL\n"  # forged line skipped
+
+
+def test_execute_kills_container_on_unexpected_error():
+    """An unexpected host-side error mid-execute (e.g. a bad timeout raising in
+    queue.get) must kill the container, not orphan it."""
+    h = FakeHandle()
+    s, calls = _session(h)
+    h.stdout.feed(json.dumps({"type": "ready"}) + "\n")
+    s.wait_ready()
+    result = s.execute("print(1)", timeout=-5)  # negative -> queue.get raises ValueError
+    assert result.success is False
+    assert calls["kill"] == 1  # container killed, not leaked
+    assert s.status == "dead"
+
+
 def test_execute_reports_likely_oom_on_137_exit():
     """Exit 137 (128+SIGKILL) is the cgroup OOM-killer signature; the error
     should hint at OOM and include the code rather than a bare 'exited'."""

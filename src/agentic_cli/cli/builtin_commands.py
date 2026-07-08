@@ -168,13 +168,29 @@ class SandboxCommand(Command):
                 for s in sessions:
                     manager.reset_session(s["session_id"])
                 app.session.add_success(f"Reset {len(sessions)} sandbox session(s).")
-            else:
-                session_id = rest if rest else "default"
-                was_active = manager.reset_session(session_id)
+            elif rest:
+                was_active = manager.reset_session(rest)
                 if was_active:
-                    app.session.add_success(f"Sandbox session '{session_id}' reset.")
+                    app.session.add_success(f"Sandbox session '{rest}' reset.")
                 else:
-                    app.session.add_warning(f"Sandbox session '{session_id}' was not active.")
+                    app.session.add_warning(f"Sandbox session '{rest}' was not active.")
+            else:
+                # No id: session ids are namespaced per conversation (conv-<id>),
+                # so a literal "default" rarely matches. Reset the current sandbox
+                # (the single active session), or ask the user to pick if ambiguous.
+                sessions = manager.list_sessions()
+                if not sessions:
+                    app.session.add_message("system", "No active sandbox sessions.")
+                elif len(sessions) == 1:
+                    sid = sessions[0]["session_id"]
+                    manager.reset_session(sid)
+                    app.session.add_success(f"Sandbox session '{sid}' reset.")
+                else:
+                    ids = ", ".join(s["session_id"] for s in sessions)
+                    app.session.add_warning(
+                        f"Multiple sandbox sessions active ({ids}). "
+                        "Reset one with /sandbox reset <id>, or all with /sandbox reset --all."
+                    )
         else:
             # List sessions
             sessions = manager.list_sessions()

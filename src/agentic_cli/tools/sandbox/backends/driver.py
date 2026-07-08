@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import signal
 import sys
 from pathlib import Path
@@ -30,12 +31,38 @@ class KernelDriver:
         self._workspace = Path(workspace or os.environ.get("AGENTIC_SANDBOX_WORKSPACE", "/workspace"))
         self._km = None
         self._kc = None
+        # Per-session secret tagging every protocol message. It lives only in
+        # this (trusted) driver process's memory — never in env/files, and the
+        # kernel can't ptrace the driver (default docker seccomp blocks it), so
+        # untrusted kernel code can't learn it. The host rejects any result line
+        # lacking this token, defeating forged writes to the driver's fd 1 via
+        # /proc/<pid>/fd/1 (which the kernel can open, but only write-only).
+        self._token = secrets.token_hex(16)
 
     def start(self) -> None:
+        import subprocess
         from jupyter_client import KernelManager
 
+        # Start the kernel in the workspace so relative file writes land in the
+        # (writable, host-mounted) /workspace rather than the read-only image
+        # WORKDIR (e.g. /home/jovyan), where they fail or don't persist. The
+        # kernel inherits the driver's cwd; KernelManager.cwd is not honored by
+        # all jupyter_client versions, so chdir here is the reliable path.
+        try:
+            os.chdir(self._workspace)
+        except OSError:
+            pass
         km = KernelManager()
-        km.start_kernel()
+        # Isolate the kernel's raw std fds (0/1/2) from the driver's. The driver
+        # uses its own fd 0/1 for the NDJSON protocol with the host; if the
+        # kernel inherited them, user code could os.write(1, ...) a forged
+        # {"type":"result"} to desync the session, os.read(0, ...) pending host
+        # requests, or os.write(2, ...) to spam the host debug log. The kernel
+        # speaks ZMQ, so it needs none of these; real output/errors flow over
+        # iopub.
+        km.start_kernel(stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL)
         kc = km.blocking_client()
         kc.start_channels()
         kc.wait_for_ready(timeout=60)
@@ -66,6 +93,7 @@ class KernelDriver:
         return {"type": "result", **data}
 
     def _write(self, obj: dict) -> None:
+        obj = {**obj, "token": self._token}
         self._stdout.write(json.dumps(obj) + "\n")
         self._stdout.flush()
 

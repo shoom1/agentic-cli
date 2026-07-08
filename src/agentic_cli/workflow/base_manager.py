@@ -250,7 +250,7 @@ class BaseWorkflowManager(ABC):
         if s.get(LLM_SUMMARIZER):
             tool_map["web_fetch"] = make_webfetch_tool(s[LLM_SUMMARIZER])
         if s.get(SANDBOX_MANAGER):
-            tool_map["sandbox_execute"] = make_sandbox_tool(s[SANDBOX_MANAGER])
+            tool_map["sandbox_execute"] = make_sandbox_tool(s[SANDBOX_MANAGER], self)
         if s.get(ARXIV_SOURCE):
             for t in make_arxiv_tools(s[ARXIV_SOURCE]):
                 tool_map[t.__name__] = t

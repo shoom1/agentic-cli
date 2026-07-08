@@ -85,7 +85,11 @@ def _code_preview(
     """Truncated preview of the executable payload for ``*.exec`` grants, else ''."""
     if not args:
         return ""
-    if not any(cap.name.endswith(".exec") for cap in capabilities):
+    # Match the whole exec namespace: "python.exec" AND sub-capabilities like
+    # "python.exec.stateful" (sandbox_execute). Keying only on the ".exec"
+    # suffix would skip the stateful kernel — the more dangerous tool.
+    if not any(cap.name.endswith(".exec") or ".exec." in cap.name
+               for cap in capabilities):
         return ""
     for key in _CODE_ARGS:
         value = args.get(key)

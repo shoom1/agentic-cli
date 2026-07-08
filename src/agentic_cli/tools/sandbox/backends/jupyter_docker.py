@@ -6,6 +6,7 @@ import json
 import os
 import queue
 import threading
+import time
 from pathlib import Path
 
 from agentic_cli.logging import Loggers
@@ -43,6 +44,7 @@ class ContainerSession:
         self._queue: queue.Queue = queue.Queue()
         self._lock = threading.Lock()
         self._status = "starting"
+        self._token: str | None = None  # captured from the driver's ready message
         self._reader = threading.Thread(target=self._read_stdout, daemon=True)
         self._reader.start()
         self._stderr_reader = None
@@ -86,6 +88,9 @@ class ContainerSession:
         if msg.get("type") != "ready":
             self._status = "dead"
             raise SandboxStartError(f"unexpected startup message: {msg!r}")
+        # Capture the session token. This ready message is genuine: no user code
+        # runs before it (the kernel executes nothing until an execute request).
+        self._token = msg.get("token")
         self._status = "ready"
 
     def execute(self, code: str, timeout: float) -> ExecutionResult:
@@ -101,32 +106,55 @@ class ContainerSession:
                 self._handle.stdin.write(json.dumps({"type": "execute", "code": code}) + "\n")
                 self._handle.stdin.flush()
 
-                line = self._await(timeout)
-                if line is None:  # timed out -> cooperative interrupt, then hard kill
+                msg = self._read_authenticated(timeout)
+                if msg is None:  # timed out -> cooperative interrupt, then hard kill
                     self._interrupt()
-                    line = self._await(self._interrupt_grace)
-                    if line is None:
+                    msg = self._read_authenticated(self._interrupt_grace)
+                    if msg is None:
                         self._kill()
                         self._status = "dead"
                         return ExecutionResult(success=False,
                                                error=f"Execution timed out after {timeout}s; container killed")
-                if line is _EOF:
+                if msg is _EOF:
                     self._status = "dead"
                     return ExecutionResult(success=False,
                                            error=f"sandbox container exited unexpectedly ({self._exit_detail()})")
 
-                data = json.loads(line)
                 self._status = "ready"
-                return self._to_result(data)
+                return self._to_result(msg)
             except Exception as exc:
+                # Don't leak the container on an unexpected host-side error
+                # (e.g. a bad timeout raising in queue.get).
+                try:
+                    self._kill()
+                except Exception:
+                    pass
                 self._status = "dead"
                 return ExecutionResult(success=False, error=f"sandbox execution failed: {exc}")
 
-    def _await(self, timeout: float):
-        try:
-            return self._queue.get(timeout=timeout)
-        except queue.Empty:
-            return None
+    def _read_authenticated(self, timeout: float):
+        """Return the next AUTHENTICATED protocol message within ``timeout``,
+        skipping lines that don't carry the session token — those are forged by
+        user code writing to the driver's fd 1 (e.g. via /proc/<pid>/fd/1).
+        Returns the parsed dict, ``None`` on timeout, or ``_EOF``."""
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            try:
+                line = self._queue.get(timeout=remaining)
+            except queue.Empty:
+                return None
+            if line is _EOF:
+                return _EOF
+            try:
+                msg = json.loads(line)
+            except (ValueError, TypeError):
+                continue  # non-JSON garbage — forged
+            if self._token is not None and msg.get("token") != self._token:
+                continue  # missing/wrong token — forged, skip it
+            return msg
 
     def _exit_detail(self) -> str:
         """Describe why the container process exited, from the docker-run exit
@@ -187,6 +215,9 @@ class JupyterDockerBackend(SandboxBackend):
     def _build_spec(self, session_id: str, working_dir) -> ContainerSpec:
         s = self._settings
         here = Path(__file__).parent
+        # NOTE: /workspace is a writable host bind mount with NO disk quota —
+        # Docker caps memory/CPU/PIDs but not bind-mount disk. Operators who need
+        # a hard limit should place workspace_dir on a quota'd filesystem.
         mounts = [
             Mount(str(working_dir), "/workspace", read_only=False),
             Mount(str(here / "driver.py"), f"{_DRIVER_DIR}/driver.py", read_only=True),

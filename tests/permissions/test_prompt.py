@@ -81,6 +81,17 @@ class TestBuildRequest:
         )
         assert "os.system('rm -rf ~')" in req.prompt
 
+    def test_shows_code_preview_for_stateful_exec_capability(self):
+        """sandbox_execute carries python.exec.stateful (a sub-namespace of
+        python.exec) — it is MORE dangerous (persistent kernel), so its code must
+        also be shown at approval, not just python.exec's."""
+        req = build_request(
+            "sandbox_execute",
+            [ResolvedCapability("python.exec.stateful", "*")],
+            args={"code": "import os\nos.system('rm -rf ~')"},
+        )
+        assert "os.system('rm -rf ~')" in req.prompt
+
     def test_long_code_preview_is_truncated(self):
         req = build_request(
             "execute_python",

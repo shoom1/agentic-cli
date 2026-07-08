@@ -34,12 +34,17 @@ def _probe_daemon(exe: str) -> bool:
 
 @lru_cache(maxsize=1)
 def detect_docker() -> DockerAvailability:
+    details: list[str] = []
     for exe in _RUNTIMES:
         if shutil.which(exe) is None:
             continue
         if _probe_daemon(exe):
             return DockerAvailability(True, exe, f"{exe} available")
-        return DockerAvailability(False, "", f"{exe} CLI found but daemon not reachable")
+        # CLI present but daemon down — keep probing the remaining runtimes
+        # (the "docker, then podman" design) instead of giving up here.
+        details.append(f"{exe} CLI found but daemon not reachable")
+    if details:
+        return DockerAvailability(False, "", "; ".join(details))
     return DockerAvailability(False, "", "docker/podman not found in PATH")
 
 

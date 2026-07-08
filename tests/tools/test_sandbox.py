@@ -161,6 +161,36 @@ class TestSandboxManager:
             assert len(mgr.list_sessions()) == 2
             mgr.cleanup()
 
+    def test_failed_start_does_not_consume_session_slots(self, tmp_path):
+        """A failed start (e.g. Docker unavailable) must not leave phantom
+        session metadata that fills sandbox_max_sessions with no real session."""
+        class _FailingBackend(SandboxBackend):
+            backend_name = "failing"
+            def execute(self, code, session_id, timeout_seconds=120, working_dir=None):
+                return ExecutionResult(success=False, error="Docker sandbox backend unavailable")
+            def reset_session(self, session_id): pass
+            def cleanup(self): pass
+            def has_session(self, session_id): return False
+
+        with MockContext(sandbox_max_sessions=2) as ctx:
+            mgr = SandboxManager(ctx.settings, backend=_FailingBackend())
+            for i in range(5):
+                r = mgr.execute("x = 1", session_id=f"s{i}")
+                assert r.success is False
+                assert "Maximum sessions" not in r.error  # never blocked by phantom slots
+            assert mgr.list_sessions() == []  # no slots consumed
+            mgr.cleanup()
+
+    def test_rejects_non_positive_timeout(self, tmp_path):
+        """A non-positive timeout must be rejected up front, not fall through to
+        the backend where it would raise and orphan a container."""
+        with MockContext() as ctx:
+            mgr = SandboxManager(ctx.settings, backend=MockSandboxBackend())
+            r = mgr.execute("x = 1", timeout_seconds=-5)
+            assert r.success is False
+            assert "timeout" in r.error.lower()
+            mgr.cleanup()
+
     def test_reset_active_session(self, tmp_path):
         with MockContext() as ctx:
             backend = MockSandboxBackend()
@@ -272,6 +302,49 @@ class TestSandboxTools:
             result = sandbox_execute("print('hi')")
             assert result["success"] is False
             assert "enabled" in result["error"].lower()
+
+    def test_factory_tool_respects_enabled_flag(self, tmp_path):
+        """CRITICAL regression: the workflow uses the factory-bound tool
+        (base_manager wires make_sandbox_tool), which must honor the
+        sandbox_execute_enabled opt-in — not just the module-level tool."""
+        from agentic_cli.tools.factories import make_sandbox_tool
+
+        with MockContext(sandbox_execute_enabled=False) as ctx:
+            mgr = SandboxManager(ctx.settings, backend=MockSandboxBackend())
+            tool = make_sandbox_tool(mgr)
+            r = tool(code="x = 1")
+            assert r["success"] is False, "factory tool executed despite disabled flag"
+            assert "enabled" in r["error"].lower()
+            mgr.cleanup()
+
+        with MockContext(sandbox_execute_enabled=True) as ctx:
+            mgr = SandboxManager(ctx.settings, backend=MockSandboxBackend())
+            tool = make_sandbox_tool(mgr)
+            r = tool(code="x = 1")
+            assert r["success"] is True
+            mgr.cleanup()
+
+    def test_factory_tool_namespaces_default_session_to_conversation(self, tmp_path):
+        """HIGH regression: with session_id='default', distinct conversations
+        must NOT share one kernel/workspace — the default is namespaced to the
+        active conversation. An explicit session_id is still honored verbatim."""
+        from agentic_cli.tools.factories import make_sandbox_tool
+
+        class _WF:
+            active_session_id = "conv-abc"
+
+        with MockContext(sandbox_execute_enabled=True) as ctx:
+            backend = MockSandboxBackend()
+            mgr = SandboxManager(ctx.settings, backend=backend)
+            tool = make_sandbox_tool(mgr, _WF())
+
+            tool(code="x = 1")  # default -> namespaced to the conversation
+            assert backend.execute_calls[-1]["session_id"] != "default"
+            assert "conv-abc" in backend.execute_calls[-1]["session_id"]
+
+            tool(code="y = 1", session_id="explicit")  # explicit id untouched
+            assert backend.execute_calls[-1]["session_id"] == "explicit"
+            mgr.cleanup()
 
     def test_disabled_message_is_backend_aware(self, tmp_path):
         """The disabled-tool message must reflect the selected backend: the local
@@ -413,6 +486,35 @@ class TestSandboxCommand:
             await cmd.execute("reset", mock_app)
             mock_app.session.add_success.assert_called_once()
             assert len(mgr.list_sessions()) == 0
+
+    @pytest.mark.asyncio
+    async def test_reset_no_arg_resets_single_namespaced_session(self, mock_app):
+        """No-arg reset targets the current sandbox even when it is namespaced
+        (conv-<id>), not a literal 'default' — the regression from namespacing."""
+        with MockContext() as ctx:
+            from agentic_cli.cli.builtin_commands import SandboxCommand
+
+            mgr = self._make_manager(ctx, sessions=["conv-abc"])
+            mock_app.workflow.sandbox_manager = mgr
+            cmd = SandboxCommand()
+
+            await cmd.execute("reset", mock_app)
+            mock_app.session.add_success.assert_called_once()
+            assert len(mgr.list_sessions()) == 0
+            mgr.cleanup()
+
+    @pytest.mark.asyncio
+    async def test_reset_no_arg_multiple_sessions_asks_to_specify(self, mock_app):
+        with MockContext() as ctx:
+            from agentic_cli.cli.builtin_commands import SandboxCommand
+
+            mgr = self._make_manager(ctx, sessions=["conv-a", "conv-b"])
+            mock_app.workflow.sandbox_manager = mgr
+            cmd = SandboxCommand()
+
+            await cmd.execute("reset", mock_app)
+            mock_app.session.add_warning.assert_called_once()  # guidance, not a wrong reset
+            assert len(mgr.list_sessions()) == 2  # nothing reset
             mgr.cleanup()
 
     @pytest.mark.asyncio

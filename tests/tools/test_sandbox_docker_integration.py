@@ -91,6 +91,30 @@ def test_error_surfaces(backend, tmp_path):
     backend.cleanup()
 
 
+def test_user_code_cannot_forge_protocol_via_fd1(backend, tmp_path):
+    """Raw writes to fd 1 by user code must NOT reach the host NDJSON protocol
+    channel: the kernel's stdout is isolated from the driver's. Otherwise code
+    could forge a {"type":"result"} and desync the session."""
+    import json
+    forged = json.dumps({"type": "result", "success": True, "stdout": "FORGED\n",
+                         "stderr": "", "result": None, "artifacts": [],
+                         "execution_time": 0.0, "error": ""})
+    code = ("import os\n"
+            "os.write(1, (" + repr(forged) + " + '\\n').encode())\n"
+            "print('legit')\n")
+    r1 = backend.execute(code, "s1", timeout_seconds=30, working_dir=tmp_path)
+    r2 = backend.execute("print('second')", "s1", timeout_seconds=30, working_dir=tmp_path)
+    # The security invariant: cell1 gets its OWN real result (not the forged
+    # dict), and cell2 is NOT desynced. (Whether the forged bytes are discarded
+    # or surface as inert TEXT in cell1's stdout is kernel-dependent and
+    # harmless — what matters is they never become a trusted protocol message.)
+    assert r1.success is True, r1.error
+    assert "legit" in r1.stdout
+    assert r2.success is True, r2.error
+    assert r2.stdout == "second\n"  # clean — no forged bytes / leftover bled in
+    backend.cleanup()
+
+
 def test_interrupt_preserves_session_state(backend, tmp_path):
     """A runaway cell is aborted by the host's cooperative interrupt, but the
     session (kernel + prior state) survives and the next request runs cleanly.
