@@ -273,6 +273,11 @@ class JupyterDockerBackend(SandboxBackend):
         # permissions. No chmod needed.
         runtime = self._ensure_runtime()
         spec = self._build_spec(session_id, working_dir)
+        if working_dir is not None:
+            # Pre-create the /workspace/outputs mount point as the host user.
+            # Docker would otherwise create this nested bind-mount target as root,
+            # which pollutes the session dir and breaks host-side cleanup.
+            (Path(working_dir) / "outputs").mkdir(parents=True, exist_ok=True)
         handle = runtime.start(spec)
         name = spec.name
         session = ContainerSession(

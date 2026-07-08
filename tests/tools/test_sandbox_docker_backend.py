@@ -215,6 +215,23 @@ def test_build_spec_mounts_shared_outputs_dir(tmp_path):
         ctx.__exit__(None, None, None)
 
 
+def test_outputs_mountpoint_pre_created_as_host_user(tmp_path):
+    """Docker must not create /workspace/outputs as root.
+    The backend must pre-create <working_dir>/outputs before runtime.start() so
+    the mount-point directory is owned by the host user (not root), which allows
+    pytest teardown to remove it and keeps the session dir clean."""
+    backend, rt, ctx = _backend()
+    try:
+        _feed_result(rt)
+        wd = tmp_path / "sess"
+        wd.mkdir()
+        backend.execute("x = 1", "s1", timeout_seconds=5, working_dir=wd)
+        assert (wd / "outputs").exists(), "outputs/ mount-point must exist after execute"
+        assert (wd / "outputs").is_dir(), "outputs/ must be a directory, not a file"
+    finally:
+        ctx.__exit__(None, None, None)
+
+
 def test_data_mount_name_cannot_escape_workspace(tmp_path):
     """A hostile data-mount name (traversal) must not remap the mount point
     outside /workspace/data/ inside the container."""
