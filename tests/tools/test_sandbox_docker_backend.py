@@ -262,9 +262,13 @@ def test_execute_copies_outputs_to_shared_dir(tmp_path):
         ctx.__exit__(None, None, None)
 
 
-def test_data_mount_points_pre_created_host_owned(tmp_path):
-    """Data-mount target dirs under working_dir/data/ must be pre-created by the
-    host before runtime.start() so Docker does not create them as root."""
+def test_data_mount_is_not_nested_under_workspace(tmp_path):
+    """Data is mounted at a top-level /data/<name> (a sibling of /workspace), not
+    nested under the /workspace bind mount. Nesting a second bind mount under the
+    session-dir mount makes Docker synthesize the mount-point dir root-owned
+    (Linux) / ACL-stamped (macOS), which breaks host-side cleanup; a top-level
+    mount point lives in the container's own layer and leaves the session dir
+    untouched, so nothing is pre-created on the host."""
     some_dir = tmp_path / "mydata"
     some_dir.mkdir()
     ctx = MockContext(stateful_executor_backend="docker",
@@ -279,15 +283,21 @@ def test_data_mount_points_pre_created_host_owned(tmp_path):
         wd = tmp_path / "sess"
         wd.mkdir()
         backend.execute("x = 1", "s1", timeout_seconds=5, working_dir=wd)
-        assert (wd / "data" / "samples").exists(), "data/samples mount point must be pre-created"
-        assert (wd / "data" / "samples").is_dir(), "data/samples must be a directory"
+        data = [m for m in rt.started[0].mounts if m.container == "/data/samples"]
+        assert data, "data must be mounted at /data/samples (sibling of /workspace)"
+        assert not any(m.container.startswith("/workspace/data") for m in rt.started[0].mounts), (
+            "data must NOT be nested under the /workspace bind mount"
+        )
+        assert not (wd / "data").exists(), (
+            "no host-side data mount point should be created under the session dir"
+        )
     finally:
         ctx.__exit__(None, None, None)
 
 
-def test_data_mount_name_cannot_escape_workspace(tmp_path):
+def test_data_mount_name_cannot_escape_data_dir(tmp_path):
     """A hostile data-mount name (traversal) must not remap the mount point
-    outside /workspace/data/ inside the container."""
+    outside /data/ inside the container."""
     import posixpath
     ctx = MockContext(stateful_executor_backend="docker",
                       sandbox_data_mounts=[f"{tmp_path}:../../etc"]).__enter__()
@@ -299,10 +309,10 @@ def test_data_mount_name_cannot_escape_workspace(tmp_path):
     try:
         _feed_result(rt)
         backend.execute("x = 1", "s1", timeout_seconds=5, working_dir=tmp_path)
-        data = [m for m in rt.started[0].mounts if m.container.startswith("/workspace/data/")]
-        assert data, "expected a data mount under /workspace/data/"
+        data = [m for m in rt.started[0].mounts if m.container.startswith("/data/")]
+        assert data, "expected a data mount under /data/"
         for m in data:
             assert ".." not in m.container
-            assert posixpath.normpath(m.container).startswith("/workspace/data/")
+            assert posixpath.normpath(m.container).startswith("/data/")
     finally:
         ctx.__exit__(None, None, None)

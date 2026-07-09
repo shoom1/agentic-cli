@@ -194,6 +194,12 @@ class ContainerSession:
 
 
 _DRIVER_DIR = "/opt/agentic_sandbox"
+# Read-only data mounts land here, a TOP-LEVEL path (sibling of /workspace) —
+# NOT nested under the /workspace bind mount. Nesting a second bind mount under
+# the session-dir mount makes Docker synthesize the mount-point dir root-owned
+# (Linux) / file-sharing-ACL-stamped (macOS), which breaks host-side cleanup. A
+# top-level mount point lives in the container's own ephemeral layer instead.
+_DATA_DIR = "/data"
 
 
 class JupyterDockerBackend(SandboxBackend):
@@ -224,17 +230,13 @@ class JupyterDockerBackend(SandboxBackend):
         return base
 
     def _parse_data_mounts(self) -> list[tuple[str, str]]:
-        """Parse sandbox_data_mounts into (host_path, sanitized_name) pairs.
-
-        Used by both _build_spec (to build Mount objects) and _start_session
-        (to pre-create host-side mount-point dirs before runtime.start).
-        """
+        """Parse sandbox_data_mounts into (host_path, sanitized_name) pairs."""
         result = []
         for entry in self._settings.sandbox_data_mounts:
             host, _, name = entry.partition(":")
             # Sanitize the mount name so a hostile '..'/absolute value can't
-            # remap the mount outside /workspace/data/ (sanitize_filename maps
-            # '/' and '.' to '_').
+            # remap the mount outside /data/ (sanitize_filename maps '/' and
+            # '.' to '_').
             name = sanitize_filename(name or Path(host).name) or "mount"
             result.append((host, name))
         return result
@@ -251,7 +253,7 @@ class JupyterDockerBackend(SandboxBackend):
             Mount(str(here / "kernel_exec.py"), f"{_DRIVER_DIR}/kernel_exec.py", read_only=True),
         ]
         for host, name in self._parse_data_mounts():
-            mounts.append(Mount(host, f"/workspace/data/{name}", read_only=True))
+            mounts.append(Mount(host, f"{_DATA_DIR}/{name}", read_only=True))
         env = {
             "HOME": "/tmp", "MPLCONFIGDIR": "/tmp", "IPYTHONDIR": "/tmp",
             "JUPYTER_RUNTIME_DIR": "/tmp", "PYTHONDONTWRITEBYTECODE": "1",
@@ -286,21 +288,14 @@ class JupyterDockerBackend(SandboxBackend):
         spec = self._build_spec(session_id, working_dir)
         if working_dir is not None:
             wd = Path(working_dir)
-            # Pre-create the /workspace/outputs mount point as the host user.
-            # Docker would otherwise create this nested bind-mount target as root,
-            # which pollutes the session dir and breaks host-side cleanup.
+            # Pre-create the outputs/ subdir host-owned so the container (running
+            # as the host uid) writes finals into a host-owned dir. It is a plain
+            # subdir of the /workspace mount, not a nested bind mount, so it has
+            # none of the root-owned/ACL cleanup problems that data mounts had.
+            # Data mounts need no pre-create: they land at a top-level /data/
+            # (see _DATA_DIR) whose mount point lives in the container's own
+            # layer, never inside the host session dir.
             (wd / "outputs").mkdir(parents=True, exist_ok=True)
-            # Pre-create data-mount host-side mount points before runtime.start().
-            # Without this, Docker creates them as root inside the session dir,
-            # which breaks host-side cleanup and causes ACL issues on macOS.
-            for host, name in self._parse_data_mounts():
-                mount_point = wd / "data" / name
-                if Path(host).is_dir():
-                    mount_point.mkdir(parents=True, exist_ok=True)
-                else:
-                    mount_point.parent.mkdir(parents=True, exist_ok=True)
-                    if not mount_point.exists():
-                        mount_point.touch()
         handle = runtime.start(spec)
         name = spec.name
         session = ContainerSession(

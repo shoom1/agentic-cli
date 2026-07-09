@@ -206,6 +206,43 @@ def test_analyst_flow_stage_analyze_output(tmp_path):
             mgr.cleanup()
 
 
+@_requires_docker
+def test_data_mount_readable_and_session_cleans_up(tmp_path):
+    """A read-only data mount is readable at /data/<name> AND leaves the session
+    dir removable afterward.
+
+    The old design nested the mount at /workspace/data/<name>; Docker then
+    synthesized that mount-point dir root-owned (Linux) / ACL-stamped (macOS),
+    so a host-side rmtree of the session dir failed. Mounting at a top-level
+    /data/<name> keeps the mount point in the container's own ephemeral layer,
+    so the host session dir stays clean. This asserts both halves on a real
+    daemon — the exact scenario the fake-runtime tests cannot reach."""
+    import shutil
+    datadir = tmp_path / "host_data"
+    datadir.mkdir()
+    (datadir / "sample.csv").write_text("a,b\n1,2\n")
+    session_dir = tmp_path / "sess"
+    session_dir.mkdir()
+    with MockContext(stateful_executor_backend="docker",
+                     sandbox_data_mounts=[f"{datadir}:samples"]) as ctx:
+        b = JupyterDockerBackend(ctx.settings)
+        try:
+            r = b.execute("print(open('/data/samples/sample.csv').read().strip())",
+                          "dm", timeout_seconds=60, working_dir=session_dir)
+            assert r.success is True, r.error
+            assert "a,b" in r.stdout and "1,2" in r.stdout
+            assert not (session_dir / "data").exists(), (
+                "no data mount point should be created under the session dir"
+            )
+        finally:
+            b.cleanup()
+        # The exact failure the nested mount caused on macOS: the host could not
+        # remove the session dir because the synthesized mount point was
+        # un-rmdir-able. With a top-level mount there is nothing to trip on.
+        shutil.rmtree(session_dir)
+        assert not session_dir.exists()
+
+
 # --------------------------------------------------------------------------
 # Cooperative interrupt: a runaway cell is aborted but the session survives
 # --------------------------------------------------------------------------

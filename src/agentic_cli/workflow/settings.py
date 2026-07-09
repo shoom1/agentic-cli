@@ -320,7 +320,7 @@ class WorkflowSettingsMixin:
     sandbox_data_mounts: list[str] = Field(
         default_factory=list,
         title="Sandbox Data Mounts",
-        description="Read-only data staged into the container as 'host_path:mount_name' (mounted under /workspace/data/).",
+        description="Read-only data staged into the container as 'host_path:mount_name' (mounted read-only under /data/).",
         json_schema_extra={"ui_order": 132},
     )
     sandbox_start_timeout: int = Field(
