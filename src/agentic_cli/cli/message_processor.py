@@ -491,6 +491,15 @@ class MessageProcessor:
         """Handle TOOL_CALL events — update status line."""
         tool_name = event.metadata.get("tool_name", "unknown")
         state.status_line = f"Calling: {tool_name}"
+        # For the stateful executor, show the code being run (syntax-highlighted,
+        # first N lines) so the run is visible, not just a status blip.
+        if tool_name == "sandbox_execute":
+            from agentic_cli.cli.sandbox_render import render_sandbox_code
+
+            code = (event.metadata.get("tool_args") or {}).get("code", "")
+            block = render_sandbox_code(code)
+            if block is not None:
+                ui.add_rich(block)
 
     async def _handle_tool_result(
         self,
@@ -506,6 +515,16 @@ class MessageProcessor:
         duration = event.metadata.get("duration_ms")
         icon = "+" if success else "x"
         duration_str = f" ({duration}ms)" if duration else ""
+        # The stateful executor gets a single combined message: a +/x header with
+        # the run's output indented under a ╰ marker (mirrors the code block).
+        if tool_name == "sandbox_execute":
+            from agentic_cli.cli.sandbox_render import render_sandbox_result
+
+            result = event.metadata.get("result")
+            result_dict = result if isinstance(result, dict) else {}
+            state.status_line = f"{icon} {tool_name}{duration_str}"
+            ui.add_rich(render_sandbox_result(result_dict, success=success))
+            return
         lines = event.content.split("\n")
         first_line = lines[0]
         state.status_line = f"{icon} {tool_name}: {first_line}{duration_str}"

@@ -76,6 +76,16 @@ def _shell_executor(r: dict) -> str:
     return f"Exit {code} ({dur:.1f}s)"
 
 
+def _sandbox_execute(r: dict) -> str:
+    stdout = r.get("stdout", "")
+    if stdout and stdout.strip():
+        return truncate(stdout.strip().splitlines()[0], TOOL_SUMMARY_MAX_LENGTH)
+    if not r.get("success", True):
+        err = r.get("error") or r.get("stderr") or "failed"
+        return truncate(str(err).strip().splitlines()[0], TOOL_SUMMARY_MAX_LENGTH)
+    return "ok"
+
+
 def _save_tasks(r: dict) -> str:
     return r.get("message", f"{r['count']} tasks saved")
 
@@ -157,6 +167,7 @@ _TOOL_FORMATTERS: dict[str, Callable[[dict[str, Any]], str]] = {
     "edit_file": _edit_file,
     "execute_python": _execute_python,
     "shell_executor": _shell_executor,
+    "sandbox_execute": _sandbox_execute,
     "save_tasks": _save_tasks,
     "get_tasks": _get_tasks,
     "get_plan": _get_plan,

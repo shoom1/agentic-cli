@@ -450,3 +450,20 @@ class TestEventsFormatResultContent:
             success=True,
         )
         assert event.content == "some string result"
+
+
+class TestSandboxExecute:
+    def test_first_stdout_line(self):
+        result = {"success": True, "stdout": "shape (5, 5)\nmore\n"}
+        assert format_tool_summary("sandbox_execute", result) == "shape (5, 5)"
+
+    def test_ok_when_no_stdout(self):
+        assert format_tool_summary("sandbox_execute", {"success": True, "stdout": ""}) == "ok"
+
+    def test_error_on_failure(self):
+        result = {"success": False, "error": "NameError: boom", "stdout": ""}
+        assert format_tool_summary("sandbox_execute", result) == "NameError: boom"
+
+    def test_failure_falls_back_to_stderr(self):
+        result = {"success": False, "error": "", "stderr": "Traceback here", "stdout": ""}
+        assert format_tool_summary("sandbox_execute", result) == "Traceback here"

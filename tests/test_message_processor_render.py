@@ -211,3 +211,72 @@ class TestRecordReplayRoundTrip:
 
         assert ui_direct.kinds() == ui_replayed.kinds()
         assert ui_direct.responses() == ui_replayed.responses()
+
+
+class TestSandboxExecuteRendering:
+    """sandbox_execute renders a code block on the call and a single combined
+    result message (header + output) on the result."""
+
+    async def test_code_block_and_combined_result_rendered(self):
+        events = [
+            WorkflowEvent.tool_call("sandbox_execute", {"code": "x = 41\nprint(x + 1)"}),
+            WorkflowEvent.tool_result(
+                "sandbox_execute",
+                {"success": True, "stdout": "RESULT-42\n"},
+                success=True,
+                duration_ms=12,
+            ),
+        ]
+        ui, _, _ = await _render(events)
+        rich = ui.rich()
+        # code block carries the header and the code itself
+        assert any("Running Python in the stateful executor" in r for r in rich), rich
+        assert any("x = 41" in r for r in rich), rich
+        # combined result: fixed header label + output indented below
+        assert any("Stateful Python executor output:" in r for r in rich), rich
+        assert any("RESULT-42" in r for r in rich), rich
+        # exactly two messages: code block (on call) + combined result (on result)
+        assert len(rich) == 2, rich
+
+    async def test_result_is_single_message_without_output_when_stdout_empty(self):
+        events = [
+            WorkflowEvent.tool_call("sandbox_execute", {"code": "y = 5"}),
+            WorkflowEvent.tool_result(
+                "sandbox_execute",
+                {"success": True, "stdout": ""},
+                success=True,
+                duration_ms=5,
+            ),
+        ]
+        ui, _, _ = await _render(events)
+        rich = ui.rich()
+        assert len(rich) == 2, rich
+        # with no output the result is a single "no output" line
+        result_msg = [r for r in rich if r.lstrip().startswith("+")][0]
+        assert result_msg.strip() == "+ Stateful Python executor: no output", result_msg
+
+    async def test_failure_surfaces_error(self):
+        events = [
+            WorkflowEvent.tool_call("sandbox_execute", {"code": "boom()"}),
+            WorkflowEvent.tool_result(
+                "sandbox_execute",
+                {"success": False, "error": "NameError: boom", "stdout": ""},
+                success=False,
+            ),
+        ]
+        ui, _, _ = await _render(events)
+        rich = ui.rich()
+        assert any("NameError: boom" in r for r in rich), rich
+
+    async def test_non_sandbox_tool_call_emits_no_code_block(self):
+        """The code-block behavior is scoped to sandbox_execute; a normal tool
+        call still renders exactly one rich call (its result summary)."""
+        events = [
+            WorkflowEvent.tool_call("read_file", {"path": "/tmp/x"}),
+            WorkflowEvent.tool_result(
+                "read_file", {"success": True, "content": "hi", "path": "/tmp/x", "size": 2},
+                success=True,
+            ),
+        ]
+        ui, _, _ = await _render(events)
+        assert len(ui.rich()) == 1, ui.rich()
