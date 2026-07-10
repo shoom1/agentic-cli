@@ -1,9 +1,9 @@
 ---
-name: report_writer
+name: report-writer
 description: Write and compile a LaTeX analysis report to PDF from figures and tables already produced in the run's artifacts directory. Use when the user wants a written or PDF report of a completed analysis.
 ---
 
-# report_writer
+# report-writer
 
 Produce a compiled PDF analysis report with LaTeX. You author a `.tex` file and
 compile it with the `compile_document` tool. You do NOT run arbitrary code.
@@ -31,7 +31,7 @@ Write these sections, in order:
 
 ## Authoring
 
-1. Load the template: `load_skill_resource("report_writer", "assets/report_template.tex")`.
+1. Load the template: `load_skill_resource("report-writer", "assets/report_template.tex")`.
 2. Fill the placeholders (title, author/date, section prose, figure includes, table rows).
 3. Escape LaTeX specials in prose: `%  &  _  #  $  {  }` → `\%  \&  \_  \#  \$  \{  \}`.
 4. `write_file` the filled source to the build directory as `report.tex`.
