@@ -1,13 +1,16 @@
 """Agent configuration for the Research Demo application.
 
-Multi-agent architecture with three agents:
+Multi-agent architecture with four agents:
 - research_coordinator: Root agent that owns workflow state (planning, tasks, HITL)
-  and delegates to the arXiv specialist and data analyst.
+  and delegates to the arXiv specialist, data analyst, and report writer.
 - arxiv_specialist: Leaf agent focused on arXiv paper search, analysis, and ingestion.
 - data_analyst: Leaf agent that runs multi-step data analysis in a stateful executor.
+- report_writer: Leaf agent that turns analysis artifacts into a compiled LaTeX PDF.
 
 Uses framework-provided tools exclusively — no app-specific tools needed.
 """
+
+from pathlib import Path
 
 from agentic_cli.workflow import AgentConfig
 from agentic_cli.tools import (
@@ -26,6 +29,7 @@ from agentic_cli.tools import (
     diff_compare,
     grep,
     glob,
+    compile_document,
 )
 from agentic_cli.tools.sandbox import sandbox_execute
 
@@ -126,6 +130,40 @@ Report what you found with concrete numbers, and name the files you wrote to `ou
 
 
 # ---------------------------------------------------------------------------
+# Report Writer (leaf agent)
+# ---------------------------------------------------------------------------
+
+def report_writer_prompt() -> str:
+    """Build the prompt from the *active* settings, so the artifacts/build paths
+    follow whatever workspace is configured (default ~/.research_demo, a tmp dir
+    under test, or a user override) instead of a hard-coded path. AgentConfig
+    calls this (get_prompt()) at agent-assembly time, when settings are set."""
+    from agentic_cli.config import get_settings
+
+    settings = get_settings()
+    artifacts_dir = str(
+        settings.sandbox_outputs_dir or (Path(settings.workspace_dir) / "artifacts")
+    )
+    reports_dir = str(Path(settings.workspace_dir) / "reports")
+    return f"""You are a report writer. You turn a completed data analysis into a compiled PDF report using LaTeX.
+
+## Where things are
+- Analysis deliverables (figures as .png, tables as .csv) are in the artifacts directory: {artifacts_dir}
+- Author your LaTeX source in the build directory: {reports_dir}
+- Deliver the final PDF to: {artifacts_dir}/report.pdf
+
+## How to work
+You have a `report-writer` skill — call `load_skill("report-writer")` for the report structure, the LaTeX template, the compile steps, and the error-recovery guide. In short:
+1. `glob("{artifacts_dir}/*.png")` to learn the exact figure filenames.
+2. Load the template, fill it in, and `write_file` it to {reports_dir}/report.tex (reference figures by BARE filename).
+3. Compile with `compile_document(source_path="{reports_dir}/report.tex", output_pdf="{artifacts_dir}/report.pdf", assets_dir="{artifacts_dir}")`.
+4. If it fails, read the returned errors/log_tail, fix the .tex, and recompile (at most 3 tries).
+
+Report the final PDF path to the user. You only use these tools — you do not run arbitrary code.
+"""
+
+
+# ---------------------------------------------------------------------------
 # Research Coordinator (root agent)
 # ---------------------------------------------------------------------------
 
@@ -178,6 +216,7 @@ When the user asks you to research something:
 7. **WAIT for user confirmation** before executing tasks.
 8. For arXiv paper research, **delegate to arxiv_specialist** (it has KB writer access and writes concept pages when 3+ related papers accumulate).
 - For multi-step data analysis (datasets, DataFrames, plots), delegate to **data_analyst**. Use `execute_python` only for quick one-off calculations.
+- To produce a written/PDF **report** of a completed analysis, delegate to **report_writer** (it compiles a LaTeX report from the analysis artifacts).
 9. Execute ONE task at a time, updating the plan after each.
 10. Use `web_fetch` to extract information from specific URLs found during research.
 11. Use `execute_python` for quick calculations and data validation.
@@ -248,6 +287,15 @@ AGENT_CONFIGS = [
         tools=[sandbox_execute, read_file, write_file, ask_clarification],
         description="Stateful data-analysis specialist: loads datasets and runs multi-step pandas/plotting analysis in an isolated executor.",
     ),
+    # Leaf agent: report writer (must be listed before coordinator)
+    AgentConfig(
+        name="report_writer",
+        prompt=report_writer_prompt,
+        include_state_tools=False,
+        tools=[write_file, read_file, glob, compile_document, ask_clarification],
+        skills=["report-writer"],
+        description="Report writer: turns the analysis figures/tables in the artifacts dir into a compiled LaTeX PDF report.",
+    ),
     # Root agent: research coordinator (owns workflow state, delegates arXiv work)
     AgentConfig(
         name="research_coordinator",
@@ -273,7 +321,7 @@ AGENT_CONFIGS = [
             grep,
             diff_compare,
         ],
-        sub_agents=["arxiv_specialist", "data_analyst"],
+        sub_agents=["arxiv_specialist", "data_analyst", "report_writer"],
         description="Research coordinator with memory, planning, task management, knowledge base, and HITL capabilities",
     ),
 ]

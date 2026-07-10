@@ -50,6 +50,7 @@ from agentic_cli.tools.arxiv_tools import (
     fetch_arxiv_paper,
 )
 from agentic_cli.tools.execution_tools import execute_python
+from agentic_cli.tools.document import compile_document
 from agentic_cli.tools.interaction_tools import ask_clarification
 
 # Long-running job tools (generic observe-only management). Typed long-running
@@ -126,6 +127,7 @@ __all__ = [
     "search_arxiv",
     "fetch_arxiv_paper",
     "execute_python",
+    "compile_document",
     "ask_clarification",
     # Long-running jobs (observe-only; typed starters are app-provided)
     "job_status",
