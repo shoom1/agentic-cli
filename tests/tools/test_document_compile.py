@@ -106,3 +106,52 @@ def test_timeout_returns_structured_failure(monkeypatch, tmp_path):
     monkeypatch.setattr(mod, "_run", fake_run)
     r = compile_document(str(tex), timeout_s=1)
     assert r["success"] is False and "timed out" in r["error"]
+
+
+# --- Fix wave 1 tests ---
+
+def test_run_raises_file_not_found_returns_structured_error(monkeypatch, tmp_path):
+    """Finding 1: _run raising FileNotFoundError must not propagate; must return failure dict."""
+    _fake_engine(monkeypatch)
+    tex = tmp_path / "r.tex"; tex.write_text("x")
+
+    def fake_run(argv, *, cwd, env, timeout):
+        raise FileNotFoundError("latexmk: not found")
+
+    monkeypatch.setattr(mod, "_run", fake_run)
+    r = compile_document(str(tex))
+    assert r["success"] is False
+    assert r["error"] is not None and len(r["error"]) > 0
+    assert r["engine"] == "latexmk"
+    assert r["pdf_path"] is None
+    assert "duration_ms" in r
+
+
+def test_pdf_copy_oserror_returns_structured_error(monkeypatch, tmp_path):
+    """Finding 2: OSError during PDF delivery must not propagate; must return failure dict."""
+    _fake_engine(monkeypatch)
+    tex = tmp_path / "r.tex"; tex.write_text("x")
+    out = tmp_path / "deliver" / "report.pdf"
+
+    def fake_run(argv, *, cwd, env, timeout):
+        (Path(cwd) / "r.pdf").write_bytes(b"%PDF-1.5 fake")
+        (Path(cwd) / "r.log").write_text("output written on r.pdf")
+        return subprocess.CompletedProcess(argv, 0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(mod, "_run", fake_run)
+    monkeypatch.setattr(mod.shutil, "copy2", lambda src, dst: (_ for _ in ()).throw(OSError("disk full")))
+
+    r = compile_document(str(tex), output_pdf=str(out))
+    assert r["success"] is False
+    assert "deliver" in r["error"].lower() or str(out) in r["error"]
+    assert r["pdf_path"] is not None   # PDF still exists in build dir
+    assert "duration_ms" in r
+
+
+def test_forced_unsupported_engine_rejected(monkeypatch, tmp_path):
+    """Finding 3: forcing engine='xelatex' (not in _ENGINES) must be rejected → No LaTeX engine error."""
+    monkeypatch.setattr(mod, "_which", lambda n: f"/usr/bin/{n}" if n == "xelatex" else None)
+    tex = tmp_path / "r.tex"; tex.write_text("x")
+    r = compile_document(str(tex), engine="xelatex")
+    assert r["success"] is False
+    assert "No LaTeX engine" in r["error"]

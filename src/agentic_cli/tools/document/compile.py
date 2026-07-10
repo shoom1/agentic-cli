@@ -47,7 +47,7 @@ def _run(
 def _detect_engine(engine: str | None) -> str | None:
     """Return the engine to use, or None if unavailable."""
     if engine is not None:
-        return engine if _which(engine) else None
+        return engine if (engine in _ENGINES and _which(engine)) else None
     for candidate in _ENGINES:
         if _which(candidate):
             return candidate
@@ -139,6 +139,12 @@ def compile_document(
             "pdf_path": None, "engine": chosen, "log_tail": "", "errors": [],
             "duration_ms": int((time.monotonic() - start) * 1000),
         }
+    except (FileNotFoundError, OSError) as exc:
+        return {
+            "success": False, "error": f"Failed to run {chosen}: {exc}",
+            "pdf_path": None, "engine": chosen, "log_tail": "", "errors": [],
+            "duration_ms": int((time.monotonic() - start) * 1000),
+        }
     duration_ms = int((time.monotonic() - start) * 1000)
 
     log_path = work_dir / (src.stem + ".log")
@@ -160,8 +166,16 @@ def compile_document(
     final = produced
     if output_pdf:
         dest = Path(output_pdf)
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(produced, dest)
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(produced, dest)
+        except OSError as exc:
+            return {
+                "success": False,
+                "error": f"Failed to deliver PDF to {output_pdf}: {exc}",
+                "pdf_path": str(produced), "engine": chosen,
+                "log_tail": log_tail, "errors": [], "duration_ms": duration_ms,
+            }
         final = dest
 
     return {
