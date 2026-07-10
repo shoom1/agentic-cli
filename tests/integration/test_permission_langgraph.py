@@ -88,7 +88,10 @@ class TestWrapToolForPermissionUnit:
         assert result == {"success": False, "error": "Permission denied: rule: builtin/deny"}
 
     @pytest.mark.asyncio
-    async def test_engine_absent_allows(self, monkeypatch):
+    async def test_engine_absent_denies_when_permissions_enabled(self, monkeypatch):
+        """Fail closed: permissions on but no engine wired -> deny, not run."""
+        from types import SimpleNamespace
+
         from agentic_cli.tools.registry import get_registry
         from agentic_cli.workflow.langgraph.permission_wrap import wrap_tool_for_permission
 
@@ -96,15 +99,48 @@ class TestWrapToolForPermissionUnit:
             "agentic_cli.workflow.langgraph.permission_wrap.get_service",
             lambda k: None,
         )
+        monkeypatch.setattr(
+            "agentic_cli.config.get_settings",
+            lambda: SimpleNamespace(permissions_enabled=True),
+        )
         reg = get_registry()
 
         @reg.register(
-            name="read_lg2",
+            name="read_lg_deny",
             capabilities=[Capability("filesystem.read", target_arg="path")],
         )
-        def read_lg2(path: str):
+        def read_lg_deny(path: str):
             return {"ok": True}
 
-        wrapped = wrap_tool_for_permission(read_lg2)
+        wrapped = wrap_tool_for_permission(read_lg_deny)
+        result = await wrapped(path="/x")
+        assert result["success"] is False
+
+    @pytest.mark.asyncio
+    async def test_engine_absent_allows_when_permissions_disabled(self, monkeypatch):
+        """Permissions off is the only case a missing engine runs the tool."""
+        from types import SimpleNamespace
+
+        from agentic_cli.tools.registry import get_registry
+        from agentic_cli.workflow.langgraph.permission_wrap import wrap_tool_for_permission
+
+        monkeypatch.setattr(
+            "agentic_cli.workflow.langgraph.permission_wrap.get_service",
+            lambda k: None,
+        )
+        monkeypatch.setattr(
+            "agentic_cli.config.get_settings",
+            lambda: SimpleNamespace(permissions_enabled=False),
+        )
+        reg = get_registry()
+
+        @reg.register(
+            name="read_lg_allow",
+            capabilities=[Capability("filesystem.read", target_arg="path")],
+        )
+        def read_lg_allow(path: str):
+            return {"ok": True}
+
+        wrapped = wrap_tool_for_permission(read_lg_allow)
         result = await wrapped(path="/x")
         assert result == {"ok": True}

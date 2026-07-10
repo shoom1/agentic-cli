@@ -4,7 +4,8 @@
 Adapter check order matches ADK's PermissionPlugin:
 1. EXEMPT tool → returned unwrapped (no engine call ever).
 2. Tool has no capability declaration → wrapper returns deny dict at call time.
-3. Engine absent from service registry → wrapper runs the original tool (fallback).
+3. Engine absent from service registry → fail closed (deny) when permissions
+   are enabled; run the tool only when permissions are disabled.
 4. Otherwise call engine.check(); return on allow, deny dict on deny.
 """
 
@@ -47,7 +48,19 @@ def wrap_tool_for_permission(tool: Callable[..., Any]) -> Callable[..., Any]:
                 "error": "Permission denied: tool has no capability declaration",
             }
         engine = get_service(PERMISSION_ENGINE)
-        if engine is not None:
+        if engine is None:
+            # Fail closed: permissions on but no engine wired is a
+            # misconfiguration (base_manager always builds one) — deny rather
+            # than run ungated. Only permissions-disabled falls through to run.
+            from agentic_cli.config import get_settings
+
+            if get_settings().permissions_enabled:
+                logger.warning("permission_engine_missing", tool=name)
+                return {
+                    "success": False,
+                    "error": "Permission denied: permission engine unavailable",
+                }
+        else:
             result = await engine.check(name, caps, kwargs)
             if not result.allowed:
                 return {"success": False, "error": f"Permission denied: {result.reason}"}

@@ -91,8 +91,31 @@ class TestMCPPermissions:
         res = await _check(eng, _MCPTool("notion_search"))
         assert res is not None and res["success"] is False
 
-    async def test_engine_absent_allows(self, tmp_path):
-        # No engine in the registry -> test/dev fallback allows.
+    async def test_engine_absent_denies_when_permissions_enabled(self, tmp_path, monkeypatch):
+        # No engine but permissions enabled -> fail closed (deny), not allow.
+        from types import SimpleNamespace
+
+        monkeypatch.setattr(
+            "agentic_cli.config.get_settings",
+            lambda: SimpleNamespace(permissions_enabled=True),
+        )
+        token = set_service_registry({})
+        try:
+            res = await PermissionPlugin().before_tool_callback(
+                tool=_MCPTool("notion_search"), tool_args={}, tool_context=None
+            )
+        finally:
+            token.var.reset(token)
+        assert res is not None and res["success"] is False
+
+    async def test_engine_absent_allows_when_permissions_disabled(self, tmp_path, monkeypatch):
+        # Permissions off is the only case a missing engine allows.
+        from types import SimpleNamespace
+
+        monkeypatch.setattr(
+            "agentic_cli.config.get_settings",
+            lambda: SimpleNamespace(permissions_enabled=False),
+        )
         token = set_service_registry({})
         try:
             res = await PermissionPlugin().before_tool_callback(
