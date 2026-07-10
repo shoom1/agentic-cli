@@ -47,3 +47,7 @@ class ResearchDemoSettings(BaseSettings):
             object.__setattr__(self, "sandbox_data_mounts", [f"{data_dir}:samples"])
         if "sandbox_outputs_dir" not in self.model_fields_set:
             object.__setattr__(self, "sandbox_outputs_dir", str(Path(self.workspace_dir) / "artifacts"))
+        if "skills_dirs" not in self.model_fields_set:
+            object.__setattr__(
+                self, "skills_dirs", [str(Path(__file__).parent / "skills")]
+            )
