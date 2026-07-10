@@ -153,7 +153,7 @@ def report_writer_prompt() -> str:
 - Deliver the final PDF to: {artifacts_dir}/report.pdf
 
 ## How to work
-You have a `report_writer` skill — call `load_skill("report-writer")` for the report structure, the LaTeX template, the compile steps, and the error-recovery guide. In short:
+You have a `report-writer` skill — call `load_skill("report-writer")` for the report structure, the LaTeX template, the compile steps, and the error-recovery guide. In short:
 1. `glob("{artifacts_dir}/*.png")` to learn the exact figure filenames.
 2. Load the template, fill it in, and `write_file` it to {reports_dir}/report.tex (reference figures by BARE filename).
 3. Compile with `compile_document(source_path="{reports_dir}/report.tex", output_pdf="{artifacts_dir}/report.pdf", assets_dir="{artifacts_dir}")`.

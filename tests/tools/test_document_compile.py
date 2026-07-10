@@ -155,3 +155,37 @@ def test_forced_unsupported_engine_rejected(monkeypatch, tmp_path):
     r = compile_document(str(tex), engine="xelatex")
     assert r["success"] is False
     assert "No LaTeX engine" in r["error"]
+
+
+# --- Fix wave — final review (I1/I2/M1/M2/M3) ---
+
+def test_run_group_kill_on_timeout(monkeypatch):
+    """I1: _run must start a new session and kill the process group on timeout."""
+    import subprocess as _subprocess
+
+    popen_kwargs: dict = {}
+    killpg_calls: list = []
+
+    class FakePopen:
+        pid = 42
+
+        def __init__(self, argv, **kwargs):
+            popen_kwargs.update(kwargs)
+
+        def communicate(self, timeout=None):
+            if timeout is not None:
+                raise _subprocess.TimeoutExpired([], timeout)
+            # reap call after kill
+            return ("", "")
+
+    monkeypatch.setattr(mod.subprocess, "Popen", FakePopen)
+    monkeypatch.setattr(mod.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(mod.os, "killpg", lambda pgid, sig: killpg_calls.append((pgid, sig)))
+
+    try:
+        mod._run(["latexmk"], cwd="/tmp", env={}, timeout=1.0)
+    except _subprocess.TimeoutExpired:
+        pass  # expected
+
+    assert popen_kwargs.get("start_new_session") is True, "Popen must use start_new_session=True"
+    assert len(killpg_calls) >= 1, "os.killpg must be called on timeout"

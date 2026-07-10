@@ -1,10 +1,16 @@
 """Compile a LaTeX document to PDF with a host TeX engine.
 
 ``compile_document`` is a narrow, permission-gated tool: it runs ``latexmk``
-(preferred) or ``pdflatex`` as a guarded subprocess — no shell-escape, a
-wall-clock timeout, and a scoped working dir — and returns a structured result.
-It does NOT execute arbitrary code; a ``report_writer``-style agent uses it to
-turn an authored ``.tex`` into a PDF.
+(preferred) or ``pdflatex`` as a guarded subprocess — shell-escape is disabled
+for the **pdflatex** path (``-no-shell-escape`` flag).  For ``latexmk``, the
+engine relies on its default restricted mode; note that ``latexmk`` also reads
+``.latexmkrc`` (arbitrary Perl) from the build directory and home directory, so
+callers with an untrusted ``.tex``/build directory should prefer ``pdflatex``.
+OS-sandbox confinement for the general case is deferred.
+
+The tool runs with a wall-clock timeout and a scoped working dir, and returns a
+structured result.  It does NOT execute arbitrary code; a ``report_writer``-style
+agent uses it to turn an authored ``.tex`` into a PDF.
 
 Provisioning is host-based: the engine must be on ``PATH`` (TeX Live / MacTeX).
 If neither is found the tool returns a structured error with an install hint.
@@ -18,6 +24,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import signal
 import subprocess
 import time
 from pathlib import Path
@@ -38,10 +45,21 @@ def _which(name: str) -> str | None:
 def _run(
     argv: list[str], *, cwd: str, env: dict[str, str], timeout: float
 ) -> subprocess.CompletedProcess:
-    """Run a subprocess capturing output (seam for tests)."""
-    return subprocess.run(
-        argv, cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout
+    """Run a subprocess in its own process group so a timeout kills the whole
+    tree (latexmk + its pdflatex grandchild), not just the direct child. Seam
+    for tests. POSIX (macOS/Linux), which is what the framework targets."""
+    proc = subprocess.Popen(
+        argv, cwd=cwd, env=env,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        start_new_session=True,
     )
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        proc.communicate()  # reap the killed group
+        raise
+    return subprocess.CompletedProcess(argv, proc.returncode, stdout=out, stderr=err)
 
 
 def _detect_engine(engine: str | None) -> str | None:
@@ -74,8 +92,10 @@ def _parse_errors(log_text: str) -> list[str]:
     capabilities=[Capability("document.compile", target_arg="source_path")],
     description=(
         "Compile a LaTeX source file to PDF using a host TeX engine (latexmk or "
-        "pdflatex), with shell-escape disabled. Returns the PDF path plus any "
-        "compiler errors. Requires TeX Live/MacTeX on PATH."
+        "pdflatex). Shell-escape is disabled for pdflatex (-no-shell-escape); "
+        "latexmk uses its default restricted mode but also reads .latexmkrc from "
+        "the build/home directory. Returns the PDF path plus any compiler errors. "
+        "Requires TeX Live/MacTeX on PATH."
     ),
 )
 def compile_document(
@@ -139,7 +159,7 @@ def compile_document(
             "pdf_path": None, "engine": chosen, "log_tail": "", "errors": [],
             "duration_ms": int((time.monotonic() - start) * 1000),
         }
-    except (FileNotFoundError, OSError) as exc:
+    except OSError as exc:
         return {
             "success": False, "error": f"Failed to run {chosen}: {exc}",
             "pdf_path": None, "engine": chosen, "log_tail": "", "errors": [],
@@ -148,10 +168,10 @@ def compile_document(
     duration_ms = int((time.monotonic() - start) * 1000)
 
     log_path = work_dir / (src.stem + ".log")
-    log_text = (
-        log_path.read_text(errors="replace") if log_path.is_file()
-        else (proc.stdout or "")
-    )
+    try:
+        log_text = log_path.read_text(errors="replace") if log_path.is_file() else (proc.stdout or "")
+    except OSError:
+        log_text = proc.stdout or ""
     log_tail = "\n".join(log_text.splitlines()[-_LOG_TAIL_LINES:])
     produced = work_dir / (src.stem + ".pdf")
     success = proc.returncode == 0 and produced.is_file()
