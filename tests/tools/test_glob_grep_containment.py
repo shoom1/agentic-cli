@@ -6,6 +6,9 @@ outside the granted directory. These tests pin the containment behavior.
 """
 from __future__ import annotations
 
+import json
+import subprocess
+
 import agentic_cli.tools.grep_tool as grep_mod
 from agentic_cli.tools.glob_tool import glob
 from agentic_cli.tools.grep_tool import grep
@@ -95,3 +98,52 @@ def test_grep_python_skips_symlink_escaping_root(tmp_path, monkeypatch):
     # even though its own path name doesn't contain "secret".
     assert not any("link.txt" in f for f in files)
     assert any("real.txt" in f for f in files)
+
+
+def test_grep_ripgrep_filters_outside_root(tmp_path, monkeypatch):
+    """The ripgrep path (used when rg is installed) must apply the same
+    containment as the Python fallback — a followed symlink that rg reports
+    with an outside-root path must be dropped."""
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "real.txt").write_text("needle here")
+    monkeypatch.setattr(grep_mod, "_ripgrep_available", lambda: True)
+
+    outside = tmp_path / "outside" / "secret.txt"
+    inside = root / "real.txt"
+
+    def fake_run(cmd, **kwargs):
+        lines = [
+            json.dumps({"type": "match", "data": {
+                "path": {"text": str(outside)}, "line_number": 1,
+                "lines": {"text": "needle SECRET\n"}}}),
+            json.dumps({"type": "match", "data": {
+                "path": {"text": str(inside)}, "line_number": 1,
+                "lines": {"text": "needle here\n"}}}),
+        ]
+        return subprocess.CompletedProcess(cmd, 0, stdout="\n".join(lines), stderr="")
+
+    monkeypatch.setattr(grep_mod.subprocess, "run", fake_run)
+    r = grep(pattern="needle", path=str(root))
+    files = {m["file"] for m in r["matches"]}
+    assert any("real.txt" in f for f in files)
+    assert not any("secret.txt" in f for f in files)
+
+
+def test_grep_ripgrep_scrubs_config_path_env(tmp_path, monkeypatch):
+    """A host RIPGREP_CONFIG_PATH could inject --follow (defeating containment);
+    it must not be inherited by the rg subprocess."""
+    root = tmp_path / "root"
+    root.mkdir()
+    monkeypatch.setenv("RIPGREP_CONFIG_PATH", "/home/user/.rgrc")
+    monkeypatch.setattr(grep_mod, "_ripgrep_available", lambda: True)
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["env"] = kwargs.get("env")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(grep_mod.subprocess, "run", fake_run)
+    grep(pattern="x", path=str(root))
+    assert captured["env"] is not None
+    assert "RIPGREP_CONFIG_PATH" not in captured["env"]

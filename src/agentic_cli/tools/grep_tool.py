@@ -5,6 +5,7 @@ Provides pattern-based content search across files:
 """
 
 import functools
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -158,12 +159,17 @@ def _grep_with_ripgrep(
     cmd.append("--")
     cmd.append(str(path))
 
+    # Drop RIPGREP_CONFIG_PATH so a host config can't inject flags (e.g.
+    # --follow, which would make rg traverse symlinks out of the authorized
+    # root). Containment below is the backstop; this removes the vector.
+    rg_env = {k: v for k, v in os.environ.items() if k != "RIPGREP_CONFIG_PATH"}
     try:
         result = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
             timeout=30,
+            env=rg_env,
         )
     except subprocess.TimeoutExpired:
         return {
@@ -207,6 +213,14 @@ def _grep_with_ripgrep(
         if data.get("type") == "match":
             match_data = data.get("data", {})
             file_path = match_data.get("path", {}).get("text", "")
+            # Drop files resolving outside the authorized root (e.g. a symlink
+            # rg followed) — parity with the Python fallback's containment. rg
+            # may report a path relative to the search root, so resolve it there.
+            if file_path:
+                fp = Path(file_path)
+                abs_fp = fp if fp.is_absolute() else (path / fp)
+                if not path_is_within(abs_fp, path):
+                    continue
             files_searched.add(file_path)
             file_counts[file_path] = file_counts.get(file_path, 0) + 1
             total_matches += 1
