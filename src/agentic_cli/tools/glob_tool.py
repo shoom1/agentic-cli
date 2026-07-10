@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
+from agentic_cli.file_utils import glob_pattern_escapes_root, path_is_within
 from agentic_cli.tools.registry import (
     ToolCategory,
     register_tool,
@@ -72,12 +73,26 @@ def glob(
             "path": str(search_path),
         }
 
+    # The permission engine authorizes only `path`; a pattern like "../*" or an
+    # absolute pattern would escape that authorized root, so reject it.
+    if glob_pattern_escapes_root(pattern):
+        return {
+            "success": False,
+            "error": f"Pattern escapes the search root: {pattern!r}",
+            "path": str(search_path),
+        }
+
     # Find matching files
     matches = list(search_path.glob(pattern))
 
     # Filter results
     filtered = []
     for match in matches:
+        # Drop anything resolving outside the authorized root (e.g. a symlink
+        # inside `path` that points elsewhere) — defense in depth.
+        if not path_is_within(match, search_path):
+            continue
+
         # Skip hidden files if not requested
         if not include_hidden and match.name.startswith("."):
             continue

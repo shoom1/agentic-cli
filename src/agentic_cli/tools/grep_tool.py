@@ -10,6 +10,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Literal
 
+from agentic_cli.file_utils import glob_pattern_escapes_root, path_is_within
 from agentic_cli.tools.registry import (
     ToolCategory,
     register_tool,
@@ -68,6 +69,18 @@ def grep(
             "success": False,
             "error": f"Path not found: {path}",
             "path": str(search_path),
+        }
+
+    # The permission engine authorizes only `path`; a file_pattern like "../*"
+    # or an absolute pattern would escape that authorized root, so reject it.
+    if file_pattern and glob_pattern_escapes_root(file_pattern):
+        return {
+            "success": False,
+            "error": f"File pattern escapes the search root: {file_pattern!r}",
+            "matches": [],
+            "total_matches": 0,
+            "files_searched": 0,
+            "truncated": False,
         }
 
     # Try to use ripgrep if available (faster, respects .gitignore)
@@ -274,6 +287,11 @@ def _grep_python(
 
     for file_path in files:
         if not file_path.is_file():
+            continue
+
+        # Skip files resolving outside the authorized root (e.g. a symlink
+        # under `path` pointing elsewhere) — defense in depth.
+        if not path_is_within(file_path, path):
             continue
 
         try:
