@@ -49,6 +49,8 @@ _LOG_TAIL_LINES = 40
 _ENV_PASSTHROUGH = (
     "PATH", "HOME", "TERM", "TMPDIR", "TEMP", "TMP",
     "LANG", "LC_ALL", "LC_CTYPE", "SOURCE_DATE_EPOCH",
+    # latexmk is a Perl program; without its module path it can fail to load.
+    "PERL5LIB", "PERLLIB",
 )
 
 
@@ -80,6 +82,11 @@ def _deliver_no_follow(produced: Path, dest: Path) -> None:
     it over dest. ``os.replace`` swaps the destination *name*: if dest is a
     symlink the link itself is replaced (not written through), so an
     attacker-placed symlink can't redirect the write outside the intended path.
+
+    This protects only the final path component. A symlinked ``dest.parent``
+    (or an ancestor) still redirects the write; the permission engine
+    canonicalizes ``output_pdf`` at check time, but a check→write window
+    remains. Full parent containment is deferred (spec §9, OS-sandbox).
     """
     dest.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(
@@ -91,6 +98,9 @@ def _deliver_no_follow(produced: Path, dest: Path) -> None:
             shutil.copyfileobj(src, out)
             out.flush()
             os.fsync(out.fileno())
+        # Match the produced PDF's mode/mtime (mkstemp is 0600) so the delivered
+        # file has the readability a consumer expects, as the old copy2 did.
+        shutil.copystat(produced, tmp_path)
         os.replace(tmp_path, dest)
     except BaseException:
         tmp_path.unlink(missing_ok=True)

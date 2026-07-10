@@ -516,3 +516,15 @@ class TestOptionalCapability:
             {},
         )
         assert len(resolved) == 1
+
+    @pytest.mark.asyncio
+    async def test_check_allows_when_all_optional_caps_absent(self, ctx):
+        """All-optional caps with absent args resolve to [] — check() must not
+        crash (IndexError on outcomes[0]) and should allow (nothing to gate)."""
+        engine = self._engine(ctx)
+        result = await engine.check(
+            "some_tool",
+            [Capability("filesystem.write", target_arg="out", optional=True)],
+            {},
+        )
+        assert result.allowed is True

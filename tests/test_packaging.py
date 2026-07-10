@@ -1,6 +1,9 @@
-"""Packaging consistency: every eagerly-imported third-party module must be a
-declared dependency in pyproject.toml, so a clean ``pip install`` doesn't fail
-on first import (a package built from pyproject alone won't see environment.yml).
+"""Packaging consistency regression pins.
+
+A clean ``pip install`` uses only pyproject.toml (not environment.yml), so an
+eagerly-imported third-party module missing from ``[project.dependencies]``
+breaks on first import. This pins the specific modules that regressed; it is
+not an exhaustive import-vs-dependency audit.
 """
 from __future__ import annotations
 

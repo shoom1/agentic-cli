@@ -200,6 +200,7 @@ def test_env_is_allowlisted_not_full_environ(monkeypatch, tmp_path):
     _fake_engine(monkeypatch)
     monkeypatch.setenv("MY_SECRET_TOKEN", "sk-must-not-leak")
     monkeypatch.setenv("PATH", "/custom/bin")
+    monkeypatch.setenv("PERL5LIB", "/opt/perl/lib")  # latexmk (Perl) needs this
     tex = tmp_path / "r.tex"; tex.write_text("x")
     captured = {}
 
@@ -212,6 +213,7 @@ def test_env_is_allowlisted_not_full_environ(monkeypatch, tmp_path):
     compile_document(str(tex), assets_dir="/tmp/assets")
     assert "MY_SECRET_TOKEN" not in captured["env"]
     assert captured["env"]["PATH"] == "/custom/bin"
+    assert captured["env"]["PERL5LIB"] == "/opt/perl/lib"
     assert "/tmp/assets" in captured["env"]["TEXINPUTS"]
 
 
@@ -267,3 +269,25 @@ def test_env_passes_tex_config_but_not_texinputs(monkeypatch, tmp_path):
     assert captured["env"].get("TEXMFHOME") == "/home/user/texmf"
     assert "/evil/inputs" not in captured["env"]["TEXINPUTS"]
     assert "/tmp/assets" in captured["env"]["TEXINPUTS"]
+
+
+def test_delivery_preserves_readable_mode(monkeypatch, tmp_path):
+    """Delivered PDF keeps the produced file's mode (copystat), not the
+    mkstemp default 0600 — a report is not a secret and consumers expect it
+    readable."""
+    import os as _os
+
+    _fake_engine(monkeypatch)
+    tex = tmp_path / "r.tex"; tex.write_text("x")
+    out = tmp_path / "deliver" / "report.pdf"
+
+    def fake_run(argv, *, cwd, env, timeout):
+        p = Path(cwd) / "r.pdf"
+        p.write_bytes(b"%PDF")
+        _os.chmod(p, 0o644)
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(mod, "_run", fake_run)
+    r = compile_document(str(tex), output_pdf=str(out))
+    assert r["success"] is True
+    assert out.stat().st_mode & 0o044  # group/other readable, not 0600
