@@ -139,7 +139,8 @@ def test_pdf_copy_oserror_returns_structured_error(monkeypatch, tmp_path):
         return subprocess.CompletedProcess(argv, 0, stdout="ok", stderr="")
 
     monkeypatch.setattr(mod, "_run", fake_run)
-    monkeypatch.setattr(mod.shutil, "copy2", lambda src, dst: (_ for _ in ()).throw(OSError("disk full")))
+    # Delivery is a no-follow atomic write; force the atomic rename to fail.
+    monkeypatch.setattr(mod.os, "replace", lambda src, dst: (_ for _ in ()).throw(OSError("disk full")))
 
     r = compile_document(str(tex), output_pdf=str(out))
     assert r["success"] is False
@@ -189,3 +190,59 @@ def test_run_group_kill_on_timeout(monkeypatch):
 
     assert popen_kwargs.get("start_new_session") is True, "Popen must use start_new_session=True"
     assert len(killpg_calls) >= 1, "os.killpg must be called on timeout"
+
+
+# --- P0-3 hardening: env allowlist, no-follow delivery, capability scope ---
+
+def test_env_is_allowlisted_not_full_environ(monkeypatch, tmp_path):
+    """Env inheritance leak: the TeX process must not receive host secrets;
+    PATH is preserved and assets_dir still reaches TEXINPUTS."""
+    _fake_engine(monkeypatch)
+    monkeypatch.setenv("MY_SECRET_TOKEN", "sk-must-not-leak")
+    monkeypatch.setenv("PATH", "/custom/bin")
+    tex = tmp_path / "r.tex"; tex.write_text("x")
+    captured = {}
+
+    def fake_run(argv, *, cwd, env, timeout):
+        captured["env"] = env
+        (Path(cwd) / "r.pdf").write_bytes(b"%PDF")
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(mod, "_run", fake_run)
+    compile_document(str(tex), assets_dir="/tmp/assets")
+    assert "MY_SECRET_TOKEN" not in captured["env"]
+    assert captured["env"]["PATH"] == "/custom/bin"
+    assert "/tmp/assets" in captured["env"]["TEXINPUTS"]
+
+
+def test_delivery_does_not_follow_output_symlink(monkeypatch, tmp_path):
+    """output_pdf may be an attacker-placed symlink; delivery must not write
+    through it to the link target."""
+    _fake_engine(monkeypatch)
+    tex = tmp_path / "r.tex"; tex.write_text("x")
+    outside = tmp_path / "outside.pdf"; outside.write_bytes(b"ORIGINAL")
+    deliver = tmp_path / "deliver"; deliver.mkdir()
+    link = deliver / "report.pdf"; link.symlink_to(outside)
+
+    def fake_run(argv, *, cwd, env, timeout):
+        (Path(cwd) / "r.pdf").write_bytes(b"%PDF-NEW")
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(mod, "_run", fake_run)
+    r = compile_document(str(tex), output_pdf=str(link))
+    assert r["success"] is True
+    assert outside.read_bytes() == b"ORIGINAL"   # link target NOT overwritten
+    assert link.read_bytes() == b"%PDF-NEW"      # PDF delivered to the path
+    assert not link.is_symlink()                 # symlink replaced by a real file
+
+
+def test_capabilities_scope_assets_and_output():
+    """document.compile alone under-authorizes: reading assets_dir and writing
+    output_pdf need explicit (optional) filesystem capabilities."""
+    from agentic_cli.tools.registry import get_registry
+
+    defn = get_registry().get("compile_document")
+    caps = {(c.name, c.target_arg, c.optional) for c in defn.capabilities}
+    assert ("document.compile", "source_path", False) in caps
+    assert ("filesystem.read", "assets_dir", True) in caps
+    assert ("filesystem.write", "output_pdf", True) in caps

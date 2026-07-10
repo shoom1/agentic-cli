@@ -175,6 +175,10 @@ class PermissionEngine:
                 resolved.append(ResolvedCapability(cap.name, "*"))
                 continue
             value = args.get(cap.target_arg, "")
+            if cap.optional and (value is None or value == ""):
+                # Optional target not supplied → the side effect isn't performed
+                # this call, so don't resolve (and don't spuriously prompt) it.
+                continue
             matcher = get_matcher(cap.name)
             items = value if isinstance(value, (list, tuple)) else [value]
             for item in items:

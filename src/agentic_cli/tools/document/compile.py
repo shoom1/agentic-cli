@@ -12,6 +12,11 @@ The tool runs with a wall-clock timeout and a scoped working dir, and returns a
 structured result.  It does NOT execute arbitrary code; a ``report_writer``-style
 agent uses it to turn an authored ``.tex`` into a PDF.
 
+The subprocess receives only an allowlisted environment (``_ENV_PASSTHROUGH``),
+not the full host environment, so host secrets aren't handed to the TeX process.
+Delivery to ``output_pdf`` is a no-follow atomic write (temp file + ``os.replace``)
+so an attacker-placed symlink at the destination can't redirect the write.
+
 Provisioning is host-based: the engine must be on ``PATH`` (TeX Live / MacTeX).
 If neither is found the tool returns a structured error with an install hint.
 
@@ -26,6 +31,7 @@ import os
 import shutil
 import signal
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -35,6 +41,51 @@ from agentic_cli.workflow.permissions import Capability
 
 _ENGINES = ("latexmk", "pdflatex")
 _LOG_TAIL_LINES = 40
+
+# Only these host env vars reach the TeX process. The tool must not hand the
+# whole host environment (API keys, tokens) to a subprocess that — on the
+# latexmk path — can execute arbitrary Perl from a .latexmkrc. PATH/HOME are
+# needed for the engine binary and kpathsea; TEXINPUTS is set explicitly.
+_ENV_PASSTHROUGH = (
+    "PATH", "HOME", "TERM", "TMPDIR", "TEMP", "TMP",
+    "LANG", "LC_ALL", "LC_CTYPE", "SOURCE_DATE_EPOCH",
+)
+
+
+def _build_env(assets_dir: str | None) -> dict[str, str]:
+    """Minimal, allowlisted environment for the TeX subprocess."""
+    env = {k: os.environ[k] for k in _ENV_PASSTHROUGH if k in os.environ}
+    env.setdefault("PATH", os.defpath)
+    if assets_dir:
+        # Prepend assets_dir; the trailing empty entries let kpathsea append the
+        # default search path. A caller-inherited TEXINPUTS is intentionally
+        # dropped (not in the allowlist) so it can't redirect input resolution.
+        env["TEXINPUTS"] = f"{assets_dir}{os.pathsep}{os.pathsep}"
+    return env
+
+
+def _deliver_no_follow(produced: Path, dest: Path) -> None:
+    """Copy ``produced`` to ``dest`` without following a symlink at ``dest``.
+
+    Writes to a private temp file in dest's directory, then atomically renames
+    it over dest. ``os.replace`` swaps the destination *name*: if dest is a
+    symlink the link itself is replaced (not written through), so an
+    attacker-placed symlink can't redirect the write outside the intended path.
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(dest.parent), prefix=f".{dest.name}.", suffix=".tmp"
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as out, open(produced, "rb") as src:
+            shutil.copyfileobj(src, out)
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(tmp_path, dest)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
 
 
 def _which(name: str) -> str | None:
@@ -89,7 +140,13 @@ def _parse_errors(log_text: str) -> list[str]:
 
 @register_tool(
     category=ToolCategory.EXECUTION,
-    capabilities=[Capability("document.compile", target_arg="source_path")],
+    capabilities=[
+        Capability("document.compile", target_arg="source_path"),
+        # The tool also reads assets_dir and writes output_pdf when those are
+        # supplied; scope them explicitly (optional → not exercised when absent).
+        Capability("filesystem.read", target_arg="assets_dir", optional=True),
+        Capability("filesystem.write", target_arg="output_pdf", optional=True),
+    ],
     description=(
         "Compile a LaTeX source file to PDF using a host TeX engine (latexmk or "
         "pdflatex). Shell-escape is disabled for pdflatex (-no-shell-escape); "
@@ -143,11 +200,7 @@ def compile_document(
         }
 
     work_dir = src.parent
-    env = dict(os.environ)
-    if assets_dir:
-        prev = env.get("TEXINPUTS", "")
-        # Prepend assets_dir; trailing empty entry preserves the default path.
-        env["TEXINPUTS"] = f"{assets_dir}{os.pathsep}{prev}{os.pathsep}"
+    env = _build_env(assets_dir)
 
     argv = _build_argv(chosen, src.name)
     start = time.monotonic()
@@ -187,8 +240,7 @@ def compile_document(
     if output_pdf:
         dest = Path(output_pdf)
         try:
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(produced, dest)
+            _deliver_no_follow(produced, dest)
         except OSError as exc:
             return {
                 "success": False,

@@ -469,3 +469,50 @@ class TestTargetlessAllowAlwaysRegression:
         )
         assert result.allowed is True
         w2.request_user_input.assert_not_called()
+
+
+class TestOptionalCapability:
+    """A capability marked optional is only exercised when its target arg is
+    supplied — so a tool with an optional output/asset path doesn't prompt for a
+    write/read it isn't performing this call."""
+
+    def _engine(self, ctx):
+        return PermissionEngine(
+            settings=_stub_settings(), workflow=_stub_workflow(), ctx=ctx,
+        )
+
+    def test_optional_cap_skipped_when_arg_absent(self, ctx):
+        engine = self._engine(ctx)
+        resolved = engine._resolve(
+            [Capability("filesystem.write", target_arg="output_pdf", optional=True)],
+            {},  # output_pdf not supplied
+        )
+        assert resolved == []
+
+    def test_optional_cap_skipped_when_arg_empty(self, ctx):
+        engine = self._engine(ctx)
+        resolved = engine._resolve(
+            [Capability("filesystem.write", target_arg="output_pdf", optional=True)],
+            {"output_pdf": None},
+        )
+        assert resolved == []
+
+    def test_optional_cap_resolved_when_arg_present(self, ctx, tmp_path):
+        engine = self._engine(ctx)
+        target = str(tmp_path / "out.pdf")
+        resolved = engine._resolve(
+            [Capability("filesystem.write", target_arg="output_pdf", optional=True)],
+            {"output_pdf": target},
+        )
+        assert len(resolved) == 1
+        assert resolved[0].name == "filesystem.write"
+
+    def test_required_cap_still_resolves_when_arg_absent(self, ctx):
+        """Non-optional (default) behavior is unchanged: an absent target still
+        resolves (to be evaluated/asked), never silently skipped."""
+        engine = self._engine(ctx)
+        resolved = engine._resolve(
+            [Capability("filesystem.write", target_arg="path")],  # optional=False
+            {},
+        )
+        assert len(resolved) == 1

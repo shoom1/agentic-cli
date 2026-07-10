@@ -21,6 +21,11 @@ class Capability:
 
     name: str                         # e.g. "filesystem.read"
     target_arg: str | None = None     # arg name holding the target; None → target "*"
+    optional: bool = False            # when the target arg is absent/empty, skip
+    #                                   this capability (the side effect isn't
+    #                                   performed) instead of resolving it to a
+    #                                   spurious target. Only for genuinely
+    #                                   optional args (e.g. an output path).
 
 
 @dataclass(frozen=True)
