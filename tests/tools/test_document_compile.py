@@ -246,3 +246,24 @@ def test_capabilities_scope_assets_and_output():
     assert ("document.compile", "source_path", False) in caps
     assert ("filesystem.read", "assets_dir", True) in caps
     assert ("filesystem.write", "output_pdf", True) in caps
+
+
+def test_env_passes_tex_config_but_not_texinputs(monkeypatch, tmp_path):
+    """TeX's own TEX* config vars pass through (so a custom TEXMFHOME works),
+    but a caller-inherited TEXINPUTS is dropped in favor of our controlled one."""
+    _fake_engine(monkeypatch)
+    monkeypatch.setenv("TEXMFHOME", "/home/user/texmf")
+    monkeypatch.setenv("TEXINPUTS", "/evil/inputs")
+    tex = tmp_path / "r.tex"; tex.write_text("x")
+    captured = {}
+
+    def fake_run(argv, *, cwd, env, timeout):
+        captured["env"] = env
+        (Path(cwd) / "r.pdf").write_bytes(b"%PDF")
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(mod, "_run", fake_run)
+    compile_document(str(tex), assets_dir="/tmp/assets")
+    assert captured["env"].get("TEXMFHOME") == "/home/user/texmf"
+    assert "/evil/inputs" not in captured["env"]["TEXINPUTS"]
+    assert "/tmp/assets" in captured["env"]["TEXINPUTS"]

@@ -53,8 +53,17 @@ _ENV_PASSTHROUGH = (
 
 
 def _build_env(assets_dir: str | None) -> dict[str, str]:
-    """Minimal, allowlisted environment for the TeX subprocess."""
-    env = {k: os.environ[k] for k in _ENV_PASSTHROUGH if k in os.environ}
+    """Minimal, allowlisted environment for the TeX subprocess.
+
+    Passes PATH/HOME/locale plus TeX's own ``TEX*`` configuration variables
+    (so a custom ``TEXMFHOME`` etc. keeps working) — but not arbitrary host env,
+    and never the caller's ``TEXINPUTS`` (set explicitly below).
+    """
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if k in _ENV_PASSTHROUGH or (k.startswith("TEX") and k != "TEXINPUTS")
+    }
     env.setdefault("PATH", os.defpath)
     if assets_dir:
         # Prepend assets_dir; the trailing empty entries let kpathsea append the
