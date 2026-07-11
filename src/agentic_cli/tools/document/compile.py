@@ -46,6 +46,9 @@ _ENGINES = ("latexmk", "pdflatex")
 _LOG_TAIL_LINES = 40
 _LOG_TAIL_BYTES = 64 * 1024
 _MAX_CAPTURE_BYTES = 200_000
+# Cap the size of any single file the TeX child writes (bounds runaway-`.tex`
+# disk use, incl. the log/pdf/aux and our redirected stdout/stderr temp files).
+_RLIMIT_FSIZE_BYTES = 500 * 1024 * 1024
 
 # Only these host env vars reach the TeX process. The tool must not hand the
 # whole host environment (API keys, tokens) to a subprocess that — on the
@@ -140,19 +143,37 @@ def _which(name: str) -> str | None:
     return shutil.which(name)
 
 
+def _child_rlimits(cpu_seconds: int):
+    """Build a ``preexec_fn`` that caps the child's file size and CPU time, so a
+    runaway ``.tex`` can't fill the disk or burn CPU within the wall-clock
+    timeout. Best-effort (a platform without ``resource`` just skips it)."""
+    def _apply() -> None:  # runs in the forked child, before exec
+        try:
+            import resource
+            resource.setrlimit(
+                resource.RLIMIT_FSIZE, (_RLIMIT_FSIZE_BYTES, _RLIMIT_FSIZE_BYTES)
+            )
+            resource.setrlimit(resource.RLIMIT_CPU, (cpu_seconds, cpu_seconds))
+        except (ValueError, OSError, ImportError):
+            pass
+    return _apply
+
+
 def _run(
     argv: list[str], *, cwd: str, env: dict[str, str], timeout: float
 ) -> subprocess.CompletedProcess:
     """Run a subprocess in its own process group so a timeout kills the whole
     tree (latexmk + its pdflatex grandchild), not just the direct child.
     stdout/stderr are captured to temp files and only the last
-    _MAX_CAPTURE_BYTES of each are retained, bounding host memory. Seam for
-    tests. POSIX (macOS/Linux), which is what the framework targets."""
+    _MAX_CAPTURE_BYTES of each are retained, bounding host memory. The child
+    also runs under RLIMIT_FSIZE/RLIMIT_CPU limits. Seam for tests. POSIX
+    (macOS/Linux), which is what the framework targets."""
     with tempfile.TemporaryFile() as out_f, tempfile.TemporaryFile() as err_f:
         proc = subprocess.Popen(
             argv, cwd=cwd, env=env,
             stdout=out_f, stderr=err_f,
             start_new_session=True,
+            preexec_fn=_child_rlimits(int(timeout) + 30),
         )
         try:
             proc.wait(timeout=timeout)

@@ -465,3 +465,16 @@ def test_texinputs_roots_are_absolute_for_relative_source(monkeypatch, tmp_path)
     assert entries
     assert all(os.path.isabs(e) for e in entries)
     assert str((tmp_path / "assets").resolve()) in entries
+
+
+def test_run_limits_child_file_size(monkeypatch, tmp_path):
+    """A runaway child writing beyond RLIMIT_FSIZE is killed (SIGXFSZ), not
+    allowed to fill the disk."""
+    import os as _os
+    import sys as _sys
+
+    monkeypatch.setattr(mod, "_RLIMIT_FSIZE_BYTES", 4096)
+    argv = [_sys.executable, "-c", "open('big.bin','wb').write(b'x' * 1_000_000)"]
+    r = mod._run(argv, cwd=str(tmp_path), env={"PATH": _os.environ.get("PATH", "")}, timeout=30)
+    assert r.returncode != 0                              # killed by the file-size limit
+    assert (tmp_path / "big.bin").stat().st_size <= 4096 * 8   # capped, not 1MB
