@@ -161,8 +161,9 @@ def test_forced_unsupported_engine_rejected(monkeypatch, tmp_path):
 
 # --- Fix wave — final review (I1/I2/M1/M2/M3) ---
 
-def test_run_group_kill_on_timeout(monkeypatch):
-    """I1: _run must start a new session and kill the process group on timeout."""
+def test_run_group_kill_on_timeout(monkeypatch, tmp_path):
+    """I1 regression: _run starts a new session and kills the process group on
+    timeout (now via proc.wait, not communicate)."""
     import subprocess as _subprocess
 
     popen_kwargs: dict = {}
@@ -174,23 +175,33 @@ def test_run_group_kill_on_timeout(monkeypatch):
         def __init__(self, argv, **kwargs):
             popen_kwargs.update(kwargs)
 
-        def communicate(self, timeout=None):
+        def wait(self, timeout=None):
             if timeout is not None:
                 raise _subprocess.TimeoutExpired([], timeout)
-            # reap call after kill
-            return ("", "")
+            return 0
 
     monkeypatch.setattr(mod.subprocess, "Popen", FakePopen)
     monkeypatch.setattr(mod.os, "getpgid", lambda pid: pid)
     monkeypatch.setattr(mod.os, "killpg", lambda pgid, sig: killpg_calls.append((pgid, sig)))
 
     try:
-        mod._run(["latexmk"], cwd="/tmp", env={}, timeout=1.0)
+        mod._run(["latexmk"], cwd=str(tmp_path), env={}, timeout=1.0)
     except _subprocess.TimeoutExpired:
         pass  # expected
 
-    assert popen_kwargs.get("start_new_session") is True, "Popen must use start_new_session=True"
-    assert len(killpg_calls) >= 1, "os.killpg must be called on timeout"
+    assert popen_kwargs.get("start_new_session") is True
+    assert len(killpg_calls) >= 1
+
+
+def test_run_caps_captured_output(tmp_path):
+    import os as _os
+    import sys as _sys
+
+    argv = [_sys.executable, "-c", "print('x' * 1_000_000)"]
+    r = mod._run(argv, cwd=str(tmp_path), env={"PATH": _os.environ.get("PATH", "")}, timeout=30)
+    assert r.returncode == 0
+    assert len(r.stdout) <= mod._MAX_CAPTURE_CHARS + 8  # bounded (decode slack)
+    assert r.stdout.rstrip().endswith("x")               # tail retained
 
 
 # --- P0-3 hardening: env allowlist, no-follow delivery, capability scope ---

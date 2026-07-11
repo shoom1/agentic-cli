@@ -45,6 +45,7 @@ from agentic_cli.workflow.permissions import Capability
 _ENGINES = ("latexmk", "pdflatex")
 _LOG_TAIL_LINES = 40
 _LOG_TAIL_BYTES = 64 * 1024
+_MAX_CAPTURE_CHARS = 200_000
 
 # Only these host env vars reach the TeX process. The tool must not hand the
 # whole host environment (API keys, tokens) to a subprocess that — on the
@@ -131,19 +132,24 @@ def _run(
     argv: list[str], *, cwd: str, env: dict[str, str], timeout: float
 ) -> subprocess.CompletedProcess:
     """Run a subprocess in its own process group so a timeout kills the whole
-    tree (latexmk + its pdflatex grandchild), not just the direct child. Seam
-    for tests. POSIX (macOS/Linux), which is what the framework targets."""
-    proc = subprocess.Popen(
-        argv, cwd=cwd, env=env,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-        start_new_session=True,
-    )
-    try:
-        out, err = proc.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        proc.communicate()  # reap the killed group
-        raise
+    tree (latexmk + its pdflatex grandchild), not just the direct child.
+    stdout/stderr are captured to temp files and only the last
+    _MAX_CAPTURE_CHARS of each are retained, bounding host memory. Seam for
+    tests. POSIX (macOS/Linux), which is what the framework targets."""
+    with tempfile.TemporaryFile() as out_f, tempfile.TemporaryFile() as err_f:
+        proc = subprocess.Popen(
+            argv, cwd=cwd, env=env,
+            stdout=out_f, stderr=err_f,
+            start_new_session=True,
+        )
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            proc.wait()  # reap the killed group
+            raise
+        out = _tail_of_file(out_f, _MAX_CAPTURE_CHARS)
+        err = _tail_of_file(err_f, _MAX_CAPTURE_CHARS)
     return subprocess.CompletedProcess(argv, proc.returncode, stdout=out, stderr=err)
 
 
@@ -185,6 +191,13 @@ def _safe_source_arg(name: str) -> str:
 def _parse_errors(log_text: str) -> list[str]:
     """Extract LaTeX error lines (those beginning with '!') from a log."""
     return [ln for ln in log_text.splitlines() if ln.startswith("!")]
+
+
+def _tail_of_file(f, limit: int) -> str:
+    """Return the last ``limit`` bytes of an open binary temp file, decoded."""
+    size = f.seek(0, os.SEEK_END)
+    f.seek(max(0, size - limit))
+    return f.read().decode("utf-8", errors="replace")
 
 
 def _read_log_tail(log_path: Path, fallback: str) -> str:
