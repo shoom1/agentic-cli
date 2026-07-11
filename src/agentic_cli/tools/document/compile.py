@@ -45,7 +45,7 @@ from agentic_cli.workflow.permissions import Capability
 _ENGINES = ("latexmk", "pdflatex")
 _LOG_TAIL_LINES = 40
 _LOG_TAIL_BYTES = 64 * 1024
-_MAX_CAPTURE_CHARS = 200_000
+_MAX_CAPTURE_BYTES = 200_000
 
 # Only these host env vars reach the TeX process. The tool must not hand the
 # whole host environment (API keys, tokens) to a subprocess that — on the
@@ -134,7 +134,7 @@ def _run(
     """Run a subprocess in its own process group so a timeout kills the whole
     tree (latexmk + its pdflatex grandchild), not just the direct child.
     stdout/stderr are captured to temp files and only the last
-    _MAX_CAPTURE_CHARS of each are retained, bounding host memory. Seam for
+    _MAX_CAPTURE_BYTES of each are retained, bounding host memory. Seam for
     tests. POSIX (macOS/Linux), which is what the framework targets."""
     with tempfile.TemporaryFile() as out_f, tempfile.TemporaryFile() as err_f:
         proc = subprocess.Popen(
@@ -148,8 +148,8 @@ def _run(
             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
             proc.wait()  # reap the killed group
             raise
-        out = _tail_of_file(out_f, _MAX_CAPTURE_CHARS)
-        err = _tail_of_file(err_f, _MAX_CAPTURE_CHARS)
+        out = _tail_of_file(out_f, _MAX_CAPTURE_BYTES)
+        err = _tail_of_file(err_f, _MAX_CAPTURE_BYTES)
     return subprocess.CompletedProcess(argv, proc.returncode, stdout=out, stderr=err)
 
 

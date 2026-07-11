@@ -1,6 +1,7 @@
 """Offline tests for compile_document — subprocess and engine lookup faked."""
 from __future__ import annotations
 
+import signal
 import subprocess
 from pathlib import Path
 
@@ -191,6 +192,7 @@ def test_run_group_kill_on_timeout(monkeypatch, tmp_path):
 
     assert popen_kwargs.get("start_new_session") is True
     assert len(killpg_calls) >= 1
+    assert killpg_calls[0][1] == signal.SIGKILL
 
 
 def test_run_caps_captured_output(tmp_path):
@@ -200,8 +202,8 @@ def test_run_caps_captured_output(tmp_path):
     argv = [_sys.executable, "-c", "print('x' * 1_000_000)"]
     r = mod._run(argv, cwd=str(tmp_path), env={"PATH": _os.environ.get("PATH", "")}, timeout=30)
     assert r.returncode == 0
-    assert len(r.stdout) <= mod._MAX_CAPTURE_CHARS + 8  # bounded (decode slack)
-    assert r.stdout.rstrip().endswith("x")               # tail retained
+    assert len(r.stdout) <= mod._MAX_CAPTURE_BYTES + 1  # bounded (byte cap + trailing newline)
+    assert r.stdout.rstrip().endswith("x")              # tail retained
 
 
 # --- P0-3 hardening: env allowlist, no-follow delivery, capability scope ---
