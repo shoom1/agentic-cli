@@ -6,8 +6,10 @@ Provides pattern-based content search across files:
 
 import functools
 import os
-import re
+import signal
 import subprocess
+import tempfile
+import re
 from pathlib import Path
 from typing import Any, Literal
 
@@ -20,6 +22,7 @@ from agentic_cli.workflow.permissions import Capability
 
 _MAX_FILES = 10_000        # cap the number of files the Python fallback scans
 _MAX_FILE_BYTES = 5_000_000  # skip files larger than this (avoid reading whole huge files)
+_MAX_RG_OUTPUT_BYTES = 10_000_000  # cap ripgrep JSON we read into memory
 
 
 @register_tool(
@@ -166,23 +169,31 @@ def _grep_with_ripgrep(
     # --follow, which would make rg traverse symlinks out of the authorized
     # root). Containment below is the backstop; this removes the vector.
     rg_env = {k: v for k, v in os.environ.items() if k != "RIPGREP_CONFIG_PATH"}
+    # Capture rg output to a temp file and read back at most _MAX_RG_OUTPUT_BYTES
+    # so a large tree can't allocate unbounded JSON in host memory.
+    rg_truncated = False
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=30,
-            env=rg_env,
-        )
-    except subprocess.TimeoutExpired:
-        return {
-            "success": False,
-            "error": "Search timed out after 30 seconds",
-            "matches": [],
-            "total_matches": 0,
-            "files_searched": 0,
-            "truncated": False,
-        }
+        with tempfile.TemporaryFile(mode="w+b") as out_f:
+            proc = subprocess.Popen(
+                cmd, stdout=out_f, stderr=subprocess.DEVNULL,
+                env=rg_env, start_new_session=True,
+            )
+            try:
+                proc.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                proc.wait()
+                return {
+                    "success": False,
+                    "error": "Search timed out after 30 seconds",
+                    "matches": [],
+                    "total_matches": 0,
+                    "files_searched": 0,
+                    "truncated": False,
+                }
+            out_f.seek(0)
+            raw = out_f.read(_MAX_RG_OUTPUT_BYTES)
+            rg_truncated = bool(out_f.read(1))  # more output than the cap remained
     except FileNotFoundError:
         # Ripgrep not found, fall back to Python
         return _grep_python(
@@ -197,6 +208,8 @@ def _grep_with_ripgrep(
             output_mode=output_mode,
         )
 
+    stdout_text = raw.decode("utf-8", errors="replace")
+
     # Parse ripgrep JSON output
     import json
 
@@ -205,7 +218,7 @@ def _grep_with_ripgrep(
     file_counts: dict[str, int] = {}
     total_matches = 0
 
-    for line in result.stdout.strip().split("\n"):
+    for line in stdout_text.strip().split("\n"):
         if not line:
             continue
         try:
@@ -249,7 +262,7 @@ def _grep_with_ripgrep(
         "matches": matches,
         "total_matches": total_matches,
         "files_searched": len(files_searched),
-        "truncated": len(matches) >= max_results,
+        "truncated": rg_truncated or len(matches) >= max_results,
     }
 
 

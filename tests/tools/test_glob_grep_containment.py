@@ -15,6 +15,15 @@ from agentic_cli.tools.glob_tool import glob
 from agentic_cli.tools.grep_tool import grep
 
 
+class _FakeProc:
+    """Stand-in for a ripgrep subprocess (grep now uses Popen + a temp file)."""
+    pid = 4321
+    returncode = 0
+
+    def wait(self, timeout=None):
+        return 0
+
+
 def test_glob_rejects_parent_escape(tmp_path):
     root = tmp_path / "root"
     root.mkdir()
@@ -113,18 +122,20 @@ def test_grep_ripgrep_filters_outside_root(tmp_path, monkeypatch):
     outside = tmp_path / "outside" / "secret.txt"
     inside = root / "real.txt"
 
-    def fake_run(cmd, **kwargs):
-        lines = [
+    def fake_popen(cmd, **kwargs):
+        out = kwargs["stdout"]
+        lines = "\n".join([
             json.dumps({"type": "match", "data": {
                 "path": {"text": str(outside)}, "line_number": 1,
                 "lines": {"text": "needle SECRET\n"}}}),
             json.dumps({"type": "match", "data": {
                 "path": {"text": str(inside)}, "line_number": 1,
                 "lines": {"text": "needle here\n"}}}),
-        ]
-        return subprocess.CompletedProcess(cmd, 0, stdout="\n".join(lines), stderr="")
+        ]) + "\n"
+        out.write(lines.encode())
+        return _FakeProc()
 
-    monkeypatch.setattr(grep_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(grep_mod.subprocess, "Popen", fake_popen)
     r = grep(pattern="needle", path=str(root))
     files = {m["file"] for m in r["matches"]}
     assert any("real.txt" in f for f in files)
@@ -140,14 +151,38 @@ def test_grep_ripgrep_scrubs_config_path_env(tmp_path, monkeypatch):
     monkeypatch.setattr(grep_mod, "_ripgrep_available", lambda: True)
     captured = {}
 
-    def fake_run(cmd, **kwargs):
+    def fake_popen(cmd, **kwargs):
         captured["env"] = kwargs.get("env")
-        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        return _FakeProc()
 
-    monkeypatch.setattr(grep_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(grep_mod.subprocess, "Popen", fake_popen)
     grep(pattern="x", path=str(root))
     assert captured["env"] is not None
     assert "RIPGREP_CONFIG_PATH" not in captured["env"]
+
+
+def test_grep_ripgrep_output_bounded(tmp_path, monkeypatch):
+    """rg output beyond _MAX_RG_OUTPUT_BYTES is not read into memory whole; the
+    result is flagged truncated."""
+    root = tmp_path / "root"
+    root.mkdir()
+    inside = root / "a.txt"
+    inside.write_text("needle")
+    monkeypatch.setattr(grep_mod, "_ripgrep_available", lambda: True)
+    monkeypatch.setattr(grep_mod, "_MAX_RG_OUTPUT_BYTES", 200)
+
+    def fake_popen(cmd, **kwargs):
+        out = kwargs["stdout"]
+        line = (json.dumps({"type": "match", "data": {
+            "path": {"text": str(inside)}, "line_number": 1,
+            "lines": {"text": "needle\n"}}}) + "\n").encode()
+        for _ in range(50):  # well over the 200-byte cap
+            out.write(line)
+        return _FakeProc()
+
+    monkeypatch.setattr(grep_mod.subprocess, "Popen", fake_popen)
+    r = grep(pattern="needle", path=str(root))
+    assert r["truncated"] is True
 
 
 def test_glob_excludes_hidden_ancestor(tmp_path):

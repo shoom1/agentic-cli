@@ -6,24 +6,32 @@ an arbitrary program per searched file (RCE with only filesystem.read).
 """
 
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from agentic_cli.tools.grep_tool import grep
+
+
+class _FakeProc:
+    pid = 4321
+    returncode = 0
+
+    def wait(self, timeout=None):
+        return 0
 
 
 def _run_grep_capturing_argv(tmp_path: Path, pattern: str, rg_stdout: str = ""):
     """Call grep() forcing the ripgrep path and capture the argv built."""
     captured = {}
 
-    def fake_run(cmd, *args, **kwargs):
+    def fake_popen(cmd, *args, **kwargs):
         captured["cmd"] = cmd
-        result = MagicMock()
-        result.stdout = rg_stdout
-        result.returncode = 0
-        return result
+        out = kwargs.get("stdout")
+        if out is not None and rg_stdout:
+            out.write(rg_stdout.encode())
+        return _FakeProc()
 
     with patch("agentic_cli.tools.grep_tool._ripgrep_available", return_value=True), \
-            patch("agentic_cli.tools.grep_tool.subprocess.run", side_effect=fake_run):
+            patch("agentic_cli.tools.grep_tool.subprocess.Popen", side_effect=fake_popen):
         out = grep(pattern=pattern, path=str(tmp_path))
     return captured["cmd"], out
 
