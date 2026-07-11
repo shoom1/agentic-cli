@@ -394,8 +394,19 @@ def test_read_log_tail_bounds_large_log(tmp_path):
     out = mod._read_log_tail(log, fallback="FB")
     assert "END" in out and "! Real error." in out       # tail retained
     assert "START" not in out                              # head dropped
-    assert len(out) <= mod._LOG_TAIL_BYTES + 16            # bounded
+    assert len(out) <= mod._LOG_TAIL_BYTES + 3             # bounded
 
 
 def test_read_log_tail_missing_returns_fallback(tmp_path):
     assert mod._read_log_tail(tmp_path / "nope.log", fallback="FB") == "FB"
+
+
+def test_read_log_tail_oserror_returns_fallback(monkeypatch, tmp_path):
+    """An existing-but-unreadable log (open raises OSError) returns fallback, not raises."""
+    log = tmp_path / "x.log"; log.write_text("data")
+
+    def boom(*a, **k):
+        raise PermissionError("nope")
+
+    monkeypatch.setattr("builtins.open", boom)
+    assert mod._read_log_tail(log, fallback="FB") == "FB"
