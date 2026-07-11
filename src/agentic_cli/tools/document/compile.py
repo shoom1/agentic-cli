@@ -44,6 +44,7 @@ from agentic_cli.workflow.permissions import Capability
 
 _ENGINES = ("latexmk", "pdflatex")
 _LOG_TAIL_LINES = 40
+_LOG_TAIL_BYTES = 64 * 1024
 
 # Only these host env vars reach the TeX process. The tool must not hand the
 # whole host environment (API keys, tokens) to a subprocess that — on the
@@ -186,6 +187,20 @@ def _parse_errors(log_text: str) -> list[str]:
     return [ln for ln in log_text.splitlines() if ln.startswith("!")]
 
 
+def _read_log_tail(log_path: Path, fallback: str) -> str:
+    """Return at most the last _LOG_TAIL_BYTES of the log (decoded), else
+    ``fallback``. Bounds memory on a runaway compiler log."""
+    try:
+        if not log_path.is_file():
+            return fallback
+        with open(log_path, "rb") as f:
+            size = f.seek(0, os.SEEK_END)
+            f.seek(max(0, size - _LOG_TAIL_BYTES))
+            return f.read().decode("utf-8", errors="replace")
+    except OSError:
+        return fallback
+
+
 @register_tool(
     category=ToolCategory.EXECUTION,
     capabilities=[
@@ -289,10 +304,7 @@ def compile_document(
         duration_ms = int((time.monotonic() - start) * 1000)
 
         log_path = build / (src.stem + ".log")
-        try:
-            log_text = log_path.read_text(errors="replace") if log_path.is_file() else (proc.stdout or "")
-        except OSError:
-            log_text = proc.stdout or ""
+        log_text = _read_log_tail(log_path, fallback=proc.stdout or "")
         log_tail = "\n".join(log_text.splitlines()[-_LOG_TAIL_LINES:])
         produced = build / (src.stem + ".pdf")
         success = proc.returncode == 0 and produced.is_file()

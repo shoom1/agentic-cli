@@ -383,3 +383,19 @@ def test_default_delivery_to_source_dir_without_intermediates(monkeypatch, tmp_p
     assert r["pdf_path"] == str(tmp_path / "r.pdf")
     assert (tmp_path / "r.pdf").is_file()              # delivered to source dir
     assert not (tmp_path / "r.aux").exists()           # intermediate isolated in temp
+
+
+# --- P0-3 hardening: tail-read .log to bound memory on runaway compiler logs ---
+
+
+def test_read_log_tail_bounds_large_log(tmp_path):
+    log = tmp_path / "big.log"
+    log.write_text("START\n" + ("x" * 200_000) + "\n! Real error.\nEND\n")
+    out = mod._read_log_tail(log, fallback="FB")
+    assert "END" in out and "! Real error." in out       # tail retained
+    assert "START" not in out                              # head dropped
+    assert len(out) <= mod._LOG_TAIL_BYTES + 16            # bounded
+
+
+def test_read_log_tail_missing_returns_fallback(tmp_path):
+    assert mod._read_log_tail(tmp_path / "nope.log", fallback="FB") == "FB"
