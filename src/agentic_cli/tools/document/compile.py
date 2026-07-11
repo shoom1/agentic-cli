@@ -7,11 +7,12 @@ from the build directory or home) and ``pdflatex`` with ``-no-shell-escape`` (no
 ``\\write18``).  It runs on the host (not the container sandbox — an intentional
 decoupling); OS-sandbox confinement of the build tree is deferred (spec §9).
 
-The tool runs with a wall-clock timeout and a scoped working dir, and returns a
-structured result.  It does not execute arbitrary host code by default; a
-``report_writer``-style agent uses it to turn an authored ``.tex`` into a PDF.
-Build intermediates are still written in the source directory, so a fully
-untrusted ``.tex`` + build dir remains out of scope for the current controls.
+The tool runs with a wall-clock timeout and a private temp build dir, and
+returns a structured result.  It does not execute arbitrary host code by
+default; a ``report_writer``-style agent uses it to turn an authored ``.tex``
+into a PDF.  Build intermediates (``*.aux``, ``*.log``) are isolated in a
+``tempfile.TemporaryDirectory`` and never written to the source or delivery dir;
+only the final PDF is promoted via ``_deliver_no_follow``.
 
 The subprocess receives only an allowlisted environment (``_ENV_PASSTHROUGH`` +
 the ``TEXMF*``/TeX config vars), not the full host environment, so host secrets
@@ -63,7 +64,7 @@ _TEX_VARS = (
 )
 
 
-def _build_env(assets_dir: str | None) -> dict[str, str]:
+def _build_env(assets_dir: str | None, source_dir: str | None = None) -> dict[str, str]:
     """Minimal, allowlisted environment for the TeX subprocess.
 
     Passes PATH/HOME/locale plus TeX's own configuration variables — the
@@ -71,6 +72,9 @@ def _build_env(assets_dir: str | None) -> dict[str, str]:
     ``TEXMFHOME`` etc. keeps working, but not arbitrary host env (a name like
     ``TEXT_API_TOKEN`` starts with "TEX" yet is not a TeX var), and never the
     caller's ``TEXINPUTS`` (set explicitly below).
+
+    ``assets_dir`` and ``source_dir`` become TEXINPUTS read roots so figures and
+    ``\\input`` siblings resolve even though the build runs in a private temp dir.
     """
     env = {
         k: v
@@ -78,11 +82,10 @@ def _build_env(assets_dir: str | None) -> dict[str, str]:
         if k in _ENV_PASSTHROUGH or k.startswith("TEXMF") or k in _TEX_VARS
     }
     env.setdefault("PATH", os.defpath)
-    if assets_dir:
-        # Prepend assets_dir; the trailing empty entries let kpathsea append the
-        # default search path. A caller-inherited TEXINPUTS is intentionally
-        # dropped (not in the allowlist) so it can't redirect input resolution.
-        env["TEXINPUTS"] = f"{assets_dir}{os.pathsep}{os.pathsep}"
+    roots = [r for r in (assets_dir, source_dir) if r]
+    if roots:
+        # Trailing empty entry lets kpathsea append its default search path.
+        env["TEXINPUTS"] = os.pathsep.join(roots) + os.pathsep
     return env
 
 
@@ -254,59 +257,66 @@ def compile_document(
             "duration_ms": 0,
         }
 
-    work_dir = src.parent
-    env = _build_env(assets_dir)
-
+    env = _build_env(assets_dir, source_dir=str(src.parent))
     argv = _build_argv(chosen, _safe_source_arg(src.name))
     start = time.monotonic()
-    try:
-        proc = _run(argv, cwd=str(work_dir), env=env, timeout=float(timeout_s))
-    except subprocess.TimeoutExpired:
-        return {
-            "success": False, "error": f"Compilation timed out after {timeout_s}s",
-            "pdf_path": None, "engine": chosen, "log_tail": "", "errors": [],
-            "duration_ms": int((time.monotonic() - start) * 1000),
-        }
-    except OSError as exc:
-        return {
-            "success": False, "error": f"Failed to run {chosen}: {exc}",
-            "pdf_path": None, "engine": chosen, "log_tail": "", "errors": [],
-            "duration_ms": int((time.monotonic() - start) * 1000),
-        }
-    duration_ms = int((time.monotonic() - start) * 1000)
 
-    log_path = work_dir / (src.stem + ".log")
-    try:
-        log_text = log_path.read_text(errors="replace") if log_path.is_file() else (proc.stdout or "")
-    except OSError:
-        log_text = proc.stdout or ""
-    log_tail = "\n".join(log_text.splitlines()[-_LOG_TAIL_LINES:])
-    produced = work_dir / (src.stem + ".pdf")
-    success = proc.returncode == 0 and produced.is_file()
+    with tempfile.TemporaryDirectory(prefix="texbuild-") as build_dir:
+        build = Path(build_dir)
+        try:
+            shutil.copy2(src, build / src.name)
+        except OSError as exc:
+            return {
+                "success": False, "error": f"Failed to stage source: {exc}",
+                "pdf_path": None, "engine": chosen, "log_tail": "", "errors": [],
+                "duration_ms": int((time.monotonic() - start) * 1000),
+            }
 
-    if not success:
-        return {
-            "success": False, "pdf_path": None, "engine": chosen,
-            "log_tail": log_tail, "errors": _parse_errors(log_text),
-            "duration_ms": duration_ms, "error": None,
-        }
+        try:
+            proc = _run(argv, cwd=str(build), env=env, timeout=float(timeout_s))
+        except subprocess.TimeoutExpired:
+            return {
+                "success": False, "error": f"Compilation timed out after {timeout_s}s",
+                "pdf_path": None, "engine": chosen, "log_tail": "", "errors": [],
+                "duration_ms": int((time.monotonic() - start) * 1000),
+            }
+        except OSError as exc:
+            return {
+                "success": False, "error": f"Failed to run {chosen}: {exc}",
+                "pdf_path": None, "engine": chosen, "log_tail": "", "errors": [],
+                "duration_ms": int((time.monotonic() - start) * 1000),
+            }
+        duration_ms = int((time.monotonic() - start) * 1000)
 
-    final = produced
-    if output_pdf:
-        dest = Path(output_pdf)
+        log_path = build / (src.stem + ".log")
+        try:
+            log_text = log_path.read_text(errors="replace") if log_path.is_file() else (proc.stdout or "")
+        except OSError:
+            log_text = proc.stdout or ""
+        log_tail = "\n".join(log_text.splitlines()[-_LOG_TAIL_LINES:])
+        produced = build / (src.stem + ".pdf")
+        success = proc.returncode == 0 and produced.is_file()
+
+        if not success:
+            return {
+                "success": False, "pdf_path": None, "engine": chosen,
+                "log_tail": log_tail, "errors": _parse_errors(log_text),
+                "duration_ms": duration_ms, "error": None,
+            }
+
+        dest = Path(output_pdf) if output_pdf else (src.parent / (src.stem + ".pdf"))
         try:
             _deliver_no_follow(produced, dest)
         except OSError as exc:
             return {
                 "success": False,
-                "error": f"Failed to deliver PDF to {output_pdf}: {exc}",
+                "error": f"Failed to deliver PDF to {dest}: {exc}",
                 "pdf_path": str(produced), "engine": chosen,
                 "log_tail": log_tail, "errors": [], "duration_ms": duration_ms,
             }
-        final = dest
 
     return {
-        "success": True, "pdf_path": str(final), "engine": chosen,
+        "success": True, "pdf_path": str(dest), "engine": chosen,
         "log_tail": log_tail, "errors": [], "duration_ms": duration_ms,
         "error": None,
     }

@@ -26,12 +26,13 @@ def test_missing_source_returns_error(tmp_path):
     assert r["success"] is False and "not found" in r["error"]
 
 
-def test_success_places_pdf_and_keeps_intermediates(monkeypatch, tmp_path):
+def test_success_delivers_pdf_and_isolates_intermediates(monkeypatch, tmp_path):
     _fake_engine(monkeypatch)
     tex = tmp_path / "r.tex"
     tex.write_text("\\documentclass{article}\\begin{document}hi\\end{document}")
 
     def fake_run(argv, *, cwd, env, timeout):
+        # fake_run receives the private build dir as cwd; write artifacts there
         (Path(cwd) / "r.pdf").write_bytes(b"%PDF-1.5 fake")
         (Path(cwd) / "r.log").write_text("output written on r.pdf")
         (Path(cwd) / "r.aux").write_text("\\relax")
@@ -42,9 +43,9 @@ def test_success_places_pdf_and_keeps_intermediates(monkeypatch, tmp_path):
     r = compile_document(str(tex), output_pdf=str(out), assets_dir=str(tmp_path / "assets"))
     assert r["success"] is True
     assert r["pdf_path"] == str(out)
-    assert out.is_file()                             # PDF promoted to delivery dir
-    assert (tmp_path / "r.aux").is_file()            # intermediates stay in build dir
-    assert not (out.parent / "r.aux").exists()       # not beside the delivered PDF
+    assert out.is_file()                              # PDF promoted to delivery dir
+    assert not (tmp_path / "r.aux").exists()          # intermediates NOT in the source dir
+    assert not (out.parent / "r.aux").exists()        # nor beside the delivered PDF
 
 
 def test_failure_parses_errors(monkeypatch, tmp_path):
@@ -363,3 +364,22 @@ def test_option_like_source_name_not_treated_as_flag(monkeypatch, tmp_path):
     assert "-pdflatex=evil.tex" not in captured["argv"]        # never a bare option-like token
     assert "./-pdflatex=evil.tex" in captured["argv"]          # anchored as a path
     assert r["success"] is True
+
+
+def test_default_delivery_to_source_dir_without_intermediates(monkeypatch, tmp_path):
+    """No output_pdf → PDF lands at <source dir>/<stem>.pdf, but the build's
+    intermediates never touch the source dir."""
+    _fake_engine(monkeypatch)
+    tex = tmp_path / "r.tex"; tex.write_text("x")
+
+    def fake_run(argv, *, cwd, env, timeout):
+        (Path(cwd) / "r.pdf").write_bytes(b"%PDF")
+        (Path(cwd) / "r.aux").write_text("aux")
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(mod, "_run", fake_run)
+    r = compile_document(str(tex))                     # no output_pdf
+    assert r["success"] is True
+    assert r["pdf_path"] == str(tmp_path / "r.pdf")
+    assert (tmp_path / "r.pdf").is_file()              # delivered to source dir
+    assert not (tmp_path / "r.aux").exists()           # intermediate isolated in temp
