@@ -65,12 +65,20 @@ _TEX_VARS = (
     "TEXCONFIG", "TEXDOCS", "TEXSOURCES",
 )
 
+# The kpathsea TEXMF* configuration variables (exact — a strict secret boundary,
+# so a name like TEXMF_SECRET is not passed through).
+_TEXMF_VARS = (
+    "TEXMFHOME", "TEXMFVAR", "TEXMFCONFIG", "TEXMFCACHE", "TEXMFLOCAL",
+    "TEXMFDIST", "TEXMFMAIN", "TEXMFSYSVAR", "TEXMFSYSCONFIG", "TEXMFDBS",
+    "TEXMFCNF", "TEXMFOUTPUT",
+)
+
 
 def _build_env(assets_dir: str | None, source_dir: str | None = None) -> dict[str, str]:
     """Minimal, allowlisted environment for the TeX subprocess.
 
-    Passes PATH/HOME/locale plus TeX's own configuration variables — the
-    ``TEXMF*`` tree and a fixed set of other TeX vars — so a custom
+    Passes PATH/HOME/locale plus TeX's own configuration variables — an exact
+    list of ``TEXMF*`` vars and a fixed set of other TeX vars — so a custom
     ``TEXMFHOME`` etc. keeps working, but not arbitrary host env (a name like
     ``TEXT_API_TOKEN`` starts with "TEX" yet is not a TeX var), and never the
     caller's ``TEXINPUTS`` (set explicitly below).
@@ -81,7 +89,7 @@ def _build_env(assets_dir: str | None, source_dir: str | None = None) -> dict[st
     env = {
         k: v
         for k, v in os.environ.items()
-        if k in _ENV_PASSTHROUGH or k.startswith("TEXMF") or k in _TEX_VARS
+        if k in _ENV_PASSTHROUGH or k in _TEXMF_VARS or k in _TEX_VARS
     }
     env.setdefault("PATH", os.defpath)
     roots = [r for r in (assets_dir, source_dir) if r]

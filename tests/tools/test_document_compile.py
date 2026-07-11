@@ -329,6 +329,25 @@ def test_env_excludes_nontex_vars_starting_with_tex(monkeypatch, tmp_path):
     assert captured["env"].get("TEXMFHOME") == "/home/u/texmf"
 
 
+def test_env_texmf_uses_exact_allowlist_not_prefix(monkeypatch, tmp_path):
+    """A real TEXMF var passes; a TEXMF-prefixed non-var (potential secret) does not."""
+    _fake_engine(monkeypatch)
+    monkeypatch.setenv("TEXMFHOME", "/home/u/texmf")
+    monkeypatch.setenv("TEXMF_SECRET", "leak")
+    tex = tmp_path / "r.tex"; tex.write_text("x")
+    captured = {}
+
+    def fake_run(argv, *, cwd, env, timeout):
+        captured["env"] = env
+        (Path(cwd) / "r.pdf").write_bytes(b"%PDF")
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(mod, "_run", fake_run)
+    compile_document(str(tex))
+    assert captured["env"].get("TEXMFHOME") == "/home/u/texmf"
+    assert "TEXMF_SECRET" not in captured["env"]
+
+
 def test_assets_dir_with_path_separator_rejected(monkeypatch, tmp_path):
     """assets_dir authorized as one filesystem path must not smuggle extra
     TEXINPUTS roots via os.pathsep (e.g. 'assets:/etc')."""
