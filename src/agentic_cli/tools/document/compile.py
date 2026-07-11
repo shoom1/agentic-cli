@@ -92,7 +92,11 @@ def _build_env(assets_dir: str | None, source_dir: str | None = None) -> dict[st
         if k in _ENV_PASSTHROUGH or k in _TEXMF_VARS or k in _TEX_VARS
     }
     env.setdefault("PATH", os.defpath)
-    roots = [r for r in (assets_dir, source_dir) if r]
+    roots = [
+        str(Path(r).expanduser().resolve())
+        for r in (assets_dir, source_dir)
+        if r
+    ]
     if roots:
         # Trailing empty entry lets kpathsea append its default search path.
         env["TEXINPUTS"] = os.pathsep.join(roots) + os.pathsep
@@ -251,7 +255,7 @@ def compile_document(
     Args:
         source_path: Path to the .tex file to compile.
         output_pdf: If set, the produced PDF is copied here (parents created);
-            build intermediates stay in the source's directory.
+            build intermediates are isolated in a private temp dir.
         assets_dir: Directory prepended to TEXINPUTS so figures/resources resolve
             by bare name (e.g. an artifacts dir).
         engine: Force an engine ("latexmk"/"pdflatex"); default auto-detects
@@ -297,7 +301,7 @@ def compile_document(
     argv = _build_argv(chosen, _safe_source_arg(src.name))
     start = time.monotonic()
 
-    with tempfile.TemporaryDirectory(prefix="texbuild-") as build_dir:
+    with tempfile.TemporaryDirectory(prefix="texbuild-", ignore_cleanup_errors=True) as build_dir:
         build = Path(build_dir)
         try:
             shutil.copy2(src, build / src.name)
@@ -344,7 +348,7 @@ def compile_document(
             return {
                 "success": False,
                 "error": f"Failed to deliver PDF to {dest}: {exc}",
-                "pdf_path": str(produced), "engine": chosen,
+                "pdf_path": None, "engine": chosen,
                 "log_tail": log_tail, "errors": [], "duration_ms": duration_ms,
             }
 

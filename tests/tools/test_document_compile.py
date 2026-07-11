@@ -1,6 +1,7 @@
 """Offline tests for compile_document — subprocess and engine lookup faked."""
 from __future__ import annotations
 
+import os
 import signal
 import subprocess
 from pathlib import Path
@@ -147,7 +148,7 @@ def test_pdf_copy_oserror_returns_structured_error(monkeypatch, tmp_path):
     r = compile_document(str(tex), output_pdf=str(out))
     assert r["success"] is False
     assert "deliver" in r["error"].lower() or str(out) in r["error"]
-    assert r["pdf_path"] is not None   # PDF still exists in build dir
+    assert r["pdf_path"] is None   # build dir (with the PDF) is cleaned up on return
     assert "duration_ms" in r
 
 
@@ -442,3 +443,25 @@ def test_read_log_tail_oserror_returns_fallback(monkeypatch, tmp_path):
 
     monkeypatch.setattr("builtins.open", boom)
     assert mod._read_log_tail(log, fallback="FB") == "FB"
+
+
+def test_texinputs_roots_are_absolute_for_relative_source(monkeypatch, tmp_path):
+    """Relative source_path/assets_dir must resolve to ABSOLUTE TEXINPUTS roots
+    (the build runs in a temp dir, so relative roots would resolve there)."""
+    _fake_engine(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "assets").mkdir()
+    (tmp_path / "r.tex").write_text("x")
+    captured = {}
+
+    def fake_run(argv, *, cwd, env, timeout):
+        captured["env"] = env
+        (Path(cwd) / "r.pdf").write_bytes(b"%PDF")
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(mod, "_run", fake_run)
+    compile_document("r.tex", assets_dir="assets")  # relative paths
+    entries = [e for e in captured["env"]["TEXINPUTS"].split(os.pathsep) if e]
+    assert entries
+    assert all(os.path.isabs(e) for e in entries)
+    assert str((tmp_path / "assets").resolve()) in entries
