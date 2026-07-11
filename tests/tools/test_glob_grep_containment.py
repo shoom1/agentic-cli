@@ -171,7 +171,7 @@ def test_glob_caps_scanned_matches(tmp_path, monkeypatch):
     monkeypatch.setattr(glob_mod, "_MAX_SCAN", 3)
     r = glob(pattern="*", path=str(root), max_results=100)
     assert r["success"] is True
-    assert len(r["files"]) <= 3
+    assert len(r["files"]) == 3   # exactly the ceiling (6 files, all pass filters)
     assert r["truncated"] is True
 
 
@@ -186,3 +186,33 @@ def test_grep_python_skips_oversized_files(tmp_path, monkeypatch):
     files = {m["file"] for m in r["matches"]}
     assert any("small.txt" in f for f in files)
     assert not any("big.txt" in f for f in files)   # oversized file skipped
+
+
+def test_grep_python_reports_truncated_when_file_cap_hit(tmp_path, monkeypatch):
+    """Hitting the _MAX_FILES scan ceiling must be reported as truncated, not
+    silently dropped (else a partial result claims to be complete)."""
+    root = tmp_path / "root"
+    root.mkdir()
+    for i in range(3):
+        (root / f"f{i}.txt").write_text("needle")
+    monkeypatch.setattr(grep_mod, "_ripgrep_available", lambda: False)
+    monkeypatch.setattr(grep_mod, "_MAX_FILES", 2)  # fewer than the 3 files
+    r = grep(pattern="needle", path=str(root))
+    assert r["truncated"] is True
+
+
+def test_grep_python_directories_do_not_consume_file_budget(tmp_path, monkeypatch):
+    """Directories must not count against _MAX_FILES — otherwise dirs before the
+    files exhaust the budget and matches are silently missed."""
+    root = tmp_path / "root"
+    root.mkdir()
+    for i in range(20):
+        (root / f"dir{i}").mkdir()
+    (root / "a.txt").write_text("needle")
+    (root / "b.txt").write_text("needle")
+    monkeypatch.setattr(grep_mod, "_ripgrep_available", lambda: False)
+    monkeypatch.setattr(grep_mod, "_MAX_FILES", 2)  # exactly the 2 real files
+    r = grep(pattern="needle", path=str(root))
+    files = {m["file"] for m in r["matches"]}
+    assert any("a.txt" in f for f in files)
+    assert any("b.txt" in f for f in files)

@@ -296,9 +296,15 @@ def _grep_python(
         candidates = path.rglob("*") if recursive else path.iterdir()
 
     files = []
+    scan_truncated = False
     for f in candidates:
+        # Count only files against the budget — directories must not exhaust it
+        # (otherwise dirs before the files silently drop matches).
+        if not f.is_file():
+            continue
         files.append(f)
         if len(files) >= _MAX_FILES:
+            scan_truncated = True
             break
 
     for file_path in files:
@@ -366,5 +372,5 @@ def _grep_python(
         "matches": matches,
         "total_matches": total_matches,
         "files_searched": files_searched,
-        "truncated": total_matches > max_results,
+        "truncated": scan_truncated or total_matches > max_results,
     }
