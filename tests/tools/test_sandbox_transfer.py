@@ -41,3 +41,48 @@ def test_stage_inputs_duplicate_basename_errors(tmp_path):
     b = tmp_path / "b" / "x.csv"; b.parent.mkdir(); b.write_text("2")
     with pytest.raises(ValueError):
         stage_inputs(session, [str(a), str(b)])
+
+
+from types import SimpleNamespace
+
+from agentic_cli.tools.sandbox.backends.jupyter_docker import JupyterDockerBackend
+
+
+def _backend(shared: Path):
+    return JupyterDockerBackend(
+        settings=SimpleNamespace(sandbox_outputs_dir=str(shared), workspace_dir=str(shared))
+    )
+
+
+def test_collect_outputs_copies_regular_files(tmp_path):
+    shared = tmp_path / "shared"
+    wd = tmp_path / "wd"; (wd / "outputs").mkdir(parents=True)
+    (wd / "outputs" / "plot.png").write_bytes(b"PNG")
+    got = _backend(shared)._collect_outputs(wd)
+    assert (shared / "plot.png").read_bytes() == b"PNG"
+    assert any("plot.png" in g for g in got)
+
+
+def test_collect_outputs_skips_symlink_to_host_secret(tmp_path):
+    shared = tmp_path / "shared"
+    wd = tmp_path / "wd"; (wd / "outputs").mkdir(parents=True)
+    secret = tmp_path / "aws_credentials"; secret.write_bytes(b"AKIA-SECRET")
+    (wd / "outputs" / "result.txt").symlink_to(secret)     # kernel exfil attempt
+    got = _backend(shared)._collect_outputs(wd)
+    assert got == []
+    assert not (shared / "result.txt").exists()            # secret not copied out
+
+
+def test_collect_outputs_skips_when_outputs_is_symlink(tmp_path):
+    shared = tmp_path / "shared"
+    wd = tmp_path / "wd"; wd.mkdir()
+    elsewhere = tmp_path / "elsewhere"; elsewhere.mkdir()
+    (elsewhere / "x.txt").write_text("data")
+    (wd / "outputs").symlink_to(elsewhere)                 # 'outputs' itself a symlink
+    assert _backend(shared)._collect_outputs(wd) == []
+
+
+def test_outputs_dir_is_0700(tmp_path):
+    shared = tmp_path / "shared"
+    base = _backend(shared)._outputs_dir()
+    assert (base.stat().st_mode & 0o777) == 0o700
