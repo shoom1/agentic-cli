@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import subprocess
 
+import agentic_cli.tools.glob_tool as glob_mod
 import agentic_cli.tools.grep_tool as grep_mod
 from agentic_cli.tools.glob_tool import glob
 from agentic_cli.tools.grep_tool import grep
@@ -160,3 +161,28 @@ def test_glob_excludes_hidden_ancestor(tmp_path):
     assert r["success"] is True
     assert all(".hidden" not in f for f in r["files"])
     assert any("visible.txt" in f for f in r["files"])
+
+
+def test_glob_caps_scanned_matches(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    root.mkdir()
+    for i in range(6):
+        (root / f"f{i}.txt").write_text("x")
+    monkeypatch.setattr(glob_mod, "_MAX_SCAN", 3)
+    r = glob(pattern="*", path=str(root), max_results=100)
+    assert r["success"] is True
+    assert len(r["files"]) <= 3
+    assert r["truncated"] is True
+
+
+def test_grep_python_skips_oversized_files(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "small.txt").write_text("needle here")
+    (root / "big.txt").write_text("needle " + ("x" * 1000))
+    monkeypatch.setattr(grep_mod, "_ripgrep_available", lambda: False)
+    monkeypatch.setattr(grep_mod, "_MAX_FILE_BYTES", 100)
+    r = grep(pattern="needle", path=str(root))
+    files = {m["file"] for m in r["matches"]}
+    assert any("small.txt" in f for f in files)
+    assert not any("big.txt" in f for f in files)   # oversized file skipped

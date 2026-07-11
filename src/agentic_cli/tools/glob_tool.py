@@ -16,6 +16,8 @@ from agentic_cli.tools.registry import (
 )
 from agentic_cli.workflow.permissions import Capability
 
+_MAX_SCAN = 10_000  # hard ceiling on matches materialized before sorting/limiting
+
 
 @register_tool(
     category=ToolCategory.READ,
@@ -82,8 +84,15 @@ def glob(
             "path": str(search_path),
         }
 
-    # Find matching files
-    matches = list(search_path.glob(pattern))
+    # Find matching files, capping how many we materialize (a pathological
+    # pattern like "**/*" over a huge tree must not exhaust memory).
+    matches = []
+    scan_truncated = False
+    for p in search_path.glob(pattern):
+        matches.append(p)
+        if len(matches) >= _MAX_SCAN:
+            scan_truncated = True
+            break
 
     # Filter results
     filtered = []
@@ -115,7 +124,7 @@ def glob(
         filtered.sort(key=lambda p: p.stat().st_mtime, reverse=True)
 
     # Truncate if needed
-    truncated = len(filtered) > max_results
+    truncated = scan_truncated or len(filtered) > max_results
     filtered = filtered[:max_results]
 
     # Format output

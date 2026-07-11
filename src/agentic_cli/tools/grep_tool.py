@@ -18,6 +18,9 @@ from agentic_cli.tools.registry import (
 )
 from agentic_cli.workflow.permissions import Capability
 
+_MAX_FILES = 10_000        # cap the number of files the Python fallback scans
+_MAX_FILE_BYTES = 5_000_000  # skip files larger than this (avoid reading whole huge files)
+
 
 @register_tool(
     category=ToolCategory.READ,
@@ -284,20 +287,19 @@ def _grep_python(
     total_matches = 0
     file_counts: dict[str, int] = {}
 
-    # Get files to search
+    # Get files to search, capping how many we materialize.
     if path.is_file():
-        files = [path]
+        candidates = iter([path])
+    elif file_pattern:
+        candidates = path.rglob(file_pattern) if recursive else path.glob(file_pattern)
     else:
-        if file_pattern:
-            if recursive:
-                files = list(path.rglob(file_pattern))
-            else:
-                files = list(path.glob(file_pattern))
-        else:
-            if recursive:
-                files = [f for f in path.rglob("*") if f.is_file()]
-            else:
-                files = [f for f in path.iterdir() if f.is_file()]
+        candidates = path.rglob("*") if recursive else path.iterdir()
+
+    files = []
+    for f in candidates:
+        files.append(f)
+        if len(files) >= _MAX_FILES:
+            break
 
     for file_path in files:
         if not file_path.is_file():
@@ -306,6 +308,13 @@ def _grep_python(
         # Skip files resolving outside the authorized root (e.g. a symlink
         # under `path` pointing elsewhere) — defense in depth.
         if not path_is_within(file_path, path):
+            continue
+
+        # Skip files that are too large to read whole (reliability bound).
+        try:
+            if file_path.stat().st_size > _MAX_FILE_BYTES:
+                continue
+        except OSError:
             continue
 
         try:
