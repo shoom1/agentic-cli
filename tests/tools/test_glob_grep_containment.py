@@ -147,3 +147,16 @@ def test_grep_ripgrep_scrubs_config_path_env(tmp_path, monkeypatch):
     grep(pattern="x", path=str(root))
     assert captured["env"] is not None
     assert "RIPGREP_CONFIG_PATH" not in captured["env"]
+
+
+def test_glob_excludes_hidden_ancestor(tmp_path):
+    """include_hidden=False must drop results with a hidden ANCESTOR, not just
+    a hidden basename (e.g. .hidden/secret.txt via **/*)."""
+    root = tmp_path / "root"
+    (root / ".hidden").mkdir(parents=True)
+    (root / ".hidden" / "secret.txt").write_text("s")
+    (root / "visible.txt").write_text("v")
+    r = glob(pattern="**/*", path=str(root), include_hidden=False)
+    assert r["success"] is True
+    assert all(".hidden" not in f for f in r["files"])
+    assert any("visible.txt" in f for f in r["files"])

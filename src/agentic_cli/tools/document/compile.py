@@ -1,21 +1,23 @@
 """Compile a LaTeX document to PDF with a host TeX engine.
 
 ``compile_document`` is a narrow, permission-gated tool: it runs ``latexmk``
-(preferred) or ``pdflatex`` as a guarded subprocess — shell-escape is disabled
-for the **pdflatex** path (``-no-shell-escape`` flag).  For ``latexmk``, the
-engine relies on its default restricted mode; note that ``latexmk`` also reads
-``.latexmkrc`` (arbitrary Perl) from the build directory and home directory, so
-callers with an untrusted ``.tex``/build directory should prefer ``pdflatex``.
-OS-sandbox confinement for the general case is deferred.
+(preferred) or ``pdflatex`` as a guarded subprocess with the two arbitrary-code
+vectors disabled — ``latexmk`` with ``-norc`` (so no ``.latexmkrc`` Perl is read
+from the build directory or home) and ``pdflatex`` with ``-no-shell-escape`` (no
+``\\write18``).  It runs on the host (not the container sandbox — an intentional
+decoupling); OS-sandbox confinement of the build tree is deferred (spec §9).
 
 The tool runs with a wall-clock timeout and a scoped working dir, and returns a
-structured result.  It does NOT execute arbitrary code; a ``report_writer``-style
-agent uses it to turn an authored ``.tex`` into a PDF.
+structured result.  It does not execute arbitrary host code by default; a
+``report_writer``-style agent uses it to turn an authored ``.tex`` into a PDF.
+Build intermediates are still written in the source directory, so a fully
+untrusted ``.tex`` + build dir remains out of scope for the current controls.
 
-The subprocess receives only an allowlisted environment (``_ENV_PASSTHROUGH``),
-not the full host environment, so host secrets aren't handed to the TeX process.
-Delivery to ``output_pdf`` is a no-follow atomic write (temp file + ``os.replace``)
-so an attacker-placed symlink at the destination can't redirect the write.
+The subprocess receives only an allowlisted environment (``_ENV_PASSTHROUGH`` +
+the ``TEXMF*``/TeX config vars), not the full host environment, so host secrets
+aren't handed to the TeX process.  Delivery to ``output_pdf`` is a no-follow
+atomic write (temp file + ``os.replace``) so an attacker-placed symlink at the
+destination can't redirect the write.
 
 Provisioning is host-based: the engine must be on ``PATH`` (TeX Live / MacTeX).
 If neither is found the tool returns a structured error with an install hint.
@@ -53,18 +55,27 @@ _ENV_PASSTHROUGH = (
     "PERL5LIB", "PERLLIB",
 )
 
+# TeX's own search/config vars (kpathsea) that don't fall under the TEXMF*
+# namespace. TEXINPUTS is deliberately excluded — it is set explicitly below.
+_TEX_VARS = (
+    "TEXFONTS", "TEXFORMATS", "TEXPOOL", "TEXPSHEADERS",
+    "TEXCONFIG", "TEXDOCS", "TEXSOURCES",
+)
+
 
 def _build_env(assets_dir: str | None) -> dict[str, str]:
     """Minimal, allowlisted environment for the TeX subprocess.
 
-    Passes PATH/HOME/locale plus TeX's own ``TEX*`` configuration variables
-    (so a custom ``TEXMFHOME`` etc. keeps working) — but not arbitrary host env,
-    and never the caller's ``TEXINPUTS`` (set explicitly below).
+    Passes PATH/HOME/locale plus TeX's own configuration variables — the
+    ``TEXMF*`` tree and a fixed set of other TeX vars — so a custom
+    ``TEXMFHOME`` etc. keeps working, but not arbitrary host env (a name like
+    ``TEXT_API_TOKEN`` starts with "TEX" yet is not a TeX var), and never the
+    caller's ``TEXINPUTS`` (set explicitly below).
     """
     env = {
         k: v
         for k, v in os.environ.items()
-        if k in _ENV_PASSTHROUGH or (k.startswith("TEX") and k != "TEXINPUTS")
+        if k in _ENV_PASSTHROUGH or k.startswith("TEXMF") or k in _TEX_VARS
     }
     env.setdefault("PATH", os.defpath)
     if assets_dir:
@@ -143,9 +154,17 @@ def _detect_engine(engine: str | None) -> str | None:
 
 
 def _build_argv(engine: str, source: str) -> list[str]:
-    """Compiler argv — never enables shell-escape."""
+    """Compiler argv — never enables shell-escape.
+
+    latexmk runs with ``-norc`` so it won't read ``.latexmkrc`` (arbitrary
+    Perl) from the build directory or home; pdflatex runs with
+    ``-no-shell-escape``. Neither path executes arbitrary host code by default.
+    """
     if engine == "latexmk":
-        return ["latexmk", "-pdf", "-interaction=nonstopmode", "-halt-on-error", source]
+        return [
+            "latexmk", "-norc", "-pdf", "-interaction=nonstopmode",
+            "-halt-on-error", source,
+        ]
     return [
         "pdflatex", "-no-shell-escape", "-interaction=nonstopmode",
         "-halt-on-error", source,
@@ -168,9 +187,9 @@ def _parse_errors(log_text: str) -> list[str]:
     ],
     description=(
         "Compile a LaTeX source file to PDF using a host TeX engine (latexmk or "
-        "pdflatex). Shell-escape is disabled for pdflatex (-no-shell-escape); "
-        "latexmk uses its default restricted mode but also reads .latexmkrc from "
-        "the build/home directory. Returns the PDF path plus any compiler errors. "
+        "pdflatex). Runs on the host: latexmk with -norc (no .latexmkrc) and "
+        "pdflatex with -no-shell-escape, so it does not execute arbitrary host "
+        "code by default. Returns the PDF path plus any compiler errors. "
         "Requires TeX Live/MacTeX on PATH."
     ),
 )
@@ -201,6 +220,16 @@ def compile_document(
     if not src.is_file():
         return {
             "success": False, "error": f"Source not found: {source_path}",
+            "pdf_path": None, "engine": None, "log_tail": "", "errors": [],
+            "duration_ms": 0,
+        }
+
+    if assets_dir and os.pathsep in assets_dir:
+        # A path-list separator would turn one authorized filesystem.read target
+        # into several TEXINPUTS search roots (e.g. "assets:/etc" also reads /etc).
+        return {
+            "success": False,
+            "error": f"assets_dir must be a single path (no {os.pathsep!r}): {assets_dir}",
             "pdf_path": None, "engine": None, "log_tail": "", "errors": [],
             "duration_ms": 0,
         }

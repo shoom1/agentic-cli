@@ -291,3 +291,54 @@ def test_delivery_preserves_readable_mode(monkeypatch, tmp_path):
     r = compile_document(str(tex), output_pdf=str(out))
     assert r["success"] is True
     assert out.stat().st_mode & 0o044  # group/other readable, not 0600
+
+
+# --- P0-3 re-review: env scope, assets_dir separator, latexmk -norc ---
+
+def test_env_excludes_nontex_vars_starting_with_tex(monkeypatch, tmp_path):
+    """`k.startswith('TEX')` is too broad — TEXT_API_TOKEN etc. must NOT leak;
+    only real TeX vars (TEXMF*/known) pass."""
+    _fake_engine(monkeypatch)
+    monkeypatch.setenv("TEXT_API_TOKEN", "sk-must-not-leak")
+    monkeypatch.setenv("TEXMFHOME", "/home/u/texmf")
+    tex = tmp_path / "r.tex"; tex.write_text("x")
+    captured = {}
+
+    def fake_run(argv, *, cwd, env, timeout):
+        captured["env"] = env
+        (Path(cwd) / "r.pdf").write_bytes(b"%PDF")
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(mod, "_run", fake_run)
+    compile_document(str(tex))
+    assert "TEXT_API_TOKEN" not in captured["env"]
+    assert captured["env"].get("TEXMFHOME") == "/home/u/texmf"
+
+
+def test_assets_dir_with_path_separator_rejected(monkeypatch, tmp_path):
+    """assets_dir authorized as one filesystem path must not smuggle extra
+    TEXINPUTS roots via os.pathsep (e.g. 'assets:/etc')."""
+    import os as _os
+
+    _fake_engine(monkeypatch)
+    tex = tmp_path / "r.tex"; tex.write_text("x")
+    r = compile_document(str(tex), assets_dir=f"assets{_os.pathsep}/etc")
+    assert r["success"] is False
+    assert "assets_dir" in r["error"].lower()
+
+
+def test_latexmk_uses_norc(monkeypatch, tmp_path):
+    """latexmk must run with -norc so a build-dir/home .latexmkrc (arbitrary
+    Perl) is not executed."""
+    _fake_engine(monkeypatch)
+    tex = tmp_path / "r.tex"; tex.write_text("x")
+    captured = {}
+
+    def fake_run(argv, *, cwd, env, timeout):
+        captured["argv"] = argv
+        (Path(cwd) / "r.pdf").write_bytes(b"%PDF")
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(mod, "_run", fake_run)
+    compile_document(str(tex))
+    assert "-norc" in captured["argv"]

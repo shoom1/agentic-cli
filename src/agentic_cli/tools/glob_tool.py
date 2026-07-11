@@ -93,8 +93,11 @@ def glob(
         if not path_is_within(match, search_path):
             continue
 
-        # Skip hidden files if not requested
-        if not include_hidden and match.name.startswith("."):
+        # Skip results with any hidden component, not just a hidden basename —
+        # a pattern like "**/*" otherwise leaks files under a dot-directory.
+        if not include_hidden and any(
+            part.startswith(".") for part in match.relative_to(search_path).parts
+        ):
             continue
 
         # Skip directories if not requested
