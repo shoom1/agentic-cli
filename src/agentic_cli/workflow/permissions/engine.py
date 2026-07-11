@@ -148,6 +148,11 @@ class PermissionEngine:
         resolved = self._resolve(capabilities, args)
         outcomes = self._evaluate(resolved)
 
+        # No capabilities to evaluate (e.g. every cap is optional and its target
+        # arg was absent) → nothing to gate, allow.
+        if not outcomes:
+            return CheckResult(True, "no applicable capabilities")
+
         # DENY wins.
         deny_hits = [(c, r) for c, r in outcomes if r is not None and r.effect is Effect.DENY]
         if deny_hits:
@@ -175,6 +180,10 @@ class PermissionEngine:
                 resolved.append(ResolvedCapability(cap.name, "*"))
                 continue
             value = args.get(cap.target_arg, "")
+            if cap.optional and (value is None or value == ""):
+                # Optional target not supplied → the side effect isn't performed
+                # this call, so don't resolve (and don't spuriously prompt) it.
+                continue
             matcher = get_matcher(cap.name)
             items = value if isinstance(value, (list, tuple)) else [value]
             for item in items:

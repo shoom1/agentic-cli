@@ -31,5 +31,7 @@ def test_compiles_minimal_document(tmp_path):
     assert r["success"] is True, r
     assert Path(r["pdf_path"]).is_file() and Path(r["pdf_path"]).stat().st_size > 0
     assert out.is_file()
-    assert (build / "r.log").is_file()               # intermediates in build dir
+    # Isolation contract: the build runs in a private temp dir (cleaned up), so
+    # intermediates never land in the source dir or beside the delivered PDF.
+    assert not (build / "r.log").exists()            # source dir stays clean
     assert not (out.parent / "r.log").exists()       # not beside delivered PDF

@@ -1,16 +1,24 @@
 """Compile a LaTeX document to PDF with a host TeX engine.
 
 ``compile_document`` is a narrow, permission-gated tool: it runs ``latexmk``
-(preferred) or ``pdflatex`` as a guarded subprocess — shell-escape is disabled
-for the **pdflatex** path (``-no-shell-escape`` flag).  For ``latexmk``, the
-engine relies on its default restricted mode; note that ``latexmk`` also reads
-``.latexmkrc`` (arbitrary Perl) from the build directory and home directory, so
-callers with an untrusted ``.tex``/build directory should prefer ``pdflatex``.
-OS-sandbox confinement for the general case is deferred.
+(preferred) or ``pdflatex`` as a guarded subprocess with the two arbitrary-code
+vectors disabled — ``latexmk`` with ``-norc`` (so no ``.latexmkrc`` Perl is read
+from the build directory or home) and ``pdflatex`` with ``-no-shell-escape`` (no
+``\\write18``).  It runs on the host (not the container sandbox — an intentional
+decoupling); OS-sandbox confinement of the build tree is deferred (spec §9).
 
-The tool runs with a wall-clock timeout and a scoped working dir, and returns a
-structured result.  It does NOT execute arbitrary code; a ``report_writer``-style
-agent uses it to turn an authored ``.tex`` into a PDF.
+The tool runs with a wall-clock timeout and a private temp build dir, and
+returns a structured result.  It does not execute arbitrary host code by
+default; a ``report_writer``-style agent uses it to turn an authored ``.tex``
+into a PDF.  Build intermediates (``*.aux``, ``*.log``) are isolated in a
+``tempfile.TemporaryDirectory`` and never written to the source or delivery dir;
+only the final PDF is promoted via ``_deliver_no_follow``.
+
+The subprocess receives only an allowlisted environment (``_ENV_PASSTHROUGH`` +
+the ``TEXMF*``/TeX config vars), not the full host environment, so host secrets
+aren't handed to the TeX process.  Delivery to ``output_pdf`` is a no-follow
+atomic write (temp file + ``os.replace``) so an attacker-placed symlink at the
+destination can't redirect the write.
 
 Provisioning is host-based: the engine must be on ``PATH`` (TeX Live / MacTeX).
 If neither is found the tool returns a structured error with an install hint.
@@ -26,6 +34,7 @@ import os
 import shutil
 import signal
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -35,6 +44,98 @@ from agentic_cli.workflow.permissions import Capability
 
 _ENGINES = ("latexmk", "pdflatex")
 _LOG_TAIL_LINES = 40
+_LOG_TAIL_BYTES = 64 * 1024
+_MAX_CAPTURE_BYTES = 200_000
+# Cap the size of any single file the TeX child writes (bounds runaway-`.tex`
+# disk use, incl. the log/pdf/aux and our redirected stdout/stderr temp files).
+_RLIMIT_FSIZE_BYTES = 500 * 1024 * 1024
+
+# Only these host env vars reach the TeX process. The tool must not hand the
+# whole host environment (API keys, tokens) to a subprocess that — on the
+# latexmk path — can execute arbitrary Perl from a .latexmkrc. PATH/HOME are
+# needed for the engine binary and kpathsea; TEXINPUTS is set explicitly.
+_ENV_PASSTHROUGH = (
+    "PATH", "HOME", "TERM", "TMPDIR", "TEMP", "TMP",
+    "LANG", "LC_ALL", "LC_CTYPE", "SOURCE_DATE_EPOCH",
+    # latexmk is a Perl program; without its module path it can fail to load.
+    "PERL5LIB", "PERLLIB",
+)
+
+# TeX's own search/config vars (kpathsea) that don't fall under the TEXMF*
+# namespace. TEXINPUTS is deliberately excluded — it is set explicitly below.
+_TEX_VARS = (
+    "TEXFONTS", "TEXFORMATS", "TEXPOOL", "TEXPSHEADERS",
+    "TEXCONFIG", "TEXDOCS", "TEXSOURCES",
+)
+
+# The kpathsea TEXMF* configuration variables (exact — a strict secret boundary,
+# so a name like TEXMF_SECRET is not passed through).
+_TEXMF_VARS = (
+    "TEXMFHOME", "TEXMFVAR", "TEXMFCONFIG", "TEXMFCACHE", "TEXMFLOCAL",
+    "TEXMFDIST", "TEXMFMAIN", "TEXMFSYSVAR", "TEXMFSYSCONFIG", "TEXMFDBS",
+    "TEXMFCNF", "TEXMFOUTPUT",
+)
+
+
+def _build_env(assets_dir: str | None, source_dir: str | None = None) -> dict[str, str]:
+    """Minimal, allowlisted environment for the TeX subprocess.
+
+    Passes PATH/HOME/locale plus TeX's own configuration variables — an exact
+    list of ``TEXMF*`` vars and a fixed set of other TeX vars — so a custom
+    ``TEXMFHOME`` etc. keeps working, but not arbitrary host env (a name like
+    ``TEXT_API_TOKEN`` starts with "TEX" yet is not a TeX var), and never the
+    caller's ``TEXINPUTS`` (set explicitly below).
+
+    ``assets_dir`` and ``source_dir`` become TEXINPUTS read roots so figures and
+    ``\\input`` siblings resolve even though the build runs in a private temp dir.
+    """
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if k in _ENV_PASSTHROUGH or k in _TEXMF_VARS or k in _TEX_VARS
+    }
+    env.setdefault("PATH", os.defpath)
+    roots = [
+        str(Path(r).expanduser().resolve())
+        for r in (assets_dir, source_dir)
+        if r
+    ]
+    if roots:
+        # Trailing empty entry lets kpathsea append its default search path.
+        env["TEXINPUTS"] = os.pathsep.join(roots) + os.pathsep
+    return env
+
+
+def _deliver_no_follow(produced: Path, dest: Path) -> None:
+    """Copy ``produced`` to ``dest`` without following a symlink at ``dest``.
+
+    Writes to a private temp file in dest's directory, then atomically renames
+    it over dest. ``os.replace`` swaps the destination *name*: if dest is a
+    symlink the link itself is replaced (not written through), so an
+    attacker-placed symlink can't redirect the write outside the intended path.
+
+    This protects only the final path component. A symlinked ``dest.parent``
+    (or an ancestor) still redirects the write; the permission engine
+    canonicalizes ``output_pdf`` at check time, but a check→write window
+    remains. Full parent containment is deferred (spec §9, OS-sandbox).
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(dest.parent), prefix=f".{dest.name}.", suffix=".tmp"
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as out, open(produced, "rb") as src:
+            shutil.copyfileobj(src, out)
+            out.flush()
+            os.fsync(out.fileno())
+        # Match the produced PDF's mode/mtime (mkstemp is 0600) so the delivered
+        # file has the readability a consumer expects, as the old copy2 did.
+        shutil.copystat(produced, tmp_path)
+        os.replace(tmp_path, dest)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
 
 
 def _which(name: str) -> str | None:
@@ -42,23 +143,46 @@ def _which(name: str) -> str | None:
     return shutil.which(name)
 
 
+def _child_rlimits(cpu_seconds: int):
+    """Build a ``preexec_fn`` that caps the child's file size and CPU time, so a
+    runaway ``.tex`` can't fill the disk or burn CPU within the wall-clock
+    timeout. Best-effort (a platform without ``resource`` just skips it)."""
+    def _apply() -> None:  # runs in the forked child, before exec
+        try:
+            import resource
+            resource.setrlimit(
+                resource.RLIMIT_FSIZE, (_RLIMIT_FSIZE_BYTES, _RLIMIT_FSIZE_BYTES)
+            )
+            resource.setrlimit(resource.RLIMIT_CPU, (cpu_seconds, cpu_seconds))
+        except (ValueError, OSError, ImportError):
+            pass
+    return _apply
+
+
 def _run(
     argv: list[str], *, cwd: str, env: dict[str, str], timeout: float
 ) -> subprocess.CompletedProcess:
     """Run a subprocess in its own process group so a timeout kills the whole
-    tree (latexmk + its pdflatex grandchild), not just the direct child. Seam
-    for tests. POSIX (macOS/Linux), which is what the framework targets."""
-    proc = subprocess.Popen(
-        argv, cwd=cwd, env=env,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-        start_new_session=True,
-    )
-    try:
-        out, err = proc.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        proc.communicate()  # reap the killed group
-        raise
+    tree (latexmk + its pdflatex grandchild), not just the direct child.
+    stdout/stderr are captured to temp files and only the last
+    _MAX_CAPTURE_BYTES of each are retained, bounding host memory. The child
+    also runs under RLIMIT_FSIZE/RLIMIT_CPU limits. Seam for tests. POSIX
+    (macOS/Linux), which is what the framework targets."""
+    with tempfile.TemporaryFile() as out_f, tempfile.TemporaryFile() as err_f:
+        proc = subprocess.Popen(
+            argv, cwd=cwd, env=env,
+            stdout=out_f, stderr=err_f,
+            start_new_session=True,
+            preexec_fn=_child_rlimits(int(timeout) + 30),
+        )
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            proc.wait()  # reap the killed group
+            raise
+        out = _tail_of_file(out_f, _MAX_CAPTURE_BYTES)
+        err = _tail_of_file(err_f, _MAX_CAPTURE_BYTES)
     return subprocess.CompletedProcess(argv, proc.returncode, stdout=out, stderr=err)
 
 
@@ -73,13 +197,28 @@ def _detect_engine(engine: str | None) -> str | None:
 
 
 def _build_argv(engine: str, source: str) -> list[str]:
-    """Compiler argv — never enables shell-escape."""
+    """Compiler argv — never enables shell-escape.
+
+    latexmk runs with ``-norc`` so it won't read ``.latexmkrc`` (arbitrary
+    Perl) from the build directory or home; pdflatex runs with
+    ``-no-shell-escape``. Neither path executes arbitrary host code by default.
+    """
     if engine == "latexmk":
-        return ["latexmk", "-pdf", "-interaction=nonstopmode", "-halt-on-error", source]
+        return [
+            "latexmk", "-norc", "-pdf", "-interaction=nonstopmode",
+            "-halt-on-error", source,
+        ]
     return [
         "pdflatex", "-no-shell-escape", "-interaction=nonstopmode",
         "-halt-on-error", source,
     ]
+
+
+def _safe_source_arg(name: str) -> str:
+    """Anchor a source filename so a leading ``-`` can't be parsed as an engine
+    option (arbitrary-exec via ``-pdflatex=CMD`` etc.). ``name`` is a basename
+    and the subprocess cwd is the source's directory, so ``./`` resolves it."""
+    return name if name.startswith("./") else f"./{name}"
 
 
 def _parse_errors(log_text: str) -> list[str]:
@@ -87,14 +226,41 @@ def _parse_errors(log_text: str) -> list[str]:
     return [ln for ln in log_text.splitlines() if ln.startswith("!")]
 
 
+def _tail_of_file(f, limit: int) -> str:
+    """Return the last ``limit`` bytes of an open binary temp file, decoded."""
+    size = f.seek(0, os.SEEK_END)
+    f.seek(max(0, size - limit))
+    return f.read().decode("utf-8", errors="replace")
+
+
+def _read_log_tail(log_path: Path, fallback: str) -> str:
+    """Return at most the last _LOG_TAIL_BYTES of the log (decoded), else
+    ``fallback``. Bounds memory on a runaway compiler log."""
+    try:
+        if not log_path.is_file():
+            return fallback
+        with open(log_path, "rb") as f:
+            size = f.seek(0, os.SEEK_END)
+            f.seek(max(0, size - _LOG_TAIL_BYTES))
+            return f.read().decode("utf-8", errors="replace")
+    except OSError:
+        return fallback
+
+
 @register_tool(
     category=ToolCategory.EXECUTION,
-    capabilities=[Capability("document.compile", target_arg="source_path")],
+    capabilities=[
+        Capability("document.compile", target_arg="source_path"),
+        # The tool also reads assets_dir and writes output_pdf when those are
+        # supplied; scope them explicitly (optional → not exercised when absent).
+        Capability("filesystem.read", target_arg="assets_dir", optional=True),
+        Capability("filesystem.write", target_arg="output_pdf", optional=True),
+    ],
     description=(
         "Compile a LaTeX source file to PDF using a host TeX engine (latexmk or "
-        "pdflatex). Shell-escape is disabled for pdflatex (-no-shell-escape); "
-        "latexmk uses its default restricted mode but also reads .latexmkrc from "
-        "the build/home directory. Returns the PDF path plus any compiler errors. "
+        "pdflatex). Runs on the host: latexmk with -norc (no .latexmkrc) and "
+        "pdflatex with -no-shell-escape, so it does not execute arbitrary host "
+        "code by default. Returns the PDF path plus any compiler errors. "
         "Requires TeX Live/MacTeX on PATH."
     ),
 )
@@ -110,7 +276,7 @@ def compile_document(
     Args:
         source_path: Path to the .tex file to compile.
         output_pdf: If set, the produced PDF is copied here (parents created);
-            build intermediates stay in the source's directory.
+            build intermediates are isolated in a private temp dir.
         assets_dir: Directory prepended to TEXINPUTS so figures/resources resolve
             by bare name (e.g. an artifacts dir).
         engine: Force an engine ("latexmk"/"pdflatex"); default auto-detects
@@ -129,6 +295,16 @@ def compile_document(
             "duration_ms": 0,
         }
 
+    if assets_dir and os.pathsep in assets_dir:
+        # A path-list separator would turn one authorized filesystem.read target
+        # into several TEXINPUTS search roots (e.g. "assets:/etc" also reads /etc).
+        return {
+            "success": False,
+            "error": f"assets_dir must be a single path (no {os.pathsep!r}): {assets_dir}",
+            "pdf_path": None, "engine": None, "log_tail": "", "errors": [],
+            "duration_ms": 0,
+        }
+
     chosen = _detect_engine(engine)
     if chosen is None:
         looked = engine or "/".join(_ENGINES)
@@ -142,64 +318,63 @@ def compile_document(
             "duration_ms": 0,
         }
 
-    work_dir = src.parent
-    env = dict(os.environ)
-    if assets_dir:
-        prev = env.get("TEXINPUTS", "")
-        # Prepend assets_dir; trailing empty entry preserves the default path.
-        env["TEXINPUTS"] = f"{assets_dir}{os.pathsep}{prev}{os.pathsep}"
-
-    argv = _build_argv(chosen, src.name)
+    env = _build_env(assets_dir, source_dir=str(src.parent))
+    argv = _build_argv(chosen, _safe_source_arg(src.name))
     start = time.monotonic()
-    try:
-        proc = _run(argv, cwd=str(work_dir), env=env, timeout=float(timeout_s))
-    except subprocess.TimeoutExpired:
-        return {
-            "success": False, "error": f"Compilation timed out after {timeout_s}s",
-            "pdf_path": None, "engine": chosen, "log_tail": "", "errors": [],
-            "duration_ms": int((time.monotonic() - start) * 1000),
-        }
-    except OSError as exc:
-        return {
-            "success": False, "error": f"Failed to run {chosen}: {exc}",
-            "pdf_path": None, "engine": chosen, "log_tail": "", "errors": [],
-            "duration_ms": int((time.monotonic() - start) * 1000),
-        }
-    duration_ms = int((time.monotonic() - start) * 1000)
 
-    log_path = work_dir / (src.stem + ".log")
-    try:
-        log_text = log_path.read_text(errors="replace") if log_path.is_file() else (proc.stdout or "")
-    except OSError:
-        log_text = proc.stdout or ""
-    log_tail = "\n".join(log_text.splitlines()[-_LOG_TAIL_LINES:])
-    produced = work_dir / (src.stem + ".pdf")
-    success = proc.returncode == 0 and produced.is_file()
-
-    if not success:
-        return {
-            "success": False, "pdf_path": None, "engine": chosen,
-            "log_tail": log_tail, "errors": _parse_errors(log_text),
-            "duration_ms": duration_ms, "error": None,
-        }
-
-    final = produced
-    if output_pdf:
-        dest = Path(output_pdf)
+    with tempfile.TemporaryDirectory(prefix="texbuild-", ignore_cleanup_errors=True) as build_dir:
+        build = Path(build_dir)
         try:
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(produced, dest)
+            shutil.copy2(src, build / src.name)
+        except OSError as exc:
+            return {
+                "success": False, "error": f"Failed to stage source: {exc}",
+                "pdf_path": None, "engine": chosen, "log_tail": "", "errors": [],
+                "duration_ms": int((time.monotonic() - start) * 1000),
+            }
+
+        try:
+            proc = _run(argv, cwd=str(build), env=env, timeout=float(timeout_s))
+        except subprocess.TimeoutExpired:
+            return {
+                "success": False, "error": f"Compilation timed out after {timeout_s}s",
+                "pdf_path": None, "engine": chosen, "log_tail": "", "errors": [],
+                "duration_ms": int((time.monotonic() - start) * 1000),
+            }
+        except OSError as exc:
+            return {
+                "success": False, "error": f"Failed to run {chosen}: {exc}",
+                "pdf_path": None, "engine": chosen, "log_tail": "", "errors": [],
+                "duration_ms": int((time.monotonic() - start) * 1000),
+            }
+        duration_ms = int((time.monotonic() - start) * 1000)
+
+        log_path = build / (src.stem + ".log")
+        log_text = _read_log_tail(log_path, fallback=proc.stdout or "")
+        log_tail = "\n".join(log_text.splitlines()[-_LOG_TAIL_LINES:])
+        produced = build / (src.stem + ".pdf")
+        success = proc.returncode == 0 and produced.is_file()
+
+        if not success:
+            return {
+                "success": False, "pdf_path": None, "engine": chosen,
+                "log_tail": log_tail, "errors": _parse_errors(log_text),
+                "duration_ms": duration_ms, "error": None,
+            }
+
+        dest = Path(output_pdf) if output_pdf else (src.parent / (src.stem + ".pdf"))
+        try:
+            _deliver_no_follow(produced, dest)
         except OSError as exc:
             return {
                 "success": False,
-                "error": f"Failed to deliver PDF to {output_pdf}: {exc}",
-                "pdf_path": str(produced), "engine": chosen,
+                "error": f"Failed to deliver PDF to {dest}: {exc}",
+                "pdf_path": None, "engine": chosen,
                 "log_tail": log_tail, "errors": [], "duration_ms": duration_ms,
             }
-        final = dest
 
     return {
-        "success": True, "pdf_path": str(final), "engine": chosen,
+        "success": True, "pdf_path": str(dest), "engine": chosen,
         "log_tail": log_tail, "errors": [], "duration_ms": duration_ms,
         "error": None,
     }

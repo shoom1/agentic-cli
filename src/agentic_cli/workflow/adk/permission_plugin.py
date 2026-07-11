@@ -5,7 +5,8 @@ Adapter check order (mirrors LangGraph wrapper for consistency):
 2. Unregistered MCP toolset tool → gate through the engine under a synthetic
    ``mcp`` capability (no rule → ASK).
 3. Tool has no capability declaration → deny (author error, loud).
-4. Engine absent from service registry → allow (test/dev fallback).
+4. Engine absent from service registry → fail closed (deny) when permissions
+   are enabled; allow only when permissions are disabled.
 5. Otherwise call engine.check() and return None on allow, error dict on deny.
 """
 
@@ -59,6 +60,25 @@ def _is_mcp_tool(tool: "BaseTool") -> bool:
 _MCP_TARGET_ARG = "__mcp_target__"
 
 
+def _no_engine_result(tool_name: str) -> dict | None:
+    """Return value when the permission engine is absent from the registry.
+
+    Fail closed: if permissions are enabled but no engine is wired, deny the
+    call. In production ``base_manager`` always constructs the engine, so a
+    missing engine with permissions on is a misconfiguration — allowing would
+    silently bypass all gating. Only permissions-disabled allows (None).
+    """
+    from agentic_cli.config import get_settings
+
+    if get_settings().permissions_enabled:
+        logger.warning("permission_engine_missing", tool=tool_name)
+        return {
+            "success": False,
+            "error": "Permission denied: permission engine unavailable",
+        }
+    return None
+
+
 class PermissionPlugin(BasePlugin):
     """ADK plugin: gates every tool call through :class:`PermissionEngine`."""
 
@@ -91,7 +111,7 @@ class PermissionPlugin(BasePlugin):
 
         engine = get_service(PERMISSION_ENGINE)
         if engine is None:
-            return None  # test/dev fallback
+            return _no_engine_result(tool.name)
 
         result = await engine.check(tool.name, caps, tool_args)
         if result.allowed:
@@ -102,7 +122,7 @@ class PermissionPlugin(BasePlugin):
         """Gate an MCP tool through the engine under a synthetic capability."""
         engine = get_service(PERMISSION_ENGINE)
         if engine is None:
-            return None  # test/dev fallback
+            return _no_engine_result(tool.name)
         caps = [Capability("mcp", target_arg=_MCP_TARGET_ARG)]
         result = await engine.check(tool.name, caps, {_MCP_TARGET_ARG: tool.name})
         if result.allowed:

@@ -38,6 +38,7 @@ dependencies = [
     "numpy>=1.26.0,<2.0",
     "feedparser>=6.0.0",
     "pypdf>=4.0.0",
+    "html2text>=2020.1.16",  # eager import in tools/webfetch/converter.py
     "jupyter_client>=8.0.0",
     "ipykernel>=6.0.0",
     # Durable sessions: ADK DatabaseSessionService (SQLAlchemy async) needs an

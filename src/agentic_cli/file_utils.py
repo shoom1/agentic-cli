@@ -3,6 +3,7 @@
 import fcntl
 import json
 import os
+import re
 import tempfile
 import time
 from contextlib import contextmanager
@@ -57,6 +58,34 @@ def sanitize_filename(name: str) -> str:
     Replaces any character that isn't alphanumeric, hyphen, or underscore with underscore.
     """
     return "".join(c if c.isalnum() or c in "-_" else "_" for c in name)
+
+
+def glob_pattern_escapes_root(pattern: str) -> bool:
+    """True if a glob pattern would search outside its base directory.
+
+    Rejects absolute patterns and any pattern containing a ``..`` path
+    component. ``pathlib.Path.glob`` does not normalize ``..``, so a pattern
+    like ``../*`` escapes the base directory even though the permission engine
+    only authorized that base. Callers should reject such patterns before
+    globbing.
+    """
+    if os.path.isabs(pattern):
+        return True
+    return ".." in re.split(r"[\\/]+", pattern)
+
+
+def path_is_within(path: Path, root: Path) -> bool:
+    """True if ``path`` resolves to a location inside ``root``.
+
+    Both operands are fully resolved (following symlinks) before the check, so
+    a symlink under ``root`` that points outside is correctly rejected. Returns
+    False on any resolution error (loop, permission) — fail closed.
+    """
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except (OSError, ValueError, RuntimeError):
+        return False
 
 
 def _atomic_write(path: Path, content: str) -> None:

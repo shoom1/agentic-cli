@@ -115,7 +115,8 @@ class TestPermissionPluginUnit:
         assert result == {"success": False, "error": "Permission denied: rule: builtin/deny"}
 
     @pytest.mark.asyncio
-    async def test_engine_absent_allows(self, monkeypatch):
+    async def test_engine_absent_denies_when_permissions_enabled(self, monkeypatch):
+        """Fail closed: permissions on but no engine wired -> deny, not allow."""
         from agentic_cli.tools.registry import get_registry
         from agentic_cli.workflow.adk.permission_plugin import PermissionPlugin
 
@@ -123,19 +124,54 @@ class TestPermissionPluginUnit:
             "agentic_cli.workflow.adk.permission_plugin.get_service",
             lambda k: None,
         )
+        monkeypatch.setattr(
+            "agentic_cli.config.get_settings",
+            lambda: SimpleNamespace(permissions_enabled=True),
+        )
         reg = get_registry()
 
         @reg.register(
-            name="reader_y",
+            name="reader_y_deny",
             capabilities=[Capability("filesystem.read", target_arg="path")],
         )
-        def reader_y(path: str):
+        def reader_y_deny(path: str):
             return {}
 
         plugin = PermissionPlugin()
         result = await plugin.before_tool_callback(
-            tool=SimpleNamespace(name="reader_y"),
+            tool=SimpleNamespace(name="reader_y_deny"),
             tool_args={"path": "/tmp/x"},
             tool_context=None,
         )
-        assert result is None  # fallback allow
+        assert result is not None and result["success"] is False
+
+    @pytest.mark.asyncio
+    async def test_engine_absent_allows_when_permissions_disabled(self, monkeypatch):
+        """Permissions off is the only case a missing engine allows."""
+        from agentic_cli.tools.registry import get_registry
+        from agentic_cli.workflow.adk.permission_plugin import PermissionPlugin
+
+        monkeypatch.setattr(
+            "agentic_cli.workflow.adk.permission_plugin.get_service",
+            lambda k: None,
+        )
+        monkeypatch.setattr(
+            "agentic_cli.config.get_settings",
+            lambda: SimpleNamespace(permissions_enabled=False),
+        )
+        reg = get_registry()
+
+        @reg.register(
+            name="reader_y_allow",
+            capabilities=[Capability("filesystem.read", target_arg="path")],
+        )
+        def reader_y_allow(path: str):
+            return {}
+
+        plugin = PermissionPlugin()
+        result = await plugin.before_tool_callback(
+            tool=SimpleNamespace(name="reader_y_allow"),
+            tool_args={"path": "/tmp/x"},
+            tool_context=None,
+        )
+        assert result is None
