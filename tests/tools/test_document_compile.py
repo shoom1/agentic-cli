@@ -342,3 +342,24 @@ def test_latexmk_uses_norc(monkeypatch, tmp_path):
     monkeypatch.setattr(mod, "_run", fake_run)
     compile_document(str(tex))
     assert "-norc" in captured["argv"]
+
+
+def test_option_like_source_name_not_treated_as_flag(monkeypatch, tmp_path):
+    """A source basename starting with '-' must be anchored (./) so the engine
+    parses it as a file, not an option — otherwise '-pdflatex=CMD.tex' et al.
+    execute arbitrary host commands (which -norc does NOT prevent)."""
+    _fake_engine(monkeypatch)
+    tex = tmp_path / "-pdflatex=evil.tex"
+    tex.write_text("x")
+    captured = {}
+
+    def fake_run(argv, *, cwd, env, timeout):
+        captured["argv"] = argv
+        (Path(cwd) / (tex.stem + ".pdf")).write_bytes(b"%PDF")
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(mod, "_run", fake_run)
+    r = compile_document(str(tex))
+    assert "-pdflatex=evil.tex" not in captured["argv"]        # never a bare option-like token
+    assert "./-pdflatex=evil.tex" in captured["argv"]          # anchored as a path
+    assert r["success"] is True

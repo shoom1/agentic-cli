@@ -171,6 +171,13 @@ def _build_argv(engine: str, source: str) -> list[str]:
     ]
 
 
+def _safe_source_arg(name: str) -> str:
+    """Anchor a source filename so a leading ``-`` can't be parsed as an engine
+    option (arbitrary-exec via ``-pdflatex=CMD`` etc.). ``name`` is a basename
+    and the subprocess cwd is the source's directory, so ``./`` resolves it."""
+    return name if name.startswith("./") else f"./{name}"
+
+
 def _parse_errors(log_text: str) -> list[str]:
     """Extract LaTeX error lines (those beginning with '!') from a log."""
     return [ln for ln in log_text.splitlines() if ln.startswith("!")]
@@ -250,7 +257,7 @@ def compile_document(
     work_dir = src.parent
     env = _build_env(assets_dir)
 
-    argv = _build_argv(chosen, src.name)
+    argv = _build_argv(chosen, _safe_source_arg(src.name))
     start = time.monotonic()
     try:
         proc = _run(argv, cwd=str(work_dir), env=env, timeout=float(timeout_s))
