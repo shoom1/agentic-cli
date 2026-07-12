@@ -129,21 +129,6 @@ class URLValidator:
                 raise BlockedAddressError(f"blocked non-global address {ip_obj} for {host}")
         return str(ips[0])
 
-    def validate_ip(self, ip_str: str) -> ValidationResult:
-        """DEPRECATED (removed in the fetcher task once its last caller is gone).
-        Retained temporarily so the fetcher's post-fetch re-check keeps working."""
-        try:
-            ip = ipaddress.ip_address(ip_str)
-        except ValueError as e:
-            return ValidationResult(valid=False, error=f"Invalid IP address: {e}")
-        if not _ip_is_safe(ip):
-            return ValidationResult(
-                valid=False,
-                error=f"Private/internal IP address blocked: {ip_str}",
-                resolved_ip=ip_str,
-            )
-        return ValidationResult(valid=True, resolved_ip=ip_str)
-
     def _is_domain_blocked(self, hostname: str) -> bool:
         hostname_lower = hostname.lower()
         for pattern in self.blocked_domains:

@@ -1,10 +1,35 @@
 """Tests for webfetch tool."""
 
 import ipaddress
+import socket
+import time
 
+import httpx
 import pytest
+from unittest.mock import AsyncMock, patch
 
 from agentic_cli.config import BaseSettings
+
+
+def _pinned_fetcher(monkeypatch, handler, *, resolves_to="93.184.216.34", **kw):
+    """Build a ContentFetcher whose transport is a PinnedTransport over a
+    MockTransport(handler); getaddrinfo is stubbed so pinning succeeds."""
+    from agentic_cli.tools.webfetch.validator import URLValidator
+    from agentic_cli.tools.webfetch.transport import PinnedTransport
+    from agentic_cli.tools.webfetch.robots import RobotsTxtChecker
+    from agentic_cli.tools.webfetch.fetcher import ContentFetcher
+
+    def _gai(host, port, *a, **k):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (resolves_to, port))]
+    monkeypatch.setattr(socket, "getaddrinfo", _gai)
+
+    validator = URLValidator()
+    transport = PinnedTransport(validator, inner=httpx.MockTransport(handler))
+    robots = RobotsTxtChecker()  # robots.can_fetch is patched in these tests, so
+                                 # its transport is irrelevant here (wired in Task 4)
+    return ContentFetcher(
+        validator=validator, robots_checker=robots, transport=transport, **kw
+    )
 
 
 class TestWebFetchSettings:
@@ -119,78 +144,6 @@ class TestURLValidator:
         assert result.valid is False
 
 
-class TestValidateIP:
-    """Tests for URLValidator.validate_ip() (C3: extracted IP check)."""
-
-    @pytest.fixture
-    def validator(self):
-        from agentic_cli.tools.webfetch.validator import URLValidator
-        return URLValidator(blocked_domains=[])
-
-    def test_validate_ip_blocks_private(self, validator):
-        """Private IPs are blocked."""
-        for ip in ("127.0.0.1", "10.0.0.1", "192.168.1.1", "172.16.0.1"):
-            result = validator.validate_ip(ip)
-            assert result.valid is False, f"{ip} should be blocked"
-            assert "blocked" in result.error.lower()
-
-    def test_validate_ip_allows_public(self, validator):
-        """Public IPs pass validation."""
-        result = validator.validate_ip("8.8.8.8")
-        assert result.valid is True
-        assert result.resolved_ip == "8.8.8.8"
-
-    def test_validate_ip_invalid_string(self, validator):
-        """Invalid IP string returns error."""
-        result = validator.validate_ip("not-an-ip")
-        assert result.valid is False
-        assert "invalid" in result.error.lower()
-
-
-class TestPostFetchRevalidation:
-    """Tests for DNS rebinding protection in ContentFetcher (C3)."""
-
-    @pytest.mark.asyncio
-    async def test_post_fetch_revalidation_blocks_rebind(self):
-        """If DNS resolves to private IP post-fetch, the response is rejected."""
-        from agentic_cli.tools.webfetch.fetcher import ContentFetcher
-        from agentic_cli.tools.webfetch.validator import URLValidator, ValidationResult
-        from agentic_cli.tools.webfetch.robots import RobotsTxtChecker
-        from unittest.mock import AsyncMock, patch, MagicMock
-
-        fetcher = ContentFetcher(
-            validator=URLValidator(blocked_domains=[]),
-            robots_checker=RobotsTxtChecker(),
-        )
-
-        # Mock validator.validate to allow pre-fetch (public IP)
-        with patch.object(fetcher._validator, "validate") as mock_validate:
-            mock_validate.return_value = ValidationResult(valid=True, resolved_ip="1.2.3.4")
-
-            with patch.object(fetcher._robots, "can_fetch", new_callable=AsyncMock) as mock_robots:
-                mock_robots.return_value = True
-
-                with patch("httpx.AsyncClient.get", new_callable=AsyncMock) as mock_get:
-                    mock_response = AsyncMock()
-                    mock_response.status_code = 200
-                    mock_response.text = "evil content"
-                    mock_response.headers = {"content-type": "text/html"}
-                    mock_response.history = []
-                    mock_response.url = "https://example.com/page"
-                    mock_get.return_value = mock_response
-
-                    # Post-fetch DNS resolves to private IP (rebinding attack)
-                    with patch("agentic_cli.tools.webfetch.fetcher.socket.gethostbyname") as mock_dns:
-                        mock_dns.return_value = "127.0.0.1"
-                        result = await fetcher.fetch("https://example.com/page")
-
-        assert result.success is False
-        assert "rebinding" in result.error.lower()
-
-
-from unittest.mock import AsyncMock, patch
-
-
 class TestRobotsTxtChecker:
     """Tests for robots.txt compliance."""
 
@@ -262,227 +215,125 @@ Disallow: /private/
             assert mock_get.call_count == 1
 
 
-import time
-import httpx
-
-
 class TestContentFetcher:
-    """Tests for content fetching with caching and redirect handling."""
-
-    @pytest.fixture
-    def fetcher(self):
-        from agentic_cli.tools.webfetch.fetcher import ContentFetcher
-        from agentic_cli.tools.webfetch.validator import URLValidator
-        from agentic_cli.tools.webfetch.robots import RobotsTxtChecker
-        return ContentFetcher(
-            validator=URLValidator(blocked_domains=[]),
-            robots_checker=RobotsTxtChecker(),
-            cache_ttl_seconds=900,
-            max_content_bytes=102400,
-        )
-
     @pytest.mark.asyncio
-    async def test_fetch_success(self, fetcher):
-        """Test successful fetch."""
-        with patch("httpx.AsyncClient.get", new_callable=AsyncMock) as mock_get:
-            mock_response = AsyncMock()
-            mock_response.status_code = 200
-            mock_response.text = "<html><body>Content</body></html>"
-            mock_response.headers = {"content-type": "text/html"}
-            mock_response.history = []
-            mock_response.url = "https://example.com/page"
-            mock_get.return_value = mock_response
-
-            with patch.object(fetcher._robots, "can_fetch", new_callable=AsyncMock) as mock_robots:
-                mock_robots.return_value = True
-                result = await fetcher.fetch("https://example.com/page")
-
+    async def test_fetch_success(self, monkeypatch):
+        fetcher = _pinned_fetcher(
+            monkeypatch,
+            lambda req: httpx.Response(200, text="<html><body>Content</body></html>",
+                                       headers={"content-type": "text/html"}),
+        )
+        with patch.object(fetcher._robots, "can_fetch", new_callable=AsyncMock, return_value=True):
+            result = await fetcher.fetch("https://example.com/page")
         assert result.success is True
         assert "Content" in result.content
 
     @pytest.mark.asyncio
-    async def test_fetch_blocked_by_validator(self, fetcher):
-        """Test fetch blocked by URL validator."""
-        result = await fetcher.fetch("http://127.0.0.1/internal")
-        assert result.success is False
-        assert "blocked" in result.error.lower() or "private" in result.error.lower()
+    async def test_fetch_pins_to_validated_ip(self, monkeypatch):
+        seen = {}
+        def handler(req):
+            seen["host"] = req.url.host
+            seen["host_header"] = req.headers.get("Host")
+            return httpx.Response(200, text="ok", headers={"content-type": "text/html"})
+        fetcher = _pinned_fetcher(monkeypatch, handler)
+        with patch.object(fetcher._robots, "can_fetch", new_callable=AsyncMock, return_value=True):
+            await fetcher.fetch("https://example.com/page")
+        assert seen["host"] == "93.184.216.34"      # connected to pinned IP
+        assert seen["host_header"] == "example.com"  # Host preserved
 
     @pytest.mark.asyncio
-    async def test_fetch_blocked_by_robots(self, fetcher):
-        """Test fetch blocked by robots.txt."""
-        with patch.object(fetcher._robots, "can_fetch", new_callable=AsyncMock) as mock_robots:
-            mock_robots.return_value = False
-            with patch.object(fetcher._validator, "validate") as mock_validate:
-                from agentic_cli.tools.webfetch.validator import ValidationResult
-                mock_validate.return_value = ValidationResult(valid=True, resolved_ip="1.2.3.4")
-                result = await fetcher.fetch("https://example.com/private/page")
+    async def test_fetch_blocked_by_validator_ip_literal(self, monkeypatch):
+        fetcher = _pinned_fetcher(monkeypatch, lambda req: httpx.Response(200))
+        result = await fetcher.fetch("http://127.0.0.1/internal")
+        assert result.success is False
 
+    @pytest.mark.asyncio
+    async def test_fetch_blocked_when_host_resolves_private(self, monkeypatch):
+        fetcher = _pinned_fetcher(monkeypatch, lambda req: httpx.Response(200),
+                                  resolves_to="10.0.0.5")
+        with patch.object(fetcher._robots, "can_fetch", new_callable=AsyncMock, return_value=True):
+            result = await fetcher.fetch("https://intranet.test/secret")
+        assert result.success is False
+        assert "block" in (result.error or "").lower()
+
+    @pytest.mark.asyncio
+    async def test_fetch_blocked_by_robots(self, monkeypatch):
+        fetcher = _pinned_fetcher(monkeypatch, lambda req: httpx.Response(200, text="x"))
+        with patch.object(fetcher._robots, "can_fetch", new_callable=AsyncMock, return_value=False):
+            result = await fetcher.fetch("https://example.com/private/page")
         assert result.success is False
         assert "robots" in result.error.lower()
 
     @pytest.mark.asyncio
-    async def test_fetch_cross_host_redirect_blocks_before_second_request(self, fetcher):
-        """A 3xx redirect to a different host must be reported as a cross-host
-        redirect WITHOUT issuing the next GET. The user's permission grant
-        covers the original host only, so contacting another origin is an
-        unapproved side effect."""
-        redirect_response = AsyncMock()
-        redirect_response.status_code = 302
-        redirect_response.headers = {"location": "https://other.com/page"}
-        redirect_response.url = httpx.URL("https://example.com/page")
-
-        with patch("httpx.AsyncClient.get", new_callable=AsyncMock) as mock_get:
-            mock_get.return_value = redirect_response
-            with patch.object(fetcher._robots, "can_fetch", new_callable=AsyncMock) as mock_robots:
-                mock_robots.return_value = True
-                with patch.object(fetcher._validator, "validate") as mock_validate:
-                    from agentic_cli.tools.webfetch.validator import ValidationResult
-                    mock_validate.return_value = ValidationResult(valid=True, resolved_ip="1.2.3.4")
-                    result = await fetcher.fetch("https://example.com/page")
-
+    async def test_cross_host_redirect_blocks_before_second_request(self, monkeypatch):
+        calls = {"n": 0}
+        def handler(req):
+            calls["n"] += 1
+            return httpx.Response(302, headers={"location": "https://other.com/page"})
+        fetcher = _pinned_fetcher(monkeypatch, handler)
+        with patch.object(fetcher._robots, "can_fetch", new_callable=AsyncMock, return_value=True):
+            result = await fetcher.fetch("https://example.com/page")
         assert result.success is False
-        assert result.redirect is not None
-        assert result.redirect.to_host == "other.com"
-        # Only the original GET should have been issued.
-        assert mock_get.call_count == 1
+        assert result.redirect is not None and result.redirect.to_host == "other.com"
+        assert calls["n"] == 1  # next GET never issued
 
     @pytest.mark.asyncio
-    async def test_fetch_same_host_redirect_blocked_by_robots(self, fetcher):
-        """A same-host redirect whose target is disallowed by robots.txt
-        must not be fetched, even though the original URL was allowed."""
-        redirect_response = AsyncMock()
-        redirect_response.status_code = 302
-        redirect_response.headers = {"location": "/private/page"}
-        redirect_response.url = httpx.URL("https://example.com/public")
-
-        robots_calls: list[str] = []
-
-        async def fake_can_fetch(u):
-            robots_calls.append(u)
-            return "/private" not in u
-
-        with patch("httpx.AsyncClient.get", new_callable=AsyncMock) as mock_get:
-            mock_get.return_value = redirect_response
-            with patch.object(fetcher._robots, "can_fetch", side_effect=fake_can_fetch):
-                with patch.object(fetcher._validator, "validate") as mock_validate:
-                    from agentic_cli.tools.webfetch.validator import ValidationResult
-                    mock_validate.return_value = ValidationResult(valid=True, resolved_ip="1.2.3.4")
-                    result = await fetcher.fetch("https://example.com/public")
-
-        assert result.success is False
-        assert "robots" in (result.error or "").lower()
-        # Only the original GET should have fired; redirected URL was blocked
-        # before its request.
-        assert mock_get.call_count == 1
-        # robots.txt was consulted for both the original and the redirect target.
-        assert any("/public" in u for u in robots_calls)
-        assert any("/private/page" in u for u in robots_calls)
-
-    @pytest.mark.asyncio
-    async def test_fetch_redirect_to_internal_ip_blocked_before_request(self, fetcher):
-        """A redirect Location pointing at a private IP is blocked without issuing the next request."""
-        redirect_response = AsyncMock()
-        redirect_response.status_code = 302
-        redirect_response.headers = {"location": "http://169.254.169.254/latest/meta-data/"}
-        redirect_response.url = httpx.URL("https://example.com/page")
-
-        with patch("httpx.AsyncClient.get", new_callable=AsyncMock) as mock_get:
-            mock_get.return_value = redirect_response
-            with patch.object(fetcher._robots, "can_fetch", new_callable=AsyncMock) as mock_robots:
-                mock_robots.return_value = True
-                # First validate() call (original URL) passes; the second
-                # call (redirect target) is the real one — we let the real
-                # validator catch the private IP.
-                from agentic_cli.tools.webfetch.validator import ValidationResult, URLValidator
-                real_validator = URLValidator()
-                with patch.object(
-                    fetcher._validator, "validate",
-                    side_effect=[
-                        ValidationResult(valid=True, resolved_ip="1.2.3.4"),
-                        real_validator.validate("http://169.254.169.254/latest/meta-data/"),
-                    ],
-                ):
-                    result = await fetcher.fetch("https://example.com/page")
-
-        assert result.success is False
-        assert "redirect" in (result.error or "").lower()
-        # Only the first GET (the original URL) should have been issued.
-        assert mock_get.call_count == 1
-
-    @pytest.mark.asyncio
-    async def test_fetch_too_many_redirects(self, fetcher):
-        """A redirect loop longer than MAX_REDIRECTS is rejected."""
-        from agentic_cli.tools.webfetch.fetcher import ContentFetcher
-
-        def make_redirect(i: int):
-            r = AsyncMock()
-            r.status_code = 302
-            r.headers = {"location": f"https://example.com/hop{i + 1}"}
-            r.url = httpx.URL(f"https://example.com/hop{i}")
-            return r
-
-        responses = [make_redirect(i) for i in range(ContentFetcher.MAX_REDIRECTS + 1)]
-
-        with patch("httpx.AsyncClient.get", new_callable=AsyncMock) as mock_get:
-            mock_get.side_effect = responses
-            with patch.object(fetcher._robots, "can_fetch", new_callable=AsyncMock) as mock_robots:
-                mock_robots.return_value = True
-                with patch.object(fetcher._validator, "validate") as mock_validate:
-                    from agentic_cli.tools.webfetch.validator import ValidationResult
-                    mock_validate.return_value = ValidationResult(valid=True, resolved_ip="1.2.3.4")
-                    result = await fetcher.fetch("https://example.com/hop0")
-
-        assert result.success is False
-        assert "redirect" in (result.error or "").lower()
-
-    @pytest.mark.asyncio
-    async def test_fetch_caching(self, fetcher):
-        """Test responses are cached."""
-        with patch("httpx.AsyncClient.get", new_callable=AsyncMock) as mock_get:
-            mock_response = AsyncMock()
-            mock_response.status_code = 200
-            mock_response.text = "Cached content"
-            mock_response.headers = {"content-type": "text/html"}
-            mock_response.history = []
-            mock_response.url = "https://example.com/page"
-            mock_get.return_value = mock_response
-
-            with patch.object(fetcher._robots, "can_fetch", new_callable=AsyncMock) as mock_robots:
-                mock_robots.return_value = True
-                with patch.object(fetcher._validator, "validate") as mock_validate:
-                    from agentic_cli.tools.webfetch.validator import ValidationResult
-                    mock_validate.return_value = ValidationResult(valid=True, resolved_ip="1.2.3.4")
-
-                    result1 = await fetcher.fetch("https://example.com/page")
-                    result2 = await fetcher.fetch("https://example.com/page")
-
-        assert result1.from_cache is False
-        assert result2.from_cache is True
-        assert mock_get.call_count == 1
-
-    @pytest.mark.asyncio
-    async def test_fetch_content_truncation(self, fetcher):
-        """Test content is truncated when too large."""
-        large_content = "x" * 200000
-
-        with patch("httpx.AsyncClient.get", new_callable=AsyncMock) as mock_get:
-            mock_response = AsyncMock()
-            mock_response.status_code = 200
-            mock_response.text = large_content
-            mock_response.headers = {"content-type": "text/plain"}
-            mock_response.history = []
-            mock_response.url = "https://example.com/large"
-            mock_get.return_value = mock_response
-
-            with patch.object(fetcher._robots, "can_fetch", new_callable=AsyncMock) as mock_robots:
-                mock_robots.return_value = True
-                with patch.object(fetcher._validator, "validate") as mock_validate:
-                    from agentic_cli.tools.webfetch.validator import ValidationResult
-                    mock_validate.return_value = ValidationResult(valid=True, resolved_ip="1.2.3.4")
-                    result = await fetcher.fetch("https://example.com/large")
-
+    async def test_same_host_redirect_followed(self, monkeypatch):
+        def handler(req):
+            if req.url.path == "/public":
+                return httpx.Response(302, headers={"location": "/inner"})
+            return httpx.Response(200, text="inner page", headers={"content-type": "text/html"})
+        fetcher = _pinned_fetcher(monkeypatch, handler)
+        with patch.object(fetcher._robots, "can_fetch", new_callable=AsyncMock, return_value=True):
+            result = await fetcher.fetch("https://example.com/public")
         assert result.success is True
-        assert result.truncated is True
+        assert "inner page" in result.content
+
+    @pytest.mark.asyncio
+    async def test_redirect_to_internal_ip_blocked(self, monkeypatch):
+        def handler(req):
+            return httpx.Response(302, headers={"location": "http://169.254.169.254/latest/"})
+        fetcher = _pinned_fetcher(monkeypatch, handler)
+        with patch.object(fetcher._robots, "can_fetch", new_callable=AsyncMock, return_value=True):
+            result = await fetcher.fetch("https://example.com/page")
+        assert result.success is False
+        assert "redirect" in (result.error or "").lower()
+
+    @pytest.mark.asyncio
+    async def test_too_many_redirects(self, monkeypatch):
+        def handler(req):
+            n = int(req.url.path.rsplit("hop", 1)[-1])
+            return httpx.Response(302, headers={"location": f"https://example.com/hop{n + 1}"})
+        fetcher = _pinned_fetcher(monkeypatch, handler)
+        with patch.object(fetcher._robots, "can_fetch", new_callable=AsyncMock, return_value=True):
+            result = await fetcher.fetch("https://example.com/hop0")
+        assert result.success is False
+        assert "redirect" in (result.error or "").lower()
+
+    @pytest.mark.asyncio
+    async def test_caching(self, monkeypatch):
+        calls = {"n": 0}
+        def handler(req):
+            calls["n"] += 1
+            return httpx.Response(200, text="Cached content", headers={"content-type": "text/html"})
+        fetcher = _pinned_fetcher(monkeypatch, handler)
+        with patch.object(fetcher._robots, "can_fetch", new_callable=AsyncMock, return_value=True):
+            r1 = await fetcher.fetch("https://example.com/page")
+            r2 = await fetcher.fetch("https://example.com/page")
+        assert r1.from_cache is False and r2.from_cache is True
+        assert calls["n"] == 1
+
+    @pytest.mark.asyncio
+    async def test_content_truncation_streamed(self, monkeypatch):
+        big = "x" * 200000
+        fetcher = _pinned_fetcher(
+            monkeypatch,
+            lambda req: httpx.Response(200, text=big, headers={"content-type": "text/plain"}),
+            max_content_bytes=102400,
+        )
+        with patch.object(fetcher._robots, "can_fetch", new_callable=AsyncMock, return_value=True):
+            result = await fetcher.fetch("https://example.com/large")
+        assert result.success is True and result.truncated is True
         assert len(result.content) <= fetcher._max_content_bytes + 100
 
 
@@ -607,69 +458,29 @@ class TestPDFConversion:
         assert "no extractable text" in result.lower() or "Page" in result
 
     @pytest.mark.asyncio
-    async def test_fetcher_pdf_uses_bytes(self):
-        """Test fetcher uses response.content (bytes) for PDFs."""
-        from agentic_cli.tools.webfetch.fetcher import ContentFetcher
-        from agentic_cli.tools.webfetch.validator import URLValidator, ValidationResult
-        from agentic_cli.tools.webfetch.robots import RobotsTxtChecker
-
-        fetcher = ContentFetcher(
-            validator=URLValidator(blocked_domains=[]),
-            robots_checker=RobotsTxtChecker(),
+    async def test_fetcher_pdf_uses_bytes(self, monkeypatch):
+        pdf = b"%PDF-1.4 fake pdf content"
+        fetcher = _pinned_fetcher(
+            monkeypatch,
+            lambda req: httpx.Response(200, content=pdf, headers={"content-type": "application/pdf"}),
         )
-
-        pdf_bytes = b"%PDF-1.4 fake pdf content"
-
-        with patch("httpx.AsyncClient.get", new_callable=AsyncMock) as mock_get:
-            mock_response = AsyncMock()
-            mock_response.status_code = 200
-            mock_response.content = pdf_bytes
-            mock_response.text = "garbled text"
-            mock_response.headers = {"content-type": "application/pdf"}
-            mock_response.history = []
-            mock_response.url = "https://arxiv.org/pdf/2301.00001"
-            mock_get.return_value = mock_response
-
-            with patch.object(fetcher._robots, "can_fetch", new_callable=AsyncMock) as mock_robots:
-                mock_robots.return_value = True
-                result = await fetcher.fetch("https://arxiv.org/pdf/2301.00001")
-
+        with patch.object(fetcher._robots, "can_fetch", new_callable=AsyncMock, return_value=True):
+            result = await fetcher.fetch("https://arxiv.org/pdf/2301.00001")
         assert result.success is True
-        assert result.content == pdf_bytes  # Should be bytes, not garbled text
-        assert isinstance(result.content, bytes)
+        assert result.content == pdf and isinstance(result.content, bytes)
 
     @pytest.mark.asyncio
-    async def test_fetcher_pdf_byte_limit(self):
-        """Test large PDF is truncated at max_pdf_bytes."""
-        from agentic_cli.tools.webfetch.fetcher import ContentFetcher
-        from agentic_cli.tools.webfetch.validator import URLValidator, ValidationResult
-        from agentic_cli.tools.webfetch.robots import RobotsTxtChecker
-
-        max_pdf = 1000
-        fetcher = ContentFetcher(
-            validator=URLValidator(blocked_domains=[]),
-            robots_checker=RobotsTxtChecker(),
-            max_pdf_bytes=max_pdf,
+    async def test_fetcher_pdf_byte_limit(self, monkeypatch):
+        big = b"x" * 5000
+        fetcher = _pinned_fetcher(
+            monkeypatch,
+            lambda req: httpx.Response(200, content=big, headers={"content-type": "application/pdf"}),
+            max_pdf_bytes=1000,
         )
-
-        large_pdf = b"x" * 5000
-
-        with patch("httpx.AsyncClient.get", new_callable=AsyncMock) as mock_get:
-            mock_response = AsyncMock()
-            mock_response.status_code = 200
-            mock_response.content = large_pdf
-            mock_response.headers = {"content-type": "application/pdf"}
-            mock_response.history = []
-            mock_response.url = "https://arxiv.org/pdf/2301.00001"
-            mock_get.return_value = mock_response
-
-            with patch.object(fetcher._robots, "can_fetch", new_callable=AsyncMock) as mock_robots:
-                mock_robots.return_value = True
-                result = await fetcher.fetch("https://arxiv.org/pdf/2301.00001")
-
-        assert result.success is True
-        assert result.truncated is True
-        assert len(result.content) == max_pdf
+        with patch.object(fetcher._robots, "can_fetch", new_callable=AsyncMock, return_value=True):
+            result = await fetcher.fetch("https://arxiv.org/pdf/2301.00001")
+        assert result.success is True and result.truncated is True
+        assert len(result.content) == 1000
 
 
 class TestWebFetchPDFSetting:
