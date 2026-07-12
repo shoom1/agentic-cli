@@ -825,3 +825,20 @@ class TestWorkflowManagerIntegration:
         # The manager itself should be the summarizer (has summarize() method)
         assert manager.llm_summarizer is manager
         assert hasattr(manager.llm_summarizer, "summarize")
+
+
+class TestFactoryWiring:
+    def test_get_or_create_fetcher_shares_one_pinned_transport(self):
+        import agentic_cli.tools.webfetch_tool as wt
+        from agentic_cli.tools.webfetch.transport import PinnedTransport
+        from agentic_cli.config import BaseSettings
+
+        wt._fetcher = None  # reset module cache
+        wt._fetcher_settings_snapshot = None
+        fetcher = wt.get_or_create_fetcher(BaseSettings())
+
+        assert isinstance(fetcher._transport, PinnedTransport)
+        # the robots checker shares the SAME transport instance
+        assert fetcher._robots._transport is fetcher._transport
+        # the transport validates against the same validator the fetcher holds
+        assert fetcher._transport._validator is fetcher._validator

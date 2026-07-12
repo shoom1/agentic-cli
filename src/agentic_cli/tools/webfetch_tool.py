@@ -62,7 +62,7 @@ def get_or_create_fetcher(settings=None) -> ContentFetcher:
 
     validator = URLValidator(blocked_domains=settings.webfetch_blocked_domains)
     transport = PinnedTransport(validator)
-    robots_checker = RobotsTxtChecker()
+    robots_checker = RobotsTxtChecker(transport=transport)
 
     _fetcher = ContentFetcher(
         validator=validator,
