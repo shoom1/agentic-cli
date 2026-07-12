@@ -38,6 +38,19 @@ def get_user_config_path(app_name: str) -> Path:
     return Path.home() / f".{app_name}" / "settings.json"
 
 
+def get_user_project_grants_path(app_name: str) -> Path:
+    """Path to interactively-granted permission rules
+    (``~/.{app_name}/project_grants.json``), keyed by resolved project path.
+
+    Lives in USER config — never in the repo — so a cloned workspace carries no
+    "Allow always" grants: a clone at a different path simply has no entry and
+    the user re-grants. Structure::
+
+        { "<resolved project root>": {"permissions": {"allow": [...], "deny": [...]}} }
+    """
+    return Path.home() / f".{app_name}" / "project_grants.json"
+
+
 def get_project_local_permissions_path(app_name: str) -> Path:
     """Path to interactively-granted permission rules
     (./.{app_name}/permissions.local.json).

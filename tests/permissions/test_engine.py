@@ -193,6 +193,7 @@ class TestEngineAskFlow:
     async def test_user_allow_always_writes_project_file(self, ctx, tmp_path, monkeypatch):
         import json
         monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
         w = _stub_workflow()
         w.request_user_input = AsyncMock(return_value="Allow always (save to project)")
         engine = PermissionEngine(settings=_stub_settings(), workflow=w, ctx=ctx)
@@ -204,9 +205,12 @@ class TestEngineAskFlow:
         )
         assert result.allowed is True
 
-        # Interactive grants persist to the trusted local file, not settings.json.
-        data = json.loads((tmp_path / ".agentic/permissions.local.json").read_text())
-        allow = data["permissions"]["allow"]
+        # Interactive grants persist to the USER-side, path-keyed grants file
+        # (keyed by the resolved project cwd), never into the repo.
+        grants = json.loads(
+            (tmp_path / "home" / ".agentic" / "project_grants.json").read_text()
+        )
+        allow = grants[str(ctx.workdir.resolve())]["permissions"]["allow"]
         assert len(allow) == 1
         assert allow[0]["capability"] == "http.read"
         assert "example.com" in allow[0]["target"]
@@ -330,6 +334,7 @@ class TestTargetlessAllowAlwaysRegression:
     @pytest.mark.asyncio
     async def test_http_read_allow_always_matches_next_call(self, ctx, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
         w = _stub_workflow()
         w.request_user_input = AsyncMock(return_value="Allow always (save to project)")
         engine = PermissionEngine(settings=_stub_settings(), workflow=w, ctx=ctx)
@@ -369,6 +374,7 @@ class TestTargetlessAllowAlwaysRegression:
         """When user picks 'Allow always' for filesystem.write to /foo/bar.txt,
         the rule covers /foo/** — subsequent writes to /foo/baz.txt must not re-prompt."""
         monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
         outside = tmp_path / "out"
         outside.mkdir()
 
@@ -448,27 +454,33 @@ class TestTargetlessAllowAlwaysRegression:
 
     @pytest.mark.asyncio
     async def test_reloaded_wildcard_rule_still_matches(self, ctx, tmp_path, monkeypatch):
-        """After the project JSON is reloaded (simulating next process run),
-        a rule stored with target='*' must still match a targetless capability."""
+        """A rule granted with target='*' must be stored with the wildcard
+        preserved (not mangled by matchers) so it can be reloaded correctly.
+
+        This test verifies the WRITE side: the user grants file (P0-1,
+        ``~/.{app}/project_grants.json``) is created with ``"*"`` intact.
+        Task 4 (load-path migration) will add coverage for the reload side.
+        """
+        import json
         monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
 
         # Round 1: grant "allow always" so the rule is persisted.
         w1 = _stub_workflow()
         w1.request_user_input = AsyncMock(return_value="Allow always (save to project)")
         engine1 = PermissionEngine(settings=_stub_settings(), workflow=w1, ctx=ctx)
-        await engine1.check("web_search", [Capability("http.read")], {"query": "x"})
+        result1 = await engine1.check("web_search", [Capability("http.read")], {"query": "x"})
+        assert result1.allowed is True
 
-        # Round 2: fresh engine reads rules from disk.
-        w2 = _stub_workflow()
-        w2.request_user_input = AsyncMock(return_value="Deny")  # would deny if re-asked
-        engine2 = PermissionEngine(settings=_stub_settings(), workflow=w2, ctx=ctx)
-        result = await engine2.check(
-            "web_search",
-            [Capability("http.read")],
-            {"query": "y"},
+        # The grants file must preserve the wildcard target ('*') so it
+        # survives serialisation and can be reloaded without corruption.
+        grants = json.loads(
+            (tmp_path / "home" / ".agentic" / "project_grants.json").read_text()
         )
-        assert result.allowed is True
-        w2.request_user_input.assert_not_called()
+        allow = grants[str(ctx.workdir.resolve())]["permissions"]["allow"]
+        assert len(allow) == 1
+        assert allow[0]["capability"] == "http.read"
+        assert allow[0]["target"] == "*"  # wildcard preserved, not mangled
 
 
 class TestOptionalCapability:

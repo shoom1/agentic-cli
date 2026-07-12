@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from agentic_cli.file_utils import atomic_write_text
-from agentic_cli.settings_persistence import get_project_local_permissions_path
+from agentic_cli.settings_persistence import get_user_project_grants_path
 from agentic_cli.workflow.permissions.rules import Effect, Rule, RuleSource
 
 
@@ -107,27 +107,32 @@ def load_rules(
     return rules
 
 
-def append_project_rule(app_name: str, rule: Rule) -> None:
-    """Append ``rule`` to the project-local permissions file.
+def append_project_rule(app_name: str, rule: Rule, project_root: Path) -> None:
+    """Persist an interactive 'Allow always' grant to the USER-side, path-keyed
+    grants file (``~/.{app}/project_grants.json``), under ``project_root``'s
+    resolved path.
 
-    Writes to ``./.{app}/permissions.local.json`` (NOT ``settings.json``) so
-    the user's own "Allow always" grants are stored in a file that is loaded as
-    trusted, separate from the repo-shippable ``settings.json`` whose allow
-    rules are ignored. Creates the file if absent; dedupes by exact
-    ``(capability, target)``; atomic rewrite via ``atomic_write_text``.
+    Kept out of the repo (P0-1) so a cloned workspace carries no grants: a clone
+    at a different path has no matching entry and the user re-grants. Creates the
+    file if absent; dedupes by exact ``(capability, target)`` within the
+    project's section; atomic rewrite via ``atomic_write_text``.
 
     Only ``Rule`` instances with ``source == RuleSource.PROJECT`` should be
-    passed here — this helper doesn't validate (engine enforces the
-    invariant).
+    passed here — this helper doesn't validate (engine enforces the invariant).
     """
-    path = get_project_local_permissions_path(app_name)
+    path = get_user_project_grants_path(app_name)
     try:
         data = json.loads(path.read_text()) if path.exists() else {}
     except json.JSONDecodeError as exc:
         raise ValueError(f"Malformed JSON in {path}: {exc}") from exc
 
+    proj_key = str(project_root.resolve())
     key = "allow" if rule.effect is Effect.ALLOW else "deny"
-    section = data.setdefault("permissions", {}).setdefault(key, [])
+    section = (
+        data.setdefault(proj_key, {})
+        .setdefault("permissions", {})
+        .setdefault(key, [])
+    )
     entry = {"capability": rule.capability, "target": rule.target}
     if entry not in section:
         section.append(entry)

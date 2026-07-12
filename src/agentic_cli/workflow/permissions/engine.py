@@ -250,7 +250,7 @@ class PermissionEngine:
             rule = Rule(cap.name, target, Effect.ALLOW, source)
             self._session_rules.append(rule)
             if source is RuleSource.PROJECT:
-                append_project_rule(self._settings.app_name, rule)
+                append_project_rule(self._settings.app_name, rule, self._ctx.workdir)
 
         label = "session" if source is RuleSource.SESSION else "always, saved to project"
         return CheckResult(True, f"no rule + user allowed ({label})")
