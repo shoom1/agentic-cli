@@ -1,5 +1,4 @@
 import os
-from pathlib import Path
 
 import pytest
 
@@ -22,9 +21,17 @@ def test_rejects_symlink_source(tmp_path):
 
 
 def test_rejects_fifo_source_without_hanging(tmp_path):
+    import threading
     fifo = tmp_path / "pipe"; os.mkfifo(fifo)
-    with pytest.raises((OSError, ValueError)):  # O_NONBLOCK avoids a hang; S_ISREG fails
-        copy_regular_file_no_follow(fifo, tmp_path / "out.txt")
+    result = {}
+    def run():
+        try:
+            copy_regular_file_no_follow(fifo, tmp_path / "out.txt")
+        except (OSError, ValueError):
+            result["rejected"] = True
+    t = threading.Thread(target=run, daemon=True); t.start(); t.join(5)
+    assert not t.is_alive(), "copy hung on a FIFO source (O_NONBLOCK missing?)"
+    assert result.get("rejected")
 
 
 def test_does_not_follow_dest_symlink(tmp_path):

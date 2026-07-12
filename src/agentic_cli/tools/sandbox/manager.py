@@ -7,6 +7,8 @@ Manages sandbox sessions and delegates execution to a pluggable backend
 from __future__ import annotations
 
 import atexit
+import os
+import stat
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
@@ -32,6 +34,10 @@ def stage_inputs(session_dir: Path, inputs: list[str]) -> None:
         return
     inputs_dir = Path(session_dir) / "inputs"
     inputs_dir.mkdir(parents=True, exist_ok=True)
+    if not stat.S_ISDIR(os.lstat(inputs_dir).st_mode):
+        # 'inputs' is a symlink / not a real dir (kernel-plantable) — O_NOFOLLOW
+        # and os.replace only guard the final component, not this parent.
+        raise ValueError("inputs staging directory is not a real directory (symlink?)")
     seen: set[str] = set()
     for src in inputs:
         p = Path(src).expanduser()

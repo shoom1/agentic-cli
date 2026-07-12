@@ -232,16 +232,22 @@ class JupyterDockerBackend(SandboxBackend):
     def _collect_outputs(self, working_dir: Path) -> list[str]:
         """Copy regular files from <working_dir>/outputs into the shared outputs
         dir without following symlinks. Skips symlinks / special files (a kernel
-        could plant `outputs/x -> /host/secret`) and a symlinked `outputs` dir."""
+        could plant `outputs/x -> /host/secret`) and a symlinked `outputs` dir.
+        Never raises — best-effort contract so execute() is not disrupted."""
         session_outs = Path(working_dir) / "outputs"
         try:
             if not stat.S_ISDIR(os.lstat(session_outs).st_mode):
                 return []  # 'outputs' is a symlink or not a directory
         except OSError:
             return []
-        shared = self._outputs_dir()
         collected: list[str] = []
-        for src in sorted(session_outs.iterdir()):
+        try:
+            shared = self._outputs_dir()
+            entries = sorted(session_outs.iterdir())
+        except OSError:
+            logger.warning("sandbox_outputs_unreadable", path=str(session_outs))
+            return collected
+        for src in entries:
             dst = shared / src.name
             try:
                 copy_regular_file_no_follow(src, dst)

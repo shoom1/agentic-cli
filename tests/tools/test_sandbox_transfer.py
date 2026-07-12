@@ -1,9 +1,16 @@
-import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from agentic_cli.tools.sandbox.manager import stage_inputs
+from agentic_cli.tools.sandbox.backends.jupyter_docker import JupyterDockerBackend
+
+
+def _backend(shared: Path):
+    return JupyterDockerBackend(
+        settings=SimpleNamespace(sandbox_outputs_dir=str(shared), workspace_dir=str(shared))
+    )
 
 
 def test_stage_inputs_copies_regular_file(tmp_path):
@@ -43,17 +50,6 @@ def test_stage_inputs_duplicate_basename_errors(tmp_path):
         stage_inputs(session, [str(a), str(b)])
 
 
-from types import SimpleNamespace
-
-from agentic_cli.tools.sandbox.backends.jupyter_docker import JupyterDockerBackend
-
-
-def _backend(shared: Path):
-    return JupyterDockerBackend(
-        settings=SimpleNamespace(sandbox_outputs_dir=str(shared), workspace_dir=str(shared))
-    )
-
-
 def test_collect_outputs_copies_regular_files(tmp_path):
     shared = tmp_path / "shared"
     wd = tmp_path / "wd"; (wd / "outputs").mkdir(parents=True)
@@ -86,3 +82,26 @@ def test_outputs_dir_is_0700(tmp_path):
     shared = tmp_path / "shared"
     base = _backend(shared)._outputs_dir()
     assert (base.stat().st_mode & 0o777) == 0o700
+
+
+def test_stage_inputs_rejects_symlinked_inputs_dir(tmp_path):
+    # Kernel plants session/inputs as a symlink to a host dir -> must be rejected,
+    # not written through (O_NOFOLLOW guards only the final component).
+    session = tmp_path / "session"; session.mkdir()
+    outside = tmp_path / "host_dir"; outside.mkdir()
+    (session / "inputs").symlink_to(outside, target_is_directory=True)
+    src = tmp_path / "data.csv"; src.write_bytes(b"INPUT")
+    with pytest.raises(ValueError):
+        stage_inputs(session, [str(src)])
+    assert list(outside.iterdir()) == []   # nothing written into the host dir
+
+
+def test_collect_outputs_never_raises_on_outputs_dir_error(tmp_path, monkeypatch):
+    shared = tmp_path / "shared"
+    wd = tmp_path / "wd"; (wd / "outputs").mkdir(parents=True)
+    (wd / "outputs" / "a.txt").write_text("x")
+    b = _backend(shared)
+    def boom():
+        raise OSError("boom")
+    monkeypatch.setattr(b, "_outputs_dir", boom)
+    assert b._collect_outputs(wd) == []   # best-effort: never raises
