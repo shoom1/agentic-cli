@@ -7,6 +7,14 @@ import socket
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
+import httpx
+
+
+class BlockedAddressError(httpx.RequestError):
+    """A host resolves to a non-global / blocked address (or cannot be
+    resolved). Subclasses httpx.RequestError so the fetcher's existing
+    ``except httpx.RequestError`` maps it to a FetchResult error."""
+
 
 @dataclass
 class ValidationResult:
@@ -17,137 +25,133 @@ class ValidationResult:
     resolved_ip: str | None = None
 
 
-class URLValidator:
-    """Validates URLs for security (SSRF protection) and policy compliance.
+# Ranges ipaddress.is_global marks global but that are SSRF-risky.
+_SUPPLEMENTARY_BLOCKED = [
+    ipaddress.ip_network("64:ff9b::/96"),    # NAT64 well-known prefix (embeds v4)
+    ipaddress.ip_network("64:ff9b:1::/48"),  # NAT64 local-use prefix
+    ipaddress.ip_network("192.88.99.0/24"),  # 6to4 relay anycast (deprecated)
+]
 
-    Checks:
-    - Allowed schemes (http, https only)
-    - Private/internal IP addresses blocked
-    - Configurable domain blocklist with wildcard support
+
+def _ip_is_safe(ip_obj: ipaddress._BaseAddress) -> bool:
+    """True only if the address is globally routable and not SSRF-risky."""
+    if not ip_obj.is_global:
+        return False
+    for net in _SUPPLEMENTARY_BLOCKED:
+        if ip_obj in net:
+            return False
+    mapped = getattr(ip_obj, "ipv4_mapped", None)
+    if mapped is not None and not _ip_is_safe(mapped):
+        return False
+    return True
+
+
+def _as_ip_literal(host: str) -> ipaddress._BaseAddress | None:
+    """Return the IP if host is an IP literal (brackets stripped), else None."""
+    try:
+        return ipaddress.ip_address(host.strip("[]"))
+    except ValueError:
+        return None
+
+
+class URLValidator:
+    """Validates URLs for SSRF protection and policy compliance.
+
+    ``validate`` performs non-DNS policy (scheme, blocked domains, IP-literal
+    safety). Authoritative resolution + pinning happens in
+    ``resolve_and_validate`` (used by PinnedTransport), which resolves every
+    A+AAAA and requires all of them to be globally routable.
     """
 
     ALLOWED_SCHEMES = {"http", "https"}
 
-    BLOCKED_NETWORKS = [
-        ipaddress.ip_network("127.0.0.0/8"),      # Loopback
-        ipaddress.ip_network("10.0.0.0/8"),       # Private A
-        ipaddress.ip_network("172.16.0.0/12"),    # Private B
-        ipaddress.ip_network("192.168.0.0/16"),   # Private C
-        ipaddress.ip_network("169.254.0.0/16"),   # Link-local
-        ipaddress.ip_network("::1/128"),          # IPv6 loopback
-        ipaddress.ip_network("fc00::/7"),         # IPv6 private
-        ipaddress.ip_network("fe80::/10"),        # IPv6 link-local
-    ]
-
     def __init__(self, blocked_domains: list[str] | None = None) -> None:
-        """Initialize validator.
-
-        Args:
-            blocked_domains: List of domains to block. Supports wildcards (*.example.com).
-        """
         self.blocked_domains = blocked_domains or []
 
     def validate(self, url: str) -> ValidationResult:
-        """Validate a URL for fetching.
+        """Scheme + blocked-domain + hostname-present + IP-literal safety.
 
-        Args:
-            url: The URL to validate.
-
-        Returns:
-            ValidationResult with valid=True if OK, or valid=False with error message.
+        Does NOT resolve DNS — hostname resolution is done (once) by the
+        transport's resolve_and_validate, which pins the connection.
         """
-        # Parse URL
         try:
             parsed = urlparse(url)
         except Exception as e:
             return ValidationResult(valid=False, error=f"Malformed URL: {e}")
 
-        # Check scheme
         if parsed.scheme not in self.ALLOWED_SCHEMES:
             return ValidationResult(
                 valid=False,
                 error=f"Scheme '{parsed.scheme}' not allowed. Use http or https.",
             )
 
-        # Check hostname exists
         hostname = parsed.hostname
         if not hostname:
             return ValidationResult(valid=False, error="URL must have a hostname")
 
-        # Check blocked domains
         if self._is_domain_blocked(hostname):
+            return ValidationResult(valid=False, error=f"Domain '{hostname}' is blocked by policy")
+
+        literal = _as_ip_literal(hostname)
+        if literal is not None and not _ip_is_safe(literal):
             return ValidationResult(
                 valid=False,
-                error=f"Domain '{hostname}' is blocked by policy",
+                error=f"Private/internal IP address blocked: {literal}",
+                resolved_ip=str(literal),
             )
 
-        # Resolve hostname and check for private IPs
+        return ValidationResult(valid=True)
+
+    def resolve_and_validate(self, host: str, port: int) -> str:
+        """Resolve every A+AAAA for host and return one validated pinned IP.
+
+        Rejects the whole host (BlockedAddressError) if ANY resolved address is
+        unsafe, so a split-horizon / rebinding resolver cannot smuggle a private
+        address alongside a public one. An IP-literal host is validated directly.
+        """
+        literal = _as_ip_literal(host)
+        if literal is not None:
+            if not _ip_is_safe(literal):
+                raise BlockedAddressError(f"blocked non-global address: {host}")
+            return str(literal)
+
         try:
-            ip_str = socket.gethostbyname(hostname)
-            ip = ipaddress.ip_address(ip_str)
+            infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        except socket.gaierror as exc:
+            raise BlockedAddressError(f"could not resolve {host}: {exc}") from exc
 
-            for network in self.BLOCKED_NETWORKS:
-                if ip in network:
-                    return ValidationResult(
-                        valid=False,
-                        error=f"Private/internal IP address blocked: {ip_str}",
-                        resolved_ip=ip_str,
-                    )
-
-            return ValidationResult(valid=True, resolved_ip=ip_str)
-
-        except socket.gaierror as e:
-            return ValidationResult(
-                valid=False,
-                error=f"Could not resolve hostname '{hostname}': {e}",
-            )
+        # sockaddr[0] is the IP; strip any IPv6 zone id ("fe80::1%eth0").
+        ips = [ipaddress.ip_address(info[4][0].split("%")[0]) for info in infos]
+        if not ips:
+            raise BlockedAddressError(f"no addresses for {host}")
+        for ip_obj in ips:
+            if not _ip_is_safe(ip_obj):
+                raise BlockedAddressError(f"blocked non-global address {ip_obj} for {host}")
+        return str(ips[0])
 
     def validate_ip(self, ip_str: str) -> ValidationResult:
-        """Validate an IP address against blocked networks.
-
-        Args:
-            ip_str: The IP address string to validate.
-
-        Returns:
-            ValidationResult with valid=True if OK, or valid=False if blocked.
-        """
+        """DEPRECATED (removed in the fetcher task once its last caller is gone).
+        Retained temporarily so the fetcher's post-fetch re-check keeps working."""
         try:
             ip = ipaddress.ip_address(ip_str)
         except ValueError as e:
             return ValidationResult(valid=False, error=f"Invalid IP address: {e}")
-
-        for network in self.BLOCKED_NETWORKS:
-            if ip in network:
-                return ValidationResult(
-                    valid=False,
-                    error=f"Private/internal IP address blocked: {ip_str}",
-                    resolved_ip=ip_str,
-                )
-
+        if not _ip_is_safe(ip):
+            return ValidationResult(
+                valid=False,
+                error=f"Private/internal IP address blocked: {ip_str}",
+                resolved_ip=ip_str,
+            )
         return ValidationResult(valid=True, resolved_ip=ip_str)
 
     def _is_domain_blocked(self, hostname: str) -> bool:
-        """Check if hostname matches any blocked domain pattern.
-
-        Args:
-            hostname: The hostname to check.
-
-        Returns:
-            True if blocked, False otherwise.
-        """
         hostname_lower = hostname.lower()
-
         for pattern in self.blocked_domains:
             pattern_lower = pattern.lower()
-
-            # Exact match
             if hostname_lower == pattern_lower:
                 return True
-
-            # Wildcard match (*.example.com matches sub.example.com)
             if pattern_lower.startswith("*."):
                 suffix = pattern_lower[1:]  # .example.com
                 if hostname_lower.endswith(suffix) and hostname_lower != pattern_lower[2:]:
                     return True
-
         return False

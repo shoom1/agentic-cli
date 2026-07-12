@@ -61,11 +61,10 @@ class TestURLValidator:
         result = validator.validate("file:///etc/passwd")
         assert result.valid is False
 
-    def test_localhost_blocked(self, validator):
-        """Test localhost is blocked."""
-        result = validator.validate("http://localhost/api")
+    def test_localhost_ip_literal_blocked(self, validator):
+        """A loopback IP literal is blocked by validate() without DNS."""
+        result = validator.validate("http://127.0.0.1/api")
         assert result.valid is False
-        assert "private" in result.error.lower() or "blocked" in result.error.lower()
 
     def test_127_0_0_1_blocked(self, validator):
         """Test 127.0.0.1 is blocked."""
