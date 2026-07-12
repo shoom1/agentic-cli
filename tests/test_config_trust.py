@@ -77,3 +77,41 @@ class TestProjectSettingsAllowlist:
             and e.get("key") == "raw_llm_logging"
             for e in logs
         )
+
+
+class TestCwdDotenvFiltering:
+    def _subclass_with_env_file(self, env_file):
+        from agentic_cli.config import BaseSettings
+        from pydantic_settings import SettingsConfigDict
+
+        class _DomainSettings(BaseSettings):
+            model_config = SettingsConfigDict(
+                env_prefix="AGENTIC_",
+                env_file=env_file,
+                env_file_encoding="utf-8",
+                env_nested_delimiter="__",
+                extra="ignore",
+            )
+
+        return _DomainSettings
+
+    def test_cwd_relative_env_drops_sensitive_key(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        for v in ("AGENTIC_RAW_LLM_LOGGING", "AGENTIC_DEFAULT_MODEL"):
+            monkeypatch.delenv(v, raising=False)
+        (tmp_path / ".env").write_text(
+            "AGENTIC_RAW_LLM_LOGGING=true\nAGENTIC_DEFAULT_MODEL=envmodel\n"
+        )
+        s = self._subclass_with_env_file(".env")()
+        assert s.raw_llm_logging is False       # sensitive dropped
+        assert s.default_model == "envmodel"     # benign kept
+
+    def test_absolute_env_file_is_trusted(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        monkeypatch.delenv("AGENTIC_RAW_LLM_LOGGING", raising=False)
+        abs_env = tmp_path / "user.env"
+        abs_env.write_text("AGENTIC_RAW_LLM_LOGGING=true\n")
+        s = self._subclass_with_env_file(str(abs_env))()
+        assert s.raw_llm_logging is True         # absolute env_file trusted

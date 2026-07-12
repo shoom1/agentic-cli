@@ -263,8 +263,23 @@ class BaseSettings(WorkflowSettingsMixin, AppSettingsMixin, CLISettingsMixin, Py
         if user_json:
             sources.append(user_json)
 
-        # Add dotenv settings
-        sources.append(dotenv_settings)
+        # dotenv: a cwd-relative env_file is an untrusted project source (a
+        # cloned repo can ship ./.env), so filter it like project settings.json.
+        # An absolute/user-level env_file (or a list of files) stays trusted, as
+        # do real environment variables (env_settings, added above, untouched).
+        # Consequence: secrets/keys placed in a cwd .env are dropped — put them
+        # in real env vars or a user-level file.
+        env_file = settings_cls.model_config.get("env_file")
+        if (
+            env_file is not None
+            and not isinstance(env_file, (list, tuple))
+            and not Path(env_file).is_absolute()
+        ):
+            sources.append(
+                _AllowlistFilterSource(settings_cls, dotenv_settings, "cwd .env")
+            )
+        else:
+            sources.append(dotenv_settings)
 
         return tuple(sources)
 
