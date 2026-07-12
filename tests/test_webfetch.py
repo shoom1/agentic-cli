@@ -2,7 +2,6 @@
 
 import ipaddress
 import socket
-import time
 
 import httpx
 import pytest
@@ -246,6 +245,7 @@ class TestContentFetcher:
         fetcher = _pinned_fetcher(monkeypatch, lambda req: httpx.Response(200))
         result = await fetcher.fetch("http://127.0.0.1/internal")
         assert result.success is False
+        assert result.error
 
     @pytest.mark.asyncio
     async def test_fetch_blocked_when_host_resolves_private(self, monkeypatch):
@@ -263,6 +263,23 @@ class TestContentFetcher:
             result = await fetcher.fetch("https://example.com/private/page")
         assert result.success is False
         assert "robots" in result.error.lower()
+
+    @pytest.mark.asyncio
+    async def test_same_host_redirect_blocked_by_robots(self, monkeypatch):
+        def handler(req):
+            if req.url.path == "/public":
+                return httpx.Response(302, headers={"location": "/private/page"})
+            return httpx.Response(200, text="x", headers={"content-type": "text/html"})
+        fetcher = _pinned_fetcher(monkeypatch, handler)
+        robots_calls = []
+        async def fake_can_fetch(u):
+            robots_calls.append(u)
+            return "/private" not in u
+        with patch.object(fetcher._robots, "can_fetch", side_effect=fake_can_fetch):
+            result = await fetcher.fetch("https://example.com/public")
+        assert result.success is False
+        assert "robots" in result.error.lower()
+        assert any("/private" in u for u in robots_calls)
 
     @pytest.mark.asyncio
     async def test_cross_host_redirect_blocks_before_second_request(self, monkeypatch):
