@@ -126,3 +126,28 @@ class TestCwdDotenvFiltering:
         abs_env.write_text("AGENTIC_RAW_LLM_LOGGING=true\n")
         s = self._subclass_with_env_file([str(abs_env)])()
         assert s.raw_llm_logging is True   # list env_file trusted
+
+    def test_tilde_env_file_is_trusted(self, tmp_path, monkeypatch):
+        # A "~"-prefixed env_file is a user-level path (pydantic expands ~ when
+        # reading it), so it must stay TRUSTED (unfiltered).
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(fake_home))
+        monkeypatch.delenv("AGENTIC_RAW_LLM_LOGGING", raising=False)
+        (fake_home / "user.env").write_text("AGENTIC_RAW_LLM_LOGGING=true\n")
+        s = self._subclass_with_env_file("~/user.env")()
+        assert s.raw_llm_logging is True   # tilde (user-level) env_file trusted
+
+    def test_list_env_file_with_cwd_relative_entry_is_filtered(self, tmp_path, monkeypatch):
+        # If ANY entry in a list env_file is cwd-relative, the whole dotenv
+        # source is filtered (fail-safe over-filter) — a repo could otherwise
+        # ship ./.env alongside a trusted absolute file and stay unfiltered.
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        monkeypatch.delenv("AGENTIC_RAW_LLM_LOGGING", raising=False)
+        abs_env = tmp_path / "abs.env"
+        abs_env.write_text("")  # trusted absolute entry (empty)
+        (tmp_path / ".env").write_text("AGENTIC_RAW_LLM_LOGGING=true\n")  # cwd-relative
+        s = self._subclass_with_env_file([str(abs_env), ".env"])()
+        assert s.raw_llm_logging is False   # cwd-relative entry → whole source filtered

@@ -88,8 +88,10 @@ class _AllowlistFilterSource(PydanticBaseSettingsSource):
 
     Applied to the project ``settings.json`` and a cwd-relative ``.env``. Any
     non-allowlisted key is dropped and logged (one warning per key) so a cloned
-    repo cannot flip a security boundary. Drops, never raises — a malformed or
-    hostile project file can never brick the app.
+    repo cannot flip a security boundary. Drops (never raises) a non-allowlisted
+    key, so a repo cannot flip a boundary by *adding* keys. (Malformed JSON or a
+    bad-typed allowlisted value is still rejected upstream, as before P0-1 —
+    this narrows, not removes, that pre-existing surface.)
     """
 
     def __init__(
@@ -265,16 +267,26 @@ class BaseSettings(WorkflowSettingsMixin, AppSettingsMixin, CLISettingsMixin, Py
 
         # dotenv: a cwd-relative env_file is an untrusted project source (a
         # cloned repo can ship ./.env), so filter it like project settings.json.
-        # An absolute/user-level env_file (or a list of files) stays trusted, as
-        # do real environment variables (env_settings, added above, untouched).
-        # Consequence: secrets/keys placed in a cwd .env are dropped — put them
-        # in real env vars or a user-level file.
+        # We inspect EVERY configured env_file (a str/Path or a list of them):
+        # if ANY entry is cwd-relative after ~ expansion, the whole dotenv
+        # source is filtered. DotEnvSettingsSource merges all files into one
+        # dict, so we cannot filter per-file; over-filtering fails safe. An
+        # absolute/user-level env_file (including a "~/..." path) and real
+        # environment variables stay trusted. Consequence: secrets/keys placed
+        # in a cwd .env are dropped — put them in real env vars or an
+        # absolute/user-level file.
         env_file = settings_cls.model_config.get("env_file")
-        if (
-            env_file is not None
-            and not isinstance(env_file, (list, tuple))
-            and not Path(env_file).is_absolute()
-        ):
+        if env_file is None:
+            _env_entries: list = []
+        elif isinstance(env_file, (list, tuple)):
+            _env_entries = list(env_file)
+        else:
+            _env_entries = [env_file]
+        _has_cwd_relative = any(
+            e is not None and not Path(e).expanduser().is_absolute()
+            for e in _env_entries
+        )
+        if _has_cwd_relative:
             sources.append(
                 _AllowlistFilterSource(settings_cls, dotenv_settings, "cwd .env")
             )
