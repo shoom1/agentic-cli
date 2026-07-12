@@ -38,6 +38,9 @@ from agentic_cli.workflow.settings import WorkflowSettingsMixin
 from agentic_cli.workflow.models import ModelRegistry
 from agentic_cli.settings_mixins import AppSettingsMixin, CLISettingsMixin
 from agentic_cli.settings_persistence import get_project_config_path, get_user_config_path
+from agentic_cli.logging import Loggers
+
+logger = Loggers.config()
 
 __all__ = [
     "BaseSettings",
@@ -52,11 +55,69 @@ __all__ = [
 ]
 
 
-# Settings a PROJECT ./.{app}/settings.json must NOT be able to set: a cloned
-# repo could otherwise disable the permission engine. These remain settable via
-# env and user (~/.{app}) config. (Permission allow-rules are filtered
-# separately in the engine — see workflow/permissions/store.load_rules.)
-_UNTRUSTED_PROJECT_KEYS = frozenset({"permissions_enabled"})
+# Deny-by-default allowlist: the ONLY keys a project ./.{app}/settings.json (or
+# a cwd-relative .env) may set. A cloned/untrusted repo must not be able to flip
+# a security boundary — executor backend, container image/user, bind mounts,
+# outputs dir, OS-sandbox policy, shell backend, raw LLM logging, workspace dir,
+# permission rules, or secrets. Every entry below is a benign field that cannot
+# select code execution, filesystem/mount scope, container identity/image,
+# network policy, secrets, or sensitive logging. Anything not clearly benign —
+# and any new field — is excluded automatically. Real environment variables and
+# the user ~/.{app}/settings.json remain fully trusted.
+_PROJECT_SETTABLE_KEYS = frozenset({
+    # model / behavior
+    "default_model", "thinking_effort", "orchestrator",
+    "context_window_trigger_tokens", "context_window_target_tokens",
+    # retry / request timeouts (not code paths)
+    "retry_max_attempts", "retry_initial_delay", "retry_backoff_factor",
+    "anthropic_request_timeout", "python_executor_timeout", "sandbox_timeout",
+    # sandbox RESOURCE limits (not backend / image / mounts / user / network)
+    "sandbox_max_sessions", "sandbox_memory_mb", "sandbox_cpus", "sandbox_pids_limit",
+    # non-exec tool config
+    "search_backend",
+    "webfetch_cache_ttl_seconds", "webfetch_max_content_bytes", "webfetch_max_pdf_bytes",
+    # persistence backend selection (NOT the credential-bearing postgres_uri)
+    "session_store",
+    # display / logging verbosity (NOT raw_llm_logging)
+    "log_level", "log_format", "verbose_thinking",
+})
+
+
+class _AllowlistFilterSource(PydanticBaseSettingsSource):
+    """Wrap an untrusted settings source, keeping only allowlisted keys.
+
+    Applied to the project ``settings.json`` and a cwd-relative ``.env``. Any
+    non-allowlisted key is dropped and logged (one warning per key) so a cloned
+    repo cannot flip a security boundary. Drops (never raises) a non-allowlisted
+    key, so a repo cannot flip a boundary by *adding* keys. (Malformed JSON or a
+    bad-typed allowlisted value is still rejected upstream, as before P0-1 —
+    this narrows, not removes, that pre-existing surface.)
+    """
+
+    def __init__(
+        self,
+        settings_cls: Type[PydanticBaseSettings],
+        inner: PydanticBaseSettingsSource,
+        label: str,
+    ) -> None:
+        super().__init__(settings_cls)
+        self._inner = inner
+        self._label = label
+
+    def get_field_value(self, field: Any, field_name: str) -> Tuple[Any, str, bool]:
+        # Unused: __call__ is overridden to filter the inner source's output.
+        return None, field_name, False
+
+    def __call__(self) -> dict[str, Any]:
+        kept: dict[str, Any] = {}
+        for key, value in self._inner().items():
+            if key in _PROJECT_SETTABLE_KEYS:
+                kept[key] = value
+            else:
+                logger.warning(
+                    "untrusted_project_setting_ignored", key=key, source=self._label
+                )
+        return kept
 
 
 def _get_json_config_source(
@@ -70,8 +131,9 @@ def _get_json_config_source(
     Args:
         settings_cls: The settings class
         json_file: Path to JSON config file
-        untrusted: When True (the project file), strip security-sensitive keys
-            so a cloned workspace cannot disable permission enforcement.
+        untrusted: When True (the project file), keep only allowlisted
+            (non-security) keys so a cloned workspace cannot flip a security
+            boundary.
 
     Returns:
         JsonConfigSettingsSource if file exists, None otherwise
@@ -88,14 +150,13 @@ def _get_json_config_source(
     if not untrusted:
         return JsonConfigSettingsSource(settings_cls, json_file=json_file)
 
-    class _UntrustedJsonConfigSource(JsonConfigSettingsSource):
-        """Drops security-sensitive keys the project file may not override."""
-
-        def __call__(self) -> dict[str, Any]:
-            data = super().__call__()
-            return {k: v for k, v in data.items() if k not in _UNTRUSTED_PROJECT_KEYS}
-
-    return _UntrustedJsonConfigSource(settings_cls, json_file=json_file)
+    # Untrusted (the project file): keep only allowlisted keys so a cloned
+    # workspace cannot flip a security boundary.
+    return _AllowlistFilterSource(
+        settings_cls,
+        JsonConfigSettingsSource(settings_cls, json_file=json_file),
+        "project settings.json",
+    )
 
 
 class BaseSettings(WorkflowSettingsMixin, AppSettingsMixin, CLISettingsMixin, PydanticBaseSettings):
@@ -204,8 +265,33 @@ class BaseSettings(WorkflowSettingsMixin, AppSettingsMixin, CLISettingsMixin, Py
         if user_json:
             sources.append(user_json)
 
-        # Add dotenv settings
-        sources.append(dotenv_settings)
+        # dotenv: a cwd-relative env_file is an untrusted project source (a
+        # cloned repo can ship ./.env), so filter it like project settings.json.
+        # We inspect EVERY configured env_file (a str/Path or a list of them):
+        # if ANY entry is cwd-relative after ~ expansion, the whole dotenv
+        # source is filtered. DotEnvSettingsSource merges all files into one
+        # dict, so we cannot filter per-file; over-filtering fails safe. An
+        # absolute/user-level env_file (including a "~/..." path) and real
+        # environment variables stay trusted. Consequence: secrets/keys placed
+        # in a cwd .env are dropped — put them in real env vars or an
+        # absolute/user-level file.
+        env_file = settings_cls.model_config.get("env_file")
+        if env_file is None:
+            _env_entries: list = []
+        elif isinstance(env_file, (list, tuple)):
+            _env_entries = list(env_file)
+        else:
+            _env_entries = [env_file]
+        _has_cwd_relative = any(
+            e is not None and not Path(e).expanduser().is_absolute()
+            for e in _env_entries
+        )
+        if _has_cwd_relative:
+            sources.append(
+                _AllowlistFilterSource(settings_cls, dotenv_settings, "cwd .env")
+            )
+        else:
+            sources.append(dotenv_settings)
 
         return tuple(sources)
 

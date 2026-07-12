@@ -38,16 +38,18 @@ def get_user_config_path(app_name: str) -> Path:
     return Path.home() / f".{app_name}" / "settings.json"
 
 
-def get_project_local_permissions_path(app_name: str) -> Path:
+def get_user_project_grants_path(app_name: str) -> Path:
     """Path to interactively-granted permission rules
-    (./.{app_name}/permissions.local.json).
+    (``~/.{app_name}/project_grants.json``), keyed by resolved project path.
 
-    Kept separate from ``settings.json`` so a cloned repo's committed
-    ``settings.json`` cannot forge trusted allow-rules: this file is written
-    only by the user's own "Allow always" grants and is loaded as trusted,
-    while ``settings.json`` permission rules are honored deny-only.
+    Lives in USER config — never in the repo — so a cloned workspace carries no
+    "Allow always" grants: a clone at a different path simply has no entry and
+    the user re-grants. Structure::
+
+        { "<resolved project root>": {"permissions": {"allow": [...], "deny": [...]}} }
     """
-    return Path.cwd() / f".{app_name}" / "permissions.local.json"
+    return Path.home() / f".{app_name}" / "project_grants.json"
+
 
 
 class SettingsPersistence:

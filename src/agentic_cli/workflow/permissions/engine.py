@@ -18,7 +18,6 @@ from typing import TYPE_CHECKING
 from agentic_cli.logging import Loggers
 from agentic_cli.settings_persistence import (
     get_project_config_path,
-    get_project_local_permissions_path,
     get_user_config_path,
 )
 from agentic_cli.workflow.permissions.capabilities import Capability, ResolvedCapability
@@ -33,6 +32,7 @@ from agentic_cli.workflow.permissions.rules import (
 from agentic_cli.workflow.permissions.store import (
     BUILTIN_RULES,
     PermissionContext,
+    load_project_grants,
     load_rules,
 )
 
@@ -117,13 +117,11 @@ class PermissionEngine:
             self._ctx,
             allowed_effects=frozenset({Effect.DENY}),
         )
-        # Interactively-granted "Allow always" rules live in a separate local
-        # file the user (not a repo) authored — trusted, so allow+deny apply.
-        rules += load_rules(
-            get_project_local_permissions_path(app),
-            RuleSource.PROJECT,
-            self._ctx,
-        )
+        # Interactive "Allow always" grants live in USER config, keyed by the
+        # resolved project path — trusted (allow+deny). A cloned repo carries
+        # none (its path won't match), and a repo-shipped permissions.local.json
+        # is no longer loaded at all.
+        rules += load_project_grants(app, self._ctx)
         return rules
 
     @property
@@ -250,7 +248,7 @@ class PermissionEngine:
             rule = Rule(cap.name, target, Effect.ALLOW, source)
             self._session_rules.append(rule)
             if source is RuleSource.PROJECT:
-                append_project_rule(self._settings.app_name, rule)
+                append_project_rule(self._settings.app_name, rule, self._ctx.workdir)
 
         label = "session" if source is RuleSource.SESSION else "always, saved to project"
         return CheckResult(True, f"no rule + user allowed ({label})")
