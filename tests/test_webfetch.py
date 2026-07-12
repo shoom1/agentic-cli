@@ -144,74 +144,43 @@ class TestURLValidator:
 
 
 class TestRobotsTxtChecker:
-    """Tests for robots.txt compliance."""
-
-    @pytest.fixture
-    def checker(self):
+    def _checker(self, monkeypatch, handler, resolves_to="93.184.216.34"):
+        from agentic_cli.tools.webfetch.validator import URLValidator
+        from agentic_cli.tools.webfetch.transport import PinnedTransport
         from agentic_cli.tools.webfetch.robots import RobotsTxtChecker
-        return RobotsTxtChecker()
+        def _gai(host, port, *a, **k):
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (resolves_to, port))]
+        monkeypatch.setattr(socket, "getaddrinfo", _gai)
+        transport = PinnedTransport(URLValidator(), inner=httpx.MockTransport(handler))
+        return RobotsTxtChecker(transport=transport)
 
     @pytest.mark.asyncio
-    async def test_allowed_when_no_robots_txt(self, checker):
-        """Test URL is allowed when robots.txt doesn't exist."""
-        with patch("httpx.AsyncClient.get", new_callable=AsyncMock) as mock_get:
-            mock_get.return_value.status_code = 404
-            result = await checker.can_fetch("https://example.com/page")
-            assert result is True
+    async def test_allowed_when_no_robots_txt(self, monkeypatch):
+        checker = self._checker(monkeypatch, lambda req: httpx.Response(404))
+        assert await checker.can_fetch("https://example.com/page") is True
 
     @pytest.mark.asyncio
-    async def test_allowed_when_robots_txt_error(self, checker):
-        """Test URL is allowed when robots.txt fetch fails."""
-        with patch("httpx.AsyncClient.get", new_callable=AsyncMock) as mock_get:
-            mock_get.side_effect = Exception("Network error")
-            result = await checker.can_fetch("https://example.com/page")
-            assert result is True  # Permissive on error
+    async def test_blocked_by_robots_txt(self, monkeypatch):
+        robots = "User-agent: *\nDisallow: /private/\n"
+        checker = self._checker(monkeypatch, lambda req: httpx.Response(200, text=robots))
+        assert await checker.can_fetch("https://example.com/private/secret") is False
 
     @pytest.mark.asyncio
-    async def test_blocked_by_robots_txt(self, checker):
-        """Test URL is blocked when robots.txt disallows it."""
-        robots_content = """
-User-agent: *
-Disallow: /private/
-"""
-        with patch("httpx.AsyncClient.get", new_callable=AsyncMock) as mock_get:
-            mock_response = AsyncMock()
-            mock_response.status_code = 200
-            mock_response.text = robots_content
-            mock_get.return_value = mock_response
-            result = await checker.can_fetch("https://example.com/private/secret")
-            assert result is False
+    async def test_allowed_by_robots_txt(self, monkeypatch):
+        robots = "User-agent: *\nDisallow: /private/\n"
+        checker = self._checker(monkeypatch, lambda req: httpx.Response(200, text=robots))
+        assert await checker.can_fetch("https://example.com/public/page") is True
 
     @pytest.mark.asyncio
-    async def test_allowed_by_robots_txt(self, checker):
-        """Test URL is allowed when robots.txt permits it."""
-        robots_content = """
-User-agent: *
-Disallow: /private/
-"""
-        with patch("httpx.AsyncClient.get", new_callable=AsyncMock) as mock_get:
-            mock_response = AsyncMock()
-            mock_response.status_code = 200
-            mock_response.text = robots_content
-            mock_get.return_value = mock_response
-            result = await checker.can_fetch("https://example.com/public/page")
-            assert result is True
-
-    @pytest.mark.asyncio
-    async def test_robots_txt_cached(self, checker):
-        """Test robots.txt is cached per domain."""
-        robots_content = "User-agent: *\nAllow: /"
-        with patch("httpx.AsyncClient.get", new_callable=AsyncMock) as mock_get:
-            mock_response = AsyncMock()
-            mock_response.status_code = 200
-            mock_response.text = robots_content
-            mock_get.return_value = mock_response
-
-            await checker.can_fetch("https://example.com/page1")
-            await checker.can_fetch("https://example.com/page2")
-
-            # Should only fetch robots.txt once
-            assert mock_get.call_count == 1
+    async def test_robots_txt_cached(self, monkeypatch):
+        calls = {"n": 0}
+        def handler(req):
+            calls["n"] += 1
+            return httpx.Response(200, text="User-agent: *\nAllow: /\n")
+        checker = self._checker(monkeypatch, handler)
+        await checker.can_fetch("https://example.com/page1")
+        await checker.can_fetch("https://example.com/page2")
+        assert calls["n"] == 1  # one robots.txt fetch per domain
 
 
 class TestContentFetcher:

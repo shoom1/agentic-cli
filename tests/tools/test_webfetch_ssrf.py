@@ -134,3 +134,20 @@ class TestPinnedTransport:
             with pytest.raises(BlockedAddressError):
                 await client.get("http://metadata.test/latest")
         assert called["inner"] is False  # never connected
+
+
+class TestRobotsThroughTransport:
+    @pytest.mark.asyncio
+    async def test_robots_fetch_for_private_host_is_refused_at_transport(self, monkeypatch):
+        """A host resolving to a private IP: the robots fetch is refused by the
+        transport (no connection), and can_fetch stays permissive."""
+        from agentic_cli.tools.webfetch.robots import RobotsTxtChecker
+        monkeypatch.setattr(socket, "getaddrinfo", stub_getaddrinfo("169.254.169.254"))
+        inner_called = {"n": 0}
+        def handler(req):
+            inner_called["n"] += 1
+            return httpx.Response(200, text="User-agent: *\nDisallow: /\n")
+        checker = RobotsTxtChecker(transport=mock_pinned_transport(handler))
+        allowed = await checker.can_fetch("http://metadata.test/x")
+        assert inner_called["n"] == 0     # never connected to the private IP
+        assert allowed is True            # permissive on the (blocked) fetch error
