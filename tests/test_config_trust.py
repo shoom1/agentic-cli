@@ -115,3 +115,14 @@ class TestCwdDotenvFiltering:
         abs_env.write_text("AGENTIC_RAW_LLM_LOGGING=true\n")
         s = self._subclass_with_env_file(str(abs_env))()
         assert s.raw_llm_logging is True         # absolute env_file trusted
+
+    def test_list_env_file_is_trusted(self, tmp_path, monkeypatch):
+        # A list/tuple env_file must stay trusted (unfiltered) — only a single
+        # cwd-relative env_file is filtered.
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        monkeypatch.delenv("AGENTIC_RAW_LLM_LOGGING", raising=False)
+        abs_env = tmp_path / "user.env"
+        abs_env.write_text("AGENTIC_RAW_LLM_LOGGING=true\n")
+        s = self._subclass_with_env_file([str(abs_env)])()
+        assert s.raw_llm_logging is True   # list env_file trusted
