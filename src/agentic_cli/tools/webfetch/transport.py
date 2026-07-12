@@ -43,4 +43,10 @@ class PinnedTransport(httpx.AsyncBaseTransport):
         return await self._inner.handle_async_request(request)
 
     async def aclose(self) -> None:
-        await self._inner.aclose()
+        # No-op: this transport is SHARED and long-lived (one per fetcher, used
+        # by both the fetcher and the robots checker). Each webfetch call opens
+        # a short-lived httpx.AsyncClient(transport=self) and closes it on exit,
+        # which would otherwise tear down the shared inner pool under a
+        # concurrent call. The inner pool persists for the fetcher's lifetime
+        # (which also enables connection keep-alive across fetches).
+        return None

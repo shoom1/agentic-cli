@@ -833,12 +833,15 @@ class TestFactoryWiring:
         from agentic_cli.tools.webfetch.transport import PinnedTransport
         from agentic_cli.config import BaseSettings
 
-        wt._fetcher = None  # reset module cache
-        wt._fetcher_settings_snapshot = None
-        fetcher = wt.get_or_create_fetcher(BaseSettings())
-
-        assert isinstance(fetcher._transport, PinnedTransport)
-        # the robots checker shares the SAME transport instance
-        assert fetcher._robots._transport is fetcher._transport
-        # the transport validates against the same validator the fetcher holds
-        assert fetcher._transport._validator is fetcher._validator
+        orig_fetcher = wt._fetcher
+        orig_snapshot = wt._fetcher_settings_snapshot
+        try:
+            wt._fetcher = None
+            wt._fetcher_settings_snapshot = None
+            fetcher = wt.get_or_create_fetcher(BaseSettings())
+            assert isinstance(fetcher._transport, PinnedTransport)
+            assert fetcher._robots._transport is fetcher._transport
+            assert fetcher._transport._validator is fetcher._validator
+        finally:
+            wt._fetcher = orig_fetcher
+            wt._fetcher_settings_snapshot = orig_snapshot

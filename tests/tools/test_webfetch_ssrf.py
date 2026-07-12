@@ -6,6 +6,7 @@ import socket
 import httpx
 import pytest
 
+from agentic_cli.tools.webfetch.transport import PinnedTransport
 from agentic_cli.tools.webfetch.validator import (
     URLValidator,
     BlockedAddressError,
@@ -87,10 +88,14 @@ class TestValidateNoDNS:
         r = URLValidator().validate("http://127.0.0.1/x")
         assert r.valid is False
 
-    def test_public_hostname_passes_policy(self):
-        # validate() no longer resolves; a normal hostname passes policy checks
-        r = URLValidator().validate("https://example.com/x")
-        assert r.valid is True
+    def test_public_hostname_passes_policy(self, monkeypatch):
+        # validate() must NOT resolve DNS — make resolution explode and assert
+        # a normal hostname still passes policy.
+        def _boom(*a, **k):
+            raise AssertionError("validate() must not call DNS")
+        monkeypatch.setattr(socket, "getaddrinfo", _boom)
+        monkeypatch.setattr(socket, "gethostbyname", _boom)
+        assert URLValidator().validate("https://example.com/x").valid is True
 
 
 def mock_pinned_transport(handler, validator=None):
@@ -151,3 +156,28 @@ class TestRobotsThroughTransport:
         allowed = await checker.can_fetch("http://metadata.test/x")
         assert inner_called["n"] == 0     # never connected to the private IP
         assert allowed is True            # permissive on the (blocked) fetch error
+
+
+class _SpyInner(httpx.MockTransport):
+    def __init__(self, handler):
+        super().__init__(handler)
+        self.closed = False
+
+    async def aclose(self):
+        self.closed = True
+        await super().aclose()
+
+
+class TestSharedTransportLifecycle:
+    @pytest.mark.asyncio
+    async def test_client_close_does_not_close_shared_inner(self, monkeypatch):
+        monkeypatch.setattr(socket, "getaddrinfo", stub_getaddrinfo("93.184.216.34"))
+        inner = _SpyInner(lambda req: httpx.Response(200, text="ok"))
+        transport = PinnedTransport(URLValidator(), inner=inner)
+        async with httpx.AsyncClient(transport=transport) as client:
+            await client.get("https://example.com/x")
+        assert inner.closed is False   # shared inner NOT closed by client exit
+        # ...and the transport is still usable for a subsequent client
+        async with httpx.AsyncClient(transport=transport) as client2:
+            r = await client2.get("https://example.com/y")
+        assert r.status_code == 200
