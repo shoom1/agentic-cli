@@ -457,9 +457,9 @@ class TestTargetlessAllowAlwaysRegression:
         """A rule granted with target='*' must be stored with the wildcard
         preserved (not mangled by matchers) so it can be reloaded correctly.
 
-        This test verifies the WRITE side: the user grants file (P0-1,
-        ``~/.{app}/project_grants.json``) is created with ``"*"`` intact.
-        Task 4 (load-path migration) will add coverage for the reload side.
+        Verifies both the WRITE side (grants file persisted with '*' intact) and
+        the RELOAD side (a fresh engine reloads the persisted grant and allows
+        the same capability without prompting).
         """
         import json
         monkeypatch.chdir(tmp_path)
@@ -481,6 +481,15 @@ class TestTargetlessAllowAlwaysRegression:
         assert len(allow) == 1
         assert allow[0]["capability"] == "http.read"
         assert allow[0]["target"] == "*"  # wildcard preserved, not mangled
+
+        # Round 2: a FRESH engine (same settings + ctx → same resolved project
+        # key) must reload the persisted wildcard grant from project_grants.json
+        # and allow the same capability WITHOUT prompting.
+        w2 = _stub_workflow()  # default response "Deny" — a prompt here fails the test
+        engine2 = PermissionEngine(settings=_stub_settings(), workflow=w2, ctx=ctx)
+        result2 = await engine2.check("web_search", [Capability("http.read")], {"query": "y"})
+        assert result2.allowed is True
+        w2.request_user_input.assert_not_called()
 
 
 class TestOptionalCapability:

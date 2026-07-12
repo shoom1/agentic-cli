@@ -51,17 +51,6 @@ def get_user_project_grants_path(app_name: str) -> Path:
     return Path.home() / f".{app_name}" / "project_grants.json"
 
 
-def get_project_local_permissions_path(app_name: str) -> Path:
-    """Path to interactively-granted permission rules
-    (./.{app_name}/permissions.local.json).
-
-    Kept separate from ``settings.json`` so a cloned repo's committed
-    ``settings.json`` cannot forge trusted allow-rules: this file is written
-    only by the user's own "Allow always" grants and is loaded as trusted,
-    while ``settings.json`` permission rules are honored deny-only.
-    """
-    return Path.cwd() / f".{app_name}" / "permissions.local.json"
-
 
 class SettingsPersistence:
     """Manages loading and saving settings to JSON files.

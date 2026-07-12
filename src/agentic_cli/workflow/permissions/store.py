@@ -107,6 +107,39 @@ def load_rules(
     return rules
 
 
+def load_project_grants(app_name: str, ctx: PermissionContext) -> list[Rule]:
+    """Load interactive 'Allow always' grants for the CURRENT project only.
+
+    Reads ``~/.{app}/project_grants.json`` and returns the allow+deny rules
+    stored under ``str(ctx.workdir.resolve())`` — trusted (``RuleSource.PROJECT``,
+    both effects honored), since the user (not a repo) authored them. Returns
+    ``[]`` when the file or the project's entry is absent. Raises ``ValueError``
+    on malformed JSON.
+    """
+    # Local import to avoid a cycle: matchers.py imports PermissionContext here.
+    from agentic_cli.workflow.permissions.matchers import get_matcher  # noqa: PLC0415
+
+    path = get_user_project_grants_path(app_name)
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text())
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Malformed JSON in {path}: {exc}") from exc
+
+    if not isinstance(data, dict):
+        raise ValueError(f"Expected a JSON object in {path}, got {type(data).__name__}")
+
+    section = (data.get(str(ctx.workdir.resolve())) or {}).get("permissions") or {}
+    rules: list[Rule] = []
+    for effect_name, effect in (("allow", Effect.ALLOW), ("deny", Effect.DENY)):
+        for entry in section.get(effect_name) or []:
+            cap = entry["capability"]
+            target = get_matcher(cap).canonicalize(entry["target"], ctx)
+            rules.append(Rule(cap, target, effect, RuleSource.PROJECT))
+    return rules
+
+
 def append_project_rule(app_name: str, rule: Rule, project_root: Path) -> None:
     """Persist an interactive 'Allow always' grant to the USER-side, path-keyed
     grants file (``~/.{app}/project_grants.json``), under ``project_root``'s
@@ -125,6 +158,9 @@ def append_project_rule(app_name: str, rule: Rule, project_root: Path) -> None:
         data = json.loads(path.read_text()) if path.exists() else {}
     except json.JSONDecodeError as exc:
         raise ValueError(f"Malformed JSON in {path}: {exc}") from exc
+
+    if not isinstance(data, dict):
+        raise ValueError(f"Expected a JSON object in {path}, got {type(data).__name__}")
 
     proj_key = str(project_root.resolve())
     key = "allow" if rule.effect is Effect.ALLOW else "deny"
