@@ -7,13 +7,14 @@ Manages sandbox sessions and delegates execution to a pluggable backend
 from __future__ import annotations
 
 import atexit
-import shutil
+import os
+import stat
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
 from agentic_cli.logging import Loggers
-from agentic_cli.file_utils import sanitize_filename
+from agentic_cli.file_utils import copy_regular_file_no_follow, sanitize_filename
 from agentic_cli.tools.sandbox.models import ExecutionResult
 
 if TYPE_CHECKING:
@@ -33,16 +34,23 @@ def stage_inputs(session_dir: Path, inputs: list[str]) -> None:
         return
     inputs_dir = Path(session_dir) / "inputs"
     inputs_dir.mkdir(parents=True, exist_ok=True)
+    if not stat.S_ISDIR(os.lstat(inputs_dir).st_mode):
+        # 'inputs' is a symlink / not a real dir (kernel-plantable) — O_NOFOLLOW
+        # and os.replace only guard the final component, not this parent.
+        raise ValueError("inputs staging directory is not a real directory (symlink?)")
     seen: set[str] = set()
     for src in inputs:
         p = Path(src).expanduser()
-        if not p.is_file():
-            raise ValueError(f"input file not found: {src}")
         name = p.name
         if name in seen:
             raise ValueError(f"duplicate input basename {name!r}; rename one of the source files")
         seen.add(name)
-        shutil.copy2(p, inputs_dir / name)
+        try:
+            copy_regular_file_no_follow(p, inputs_dir / name)
+        except FileNotFoundError as exc:
+            raise ValueError(f"input file not found: {src}") from exc
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"input must be a regular file: {src}") from exc
 
 
 def sandbox_disabled_reason(settings) -> str:

@@ -5,14 +5,14 @@ from __future__ import annotations
 import json
 import os
 import queue
-import shutil
+import stat
 import threading
 import time
 from pathlib import Path
 
 from agentic_cli.logging import Loggers
 from agentic_cli.tools.sandbox.models import ExecutionResult, SessionStatus
-from agentic_cli.file_utils import sanitize_filename
+from agentic_cli.file_utils import copy_regular_file_no_follow, sanitize_filename
 from agentic_cli.tools.sandbox.backends.base import SandboxBackend
 from agentic_cli.tools.sandbox.backends import kernel_exec
 from agentic_cli.tools.sandbox.backends.container_runtime import (
@@ -224,10 +224,38 @@ class JupyterDockerBackend(SandboxBackend):
         base = Path(configured) if configured else Path(self._settings.workspace_dir) / "artifacts"
         base.mkdir(parents=True, exist_ok=True)
         try:
-            os.chmod(base, 0o777)  # container runs as host uid; keep writable across sessions
+            os.chmod(base, 0o700)  # single-user; not world-accessible
         except OSError:
             pass
         return base
+
+    def _collect_outputs(self, working_dir: Path) -> list[str]:
+        """Copy regular files from <working_dir>/outputs into the shared outputs
+        dir without following symlinks. Skips symlinks / special files (a kernel
+        could plant `outputs/x -> /host/secret`) and a symlinked `outputs` dir.
+        Never raises — best-effort contract so execute() is not disrupted."""
+        session_outs = Path(working_dir) / "outputs"
+        try:
+            if not stat.S_ISDIR(os.lstat(session_outs).st_mode):
+                return []  # 'outputs' is a symlink or not a directory
+        except OSError:
+            return []
+        collected: list[str] = []
+        try:
+            shared = self._outputs_dir()
+            entries = sorted(session_outs.iterdir())
+        except OSError:
+            logger.warning("sandbox_outputs_unreadable", path=str(session_outs))
+            return collected
+        for src in entries:
+            dst = shared / src.name
+            try:
+                copy_regular_file_no_follow(src, dst)
+            except (OSError, ValueError):
+                logger.warning("sandbox_output_skipped", entry=str(src))
+                continue
+            collected.append(str(dst))
+        return collected
 
     def _parse_data_mounts(self) -> list[tuple[str, str]]:
         """Parse sandbox_data_mounts into (host_path, sanitized_name) pairs."""
@@ -340,17 +368,9 @@ class JupyterDockerBackend(SandboxBackend):
                 return ExecutionResult(success=False, error=f"Failed to start sandbox: {exc}")
         result = session.execute(code, timeout_seconds)
         if result.success and working_dir is not None:
-            session_outs = Path(working_dir) / "outputs"
-            if session_outs.is_dir():
-                shared = self._outputs_dir()
-                extra: list[str] = []
-                for src in sorted(session_outs.iterdir()):
-                    if src.is_file():
-                        dst = shared / src.name
-                        shutil.copy2(src, dst)
-                        extra.append(str(dst))
-                if extra:
-                    result.artifacts = list(result.artifacts) + extra
+            extra = self._collect_outputs(Path(working_dir))
+            if extra:
+                result.artifacts = list(result.artifacts) + extra
         return result
 
     def reset_session(self, session_id: str) -> None:
