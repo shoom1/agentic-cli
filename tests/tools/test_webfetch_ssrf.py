@@ -91,3 +91,46 @@ class TestValidateNoDNS:
         # validate() no longer resolves; a normal hostname passes policy checks
         r = URLValidator().validate("https://example.com/x")
         assert r.valid is True
+
+
+def mock_pinned_transport(handler, validator=None):
+    """PinnedTransport whose inner is an httpx.MockTransport(handler)."""
+    from agentic_cli.tools.webfetch.transport import PinnedTransport
+    return PinnedTransport(validator or URLValidator(), inner=httpx.MockTransport(handler))
+
+
+class TestPinnedTransport:
+    @pytest.mark.asyncio
+    async def test_pins_to_validated_ip_preserving_host_and_sni(self, monkeypatch):
+        monkeypatch.setattr(socket, "getaddrinfo", stub_getaddrinfo("93.184.216.34"))
+        seen = {}
+
+        def handler(request):
+            seen["url_host"] = request.url.host
+            seen["host_header"] = request.headers.get("Host")
+            seen["sni"] = request.extensions.get("sni_hostname")
+            return httpx.Response(200, text="ok")
+
+        transport = mock_pinned_transport(handler)
+        async with httpx.AsyncClient(transport=transport) as client:
+            resp = await client.get("https://example.com/page")
+
+        assert resp.status_code == 200
+        assert seen["url_host"] == "93.184.216.34"   # connected to the pinned IP
+        assert seen["host_header"] == "example.com"  # Host preserved
+        assert seen["sni"] == "example.com"          # TLS SNI bound to hostname
+
+    @pytest.mark.asyncio
+    async def test_blocked_host_raises_and_never_calls_inner(self, monkeypatch):
+        monkeypatch.setattr(socket, "getaddrinfo", stub_getaddrinfo("169.254.169.254"))
+        called = {"inner": False}
+
+        def handler(request):
+            called["inner"] = True
+            return httpx.Response(200)
+
+        transport = mock_pinned_transport(handler)
+        async with httpx.AsyncClient(transport=transport) as client:
+            with pytest.raises(BlockedAddressError):
+                await client.get("http://metadata.test/latest")
+        assert called["inner"] is False  # never connected
