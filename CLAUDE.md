@@ -20,7 +20,7 @@ agentic-cli/
 │   ├── __init__.py           # Package exports, lazy imports
 │   ├── config.py             # BaseSettings (pydantic-settings)
 │   ├── settings_mixins.py    # Composable settings field groups
-│   ├── settings_persistence.py # save_settings() (excludes SECRET_FIELDS)
+│   ├── settings_persistence.py # Trust-split save (PROJECT_SETTABLE_KEYS → project, rest → user config; excludes SECRET_FIELDS)
 │   ├── constants.py          # Shared constants, truncate()
 │   ├── file_utils.py         # atomic_write_json / atomic_write_text
 │   ├── logging.py

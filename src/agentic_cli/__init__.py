@@ -39,7 +39,7 @@ from agentic_cli.config import (
     validate_settings,
     reload_settings,
 )
-from agentic_cli.settings_persistence import SettingsPersistence
+from agentic_cli.settings_persistence import SettingsPersistence, SettingsSaveResult
 from agentic_cli.workflow.settings import WorkflowSettingsMixin
 from agentic_cli.settings_mixins import AppSettingsMixin, CLISettingsMixin
 
@@ -83,6 +83,7 @@ __all__ = [
     "SettingsContext",
     "SettingsValidationError",
     "SettingsPersistence",
+    "SettingsSaveResult",
     "get_settings",
     "set_settings",
     "set_context_settings",
