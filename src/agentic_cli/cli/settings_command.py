@@ -55,9 +55,14 @@ class SettingsCommand(Command):
         # Apply settings changes
         await app.apply_settings(result)
 
-        # Save settings to project config file
+        # Save settings, split by trust (allowlisted → project config,
+        # user-scoped → user config)
         try:
-            path = await app.save_settings()
-            app.session.add_success(f"Settings saved to {path}")
+            saved = await app.save_settings()
+            message = f"Settings saved to {saved.project_path}"
+            if saved.user_path is not None:
+                keys = ", ".join(saved.user_scoped_keys)
+                message += f"; user-scoped ({keys}) saved to {saved.user_path}"
+            app.session.add_success(message)
         except Exception as e:
             app.session.add_warning(f"Settings applied but not saved: {e}")

@@ -26,7 +26,7 @@ from agentic_cli.config import BaseSettings
 from agentic_cli.logging import Loggers, configure_logging
 
 if TYPE_CHECKING:
-    from pathlib import Path
+    from agentic_cli.settings_persistence import SettingsSaveResult
     from agentic_cli.workflow import GoogleADKWorkflowManager, EventType, WorkflowEvent
     from agentic_cli.workflow.base_manager import BaseWorkflowManager
     from agentic_cli.workflow.config import AgentConfig
@@ -258,16 +258,18 @@ class BaseCLIApp:
         # Sort by order and return items only
         return [item for _, item in sorted(items, key=lambda x: x[0])]
 
-    async def save_settings(self) -> "Path":
-        """Save current settings to project config file (./.{app_name}/settings.json).
+    async def save_settings(self) -> "SettingsSaveResult":
+        """Save current settings, split by trust.
 
-        Uses SettingsPersistence to save non-default settings to the
-        project-level config file. Secrets (API keys) are never saved.
+        Allowlisted keys go to the project config
+        (./.{app_name}/settings.json). User-scoped keys differing from their
+        defaults go to the user config (~/.{app_name}/settings.json), where
+        the loader trusts them — the project file may only carry allowlisted
+        keys since P0-1. Secrets (API keys) are never saved.
 
         Returns:
-            Path to the saved config file
+            SettingsSaveResult with the written path(s)
         """
-        from pathlib import Path
         from agentic_cli.settings_persistence import SettingsPersistence
 
         persistence = SettingsPersistence(self._settings.app_name)
