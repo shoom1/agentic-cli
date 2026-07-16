@@ -24,6 +24,7 @@ from agentic_cli.cli.usage_tracker import UsageTracker
 from agentic_cli.cli.workflow_controller import WorkflowController
 from agentic_cli.config import BaseSettings
 from agentic_cli.logging import Loggers, configure_logging
+from agentic_cli.settings_persistence import PROJECT_SETTABLE_KEYS
 
 if TYPE_CHECKING:
     from agentic_cli.settings_persistence import SettingsSaveResult
@@ -32,6 +33,12 @@ if TYPE_CHECKING:
     from agentic_cli.workflow.config import AgentConfig
 
 logger = Loggers.cli()
+
+# Synthetic dialog keys → the settings field their setter actually writes.
+# "model" is not a field; update_setting() routes it via set_model() to
+# default_model. A synthetic key without an entry here is treated as writing
+# a field of the same name.
+_UI_KEY_TARGET_FIELDS = {"model": "default_model"}
 
 
 # === Slash Command Completer ===
@@ -196,6 +203,11 @@ class BaseCLIApp:
         Override to customize which settings appear in the UI.
         Default: model, thinking_effort
 
+        Only project-scoped settings may appear: a key whose target field is
+        not in PROJECT_SETTABLE_KEYS is excluded by _build_ui_items (with a
+        warning), because a /settings edit to it would persist in the user
+        ~/.{app}/settings.json and apply across all projects of the app.
+
         Returns:
             List of field names that should appear in the settings UI
         """
@@ -216,6 +228,15 @@ class BaseCLIApp:
         items: list[tuple[int, Any]] = []
 
         for key in self.get_ui_setting_keys():
+            # Project-scope guard: the dialog may only expose settings the
+            # project file can persist (PROJECT_SETTABLE_KEYS). A user-scoped
+            # key would save to the user ~/.{app}/settings.json and leak the
+            # change across all projects of the app.
+            target_field = _UI_KEY_TARGET_FIELDS.get(key, key)
+            if target_field not in PROJECT_SETTABLE_KEYS:
+                logger.warning("user_scoped_setting_excluded_from_ui", key=key)
+                continue
+
             # Handle special 'model' field with dynamic options
             if key == "model":
                 available_models = list(self._settings.get_available_models())
