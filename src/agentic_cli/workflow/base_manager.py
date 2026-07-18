@@ -13,6 +13,7 @@ It also provides shared implementations for:
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 from abc import ABC, abstractmethod
 from typing import Any, AsyncGenerator, Awaitable, Callable, Iterator, TYPE_CHECKING
@@ -90,6 +91,10 @@ class BaseWorkflowManager(ABC):
         self._settings = settings or get_settings()
         self._app_name = app_name or self._settings.app_name
         self._initialized = False
+        # Serializes initialize_services(): background init and a first user
+        # message (process → _ensure_initialized) may call it concurrently,
+        # and the _initialized guard alone is check-then-act.
+        self._init_lock = asyncio.Lock()
         self._on_event = on_event
 
         # Model resolution (lazy)
@@ -578,39 +583,42 @@ class BaseWorkflowManager(ABC):
 
     async def initialize_services(self, validate: bool = True) -> None:
         """Initialize backend services asynchronously.
+
+        Concurrency-safe and idempotent: concurrent callers serialize on the
+        init lock; late arrivals see ``_initialized`` and return.
+
         Args:
             validate: If True, validate settings before initialization.
         Raises:
             SettingsValidationError: If settings validation fails.
         """
-        if self._initialized:
-            return
+        async with self._init_lock:
+            if self._initialized:
+                return
 
-        from agentic_cli.config import validate_settings
+            from agentic_cli.config import validate_settings
 
-        if validate:
-            validate_settings(self._settings)
+            if validate:
+                validate_settings(self._settings)
 
-        self._settings.export_api_keys_to_env()
+            self._settings.export_api_keys_to_env()
 
-        # Refresh model registry from APIs
-        await self._model_registry.refresh(
-            google_api_key=self._settings.google_api_key,
-            anthropic_api_key=self._settings.anthropic_api_key,
-        )
-        self._settings.set_model_registry(self._model_registry)
+            # Refresh model registry from APIs
+            await self._model_registry.refresh(
+                google_api_key=self._settings.google_api_key,
+                anthropic_api_key=self._settings.anthropic_api_key,
+            )
+            self._settings.set_model_registry(self._model_registry)
 
-        # Create services BEFORE backend init so _build_tools() can
-        # produce factory-bound tools during agent/graph creation.
-        # Offloaded to a worker thread because constructors here may
-        # load heavy dependencies (e.g. the sentence-transformers model
-        # inside EmbeddingService) that would otherwise block the event
-        # loop — which keeps the prompt unresponsive at startup.
-        import asyncio as _asyncio
-
-        await _asyncio.to_thread(self._ensure_managers_initialized)
-        await self._do_initialize()
-        self._initialized = True
+            # Create services BEFORE backend init so _build_tools() can
+            # produce factory-bound tools during agent/graph creation.
+            # Offloaded to a worker thread because constructors here may
+            # load heavy dependencies (e.g. the sentence-transformers model
+            # inside EmbeddingService) that would otherwise block the event
+            # loop — which keeps the prompt unresponsive at startup.
+            await asyncio.to_thread(self._ensure_managers_initialized)
+            await self._do_initialize()
+            self._initialized = True
 
     @abstractmethod
     async def _do_initialize(self) -> None:

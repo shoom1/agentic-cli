@@ -313,3 +313,149 @@ class TestWorkflowControllerOrchestratorSwap:
         old_workflow.reinitialize.assert_not_called()
         new_workflow.initialize_services.assert_awaited_once()
         assert controller._workflow is new_workflow
+
+
+# --- Lifecycle: readiness, atomic swap, close() ---
+
+
+def _make_lifecycle_controller(orchestrator=OrchestratorType.ADK):
+    configs = [AgentConfig(name="test", prompt="Test")]
+    return WorkflowController(configs, _make_settings(orchestrator=orchestrator))
+
+
+def _blocked_init_workflow():
+    """Fake manager whose initialize_services blocks until released."""
+    import asyncio
+
+    wf = _FakeADKWorkflow()
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def _slow_init():
+        started.set()
+        await release.wait()
+
+    wf.initialize_services = _slow_init
+    return wf, started, release
+
+
+class TestControllerLifecycle:
+    """is_ready / ensure_initialized must reflect completed service init."""
+
+    async def test_not_ready_until_services_initialized(self):
+        import asyncio
+
+        controller = _make_lifecycle_controller()
+        wf, started, release = _blocked_init_workflow()
+        controller._create_fn = lambda: wf
+
+        await controller.start_background_init()
+        await asyncio.wait_for(started.wait(), timeout=5)
+
+        assert controller.is_ready is False
+        with pytest.raises(RuntimeError):
+            controller.workflow
+
+        release.set()
+        await controller._init_task
+        assert controller.is_ready is True
+        assert controller.workflow is wf
+
+    async def test_failed_service_init_is_not_ready_and_cleans_up(self):
+        controller = _make_lifecycle_controller()
+        wf = _FakeADKWorkflow()
+        wf.initialize_services = AsyncMock(side_effect=RuntimeError("boom"))
+        controller._create_fn = lambda: wf
+
+        await controller.start_background_init()
+        await controller._init_task
+
+        assert controller.is_ready is False
+        assert isinstance(controller.init_error, RuntimeError)
+        assert await controller.ensure_initialized() is False
+        wf.cleanup.assert_awaited_once()
+
+    async def test_ensure_initialized_waits_for_inflight_services(self):
+        import asyncio
+
+        controller = _make_lifecycle_controller()
+        wf, started, release = _blocked_init_workflow()
+        controller._create_fn = lambda: wf
+
+        await controller.start_background_init()
+        await asyncio.wait_for(started.wait(), timeout=5)
+
+        ensure_task = asyncio.create_task(controller.ensure_initialized())
+        await asyncio.sleep(0.05)
+        assert not ensure_task.done()
+
+        release.set()
+        assert await ensure_task is True
+
+
+class TestOrchestratorSwapLifecycle:
+    """Swap must initialize the replacement first, then replace atomically."""
+
+    def _controller_needing_swap(self):
+        # Live ADK manager while settings demand LangGraph → swap required
+        controller = _make_lifecycle_controller(
+            orchestrator=OrchestratorType.LANGGRAPH
+        )
+        old = _FakeADKWorkflow()
+        controller._workflow = old
+        return controller, old
+
+    async def test_swap_failure_keeps_old_manager(self):
+        controller, old = self._controller_needing_swap()
+        new = _FakeLangGraphWorkflow()
+        new.initialize_services = AsyncMock(side_effect=RuntimeError("init failed"))
+
+        with patch(
+            "agentic_cli.cli.workflow_controller.create_workflow_manager_from_settings",
+            return_value=new,
+        ):
+            with pytest.raises(RuntimeError, match="init failed"):
+                await controller.reinitialize()
+
+        assert controller._workflow is old
+        old.cleanup.assert_not_awaited()
+        new.cleanup.assert_awaited_once()
+
+    async def test_swap_success_replaces_then_cleans_old(self):
+        controller, old = self._controller_needing_swap()
+        new = _FakeLangGraphWorkflow()
+
+        with patch(
+            "agentic_cli.cli.workflow_controller.create_workflow_manager_from_settings",
+            return_value=new,
+        ):
+            await controller.reinitialize()
+
+        assert controller._workflow is new
+        old.cleanup.assert_awaited_once()
+
+
+class TestControllerClose:
+    """close() releases the manager and is safe to call repeatedly."""
+
+    async def test_close_cleans_manager_and_is_idempotent(self):
+        controller = _make_lifecycle_controller()
+        wf = _FakeADKWorkflow()
+        controller._workflow = wf
+
+        await controller.close()
+        wf.cleanup.assert_awaited_once()
+        assert controller.is_ready is False
+
+        await controller.close()
+        wf.cleanup.assert_awaited_once()  # still once — idempotent
+
+    async def test_background_init_cm_closes_manager_on_exit(self):
+        controller = _make_lifecycle_controller()
+        wf = _FakeADKWorkflow()
+        controller._create_fn = lambda: wf
+        ui = MagicMock()
+
+        async with controller.background_init(ui):
+            assert await controller.ensure_initialized() is True
+
+        wf.cleanup.assert_awaited_once()

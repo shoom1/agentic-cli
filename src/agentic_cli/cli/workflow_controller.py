@@ -40,9 +40,14 @@ class WorkflowController:
 
     Encapsulates:
     - Background initialization in ThreadPoolExecutor
-    - Readiness checking (blocking and non-blocking)
-    - Reinitialization when model/settings change
-    - Cleanup of pending init tasks
+    - Readiness checking (blocking and non-blocking); the manager is
+      published only after initialize_services() succeeds, so is_ready
+      implies a fully-initialized manager
+    - Reinitialization when model/settings change (an orchestrator swap
+      initializes the replacement first, swaps atomically, then cleans up
+      the old manager)
+    - close(): idempotent shutdown — cancels pending init and cleans up
+      the live manager; invoked on app exit via background_init()
 
     Example:
         controller = WorkflowController(
@@ -141,27 +146,40 @@ class WorkflowController:
         Creates the workflow manager and calls initialize_services() to
         preload LLM, build graph, and set up checkpointing. This avoids
         lag on the first user message.
+
+        The manager is published to ``self._workflow`` only after
+        initialize_services() succeeds, so ``is_ready`` /
+        ``ensure_initialized()`` never report a partially-initialized or
+        failed manager as ready.
         """
         loop = asyncio.get_running_loop()
 
         def _create_workflow() -> "BaseWorkflowManager":
             return self._create_fn()
 
+        manager: "BaseWorkflowManager | None" = None
         try:
             logger.debug("background_init_starting")
 
             # Step 1: Create workflow manager (sync, in thread pool)
-            self._workflow = await loop.run_in_executor(
+            manager = await loop.run_in_executor(
                 self._init_executor, _create_workflow
             )
 
             # Step 2: Initialize services (async - builds graph, loads LLM, etc.)
-            await self._workflow.initialize_services()
+            await manager.initialize_services()
 
-            logger.info("background_init_complete", model=self._workflow.model)
+            self._workflow = manager
+            logger.info("background_init_complete", model=manager.model)
 
+        except asyncio.CancelledError:
+            if manager is not None:
+                await self._cleanup_manager(manager)
+            raise
         except Exception as e:
             self._init_error = e
+            if manager is not None:
+                await self._cleanup_manager(manager)
             logger.debug("background_init_failed", error=str(e))
 
     async def ensure_initialized(
@@ -245,13 +263,22 @@ class WorkflowController:
                 old_model=self._workflow.model,
                 new_model=model,
             )
-            self._workflow = create_workflow_manager_from_settings(
+            # Initialize the replacement fully before swapping so a failed
+            # init leaves the working manager in place; clean up whichever
+            # manager ends up unused.
+            new_workflow = create_workflow_manager_from_settings(
                 agent_configs=self._agent_configs,
                 settings=self._settings,
                 app_name=self._app_name,
                 model=model,
             )
-            await self._workflow.initialize_services()
+            try:
+                await new_workflow.initialize_services()
+            except Exception:
+                await self._cleanup_manager(new_workflow)
+                raise
+            old_workflow, self._workflow = self._workflow, new_workflow
+            await self._cleanup_manager(old_workflow)
         else:
             await self._workflow.reinitialize(model=model, preserve_sessions=True)
 
@@ -264,6 +291,25 @@ class WorkflowController:
             except asyncio.CancelledError:
                 pass
         self._init_executor.shutdown(wait=False)
+
+    @staticmethod
+    async def _cleanup_manager(manager: "BaseWorkflowManager") -> None:
+        """Best-effort manager cleanup; a failing cleanup is logged, not raised."""
+        try:
+            await manager.cleanup()
+        except Exception as e:
+            logger.warning("workflow_manager_cleanup_failed", error=str(e))
+
+    async def close(self) -> None:
+        """Release the controller: cancel pending init, clean up the manager.
+
+        Idempotent — safe to call multiple times. Invoked from application
+        shutdown (the background_init context manager exit).
+        """
+        await self.cancel_init()
+        manager, self._workflow = self._workflow, None
+        if manager is not None:
+            await self._cleanup_manager(manager)
 
     def update_status_bar(self, ui: "ThinkingPromptSession") -> None:
         """Update UI status bar with current workflow status.
@@ -315,12 +361,12 @@ class WorkflowController:
         try:
             yield
         finally:
-            # Cancel init task if still running
-            await self.cancel_init()
-            # Also cancel status update task if still running
+            # Cancel status update task if still running
             if not update_task.done():
                 update_task.cancel()
                 try:
                     await update_task
                 except asyncio.CancelledError:
                     pass
+            # Cancel pending init and clean up the manager (app shutdown)
+            await self.close()
