@@ -1092,23 +1092,25 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
     # Sessions (native — DatabaseSessionService persists events continuously)
     # -------------------------------------------------------------------------
 
-    async def session_exists(self, session_id: str) -> bool:
-        """True if the store holds this session with any events."""
+    async def session_exists(
+        self, session_id: str, *, user_id: str | None = None
+    ) -> bool:
+        """True if the store holds this session (for the given user) with any events."""
         if not self._session_service:
             return False
         session = await self._session_service.get_session(
             app_name=self.app_name,
-            user_id=self._settings.default_user,
+            user_id=user_id or self._settings.default_user,
             session_id=session_id,
         )
         return session is not None and bool(getattr(session, "events", None))
 
-    async def list_sessions(self) -> list[dict]:
-        """List persisted sessions for the current user (most recent first)."""
+    async def list_sessions(self, *, user_id: str | None = None) -> list[dict]:
+        """List persisted sessions for a user (default: settings.default_user)."""
         if not self._session_service:
             return []
         resp = await self._session_service.list_sessions(
-            app_name=self.app_name, user_id=self._settings.default_user,
+            app_name=self.app_name, user_id=user_id or self._settings.default_user,
         )
         sessions = [
             {
@@ -1121,24 +1123,28 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         sessions.sort(key=lambda x: x["last_update"] or 0, reverse=True)
         return sessions
 
-    async def delete_session(self, session_id: str) -> bool:
-        """Delete a persisted session from the store."""
+    async def delete_session(
+        self, session_id: str, *, user_id: str | None = None
+    ) -> bool:
+        """Delete a persisted session (for the given user) from the store."""
         if not self._session_service:
             return False
         await self._session_service.delete_session(
             app_name=self.app_name,
-            user_id=self._settings.default_user,
+            user_id=user_id or self._settings.default_user,
             session_id=session_id,
         )
         return True
 
-    async def recent_messages(self, session_id: str, limit: int = 20) -> list[dict]:
+    async def recent_messages(
+        self, session_id: str, limit: int = 20, *, user_id: str | None = None
+    ) -> list[dict]:
         """Recent text messages from the stored session (for fact extraction)."""
         if not self._session_service:
             return []
         session = await self._session_service.get_session(
             app_name=self.app_name,
-            user_id=self._settings.default_user,
+            user_id=user_id or self._settings.default_user,
             session_id=session_id,
         )
         if session is None or not getattr(session, "events", None):

@@ -137,3 +137,68 @@ class TestAdkNativeSessions:
         # A second manager over the same sqlite file sees the session.
         mgr2, _ = self._manager(tmp_path)
         assert await mgr2.session_exists("sess-z") is True
+
+
+class TestAdkSessionUserScope:
+    """Session APIs accept an explicit user_id, defaulting to settings.default_user.
+
+    process() always accepted arbitrary user_id (and job-resume threads
+    record.user_id), but the query/manage APIs hard-coded default_user —
+    sessions created for another user were invisible to them.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _require_adk(self):
+        pytest.importorskip("google.adk")
+
+    def _manager(self, tmp_path: Path):
+        from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager
+
+        settings = _settings(tmp_path, session_store="sqlite")
+        mgr = GoogleADKWorkflowManager.__new__(GoogleADKWorkflowManager)
+        mgr._settings = settings
+        mgr._app_name = "test_app"
+        mgr.session_id = "default_session"
+        mgr._session_service = mgr._make_session_service()
+        return mgr, settings
+
+    async def _seed_as(self, mgr, user_id: str, sid: str, text: str):
+        from google.adk.events import Event
+        from google.genai import types
+
+        s = await mgr._session_service.create_session(
+            app_name=mgr.app_name, user_id=user_id, session_id=sid
+        )
+        await mgr._session_service.append_event(
+            session=s,
+            event=Event(
+                author="user",
+                content=types.Content(
+                    role="user", parts=[types.Part.from_text(text=text)]
+                ),
+            ),
+        )
+
+    async def test_session_apis_scope_to_given_user(self, tmp_path: Path):
+        mgr, settings = self._manager(tmp_path)
+        await self._seed_as(mgr, "alice", "sess-a", "alice message")
+        await self._seed_as(mgr, settings.default_user, "sess-d", "default message")
+
+        # Default scope: unchanged behavior, sees only default_user's sessions
+        assert await mgr.session_exists("sess-d") is True
+        assert await mgr.session_exists("sess-a") is False
+
+        # Explicit user scope reaches alice's session through every API
+        assert await mgr.session_exists("sess-a", user_id="alice") is True
+
+        listed = await mgr.list_sessions(user_id="alice")
+        assert [s["session_id"] for s in listed] == ["sess-a"]
+
+        recent = await mgr.recent_messages("sess-a", user_id="alice")
+        assert recent and recent[-1]["content"] == "alice message"
+
+        assert await mgr.delete_session("sess-a", user_id="alice") is True
+        assert await mgr.session_exists("sess-a", user_id="alice") is False
+
+        # Default user's session untouched by alice-scoped operations
+        assert await mgr.session_exists("sess-d") is True
