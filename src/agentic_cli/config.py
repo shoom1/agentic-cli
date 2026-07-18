@@ -10,10 +10,16 @@ Settings Management:
         set_settings(my_settings)
         settings = get_settings()
 
-    2. Context-based (isolated contexts, multi-tenant):
+    2. Context-based (isolated settings lookup, e.g. tests or per-request
+       overrides):
         with SettingsContext(my_settings):
             # Code here sees my_settings via get_settings()
             settings = get_settings()  # Returns my_settings
+
+       Note: isolation covers settings *lookup* only. API credentials are
+       exported to process-global env vars at manager initialization
+       (provider SDKs read them from the environment), so a SettingsContext
+       does not isolate credentials between contexts in one process.
 
 Settings Loading Priority (highest to lowest):
     1. Environment variables (AGENTIC_* prefix)
