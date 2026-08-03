@@ -12,13 +12,23 @@ from typing import Literal, TYPE_CHECKING
 
 from pydantic import BaseModel, Field, field_validator
 
+from agentic_cli.logging import Loggers
 from agentic_cli.workflow.models import ModelFamily, ModelRegistry
 
 if TYPE_CHECKING:
     pass
 
+logger = Loggers.config()
+
 # Thinking effort levels (module-level constant for backward compatibility)
 THINKING_EFFORT_LEVELS = ModelRegistry.THINKING_EFFORT_LEVELS
+
+# Which environment variable supplies each provider's credential (for error
+# messages — the value is never echoed).
+_PROVIDER_ENV_VAR = {
+    ModelFamily.GEMINI: "GOOGLE_API_KEY",
+    ModelFamily.CLAUDE: "ANTHROPIC_API_KEY",
+}
 
 
 class PermissionRuleConfig(BaseModel):
@@ -625,22 +635,68 @@ class WorkflowSettingsMixin:
         registry = self._get_registry()
         return registry.supports_thinking(model)
 
-    def set_model(self, model: str) -> None:
-        """Set the default model."""
+    def check_model(self, model: str, *, label: str = "model") -> str:
+        """Validate one model against credentials and discovery authority.
+
+        The single rule set shared by ``set_model()`` and ``validate_settings()``
+        so a model the setter accepts can never be rejected at startup (or the
+        reverse):
+
+        1. the provider must be derivable from the id;
+        2. that provider's credential must be configured;
+        3. a deprecated alias resolves to its replacement (warned);
+        4. an unknown model is rejected only when that provider's listing is
+           authoritative — a degraded/unattempted listing cannot disprove it,
+           and is logged instead.
+
+        Args:
+            model: Model identifier to check.
+            label: What is being checked, for the error message.
+
+        Returns:
+            The resolved model id (differs only for a deprecated alias).
+
+        Raises:
+            ValueError: With an actionable message; never includes a credential.
+        """
         registry = self._get_registry()
-        if registry.is_refreshed:
-            # Validate and possibly resolve deprecated models
-            resolved = registry.resolve_model(model)
-            object.__setattr__(self, "default_model", resolved)
-        else:
-            # Pre-refresh: validate against fallback list
-            available = self.get_available_models()
-            if model not in available:
-                raise ValueError(
-                    f"Model '{model}' is not available. "
-                    f"Available models: {', '.join(available)}"
-                )
-            object.__setattr__(self, "default_model", model)
+        try:
+            family = registry.get_family(model)
+        except ValueError:
+            raise ValueError(
+                f"Model '{model}' ({label}) is not available: its provider "
+                "cannot be determined from the model id."
+            ) from None
+
+        if not self._has_credential_for(family):
+            env_var = _PROVIDER_ENV_VAR.get(family, "the provider API key")
+            raise ValueError(
+                f"Model '{model}' ({label}) is not available: it needs a "
+                f"{family.value} credential. Set {env_var}."
+            )
+
+        resolved = registry.resolve_model(model)  # raises when authoritative
+        if resolved == model and model not in self.get_available_models():
+            # Not authoritative (else resolve_model would have raised), so the
+            # static list simply lags reality.
+            logger.warning("model_not_in_static_list", model=model, source=label)
+        return resolved
+
+    def _has_credential_for(self, family: ModelFamily) -> bool:
+        """Whether the credential a model family needs is configured."""
+        if family is ModelFamily.GEMINI:
+            return self.has_google_key
+        if family is ModelFamily.CLAUDE:
+            return self.has_anthropic_key
+        return False
+
+    def set_model(self, model: str) -> None:
+        """Set the default model, validating it exactly as startup would.
+
+        Raises:
+            ValueError: If the model is unusable (see :meth:`check_model`).
+        """
+        object.__setattr__(self, "default_model", self.check_model(model))
 
     def set_thinking_effort(self, effort: str) -> None:
         """Set the thinking effort level."""

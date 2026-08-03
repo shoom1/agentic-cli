@@ -624,19 +624,19 @@ class BaseWorkflowManager(ABC):
         # any network call is made: a bad graph is a static configuration
         # error and should not cost a model listing or an embedding model.
         self._validate_agent_graph()
-        from agentic_cli.config import validate_settings
-
-        if validate:
-            validate_settings(self._settings)
 
         self._settings.export_api_keys_to_env()
 
-        # Refresh model registry from APIs
+        # Discover models BEFORE validating them: the static fallback list
+        # would otherwise reject a model that exists but predates the list.
         await self._model_registry.refresh(
             google_api_key=self._settings.google_api_key,
             anthropic_api_key=self._settings.anthropic_api_key,
         )
         self._settings.set_model_registry(self._model_registry)
+
+        if validate:
+            self._validate_models()
 
         # Create services BEFORE backend init so _build_tools() can
         # produce factory-bound tools during agent/graph creation.
@@ -649,6 +649,40 @@ class BaseWorkflowManager(ABC):
         await _asyncio.to_thread(self._ensure_managers_initialized)
         await self._do_initialize()
         self._initialized = True
+
+    # Label for this manager's own model in validation errors.
+    _MODEL_OVERRIDE_LABEL = "workflow model"
+
+    def _validate_models(self) -> None:
+        """Validate every model this manager will actually use, and normalize it.
+
+        ``settings.default_model`` and the per-agent overrides are validated by
+        ``validate_settings``. This manager's *own* model is not in settings at
+        all — it comes from ``Manager(model=...)``, ``reinitialize(model=...)``,
+        or a ``settings.get_model()`` cached before discovery ran — so it is
+        passed into the same all-or-nothing pass rather than checked separately:
+        an unusable id must fail startup, and a deprecated one must be replaced
+        by the id the runtime then sends.
+
+        Raises:
+            SettingsValidationError: If any effective model is unusable.
+        """
+        from agentic_cli.config import _validate_settings_with_models
+
+        extras: list[tuple[str, str]] = []
+        if self._model_resolved and self._model:
+            extras.append((self._MODEL_OVERRIDE_LABEL, self._model))
+
+        resolved = _validate_settings_with_models(
+            self._settings, self._agent_configs, extras
+        )
+
+        replacement = resolved.get(self._MODEL_OVERRIDE_LABEL)
+        if replacement is not None and replacement != self._model:
+            logger.info(
+                "model_override_resolved", requested=self._model, model=replacement
+            )
+            self._model = replacement
 
     def _validate_agent_graph(self) -> None:
         """Validate the declared agent graph. Backends may narrow this.
