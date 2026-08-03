@@ -680,6 +680,7 @@ def _find_document_in_kbs(doc_id_or_title: str) -> tuple:
     category=ToolCategory.KNOWLEDGE,
     capabilities=[Capability("kb.read")],
     description="Search the local knowledge base for relevant documents using semantic similarity. Use this when you need to find previously ingested papers, notes, or documents.",
+    requires="kb_manager",
 )
 def kb_search(
     query: str,
@@ -711,6 +712,7 @@ def kb_search(
         "you already have in memory; use kb_ingest_file for local files and "
         "kb_ingest_url for remote URLs."
     ),
+    requires="kb_manager",
 )
 async def kb_ingest_text(
     content: str,
@@ -758,6 +760,7 @@ async def kb_ingest_text(
         "extracted automatically. Triggers a filesystem.read permission "
         "check for the supplied path."
     ),
+    requires="kb_manager",
 )
 async def kb_ingest_file(
     path: str,
@@ -807,6 +810,7 @@ async def kb_ingest_file(
         "papers, prefer ingest_arxiv_paper. Triggers an http.read "
         "permission check for the supplied URL."
     ),
+    requires="kb_manager",
 )
 async def kb_ingest_url(
     url: str,
@@ -851,6 +855,7 @@ async def kb_ingest_url(
         "sidecar (summary, key claims, entities) by default. Pass full=True "
         "to get the raw extracted text up to max_chars."
     ),
+    requires="kb_manager",
 )
 async def kb_read(
     doc_id_or_title: str,
@@ -875,6 +880,7 @@ async def kb_read(
     category=ToolCategory.KNOWLEDGE,
     capabilities=[Capability("kb.read")],
     description="List documents in the knowledge base with summaries. Filter by query or source type. Returns summaries, not full content.",
+    requires="kb_manager",
 )
 def kb_list(
     query: str = "",
@@ -907,6 +913,7 @@ def kb_list(
         "agent-writable, grep-searchable, and human-readable. `sources` "
         "must cite at least one valid document ID from the KB."
     ),
+    requires="kb_manager",
 )
 async def kb_write_concept(
     title: str,
@@ -944,6 +951,7 @@ async def kb_write_concept(
         "Case-insensitive substring match; title hits rank above body "
         "hits. Use when asking 'what does the KB know about X?'."
     ),
+    requires="kb_manager",
 )
 async def kb_search_concepts(
     query: str,

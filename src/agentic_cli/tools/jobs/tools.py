@@ -46,6 +46,7 @@ def _manager():
     category=ToolCategory.EXECUTION,
     capabilities=[Capability("jobs.manage")],
     description="Check a background job: state, exit code, a stdout tail, and the result once finished.",
+    requires="job_manager",
 )
 def job_status(job_id: str) -> dict:
     """One-stop check for a background job.
@@ -74,6 +75,7 @@ def job_status(job_id: str) -> dict:
     category=ToolCategory.EXECUTION,
     capabilities=[Capability("jobs.manage")],
     description="Get the result of a finished background job.",
+    requires="job_manager",
 )
 def job_result(job_id: str) -> dict:
     """Return the job's result, or an error if it isn't finished yet."""
@@ -94,6 +96,7 @@ def job_result(job_id: str) -> dict:
     category=ToolCategory.EXECUTION,
     capabilities=[Capability("jobs.manage")],
     description="Read recent log lines (stdout/stderr) of a background job.",
+    requires="job_manager",
 )
 def job_logs(job_id: str, last_n: int = 50, stream: str = "stdout") -> dict:
     """Return the last ``last_n`` lines of the job's ``stdout`` or ``stderr``."""
@@ -109,6 +112,7 @@ def job_logs(job_id: str, last_n: int = 50, stream: str = "stdout") -> dict:
     category=ToolCategory.EXECUTION,
     capabilities=[Capability("jobs.manage")],
     description="Cancel a running background job.",
+    requires="job_manager",
 )
 def job_cancel(job_id: str) -> dict:
     """Best-effort cancel a running job."""
@@ -125,6 +129,7 @@ def job_cancel(job_id: str) -> dict:
     category=ToolCategory.EXECUTION,
     capabilities=[Capability("jobs.manage")],
     description="List background jobs, optionally filtered by state or tag.",
+    requires="job_manager",
 )
 def job_list(state: str = "", tag: str = "") -> dict:
     """List jobs (most recent first), optionally filtered by state/tag."""

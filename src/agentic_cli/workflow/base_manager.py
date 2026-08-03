@@ -332,39 +332,6 @@ class BaseWorkflowManager(ABC):
         """
         ...
 
-    # Mapping from tool function name to the service(s) it requires.
-    # Value may be a single service key or a tuple of keys for tools
-    # that compose multiple services.
-    _TOOL_SERVICE_MAP: dict[str, str | tuple[str, ...]] = {
-        "save_memory": "memory_store",
-        "search_memory": "memory_store",
-        "update_memory": "memory_store",
-        "delete_memory": "memory_store",
-        "kb_search": "kb_manager",
-        "kb_ingest_text": "kb_manager",
-        "kb_ingest_file": "kb_manager",
-        "kb_ingest_url": "kb_manager",
-        "kb_read": "kb_manager",
-        "kb_list": "kb_manager",
-        "kb_write_concept": "kb_manager",
-        "kb_search_concepts": "kb_manager",
-        "web_fetch": "llm_summarizer",
-        "sandbox_execute": "sandbox_manager",
-        "search_arxiv": "arxiv_source",
-        "fetch_arxiv_paper": "arxiv_source",
-        "ingest_arxiv_paper": ("arxiv_source", "kb_manager"),
-        # Long-running jobs: the observe-only tools need the JobManager service.
-        # ``run_shell_job`` is an application-provided typed starter (see
-        # examples/jobs_demo.py), not a framework tool — its name is mapped here
-        # by convention so an app can add it without also adding observe tools.
-        "run_shell_job": "job_manager",
-        "job_status": "job_manager",
-        "job_result": "job_manager",
-        "job_logs": "job_manager",
-        "job_cancel": "job_manager",
-        "job_list": "job_manager",
-    }
-
     def _resolve_config_tool_refs(self) -> None:
         """Resolve string/dotted-path tool refs in configs to callables.
 
@@ -381,26 +348,34 @@ class BaseWorkflowManager(ABC):
                 config.tools = resolve_tools(config.tools)
 
     def _detect_required_managers(self) -> set[str]:
-        """Detect which services are needed by scanning tool names.
+        """Detect which services the configured tools declared they need.
+
+        Each tool declares its own dependencies via
+        ``register_tool(..., requires=...)``, so an extension can ship a
+        service-backed tool without editing the framework. Tools that are not
+        registered (plain callables) declare nothing and need nothing.
+
+        Resolution is by registry identity only: a renamed tool's original
+        callable still declares its services, but a callable the default
+        registry never issued declares nothing, however it is named. Building a
+        knowledge base because an application named a function ``kb_search``
+        would be work done for a tool that is denied at permission time.
 
         Returns:
             Set of required service keys (e.g. ``{"kb_manager", "memory_store"}``).
         """
+        from agentic_cli.tools.registry import identify_tool
+
         required: set[str] = set()
         for config in self._agent_configs:
             for tool in config.tools or []:
-                name = getattr(tool, "__name__", "")
-                service = self._TOOL_SERVICE_MAP.get(name)
-                if service is None:
-                    continue
-                if isinstance(service, tuple):
-                    required.update(service)
-                else:
-                    required.add(service)
+                definition = identify_tool(tool)
+                if definition is not None:
+                    required.update(definition.requires)
         return required
 
     def _ensure_managers_initialized(self) -> None:
-        """Create managers based on detected requirements.
+        """Create and publish the services detected from tool metadata.
 
         Called during initialize_services() to lazily create only the
         managers that are actually needed by the configured tools.
