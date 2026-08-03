@@ -142,9 +142,17 @@ class TestFallbackBehavior:
 class TestResolveModel:
     """Tests for model resolution."""
 
-    def test_resolve_before_refresh_accepts_any(self):
+    def test_resolve_before_refresh_accepts_a_known_family(self):
+        """Without discovery the registry cannot disprove a model id."""
         reg = ModelRegistry()
-        assert reg.resolve_model("any-model") == "any-model"
+        assert reg.resolve_model("gemini-9.9-experimental") == "gemini-9.9-experimental"
+        assert reg.resolve_model("claude-opus-9") == "claude-opus-9"
+
+    def test_resolve_rejects_an_id_with_no_determinable_provider(self):
+        """Well-formedness is not a discovery question — always an error."""
+        reg = ModelRegistry()
+        with pytest.raises(ValueError, match="cannot be determined"):
+            reg.resolve_model("any-model")
 
     def test_resolve_exact_match(self):
         reg = ModelRegistry()
@@ -167,16 +175,16 @@ class TestResolveModel:
         resolved = reg.resolve_model("gemini-2.0-pro")
         assert resolved == "gemini-2.5-pro"
 
-    def test_resolve_missing_finds_closest(self):
+    def test_resolve_missing_is_rejected_not_substituted(self):
+        """An explicitly chosen unknown model must never become another one."""
         reg = ModelRegistry()
         reg._models["gemini-2.5-flash"] = ModelInfo(
             id="gemini-2.5-flash", family=ModelFamily.GEMINI
         )
         reg._refreshed = True
 
-        # Missing pro model → falls back to flash (only available)
-        resolved = reg.resolve_model("gemini-3-pro-preview")
-        assert resolved == "gemini-2.5-flash"
+        with pytest.raises(ValueError, match="not available"):
+            reg.resolve_model("gemini-3-pro-preview")
 
     def test_resolve_missing_unknown_family_raises(self):
         reg = ModelRegistry()

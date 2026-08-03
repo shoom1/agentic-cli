@@ -61,6 +61,9 @@ from agentic_cli.workflow.service_registry import JOB_MANAGER, get_service
 @register_tool(
     category=ToolCategory.EXECUTION,
     capabilities=[Capability("longrunning.run_shell_job")],
+    # Declares its own service need, so the manager creates the JobManager for
+    # an app that ships only this starter (no framework job_* tools required).
+    requires="job_manager",
     long_running=True,
     description="Run a shell command as a detached background job; returns a job_id immediately.",
 )

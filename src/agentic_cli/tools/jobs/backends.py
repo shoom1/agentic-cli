@@ -87,6 +87,13 @@ class JobBackend(ABC):
     name: str = "base"
     survives_restart: bool = False
     streams_logs: bool = False
+    # Whether a *different* manager can cancel a job this backend started.
+    # True only when the job is addressed through a durable handle (a pid, a
+    # remote id) rather than an object in the starter's memory — otherwise
+    # "cancelled" would be recorded while the job kept running elsewhere.
+    # Distinct from ``survives_restart``: a backend can publish a readable
+    # outcome without being remotely controllable.
+    cancels_foreign_jobs: bool = False
 
     @abstractmethod
     def start(self, record: "JobRecord", job_dir: Path) -> None:
@@ -111,6 +118,14 @@ class JobBackend(ABC):
         """Return the job's result (backend-specific)."""
         return {"exit_code": record.exit_code, "stdout_tail": self.logs(record, job_dir, 20, "stdout")}
 
+    def close(self) -> None:
+        """Release resources the backend owns. Idempotent; default no-op.
+
+        Backends that own OS resources (thread pools, connections) override
+        this; running work is *not* cancelled — see each backend's docstring.
+        """
+        return None
+
 
 class SubprocessBackend(JobBackend):
     """Detached subprocess; restart-safe via an on-disk ``exit_code`` sentinel."""
@@ -118,6 +133,7 @@ class SubprocessBackend(JobBackend):
     name = "subprocess"
     survives_restart = True
     streams_logs = True
+    cancels_foreign_jobs = True  # addressed by pid
 
     def __init__(self) -> None:
         # job_id -> Popen, kept so cancel() can signal the process group.
@@ -205,6 +221,7 @@ class InProcessBackend(JobBackend):
     name = "inprocess"
     survives_restart = False
     streams_logs = False
+    cancels_foreign_jobs = False  # the Future lives in the starting manager
 
     def __init__(self, max_workers: int = 8) -> None:
         self._pool = ThreadPoolExecutor(
@@ -253,6 +270,26 @@ class InProcessBackend(JobBackend):
         fut = self._futures.get(record.job_id)
         if fut is not None:
             fut.cancel()  # only succeeds if not yet started; running threads continue
+
+    def close(self) -> None:
+        """Stop accepting new work; let everything already submitted finish.
+
+        Idempotent, and does not block. Submitted work is deliberately **not**
+        cancelled, per ``JobManager.close()``'s contract — here that is a
+        correctness requirement, not just a courtesy. A job's outcome is
+        published only by ``_run`` writing the ``exit_code`` sentinel, and its
+        record is already durably RUNNING under a live owner by the time it is
+        queued. Dropping the future left a record no manager could ever
+        resolve: this one no longer holds the future, and any other reads
+        UNKNOWN from a live foreign owner and (correctly) declines to believe
+        it — so the job stayed RUNNING forever and was never deliverable.
+
+        A thread already running a job cannot be interrupted anyway; queued
+        jobs now share that fate. The cost is bounded by the queue: the pool's
+        threads are joined at interpreter exit, so a long backlog delays
+        process exit rather than being silently discarded.
+        """
+        self._pool.shutdown(wait=False)
 
     def result(self, record: "JobRecord", job_dir: Path) -> Any:
         result_file = job_dir / "result.json"

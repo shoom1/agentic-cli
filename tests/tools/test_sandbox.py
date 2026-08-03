@@ -576,12 +576,12 @@ class TestSandboxCommand:
 # ---------------------------------------------------------------------------
 
 class TestManagerAutoDetection:
-    def test_sandbox_detected_via_tool_service_map(self):
-        """Verify sandbox_execute is detected via _TOOL_SERVICE_MAP."""
-        from agentic_cli.workflow.base_manager import BaseWorkflowManager
+    def test_sandbox_execute_declares_the_sandbox_service(self):
+        """sandbox_execute carries its own service requirement in the registry."""
+        from agentic_cli.tools.registry import get_registry
+        from agentic_cli.tools.sandbox import sandbox_execute  # noqa: F401
 
-        assert "sandbox_execute" in BaseWorkflowManager._TOOL_SERVICE_MAP
-        assert BaseWorkflowManager._TOOL_SERVICE_MAP["sandbox_execute"] == "sandbox_manager"
+        assert get_registry().get("sandbox_execute").requires == ("sandbox_manager",)
 
     def test_base_manager_detects_sandbox(self, tmp_path):
         """BaseWorkflowManager picks up sandbox_manager from tool configs."""

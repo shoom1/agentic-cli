@@ -13,11 +13,17 @@ from google.adk.tools.tool_context import ToolContext
 
 from agentic_cli.tools._core.planning import summarize_checkboxes
 from agentic_cli.tools._core.tasks import validate_tasks, normalize_tasks, filter_tasks
+from agentic_cli.tools._core.state_tools import declare_state_tools
 from agentic_cli.tools.registry import ToolCategory, register_tool
 from agentic_cli.workflow.permissions import EXEMPT
 
+# The shared contract must exist before these variants register against it.
+declare_state_tools()
 
-@register_tool(capabilities=EXEMPT, category=ToolCategory.PLANNING)
+
+@register_tool(
+    variant_of="save_plan", capabilities=EXEMPT, category=ToolCategory.PLANNING
+)
 def save_plan(content: str, tool_context: ToolContext) -> dict[str, Any]:
     """Save or update the execution plan as markdown with checkboxes.
 
@@ -36,7 +42,9 @@ def save_plan(content: str, tool_context: ToolContext) -> dict[str, Any]:
     return {"success": True, "message": message}
 
 
-@register_tool(capabilities=EXEMPT, category=ToolCategory.PLANNING)
+@register_tool(
+    variant_of="get_plan", capabilities=EXEMPT, category=ToolCategory.PLANNING
+)
 def get_plan(tool_context: ToolContext) -> dict[str, Any]:
     """Retrieve the current execution plan.
 
@@ -51,7 +59,9 @@ def get_plan(tool_context: ToolContext) -> dict[str, Any]:
     return {"success": True, "content": plan}
 
 
-@register_tool(capabilities=EXEMPT, category=ToolCategory.PLANNING)
+@register_tool(
+    variant_of="save_tasks", capabilities=EXEMPT, category=ToolCategory.PLANNING
+)
 def save_tasks(
     tasks: list[dict[str, Any]], tool_context: ToolContext
 ) -> dict[str, Any]:
@@ -91,7 +101,9 @@ def save_tasks(
     }
 
 
-@register_tool(capabilities=EXEMPT, category=ToolCategory.PLANNING)
+@register_tool(
+    variant_of="get_tasks", capabilities=EXEMPT, category=ToolCategory.PLANNING
+)
 def get_tasks(
     status: str = "",
     priority: str = "",

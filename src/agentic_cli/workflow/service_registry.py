@@ -23,6 +23,33 @@ SANDBOX_MANAGER = "sandbox_manager"
 USER_KB_MANAGER = "user_kb_manager"
 WORKFLOW = "workflow"
 
+# Service keys a tool may declare via ``register_tool(requires=...)``.
+#
+# Every entry must be something a manager can actually construct on demand
+# (see ``BaseWorkflowManager._ensure_managers_initialized``). Keys that are
+# always present (PERMISSION_ENGINE, WORKFLOW) say nothing when declared, and
+# USER_KB_MANAGER is not independently constructible — it is created together
+# with KB_MANAGER — so declaring it would validate and then provide nothing.
+KNOWN_SERVICE_KEYS = frozenset({
+    ARXIV_SOURCE,
+    JOB_MANAGER,
+    KB_MANAGER,
+    LLM_SUMMARIZER,
+    MEMORY_STORE,
+    SANDBOX_MANAGER,
+})
+
+# Extra guidance for keys that look declarable but are not.
+SERVICE_KEY_HINTS = {
+    USER_KB_MANAGER: (
+        f"{USER_KB_MANAGER!r} is created together with {KB_MANAGER!r}; "
+        f"declare requires={KB_MANAGER!r} to get both the project- and "
+        "user-scoped knowledge bases."
+    ),
+    PERMISSION_ENGINE: f"{PERMISSION_ENGINE!r} is always available.",
+    WORKFLOW: f"{WORKFLOW!r} is always available.",
+}
+
 
 # ---- ContextVar and accessors ----
 

@@ -151,3 +151,100 @@ class TestCwdDotenvFiltering:
         (tmp_path / ".env").write_text("AGENTIC_RAW_LLM_LOGGING=true\n")  # cwd-relative
         s = self._subclass_with_env_file([str(abs_env), ".env"])()
         assert s.raw_llm_logging is False   # cwd-relative entry → whole source filtered
+
+
+class TestCredentialInputSurface:
+    """Credential fields accept their field name *and* the provider env name.
+
+    The bare ``validation_alias`` bound only the env var, so a programmatic
+    ``BaseSettings(google_api_key=...)`` was silently dropped by
+    ``extra="ignore"``. Widening the alias must not widen the P0-1 trust
+    boundary: an untrusted project file still cannot inject a key.
+    """
+
+    def _clean_env(self, monkeypatch, tmp_path):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        for var in ("GOOGLE_API_KEY", "ANTHROPIC_API_KEY", "TAVILY_API_KEY", "BRAVE_API_KEY"):
+            monkeypatch.delenv(var, raising=False)
+
+    def test_constructor_field_name_is_retained(self, tmp_path, monkeypatch):
+        self._clean_env(monkeypatch, tmp_path)
+        from agentic_cli.config import BaseSettings
+
+        settings = BaseSettings(
+            google_api_key="ctor-google", anthropic_api_key="ctor-anthropic"
+        )
+        assert settings.google_api_key == "ctor-google"
+        assert settings.anthropic_api_key == "ctor-anthropic"
+        assert settings.has_any_api_key is True
+
+    def test_environment_variable_still_binds(self, tmp_path, monkeypatch):
+        self._clean_env(monkeypatch, tmp_path)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "env-key")
+        from agentic_cli.config import BaseSettings
+
+        assert BaseSettings().anthropic_api_key == "env-key"
+
+    def test_constructor_beats_environment(self, tmp_path, monkeypatch):
+        self._clean_env(monkeypatch, tmp_path)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "env-key")
+        from agentic_cli.config import BaseSettings
+
+        assert BaseSettings(anthropic_api_key="ctor-key").anthropic_api_key == "ctor-key"
+
+    def test_secrets_stay_out_of_repr(self, tmp_path, monkeypatch):
+        self._clean_env(monkeypatch, tmp_path)
+        from agentic_cli.config import BaseSettings
+
+        settings = BaseSettings(google_api_key="super-secret")
+        assert "super-secret" not in repr(settings)
+        assert "super-secret" not in str(settings)
+
+    def test_misspelled_credential_kwarg_raises(self, tmp_path, monkeypatch):
+        self._clean_env(monkeypatch, tmp_path)
+        import pytest
+
+        from agentic_cli.config import BaseSettings
+
+        with pytest.raises(ValueError, match="Unknown credential setting"):
+            BaseSettings(anthropic_apikey="typo")
+
+    def test_pydantic_settings_own_kwargs_are_not_mistaken_for_credentials(
+        self, tmp_path, monkeypatch
+    ):
+        """``_secrets_dir`` matches the credential shape but is a library kwarg."""
+        self._clean_env(monkeypatch, tmp_path)
+        from agentic_cli.config import BaseSettings
+
+        secrets_dir = tmp_path / "secrets"
+        secrets_dir.mkdir()
+        BaseSettings(_secrets_dir=str(secrets_dir))  # must not raise
+
+    def test_unknown_non_credential_kwarg_still_ignored(self, tmp_path, monkeypatch):
+        """Only credential-shaped keys are strict; config files stay permissive."""
+        self._clean_env(monkeypatch, tmp_path)
+        from agentic_cli.config import BaseSettings
+
+        BaseSettings(some_future_option=True)  # must not raise
+
+    def test_project_settings_json_still_cannot_inject_a_key(self, tmp_path, monkeypatch):
+        self._clean_env(monkeypatch, tmp_path)
+        _write_project_settings(
+            tmp_path,
+            "agentic_cli",
+            {"google_api_key": "from-untrusted-repo", "GOOGLE_API_KEY": "also-untrusted"},
+        )
+        from agentic_cli.config import BaseSettings
+
+        assert BaseSettings().google_api_key is None
+
+    def test_cwd_dotenv_still_cannot_inject_a_key(self, tmp_path, monkeypatch):
+        self._clean_env(monkeypatch, tmp_path)
+        (tmp_path / ".env").write_text("GOOGLE_API_KEY=from-untrusted-repo\n")
+        from agentic_cli.config import BaseSettings
+
+        class _DomainSettings(BaseSettings):
+            model_config = {**BaseSettings.model_config, "env_file": ".env"}
+
+        assert _DomainSettings().google_api_key is None

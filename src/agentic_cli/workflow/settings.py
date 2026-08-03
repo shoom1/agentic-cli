@@ -10,15 +10,25 @@ from __future__ import annotations
 from enum import Enum
 from typing import Literal, TYPE_CHECKING
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import AliasChoices, BaseModel, Field, field_validator
 
+from agentic_cli.logging import Loggers
 from agentic_cli.workflow.models import ModelFamily, ModelRegistry
 
 if TYPE_CHECKING:
     pass
 
+logger = Loggers.config()
+
 # Thinking effort levels (module-level constant for backward compatibility)
 THINKING_EFFORT_LEVELS = ModelRegistry.THINKING_EFFORT_LEVELS
+
+# Which environment variable supplies each provider's credential (for error
+# messages — the value is never echoed).
+_PROVIDER_ENV_VAR = {
+    ModelFamily.GEMINI: "GOOGLE_API_KEY",
+    ModelFamily.CLAUDE: "ANTHROPIC_API_KEY",
+}
 
 
 class PermissionRuleConfig(BaseModel):
@@ -92,26 +102,38 @@ class WorkflowSettingsMixin:
         json_schema_extra={"ui_order": 27},
     )
 
-    # API Keys (common across all domains, never saved to JSON)
+    # API Keys (common across all domains, never saved to JSON).
+    #
+    # Each accepts BOTH the provider's environment variable name and its Python
+    # field name (``AliasChoices``): the bare env alias made
+    # ``BaseSettings(google_api_key=...)`` bind nothing at all — the value was
+    # dropped by ``extra="ignore"`` and the field kept its default. The env name
+    # is listed first, so a real environment variable still wins within a source.
+    # Values are kept out of ``repr()`` and out of every persisted file (see
+    # ``settings_persistence.SECRET_FIELDS``).
     google_api_key: str | None = Field(
         default=None,
         description="Google API key for Gemini models",
-        validation_alias="GOOGLE_API_KEY",
+        validation_alias=AliasChoices("GOOGLE_API_KEY", "google_api_key"),
+        repr=False,
     )
     anthropic_api_key: str | None = Field(
         default=None,
         description="Anthropic API key for Claude models",
-        validation_alias="ANTHROPIC_API_KEY",
+        validation_alias=AliasChoices("ANTHROPIC_API_KEY", "anthropic_api_key"),
+        repr=False,
     )
     tavily_api_key: str | None = Field(
         default=None,
         description="Tavily API key for web search",
-        validation_alias="TAVILY_API_KEY",
+        validation_alias=AliasChoices("TAVILY_API_KEY", "tavily_api_key"),
+        repr=False,
     )
     brave_api_key: str | None = Field(
         default=None,
         description="Brave Search API key for web search",
-        validation_alias="BRAVE_API_KEY",
+        validation_alias=AliasChoices("BRAVE_API_KEY", "brave_api_key"),
+        repr=False,
     )
 
     # Web search configuration
@@ -436,12 +458,11 @@ class WorkflowSettingsMixin:
         description="Directories searched for named skills (Agent Skills / SKILL.md folders)",
         json_schema_extra={"ui_order": 141},
     )
-    skill_scripts_enabled: bool = Field(
-        default=False,
-        title="Skill Scripts Enabled",
-        description="Allow executing scripts bundled with skills (requires a code executor; disabled by default)",
-        json_schema_extra={"ui_order": 142},
-    )
+    # NOTE: ``skill_scripts_enabled`` was removed. Turning it on exposed ADK's
+    # ``run_skill_script`` while the supported manager path supplies no code
+    # executor, so every call answered ``NO_CODE_EXECUTOR``. Script execution is
+    # now enabled by passing a code executor to ``make_skill_toolset`` — the
+    # thing that actually makes it work — instead of by a switch that cannot.
 
     # Persistence settings (LangGraph)
     postgres_uri: str | None = Field(
@@ -625,22 +646,68 @@ class WorkflowSettingsMixin:
         registry = self._get_registry()
         return registry.supports_thinking(model)
 
-    def set_model(self, model: str) -> None:
-        """Set the default model."""
+    def check_model(self, model: str, *, label: str = "model") -> str:
+        """Validate one model against credentials and discovery authority.
+
+        The single rule set shared by ``set_model()`` and ``validate_settings()``
+        so a model the setter accepts can never be rejected at startup (or the
+        reverse):
+
+        1. the provider must be derivable from the id;
+        2. that provider's credential must be configured;
+        3. a deprecated alias resolves to its replacement (warned);
+        4. an unknown model is rejected only when that provider's listing is
+           authoritative — a degraded/unattempted listing cannot disprove it,
+           and is logged instead.
+
+        Args:
+            model: Model identifier to check.
+            label: What is being checked, for the error message.
+
+        Returns:
+            The resolved model id (differs only for a deprecated alias).
+
+        Raises:
+            ValueError: With an actionable message; never includes a credential.
+        """
         registry = self._get_registry()
-        if registry.is_refreshed:
-            # Validate and possibly resolve deprecated models
-            resolved = registry.resolve_model(model)
-            object.__setattr__(self, "default_model", resolved)
-        else:
-            # Pre-refresh: validate against fallback list
-            available = self.get_available_models()
-            if model not in available:
-                raise ValueError(
-                    f"Model '{model}' is not available. "
-                    f"Available models: {', '.join(available)}"
-                )
-            object.__setattr__(self, "default_model", model)
+        try:
+            family = registry.get_family(model)
+        except ValueError:
+            raise ValueError(
+                f"Model '{model}' ({label}) is not available: its provider "
+                "cannot be determined from the model id."
+            ) from None
+
+        if not self._has_credential_for(family):
+            env_var = _PROVIDER_ENV_VAR.get(family, "the provider API key")
+            raise ValueError(
+                f"Model '{model}' ({label}) is not available: it needs a "
+                f"{family.value} credential. Set {env_var}."
+            )
+
+        resolved = registry.resolve_model(model)  # raises when authoritative
+        if resolved == model and model not in self.get_available_models():
+            # Not authoritative (else resolve_model would have raised), so the
+            # static list simply lags reality.
+            logger.warning("model_not_in_static_list", model=model, source=label)
+        return resolved
+
+    def _has_credential_for(self, family: ModelFamily) -> bool:
+        """Whether the credential a model family needs is configured."""
+        if family is ModelFamily.GEMINI:
+            return self.has_google_key
+        if family is ModelFamily.CLAUDE:
+            return self.has_anthropic_key
+        return False
+
+    def set_model(self, model: str) -> None:
+        """Set the default model, validating it exactly as startup would.
+
+        Raises:
+            ValueError: If the model is unusable (see :meth:`check_model`).
+        """
+        object.__setattr__(self, "default_model", self.check_model(model))
 
     def set_thinking_effort(self, effort: str) -> None:
         """Set the thinking effort level."""

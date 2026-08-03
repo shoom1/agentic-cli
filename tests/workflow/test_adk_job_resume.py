@@ -7,6 +7,8 @@ the follow-up turn — exercised against a fake runner (no live model).
 
 from __future__ import annotations
 
+import asyncio
+
 from types import SimpleNamespace
 
 import pytest
@@ -69,15 +71,22 @@ class _FakeRunner:
 
 def _resume_manager(runner: _FakeRunner, *, session_exists: bool = True) -> GoogleADKWorkflowManager:
     mgr = GoogleADKWorkflowManager.__new__(GoogleADKWorkflowManager)
-    mgr._settings = SimpleNamespace(app_name="test", context_window_enabled=False)
+    mgr._settings = SimpleNamespace(
+        app_name="test", context_window_enabled=False, default_user="default_user"
+    )
     mgr._app_name = "test"
     mgr._services = {}
-    mgr._active_session_id = None
-    mgr._active_user_id = None
+    # Turns serialize on the manager's turn lock (see the concurrency contract).
+    mgr._turn_lock = asyncio.Lock()
+    mgr._lifecycle_lock = asyncio.Lock()
     mgr._model = "gemini-2.5-flash"
     mgr._model_resolved = True
     mgr._on_event = None
+    # Turn admission re-checks that the backend is live while holding the turn
+    # lock, so the double has to present a complete one.
+    mgr._initialized = True
     mgr._runner = runner
+    mgr._root_agent = SimpleNamespace(name="root")
     mgr._llm_logging_plugin = None
     mgr._task_progress_plugin = None
 

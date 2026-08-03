@@ -13,7 +13,12 @@ from agentic_cli.tools.jobs.backends import (
     SubprocessBackend,
     default_backends,
 )
-from agentic_cli.tools.jobs.manager import JobManager, JobRecord
+from agentic_cli.tools.jobs.manager import (
+    JobManager,
+    JobRecord,
+    ResumeState,
+    ResumeStateError,
+)
 from agentic_cli.tools.jobs.tools import (
     job_cancel,
     job_list,
@@ -26,6 +31,8 @@ __all__ = [
     "JobManager",
     "JobRecord",
     "JobState",
+    "ResumeState",
+    "ResumeStateError",
     "JobBackend",
     "SubprocessBackend",
     "InProcessBackend",

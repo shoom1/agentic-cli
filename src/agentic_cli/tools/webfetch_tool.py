@@ -81,6 +81,7 @@ def get_or_create_fetcher(settings=None) -> ContentFetcher:
     category=ToolCategory.NETWORK,
     capabilities=[Capability("http.read", target_arg="url")],
     description="Fetch a web page, convert it to markdown, and summarize it using an LLM based on your prompt. Use this to extract specific information from a URL (e.g., documentation, articles).",
+    requires="llm_summarizer",
 )
 async def web_fetch(url: str, prompt: str, timeout: int = 30) -> dict[str, Any]:
     """Fetch web content and summarize it using an LLM.

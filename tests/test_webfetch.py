@@ -638,12 +638,11 @@ class TestWebFetchTool:
         finally:
             token.var.reset(token)
 
-    def test_web_fetch_detected_via_tool_service_map(self):
-        """Test web_fetch is detected via _TOOL_SERVICE_MAP."""
-        from agentic_cli.workflow.base_manager import BaseWorkflowManager
+    def test_web_fetch_declares_the_llm_summarizer_service(self):
+        """web_fetch carries its own service requirement in the registry."""
+        from agentic_cli.tools.registry import get_registry
 
-        assert "web_fetch" in BaseWorkflowManager._TOOL_SERVICE_MAP
-        assert BaseWorkflowManager._TOOL_SERVICE_MAP["web_fetch"] == "llm_summarizer"
+        assert get_registry().get("web_fetch").requires == ("llm_summarizer",)
 
 
 class TestWorkflowManagerIntegration:

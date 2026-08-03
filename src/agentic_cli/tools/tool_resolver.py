@@ -67,6 +67,34 @@ def _unknown_name_error(name: str, registry: ToolRegistry) -> ValueError:
     )
 
 
+def _qualified(variant: Any) -> str:
+    """Module-qualified name of a variant — two backends' tools share a name."""
+    target = getattr(variant, "__wrapped__", variant)
+    module = getattr(target, "__module__", "") or ""
+    qualname = getattr(target, "__qualname__", None) or repr(target)
+    return f"{module}.{qualname}" if module else qualname
+
+
+def _ambiguous_name_error(defn: Any) -> ValueError:
+    """Build the error for a bare name with no backend-neutral implementation.
+
+    Some tools exist only as backend-native variants (the plan/task state tools
+    read and write ADK's ``ToolContext.state`` or LangGraph's graph state). A
+    bare name cannot choose between them — and choosing by import order, which
+    is what happened before they were declared, could hand an ADK agent a
+    LangGraph tool.
+    """
+    variants = ", ".join(
+        _qualified(v) for v in getattr(defn, "variants", ())
+    )
+    return ValueError(
+        f"Tool name {defn.name!r} is ambiguous: it has no backend-neutral "
+        f"implementation, only backend-native variants ({variants or 'none yet'}). "
+        "Let the workflow manager inject it (AgentConfig.include_state_tools=True), "
+        "or reference the backend's implementation by dotted path."
+    )
+
+
 def resolve_tool(
     ref: Callable[..., Any] | str | Any,
     registry: ToolRegistry | None = None,
@@ -97,7 +125,10 @@ def resolve_tool(
         return _import_dotted(name)
 
     # Bare name -> registry lookup.
-    reg = registry or get_registry()
+    # Not ``registry or get_registry()``: ToolRegistry defines __len__, so a
+    # caller's empty registry is falsy and would be silently replaced by the
+    # global one — resolving names it never registered.
+    reg = get_registry() if registry is None else registry
     defn = reg.get(name)
     if defn is None and registry is None:
         # Default registry may not have imported the built-ins yet.
@@ -106,6 +137,8 @@ def resolve_tool(
         defn = reg.get(name)
     if defn is None:
         raise _unknown_name_error(name, reg)
+    if defn.func is None:
+        raise _ambiguous_name_error(defn)
     return defn.func
 
 

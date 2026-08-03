@@ -32,6 +32,7 @@ from agentic_cli.workflow.permissions import Capability
         "Write scratch/intermediate files to the working directory; write FINAL deliverables "
         "(figures, tables) to `outputs/` — those persist and are shared with other agents."
     ),
+    requires="sandbox_manager",
 )
 def sandbox_execute(
     code: str,

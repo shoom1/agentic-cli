@@ -463,7 +463,7 @@ class TestWorkflowManagerLifecycle:
         from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager
 
         with patch.object(
-            GoogleADKWorkflowManager, "initialize_services", new_callable=AsyncMock
+            GoogleADKWorkflowManager, "_initialize_locked", new_callable=AsyncMock
         ):
             manager = GoogleADKWorkflowManager(
                 agent_configs=agent_configs,
@@ -486,7 +486,7 @@ class TestWorkflowManagerLifecycle:
         mock_settings.get_model.return_value = "resolved-model"
 
         with patch.object(
-            GoogleADKWorkflowManager, "initialize_services", new_callable=AsyncMock
+            GoogleADKWorkflowManager, "_initialize_locked", new_callable=AsyncMock
         ):
             manager = GoogleADKWorkflowManager(
                 agent_configs=agent_configs,
@@ -508,7 +508,7 @@ class TestWorkflowManagerLifecycle:
         from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager
 
         with patch.object(
-            GoogleADKWorkflowManager, "initialize_services", new_callable=AsyncMock
+            GoogleADKWorkflowManager, "_initialize_locked", new_callable=AsyncMock
         ):
             manager = GoogleADKWorkflowManager(
                 agent_configs=agent_configs,
@@ -534,7 +534,7 @@ class TestWorkflowManagerLifecycle:
         from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager
 
         with patch.object(
-            GoogleADKWorkflowManager, "initialize_services", new_callable=AsyncMock
+            GoogleADKWorkflowManager, "_initialize_locked", new_callable=AsyncMock
         ):
             manager = GoogleADKWorkflowManager(
                 agent_configs=agent_configs,

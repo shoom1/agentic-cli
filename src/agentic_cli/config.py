@@ -29,11 +29,13 @@ Settings Loading Priority (highest to lowest):
     5. Default values
 """
 
+import re
 from contextvars import ContextVar, Token
 from pathlib import Path
-from typing import Generator, Any, Tuple, Type
+from typing import Callable, Generator, Any, Sequence, Tuple, Type
 from contextlib import contextmanager
 
+from pydantic import AliasChoices
 from pydantic_settings import (
     BaseSettings as PydanticBaseSettings,
     SettingsConfigDict,
@@ -105,6 +107,49 @@ class _AllowlistFilterSource(PydanticBaseSettingsSource):
         return kept
 
 
+# Constructor kwargs matching this shape are credentials; an unrecognised one
+# must fail loudly instead of being swallowed by ``extra="ignore"``.
+_CREDENTIAL_KEY_RE = re.compile(r"(?i)(api_?key|secret|token|password|credential)")
+
+
+def _accepted_input_names(settings_cls: Type[PydanticBaseSettings]) -> set[str]:
+    """Every name the model accepts for a field: its own name and any aliases."""
+    names: set[str] = set()
+    for field_name, field in settings_cls.model_fields.items():
+        names.add(field_name)
+        alias = field.validation_alias
+        if isinstance(alias, str):
+            names.add(alias)
+        elif isinstance(alias, AliasChoices):
+            names.update(c for c in alias.choices if isinstance(c, str))
+        if isinstance(field.alias, str):
+            names.add(field.alias)
+    return names
+
+
+def _reject_unknown_credential_kwargs(
+    settings_cls: Type[PydanticBaseSettings], values: dict[str, Any]
+) -> None:
+    """Raise on a credential-shaped kwarg the model would silently drop.
+
+    Raises:
+        ValueError: If a kwarg looks like a credential but matches no field or
+            alias. The message names the key only — never its value.
+    """
+    accepted = _accepted_input_names(settings_cls)
+    # Leading underscore = pydantic-settings' own kwargs (_env_file,
+    # _secrets_dir, …), not settings fields.
+    unknown = [k for k in values if not k.startswith("_") and k not in accepted]
+    bad = [k for k in unknown if _CREDENTIAL_KEY_RE.search(k)]
+    if not bad:
+        return
+    known = sorted(n for n in _accepted_input_names(settings_cls) if _CREDENTIAL_KEY_RE.search(n))
+    raise ValueError(
+        f"Unknown credential setting(s): {', '.join(sorted(bad))}. "
+        f"{settings_cls.__name__} accepts: {', '.join(known)}."
+    )
+
+
 def _get_json_config_source(
     settings_cls: Type[PydanticBaseSettings],
     json_file: Path,
@@ -171,6 +216,18 @@ class BaseSettings(WorkflowSettingsMixin, AppSettingsMixin, CLISettingsMixin, Py
         env_nested_delimiter="__",
         extra="ignore",
     )
+
+    def __init__(self, **values: Any) -> None:
+        """Construct settings, rejecting credential kwargs that would be dropped.
+
+        ``extra="ignore"`` (needed so config files may carry keys a given app
+        does not define) means a mistyped constructor argument vanishes without
+        a word. That is tolerable for an ordinary setting and dangerous for a
+        credential — the app then runs unauthenticated, or silently on a
+        different key. Only credential-shaped unknown kwargs raise.
+        """
+        _reject_unknown_credential_kwargs(type(self), values)
+        super().__init__(**values)
 
     def update_setting(self, key: str, value: Any) -> None:
         """Update a single setting, using dedicated setters where required.
@@ -405,19 +462,109 @@ class SettingsValidationError(Exception):
     pass
 
 
-def validate_settings(settings: BaseSettings) -> None:
+def _effective_models(
+    settings: BaseSettings, agent_configs: Any | None
+) -> list[tuple[str, str, Callable[[str], None]]]:
+    """Every model that will actually be used, with a way to rewrite it.
+
+    The configured ``default_model`` plus each agent's ``model`` override — an
+    override pointing at a provider with no credential fails just as hard as a
+    bad default, only later and less legibly.
+
+    Each entry carries an ``apply`` callback that writes a resolved id back to
+    where the model came from. A deprecated alias resolves to its live
+    replacement, and that replacement has to reach the runtime: a config value
+    loaded from settings.json or the environment never passes through
+    ``set_model()``, so validating it and discarding the result left the dead
+    id to be sent to the provider.
+    """
+    entries: list[tuple[str, str, Callable[[str], None]]] = []
+
+    if settings.default_model:
+
+        def _apply_default(resolved: str) -> None:
+            object.__setattr__(settings, "default_model", resolved)
+
+        entries.append(("default_model", settings.default_model, _apply_default))
+
+    for config in agent_configs or []:
+        model = getattr(config, "model", None)
+        if not model:
+            continue
+
+        def _apply_override(resolved: str, cfg: Any = config) -> None:
+            cfg.model = resolved
+
+        entries.append(
+            (f"agent '{getattr(config, 'name', '?')}'", model, _apply_override)
+        )
+    return entries
+
+
+def validate_settings(
+    settings: BaseSettings, agent_configs: Any | None = None
+) -> None:
     """Validate settings for runtime use.
 
     Performs validation that can only be done at runtime:
     - API key availability
-    - Model compatibility
+    - Model availability and provider credentials, for the default model *and*
+      every per-agent model override
     - Path accessibility
+
+    Every effective model goes through ``settings.check_model()`` — the same
+    rules ``set_model()`` applies, so the setter and startup validation can
+    never disagree. Model availability is judged per provider: a model is
+    rejected as unknown only when *its own* provider answered the listing.
+
+    Not purely a check: a **deprecated alias is rewritten in place** to the live
+    model it resolves to, on ``settings.default_model`` and on each
+    ``AgentConfig.model``. That is the only point at which a value loaded from
+    settings.json or the environment can be corrected, and the runtime reads
+    those attributes directly.
+
+    Rewrites are **all-or-nothing**: nothing is written until every model has
+    validated. Applying them as each model was checked left the configuration
+    half-rewritten by a call that raised, so a retry validated something the
+    user never wrote.
 
     Args:
         settings: Settings to validate
+        agent_configs: Optional agent configs whose ``model`` overrides are
+            validated — and, when deprecated, upgraded — alongside
+            ``default_model``.
 
     Raises:
         SettingsValidationError: If validation fails
+    """
+    _validate_settings_with_models(settings, agent_configs)
+
+
+def _validate_settings_with_models(
+    settings: BaseSettings,
+    agent_configs: Any | None = None,
+    extra_models: "Sequence[tuple[str, str]] | None" = None,
+) -> dict[str, str]:
+    """:func:`validate_settings` plus models that do not live in settings.
+
+    Internal. A workflow manager's own model — ``Manager(model=...)``,
+    ``reinitialize(model=...)``, or one cached before discovery ran — has to be
+    validated in the *same* all-or-nothing pass as ``default_model`` and the
+    agent overrides, but it is the manager's state to rewrite, not settings'.
+    So it is passed in here and its resolution handed back, keeping
+    ``validate_settings()``'s public contract (returns None) intact.
+
+    Args:
+        settings: Settings to validate.
+        agent_configs: Optional agent configs, as for ``validate_settings``.
+        extra_models: ``(label, model)`` pairs to validate alongside them.
+
+    Returns:
+        ``{label: resolved_model}`` for every entry in ``extra_models`` (the
+        input model when it needed no rewrite).
+
+    Raises:
+        SettingsValidationError: If validation fails.
     """
     errors = []
 
@@ -426,13 +573,30 @@ def validate_settings(settings: BaseSettings) -> None:
             "No API keys configured. Set GOOGLE_API_KEY or ANTHROPIC_API_KEY."
         )
 
-    if settings.default_model:
-        available = settings.get_available_models()
-        if settings.default_model not in available:
-            errors.append(
-                f"Configured model '{settings.default_model}' is not available. "
-                f"Available models: {', '.join(available) if available else 'none'}"
-            )
+    entries = list(_effective_models(settings, agent_configs))
+    resolutions: dict[str, str] = {}
+
+    def _record(label: str) -> Callable[[str], None]:
+        def _apply(resolved: str) -> None:
+            resolutions[label] = resolved
+
+        return _apply
+
+    for label, model in extra_models or ():
+        entries.append((label, model, _record(label)))
+
+    pending: list[tuple[Callable[[str], None], str]] = []
+    for label, model, apply_resolved in entries:
+        try:
+            resolved = settings.check_model(model, label=label)
+        except ValueError as exc:
+            errors.append(str(exc))
+            continue
+        pending.append((apply_resolved, resolved))
 
     if errors:
         raise SettingsValidationError("\n".join(errors))
+
+    for apply_resolved, resolved in pending:
+        apply_resolved(resolved)
+    return resolutions

@@ -8,6 +8,18 @@ from agentic_cli.workflow.permissions import Capability, EXEMPT
 from agentic_cli.workflow.service_registry import PERMISSION_ENGINE
 
 
+def _adk_tool(func):
+    """Wrap a registered callable the way ADK does before dispatching it.
+
+    The plugin resolves capabilities by *identity*, never by ``tool.name``, so
+    a name-only stand-in is (correctly) denied as unregistered — see
+    ``tests/workflow/test_permission_tool_identity.py``.
+    """
+    from google.adk.tools import FunctionTool
+
+    return FunctionTool(func=func)
+
+
 @pytest.fixture
 def stub_engine():
     from agentic_cli.workflow.permissions.rules import CheckResult
@@ -34,7 +46,7 @@ class TestPermissionPluginUnit:
 
         plugin = PermissionPlugin()
         result = await plugin.before_tool_callback(
-            tool=SimpleNamespace(name="exempt_x"), tool_args={}, tool_context=None,
+            tool=_adk_tool(exempt_x), tool_args={}, tool_context=None,
         )
         assert result is None
         stub_engine.check.assert_not_called()
@@ -47,16 +59,18 @@ class TestPermissionPluginUnit:
             "agentic_cli.workflow.adk.permission_plugin.get_service",
             lambda k: stub_engine if k == PERMISSION_ENGINE else None,
         )
+        def never_registered():
+            """Never passed through @register_tool."""
+            return {}
+
         plugin = PermissionPlugin()
         result = await plugin.before_tool_callback(
-            tool=SimpleNamespace(name="never_registered"),
+            tool=_adk_tool(never_registered),
             tool_args={},
             tool_context=None,
         )
-        assert result == {
-            "success": False,
-            "error": "Permission denied: tool has no capability declaration",
-        }
+        assert result is not None and result["success"] is False
+        assert "not registered" in result["error"]
 
     @pytest.mark.asyncio
     async def test_allow_calls_engine_and_passes(self, monkeypatch, stub_engine):
@@ -78,7 +92,7 @@ class TestPermissionPluginUnit:
 
         plugin = PermissionPlugin()
         result = await plugin.before_tool_callback(
-            tool=SimpleNamespace(name="reader_x"),
+            tool=_adk_tool(reader_x),
             tool_args={"path": "/tmp/x"},
             tool_context=None,
         )
@@ -108,7 +122,7 @@ class TestPermissionPluginUnit:
 
         plugin = PermissionPlugin()
         result = await plugin.before_tool_callback(
-            tool=SimpleNamespace(name="writer_x"),
+            tool=_adk_tool(writer_x),
             tool_args={"path": "/etc/x"},
             tool_context=None,
         )
@@ -139,7 +153,7 @@ class TestPermissionPluginUnit:
 
         plugin = PermissionPlugin()
         result = await plugin.before_tool_callback(
-            tool=SimpleNamespace(name="reader_y_deny"),
+            tool=_adk_tool(reader_y_deny),
             tool_args={"path": "/tmp/x"},
             tool_context=None,
         )
@@ -170,7 +184,7 @@ class TestPermissionPluginUnit:
 
         plugin = PermissionPlugin()
         result = await plugin.before_tool_callback(
-            tool=SimpleNamespace(name="reader_y_allow"),
+            tool=_adk_tool(reader_y_allow),
             tool_args={"path": "/tmp/x"},
             tool_context=None,
         )
