@@ -281,6 +281,11 @@ dynamic_agent = AgentConfig(
     tools=[tool_a, tool_b],
 )
 
+# A prompt factory may also take the manager's settings explicitly. Either way
+# it is evaluated under the manager's settings, not the global singleton.
+def get_scoped_prompt(settings):
+    return f"You are {settings.app_name}."
+
 # Coordinator with sub-agents
 coordinator = AgentConfig(
     name="coordinator",
@@ -310,12 +315,61 @@ configs = [coordinator, researcher, analyst]
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `name` | str | Unique identifier |
-| `prompt` | str \| Callable | System instruction |
+| `name` | str | Unique identifier (must be unique across the config list) |
+| `prompt` | str \| Callable | System instruction; a callable may take no arguments or a single `settings` argument |
 | `tools` | list[Callable] | Available tool functions |
 | `sub_agents` | list[str] | Names of agents this one can delegate to |
-| `description` | str | Short description for routing |
+| `description` | str | Short description for routing (defaults to `""`) |
 | `model` | str \| None | Model override (defaults to manager's model) |
+
+The agent graph is validated before anything is allocated — ahead of model
+discovery and service creation. Duplicate names, unknown `sub_agents`
+references, self-references, delegation cycles, a sub-agent shared by two
+parents, and **more than one root** raise `AgentGraphError` naming the
+offending agents. Exactly one agent may be unreferenced: the runner starts from
+a single root, so agents under any other root would never run. Agents are built
+in dependency order, so declaration order does not matter. A per-agent `model`
+override is validated against the configured provider credentials at startup,
+alongside `default_model`.
+
+A callable `prompt` may take **no arguments** (including all-defaulted ones) or
+**exactly one argument**, which receives the manager's settings. Other
+signatures, `async def` factories, and non-string results raise
+`AgentGraphError` naming the agent.
+
+### Turn and lifecycle contracts
+
+A workflow manager runs **one turn at a time**: `process()` and
+`resume_with_job_result()` serialize on a turn lock, and
+`initialize_services()`/`reinitialize()`/`cleanup()` take it too, so the backend
+is never torn down mid-stream. Admission also re-verifies the backend is live
+after acquiring the lock, so a turn queued behind a cleanup reinitializes (or
+fails cleanly) instead of running against released resources. Run separate
+managers for genuine parallelism.
+
+`MessageProcessor.process()` returns a `TurnResult` (`TurnStatus.COMPLETED` /
+`CANCELLED` / `FAILED` / `UNAVAILABLE`); a turn is never replayed by the
+harness, so a surfaced rate limit fails it explicitly. An `EventType.ERROR`
+event is rendered as it arrives — `recoverable=True` is a warning and the
+stream still decides the outcome, anything else makes the turn `FAILED`
+(`delivered` False). Cancelling the caller cancels and awaits the event
+consumer before the turn is torn down.
+
+The HITL input callback is **context-local**: `set_input_callback()` binds it
+for the calling context (and any task started from it), so two consumers of one
+manager cannot capture each other's prompts.
+
+`WorkflowController` exposes a derived `WorkflowState`
+(`uninitialized`/`initializing`/`ready`/`failed`/`closed`) that never reports
+`ready` over an uninitialized manager, and `controller.workflow` raises unless
+the state is `ready`. Lifecycle transitions (init, reinitialize, orchestrator
+swap, close) are serialized, so nothing is published after `close()`. A failed
+in-place reinitialization keeps the manager — it still owns the session service
+it preserved — and the next initialization revives it rather than discarding
+the conversation.
+
+`SessionRef(app_name, user_id, session_id)` is the conversation identity used by
+every session API. All of these are importable from `agentic_cli`.
 
 ## Tools
 
