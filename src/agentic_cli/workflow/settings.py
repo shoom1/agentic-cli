@@ -652,11 +652,25 @@ class WorkflowSettingsMixin:
         object.__setattr__(self, "thinking_effort", effort)
 
     def export_api_keys_to_env(self) -> None:
-        """Export API keys to environment variables."""
+        """Export configured API keys to provider environment variables.
+
+        Provider SDKs used by the orchestrators (ADK's AnthropicLlm/Gemini,
+        LangChain clients) read credentials from process env vars. The export
+        OVERWRITES the env from this settings instance: the key fields bind
+        only via their env alias (real env vars are the highest-priority
+        source), so settings and env diverge only when the process env
+        changed after this instance loaded — e.g. an earlier manager's
+        export, or a key loaded from a class-specific env_file — and then
+        this instance's configured value must win. (The previous
+        set-if-absent guard let the first exporting manager pin credentials
+        for every later one.) A key unset in settings leaves the environment
+        untouched. Credentials are process-global; SettingsContext does not
+        isolate them.
+        """
         import os
 
-        if self.google_api_key and not os.environ.get("GOOGLE_API_KEY"):
+        if self.google_api_key:
             os.environ["GOOGLE_API_KEY"] = self.google_api_key
 
-        if self.anthropic_api_key and not os.environ.get("ANTHROPIC_API_KEY"):
+        if self.anthropic_api_key:
             os.environ["ANTHROPIC_API_KEY"] = self.anthropic_api_key
