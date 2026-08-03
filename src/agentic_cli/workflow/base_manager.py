@@ -20,6 +20,12 @@ from typing import Any, AsyncGenerator, Awaitable, Callable, Iterator, TYPE_CHEC
 from agentic_cli.workflow.events import WorkflowEvent, UserInputRequest
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.models import ModelRegistry
+from agentic_cli.workflow.sessions import (
+    SessionRef,
+    get_active_turn,
+    reset_active_turn,
+    set_active_turn,
+)
 from agentic_cli.workflow.service_registry import (
     set_service_registry,
     ARXIV_SOURCE,
@@ -474,13 +480,23 @@ class BaseWorkflowManager(ABC):
         """
         return await self.generate_simple(prompt, max_tokens=12000)
 
-    async def on_session_end(self, messages: list[dict] | None = None) -> list[str]:
+    async def on_session_end(
+        self,
+        messages: list[dict] | None = None,
+        *,
+        session: "SessionRef | None" = None,
+    ) -> list[str]:
         """Hook called when a session ends. Optionally extracts facts.
 
         Override in downstream apps for custom session-end behavior.
 
         Args:
             messages: Recent messages from the session (optional).
+            session: Which conversation to read when ``messages`` is omitted.
+                Defaults to the turn still in context, else this manager's
+                current session under ``settings.default_user`` — so a session
+                belonging to another user is read as *that* user rather than
+                silently coming back empty.
 
         Returns:
             List of extracted facts (empty if disabled or no messages).
@@ -496,9 +512,16 @@ class BaseWorkflowManager(ABC):
         # backend session (same source/sid save_session uses) so the CLI can
         # invoke this with no arguments on exit.
         if messages is None:
-            sid = getattr(self, "session_id", "default_session")
+            ref = session or get_active_turn() or self.session_ref()
             try:
-                messages = await self.recent_messages(sid)
+                if self._is_default_user(ref.user_id):
+                    # Compatible call for backends that predate the user_id
+                    # parameter (see _user_scoped_kwargs).
+                    messages = await self.recent_messages(ref.session_id)
+                else:
+                    messages = await self.recent_messages(
+                        ref.session_id, user_id=ref.user_id
+                    )
             except Exception:
                 logger.debug("session_fact_extraction_extract_failed", exc_info=True)
                 return []
@@ -529,14 +552,26 @@ class BaseWorkflowManager(ABC):
         return facts
 
     @property
+    def active_turn(self) -> SessionRef | None:
+        """Identity of the turn running in this context, or None when idle.
+
+        Context-local, not manager-local: concurrent ``process()`` calls on one
+        manager (possible for framework consumers — the CLI serializes turns)
+        each see their own value.
+        """
+        return get_active_turn()
+
+    @property
     def active_session_id(self) -> str | None:
         """Session id of the in-flight ``process()`` call, or None when idle."""
-        return self._active_session_id
+        ref = get_active_turn()
+        return ref.session_id if ref else None
 
     @property
     def active_user_id(self) -> str | None:
         """User id of the in-flight ``process()`` call, or None when idle."""
-        return self._active_user_id
+        ref = get_active_turn()
+        return ref.user_id if ref else None
 
     async def can_resume(self, record) -> bool:
         """Whether a finished job can be resumed into its conversation now.
@@ -556,22 +591,24 @@ class BaseWorkflowManager(ABC):
     ) -> Iterator[None]:
         """Context manager that exposes the service registry to tools.
 
-        Sets a single ContextVar (the service registry) so tools can
-        call ``get_service(key)`` during execution, and records the active
-        session/user for the duration of the turn so JobManager can associate
-        a launched job with the conversation that started it.
+        Sets ContextVars (settings, the service registry, and the active turn)
+        so tools can call ``get_service(key)`` during execution and the
+        JobManager can associate a launched job with the conversation that
+        started it.
+
+        All three are restored from tokens on exit, so a nested context
+        restores the outer turn rather than clearing it, and concurrent turns
+        on one manager never see each other's identity.
         """
         from agentic_cli.config import set_context_settings
 
         settings_token = set_context_settings(self._settings)
         registry_token = set_service_registry(self._services)
-        self._active_session_id = session_id
-        self._active_user_id = user_id
+        turn_token = set_active_turn(self.session_ref(session_id, user_id))
         try:
             yield
         finally:
-            self._active_session_id = None
-            self._active_user_id = None
+            reset_active_turn(turn_token)
             registry_token.var.reset(registry_token)
             settings_token.var.reset(settings_token)
 
@@ -850,47 +887,126 @@ class BaseWorkflowManager(ABC):
     # state continuously, keyed by session_id; there is no separate snapshot.
     # ------------------------------------------------------------------
 
-    async def save_session(self, session_id: str | None = None) -> dict:
+    @property
+    def supports_sessions(self) -> bool:
+        """Whether this backend implements the durable-session hooks.
+
+        Derived from the subclass actually overriding ``session_exists``, so a
+        backend opts in by implementing the capability rather than by setting a
+        flag that can drift from the code.
+        """
+        return type(self).session_exists is not BaseWorkflowManager.session_exists
+
+    def _is_default_user(self, user_id: str | None) -> bool:
+        """Whether ``user_id`` is (or defaults to) the configured default user.
+
+        Base-class helpers call user-scoped backend hooks *without* the
+        ``user_id`` keyword in that case, so a backend that predates the
+        parameter (LangGraph, and any downstream override) keeps working; an
+        explicit non-default user is always passed through, so it can never be
+        silently serviced as the default user.
+        """
+        return user_id is None or user_id == self._settings.default_user
+
+    def session_ref(
+        self, session_id: str | None = None, user_id: str | None = None
+    ) -> SessionRef:
+        """Resolve a full :class:`SessionRef` from partial identity.
+
+        Unsupplied parts default to this manager's app name, the configured
+        ``default_user`` and the manager's current session id. Defaults apply
+        only to what the caller omitted: an explicit ``user_id`` is never
+        replaced by the default user.
+        """
+        return SessionRef(
+            app_name=self.app_name,
+            user_id=user_id or self._settings.default_user,
+            session_id=session_id or getattr(self, "session_id", "default_session"),
+        )
+
+    async def save_session(
+        self, session_id: str | None = None, *, user_id: str | None = None
+    ) -> dict:
         """No-op flush — durable stores persist as the turn runs.
 
-        Kept for API compatibility / explicit "checkpoint now" intent. Returns
-        the session id that is (already) persisted.
-        """
-        sid = session_id or getattr(self, "session_id", "default_session")
-        return {"success": True, "session_id": sid}
+        Kept for API compatibility / explicit "checkpoint now" intent.
 
-    async def load_session(self, session_id: str) -> bool:
+        Args:
+            session_id: Session to report (defaults to the manager's current one).
+            user_id: Owner (defaults to ``settings.default_user``).
+
+        Returns:
+            ``{"success": True, "session_id": ..., "user_id": ...}`` — the full
+            identity, so a caller working on behalf of another user can tell
+            which conversation was meant.
+        """
+        ref = self.session_ref(session_id, user_id)
+        return {
+            "success": True,
+            "session_id": ref.session_id,
+            "user_id": ref.user_id,
+        }
+
+    async def load_session(self, session_id: str, *, user_id: str | None = None) -> bool:
         """Adopt ``session_id`` for resume; the native store already holds it.
 
         Returns True if that session already has content (i.e. a real resume),
         False if it's new — but the id is adopted either way so the next turn
-        continues it.
+        continues it. A backend without durable sessions has nothing to resume,
+        so it adopts the id and returns False.
+
+        Args:
+            session_id: Session to adopt.
+            user_id: Owner to look the session up as (defaults to
+                ``settings.default_user``).
         """
         if hasattr(self, "session_id"):
             self.session_id = session_id
-        exists = await self.session_exists(session_id)
+        if not self.supports_sessions:
+            logger.info(
+                "session_adopted", session_id=session_id, resumed=False,
+                backend_sessions=False,
+            )
+            return False
+        if self._is_default_user(user_id):
+            exists = await self.session_exists(session_id)
+        else:
+            exists = await self.session_exists(session_id, user_id=user_id)
         logger.info("session_adopted", session_id=session_id, resumed=exists)
         return exists
 
     # ---- Backend hooks (override in ADK / LangGraph managers) ----
+    #
+    # Each takes an optional ``user_id`` so a session created for one user
+    # stays reachable through the public API. Backends that cannot persist
+    # sessions must not answer with a misleading "no" — the base raises.
 
-    async def session_exists(self, session_id: str) -> bool:
+    def _no_session_support(self, operation: str) -> NotImplementedError:
+        """Error for a session operation the backend does not implement."""
+        return NotImplementedError(
+            f"{type(self).__name__} does not implement durable sessions "
+            f"({operation}). Check ``supports_sessions`` before calling."
+        )
+
+    async def session_exists(self, session_id: str, *, user_id: str | None = None) -> bool:
         """Whether the native store already holds this session's state."""
-        return False
+        raise self._no_session_support("session_exists")
 
-    async def recent_messages(self, session_id: str, limit: int = 20) -> list[dict]:
+    async def recent_messages(
+        self, session_id: str, limit: int = 20, *, user_id: str | None = None
+    ) -> list[dict]:
         """Recent ``{role, content}`` text messages from the native session.
 
         Used for session-end fact extraction; text-only (no tool-call fidelity).
         """
-        return []
+        raise self._no_session_support("recent_messages")
 
-    async def list_sessions(self) -> list[dict]:
+    async def list_sessions(self, *, user_id: str | None = None) -> list[dict]:
         """List persisted sessions from the native store (most recent first)."""
-        return []
+        raise self._no_session_support("list_sessions")
 
-    async def delete_session(self, session_id: str) -> bool:
+    async def delete_session(self, session_id: str, *, user_id: str | None = None) -> bool:
         """Delete a persisted session from the native store."""
-        return False
+        raise self._no_session_support("delete_session")
 
 

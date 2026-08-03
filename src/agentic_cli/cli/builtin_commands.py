@@ -455,6 +455,15 @@ class SessionsCommand(Command):
             app.session.add_warning("Sessions not available yet — workflow is initializing.")
             return
 
+        # An empty list would read as "you have no saved sessions"; say plainly
+        # that this backend keeps none.
+        if not getattr(workflow, "supports_sessions", False):
+            app.session.add_warning(
+                f"The {getattr(workflow, 'backend_type', 'current')} backend does not "
+                "persist sessions, so there are none to list or delete."
+            )
+            return
+
         if delete_id:
             if await workflow.delete_session(delete_id):
                 app.session.add_success(f"Session '{delete_id}' deleted.")

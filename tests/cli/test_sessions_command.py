@@ -10,18 +10,30 @@ from tests.event_replay import RecordingSession
 
 
 class _Workflow:
+    supports_sessions = True
+    backend_type = "adk"
+
     def __init__(self, sessions: list[dict]) -> None:
         self._sessions = sessions
         self.deleted: list[str] = []
 
-    async def list_sessions(self) -> list[dict]:
+    async def list_sessions(self, *, user_id: str | None = None) -> list[dict]:
         return self._sessions
 
-    async def delete_session(self, session_id: str) -> bool:
+    async def delete_session(
+        self, session_id: str, *, user_id: str | None = None
+    ) -> bool:
         if any(s["session_id"] == session_id for s in self._sessions):
             self.deleted.append(session_id)
             return True
         return False
+
+
+class _SessionlessWorkflow:
+    """A backend with no durable session store."""
+
+    supports_sessions = False
+    backend_type = "custom"
 
 
 class _App:
@@ -70,3 +82,12 @@ async def test_not_ready_warns():
     app = _App(None)
     await SessionsCommand().execute("", app)
     assert app.session.warnings()
+
+
+async def test_backend_without_sessions_says_so():
+    """An empty list would read as 'no saved sessions' — be explicit instead."""
+    app = _App(_SessionlessWorkflow())
+    await SessionsCommand().execute("", app)
+    warnings = app.session.warnings()
+    assert warnings and any("does not" in str(w) for w in warnings)
+    assert not app.session.of("rich")
