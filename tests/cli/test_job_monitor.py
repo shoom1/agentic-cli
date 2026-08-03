@@ -157,7 +157,8 @@ class TestSegmentLogic:
         )
         rec = JobRecord(
             job_id="j1", tool="run_shell_job", backend="subprocess", name="build",
-            state=JobState.SUCCEEDED, resume_on_complete=True, call_id="c1", resumed=True,
+            state=JobState.SUCCEEDED, resume_on_complete=True, call_id="c1",
+            resume_state="delivered",
         )
         assert mon._build_segment([rec]) is None
 

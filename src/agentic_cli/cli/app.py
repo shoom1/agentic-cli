@@ -476,9 +476,20 @@ class BaseCLIApp:
         """Resume the agent for each finished, resume-flagged background job.
 
         Each resume is a serialized turn (via the turn lock) so it never
-        overlaps a user turn or another resume. Returns the number resumed.
-        Used at turn boundaries (auto, gated) and by the /resume command
-        (explicit, ungated).
+        overlaps a user turn or another resume. Used at turn boundaries (auto,
+        gated) and by the /resume command (explicit, ungated).
+
+        Delivery follows the job's resume lifecycle: the job is *claimed*
+        (pending → resuming) before the turn runs, so a crash cannot silently
+        re-deliver it, and only recorded delivered once the turn actually
+        completed — a failed or cancelled resume is recorded as such instead of
+        being dropped.
+
+        Returns:
+            The number of jobs a resume turn was run for (unchanged meaning:
+            "how many were picked up"). Whether each one was delivered is
+            recorded on the job and reported by ``/jobs``; a failed delivery is
+            surfaced to the user by the turn itself.
         """
         if not self._workflow_controller.is_ready:
             return 0
@@ -486,19 +497,67 @@ class BaseCLIApp:
         if jm is None:
             return 0
 
-        records = jm.awaiting_resume()
-        for record in records:
-            # Mark before running so a crash mid-resume can't double-fire.
-            jm.mark_resumed(record.job_id)
+        attempted = 0
+        for record in jm.awaiting_resume():
+            # Claim first: durable, so an interrupted delivery is recoverable
+            # and two coordinators can't both deliver the same result.
+            if not jm.begin_resume(record.job_id):
+                continue
+            attempted += 1
+            await self._deliver_resume(jm, record)
+        return attempted
+
+    async def _deliver_resume(self, jm, record) -> bool:
+        """Run one claimed job's resume turn and close out its transition.
+
+        Every exit path closes the claim, so no record can be left ``RESUMING``
+        in this process: a normal outcome records delivered/failed, an
+        exception records failed with the reason, and a cancellation records
+        failed before re-raising (cancellation still propagates).
+
+        Args:
+            jm: The JobManager holding the claim.
+            record: The claimed job record.
+
+        Returns:
+            True if the result was delivered to the agent.
+        """
+        try:
             async with self._turn_lock:
-                await self._message_processor.process_resume(
+                result = await self._message_processor.process_resume(
                     record=record,
                     workflow_controller=self._workflow_controller,
                     ui=self.session,
                     settings=self._settings,
                     usage_tracker=self._usage_tracker,
                 )
-        return len(records)
+        except asyncio.CancelledError:
+            jm.complete_resume(
+                record.job_id, delivered=False, error="resume cancelled"
+            )
+            logger.info("job_resume_cancelled", job_id=record.job_id)
+            raise
+        except Exception as exc:  # noqa: BLE001 - the claim must always close
+            jm.complete_resume(record.job_id, delivered=False, error=str(exc))
+            logger.warning(
+                "job_resume_raised", job_id=record.job_id, error=str(exc)
+            )
+            self.session.add_error(
+                f"Background job '{record.name}' could not be resumed: {exc}"
+            )
+            return False
+
+        jm.complete_resume(
+            record.job_id, delivered=result.delivered, error=result.error
+        )
+        if not result.delivered:
+            logger.info(
+                "job_resume_not_delivered",
+                job_id=record.job_id,
+                status=result.status.value,
+                error=result.error,
+            )
+        return result.delivered
 
     async def _adopt_session_on_startup(self) -> None:
         """Adopt this run's session id so the manager targets it from turn one.
