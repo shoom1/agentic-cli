@@ -206,22 +206,77 @@ class BaseWorkflowManager(ABC):
 
         Replaces service tools with closure-bound factory versions and
         auto-injects backend-specific state tools when requested.
+
+        Entries are matched by *registry identity* — the exact object the
+        default registry issued — never by ``__name__``. A plain callable an
+        application happens to name ``kb_search`` is not the framework's tool:
+        substituting the service-bound variant for it would silently run
+        different code, and it is denied at permission time anyway. It is
+        therefore passed through untouched, as is a tool registered into some
+        other ``ToolRegistry``.
+
+        Conversely ``register(func, name=...)`` leaves the caller holding a
+        callable whose ``__name__`` is the private implementation name; that
+        one *is* bound, so it resolves to its service-bound variant, or is
+        replaced by the canonical callable so the model sees the registered
+        name.
         """
+        from agentic_cli.tools.registry import get_registry, identify_tool
+
         if service_map is None:
             service_map = self._get_service_tool_map()
 
+        registry = get_registry()
         result = []
         for tool in config.tools or []:
-            name = getattr(tool, "__name__", "")
-            if name in service_map:
-                result.append(service_map[name])
-            else:
+            definition = identify_tool(tool)
+            if definition is None:
                 result.append(tool)
+                continue
+            variant = service_map.get(definition.name)
+            if variant is not None and identify_tool(variant) is definition:
+                # The variant must *be* this tool, not merely share its name:
+                # an application that took the name over (register(...,
+                # replace=True)) would otherwise have the framework's
+                # implementation run in place of its own.
+                result.append(variant)
+                continue
+            # A renamed tool's (or a declared variant's) original callable:
+            # hand the backend the canonical one so the model-visible name is
+            # the tool's identity. Never None — see ``canonical_for``.
+            result.append(registry.canonical_for(tool))
 
         if config.include_state_tools:
-            result.extend(self._get_state_tools())
+            result.extend(self._injectable_state_tools(result))
 
         return result
+
+    def _injectable_state_tools(self, assembled: list) -> list[Callable]:
+        """State tools worth auto-injecting, given what the agent already has.
+
+        A state tool the application has taken over (``replace=True``) leaves
+        the backend's variant *retired* — no identity, no capabilities, and the
+        replacement is what the agent should call. Injecting it anyway would
+        hand the model two tools with the same name, one of them denied.
+
+        An unregistered state tool that collides with nothing is left alone:
+        a backend may legitimately supply its own.
+        """
+        from agentic_cli.tools.registry import get_registry
+
+        registry = get_registry()
+        present = {getattr(tool, "__name__", "") for tool in assembled}
+        injectable = []
+        for tool in self._get_state_tools():
+            name = getattr(tool, "__name__", "")
+            if name in present:
+                logger.debug("state_tool_already_present", tool=name)
+                continue
+            if registry.is_retired(tool):
+                logger.debug("state_tool_retired", tool=name)
+                continue
+            injectable.append(tool)
+        return injectable
 
     def _get_service_tool_map(self) -> dict[str, Callable]:
         """Create service tools via factories, returning name→function map.
@@ -263,6 +318,10 @@ class BaseWorkflowManager(ABC):
         for t in make_interaction_tools(self):
             tool_map[t.__name__] = t
 
+        # The factories bind each closure to the definition of the exact
+        # module-level tool it re-binds (see ``factories._issued``), so a
+        # variant carries identity only while the framework still owns that
+        # tool — never merely because the names match.
         return tool_map
 
     @abstractmethod

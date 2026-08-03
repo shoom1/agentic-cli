@@ -615,18 +615,21 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         A long-running tool returns a ``job_id`` immediately and the model is
         instructed not to re-call it while pending; the eventual result is
         delivered later as a ``FunctionResponse`` (see ``resume_with_job_result``).
-        Detection is by registered tool name; non-long-running tools and any
-        already-wrapped tools (including toolset objects) pass through unchanged.
-        Permission gating is unaffected — ADK gates via ``PermissionPlugin`` (by
-        name), not by wrapping the callable.
+        Detection is by registry identity — the exact object the default
+        registry issued, never a matching name — so a plain callable an
+        application names after a long-running tool keeps its ordinary
+        call-and-return contract instead of being told to leave a job pending
+        that nothing will ever complete. Non-long-running tools and any
+        already-wrapped tools (including toolset objects) pass through
+        unchanged. Permission gating is unaffected: ADK gates via
+        ``PermissionPlugin``, which resolves the same identity.
         """
-        from agentic_cli.tools.registry import get_registry
+        from agentic_cli.tools.registry import identify_tool
 
-        reg = get_registry()
         wrapped: list = []
         for tool in tools:
-            name = getattr(tool, "__name__", "")
-            defn = reg.get(name) if name else None
+            defn = identify_tool(tool)
+            name = defn.name if defn is not None else getattr(tool, "__name__", "")
             if (
                 defn is not None
                 and defn.long_running

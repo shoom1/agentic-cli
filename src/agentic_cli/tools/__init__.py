@@ -7,6 +7,7 @@ Tool System:
     - ToolDefinition: Metadata-rich tool definitions
     - ToolRegistry: Registry for tool management and discovery
     - register_tool: Decorator for easy tool registration
+    - declare_tool: Declare a tool implemented only by backend-native variants
 
 Framework Tools:
     - memory_tools: Working and long-term memory tools
@@ -78,6 +79,7 @@ from agentic_cli.tools.registry import (
     ToolDefinition,
     ToolRegistry,
     get_registry,
+    declare_tool,
     register_tool,
 )
 
@@ -90,6 +92,7 @@ __all__ = [
     "ToolDefinition",
     "ToolRegistry",
     "get_registry",
+    "declare_tool",
     "register_tool",
     # Executor classes
     "SafePythonExecutor",

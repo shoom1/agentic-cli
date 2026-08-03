@@ -22,14 +22,20 @@ from agentic_cli.workflow.service_registry import (  # noqa: E402
 )
 
 
-class _MCPTool:
-    """Stand-in for an ADK MCP tool (detected by class name)."""
+_McpToolBase = pytest.importorskip("google.adk.tools.mcp_tool").McpTool
+
+
+class _MCPTool(_McpToolBase):
+    """A real ``McpTool`` instance without the MCP session plumbing.
+
+    It must genuinely *be* one: detection is ``isinstance`` against the class
+    ADK ships, never the class name (which any application can choose — see
+    ``tests/workflow/test_permission_tool_identity.py``).
+    """
 
     def __init__(self, name: str):
-        self.name = name
-
-
-_MCPTool.__name__ = "MCPTool"
+        object.__setattr__(self, "name", name)
+        object.__setattr__(self, "description", f"MCP tool {name}")
 
 
 class _PlainTool:

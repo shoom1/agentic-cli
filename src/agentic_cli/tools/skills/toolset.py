@@ -42,4 +42,25 @@ def make_skill_toolset(
         toolset._tools = [
             t for t in toolset._tools if not isinstance(t, RunSkillScriptTool)
         ]
+    _bind_skill_tool_identities(toolset)
     return toolset
+
+
+def _bind_skill_tool_identities(toolset: Any) -> None:
+    """Give each skill tool object the registry identity it implements.
+
+    ADK's skill tools wrap no callable, so the permission plugin cannot verify
+    them the way it verifies a function tool. Binding happens *here*, where the
+    framework itself constructs them and their concrete types are known —
+    rather than letting the plugin resolve them by ``tool.name``, which any
+    application could pick to impersonate an EXEMPT tool.
+    """
+    from agentic_cli.tools.registry import bind_tool_identity, get_registry
+
+    # The names/capabilities themselves are registered when the ``skills``
+    # package is imported, which importing this module guarantees.
+    registry = get_registry()
+    for tool in getattr(toolset, "_tools", []) or []:
+        definition = registry.get(getattr(tool, "name", ""))
+        if definition is not None:
+            bind_tool_identity(tool, definition)
