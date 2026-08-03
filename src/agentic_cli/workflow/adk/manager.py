@@ -629,11 +629,13 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         return tools
 
     def _build_skill_toolset(self, skill_refs: list[str]):
-        """Resolve skill refs and build an ADK SkillToolset (scripts gated).
+        """Resolve skill refs and build an ADK SkillToolset (discovery/read only).
 
-        Script execution is disabled unless ``settings.skill_scripts_enabled``
-        is True (and a code executor is wired — a future enhancement), so by
-        default only discovery/read tools are exposed.
+        This path supplies no code executor, so ``run_skill_script`` is not
+        exposed: only the discovery/read tools and the L1 metadata injection.
+        (There used to be a ``skill_scripts_enabled`` setting that advertised
+        the tool anyway; with no executor it could only ever answer
+        ``NO_CODE_EXECUTOR``.)
         """
         from agentic_cli.tools.skills import SkillStore, make_skill_toolset
 
@@ -641,8 +643,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         skills = store.resolve(skill_refs)
         if not skills:
             return None
-        scripts_enabled = getattr(self._settings, "skill_scripts_enabled", False)
-        return make_skill_toolset(skills, scripts_enabled=scripts_enabled)
+        return make_skill_toolset(skills)
 
     def _wrap_long_running(self, tools: list[Callable]) -> list:
         """Wrap tools flagged ``long_running`` as ADK ``LongRunningFunctionTool``.

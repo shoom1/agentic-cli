@@ -458,12 +458,11 @@ class WorkflowSettingsMixin:
         description="Directories searched for named skills (Agent Skills / SKILL.md folders)",
         json_schema_extra={"ui_order": 141},
     )
-    skill_scripts_enabled: bool = Field(
-        default=False,
-        title="Skill Scripts Enabled",
-        description="Allow executing scripts bundled with skills (requires a code executor; disabled by default)",
-        json_schema_extra={"ui_order": 142},
-    )
+    # NOTE: ``skill_scripts_enabled`` was removed. Turning it on exposed ADK's
+    # ``run_skill_script`` while the supported manager path supplies no code
+    # executor, so every call answered ``NO_CODE_EXECUTOR``. Script execution is
+    # now enabled by passing a code executor to ``make_skill_toolset`` — the
+    # thing that actually makes it work — instead of by a switch that cannot.
 
     # Persistence settings (LangGraph)
     postgres_uri: str | None = Field(

@@ -77,10 +77,34 @@ class TestMakeSkillToolset:
         assert "run_skill_script" not in names
         assert {"list_skills", "load_skill", "load_skill_resource"} <= names
 
-    def test_scripts_enabled_includes_run_tool(self, tmp_path):
+    def test_run_tool_appears_only_with_a_code_executor(self, tmp_path):
+        """The tool is exposed by the thing that makes it work, not by a flag.
+
+        A flag could enable it without an executor, and every call then failed
+        with NO_CODE_EXECUTOR.
+        """
         skills = SkillStore().resolve([str(_make_skill(tmp_path))])
-        ts = make_skill_toolset(skills, scripts_enabled=True)
+        ts = make_skill_toolset(skills, code_executor=object())
         assert "run_skill_script" in {t.name for t in ts._tools}
+
+    def test_manager_path_never_exposes_the_script_tool(self, tmp_path):
+        """The supported manager path supplies no executor, so scripts stay off."""
+        from types import SimpleNamespace
+
+        import pytest
+
+        pytest.importorskip("google.adk")
+        from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager
+
+        mgr = GoogleADKWorkflowManager.__new__(GoogleADKWorkflowManager)
+        mgr._settings = SimpleNamespace(skills_dirs=[])
+        toolset = mgr._build_skill_toolset([str(_make_skill(tmp_path))])
+        assert "run_skill_script" not in {t.name for t in toolset._tools}
+
+    def test_removed_setting_is_gone(self):
+        from agentic_cli.config import BaseSettings
+
+        assert "skill_scripts_enabled" not in BaseSettings.model_fields
 
 
 # ---------------------------------------------------------------------------
