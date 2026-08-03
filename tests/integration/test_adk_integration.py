@@ -523,148 +523,78 @@ class TestTaskProgressAutoClean:
 
 
 class TestMessageProcessorRateLimit:
-    """Tests that MessageProcessor handles 429 errors with user prompt."""
+    """A surfaced 429 fails the turn; the harness never replays it.
 
-    async def test_rate_limit_retry_on_user_accept(self):
-        """When user accepts retry, processor waits and retries."""
-        from agentic_cli.cli.message_processor import MessageProcessor
+    ADK appends the user message to the session while setting up the
+    invocation, so even a 429 raised before the first event has already
+    persisted the turn's input. Re-invoking the source would duplicate it.
+    Retrying belongs to the provider client (HttpRetryOptions).
+    """
 
-        processor = MessageProcessor()
-
-        # Mock workflow controller
+    def _harness(self):
         workflow_controller = MagicMock()
         workflow_controller.ensure_initialized = AsyncMock(return_value=True)
 
-        # First call raises 429, second call succeeds
-        call_count = 0
+        calls = {"n": 0}
 
         async def mock_process(**kwargs):
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                error = Exception("RESOURCE_EXHAUSTED: retry in 5s")
-                error.code = 429
-                raise error
-            # Second call: yield a text event
-            yield WorkflowEvent.text("Success!", "session")
+            calls["n"] += 1
+            error = Exception("RESOURCE_EXHAUSTED: retry in 5s")
+            error.code = 429
+            raise error
+            yield  # pragma: no cover - makes it an async generator
 
         mock_workflow = MagicMock()
         mock_workflow.process = mock_process
         workflow_controller.workflow = mock_workflow
 
-        # Mock UI
         ui = MagicMock()
-        ctx_mock = MagicMock()
-        ui.start_thinking.return_value = ctx_mock
+        ui.start_thinking.return_value = MagicMock()
         ui.add_response = MagicMock()
         ui.add_warning = MagicMock()
         ui.add_error = MagicMock()
         ui.add_rich = MagicMock()
-        ui.yes_no_dialog = AsyncMock(return_value=True)  # User accepts retry
-
-        # Mock settings
-        settings = MagicMock()
-        settings.default_user = "test-user"
-        settings.verbose_thinking = False
-
-        with patch("agentic_cli.cli.message_processor.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
-            await processor.process(
-                message="test",
-                workflow_controller=workflow_controller,
-                ui=ui,
-                settings=settings,
-            )
-
-        # Verify retry happened
-        assert call_count == 2
-        ui.yes_no_dialog.assert_called_once()
-        mock_sleep.assert_called_once_with(5.0)
-        ui.add_warning.assert_called_once()
-        # Success path should have been reached
-        ui.add_response.assert_called_once_with("Success!", markdown=True)
-        ui.add_error.assert_not_called()
-
-    async def test_rate_limit_cancel_on_user_decline(self):
-        """When user declines retry, processor shows error and stops."""
-        from agentic_cli.cli.message_processor import MessageProcessor
-
-        processor = MessageProcessor()
-
-        workflow_controller = MagicMock()
-        workflow_controller.ensure_initialized = AsyncMock(return_value=True)
-
-        async def mock_process(**kwargs):
-            error = Exception("RESOURCE_EXHAUSTED: retry in 30s")
-            error.code = 429
-            raise error
-            yield  # make it an async generator  # noqa: E501
-
-        mock_workflow = MagicMock()
-        mock_workflow.process = mock_process
-        workflow_controller.workflow = mock_workflow
-
-        ui = MagicMock()
-        ctx_mock = MagicMock()
-        ui.start_thinking.return_value = ctx_mock
-        ui.add_error = MagicMock()
-        ui.add_rich = MagicMock()
-        ui.yes_no_dialog = AsyncMock(return_value=False)  # User declines
+        ui.yes_no_dialog = AsyncMock(return_value=True)
 
         settings = MagicMock()
         settings.default_user = "test-user"
         settings.verbose_thinking = False
+        return workflow_controller, ui, settings, calls
 
-        await processor.process(
+    async def test_rate_limited_turn_is_not_replayed(self):
+        from agentic_cli.cli.message_processor import MessageProcessor, TurnStatus
+
+        workflow_controller, ui, settings, calls = self._harness()
+
+        result = await MessageProcessor().process(
             message="test",
             workflow_controller=workflow_controller,
             ui=ui,
             settings=settings,
         )
 
-        ui.yes_no_dialog.assert_called_once()
-        ui.add_error.assert_called_once()
-        assert "Workflow error" in ui.add_error.call_args[0][0]
-
-    async def test_non_rate_limit_error_not_retried(self):
-        """Non-429 errors are not retried, shown as workflow error."""
-        from agentic_cli.cli.message_processor import MessageProcessor
-
-        processor = MessageProcessor()
-
-        workflow_controller = MagicMock()
-        workflow_controller.ensure_initialized = AsyncMock(return_value=True)
-
-        async def mock_process(**kwargs):
-            raise RuntimeError("Something broke")
-            yield  # noqa: E501
-
-        mock_workflow = MagicMock()
-        mock_workflow.process = mock_process
-        workflow_controller.workflow = mock_workflow
-
-        ui = MagicMock()
-        ctx_mock = MagicMock()
-        ui.start_thinking.return_value = ctx_mock
-        ui.add_error = MagicMock()
-        ui.add_rich = MagicMock()
-        ui.yes_no_dialog = AsyncMock()
-
-        settings = MagicMock()
-        settings.default_user = "test-user"
-        settings.verbose_thinking = False
-
-        await processor.process(
-            message="test",
-            workflow_controller=workflow_controller,
-            ui=ui,
-            settings=settings,
-        )
-
-        # Should NOT prompt user for retry
+        assert calls["n"] == 1, "the turn was replayed after a rate limit"
         ui.yes_no_dialog.assert_not_called()
-        ui.add_error.assert_called_once()
-        assert "Something broke" in ui.add_error.call_args[0][0]
+        ui.add_response.assert_not_called()
+        assert result.status is TurnStatus.FAILED
+        assert result.delivered is False
 
+    async def test_rate_limit_error_explains_no_replay(self):
+        from agentic_cli.cli.message_processor import MessageProcessor
+
+        workflow_controller, ui, settings, _calls = self._harness()
+
+        await MessageProcessor().process(
+            message="test",
+            workflow_controller=workflow_controller,
+            ui=ui,
+            settings=settings,
+        )
+
+        ui.add_error.assert_called_once()
+        message = ui.add_error.call_args[0][0]
+        assert "Rate limited" in message
+        assert "not retried" in message.lower()
 
 class TestUserInputCallback:
     """Tests for the registered-callback path in request_user_input.

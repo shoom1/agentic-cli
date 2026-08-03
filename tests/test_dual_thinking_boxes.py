@@ -48,16 +48,20 @@ class TestEventProcessingStateSimplified:
         state = _EventProcessingState()
         assert state.get_status() == "Processing..."
 
-    def test_reset_for_retry_does_not_clear_task_fields(self):
-        """reset_for_retry() should not reference task display fields."""
+    def test_no_retry_reset_hook_remains(self):
+        """The turn is never replayed, so there is no retry-reset state hook.
+
+        ``reset_for_retry()`` existed only to re-run a turn after a 429; the
+        harness no longer does that (ADK has already persisted the input).
+        """
+        assert not hasattr(_EventProcessingState(), "reset_for_retry")
+
+    def test_side_effects_flag_tracks_visible_progress(self):
+        """It reports whether the turn got far enough to be observably partial."""
         state = _EventProcessingState()
-        state.status_line = "Something"
-        state.thinking_content.append("thought")
-        state.response_content.append("response")
-        state.reset_for_retry()
-        assert state.status_line == "Processing..."
-        assert state.thinking_content == []
-        assert state.response_content == []
+        assert state.side_effects_seen is False
+        state.side_effects_seen = True
+        assert state.side_effects_seen is True
 
 
 # ---------------------------------------------------------------------------

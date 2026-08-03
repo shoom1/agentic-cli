@@ -571,8 +571,11 @@ class BaseCLIApp:
                 # Run the session - user sees prompt immediately!
                 await self.session.run_async()
 
-        # Extract session facts into memory on exit (if enabled)
-        await self._extract_session_facts_on_exit()
+            # Extract session facts into memory (if enabled) while the workflow
+            # is still alive: leaving this context closes the manager, and fact
+            # extraction needs the live session store and an LLM call.
+            await self._extract_session_facts_on_exit()
+
         # No save-on-exit: durable session stores persist continuously per turn.
 
         logger.info("app_ending")
