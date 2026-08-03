@@ -10,7 +10,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Literal, TYPE_CHECKING
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import AliasChoices, BaseModel, Field, field_validator
 
 from agentic_cli.logging import Loggers
 from agentic_cli.workflow.models import ModelFamily, ModelRegistry
@@ -102,26 +102,38 @@ class WorkflowSettingsMixin:
         json_schema_extra={"ui_order": 27},
     )
 
-    # API Keys (common across all domains, never saved to JSON)
+    # API Keys (common across all domains, never saved to JSON).
+    #
+    # Each accepts BOTH the provider's environment variable name and its Python
+    # field name (``AliasChoices``): the bare env alias made
+    # ``BaseSettings(google_api_key=...)`` bind nothing at all — the value was
+    # dropped by ``extra="ignore"`` and the field kept its default. The env name
+    # is listed first, so a real environment variable still wins within a source.
+    # Values are kept out of ``repr()`` and out of every persisted file (see
+    # ``settings_persistence.SECRET_FIELDS``).
     google_api_key: str | None = Field(
         default=None,
         description="Google API key for Gemini models",
-        validation_alias="GOOGLE_API_KEY",
+        validation_alias=AliasChoices("GOOGLE_API_KEY", "google_api_key"),
+        repr=False,
     )
     anthropic_api_key: str | None = Field(
         default=None,
         description="Anthropic API key for Claude models",
-        validation_alias="ANTHROPIC_API_KEY",
+        validation_alias=AliasChoices("ANTHROPIC_API_KEY", "anthropic_api_key"),
+        repr=False,
     )
     tavily_api_key: str | None = Field(
         default=None,
         description="Tavily API key for web search",
-        validation_alias="TAVILY_API_KEY",
+        validation_alias=AliasChoices("TAVILY_API_KEY", "tavily_api_key"),
+        repr=False,
     )
     brave_api_key: str | None = Field(
         default=None,
         description="Brave Search API key for web search",
-        validation_alias="BRAVE_API_KEY",
+        validation_alias=AliasChoices("BRAVE_API_KEY", "brave_api_key"),
+        repr=False,
     )
 
     # Web search configuration

@@ -29,11 +29,13 @@ Settings Loading Priority (highest to lowest):
     5. Default values
 """
 
+import re
 from contextvars import ContextVar, Token
 from pathlib import Path
 from typing import Callable, Generator, Any, Sequence, Tuple, Type
 from contextlib import contextmanager
 
+from pydantic import AliasChoices
 from pydantic_settings import (
     BaseSettings as PydanticBaseSettings,
     SettingsConfigDict,
@@ -105,6 +107,49 @@ class _AllowlistFilterSource(PydanticBaseSettingsSource):
         return kept
 
 
+# Constructor kwargs matching this shape are credentials; an unrecognised one
+# must fail loudly instead of being swallowed by ``extra="ignore"``.
+_CREDENTIAL_KEY_RE = re.compile(r"(?i)(api_?key|secret|token|password|credential)")
+
+
+def _accepted_input_names(settings_cls: Type[PydanticBaseSettings]) -> set[str]:
+    """Every name the model accepts for a field: its own name and any aliases."""
+    names: set[str] = set()
+    for field_name, field in settings_cls.model_fields.items():
+        names.add(field_name)
+        alias = field.validation_alias
+        if isinstance(alias, str):
+            names.add(alias)
+        elif isinstance(alias, AliasChoices):
+            names.update(c for c in alias.choices if isinstance(c, str))
+        if isinstance(field.alias, str):
+            names.add(field.alias)
+    return names
+
+
+def _reject_unknown_credential_kwargs(
+    settings_cls: Type[PydanticBaseSettings], values: dict[str, Any]
+) -> None:
+    """Raise on a credential-shaped kwarg the model would silently drop.
+
+    Raises:
+        ValueError: If a kwarg looks like a credential but matches no field or
+            alias. The message names the key only — never its value.
+    """
+    accepted = _accepted_input_names(settings_cls)
+    # Leading underscore = pydantic-settings' own kwargs (_env_file,
+    # _secrets_dir, …), not settings fields.
+    unknown = [k for k in values if not k.startswith("_") and k not in accepted]
+    bad = [k for k in unknown if _CREDENTIAL_KEY_RE.search(k)]
+    if not bad:
+        return
+    known = sorted(n for n in _accepted_input_names(settings_cls) if _CREDENTIAL_KEY_RE.search(n))
+    raise ValueError(
+        f"Unknown credential setting(s): {', '.join(sorted(bad))}. "
+        f"{settings_cls.__name__} accepts: {', '.join(known)}."
+    )
+
+
 def _get_json_config_source(
     settings_cls: Type[PydanticBaseSettings],
     json_file: Path,
@@ -171,6 +216,18 @@ class BaseSettings(WorkflowSettingsMixin, AppSettingsMixin, CLISettingsMixin, Py
         env_nested_delimiter="__",
         extra="ignore",
     )
+
+    def __init__(self, **values: Any) -> None:
+        """Construct settings, rejecting credential kwargs that would be dropped.
+
+        ``extra="ignore"`` (needed so config files may carry keys a given app
+        does not define) means a mistyped constructor argument vanishes without
+        a word. That is tolerable for an ordinary setting and dangerous for a
+        credential — the app then runs unauthenticated, or silently on a
+        different key. Only credential-shaped unknown kwargs raise.
+        """
+        _reject_unknown_credential_kwargs(type(self), values)
+        super().__init__(**values)
 
     def update_setting(self, key: str, value: Any) -> None:
         """Update a single setting, using dedicated setters where required.
