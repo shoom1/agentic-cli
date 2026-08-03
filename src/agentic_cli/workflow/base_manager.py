@@ -13,8 +13,11 @@ It also provides shared implementations for:
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
+import inspect
 from abc import ABC, abstractmethod
+from contextvars import ContextVar, Token
 from typing import Any, AsyncGenerator, Awaitable, Callable, Iterator, TYPE_CHECKING
 
 from agentic_cli.workflow.events import WorkflowEvent, UserInputRequest
@@ -61,6 +64,21 @@ class BaseWorkflowManager(ABC):
     - Event streaming
     - User input request/response flow
 
+    Concurrency contract:
+        A manager runs **one turn at a time**. ``process()`` and
+        ``resume_with_job_result()`` serialize on an internal turn lock, so
+        overlapping callers queue rather than interleave — the backend's
+        per-invocation event buffers are manager-scoped, and interleaving would
+        let one invocation drain another's events. Run separate managers for
+        genuine parallelism. (The HITL input callback is context-local, so it
+        does not depend on that serialization; see ``set_input_callback``.)
+
+        Lifecycle mutation (``initialize_services``/``reinitialize``/
+        ``cleanup``) additionally takes the turn lock, so the backend is never
+        torn down under a running generator. Both locks are released on
+        cancellation. The active session/user identity remains a ContextVar,
+        so it stays correct for nested and task-spawned work.
+
     Example:
         class CustomWorkflowManager(BaseWorkflowManager):
             async def initialize_services(self) -> None:
@@ -96,20 +114,29 @@ class BaseWorkflowManager(ABC):
         self._settings = settings or get_settings()
         self._app_name = app_name or self._settings.app_name
         self._initialized = False
+        # --- Concurrency contract (see the class docstring) ---
+        # _lifecycle_lock serializes initialize/reinitialize/cleanup: background
+        # init and a first user message may call them concurrently, and the
+        # _initialized guard alone is check-then-act.
+        # _turn_lock serializes turns, and is taken by lifecycle mutation so it
+        # cannot tear the backend down under a running generator.
+        # Lock order is lifecycle → turn: a turn releases the lifecycle lock
+        # (inside _ensure_initialized) *before* taking the turn lock, so the
+        # two can never deadlock.
+        self._lifecycle_lock = asyncio.Lock()
+        self._turn_lock = asyncio.Lock()
         self._on_event = on_event
 
         # Model resolution (lazy)
         self._model: str | None = model
         self._model_resolved: bool = model is not None
 
-        # User input handling (callback-only)
-        self._user_input_callback: Callable[[UserInputRequest], Awaitable[str]] | None = None
-
-        # Active turn — set per process() call via _workflow_context(); read by
-        # JobManager to associate a long-running job with the session/user that
-        # launched it (phase 2 push/resume). None when no turn is in flight.
-        self._active_session_id: str | None = None
-        self._active_user_id: str | None = None
+        # User input handling (callback-only), context-local — see
+        # set_input_callback(). One ContextVar per manager; there are only ever
+        # a handful of managers in a process.
+        self._user_input_callback: ContextVar[
+            Callable[[UserInputRequest], Awaitable[str]] | None
+        ] = ContextVar(f"agentic_cli_input_callback_{id(self):x}", default=None)
 
         # Model registry
         self._model_registry = ModelRegistry()
@@ -128,13 +155,42 @@ class BaseWorkflowManager(ABC):
 
     def set_input_callback(
         self, callback: Callable[[UserInputRequest], Awaitable[str]]
-    ) -> None:
-        """Register a callback for handling user input requests from tools."""
-        self._user_input_callback = callback
+    ) -> "Token | None":
+        """Register a callback for handling user input requests from tools.
 
-    def clear_input_callback(self) -> None:
-        """Remove the registered user input callback."""
-        self._user_input_callback = None
+        **Context-local**, not manager-global. The turn lock serialises
+        ``process()``, but callbacks are installed *before* it: with a single
+        manager attribute, a second consumer that installed its callback while
+        a turn was already running would answer that turn's prompt, and the
+        first consumer's ``clear_input_callback()`` would then unregister the
+        second's. A task started after this call inherits the value (the
+        context is copied at ``create_task`` time), which is exactly the
+        consumer → turn relationship.
+
+        Returns:
+            The ContextVar token, for an exact ``clear_input_callback(token)``.
+            Callers may ignore it.
+        """
+        return self._user_input_callback.set(callback)
+
+    def clear_input_callback(self, token: "Token | None" = None) -> None:
+        """Remove the user input callback *this context* registered.
+
+        Args:
+            token: The token ``set_input_callback()`` returned. Passing it
+                restores whatever was installed before; without it the value is
+                cleared for this context only. Either way another consumer's
+                callback is untouched.
+        """
+        if token is not None:
+            try:
+                self._user_input_callback.reset(token)
+                return
+            except ValueError:
+                # Token from a different context (the caller crossed tasks);
+                # fall through and clear this context's value instead.
+                pass
+        self._user_input_callback.set(None)
 
     @property
     def agent_configs(self) -> list[AgentConfig]:
@@ -383,14 +439,59 @@ class BaseWorkflowManager(ABC):
     def _ensure_managers_initialized(self) -> None:
         """Create and publish the services detected from tool metadata.
 
-        Called during initialize_services() to lazily create only the
-        managers that are actually needed by the configured tools.
-        Populates ``self._services`` which is exposed to tools via
-        the service registry ContextVar.
+        Synchronous convenience wrapper around
+        :meth:`_build_services`/:meth:`_publish_services`; initialization uses
+        the transactional path in :meth:`_construct_services` instead.
         """
-        s = self._services
+        self._publish_services(self._build_services(frozenset(self._services)))
 
-        if "memory_store" in self._required_managers and MEMORY_STORE not in s:
+    def _publish_services(self, built: dict[str, Any]) -> None:
+        """Adopt constructed services without displacing anything already live."""
+        for key, service in built.items():
+            self._services.setdefault(key, service)
+
+    def _build_services(
+        self, existing: frozenset[str] = frozenset()
+    ) -> dict[str, Any]:
+        """Construct the required services into a **fresh** dict.
+
+        Pure construction: it never touches ``self._services``. Constructors
+        here can load heavy dependencies (the sentence-transformers model inside
+        ``EmbeddingService``), so this runs on a worker thread — and cancelling
+        the coroutine that awaits it does not stop that thread. Writing results
+        straight into the manager therefore published services *after* a
+        rolled-back or cleaned-up initialization, leaking whatever the thread
+        had built. The caller publishes, and only while it still owns the
+        attempt (see :meth:`_construct_services`).
+
+        Transactional in itself: if a later constructor raises, everything this
+        call already built is released before the error propagates. Nothing has
+        been published at that point, so nobody else could ever close it — an
+        abandoned SandboxManager or JobManager would keep its pool alive for
+        the life of the process.
+
+        Args:
+            existing: Service keys already published; those are not rebuilt.
+
+        Returns:
+            The newly constructed services, keyed by service key.
+
+        Raises:
+            Exception: Whatever a service constructor raised, after rollback.
+        """
+        s: dict[str, Any] = {}
+        try:
+            self._build_services_into(s, existing)
+        except BaseException:
+            self._close_services(s)
+            raise
+        return s
+
+    def _build_services_into(
+        self, s: dict[str, Any], existing: frozenset[str]
+    ) -> None:
+        """Construct the required services into ``s``. See :meth:`_build_services`."""
+        if "memory_store" in self._required_managers and MEMORY_STORE not in existing:
             from agentic_cli.tools.memory_tools import MemoryStore
 
             embedding_service = None
@@ -408,7 +509,7 @@ class BaseWorkflowManager(ABC):
 
             s[MEMORY_STORE] = MemoryStore(self._settings, embedding_service=embedding_service)
 
-        if "kb_manager" in self._required_managers and KB_MANAGER not in s:
+        if "kb_manager" in self._required_managers and KB_MANAGER not in existing:
             from pathlib import Path
             from agentic_cli.knowledge_base import KnowledgeBaseManager
 
@@ -431,14 +532,14 @@ class BaseWorkflowManager(ABC):
             else:
                 s[USER_KB_MANAGER] = s[KB_MANAGER]
 
-        if "llm_summarizer" in self._required_managers and LLM_SUMMARIZER not in s:
+        if "llm_summarizer" in self._required_managers and LLM_SUMMARIZER not in existing:
             s[LLM_SUMMARIZER] = self
 
-        if "sandbox_manager" in self._required_managers and SANDBOX_MANAGER not in s:
+        if "sandbox_manager" in self._required_managers and SANDBOX_MANAGER not in existing:
             from agentic_cli.tools.sandbox.manager import SandboxManager
             s[SANDBOX_MANAGER] = SandboxManager(self._settings)
 
-        if "job_manager" in self._required_managers and JOB_MANAGER not in s:
+        if "job_manager" in self._required_managers and JOB_MANAGER not in existing:
             from pathlib import Path
             from agentic_cli.tools.jobs import JobManager
 
@@ -450,12 +551,12 @@ class BaseWorkflowManager(ABC):
                 max_concurrent=getattr(self._settings, "max_concurrent_jobs", 4),
             )
 
-        if "arxiv_source" in self._required_managers and ARXIV_SOURCE not in s:
+        if "arxiv_source" in self._required_managers and ARXIV_SOURCE not in existing:
             from agentic_cli.tools.arxiv_source import ArxivSearchSource
             s[ARXIV_SOURCE] = ArxivSearchSource()
 
         # Always construct the PermissionEngine (all agents may need it)
-        if PERMISSION_ENGINE not in s:
+        if PERMISSION_ENGINE not in existing:
             from pathlib import Path
             from agentic_cli.workflow.permissions import PermissionContext, PermissionEngine
             ctx = PermissionContext(
@@ -469,6 +570,36 @@ class BaseWorkflowManager(ABC):
 
         # Always ensure workflow reference is available
         s[WORKFLOW] = self
+
+    async def _construct_services(self) -> None:
+        """Build services off the event loop and publish them transactionally.
+
+        The build runs on a worker thread that cancellation cannot interrupt,
+        so the result is published only if this attempt is still the one that
+        owns initialization. If the await is cancelled, whatever the thread
+        goes on to build is *released* rather than published — otherwise a
+        rolled-back initialization would leave a live sandbox or job manager
+        behind that nothing would ever close.
+        """
+        build = asyncio.ensure_future(
+            asyncio.to_thread(self._build_services, frozenset(self._services))
+        )
+        try:
+            built = await asyncio.shield(build)
+        except BaseException:
+            build.add_done_callback(self._discard_built_services)
+            raise
+        self._publish_services(built)
+
+    def _discard_built_services(self, build: "asyncio.Future[dict[str, Any]]") -> None:
+        """Release services constructed for an attempt that no longer owns init."""
+        if build.cancelled() or build.exception() is not None:
+            return
+        built = build.result()
+        if not built:
+            return
+        logger.warning("services_discarded_after_rollback", services=sorted(built))
+        self._close_services(built)
 
     async def summarize(self, content: str, prompt: str) -> str:
         """Summarize content using the configured LLM.
@@ -612,12 +743,65 @@ class BaseWorkflowManager(ABC):
             registry_token.var.reset(registry_token)
             settings_token.var.reset(settings_token)
 
+    async def _aclose_owned(self, resource: Any, label: str) -> None:
+        """Close one resource this manager owns; awaits an async close.
+
+        The close contract is duck-typed on ``aclose()``/``close()`` (ADK's
+        ``DatabaseSessionService`` exposes an async ``close()``; the in-memory
+        one exposes none) and must be idempotent: callers null out their
+        reference first, so a second cleanup passes ``None`` and does nothing.
+        Never raises — a failing close must not block shutdown.
+
+        Args:
+            resource: The owned resource, or None.
+            label: Name used in the failure log.
+        """
+        if resource is None:
+            return
+        closer = getattr(resource, "aclose", None) or getattr(resource, "close", None)
+        if closer is None:
+            return
+        try:
+            result = closer()
+            if inspect.isawaitable(result):
+                await result
+        except Exception as exc:  # noqa: BLE001 - shutdown must not fail
+            logger.warning("resource_close_failed", resource=label, error=str(exc))
+
+    # Services that own OS resources, and the sync method that releases them.
+    _SYNC_SERVICE_CLOSERS = (
+        (SANDBOX_MANAGER, "cleanup"),
+        (JOB_MANAGER, "close"),
+    )
+
+    @classmethod
+    def _close_services(cls, services: dict[str, Any]) -> None:
+        """Release the owned resources in a service mapping. Never raises.
+
+        Each closer is isolated — one raising must not leave the rest open.
+        Used both for the live registry and for services a rolled-back
+        initialization constructed but never published.
+        """
+        for key, method in cls._SYNC_SERVICE_CLOSERS:
+            service = services.get(key)
+            if service is None:
+                continue
+            try:
+                getattr(service, method)()
+            except Exception as exc:  # noqa: BLE001 - shutdown must not fail
+                logger.warning("resource_close_failed", resource=key, error=str(exc))
+
     def _cleanup_managers(self) -> None:
-        """Clean up all manager resources (call from subclass cleanup)."""
-        sandbox = self._services.get(SANDBOX_MANAGER)
-        if sandbox is not None:
-            sandbox.cleanup()
-        self._services = {}
+        """Release the synchronous resources this manager owns.
+
+        Only services this manager created are released (see
+        ``_build_services``). Idempotent: the registry is emptied, so a second
+        call finds nothing. The registry is cleared regardless of failures.
+        """
+        try:
+            self._close_services(self._services)
+        finally:
+            self._services = {}
 
     @property
     @abstractmethod
@@ -649,11 +833,22 @@ class BaseWorkflowManager(ABC):
 
     async def initialize_services(self, validate: bool = True) -> None:
         """Initialize backend services asynchronously.
+
+        Concurrency-safe, idempotent and transactional: concurrent callers
+        serialize on the lifecycle lock, late arrivals see ``_initialized`` and
+        return, and a failed attempt releases whatever it had allocated instead
+        of leaving the manager half-built.
+
         Args:
             validate: If True, validate settings before initialization.
         Raises:
             SettingsValidationError: If settings validation fails.
         """
+        async with self._lifecycle_lock:
+            await self._initialize_locked(validate=validate)
+
+    async def _initialize_locked(self, validate: bool = True) -> None:
+        """Initialization body. The caller must hold ``_lifecycle_lock``."""
         if self._initialized:
             return
 
@@ -677,14 +872,16 @@ class BaseWorkflowManager(ABC):
 
         # Create services BEFORE backend init so _build_tools() can
         # produce factory-bound tools during agent/graph creation.
-        # Offloaded to a worker thread because constructors here may
-        # load heavy dependencies (e.g. the sentence-transformers model
-        # inside EmbeddingService) that would otherwise block the event
-        # loop — which keeps the prompt unresponsive at startup.
-        import asyncio as _asyncio
-
-        await _asyncio.to_thread(self._ensure_managers_initialized)
-        await self._do_initialize()
+        # Construction is offloaded to a worker thread (heavy constructors)
+        # and published transactionally — see _construct_services.
+        try:
+            await self._construct_services()
+            await self._do_initialize()
+        except BaseException:
+            # Roll back: services (and any backend resource the partial
+            # _do_initialize created) must not outlive the failed attempt.
+            await self._release_resources()
+            raise
         self._initialized = True
 
     # Label for this manager's own model in validation errors.
@@ -728,6 +925,64 @@ class BaseWorkflowManager(ABC):
         error surfaces immediately and costs nothing.
         """
         return None
+
+    async def _ensure_initialized(self) -> None:
+        """Initialize on demand. Backends override to add readiness checks."""
+        if not self._initialized:
+            await self.initialize_services()
+
+    def _backend_ready(self) -> bool:
+        """Whether the backend resources a turn needs are live right now.
+
+        Backends override to check their own handles (ADK: runner, session
+        service, root agent). Used by :meth:`_turn_admission` to detect a
+        cleanup that landed between a turn's initialization and its admission.
+        """
+        return self._initialized
+
+    @contextlib.asynccontextmanager
+    async def _turn_admission(self) -> "AsyncGenerator[None, None]":
+        """Hold the turn lock with a *live* backend behind it.
+
+        Initialization takes the lifecycle lock, so a turn must initialize
+        **before** taking the turn lock — that ordering is what stops
+        cleanup (lifecycle → turn) from deadlocking against a running turn.
+        It also leaves a window: a cleanup already queued on the turn lock runs
+        first and releases everything the turn just initialized, and the turn
+        was then admitted to a torn-down backend (a ``None`` runner, surfacing
+        as an ``AttributeError`` deep inside ADK).
+
+        Readiness is therefore re-checked *while holding the turn lock*. If the
+        backend was released underneath, the lock is dropped and initialization
+        retried once — anything worse fails cleanly rather than running against
+        released resources.
+
+        Raises:
+            RuntimeError: If the backend cannot be made ready.
+        """
+        for attempt in (1, 2):
+            await self._ensure_initialized()
+            await self._turn_lock.acquire()
+            if self._backend_ready():
+                try:
+                    yield
+                finally:
+                    self._turn_lock.release()
+                return
+            self._turn_lock.release()
+            logger.info("turn_admission_retry", attempt=attempt)
+        raise RuntimeError(
+            f"{type(self).__name__} was released while this turn waited for "
+            "admission and could not be reinitialized. Retry the request."
+        )
+
+    async def _release_resources(self) -> None:
+        """Release everything this manager owns. Idempotent, never raises.
+
+        Backends override to add their own resources (ADK closes the session
+        service); the base releases the service registry.
+        """
+        self._cleanup_managers()
 
     @abstractmethod
     async def _do_initialize(self) -> None:
@@ -807,7 +1062,9 @@ class BaseWorkflowManager(ABC):
 
         Called by tools that need user interaction. Requires
         ``set_input_callback()`` to be set by the consumer (e.g.
-        MessageProcessor) before any tool invokes this method.
+        MessageProcessor) before any tool invokes this method. The callback is
+        resolved from the *current context*, so a tool always reaches the
+        consumer that started its turn.
 
         Args:
             request: The user input request.
@@ -824,13 +1081,14 @@ class BaseWorkflowManager(ABC):
             tool_name=request.tool_name,
         )
 
-        if self._user_input_callback is None:
+        callback = self._user_input_callback.get()
+        if callback is None:
             raise RuntimeError(
                 "No user input callback registered. "
                 "Call set_input_callback() before invoking tools that require user input."
             )
 
-        return await self._user_input_callback(request)
+        return await callback(request)
 
     # Async context manager support
 

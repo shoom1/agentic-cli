@@ -667,10 +667,15 @@ class TestMessageProcessorRateLimit:
 
 
 class TestUserInputCallback:
-    """Tests for the direct _user_input_callback path in request_user_input."""
+    """Tests for the registered-callback path in request_user_input.
+
+    The callback lives in a per-manager ContextVar (it is context-local, so two
+    consumers cannot capture each other's prompts), hence set_input_callback()
+    rather than an attribute assignment.
+    """
 
     async def test_callback_invoked_when_set(self, mock_settings, simple_agent_config):
-        """When _user_input_callback is set, request_user_input calls it directly."""
+        """With a callback registered, request_user_input calls it directly."""
         from agentic_cli.workflow.events import UserInputRequest, InputType
 
         manager = _create_manager(mock_settings, simple_agent_config)
@@ -681,7 +686,7 @@ class TestUserInputCallback:
             captured_requests.append(request)
             return "user answer"
 
-        manager._user_input_callback = fake_callback
+        manager.set_input_callback(fake_callback)
 
         request = UserInputRequest(
             request_id="req-1",
@@ -700,7 +705,7 @@ class TestUserInputCallback:
         from agentic_cli.workflow.events import UserInputRequest, InputType
 
         manager = _create_manager(mock_settings, simple_agent_config)
-        assert manager._user_input_callback is None
+        assert manager._user_input_callback.get() is None
 
         request = UserInputRequest(
             request_id="req-2",

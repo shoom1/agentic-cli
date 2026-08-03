@@ -164,6 +164,10 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         self._adk_config_path = adk_config_path
 
         self._session_service: BaseSessionService | None = None
+        # True while reinitialize(preserve_sessions=True) is in flight: the
+        # live session service is being carried across and must survive both a
+        # successful rebuild and a rollback.
+        self._session_service_pinned = False
         self._root_agent: Agent | None = None
         self._runner: Runner | None = None
 
@@ -243,15 +247,38 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
     async def cleanup(self) -> None:
         """Clean up workflow manager resources.
 
-        Releases resources and resets state. Call this before
-        shutting down or when reinitializing with new settings.
+        Releases resources and resets state. Call this before shutting down or
+        when reinitializing with new settings. Idempotent: references are
+        detached before being closed, so a repeat call is a no-op. Takes the
+        lifecycle and turn locks, so it cannot tear the runner down while a
+        turn is streaming.
+        """
+        async with self._lifecycle_lock:
+            async with self._turn_lock:
+                await self._release_resources()
+
+    async def _release_resources(self, keep_session_service: bool = False) -> None:
+        """Release owned resources; never raises.
+
+        The session service is *closed*, not merely dropped — the durable
+        ``DatabaseSessionService`` holds a SQLAlchemy engine whose connection
+        pool leaks otherwise. ``reinitialize(preserve_sessions=True)`` keeps it
+        instead, and then reuses that same instance rather than building a
+        replacement that would be discarded unclosed.
+
+        Args:
+            keep_session_service: Retain (do not close) the session service.
         """
         logger.debug("cleaning_up_workflow_manager")
 
-        # Clear runner and agents
+        # Detach first so a concurrent/repeat cleanup can't double-close. A
+        # pinned service is being carried across a reinitialize, so a rollback
+        # inside that window must not close it either.
+        session_service = None
+        if not (keep_session_service or self._session_service_pinned):
+            session_service, self._session_service = self._session_service, None
         self._runner = None
         self._root_agent = None
-        self._session_service = None
         self._initialized = False
 
         # Clear LLM logging plugin
@@ -259,7 +286,9 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             self._llm_logging_plugin.clear()
             self._llm_logging_plugin = None
 
-        # Clean up managers (sandbox, etc.)
+        await self._aclose_owned(session_service, "session_service")
+
+        # Clean up managers (sandbox, jobs, etc.)
         self._cleanup_managers()
 
         logger.info("workflow_manager_cleaned_up")
@@ -271,13 +300,24 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
     ) -> None:
         """Reinitialize the workflow manager with new configuration.
 
-        Use this method when settings change (e.g., model switch) to
-        properly recreate agents and runners with the new configuration.
+        Use this method when settings change (e.g. a model switch) to recreate
+        agents and runners with the new configuration.
+
+        Transactional: on failure the manager ends up *uninitialized* (
+        ``is_initialized`` False) with nothing left allocated, rather than
+        holding a half-built runner that would answer as if it were ready. The
+        caller (``WorkflowController``) turns that into a FAILED state. A
+        preserved session service survives both outcomes, so a retry can still
+        continue the same conversations.
 
         Args:
             model: Optional new model to use. If None, re-resolves from settings.
-            preserve_sessions: If True, keeps existing session data (default).
-                             If False, creates fresh session service.
+            preserve_sessions: If True, keeps the existing session service
+                (default) and reuses it for the new runner. If False, the old
+                one is closed and a fresh one created.
+
+        Raises:
+            Exception: Whatever initialization raised, after rollback.
         """
         logger.info(
             "reinitializing_workflow_manager",
@@ -285,29 +325,24 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             preserve_sessions=preserve_sessions,
         )
 
-        # Store session service if preserving
-        old_session_service = self._session_service if preserve_sessions else None
-
-        # Clean up current state
-        await self.cleanup()
-
-        # Update model
-        self._reset_model(model)
-
-        # Reinitialize services
-        await self.initialize_services()
-
-        # Restore session service if preserving
-        if old_session_service is not None and preserve_sessions:
-            self._session_service = old_session_service
-            # Update runner with preserved session service
-            if self._runner and self._root_agent:
-                self._runner = Runner(
-                    app_name=self.app_name,
-                    agent=self._root_agent,
-                    session_service=self._session_service,
-                    plugins=self._init_plugins(),
-                )
+        async with self._lifecycle_lock:
+            async with self._turn_lock:
+                preserved = self._session_service if preserve_sessions else None
+                await self._release_resources(keep_session_service=preserve_sessions)
+                self._reset_model(model)
+                self._session_service_pinned = preserve_sessions
+                try:
+                    # _do_initialize reuses self._session_service when set, so
+                    # no replacement service is built for a preserved one.
+                    await self._initialize_locked()
+                except BaseException:
+                    # _initialize_locked already rolled back what it created;
+                    # restore the preserved service so a retry can use it.
+                    if preserved is not None:
+                        self._session_service = preserved
+                    raise
+                finally:
+                    self._session_service_pinned = False
 
         logger.info(
             "workflow_manager_reinitialized",
@@ -765,9 +800,13 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         """ADK-specific initialization: session service, agents, runner."""
         logger.info("initializing_services", app_name=self.app_name)
 
-        # Create session service (durable DatabaseSessionService by default;
-        # InMemory only when session_store='memory').
-        self._session_service = self._make_session_service()
+        # Create the session service (durable DatabaseSessionService by
+        # default; InMemory only when session_store='memory') — unless one is
+        # already held, which is how reinitialize(preserve_sessions=True)
+        # carries live conversations across without building a replacement
+        # that would then be discarded unclosed.
+        if self._session_service is None:
+            self._session_service = self._make_session_service()
 
         # Create agent hierarchy — natively from an ADK config, or from configs.
         if self._adk_config_path:
@@ -805,13 +844,29 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         validate_agent_graph(self._agent_configs, backend=self.backend_type)
 
     async def _ensure_initialized(self) -> None:
-        """Ensure services are initialized before processing."""
+        """Ensure services are initialized before processing.
+
+        Called *before* the turn lock is taken, so a turn never waits on the
+        lifecycle lock while holding the turn lock (that ordering is what keeps
+        cleanup/reinitialize from deadlocking against a running turn). Because
+        of that ordering a cleanup can still land in between, which is what
+        ``_turn_admission`` re-checks with ``_backend_ready``.
+        """
         if not self._initialized:
             await self.initialize_services()
-        if not self._runner or not self._session_service or not self._root_agent:
+        if not self._backend_ready():
             raise RuntimeError(
                 "Workflow Manager failed to initialize. Check API keys and configuration."
             )
+
+    def _backend_ready(self) -> bool:
+        """True when the runner, session service and agent tree are all live."""
+        return bool(
+            self._initialized
+            and self._runner is not None
+            and self._session_service is not None
+            and self._root_agent is not None
+        )
 
     # -------------------------------------------------------------------------
     # Session handling (inlined from SessionHandler)
@@ -864,6 +919,12 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         This method sets up a settings context so that all tools called
         during processing will use this manager's settings instance.
 
+        Holds the manager's turn lock for the whole stream: the ADK plugins'
+        event buffers are manager-scoped, so overlapping turns would drain each
+        other's events. Overlapping callers queue; the lock is released on
+        cancellation. Admission also re-verifies that the backend is still live
+        (a cleanup can land between initialization and the turn lock).
+
         Args:
             message: User message
             user_id: User identifier
@@ -872,34 +933,33 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         Yields:
             WorkflowEvent objects representing workflow output
         """
-        await self._ensure_initialized()
-
         current_session_id = session_id or self.session_id
         bind_context(session_id=current_session_id, user_id=user_id)
 
         logger.info("processing_message", message_length=len(message))
 
-        # Sync event processor model (may have been lazily resolved)
-        self._event_processor.model = self.model
+        async with self._turn_admission():
+            # Sync event processor model (may have been lazily resolved)
+            self._event_processor.model = self.model
 
-        # Context setup
-        with self._workflow_context(session_id=current_session_id, user_id=user_id):
-            # Session handling
-            await self._get_or_create_session(user_id, current_session_id)
+            # Context setup
+            with self._workflow_context(session_id=current_session_id, user_id=user_id):
+                # Session handling
+                await self._get_or_create_session(user_id, current_session_id)
 
-            # Create message
-            new_message = types.Content(
-                role="user",
-                parts=[types.Part.from_text(text=message)],
-            )
+                # Create message
+                new_message = types.Content(
+                    role="user",
+                    parts=[types.Part.from_text(text=message)],
+                )
 
-            async for event in self._run_and_stream(
-                session_id=current_session_id,
-                user_id=user_id,
-                new_message=new_message,
-                run_config=self._build_run_config(),
-            ):
-                yield event
+                async for event in self._run_and_stream(
+                    session_id=current_session_id,
+                    user_id=user_id,
+                    new_message=new_message,
+                    run_config=self._build_run_config(),
+                ):
+                    yield event
 
     def _build_run_config(self):
         """Build a RunConfig with context-window compression if enabled."""
@@ -1013,8 +1073,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             record: The terminal ``JobRecord`` to resume from.
             result: The job's result; fetched from the JobManager if omitted.
         """
-        await self._ensure_initialized()
-
         session_id = record.session_id
         user_id = record.user_id
         if not session_id or not user_id or not record.call_id:
@@ -1028,43 +1086,47 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             return
 
         bind_context(session_id=session_id, user_id=user_id)
-        self._event_processor.model = self.model
 
-        with self._workflow_context(session_id=session_id, user_id=user_id):
-            # The pending call lives in the existing session; don't create a new
-            # empty one (that would have no call to answer).
-            session = await self._session_service.get_session(
-                app_name=self.app_name, user_id=user_id, session_id=session_id,
-            )
-            if session is None:
-                logger.warning("job_resume_session_missing", job_id=record.job_id,
-                               session_id=session_id)
-                return
+        # Same admission as process(): a resume is a turn, must not interleave
+        # with a user turn, and must not run against a released backend.
+        async with self._turn_admission():
+            self._event_processor.model = self.model
 
-            if result is None:
-                jm = self._services.get(JOB_MANAGER)
-                if jm is not None:
-                    result = jm.result(record.job_id)
+            with self._workflow_context(session_id=session_id, user_id=user_id):
+                # The pending call lives in the existing session; don't create a
+                # new empty one (that would have no call to answer).
+                session = await self._session_service.get_session(
+                    app_name=self.app_name, user_id=user_id, session_id=session_id,
+                )
+                if session is None:
+                    logger.warning("job_resume_session_missing", job_id=record.job_id,
+                                   session_id=session_id)
+                    return
 
-            function_response = types.FunctionResponse(
-                id=record.call_id,
-                name=record.call_name or record.tool,
-                response=self._job_result_payload(record, result),
-            )
-            new_message = types.Content(
-                role="user",
-                parts=[types.Part(function_response=function_response)],
-            )
+                if result is None:
+                    jm = self._services.get(JOB_MANAGER)
+                    if jm is not None:
+                        result = jm.result(record.job_id)
 
-            logger.info("job_resume_started", job_id=record.job_id,
-                        call_id=record.call_id, state=record.state.value)
-            async for event in self._run_and_stream(
-                session_id=session_id,
-                user_id=user_id,
-                new_message=new_message,
-                run_config=self._build_run_config(),
-            ):
-                yield event
+                function_response = types.FunctionResponse(
+                    id=record.call_id,
+                    name=record.call_name or record.tool,
+                    response=self._job_result_payload(record, result),
+                )
+                new_message = types.Content(
+                    role="user",
+                    parts=[types.Part(function_response=function_response)],
+                )
+
+                logger.info("job_resume_started", job_id=record.job_id,
+                            call_id=record.call_id, state=record.state.value)
+                async for event in self._run_and_stream(
+                    session_id=session_id,
+                    user_id=user_id,
+                    new_message=new_message,
+                    run_config=self._build_run_config(),
+                ):
+                    yield event
 
     @staticmethod
     def _job_result_payload(record, result: Any) -> dict:

@@ -444,6 +444,17 @@ class TestDeprecatedAliasesApplyAtRuntime:
             assert config.model == "gemini-2.5-pro"
 
 
+class _ReinitManager(_TestManager):
+    """A manager whose reinitialize really re-runs initialization."""
+
+    async def reinitialize(self, model=None, preserve_sessions=True):
+        async with self._lifecycle_lock:
+            async with self._turn_lock:
+                self._initialized = False
+                self._reset_model(model)
+                await self._initialize_locked()
+
+
 class TestManagerModelIsValidated:
     """Every model the *runtime* will actually send must be validated.
 
@@ -489,6 +500,14 @@ class TestManagerModelIsValidated:
 
             assert manager.model == "gemini-2.5-pro"
 
+    async def test_reinitialize_override_is_normalized(self):
+        with MockContext(google_api_key="k") as ctx:
+            manager = self._manager(ctx.settings, cls=_ReinitManager)
+            await manager.initialize_services()
+
+            await manager.reinitialize(model="gemini-old")
+
+            assert manager.model == "gemini-2.5-pro"
 
     async def test_explicit_model_without_a_credential_fails(self):
         with MockContext(google_api_key="k") as ctx:
