@@ -620,6 +620,10 @@ class BaseWorkflowManager(ABC):
         if self._initialized:
             return
 
+        # Validate the declared agent graph before anything is allocated or
+        # any network call is made: a bad graph is a static configuration
+        # error and should not cost a model listing or an embedding model.
+        self._validate_agent_graph()
         from agentic_cli.config import validate_settings
 
         if validate:
@@ -645,6 +649,14 @@ class BaseWorkflowManager(ABC):
         await _asyncio.to_thread(self._ensure_managers_initialized)
         await self._do_initialize()
         self._initialized = True
+
+    def _validate_agent_graph(self) -> None:
+        """Validate the declared agent graph. Backends may narrow this.
+
+        Runs before discovery and service creation so a static configuration
+        error surfaces immediately and costs nothing.
+        """
+        return None
 
     @abstractmethod
     async def _do_initialize(self) -> None:

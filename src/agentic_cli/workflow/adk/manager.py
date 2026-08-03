@@ -22,7 +22,7 @@ from google.adk.tools import LongRunningFunctionTool
 
 from agentic_cli.workflow.base_manager import BaseWorkflowManager
 from agentic_cli.workflow.events import WorkflowEvent, EventType
-from agentic_cli.workflow.config import AgentConfig
+from agentic_cli.workflow.config import AgentConfig, validate_agent_graph
 from agentic_cli.workflow.model_settings import ModelSettings, ThinkingSettings
 from agentic_cli.workflow.adk.event_processor import ADKEventProcessor
 from agentic_cli.workflow.adk.permission_plugin import PermissionPlugin
@@ -641,81 +641,70 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                 wrapped.append(tool)
         return wrapped
 
+    def _build_agent(
+        self,
+        config: "AgentConfig",
+        service_map: dict,
+        sub_agents: list[Agent] | None = None,
+    ) -> Agent:
+        """Construct one ``LlmAgent`` from a config (with resolved sub-agents)."""
+        return LlmAgent(
+            name=config.name,
+            model=self._build_model_arg(config),
+            instruction=config.get_prompt(self._settings),
+            tools=self._wrap_long_running(
+                self._assemble_agent_tools(config, service_map)
+            ),
+            description=config.description,
+            sub_agents=sub_agents or [],
+            planner=self._get_planner(config),
+            generate_content_config=self._get_generate_content_config(config),
+        )
+
     def _create_agents(self) -> Agent:
-        """Create agent hierarchy from configs.
+        """Create the agent hierarchy from configs, in dependency order.
+
+        The graph is validated first (``validate_agent_graph``) so duplicate
+        names, dangling ``sub_agents`` references, self-references, cycles and
+        shapes ADK cannot represent fail with the offending agent named,
+        instead of silently producing a coordinator with missing children.
+
+        Construction then follows a topological order, so an agent is always
+        built after the agents it delegates to — the previous leaves-then-
+        coordinators split silently dropped a sub-agent that was itself a
+        coordinator.
+
+        Prompt factories are called under this manager's settings context (see
+        ``AgentConfig.get_prompt``), so a prompt that reads settings sees the
+        manager's instance rather than the global singleton.
 
         Returns:
-            Root agent (the first agent with sub_agents, or first agent if none have sub_agents)
-        """
-        # Build a map of agent configs by name
-        config_map = {config.name: config for config in self._agent_configs}
+            Root agent (the first agent with sub_agents, or the first config).
 
-        # Build agents (non-coordinators first, then coordinators)
+        Raises:
+            AgentGraphError: If the configured graph is invalid.
+        """
+        graph = validate_agent_graph(self._agent_configs, backend=self.backend_type)
+
         agent_map: dict[str, Agent] = {}
         service_map = self._get_service_tool_map()
 
-        # First pass: create agents without sub_agents (leaf agents)
-        for config in self._agent_configs:
-            if not config.sub_agents:
-                agent_map[config.name] = LlmAgent(
-                    name=config.name,
-                    model=self._build_model_arg(config),
-                    instruction=config.get_prompt(),
-                    tools=self._wrap_long_running(
-                        self._assemble_agent_tools(config, service_map)
-                    ),
-                    description=config.description or None,
-                    planner=self._get_planner(config),
-                    generate_content_config=self._get_generate_content_config(config),
-                )
-                logger.debug("agent_created", name=config.name, type="leaf")
+        from agentic_cli.config import SettingsContext
 
-        # Second pass: create agents with sub_agents (coordinators)
-        for config in self._agent_configs:
-            if config.sub_agents:
-                sub_agent_instances = []
-                for sub_name in config.sub_agents:
-                    if sub_name in agent_map:
-                        sub_agent_instances.append(agent_map[sub_name])
-                    else:
-                        logger.warning(
-                            "sub_agent_not_found",
-                            coordinator=config.name,
-                            sub_agent=sub_name,
-                        )
-
-                agent_map[config.name] = LlmAgent(
-                    name=config.name,
-                    model=self._build_model_arg(config),
-                    instruction=config.get_prompt(),
-                    tools=self._wrap_long_running(
-                        self._assemble_agent_tools(config, service_map)
-                    ),
-                    description=config.description or None,
-                    sub_agents=sub_agent_instances,
-                    planner=self._get_planner(config),
-                    generate_content_config=self._get_generate_content_config(config),
-                )
+        # Prompt factories run inside the manager's settings context.
+        with SettingsContext(self._settings):
+            for name in graph.build_order:
+                config = graph.config_map[name]
+                sub_agents = [agent_map[sub] for sub in config.sub_agents]
+                agent_map[name] = self._build_agent(config, service_map, sub_agents)
                 logger.debug(
                     "agent_created",
-                    name=config.name,
-                    type="coordinator",
-                    sub_agents=[a.name for a in sub_agent_instances],
+                    name=name,
+                    type="coordinator" if sub_agents else "leaf",
+                    sub_agents=[a.name for a in sub_agents],
                 )
 
-        # Find root agent (first with sub_agents, or first in list)
-        root_agent = None
-        for config in self._agent_configs:
-            if config.sub_agents:
-                root_agent = agent_map[config.name]
-                break
-
-        if root_agent is None and self._agent_configs:
-            root_agent = agent_map[self._agent_configs[0].name]
-
-        if root_agent is None:
-            raise RuntimeError("No agents configured")
-
+        root_agent = agent_map[graph.root_name]
         logger.info("agents_created", root=root_agent.name, total=len(agent_map))
         return root_agent
 
@@ -803,6 +792,17 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             agent_name=self._root_agent.name if self._root_agent else None,
             required_managers=list(self._required_managers),
         )
+
+    def _validate_agent_graph(self) -> None:
+        """Reject an unbuildable agent graph before anything is allocated.
+
+        Runs at the top of initialization — ahead of model discovery, service
+        construction and the session service — so a static configuration error
+        costs no network call and leaves nothing to roll back.
+        """
+        if self._adk_config_path:
+            return  # native ADK config: ADK owns the topology
+        validate_agent_graph(self._agent_configs, backend=self.backend_type)
 
     async def _ensure_initialized(self) -> None:
         """Ensure services are initialized before processing."""
