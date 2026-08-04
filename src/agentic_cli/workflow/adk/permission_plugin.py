@@ -61,11 +61,34 @@ except ImportError:
     pass
 
 
+def _native_transfer_tool_type() -> type | None:
+    """ADK's exact ``TransferToAgentTool`` class, or None if unavailable."""
+    try:
+        from google.adk.tools.transfer_to_agent_tool import TransferToAgentTool
+    except ImportError:  # pragma: no cover - ADK always ships it today
+        return None
+    return TransferToAgentTool
+
+
 # ADK's own function-tool types: their documented contract is to call exactly
 # ``self.func``, so the callable's identity is the tool's identity. Matched by
 # exact type — a subclass may override ``run_async`` and run something else
 # while still advertising a genuine ``func``.
-_TRUSTED_FUNCTION_TOOL_TYPES = (FunctionTool, LongRunningFunctionTool)
+#
+# ``TransferToAgentTool`` is in the list for the same reason and on the same
+# terms. ADK auto-injects it into any agent with ``sub_agents``, and it is a
+# ``FunctionTool`` *subclass*, so an exact-type check on ``FunctionTool`` alone
+# denied the built-in routing tool as unregistered — delegation could not work
+# at all, even with permissions disabled. It is safe to add because ADK
+# constructs it as ``super().__init__(func=transfer_to_agent)`` and overrides
+# only ``_get_declaration`` (to add the agent-name enum), never ``run_async``:
+# what it invokes is still exactly ``self.func``. Listing the exact class keeps
+# every other ``FunctionTool`` subclass denied.
+_TRUSTED_FUNCTION_TOOL_TYPES = tuple(
+    t
+    for t in (FunctionTool, LongRunningFunctionTool, _native_transfer_tool_type())
+    if t is not None
+)
 
 
 def _trusted_wrapped_callable(tool: "BaseTool") -> Any | None:

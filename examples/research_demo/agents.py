@@ -204,9 +204,35 @@ Four reader tools, ordered by increasing granularity (synthesis → evidence):
 
 Rule of thumb: concept pages > sidecars > chunks. Concept pages and sidecars are synthesis-first; chunks are evidence-first.
 
+## Tool Names
+
+Call only the tools that appear in your tool declarations, and call each one by
+its exact declared name, exactly as written. If a task needs two tools, make two
+separate calls. To hand work to another agent, call
+`transfer_to_agent(agent_name="<one of your sub-agents>")`.
+
+## When to plan, and when to just do it
+
+Match the response to the size of the request:
+
+- **Explicit, bounded request** — one clear operation with its parameters
+  already given ("search arXiv for two papers on X", "ingest this note",
+  "read it back"). **Do it now**: execute or delegate directly. Do not write a
+  plan and do not ask for confirmation; the user already told you exactly what
+  they want.
+- **Open-ended or substantial multi-step research** — a goal rather than an
+  operation ("research X and write me a report", anything spanning several
+  tools or agents). **Plan first**: `save_plan(content)` with markdown
+  checkboxes, show the plan immediately, and wait for confirmation.
+- **The user asks for a plan** — always plan, whatever the size.
+
+Planning is a workflow courtesy, not a safety gate: what you are allowed to do
+is enforced by tool permissions, not by whether you planned first. So never use
+"I should plan" as a reason to refuse or defer a small, explicit request.
+
 ## Workflow Guidelines
 
-When the user asks you to research something:
+When the user asks you to research something open-ended:
 1. **Check `kb_search_concepts(topic)`** — reuse any existing synthesis before deriving a new one.
 2. Browse the knowledge base with `kb_list` to see what's already ingested.
 3. Run `kb_search` only if you need evidence that isn't already summarized in a concept page.
@@ -255,13 +281,14 @@ After all research tasks are complete, write a comprehensive report:
 - ALWAYS show the plan after creating it
 - ALWAYS show progress after completing tasks
 - Share findings and learnings explicitly in your responses
-- Ask for confirmation before starting lengthy work
+- Ask for confirmation before starting *lengthy* work — not before a single
+  explicit operation the user has already spelled out
 - Be thorough and detailed in your findings and reports
 """
 
 
 AGENT_CONFIGS = [
-    # Leaf agent: arXiv specialist (must be listed before coordinator)
+    # Leaf agent: arXiv specialist
     AgentConfig(
         name="arxiv_specialist",
         prompt=ARXIV_SPECIALIST_PROMPT,
@@ -279,7 +306,7 @@ AGENT_CONFIGS = [
         ],
         description="arXiv paper research specialist: search, analyze, save, and catalog academic papers",
     ),
-    # Leaf agent: data analyst (must be listed before coordinator)
+    # Leaf agent: data analyst
     AgentConfig(
         name="data_analyst",
         prompt=DATA_ANALYST_PROMPT,
@@ -287,7 +314,7 @@ AGENT_CONFIGS = [
         tools=[sandbox_execute, read_file, write_file, ask_clarification],
         description="Stateful data-analysis specialist: loads datasets and runs multi-step pandas/plotting analysis in an isolated executor.",
     ),
-    # Leaf agent: report writer (must be listed before coordinator)
+    # Leaf agent: report writer
     AgentConfig(
         name="report_writer",
         prompt=report_writer_prompt,
