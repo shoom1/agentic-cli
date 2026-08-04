@@ -7,6 +7,7 @@ model deprecation gracefully.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from dataclasses import dataclass, field
@@ -16,12 +17,47 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+def _close_quietly(client: Any) -> None:
+    """Release a provider SDK client after a listing, if it can be closed.
+
+    Both provider clients hold an HTTP connection pool and expose ``close()``;
+    a listing is a one-shot call, so the pool would otherwise linger until GC.
+    """
+    close = getattr(client, "close", None)
+    if close is None:
+        return
+    try:
+        close()
+    except Exception as exc:  # noqa: BLE001 - closing must not fail a listing
+        logger.debug("Failed to close provider client: %s", exc)
+
+
 class ModelFamily(str, Enum):
     """Model provider families."""
 
     GEMINI = "gemini"
     CLAUDE = "claude"
     GPT = "gpt"
+
+
+class DiscoveryState(str, Enum):
+    """How much the registry actually knows about one provider's models.
+
+    Tracked per family, because providers fail independently: an Anthropic
+    outage must not make the Gemini list non-authoritative, and it must not
+    make the *Anthropic* fallback list authoritative either.
+
+    - ``UNATTEMPTED`` — no key, or no refresh yet. Nothing is known; an
+      unrecognised model of that family cannot be rejected.
+    - ``SUCCEEDED`` — the provider answered with models. The list is
+      authoritative: an unknown model of that family is an error.
+    - ``DEGRADED`` — the listing failed or came back empty, so the hardcoded
+      fallbacks stand in. Known-incomplete; never authoritative.
+    """
+
+    UNATTEMPTED = "unattempted"
+    SUCCEEDED = "succeeded"
+    DEGRADED = "degraded"
 
 
 @dataclass
@@ -75,11 +111,57 @@ class ModelRegistry:
         self._models: dict[str, ModelInfo] = {}
         self._defaults: dict[ModelFamily, str] = dict(self.FALLBACK_DEFAULTS)
         self._refreshed = False
+        # Per-family outcome of the last refresh(); empty until one runs.
+        self._discovery: dict[ModelFamily, DiscoveryState] = {}
+        # Families whose listing failed during the in-flight refresh().
+        self._degraded_families: set[ModelFamily] = set()
 
     @property
     def is_refreshed(self) -> bool:
         """Whether the registry has been populated from APIs."""
         return self._refreshed
+
+    def authority_for(self, family: ModelFamily) -> DiscoveryState:
+        """Discovery state for one provider family.
+
+        Falls back to the global ``is_refreshed`` flag only when no refresh has
+        recorded per-family outcomes (a registry whose internals were seeded
+        directly), so callers always get a definite answer.
+        """
+        recorded = self._discovery.get(family)
+        if recorded is not None:
+            return recorded
+        return DiscoveryState.SUCCEEDED if self._refreshed else DiscoveryState.UNATTEMPTED
+
+    def is_authoritative_for(self, model_id: str) -> bool:
+        """Whether this registry's list can reject ``model_id`` as unknown.
+
+        True only when *that model's* provider answered the listing — a
+        different provider's outage is irrelevant.
+        """
+        try:
+            family = self.get_family(model_id)
+        except ValueError:
+            return False
+        return self.authority_for(family) is DiscoveryState.SUCCEEDED
+
+    @property
+    def discovery_complete(self) -> bool:
+        """Whether every attempted provider answered its listing.
+
+        Coarse, kept for callers that want one flag; prefer
+        :meth:`is_authoritative_for` when judging a specific model.
+        """
+        if not self._refreshed:
+            return False
+        attempted = [
+            state
+            for state in self._discovery.values()
+            if state is not DiscoveryState.UNATTEMPTED
+        ]
+        if not attempted:
+            return True  # internals seeded directly; nothing contradicts it
+        return all(state is DiscoveryState.SUCCEEDED for state in attempted)
 
     # ------------------------------------------------------------------
     # Public sync API
@@ -203,24 +285,33 @@ class ModelRegistry:
     def resolve_model(self, model_id: str) -> str:
         """Validate a model ID against the registry.
 
-        If the model exists, returns it as-is. If deprecated or missing,
-        attempts to find the closest match in the same family and tier.
+        A **deprecated** model is transparently upgraded to the closest live
+        model in its family and tier, with a warning — that is an alias, and
+        the user's intent is unambiguous.
+
+        A model that is simply **unknown** is never silently swapped for
+        something else: if this registry is authoritative for that family
+        (its provider answered the listing) the id is rejected; otherwise it is
+        accepted as-is, because a degraded or unattempted listing cannot prove
+        the model does not exist.
 
         Args:
             model_id: Model identifier to resolve.
 
         Returns:
-            Resolved model ID (may differ from input if deprecated).
+            The resolved model ID — the input, or the replacement for a
+            deprecated alias.
 
         Raises:
-            ValueError: If no suitable model can be found.
+            ValueError: If the model's provider cannot be determined, or the
+                provider's authoritative listing does not contain it.
         """
         # Exact match
         if model_id in self._models:
             info = self._models[model_id]
             if not info.deprecated:
                 return model_id
-            # Deprecated — find replacement
+            # Deprecated alias — upgrade, loudly.
             replacement = self._find_closest_match(model_id, info.family)
             if replacement:
                 logger.warning(
@@ -229,12 +320,10 @@ class ModelRegistry:
                     replacement,
                 )
                 return replacement
+            raise ValueError(
+                f"Model '{model_id}' is deprecated and no replacement is available."
+            )
 
-        # Not in registry — if not refreshed, accept anything
-        if not self._refreshed:
-            return model_id
-
-        # Try to find closest match
         try:
             family = self.get_family(model_id)
         except ValueError:
@@ -242,14 +331,9 @@ class ModelRegistry:
                 f"Model '{model_id}' is not available and its family cannot be determined."
             )
 
-        replacement = self._find_closest_match(model_id, family)
-        if replacement:
-            logger.warning(
-                "Model '%s' is not available, using '%s' instead",
-                model_id,
-                replacement,
-            )
-            return replacement
+        if not self.is_authoritative_for(model_id):
+            # Discovery was never attempted, or this provider's listing failed.
+            return model_id
 
         available = self.get_available_models(family)
         raise ValueError(
@@ -327,14 +411,21 @@ class ModelRegistry:
             anthropic_api_key: Anthropic API key for listing Claude models.
         """
         models: dict[str, ModelInfo] = {}
+        self._degraded_families = set()
+        self._discovery = {
+            ModelFamily.GEMINI: DiscoveryState.UNATTEMPTED,
+            ModelFamily.CLAUDE: DiscoveryState.UNATTEMPTED,
+        }
 
         if google_api_key:
             google_models = await self._fetch_google_models(google_api_key)
+            self._record_discovery(ModelFamily.GEMINI, google_models)
             for m in google_models:
                 models[m.id] = m
 
         if anthropic_api_key:
             anthropic_models = await self._fetch_anthropic_models(anthropic_api_key)
+            self._record_discovery(ModelFamily.CLAUDE, anthropic_models)
             for m in anthropic_models:
                 models[m.id] = m
 
@@ -355,6 +446,20 @@ class ModelRegistry:
                 "No models fetched from APIs, using fallback lists"
             )
 
+    def _record_discovery(
+        self, family: ModelFamily, fetched: list[ModelInfo]
+    ) -> None:
+        """Record whether a provider's listing can be trusted.
+
+        A failed listing (the fetcher substituted fallbacks) and an empty one
+        are treated the same: nothing was learned, so the family is DEGRADED.
+        """
+        if family in self._degraded_families or not fetched:
+            self._discovery[family] = DiscoveryState.DEGRADED
+            logger.warning("Model discovery degraded for %s", family.value)
+        else:
+            self._discovery[family] = DiscoveryState.SUCCEEDED
+
     # Patterns to exclude from Google model listings
     _GOOGLE_EXCLUDE_PATTERNS = re.compile(
         r"-\d{3}$"           # point releases: -001, -002
@@ -370,7 +475,16 @@ class ModelRegistry:
         Filters out non-text models (image/video/audio/embedding),
         open-source models (Gemma), specialized previews, and
         duplicate aliases.
+
+        The listing itself is a blocking SDK call, so it runs on a worker
+        thread — this coroutine is awaited during startup on the CLI's event
+        loop, which must stay responsive.
         """
+        return await asyncio.to_thread(self._fetch_google_models_sync, api_key)
+
+    def _fetch_google_models_sync(self, api_key: str) -> list[ModelInfo]:
+        """Blocking Google model listing (see :meth:`_fetch_google_models`)."""
+        client = None
         try:
             from google import genai
 
@@ -412,14 +526,27 @@ class ModelRegistry:
 
         except Exception as exc:
             logger.warning("Failed to fetch Google models: %s", exc)
-            # Return fallback models
+            # Fallbacks are incomplete; mark this family degraded so callers
+            # don't treat the list as authoritative.
+            self._degraded_families.add(ModelFamily.GEMINI)
             return [
                 ModelInfo(id=mid, family=ModelFamily.GEMINI, supports_thinking="2.5" in mid or "3" in mid)
                 for mid in self.FALLBACK_GOOGLE
             ]
+        finally:
+            _close_quietly(client)
 
     async def _fetch_anthropic_models(self, api_key: str) -> list[ModelInfo]:
-        """Fetch models from Anthropic API."""
+        """Fetch models from the Anthropic API.
+
+        Runs the blocking SDK listing on a worker thread so the event loop
+        stays responsive during startup.
+        """
+        return await asyncio.to_thread(self._fetch_anthropic_models_sync, api_key)
+
+    def _fetch_anthropic_models_sync(self, api_key: str) -> list[ModelInfo]:
+        """Blocking Anthropic model listing (see :meth:`_fetch_anthropic_models`)."""
+        client = None
         try:
             import anthropic
 
@@ -453,11 +580,15 @@ class ModelRegistry:
 
         except Exception as exc:
             logger.warning("Failed to fetch Anthropic models: %s", exc)
-            # Return fallback models
+            # Fallbacks are incomplete; mark this family degraded so callers
+            # don't treat the list as authoritative.
+            self._degraded_families.add(ModelFamily.CLAUDE)
             return [
                 ModelInfo(id=mid, family=ModelFamily.CLAUDE, supports_thinking=True)
                 for mid in self.FALLBACK_ANTHROPIC
             ]
+        finally:
+            _close_quietly(client)
 
     @staticmethod
     def _normalize_anthropic_id(model_id: str) -> str:

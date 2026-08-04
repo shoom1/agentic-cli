@@ -12,6 +12,12 @@ from agentic_cli.workflow.permissions.prompt import (
     build_request,
     parse_response,
 )
+
+#: The wording this choice used to display. Spelled out here rather than
+#: imported: it is an internal parser-compatibility detail, and a test that
+#: imported it would only prove the constant equals itself. What matters is that
+#: this exact string, as a real user response, still means PROJECT.
+SUPERSEDED_ALWAYS_RESPONSE = "Allow always (save to project)"
 from agentic_cli.workflow.permissions.rules import AskScope
 
 
@@ -71,6 +77,48 @@ class TestBuildRequest:
         req = build_request("x", [])
         assert req.request_id.startswith("perm-")
 
+    def test_shows_code_preview_for_exec_capability(self):
+        """A python.exec grant is effectively allow-any-code, so the prompt must
+        surface the actual code being run, not just the capability."""
+        req = build_request(
+            "execute_python",
+            [ResolvedCapability("python.exec", "*")],
+            args={"code": "import os\nos.system('rm -rf ~')"},
+        )
+        assert "os.system('rm -rf ~')" in req.prompt
+
+    def test_shows_code_preview_for_stateful_exec_capability(self):
+        """sandbox_execute carries python.exec.stateful (a sub-namespace of
+        python.exec) — it is MORE dangerous (persistent kernel), so its code must
+        also be shown at approval, not just python.exec's."""
+        req = build_request(
+            "sandbox_execute",
+            [ResolvedCapability("python.exec.stateful", "*")],
+            args={"code": "import os\nos.system('rm -rf ~')"},
+        )
+        assert "os.system('rm -rf ~')" in req.prompt
+
+    def test_long_code_preview_is_truncated(self):
+        req = build_request(
+            "execute_python",
+            [ResolvedCapability("python.exec", "*")],
+            args={"code": "x = 1\n" * 500},
+        )
+        assert len(req.prompt) < 2000
+
+    def test_no_code_preview_for_non_exec_capability(self):
+        """A 'code'-shaped arg on a non-exec tool must not trigger a preview."""
+        req = build_request(
+            "write_file",
+            [ResolvedCapability("filesystem.write", "/foo")],
+            args={"code": "not actually executed"},
+        )
+        assert "not actually executed" not in req.prompt
+
+    def test_backward_compatible_without_args(self):
+        req = build_request("write_file", [ResolvedCapability("filesystem.write", "/foo")])
+        assert "write_file" in req.prompt
+
 
 class TestParseResponse:
     @pytest.mark.parametrize("text, scope", [
@@ -81,6 +129,27 @@ class TestParseResponse:
     ])
     def test_round_trip(self, text, scope):
         assert parse_response(text) is scope
+
+    def test_displayed_always_choice_names_the_scope_not_a_file(self):
+        """The label describes scope; it must not imply a repo write.
+
+        Grants go to ``~/.{app}/project_grants.json``, never into the project
+        directory, so a label saying "save to project" mis-described where the
+        rule lands.
+        """
+        assert ALLOW_ALWAYS_CHOICE == "Allow always for this project"
+        assert "save to project" not in ALLOW_ALWAYS_CHOICE
+
+    def test_superseded_always_response_still_parses_as_project(self):
+        """Renaming the choice must not turn an old "always" into a denial."""
+        assert SUPERSEDED_ALWAYS_RESPONSE != ALLOW_ALWAYS_CHOICE
+        assert parse_response(SUPERSEDED_ALWAYS_RESPONSE) is AskScope.PROJECT
+
+    def test_superseded_wording_is_never_offered(self):
+        """Accepted for compatibility, but never displayed."""
+        request = build_request("t", [ResolvedCapability("http.read", "https://x.test")])
+        assert SUPERSEDED_ALWAYS_RESPONSE not in request.choices
+        assert ALLOW_ALWAYS_CHOICE in request.choices
 
     def test_unknown_defaults_to_deny(self):
         assert parse_response("whatever") is AskScope.DENY

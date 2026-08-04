@@ -9,11 +9,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
+from agentic_cli.file_utils import glob_pattern_escapes_root, path_is_within
 from agentic_cli.tools.registry import (
     ToolCategory,
     register_tool,
 )
 from agentic_cli.workflow.permissions import Capability
+
+_MAX_SCAN = 10_000  # hard ceiling on matches materialized before sorting/limiting
 
 
 @register_tool(
@@ -72,14 +75,38 @@ def glob(
             "path": str(search_path),
         }
 
-    # Find matching files
-    matches = list(search_path.glob(pattern))
+    # The permission engine authorizes only `path`; a pattern like "../*" or an
+    # absolute pattern would escape that authorized root, so reject it.
+    if glob_pattern_escapes_root(pattern):
+        return {
+            "success": False,
+            "error": f"Pattern escapes the search root: {pattern!r}",
+            "path": str(search_path),
+        }
+
+    # Find matching files, capping how many we materialize (a pathological
+    # pattern like "**/*" over a huge tree must not exhaust memory).
+    matches = []
+    scan_truncated = False
+    for p in search_path.glob(pattern):
+        matches.append(p)
+        if len(matches) >= _MAX_SCAN:
+            scan_truncated = True
+            break
 
     # Filter results
     filtered = []
     for match in matches:
-        # Skip hidden files if not requested
-        if not include_hidden and match.name.startswith("."):
+        # Drop anything resolving outside the authorized root (e.g. a symlink
+        # inside `path` that points elsewhere) — defense in depth.
+        if not path_is_within(match, search_path):
+            continue
+
+        # Skip results with any hidden component, not just a hidden basename —
+        # a pattern like "**/*" otherwise leaks files under a dot-directory.
+        if not include_hidden and any(
+            part.startswith(".") for part in match.relative_to(search_path).parts
+        ):
             continue
 
         # Skip directories if not requested
@@ -97,7 +124,7 @@ def glob(
         filtered.sort(key=lambda p: p.stat().st_mtime, reverse=True)
 
     # Truncate if needed
-    truncated = len(filtered) > max_results
+    truncated = scan_truncated or len(filtered) > max_results
     filtered = filtered[:max_results]
 
     # Format output

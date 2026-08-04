@@ -10,10 +10,16 @@ Settings Management:
         set_settings(my_settings)
         settings = get_settings()
 
-    2. Context-based (isolated contexts, multi-tenant):
+    2. Context-based (isolated settings lookup, e.g. tests or per-request
+       overrides):
         with SettingsContext(my_settings):
             # Code here sees my_settings via get_settings()
             settings = get_settings()  # Returns my_settings
+
+       Note: isolation covers settings *lookup* only. API credentials are
+       exported to process-global env vars at manager initialization
+       (provider SDKs read them from the environment), so a SettingsContext
+       does not isolate credentials between contexts in one process.
 
 Settings Loading Priority (highest to lowest):
     1. Environment variables (AGENTIC_* prefix)
@@ -23,11 +29,13 @@ Settings Loading Priority (highest to lowest):
     5. Default values
 """
 
+import re
 from contextvars import ContextVar, Token
 from pathlib import Path
-from typing import Generator, Any, Tuple, Type
+from typing import Callable, Generator, Any, Sequence, Tuple, Type
 from contextlib import contextmanager
 
+from pydantic import AliasChoices
 from pydantic_settings import (
     BaseSettings as PydanticBaseSettings,
     SettingsConfigDict,
@@ -37,7 +45,17 @@ from pydantic_settings import (
 from agentic_cli.workflow.settings import WorkflowSettingsMixin
 from agentic_cli.workflow.models import ModelRegistry
 from agentic_cli.settings_mixins import AppSettingsMixin, CLISettingsMixin
-from agentic_cli.settings_persistence import get_project_config_path, get_user_config_path
+# PROJECT_SETTABLE_KEYS lives in settings_persistence so the save-side split
+# and the load-side filter below share one definition (and because the reverse
+# import would be circular). See its definition for the trust rationale.
+from agentic_cli.settings_persistence import (
+    PROJECT_SETTABLE_KEYS as _PROJECT_SETTABLE_KEYS,
+    get_project_config_path,
+    get_user_config_path,
+)
+from agentic_cli.logging import Loggers
+
+logger = Loggers.config()
 
 __all__ = [
     "BaseSettings",
@@ -52,15 +70,100 @@ __all__ = [
 ]
 
 
+class _AllowlistFilterSource(PydanticBaseSettingsSource):
+    """Wrap an untrusted settings source, keeping only allowlisted keys.
+
+    Applied to the project ``settings.json`` and a cwd-relative ``.env``. Any
+    non-allowlisted key is dropped and logged (one warning per key) so a cloned
+    repo cannot flip a security boundary. Drops (never raises) a non-allowlisted
+    key, so a repo cannot flip a boundary by *adding* keys. (Malformed JSON or a
+    bad-typed allowlisted value is still rejected upstream, as before P0-1 —
+    this narrows, not removes, that pre-existing surface.)
+    """
+
+    def __init__(
+        self,
+        settings_cls: Type[PydanticBaseSettings],
+        inner: PydanticBaseSettingsSource,
+        label: str,
+    ) -> None:
+        super().__init__(settings_cls)
+        self._inner = inner
+        self._label = label
+
+    def get_field_value(self, field: Any, field_name: str) -> Tuple[Any, str, bool]:
+        # Unused: __call__ is overridden to filter the inner source's output.
+        return None, field_name, False
+
+    def __call__(self) -> dict[str, Any]:
+        kept: dict[str, Any] = {}
+        for key, value in self._inner().items():
+            if key in _PROJECT_SETTABLE_KEYS:
+                kept[key] = value
+            else:
+                logger.warning(
+                    "untrusted_project_setting_ignored", key=key, source=self._label
+                )
+        return kept
+
+
+# Constructor kwargs matching this shape are credentials; an unrecognised one
+# must fail loudly instead of being swallowed by ``extra="ignore"``.
+_CREDENTIAL_KEY_RE = re.compile(r"(?i)(api_?key|secret|token|password|credential)")
+
+
+def _accepted_input_names(settings_cls: Type[PydanticBaseSettings]) -> set[str]:
+    """Every name the model accepts for a field: its own name and any aliases."""
+    names: set[str] = set()
+    for field_name, field in settings_cls.model_fields.items():
+        names.add(field_name)
+        alias = field.validation_alias
+        if isinstance(alias, str):
+            names.add(alias)
+        elif isinstance(alias, AliasChoices):
+            names.update(c for c in alias.choices if isinstance(c, str))
+        if isinstance(field.alias, str):
+            names.add(field.alias)
+    return names
+
+
+def _reject_unknown_credential_kwargs(
+    settings_cls: Type[PydanticBaseSettings], values: dict[str, Any]
+) -> None:
+    """Raise on a credential-shaped kwarg the model would silently drop.
+
+    Raises:
+        ValueError: If a kwarg looks like a credential but matches no field or
+            alias. The message names the key only — never its value.
+    """
+    accepted = _accepted_input_names(settings_cls)
+    # Leading underscore = pydantic-settings' own kwargs (_env_file,
+    # _secrets_dir, …), not settings fields.
+    unknown = [k for k in values if not k.startswith("_") and k not in accepted]
+    bad = [k for k in unknown if _CREDENTIAL_KEY_RE.search(k)]
+    if not bad:
+        return
+    known = sorted(n for n in _accepted_input_names(settings_cls) if _CREDENTIAL_KEY_RE.search(n))
+    raise ValueError(
+        f"Unknown credential setting(s): {', '.join(sorted(bad))}. "
+        f"{settings_cls.__name__} accepts: {', '.join(known)}."
+    )
+
+
 def _get_json_config_source(
     settings_cls: Type[PydanticBaseSettings],
     json_file: Path,
+    *,
+    untrusted: bool = False,
 ) -> PydanticBaseSettingsSource | None:
     """Create a JSON config source if the file exists.
 
     Args:
         settings_cls: The settings class
         json_file: Path to JSON config file
+        untrusted: When True (the project file), keep only allowlisted
+            (non-security) keys so a cloned workspace cannot flip a security
+            boundary.
 
     Returns:
         JsonConfigSettingsSource if file exists, None otherwise
@@ -70,10 +173,20 @@ def _get_json_config_source(
 
     try:
         from pydantic_settings import JsonConfigSettingsSource
-        return JsonConfigSettingsSource(settings_cls, json_file=json_file)
     except ImportError:
         # Older pydantic-settings without JsonConfigSettingsSource
         return None
+
+    if not untrusted:
+        return JsonConfigSettingsSource(settings_cls, json_file=json_file)
+
+    # Untrusted (the project file): keep only allowlisted keys so a cloned
+    # workspace cannot flip a security boundary.
+    return _AllowlistFilterSource(
+        settings_cls,
+        JsonConfigSettingsSource(settings_cls, json_file=json_file),
+        "project settings.json",
+    )
 
 
 class BaseSettings(WorkflowSettingsMixin, AppSettingsMixin, CLISettingsMixin, PydanticBaseSettings):
@@ -103,6 +216,18 @@ class BaseSettings(WorkflowSettingsMixin, AppSettingsMixin, CLISettingsMixin, Py
         env_nested_delimiter="__",
         extra="ignore",
     )
+
+    def __init__(self, **values: Any) -> None:
+        """Construct settings, rejecting credential kwargs that would be dropped.
+
+        ``extra="ignore"`` (needed so config files may carry keys a given app
+        does not define) means a mistyped constructor argument vanishes without
+        a word. That is tolerable for an ordinary setting and dangerous for a
+        credential — the app then runs unauthenticated, or silently on a
+        different key. Only credential-shaped unknown kwargs raise.
+        """
+        _reject_unknown_credential_kwargs(type(self), values)
+        super().__init__(**values)
 
     def update_setting(self, key: str, value: Any) -> None:
         """Update a single setting, using dedicated setters where required.
@@ -164,10 +289,12 @@ class BaseSettings(WorkflowSettingsMixin, AppSettingsMixin, CLISettingsMixin, Py
 
         app_name = app_name or "agentic_cli"
 
-        # Add project-level JSON config (./.app_name/settings.json)
+        # Add project-level JSON config (./.app_name/settings.json). Untrusted:
+        # strip security-sensitive keys (a cloned repo can ship this file).
         project_json = _get_json_config_source(
             settings_cls,
             get_project_config_path(app_name),
+            untrusted=True,
         )
         if project_json:
             sources.append(project_json)
@@ -180,8 +307,33 @@ class BaseSettings(WorkflowSettingsMixin, AppSettingsMixin, CLISettingsMixin, Py
         if user_json:
             sources.append(user_json)
 
-        # Add dotenv settings
-        sources.append(dotenv_settings)
+        # dotenv: a cwd-relative env_file is an untrusted project source (a
+        # cloned repo can ship ./.env), so filter it like project settings.json.
+        # We inspect EVERY configured env_file (a str/Path or a list of them):
+        # if ANY entry is cwd-relative after ~ expansion, the whole dotenv
+        # source is filtered. DotEnvSettingsSource merges all files into one
+        # dict, so we cannot filter per-file; over-filtering fails safe. An
+        # absolute/user-level env_file (including a "~/..." path) and real
+        # environment variables stay trusted. Consequence: secrets/keys placed
+        # in a cwd .env are dropped — put them in real env vars or an
+        # absolute/user-level file.
+        env_file = settings_cls.model_config.get("env_file")
+        if env_file is None:
+            _env_entries: list = []
+        elif isinstance(env_file, (list, tuple)):
+            _env_entries = list(env_file)
+        else:
+            _env_entries = [env_file]
+        _has_cwd_relative = any(
+            e is not None and not Path(e).expanduser().is_absolute()
+            for e in _env_entries
+        )
+        if _has_cwd_relative:
+            sources.append(
+                _AllowlistFilterSource(settings_cls, dotenv_settings, "cwd .env")
+            )
+        else:
+            sources.append(dotenv_settings)
 
         return tuple(sources)
 
@@ -310,19 +462,109 @@ class SettingsValidationError(Exception):
     pass
 
 
-def validate_settings(settings: BaseSettings) -> None:
+def _effective_models(
+    settings: BaseSettings, agent_configs: Any | None
+) -> list[tuple[str, str, Callable[[str], None]]]:
+    """Every model that will actually be used, with a way to rewrite it.
+
+    The configured ``default_model`` plus each agent's ``model`` override — an
+    override pointing at a provider with no credential fails just as hard as a
+    bad default, only later and less legibly.
+
+    Each entry carries an ``apply`` callback that writes a resolved id back to
+    where the model came from. A deprecated alias resolves to its live
+    replacement, and that replacement has to reach the runtime: a config value
+    loaded from settings.json or the environment never passes through
+    ``set_model()``, so validating it and discarding the result left the dead
+    id to be sent to the provider.
+    """
+    entries: list[tuple[str, str, Callable[[str], None]]] = []
+
+    if settings.default_model:
+
+        def _apply_default(resolved: str) -> None:
+            object.__setattr__(settings, "default_model", resolved)
+
+        entries.append(("default_model", settings.default_model, _apply_default))
+
+    for config in agent_configs or []:
+        model = getattr(config, "model", None)
+        if not model:
+            continue
+
+        def _apply_override(resolved: str, cfg: Any = config) -> None:
+            cfg.model = resolved
+
+        entries.append(
+            (f"agent '{getattr(config, 'name', '?')}'", model, _apply_override)
+        )
+    return entries
+
+
+def validate_settings(
+    settings: BaseSettings, agent_configs: Any | None = None
+) -> None:
     """Validate settings for runtime use.
 
     Performs validation that can only be done at runtime:
     - API key availability
-    - Model compatibility
+    - Model availability and provider credentials, for the default model *and*
+      every per-agent model override
     - Path accessibility
+
+    Every effective model goes through ``settings.check_model()`` — the same
+    rules ``set_model()`` applies, so the setter and startup validation can
+    never disagree. Model availability is judged per provider: a model is
+    rejected as unknown only when *its own* provider answered the listing.
+
+    Not purely a check: a **deprecated alias is rewritten in place** to the live
+    model it resolves to, on ``settings.default_model`` and on each
+    ``AgentConfig.model``. That is the only point at which a value loaded from
+    settings.json or the environment can be corrected, and the runtime reads
+    those attributes directly.
+
+    Rewrites are **all-or-nothing**: nothing is written until every model has
+    validated. Applying them as each model was checked left the configuration
+    half-rewritten by a call that raised, so a retry validated something the
+    user never wrote.
 
     Args:
         settings: Settings to validate
+        agent_configs: Optional agent configs whose ``model`` overrides are
+            validated — and, when deprecated, upgraded — alongside
+            ``default_model``.
 
     Raises:
         SettingsValidationError: If validation fails
+    """
+    _validate_settings_with_models(settings, agent_configs)
+
+
+def _validate_settings_with_models(
+    settings: BaseSettings,
+    agent_configs: Any | None = None,
+    extra_models: "Sequence[tuple[str, str]] | None" = None,
+) -> dict[str, str]:
+    """:func:`validate_settings` plus models that do not live in settings.
+
+    Internal. A workflow manager's own model — ``Manager(model=...)``,
+    ``reinitialize(model=...)``, or one cached before discovery ran — has to be
+    validated in the *same* all-or-nothing pass as ``default_model`` and the
+    agent overrides, but it is the manager's state to rewrite, not settings'.
+    So it is passed in here and its resolution handed back, keeping
+    ``validate_settings()``'s public contract (returns None) intact.
+
+    Args:
+        settings: Settings to validate.
+        agent_configs: Optional agent configs, as for ``validate_settings``.
+        extra_models: ``(label, model)`` pairs to validate alongside them.
+
+    Returns:
+        ``{label: resolved_model}`` for every entry in ``extra_models`` (the
+        input model when it needed no rewrite).
+
+    Raises:
+        SettingsValidationError: If validation fails.
     """
     errors = []
 
@@ -331,13 +573,30 @@ def validate_settings(settings: BaseSettings) -> None:
             "No API keys configured. Set GOOGLE_API_KEY or ANTHROPIC_API_KEY."
         )
 
-    if settings.default_model:
-        available = settings.get_available_models()
-        if settings.default_model not in available:
-            errors.append(
-                f"Configured model '{settings.default_model}' is not available. "
-                f"Available models: {', '.join(available) if available else 'none'}"
-            )
+    entries = list(_effective_models(settings, agent_configs))
+    resolutions: dict[str, str] = {}
+
+    def _record(label: str) -> Callable[[str], None]:
+        def _apply(resolved: str) -> None:
+            resolutions[label] = resolved
+
+        return _apply
+
+    for label, model in extra_models or ():
+        entries.append((label, model, _record(label)))
+
+    pending: list[tuple[Callable[[str], None], str]] = []
+    for label, model, apply_resolved in entries:
+        try:
+            resolved = settings.check_model(model, label=label)
+        except ValueError as exc:
+            errors.append(str(exc))
+            continue
+        pending.append((apply_resolved, resolved))
 
     if errors:
         raise SettingsValidationError("\n".join(errors))
+
+    for apply_resolved, resolved in pending:
+        apply_resolved(resolved)
+    return resolutions

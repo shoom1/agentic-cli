@@ -248,6 +248,41 @@ class TestWorkspaceOperations:
             else:
                 os.environ.pop("GOOGLE_API_KEY", None)
 
+    def test_export_overwrites_stale_env_key(self, temp_workspace: Path, monkeypatch):
+        """Export re-asserts this instance's key over a mutated env var.
+
+        The key fields bind only via their env alias, so settings and env
+        diverge when the process env changed after this instance loaded —
+        exactly what an earlier manager's export does in a two-settings
+        process. The previous set-if-absent guard then silently kept the
+        first manager's credentials for every later one.
+        """
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "current-key")
+        settings = BaseSettings(workspace_dir=temp_workspace)
+        assert settings.anthropic_api_key == "current-key"
+
+        # Another settings instance exported its key in the meantime
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "stale-key")
+
+        settings.export_api_keys_to_env()
+
+        assert os.environ["ANTHROPIC_API_KEY"] == "current-key"
+
+    def test_export_leaves_env_when_setting_unset(
+        self, temp_workspace: Path, monkeypatch, tmp_path: Path
+    ):
+        """A key unset in settings never clobbers an externally-set env var."""
+        monkeypatch.setenv("HOME", str(tmp_path))  # no user config leakage
+        monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+        settings = BaseSettings(workspace_dir=temp_workspace)
+        assert settings.google_api_key is None
+
+        monkeypatch.setenv("GOOGLE_API_KEY", "external-key")
+
+        settings.export_api_keys_to_env()
+
+        assert os.environ["GOOGLE_API_KEY"] == "external-key"
+
 
 class TestSettingsContext:
     """Tests for context-based settings management."""

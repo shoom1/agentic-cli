@@ -32,6 +32,7 @@ from agentic_cli.workflow.permissions.rules import (
 from agentic_cli.workflow.permissions.store import (
     BUILTIN_RULES,
     PermissionContext,
+    load_project_grants,
     load_rules,
 )
 
@@ -108,7 +109,19 @@ class PermissionEngine:
             )
         app = self._settings.app_name
         rules += load_rules(get_user_config_path(app), RuleSource.USER, self._ctx)
-        rules += load_rules(get_project_config_path(app), RuleSource.PROJECT, self._ctx)
+        # PROJECT settings.json is untrusted (a cloned repo can ship it): honor
+        # only deny-rules so a workspace can tighten but never loosen policy.
+        rules += load_rules(
+            get_project_config_path(app),
+            RuleSource.PROJECT,
+            self._ctx,
+            allowed_effects=frozenset({Effect.DENY}),
+        )
+        # Interactive "Allow always" grants live in USER config, keyed by the
+        # resolved project path — trusted (allow+deny). A cloned repo carries
+        # none (its path won't match), and a repo-shipped permissions.local.json
+        # is no longer loaded at all.
+        rules += load_project_grants(app, self._ctx)
         return rules
 
     @property
@@ -133,6 +146,11 @@ class PermissionEngine:
         resolved = self._resolve(capabilities, args)
         outcomes = self._evaluate(resolved)
 
+        # No capabilities to evaluate (e.g. every cap is optional and its target
+        # arg was absent) → nothing to gate, allow.
+        if not outcomes:
+            return CheckResult(True, "no applicable capabilities")
+
         # DENY wins.
         deny_hits = [(c, r) for c, r in outcomes if r is not None and r.effect is Effect.DENY]
         if deny_hits:
@@ -145,7 +163,7 @@ class PermissionEngine:
             return CheckResult(True, self._fmt_rule_reason(any_r, any_c))
 
         # Ask flow lands in Task 16.
-        return await self._ask_and_apply(tool_name, resolved, outcomes)
+        return await self._ask_and_apply(tool_name, resolved, outcomes, args)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -156,9 +174,18 @@ class PermissionEngine:
     ) -> list[ResolvedCapability]:
         resolved: list[ResolvedCapability] = []
         for cap in capabilities:
-            raw = "*" if cap.target_arg is None else str(args.get(cap.target_arg, ""))
-            target = "*" if cap.target_arg is None else get_matcher(cap.name).canonicalize(raw, self._ctx)
-            resolved.append(ResolvedCapability(cap.name, target))
+            if cap.target_arg is None:
+                resolved.append(ResolvedCapability(cap.name, "*"))
+                continue
+            value = args.get(cap.target_arg, "")
+            if cap.optional and (value is None or value == ""):
+                # Optional target not supplied → the side effect isn't performed
+                # this call, so don't resolve (and don't spuriously prompt) it.
+                continue
+            matcher = get_matcher(cap.name)
+            items = value if isinstance(value, (list, tuple)) else [value]
+            for item in items:
+                resolved.append(ResolvedCapability(cap.name, matcher.canonicalize(str(item), self._ctx)))
         return resolved
 
     def _evaluate(
@@ -193,13 +220,14 @@ class PermissionEngine:
         tool_name: str,
         resolved: list[ResolvedCapability],
         outcomes: list[tuple[ResolvedCapability, Rule | None]],
+        args: dict | None = None,
     ) -> CheckResult:
         from agentic_cli.workflow.permissions.prompt import build_request, parse_response
         from agentic_cli.workflow.permissions.store import append_project_rule
 
         unmatched = [cap for cap, r in outcomes if r is None]
         async with self._ask_lock:
-            request = build_request(tool_name, resolved)
+            request = build_request(tool_name, resolved, args)
             response = await self._workflow.request_user_input(request)
             scope = parse_response(response)
 
@@ -220,7 +248,7 @@ class PermissionEngine:
             rule = Rule(cap.name, target, Effect.ALLOW, source)
             self._session_rules.append(rule)
             if source is RuleSource.PROJECT:
-                append_project_rule(self._settings.app_name, rule)
+                append_project_rule(self._settings.app_name, rule, self._ctx.workdir)
 
         label = "session" if source is RuleSource.SESSION else "always, saved to project"
         return CheckResult(True, f"no rule + user allowed ({label})")

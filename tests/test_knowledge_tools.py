@@ -938,10 +938,11 @@ class TestKBManagerContextVar:
         finally:
             token.var.reset(token)
 
-    def test_kb_manager_detected_via_tool_service_map(self):
-        """Verify kb tools are detected via _TOOL_SERVICE_MAP (not @requires)."""
-        from agentic_cli.workflow.base_manager import BaseWorkflowManager
-        assert "kb_search" in BaseWorkflowManager._TOOL_SERVICE_MAP
+    def test_kb_tools_declare_the_kb_manager_service(self):
+        """KB tools carry their own service requirement in the registry."""
+        from agentic_cli.tools.registry import get_registry
+
+        assert get_registry().get("kb_search").requires == ("kb_manager",)
 
     def test_base_manager_has_kb_manager_slot(self):
         from agentic_cli.workflow.base_manager import BaseWorkflowManager

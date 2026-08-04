@@ -10,7 +10,6 @@ For alternative orchestration backends (e.g., LangGraph), see the base_manager m
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import AsyncGenerator, Any, Callable
 
@@ -19,14 +18,16 @@ from google.adk import Runner
 from google.adk.agents import LlmAgent, Agent
 from google.adk.planners import BuiltInPlanner
 from google.adk.sessions import InMemorySessionService, BaseSessionService, Session
-from google.adk.events import Event
+from google.adk.tools import LongRunningFunctionTool
 
 from agentic_cli.workflow.base_manager import BaseWorkflowManager
 from agentic_cli.workflow.events import WorkflowEvent, EventType
-from agentic_cli.workflow.config import AgentConfig
+from agentic_cli.workflow.config import AgentConfig, validate_agent_graph
+from agentic_cli.workflow.model_settings import ModelSettings, ThinkingSettings
 from agentic_cli.workflow.adk.event_processor import ADKEventProcessor
 from agentic_cli.workflow.adk.permission_plugin import PermissionPlugin
 from agentic_cli.workflow.adk.plugins import LLMLoggingPlugin
+from agentic_cli.workflow.service_registry import JOB_MANAGER
 
 from agentic_cli.config import (
     BaseSettings,
@@ -40,6 +41,62 @@ logger = Loggers.workflow()
 # Suppress Google GenAI SDK warning about non-text parts (function_call) in
 # mixed responses. We already handle all part types individually in process_part.
 logging.getLogger("google_genai.types").setLevel(logging.ERROR)
+
+_RESULT_SUMMARY_LIMIT = 1000
+
+# Anthropic/Claude thinking on ADK (native AnthropicLlm, direct API).
+# Effort → thinking budget in tokens (mirrors the LangGraph Claude budgets).
+_CLAUDE_THINKING_BUDGETS = {"low": 4096, "medium": 10000, "high": 32000}
+# Anthropic requires budget_tokens >= 1024 when thinking is enabled.
+_ANTHROPIC_MIN_THINKING_BUDGET = 1024
+# Default max_tokens when no ModelSettings.max_tokens is given.
+_DEFAULT_ANTHROPIC_MAX_TOKENS = 8192
+# Output headroom reserved above the thinking budget (Anthropic counts thinking
+# tokens toward max_tokens and requires max_tokens > budget_tokens).
+_ANTHROPIC_OUTPUT_HEADROOM = 8192
+
+
+def _is_anthropic_model(model: str | None) -> bool:
+    """True for Claude/Anthropic model ids (string check, no settings needed)."""
+    return bool(model) and model.startswith("claude")
+
+
+# Claude >= 4.6 deprecates/removes ``budget_tokens`` (400 on 4.7+/Fable); those
+# use adaptive thinking + ``output_config.effort``. <= 4.5 keep the legacy
+# numeric-budget path (effort also unsupported on Sonnet 4.5 / Haiku 4.5).
+_ANTHROPIC_ADAPTIVE_MIN = (4, 6)
+# Generic thinking level -> Anthropic effort. ``xhigh``/``max`` are not exposed
+# via the generic knob; use a per-agent native override for those.
+_GENERIC_TO_EFFORT = {"low": "low", "medium": "medium", "high": "high"}
+
+
+def _claude_version(model: str) -> tuple[int, ...]:
+    """Numeric version tuple from a Claude id (``claude-opus-4-8`` -> ``(4, 8)``).
+
+    Version components are 1-2 digits; longer numeric segments are date stamps
+    (``claude-opus-4-20250514``) and must be ignored, else the date would be
+    read as a minor version and push the model past the adaptive threshold.
+    """
+    return tuple(int(p) for p in model.split("-") if p.isdigit() and len(p) <= 2)
+
+
+def _anthropic_uses_adaptive(model: str | None) -> bool:
+    """True for Claude models that require adaptive thinking (>= 4.6)."""
+    return _is_anthropic_model(model) and _claude_version(model) >= _ANTHROPIC_ADAPTIVE_MIN
+
+
+def _summarize_result(result: Any) -> str | None:
+    """Render a job result as a short string for the resume payload.
+
+    Truncates to keep the resumed turn's context lean; the agent pulls the full
+    result via the ``job_result`` tool when it needs it.
+    """
+    if result is None:
+        return None
+    text = result if isinstance(result, str) else repr(result)
+    if len(text) > _RESULT_SUMMARY_LIMIT:
+        return text[:_RESULT_SUMMARY_LIMIT] + f"… (+{len(text) - _RESULT_SUMMARY_LIMIT} chars)"
+    return text
 
 
 class GoogleADKWorkflowManager(BaseWorkflowManager):
@@ -80,6 +137,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         app_name: str | None = None,
         model: str | None = None,
         on_event: Callable[[WorkflowEvent], WorkflowEvent | None] | None = None,
+        adk_config_path: str | None = None,
     ) -> None:
         """Initialize the workflow manager.
 
@@ -90,6 +148,10 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             app_name: Application name for services (uses settings.app_name if not provided)
             model: Model override (auto-detected from API keys if not provided)
             on_event: Optional hook to transform/filter events before yielding
+            adk_config_path: Optional path to a native ADK ``root_agent.yaml``.
+                When set, the agent tree is built via ADK ``from_config`` instead
+                of from ``agent_configs`` (full ADK fidelity; framework service /
+                state tool injection does not apply).
         """
         super().__init__(
             agent_configs=agent_configs,
@@ -99,8 +161,13 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             on_event=on_event,
         )
         self.session_id = "default_session"
+        self._adk_config_path = adk_config_path
 
         self._session_service: BaseSessionService | None = None
+        # True while reinitialize(preserve_sessions=True) is in flight: the
+        # live session service is being carried across and must survive both a
+        # successful rebuild and a rollback.
+        self._session_service_pinned = False
         self._root_agent: Agent | None = None
         self._runner: Runner | None = None
 
@@ -113,6 +180,12 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         # reference to exist before process() is called)
         self._llm_logging_plugin: LLMLoggingPlugin | None = None
         self._task_progress_plugin: "TaskProgressPlugin | None" = None
+
+        # Resolve bare ``claude-*`` strings (e.g. from agent YAML / native ADK
+        # configs) to the direct-API DirectAnthropicLlm instead of Vertex Claude.
+        from agentic_cli.workflow.adk.anthropic_llm import register_direct_anthropic
+
+        register_direct_anthropic()
 
         logger.debug(
             "workflow_manager_created",
@@ -141,6 +214,23 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         """
         await self._ensure_initialized()
 
+        # Claude models are not served by the genai client — use the Anthropic
+        # SDK directly (ANTHROPIC_API_KEY is exported during initialization).
+        if _is_anthropic_model(self.model):
+            from anthropic import AsyncAnthropic
+
+            client = AsyncAnthropic()
+            message = await client.messages.create(
+                model=self.model,
+                max_tokens=max_tokens,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return "".join(
+                block.text
+                for block in message.content
+                if getattr(block, "type", None) == "text"
+            )
+
         from google import genai
 
         client = genai.Client()
@@ -157,15 +247,38 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
     async def cleanup(self) -> None:
         """Clean up workflow manager resources.
 
-        Releases resources and resets state. Call this before
-        shutting down or when reinitializing with new settings.
+        Releases resources and resets state. Call this before shutting down or
+        when reinitializing with new settings. Idempotent: references are
+        detached before being closed, so a repeat call is a no-op. Takes the
+        lifecycle and turn locks, so it cannot tear the runner down while a
+        turn is streaming.
+        """
+        async with self._lifecycle_lock:
+            async with self._turn_lock:
+                await self._release_resources()
+
+    async def _release_resources(self, keep_session_service: bool = False) -> None:
+        """Release owned resources; never raises.
+
+        The session service is *closed*, not merely dropped — the durable
+        ``DatabaseSessionService`` holds a SQLAlchemy engine whose connection
+        pool leaks otherwise. ``reinitialize(preserve_sessions=True)`` keeps it
+        instead, and then reuses that same instance rather than building a
+        replacement that would be discarded unclosed.
+
+        Args:
+            keep_session_service: Retain (do not close) the session service.
         """
         logger.debug("cleaning_up_workflow_manager")
 
-        # Clear runner and agents
+        # Detach first so a concurrent/repeat cleanup can't double-close. A
+        # pinned service is being carried across a reinitialize, so a rollback
+        # inside that window must not close it either.
+        session_service = None
+        if not (keep_session_service or self._session_service_pinned):
+            session_service, self._session_service = self._session_service, None
         self._runner = None
         self._root_agent = None
-        self._session_service = None
         self._initialized = False
 
         # Clear LLM logging plugin
@@ -173,7 +286,9 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             self._llm_logging_plugin.clear()
             self._llm_logging_plugin = None
 
-        # Clean up managers (sandbox, etc.)
+        await self._aclose_owned(session_service, "session_service")
+
+        # Clean up managers (sandbox, jobs, etc.)
         self._cleanup_managers()
 
         logger.info("workflow_manager_cleaned_up")
@@ -185,13 +300,24 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
     ) -> None:
         """Reinitialize the workflow manager with new configuration.
 
-        Use this method when settings change (e.g., model switch) to
-        properly recreate agents and runners with the new configuration.
+        Use this method when settings change (e.g. a model switch) to recreate
+        agents and runners with the new configuration.
+
+        Transactional: on failure the manager ends up *uninitialized* (
+        ``is_initialized`` False) with nothing left allocated, rather than
+        holding a half-built runner that would answer as if it were ready. The
+        caller (``WorkflowController``) turns that into a FAILED state. A
+        preserved session service survives both outcomes, so a retry can still
+        continue the same conversations.
 
         Args:
             model: Optional new model to use. If None, re-resolves from settings.
-            preserve_sessions: If True, keeps existing session data (default).
-                             If False, creates fresh session service.
+            preserve_sessions: If True, keeps the existing session service
+                (default) and reuses it for the new runner. If False, the old
+                one is closed and a fresh one created.
+
+        Raises:
+            Exception: Whatever initialization raised, after rollback.
         """
         logger.info(
             "reinitializing_workflow_manager",
@@ -199,29 +325,24 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             preserve_sessions=preserve_sessions,
         )
 
-        # Store session service if preserving
-        old_session_service = self._session_service if preserve_sessions else None
-
-        # Clean up current state
-        await self.cleanup()
-
-        # Update model
-        self._reset_model(model)
-
-        # Reinitialize services
-        await self.initialize_services()
-
-        # Restore session service if preserving
-        if old_session_service is not None and preserve_sessions:
-            self._session_service = old_session_service
-            # Update runner with preserved session service
-            if self._runner and self._root_agent:
-                self._runner = Runner(
-                    app_name=self.app_name,
-                    agent=self._root_agent,
-                    session_service=self._session_service,
-                    plugins=self._init_plugins(),
-                )
+        async with self._lifecycle_lock:
+            async with self._turn_lock:
+                preserved = self._session_service if preserve_sessions else None
+                await self._release_resources(keep_session_service=preserve_sessions)
+                self._reset_model(model)
+                self._session_service_pinned = preserve_sessions
+                try:
+                    # _do_initialize reuses self._session_service when set, so
+                    # no replacement service is built for a preserved one.
+                    await self._initialize_locked()
+                except BaseException:
+                    # _initialize_locked already rolled back what it created;
+                    # restore the preserved service so a retry can use it.
+                    if preserved is not None:
+                        self._session_service = preserved
+                    raise
+                finally:
+                    self._session_service_pinned = False
 
         logger.info(
             "workflow_manager_reinitialized",
@@ -229,57 +350,98 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             sessions_preserved=preserve_sessions,
         )
 
-    def _get_planner(self) -> BuiltInPlanner | None:
-        """Get planner with thinking configuration.
+    def _resolve_model_for_config(self, config: "AgentConfig | None") -> str:
+        """Return the effective model for an agent (per-config override or default)."""
+        if config is not None and config.model:
+            return config.model
+        return self.model
 
-        Gemini 3 models take a discrete ``thinking_level``; Gemini 2.5 models
-        only understand a numeric ``thinking_budget`` and reject ``thinking_level``
-        outright (HTTP 400 "Thinking level is not supported for this model").
-        We therefore choose the field that matches the model generation —
-        sending ``thinking_level`` to a 2.5 model breaks every request.
+    def _resolve_thinking(
+        self, config: "AgentConfig | None"
+    ) -> ThinkingSettings | None:
+        """Resolve thinking settings: per-agent override, else global effort.
+
+        Returns None when thinking is disabled (no per-agent setting and the
+        global ``thinking_effort`` is ``"none"``).
         """
-        thinking_effort = self._settings.thinking_effort
+        ms = config.model_settings if config is not None else None
+        if ms is not None and ms.thinking is not None:
+            return ms.thinking
+        global_effort = self._settings.thinking_effort
+        if global_effort == "none":
+            return None
+        return ThinkingSettings(mode=global_effort)
 
-        if thinking_effort == "none":
+    def _get_planner(
+        self, config: "AgentConfig | None" = None
+    ) -> BuiltInPlanner | None:
+        """Get planner with thinking configuration for an agent.
+
+        Thinking is resolved per-agent (``config.model_settings.thinking``) with
+        a fallback to the global ``settings.thinking_effort``.
+
+        Per family: Claude >= 4.6 uses adaptive thinking (negative budget) +
+        effort; Claude <= 4.5 and Gemini 2.5 are numeric-budget-based; Gemini 3
+        takes a discrete ``thinking_level`` (Gemini 2.5 rejects it with a 400).
+        """
+        thinking = self._resolve_thinking(config)
+        if thinking is None or thinking.mode == "none":
             return None
 
-        if not self._settings.supports_thinking_effort(self.model):
-            logger.debug(
-                "thinking_not_supported",
-                model=self.model,
-                effort=thinking_effort,
+        model = self._resolve_model_for_config(config)
+
+        if not self._settings.supports_thinking_effort(model):
+            logger.debug("thinking_not_supported", model=model, mode=thinking.mode)
+            return None
+
+        if _is_anthropic_model(model):
+            if _anthropic_uses_adaptive(model):
+                # Claude >= 4.6 rejects budget_tokens; use adaptive thinking. ADK
+                # (>= 1.34) maps a negative thinking_budget to {type:"adaptive"}.
+                # Depth is controlled by output_config.effort, set on the model
+                # instance (see _anthropic_effort / DirectAnthropicLlm).
+                thinking_config = types.ThinkingConfig(thinking_budget=-1)
+            else:
+                # Legacy Claude (<= 4.5): numeric budget_tokens (>= 1024). The same
+                # budget sizes max_tokens in _anthropic_max_tokens (Anthropic
+                # requires max_tokens > budget).
+                thinking_config = types.ThinkingConfig(
+                    include_thoughts=True,
+                    thinking_budget=self._anthropic_thinking_budget(config),
+                )
+        elif thinking.mode == "budget":
+            budget = (
+                thinking.budget_tokens if thinking.budget_tokens is not None else 12288
             )
-            return None
-
-        if "gemini-3" in self.model:
-            thinking_config = self._gemini3_thinking_config(thinking_effort)
+            thinking_config = types.ThinkingConfig(
+                include_thoughts=True, thinking_budget=budget
+            )
+        elif "gemini-3" in model:
+            thinking_config = self._gemini3_thinking_config(thinking.mode, model)
         else:
-            thinking_config = self._gemini25_thinking_config(thinking_effort)
+            thinking_config = self._gemini25_thinking_config(thinking.mode)
 
-        logger.debug(
-            "planner_created",
-            model=self.model,
-            effort=thinking_effort,
-        )
-
+        logger.debug("planner_created", model=model, mode=thinking.mode)
         return BuiltInPlanner(thinking_config=thinking_config)
 
-    def _gemini3_thinking_config(self, thinking_effort: str) -> "types.ThinkingConfig":
+    def _gemini3_thinking_config(
+        self, effort: str, model: str
+    ) -> "types.ThinkingConfig":
         """Build a Gemini 3 thinking config using the discrete ``thinking_level``.
 
         Gemini 3 Pro supports only LOW and HIGH (MEDIUM falls back to HIGH);
         Gemini 3 Flash additionally supports MINIMAL/MEDIUM.
         """
-        is_pro = "pro" in self.model
+        is_pro = "pro" in model
 
-        if thinking_effort == "low":
+        if effort == "low":
             level = types.ThinkingLevel.LOW
-        elif thinking_effort == "medium":
+        elif effort == "medium":
             if is_pro:
                 level = types.ThinkingLevel.HIGH
                 logger.debug(
                     "thinking_level_fallback",
-                    model=self.model,
+                    model=model,
                     requested="medium",
                     actual="high",
                     reason="Gemini 3 Pro only supports LOW and HIGH",
@@ -291,21 +453,101 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
 
         return types.ThinkingConfig(include_thoughts=True, thinking_level=level)
 
-    def _gemini25_thinking_config(self, thinking_effort: str) -> "types.ThinkingConfig":
+    def _gemini25_thinking_config(self, effort: str) -> "types.ThinkingConfig":
         """Build a Gemini 2.5 thinking config using the numeric ``thinking_budget``.
 
         2.5 models reject ``thinking_level``. Budgets are chosen within the
         range valid across the 2.5 family (Flash/Pro/Flash-Lite all accept
         4096–24576 tokens).
         """
-        budget = {"low": 4096, "medium": 12288, "high": 24576}[thinking_effort]
+        budget = {"low": 4096, "medium": 12288, "high": 24576}[effort]
         return types.ThinkingConfig(include_thoughts=True, thinking_budget=budget)
 
-    def _get_generate_content_config(self) -> types.GenerateContentConfig:
-        """Build GenerateContentConfig with retry-enabled HTTP options.
+    def _anthropic_thinking_budget(self, config: "AgentConfig | None") -> int:
+        """Resolved Anthropic thinking budget in tokens for an agent.
+
+        Mirrors the LangGraph Claude budgets; ``budget`` mode passes the explicit
+        value through. Floored at Anthropic's minimum (1024). Returns 0 when
+        thinking is disabled. The same number sizes the agent's ``max_tokens``.
+        """
+        thinking = self._resolve_thinking(config)
+        if thinking is None or thinking.mode == "none":
+            return 0
+        if thinking.mode == "budget":
+            budget = thinking.budget_tokens if thinking.budget_tokens is not None else 12288
+        else:
+            budget = _CLAUDE_THINKING_BUDGETS.get(thinking.mode, 10000)
+        return max(budget, _ANTHROPIC_MIN_THINKING_BUDGET)
+
+    def _anthropic_effort(self, config: "AgentConfig | None") -> str | None:
+        """Anthropic ``output_config.effort`` for an agent, or ``None``.
+
+        Only adaptive-capable Claude (>= 4.6) takes effort; older models reject
+        it and stay on the budget path. Maps the generic ``low/medium/high``
+        level; ``none``/``budget`` modes yield no effort (disabled / pure
+        adaptive — the model picks the depth).
+        """
+        if not _anthropic_uses_adaptive(self._resolve_model_for_config(config)):
+            return None
+        thinking = self._resolve_thinking(config)
+        if thinking is None or thinking.mode in ("none", "budget"):
+            return None
+        return _GENERIC_TO_EFFORT.get(thinking.mode)
+
+    def _anthropic_max_tokens(self, config: "AgentConfig | None") -> int:
+        """``max_tokens`` for an Anthropic agent.
+
+        ADK's ``AnthropicLlm`` reads ``max_tokens`` from the model instance (not
+        ``GenerateContentConfig``). On the legacy budget path Anthropic counts
+        thinking tokens toward ``max_tokens`` and requires ``max_tokens > budget``,
+        so we size it above the budget. Adaptive thinking has no fixed budget, so
+        we just honour the ``ModelSettings.max_tokens`` floor (or the default).
+        """
+        ms = config.model_settings if config is not None else None
+        base = ms.max_tokens if (ms is not None and ms.max_tokens) else _DEFAULT_ANTHROPIC_MAX_TOKENS
+        if _anthropic_uses_adaptive(self._resolve_model_for_config(config)):
+            return base
+        budget = self._anthropic_thinking_budget(config)
+        if budget:
+            return max(base, budget + _ANTHROPIC_OUTPUT_HEADROOM)
+        return base
+
+    def _build_model_arg(self, config: "AgentConfig | None"):
+        """Resolve the ``model`` argument for an ``LlmAgent``.
+
+        Anthropic/Claude models are returned as a direct-API ``DirectAnthropicLlm``
+        instance: passing the bare ``claude-*`` string would make ADK's
+        ``LLMRegistry`` resolve it to the Vertex ``Claude`` class (which needs
+        GOOGLE_CLOUD_PROJECT/LOCATION). The instance carries the coordinated
+        ``max_tokens`` and, for adaptive models, ``effort``. Gemini/Gemma pass
+        through as plain strings for native registry resolution.
+        """
+        model = self._resolve_model_for_config(config)
+        if not _is_anthropic_model(model):
+            return model
+        from agentic_cli.workflow.adk.anthropic_llm import DirectAnthropicLlm
+
+        return DirectAnthropicLlm(
+            model=model,
+            max_tokens=self._anthropic_max_tokens(config),
+            effort=self._anthropic_effort(config),
+            # An explicit (non-default) timeout keeps large-max_tokens requests
+            # off the SDK's streaming-required guard; retries honour settings.
+            request_timeout=getattr(self._settings, "anthropic_request_timeout", 900.0),
+            max_retries=getattr(self._settings, "retry_max_attempts", None),
+        )
+
+    def _get_generate_content_config(
+        self, config: "AgentConfig | None" = None
+    ) -> types.GenerateContentConfig:
+        """Build GenerateContentConfig with retry HTTP options and per-agent params.
+
+        Args:
+            config: Agent config whose ``model_settings`` (if any) supply
+                generation params merged on top of the retry options.
 
         Returns:
-            GenerateContentConfig with HttpRetryOptions configured from settings.
+            GenerateContentConfig with HttpRetryOptions plus any per-agent params.
         """
         http_options = types.HttpOptions(
             retry_options=types.HttpRetryOptions(
@@ -315,7 +557,40 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                 http_status_codes=[500, 502, 503, 504],  # Don't auto-retry 429
             )
         )
-        return types.GenerateContentConfig(http_options=http_options)
+        kwargs: dict[str, Any] = {"http_options": http_options}
+        ms = config.model_settings if config is not None else None
+        if ms is not None:
+            kwargs.update(self._generate_config_kwargs_from_settings(ms))
+        return types.GenerateContentConfig(**kwargs)
+
+    def _generate_config_kwargs_from_settings(
+        self, ms: ModelSettings
+    ) -> dict[str, Any]:
+        """Translate neutral ModelSettings into GenerateContentConfig kwargs.
+
+        Maps neutral field names (``max_tokens`` -> ``max_output_tokens``) and
+        passes ``extra`` through, filtered to valid GenerateContentConfig fields
+        (unknown keys are logged and dropped). Thinking is handled by the planner.
+        """
+        out: dict[str, Any] = {}
+        if ms.temperature is not None:
+            out["temperature"] = ms.temperature
+        if ms.top_p is not None:
+            out["top_p"] = ms.top_p
+        if ms.top_k is not None:
+            out["top_k"] = ms.top_k
+        if ms.max_tokens is not None:
+            out["max_output_tokens"] = ms.max_tokens
+        if ms.stop_sequences is not None:
+            out["stop_sequences"] = ms.stop_sequences
+        if ms.extra:
+            valid = set(types.GenerateContentConfig.model_fields)
+            for key, value in ms.extra.items():
+                if key in valid:
+                    out[key] = value
+                else:
+                    logger.warning("model_settings_extra_ignored", key=key)
+        return out
 
     def _get_state_tools(self) -> list:
         """Return ADK-native state tools using ToolContext.state."""
@@ -324,79 +599,148 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         )
         return [save_plan, get_plan, save_tasks, get_tasks]
 
+    def _assemble_agent_tools(
+        self, config: "AgentConfig", service_map: dict
+    ) -> list:
+        """Build an agent's tools: framework tools + state tools + MCP toolsets.
+
+        MCP servers declared on the config are materialized into ADK
+        ``MCPToolset`` objects (ADK connects lazily) and appended after the
+        regular tools. Skills are appended as a ``SkillToolset``. The caller is
+        responsible for ``_wrap_long_running`` over the result.
+        """
+        tools = self._build_tools(config, service_map)
+        mcp_servers = getattr(config, "mcp_servers", None) or []
+        if mcp_servers:
+            from agentic_cli.workflow.mcp import to_adk_toolset
+
+            for server in mcp_servers:
+                tools.append(to_adk_toolset(server))
+                logger.debug(
+                    "mcp_toolset_attached", agent=config.name, server=server.name
+                )
+
+        skill_refs = getattr(config, "skills", None) or []
+        if skill_refs:
+            toolset = self._build_skill_toolset(skill_refs)
+            if toolset is not None:
+                tools.append(toolset)
+                logger.debug("skill_toolset_attached", agent=config.name)
+        return tools
+
+    def _build_skill_toolset(self, skill_refs: list[str]):
+        """Resolve skill refs and build an ADK SkillToolset (discovery/read only).
+
+        This path supplies no code executor, so ``run_skill_script`` is not
+        exposed: only the discovery/read tools and the L1 metadata injection.
+        (There used to be a ``skill_scripts_enabled`` setting that advertised
+        the tool anyway; with no executor it could only ever answer
+        ``NO_CODE_EXECUTOR``.)
+        """
+        from agentic_cli.tools.skills import SkillStore, make_skill_toolset
+
+        store = SkillStore(getattr(self._settings, "skills_dirs", []) or [])
+        skills = store.resolve(skill_refs)
+        if not skills:
+            return None
+        return make_skill_toolset(skills)
+
+    def _wrap_long_running(self, tools: list[Callable]) -> list:
+        """Wrap tools flagged ``long_running`` as ADK ``LongRunningFunctionTool``.
+
+        A long-running tool returns a ``job_id`` immediately and the model is
+        instructed not to re-call it while pending; the eventual result is
+        delivered later as a ``FunctionResponse`` (see ``resume_with_job_result``).
+        Detection is by registry identity — the exact object the default
+        registry issued, never a matching name — so a plain callable an
+        application names after a long-running tool keeps its ordinary
+        call-and-return contract instead of being told to leave a job pending
+        that nothing will ever complete. Non-long-running tools and any
+        already-wrapped tools (including toolset objects) pass through
+        unchanged. Permission gating is unaffected: ADK gates via
+        ``PermissionPlugin``, which resolves the same identity.
+        """
+        from agentic_cli.tools.registry import identify_tool
+
+        wrapped: list = []
+        for tool in tools:
+            defn = identify_tool(tool)
+            name = defn.name if defn is not None else getattr(tool, "__name__", "")
+            if (
+                defn is not None
+                and defn.long_running
+                and not isinstance(tool, LongRunningFunctionTool)
+            ):
+                wrapped.append(LongRunningFunctionTool(func=tool))
+                logger.debug("long_running_tool_wrapped", tool=name)
+            else:
+                wrapped.append(tool)
+        return wrapped
+
+    def _build_agent(
+        self,
+        config: "AgentConfig",
+        service_map: dict,
+        sub_agents: list[Agent] | None = None,
+    ) -> Agent:
+        """Construct one ``LlmAgent`` from a config (with resolved sub-agents)."""
+        return LlmAgent(
+            name=config.name,
+            model=self._build_model_arg(config),
+            instruction=config.get_prompt(self._settings),
+            tools=self._wrap_long_running(
+                self._assemble_agent_tools(config, service_map)
+            ),
+            description=config.description,
+            sub_agents=sub_agents or [],
+            planner=self._get_planner(config),
+            generate_content_config=self._get_generate_content_config(config),
+        )
+
     def _create_agents(self) -> Agent:
-        """Create agent hierarchy from configs.
+        """Create the agent hierarchy from configs, in dependency order.
+
+        The graph is validated first (``validate_agent_graph``) so duplicate
+        names, dangling ``sub_agents`` references, self-references, cycles and
+        shapes ADK cannot represent fail with the offending agent named,
+        instead of silently producing a coordinator with missing children.
+
+        Construction then follows a topological order, so an agent is always
+        built after the agents it delegates to — the previous leaves-then-
+        coordinators split silently dropped a sub-agent that was itself a
+        coordinator.
+
+        Prompt factories are called under this manager's settings context (see
+        ``AgentConfig.get_prompt``), so a prompt that reads settings sees the
+        manager's instance rather than the global singleton.
 
         Returns:
-            Root agent (the first agent with sub_agents, or first agent if none have sub_agents)
-        """
-        # Build a map of agent configs by name
-        config_map = {config.name: config for config in self._agent_configs}
+            Root agent (the first agent with sub_agents, or the first config).
 
-        # Build agents (non-coordinators first, then coordinators)
+        Raises:
+            AgentGraphError: If the configured graph is invalid.
+        """
+        graph = validate_agent_graph(self._agent_configs, backend=self.backend_type)
+
         agent_map: dict[str, Agent] = {}
-        planner = self._get_planner()
-        generate_config = self._get_generate_content_config()
         service_map = self._get_service_tool_map()
 
-        # First pass: create agents without sub_agents (leaf agents)
-        for config in self._agent_configs:
-            if not config.sub_agents:
-                agent_map[config.name] = LlmAgent(
-                    name=config.name,
-                    model=config.model or self.model,
-                    instruction=config.get_prompt(),
-                    tools=self._build_tools(config, service_map),
-                    description=config.description or None,
-                    planner=planner,
-                    generate_content_config=generate_config,
-                )
-                logger.debug("agent_created", name=config.name, type="leaf")
+        from agentic_cli.config import SettingsContext
 
-        # Second pass: create agents with sub_agents (coordinators)
-        for config in self._agent_configs:
-            if config.sub_agents:
-                sub_agent_instances = []
-                for sub_name in config.sub_agents:
-                    if sub_name in agent_map:
-                        sub_agent_instances.append(agent_map[sub_name])
-                    else:
-                        logger.warning(
-                            "sub_agent_not_found",
-                            coordinator=config.name,
-                            sub_agent=sub_name,
-                        )
-
-                agent_map[config.name] = LlmAgent(
-                    name=config.name,
-                    model=config.model or self.model,
-                    instruction=config.get_prompt(),
-                    tools=self._build_tools(config, service_map),
-                    description=config.description or None,
-                    sub_agents=sub_agent_instances,
-                    planner=planner,
-                    generate_content_config=generate_config,
-                )
+        # Prompt factories run inside the manager's settings context.
+        with SettingsContext(self._settings):
+            for name in graph.build_order:
+                config = graph.config_map[name]
+                sub_agents = [agent_map[sub] for sub in config.sub_agents]
+                agent_map[name] = self._build_agent(config, service_map, sub_agents)
                 logger.debug(
                     "agent_created",
-                    name=config.name,
-                    type="coordinator",
-                    sub_agents=[a.name for a in sub_agent_instances],
+                    name=name,
+                    type="coordinator" if sub_agents else "leaf",
+                    sub_agents=[a.name for a in sub_agents],
                 )
 
-        # Find root agent (first with sub_agents, or first in list)
-        root_agent = None
-        for config in self._agent_configs:
-            if config.sub_agents:
-                root_agent = agent_map[config.name]
-                break
-
-        if root_agent is None and self._agent_configs:
-            root_agent = agent_map[self._agent_configs[0].name]
-
-        if root_agent is None:
-            raise RuntimeError("No agents configured")
-
+        root_agent = agent_map[graph.root_name]
         logger.info("agents_created", root=root_agent.name, total=len(agent_map))
         return root_agent
 
@@ -407,8 +751,18 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             List of BasePlugin instances to pass to Runner(plugins=...).
         """
         from agentic_cli.workflow.adk.task_progress_plugin import TaskProgressPlugin
+        from agentic_cli.workflow.adk.transfer_tool_description import (
+            TransferToolDescriptionPlugin,
+        )
 
         plugins: list = [PermissionPlugin()]
+
+        # ADK's generated description for its own transfer tool tells the model
+        # to call `TransferToAgentTool` — a name that does not exist as a tool.
+        # Corrected on the prepared request; a no-op once ADK ships a fixed
+        # docstring. See transfer_tool_description for why this is safe.
+        self._transfer_description_plugin = TransferToolDescriptionPlugin()
+        plugins.append(self._transfer_description_plugin)
 
         # Task progress tracking via ToolContext.state
         self._task_progress_plugin = TaskProgressPlugin()
@@ -428,16 +782,51 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
 
         return plugins
 
+    def _make_session_service(self) -> BaseSessionService:
+        """Build the ADK session service from ``session_store`` settings.
+
+        ``memory`` → ephemeral ``InMemorySessionService``; ``sqlite``/``postgres``
+        → native ``DatabaseSessionService`` (durable across restarts, full event
+        fidelity). The sqlite parent dir is created so the engine can open it.
+        """
+        db_url = self._settings.session_db_url()
+        if db_url is None:
+            logger.debug("using_in_memory_session_service")
+            return InMemorySessionService()
+
+        if db_url.startswith("sqlite"):
+            # sqlite+aiosqlite:///<path> — ensure the directory exists.
+            from pathlib import Path
+
+            path = db_url.split(":///", 1)[-1]
+            if path:
+                Path(path).parent.mkdir(parents=True, exist_ok=True)
+
+        from google.adk.sessions import DatabaseSessionService
+
+        logger.info("using_database_session_service", store=self._settings.session_store)
+        return DatabaseSessionService(db_url=db_url)
+
     async def _do_initialize(self) -> None:
         """ADK-specific initialization: session service, agents, runner."""
         logger.info("initializing_services", app_name=self.app_name)
 
-        # Create session service
-        self._session_service = InMemorySessionService()
-        logger.debug("using_in_memory_session_service")
+        # Create the session service (durable DatabaseSessionService by
+        # default; InMemory only when session_store='memory') — unless one is
+        # already held, which is how reinitialize(preserve_sessions=True)
+        # carries live conversations across without building a replacement
+        # that would then be discarded unclosed.
+        if self._session_service is None:
+            self._session_service = self._make_session_service()
 
-        # Create agent hierarchy from configs
-        self._root_agent = self._create_agents()
+        # Create agent hierarchy — natively from an ADK config, or from configs.
+        if self._adk_config_path:
+            from agentic_cli.workflow.adk_config_bridge import load_adk_agent_native
+
+            self._root_agent = load_adk_agent_native(self._adk_config_path)
+            logger.info("adk_native_config_loaded", path=self._adk_config_path)
+        else:
+            self._root_agent = self._create_agents()
 
         # Create runner with plugins
         self._runner = Runner(
@@ -454,14 +843,41 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             required_managers=list(self._required_managers),
         )
 
+    def _validate_agent_graph(self) -> None:
+        """Reject an unbuildable agent graph before anything is allocated.
+
+        Runs at the top of initialization — ahead of model discovery, service
+        construction and the session service — so a static configuration error
+        costs no network call and leaves nothing to roll back.
+        """
+        if self._adk_config_path:
+            return  # native ADK config: ADK owns the topology
+        validate_agent_graph(self._agent_configs, backend=self.backend_type)
+
     async def _ensure_initialized(self) -> None:
-        """Ensure services are initialized before processing."""
+        """Ensure services are initialized before processing.
+
+        Called *before* the turn lock is taken, so a turn never waits on the
+        lifecycle lock while holding the turn lock (that ordering is what keeps
+        cleanup/reinitialize from deadlocking against a running turn). Because
+        of that ordering a cleanup can still land in between, which is what
+        ``_turn_admission`` re-checks with ``_backend_ready``.
+        """
         if not self._initialized:
             await self.initialize_services()
-        if not self._runner or not self._session_service or not self._root_agent:
+        if not self._backend_ready():
             raise RuntimeError(
                 "Workflow Manager failed to initialize. Check API keys and configuration."
             )
+
+    def _backend_ready(self) -> bool:
+        """True when the runner, session service and agent tree are all live."""
+        return bool(
+            self._initialized
+            and self._runner is not None
+            and self._session_service is not None
+            and self._root_agent is not None
+        )
 
     # -------------------------------------------------------------------------
     # Session handling (inlined from SessionHandler)
@@ -514,6 +930,12 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         This method sets up a settings context so that all tools called
         during processing will use this manager's settings instance.
 
+        Holds the manager's turn lock for the whole stream: the ADK plugins'
+        event buffers are manager-scoped, so overlapping turns would drain each
+        other's events. Overlapping callers queue; the lock is released on
+        cancellation. Admission also re-verifies that the backend is still live
+        (a cleanup can land between initialization and the turn lock).
+
         Args:
             message: User message
             user_id: User identifier
@@ -522,84 +944,74 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         Yields:
             WorkflowEvent objects representing workflow output
         """
-        await self._ensure_initialized()
-
         current_session_id = session_id or self.session_id
         bind_context(session_id=current_session_id, user_id=user_id)
 
         logger.info("processing_message", message_length=len(message))
 
-        # Sync event processor model (may have been lazily resolved)
-        self._event_processor.model = self.model
+        async with self._turn_admission():
+            # Sync event processor model (may have been lazily resolved)
+            self._event_processor.model = self.model
 
-        # Context setup
-        with self._workflow_context():
-            # Session handling
-            session = await self._get_or_create_session(user_id, current_session_id)
+            # Context setup
+            with self._workflow_context(session_id=current_session_id, user_id=user_id):
+                # Session handling
+                await self._get_or_create_session(user_id, current_session_id)
 
-            # Create message
-            new_message = types.Content(
-                role="user",
-                parts=[types.Part.from_text(text=message)],
-            )
-
-            event_count = 0
-
-            # Build run_config with context window compression if enabled
-            run_config = None
-            if self._settings.context_window_enabled:
-                from google.genai.types import ContextWindowCompressionConfig, SlidingWindow
-                from google.adk.agents import RunConfig
-
-                run_config = RunConfig(
-                    context_window_compression=ContextWindowCompressionConfig(
-                        trigger_tokens=self._settings.context_window_trigger_tokens,
-                        sliding_window=SlidingWindow(
-                            target_tokens=self._settings.context_window_target_tokens,
-                        ),
-                    )
+                # Create message
+                new_message = types.Content(
+                    role="user",
+                    parts=[types.Part.from_text(text=message)],
                 )
 
-            # Process ADK events directly - retry is handled by HttpRetryOptions
-            async for adk_event in self._runner.run_async(
-                session_id=current_session_id,
-                user_id=user_id,
-                new_message=new_message,
-                run_config=run_config,
-            ):
-                # Yield LLM events from plugin first (raw capture)
-                if self._llm_logging_plugin:
-                    for llm_event in self._llm_logging_plugin.drain_events():
-                        llm_event = self._apply_event_hook(llm_event)
-                        if llm_event:
-                            event_count += 1
-                            yield llm_event
-
-                # Process ADK event into workflow events
-                async for workflow_event in self._event_processor.process_event(
-                    adk_event,
-                    current_session_id,
+                async for event in self._run_and_stream(
+                    session_id=current_session_id,
+                    user_id=user_id,
+                    new_message=new_message,
+                    run_config=self._build_run_config(),
                 ):
-                    event_count += 1
-                    yield workflow_event
+                    yield event
 
-                    # Drain task progress events buffered by the plugin
-                    if workflow_event.type == EventType.TOOL_RESULT and self._task_progress_plugin:
-                        for progress_event in self._task_progress_plugin.drain_events():
-                            progress_event = self._apply_event_hook(progress_event)
-                            if progress_event:
-                                event_count += 1
-                                yield progress_event
+    def _build_run_config(self):
+        """Build a RunConfig with context-window compression if enabled."""
+        if not self._settings.context_window_enabled:
+            return None
+        from google.genai.types import ContextWindowCompressionConfig, SlidingWindow
+        from google.adk.agents import RunConfig
 
-            # Final drain — catches progress from the last tool call
-            if self._task_progress_plugin:
-                for progress_event in self._task_progress_plugin.drain_events():
-                    progress_event = self._apply_event_hook(progress_event)
-                    if progress_event:
-                        event_count += 1
-                        yield progress_event
+        return RunConfig(
+            context_window_compression=ContextWindowCompressionConfig(
+                trigger_tokens=self._settings.context_window_trigger_tokens,
+                sliding_window=SlidingWindow(
+                    target_tokens=self._settings.context_window_target_tokens,
+                ),
+            )
+        )
 
-            # Drain any remaining LLM events after processing completes
+    async def _run_and_stream(
+        self,
+        *,
+        session_id: str,
+        user_id: str,
+        new_message: "types.Content",
+        run_config,
+    ) -> AsyncGenerator[WorkflowEvent, None]:
+        """Run the ADK runner for one invocation and stream WorkflowEvents.
+
+        Shared by ``process()`` (user message) and ``resume_with_job_result()``
+        (function response). The caller must already be inside
+        ``_workflow_context`` with the session prepared.
+        """
+        event_count = 0
+
+        # Process ADK events directly - retry is handled by HttpRetryOptions
+        async for adk_event in self._runner.run_async(
+            session_id=session_id,
+            user_id=user_id,
+            new_message=new_message,
+            run_config=run_config,
+        ):
+            # Yield LLM events from plugin first (raw capture)
             if self._llm_logging_plugin:
                 for llm_event in self._llm_logging_plugin.drain_events():
                     llm_event = self._apply_event_hook(llm_event)
@@ -607,136 +1019,250 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                         event_count += 1
                         yield llm_event
 
-            logger.info("message_processed", event_count=event_count)
+            # Process ADK event into workflow events
+            async for workflow_event in self._event_processor.process_event(
+                adk_event,
+                session_id,
+            ):
+                event_count += 1
+                yield workflow_event
+
+                # Drain task progress events buffered by the plugin
+                if workflow_event.type == EventType.TOOL_RESULT and self._task_progress_plugin:
+                    for progress_event in self._task_progress_plugin.drain_events():
+                        progress_event = self._apply_event_hook(progress_event)
+                        if progress_event:
+                            event_count += 1
+                            yield progress_event
+
+        # Final drain — catches progress from the last tool call
+        if self._task_progress_plugin:
+            for progress_event in self._task_progress_plugin.drain_events():
+                progress_event = self._apply_event_hook(progress_event)
+                if progress_event:
+                    event_count += 1
+                    yield progress_event
+
+        # Drain any remaining LLM events after processing completes
+        if self._llm_logging_plugin:
+            for llm_event in self._llm_logging_plugin.drain_events():
+                llm_event = self._apply_event_hook(llm_event)
+                if llm_event:
+                    event_count += 1
+                    yield llm_event
+
+        logger.info("message_processed", event_count=event_count)
+
+    async def can_resume(self, record) -> bool:
+        """True iff the originating ADK session still exists to resume into.
+
+        Requires the resume ids and a session holding the pending call. The
+        session service is durable by default (``session_store='sqlite'``), so
+        the session normally survives a CLI restart and the job stays
+        resumable. This returns False — and the harness surfaces a notice
+        instead of a dead resume turn — when the session is genuinely gone: it
+        was deleted, the record lacks its session/user/call ids, or the run used
+        the explicitly ephemeral ``session_store='memory'`` and the process
+        restarted.
+        """
+        if not (record.session_id and record.user_id and record.call_id):
+            return False
+        if self._session_service is None:
+            return False
+        session = await self._session_service.get_session(
+            app_name=self.app_name, user_id=record.user_id, session_id=record.session_id,
+        )
+        return session is not None
+
+    async def resume_with_job_result(
+        self, record, result: Any = None
+    ) -> AsyncGenerator[WorkflowEvent, None]:
+        """Resume the agent with a finished long-running job's result.
+
+        Delivers the result to the pending long-running tool call as an ADK
+        ``FunctionResponse`` (matching ``record.call_id``) and re-invokes the
+        runner, streaming the follow-up turn's events. The originating session
+        must still contain the pending call (it is persisted); if it's gone or
+        the record lacks the ids needed to resume, this yields nothing.
+
+        Args:
+            record: The terminal ``JobRecord`` to resume from.
+            result: The job's result; fetched from the JobManager if omitted.
+        """
+        session_id = record.session_id
+        user_id = record.user_id
+        if not session_id or not user_id or not record.call_id:
+            logger.warning(
+                "job_resume_missing_ids",
+                job_id=getattr(record, "job_id", None),
+                have_session=bool(session_id),
+                have_user=bool(user_id),
+                have_call_id=bool(record.call_id),
+            )
+            return
+
+        bind_context(session_id=session_id, user_id=user_id)
+
+        # Same admission as process(): a resume is a turn, must not interleave
+        # with a user turn, and must not run against a released backend.
+        async with self._turn_admission():
+            self._event_processor.model = self.model
+
+            with self._workflow_context(session_id=session_id, user_id=user_id):
+                # The pending call lives in the existing session; don't create a
+                # new empty one (that would have no call to answer).
+                session = await self._session_service.get_session(
+                    app_name=self.app_name, user_id=user_id, session_id=session_id,
+                )
+                if session is None:
+                    logger.warning("job_resume_session_missing", job_id=record.job_id,
+                                   session_id=session_id)
+                    return
+
+                if result is None:
+                    jm = self._services.get(JOB_MANAGER)
+                    if jm is not None:
+                        result = jm.result(record.job_id)
+
+                function_response = types.FunctionResponse(
+                    id=record.call_id,
+                    name=record.call_name or record.tool,
+                    response=self._job_result_payload(record, result),
+                )
+                new_message = types.Content(
+                    role="user",
+                    parts=[types.Part(function_response=function_response)],
+                )
+
+                logger.info("job_resume_started", job_id=record.job_id,
+                            call_id=record.call_id, state=record.state.value)
+                async for event in self._run_and_stream(
+                    session_id=session_id,
+                    user_id=user_id,
+                    new_message=new_message,
+                    run_config=self._build_run_config(),
+                ):
+                    yield event
+
+    @staticmethod
+    def _job_result_payload(record, result: Any) -> dict:
+        """Build the FunctionResponse payload — a summary + pointer, not raw data.
+
+        Keeps the resumed turn's context lean; the agent can pull the full
+        result/logs via ``job_result``/``job_logs`` using the job_id.
+        """
+        payload: dict[str, Any] = {
+            "job_id": record.job_id,
+            "tool": record.tool,
+            "state": record.state.value,
+        }
+        if record.exit_code is not None:
+            payload["exit_code"] = record.exit_code
+        if record.error:
+            payload["error"] = record.error
+        summary = _summarize_result(result)
+        if summary is not None:
+            payload["result_summary"] = summary
+        payload["hint"] = (
+            f"Full result via job_result('{record.job_id}'); "
+            f"logs via job_logs('{record.job_id}')."
+        )
+        return payload
 
     # -------------------------------------------------------------------------
-    # Session save/resume hooks
+    # Sessions (native — DatabaseSessionService persists events continuously)
     # -------------------------------------------------------------------------
 
-    async def _extract_session_data(self, session_id: str) -> tuple[list[dict], str | None]:
-        """Extract normalized messages and current agent from ADK session.
+    async def session_exists(self, session_id: str, *, user_id: str | None = None) -> bool:
+        """True if the store holds this session with any events.
 
-        Returns:
-            Tuple of (messages list, current agent name or None).
+        Args:
+            session_id: Session to look up.
+            user_id: Owner of the session (defaults to ``settings.default_user``).
         """
         if not self._session_service:
-            return [], None
-
+            return False
+        ref = self.session_ref(session_id, user_id)
         session = await self._session_service.get_session(
-            app_name=self.app_name,
-            user_id=self._settings.default_user,
-            session_id=session_id,
+            app_name=ref.app_name,
+            user_id=ref.user_id,
+            session_id=ref.session_id,
         )
-        if session is None or not session.events:
-            return [], None
+        return session is not None and bool(getattr(session, "events", None))
 
-        messages: list[dict] = []
+    async def list_sessions(self, *, user_id: str | None = None) -> list[dict]:
+        """List persisted sessions for a user (most recent first).
+
+        Args:
+            user_id: Owner whose sessions to list (defaults to
+                ``settings.default_user``).
+        """
+        if not self._session_service:
+            return []
+        ref = self.session_ref(user_id=user_id)
+        resp = await self._session_service.list_sessions(
+            app_name=ref.app_name, user_id=ref.user_id,
+        )
+        sessions = [
+            {
+                "session_id": s.id,
+                "last_update": getattr(s, "last_update_time", None),
+                "message_count": len(getattr(s, "events", None) or []),
+            }
+            for s in getattr(resp, "sessions", [])
+        ]
+        sessions.sort(key=lambda x: x["last_update"] or 0, reverse=True)
+        return sessions
+
+    async def delete_session(self, session_id: str, *, user_id: str | None = None) -> bool:
+        """Delete a persisted session from the store.
+
+        Args:
+            session_id: Session to delete.
+            user_id: Owner of the session (defaults to ``settings.default_user``).
+        """
+        if not self._session_service:
+            return False
+        ref = self.session_ref(session_id, user_id)
+        await self._session_service.delete_session(
+            app_name=ref.app_name,
+            user_id=ref.user_id,
+            session_id=ref.session_id,
+        )
+        return True
+
+    async def recent_messages(
+        self, session_id: str, limit: int = 20, *, user_id: str | None = None
+    ) -> list[dict]:
+        """Recent text messages from the stored session (for fact extraction).
+
+        Args:
+            session_id: Session to read.
+            limit: Maximum number of messages returned (most recent last).
+            user_id: Owner of the session (defaults to ``settings.default_user``).
+        """
+        if not self._session_service:
+            return []
+        ref = self.session_ref(session_id, user_id)
+        session = await self._session_service.get_session(
+            app_name=ref.app_name,
+            user_id=ref.user_id,
+            session_id=ref.session_id,
+        )
+        if session is None or not getattr(session, "events", None):
+            return []
+        out: list[dict] = []
         for event in session.events:
             content = getattr(event, "content", None)
             if content is None:
                 continue
-
             role = getattr(content, "role", None)
-            parts = getattr(content, "parts", None) or []
-
-            for part in parts:
-                # Text part
-                if hasattr(part, "text") and part.text:
-                    if role == "user":
-                        messages.append({"role": "user", "content": part.text})
-                    elif role == "model":
-                        messages.append({"role": "assistant", "content": part.text})
-
-                # Function call part
-                elif hasattr(part, "function_call") and part.function_call:
-                    fc = part.function_call
-                    tool_call = {
-                        "id": getattr(fc, "id", fc.name),
-                        "name": fc.name,
-                        "args": dict(fc.args) if fc.args else {},
-                    }
-                    # Attach to preceding assistant message or create one
-                    if messages and messages[-1]["role"] == "assistant":
-                        messages[-1].setdefault("tool_calls", []).append(tool_call)
-                    else:
-                        messages.append({
-                            "role": "assistant",
-                            "content": "",
-                            "tool_calls": [tool_call],
-                        })
-
-                # Function response part
-                elif hasattr(part, "function_response") and part.function_response:
-                    fr = part.function_response
-                    response_content = json.dumps(fr.response) if isinstance(fr.response, dict) else str(fr.response)
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": getattr(fr, "id", fr.name),
-                        "name": fr.name,
-                        "content": response_content,
-                    })
-
-        current_agent = getattr(session.events[-1], "author", None)
-        return messages, current_agent
-
-    async def _inject_session_messages(
-        self,
-        session_id: str,
-        messages: list[dict],
-        current_agent: str | None = None,
-    ) -> None:
-        """Inject normalized messages into the ADK session as real events.
-
-        Uses ``append_event`` so events land in the *stored* session.
-        ``create_session`` returns a copy of the stored session, so the old
-        approach of appending to that copy left the stored session empty and
-        silently lost the restored history on resume.
-        """
-        if not self._session_service:
-            raise RuntimeError("Session service not initialized")
-
-        # Create a fresh session for the restored conversation
-        session = await self._session_service.create_session(
-            app_name=self.app_name,
-            user_id=self._settings.default_user,
-            session_id=session_id,
-        )
-
-        async def _add(content: types.Content, author: str) -> None:
-            await self._session_service.append_event(
-                session, Event(author=author or "user", content=content)
+            text = " ".join(
+                p.text for p in (getattr(content, "parts", None) or [])
+                if getattr(p, "text", None)
             )
-
-        for msg in messages:
-            role = msg["role"]
-
-            if role == "user":
-                content = types.Content(
-                    role="user",
-                    parts=[types.Part.from_text(text=msg["content"])],
+            if text:
+                out.append(
+                    {"role": "user" if role == "user" else "assistant", "content": text}
                 )
-                await _add(content, "user")
-
-            elif role == "assistant":
-                parts = []
-                if msg.get("content"):
-                    parts.append(types.Part.from_text(text=msg["content"]))
-                for tc in msg.get("tool_calls", []):
-                    parts.append(types.Part.from_function_call(
-                        name=tc["name"],
-                        args=tc.get("args", {}),
-                    ))
-                content = types.Content(role="model", parts=parts)
-                await _add(content, current_agent or "model")
-
-            elif role == "tool":
-                try:
-                    response = json.loads(msg["content"])
-                except (json.JSONDecodeError, TypeError):
-                    response = {"result": msg["content"]}
-                parts = [types.Part.from_function_response(
-                    name=msg.get("name", "unknown"),
-                    response=response,
-                )]
-                content = types.Content(role="user", parts=parts)
-                await _add(content, current_agent or "user")
+        return out[-limit:]

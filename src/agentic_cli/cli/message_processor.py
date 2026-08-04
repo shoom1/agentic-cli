@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import suppress
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import TYPE_CHECKING, ClassVar
 
 from agentic_cli.logging import Loggers, bind_context
@@ -64,6 +65,46 @@ def _richify_task_display(plain: str) -> str:
     return rich_to_ansi("\n".join(lines))
 
 
+# === Turn results ===
+
+
+class TurnStatus(str, Enum):
+    """Outcome of one processed turn.
+
+    - ``COMPLETED`` — the event stream ran to the end.
+    - ``CANCELLED`` — the user pressed Ctrl+C.
+    - ``FAILED`` — the workflow raised; ``TurnResult.error`` says why.
+    - ``UNAVAILABLE`` — the turn never started (workflow not initialized, or a
+      job whose originating conversation is gone).
+    """
+
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
+    FAILED = "failed"
+    UNAVAILABLE = "unavailable"
+
+
+@dataclass(frozen=True)
+class TurnResult:
+    """Explicit outcome of ``MessageProcessor.process``/``process_resume``.
+
+    Callers that own durable state (the background-job coordinator) must key
+    off ``delivered`` rather than "the coroutine returned without raising" —
+    that is what let a failed resume be recorded as delivered and dropped.
+    """
+
+    status: TurnStatus
+    error: str | None = None
+    # True once the turn produced output or ran a tool, i.e. a replay of the
+    # whole turn would duplicate side effects.
+    partial: bool = False
+
+    @property
+    def delivered(self) -> bool:
+        """True only when the turn ran to completion."""
+        return self.status is TurnStatus.COMPLETED
+
+
 # === Event Processing State ===
 
 
@@ -81,18 +122,19 @@ class _EventProcessingState:
     in_hitl: bool = False
     thinking_content: list[str] = field(default_factory=list)
     response_content: list[str] = field(default_factory=list)
+    # Set once the turn emits assistant text or runs a tool: the turn is then
+    # observably partial, which the caller records on a failed/cancelled
+    # TurnResult. (It is not a retry gate — the harness never replays a turn.)
+    side_effects_seen: bool = False
+    # First non-recoverable ERROR event seen. The stream may keep going (the
+    # backend decides), but the turn's outcome is FAILED, never delivered.
+    fatal_error: str | None = None
     # Prevents double-counting when LangGraph emits both CONTEXT_TRIMMED and LLM_USAGE
     _context_trimmed_this_invocation: bool = False
 
     def get_status(self) -> str:
         """Return the current status line for the events thinking box."""
         return self.status_line
-
-    def reset_for_retry(self) -> None:
-        """Reset state for retry after rate limit."""
-        self.status_line = "Processing..."
-        self.thinking_content.clear()
-        self.response_content.clear()
 
 
 # === Message Processor ===
@@ -144,7 +186,8 @@ class MessageProcessor:
         ui: "ThinkingPromptSession",
         settings: "BaseSettings",
         usage_tracker: "UsageTracker | None" = None,
-    ) -> None:
+        session_id: str | None = None,
+    ) -> TurnResult:
         """Process a user message through the workflow.
 
         Args:
@@ -153,6 +196,13 @@ class MessageProcessor:
             ui: UI session for output
             settings: Application settings
             usage_tracker: Optional tracker for accumulating LLM token usage
+            session_id: Session to run the turn in. Passed explicitly so every
+                turn targets the app's durable session rather than the manager's
+                fallback (which would collapse unnamed runs into one session).
+
+        Returns:
+            The turn's outcome; ``TurnResult.delivered`` is True only when the
+            event stream ran to completion.
         """
         # Wait for initialization if needed
         if not await workflow_controller.ensure_initialized(ui):
@@ -160,14 +210,141 @@ class MessageProcessor:
                 "Cannot process message - workflow not initialized. "
                 "Please check your API keys (GOOGLE_API_KEY or ANTHROPIC_API_KEY)."
             )
-            return
-
-        # Import WorkflowEvent here (workflow module is now loaded)
-        from agentic_cli.workflow import WorkflowEvent
+            return TurnResult(
+                TurnStatus.UNAVAILABLE, error="workflow not initialized"
+            )
 
         bind_context(user_id=settings.default_user)
         logger.info("handling_message", message_length=len(message))
 
+        def _source(workflow):
+            return workflow.process(
+                message=message,
+                user_id=settings.default_user,
+                session_id=session_id,
+            )
+
+        return await self._run_turn(
+            _source, workflow_controller, ui, settings, usage_tracker
+        )
+
+    async def process_resume(
+        self,
+        record,
+        workflow_controller: "WorkflowController",
+        ui: "ThinkingPromptSession",
+        settings: "BaseSettings",
+        usage_tracker: "UsageTracker | None" = None,
+    ) -> TurnResult:
+        """Resume the agent with a finished long-running job's result.
+
+        Streams ``workflow.resume_with_job_result(record)`` through the exact
+        same rendering path as a user turn (events box, tool results, token
+        accounting, Ctrl+C).
+
+        Args:
+            record: The terminal JobRecord to resume from.
+            workflow_controller: Controller managing workflow lifecycle.
+            ui: UI session for output.
+            settings: Application settings.
+            usage_tracker: Optional tracker for accumulating LLM token usage.
+
+        Returns:
+            The turn's outcome. ``UNAVAILABLE`` when the workflow is not ready
+            or the originating conversation is gone; the caller must not record
+            the job as delivered unless ``TurnResult.delivered`` is True.
+        """
+        if not await workflow_controller.ensure_initialized(ui):
+            return TurnResult(
+                TurnStatus.UNAVAILABLE, error="workflow not initialized"
+            )
+
+        workflow = workflow_controller.workflow
+        bind_context(user_id=settings.default_user)
+        icon = "✓" if record.state.value == "succeeded" else "✗"
+
+        # Resume only if the backend supports it AND the originating conversation
+        # is still available (after a restart the in-memory ADK session is gone).
+        # Otherwise surface a notice — the result stays reachable by job id.
+        resumable = hasattr(
+            workflow, "resume_with_job_result"
+        ) and await workflow.can_resume(record)
+        if not resumable:
+            logger.info(
+                "job_resume_not_resumable",
+                job_id=record.job_id,
+                backend=getattr(workflow, "backend_type", "?"),
+            )
+            ui.add_message(
+                "system",
+                f"{icon} Background job '{record.name}' finished "
+                f"({record.state.value}) while its conversation was unavailable "
+                f"— fetch the result with /jobs {record.job_id}.",
+            )
+            return TurnResult(
+                TurnStatus.UNAVAILABLE,
+                error="originating conversation is no longer available",
+            )
+
+        logger.info("resuming_job", job_id=record.job_id, state=record.state.value)
+        ui.add_message(
+            "system",
+            f"↻ Background job '{record.name}' finished ({icon} {record.state.value}) "
+            "— resuming.",
+        )
+
+        def _source(wf):
+            return wf.resume_with_job_result(record)
+
+        return await self._run_turn(
+            _source, workflow_controller, ui, settings, usage_tracker
+        )
+
+    async def _run_turn(
+        self,
+        source_factory,
+        workflow_controller: "WorkflowController",
+        ui: "ThinkingPromptSession",
+        settings: "BaseSettings",
+        usage_tracker: "UsageTracker | None" = None,
+    ) -> TurnResult:
+        """Drive one turn from an event-source factory through the UI.
+
+        Shared by ``process`` (user message) and ``process_resume`` (job
+        result). ``source_factory(workflow)`` returns the WorkflowEvent async
+        generator to consume; everything else (events box, HITL callback,
+        Ctrl+C cancel, rate-limit retry, token accounting) is identical.
+
+        The event source is invoked **exactly once**. The harness never replays
+        a turn: ADK accepts and persists the input (the user message, or a
+        resumed ``FunctionResponse``) into the session while setting up the
+        invocation — before the first event is yielded — so there is no point
+        at which re-running ``source_factory`` is side-effect free. Even a 429
+        on the first model call leaves that input in the session, and a replay
+        would duplicate the turn and repeat any tool calls it made.
+
+        Retrying belongs at the provider/model-client boundary, which can
+        prove nothing was accepted: ADK's ``HttpRetryOptions`` (configured in
+        ``_get_generate_content_config``) retries transient 5xx inside the
+        client, and the Anthropic client retries per ``retry_max_attempts``.
+        A rate limit that still surfaces here fails the turn explicitly.
+
+        Cancellation is symmetric: whether the *user* cancels (Ctrl+C) or the
+        *caller* cancels this coroutine, the consumer task is cancelled and
+        awaited to completion **before** the HITL callback and turn state are
+        torn down — otherwise a tool could still be running, and asking for
+        input, with nothing left to answer it.
+
+        Errors reported as ``EventType.ERROR`` are rendered as they arrive. A
+        recoverable one is a warning and the stream decides the outcome; a
+        non-recoverable one makes the turn ``FAILED`` (``delivered`` False)
+        even if the stream then ends normally, so a caller owning durable
+        state does not record a failed delivery as delivered.
+
+        Returns:
+            The turn's outcome as a :class:`TurnResult`. ``partial`` reports
+            whether the turn had already emitted output or run a tool.
+        """
         state = _EventProcessingState(
             usage_tracker=usage_tracker,
             workflow_controller=workflow_controller,
@@ -190,107 +367,169 @@ class MessageProcessor:
         # (state.get_status) drives its display.
         events_ctx: "ThinkingContext | None" = None
 
+        def _finish_events_box() -> None:
+            """Finish the events box if it is open. Idempotent by construction.
+
+            Every path goes through this, so a box is finished exactly once:
+            reopening one that was already closed (or closing one twice) is
+            visible to the user as a stray or duplicated panel.
+            """
+            nonlocal events_ctx
+            if state.thinking_started and events_ctx is not None:
+                events_ctx.finish(add_to_history=False)
+            events_ctx = None
+            state.thinking_started = False
+
+        def _open_events_box() -> None:
+            nonlocal events_ctx
+            events_ctx = ui.start_thinking(state.get_status, content_format="ansi")
+            state.thinking_started = True
+
         # Set up direct callback so HITL tools can prompt the user without
         # deadlocking the workflow runner.
         async def _handle_input(request: "UserInputRequest") -> str:
-            nonlocal events_ctx
             # Mark the HITL window before tearing down the events box so the
             # cancel watcher doesn't read "no active boxes" as a Ctrl+C.
             state.in_hitl = True
+            _finish_events_box()
             try:
-                if state.thinking_started and events_ctx is not None:
-                    events_ctx.finish(add_to_history=False)
-                    state.thinking_started = False
-
                 response = await self._prompt_user_input(request, ui)
-            finally:
-                events_ctx = ui.start_thinking(
-                    state.get_status, content_format="ansi"
-                )
-                state.thinking_started = True
+            except BaseException:
+                # The turn is unwinding (cancelled, or the dialog failed).
+                # Reopening the events box here would leave a panel on screen
+                # that nothing downstream will ever finish.
                 state.in_hitl = False
+                raise
+            _open_events_box()
+            state.in_hitl = False
             return response
 
+        # The callback is context-local, so installing and clearing it here
+        # affects only this turn; no token round-trip is needed (and a manager
+        # implementing the older no-argument clear stays compatible).
         workflow.set_input_callback(_handle_input)
+        result = TurnResult(TurnStatus.FAILED, error="turn did not run")
+        proc_task: "asyncio.Task[None] | None" = None
         try:
-            while True:
-                try:
-                    events_ctx = ui.start_thinking(
-                        state.get_status, content_format="ansi"
+            try:
+                _open_events_box()
+
+                # Consume the event stream in a cancellable task so Ctrl+C
+                # can abort an in-flight run. thinking_prompt's Ctrl+C
+                # binding finishes all thinking boxes (so ui.is_thinking
+                # flips False) but never cancels our coroutine, so we watch
+                # for that and cancel the task ourselves.
+                async def _consume() -> None:
+                    async for event in source_factory(workflow):
+                        handler = dispatch.get(event.type)
+                        if handler is not None:
+                            await handler(
+                                self, event, state, ui, settings, workflow
+                            )
+
+                proc_task = asyncio.create_task(_consume())
+                if await self._watch_for_cancel(proc_task, ui, state):
+                    # Ctrl+C already finished every active box; just drop
+                    # our now-dead references so the next turn starts clean
+                    # (finishing them again would double-close).
+                    events_ctx = None
+                    state.thinking_started = False
+                    self._task_box = None
+                    self._last_task_content = None
+                    ui.add_warning("Cancelled.")
+                    workflow_controller.update_status_bar(ui)
+                    logger.info("message_cancelled_by_user")
+                    result = TurnResult(
+                        TurnStatus.CANCELLED,
+                        error="cancelled by user",
+                        partial=state.side_effects_seen,
                     )
-                    state.thinking_started = True
-
-                    # Consume the event stream in a cancellable task so Ctrl+C
-                    # can abort an in-flight run. thinking_prompt's Ctrl+C
-                    # binding finishes all thinking boxes (so ui.is_thinking
-                    # flips False) but never cancels our coroutine, so we watch
-                    # for that and cancel the task ourselves.
-                    async def _consume() -> None:
-                        async for event in workflow.process(
-                            message=message,
-                            user_id=settings.default_user,
-                        ):
-                            handler = dispatch.get(event.type)
-                            if handler is not None:
-                                await handler(
-                                    self, event, state, ui, settings, workflow
-                                )
-
-                    proc_task = asyncio.create_task(_consume())
-                    if await self._watch_for_cancel(proc_task, ui, state):
-                        # Ctrl+C already finished every active box; just drop
-                        # our now-dead references so the next turn starts clean.
-                        state.thinking_started = False
-                        self._task_box = None
-                        self._last_task_content = None
-                        ui.add_warning("Cancelled.")
-                        workflow_controller.update_status_bar(ui)
-                        logger.info("message_cancelled_by_user")
-                        break
-
+                else:
                     # Finish events box only (don't add status to history)
-                    if state.thinking_started and events_ctx is not None:
-                        events_ctx.finish(add_to_history=False)
+                    _finish_events_box()
 
                     # Ensure final token counts are reflected in status bar
                     workflow_controller.update_status_bar(ui)
 
-                    logger.debug("message_handled_successfully")
-                    break  # Success — exit retry loop
-
-                except Exception as e:
-                    if state.thinking_started and events_ctx is not None:
-                        events_ctx.finish(add_to_history=False)
-                        state.thinking_started = False
-
-                    # Check for 429 rate limit errors — prompt user to wait and retry
-                    from agentic_cli.workflow.retry import (
-                        is_rate_limit_error,
-                        parse_retry_delay,
-                    )
-
-                    if is_rate_limit_error(e):
-                        delay = parse_retry_delay(e) or 60.0
-                        retry = await ui.yes_no_dialog(
-                            title="Rate Limited",
-                            text=f"API rate limit reached. Retry in {delay:.0f}s?",
+                    if state.fatal_error is not None:
+                        # The stream ended, but it reported a failure. Never
+                        # "delivered".
+                        logger.info("turn_failed_by_error_event")
+                        result = TurnResult(
+                            TurnStatus.FAILED,
+                            error=state.fatal_error,
+                            partial=state.side_effects_seen,
                         )
-                        if retry:
-                            ui.add_warning(f"Waiting {delay:.0f}s before retrying...")
-                            await asyncio.sleep(delay)
-                            state.reset_for_retry()
-                            continue  # Retry the loop
+                    else:
+                        logger.debug("message_handled_successfully")
+                        result = TurnResult(TurnStatus.COMPLETED)
 
-                    # Non-429 or user chose cancel
+            except Exception as e:
+                _finish_events_box()
+
+                from agentic_cli.workflow.retry import is_rate_limit_error
+
+                if is_rate_limit_error(e):
+                    logger.warning("turn_rate_limited", partial=state.side_effects_seen)
+                    ui.add_error(
+                        f"Rate limited: {e}\n"
+                        "The turn was not retried: the backend accepts and "
+                        "persists the input before the first event, so running "
+                        "it again would duplicate this turn (and repeat any "
+                        "tool calls it made). Send the request again once the "
+                        "limit resets."
+                    )
+                else:
                     ui.add_error(f"Workflow error: {e}")
-                    break
+                result = TurnResult(
+                    TurnStatus.FAILED,
+                    error=str(e),
+                    partial=state.side_effects_seen,
+                )
         finally:
+            # Settle the consumer *first*: it may still be driving the workflow
+            # (a caller cancelling us does not touch it), and tearing the
+            # callback down under a live tool would strand a HITL prompt.
+            await self._settle(proc_task)
+            # Then close whatever is still open — on a cancelled turn none of
+            # the paths above ran, and a box left open outlives the turn.
+            _finish_events_box()
             workflow.clear_input_callback()
             # Cache plain-text task content for cold start on next turn
             # (not get_content() which returns already-richified ANSI)
             self._last_task_progress = (
                 self._last_task_content if self._task_box else None
             )
+        return result
+
+    @staticmethod
+    async def _settle(proc_task: "asyncio.Task[None] | None") -> None:
+        """Ensure the consumer task is finished before the turn is torn down.
+
+        A no-op on the normal paths (the task is already done). It matters when
+        *this* coroutine is cancelled while waiting on the task: cancellation
+        does not propagate into it, so it would keep consuming the workflow
+        generator after its owner is gone.
+
+        Uses ``asyncio.wait`` rather than awaiting the task, so neither the
+        task's ``CancelledError`` nor its exception is re-raised out of a
+        ``finally`` block — the original outcome must survive.
+        """
+        if proc_task is None or proc_task.done():
+            MessageProcessor._retrieve_exception(proc_task)
+            return
+        proc_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await asyncio.wait({proc_task})
+        MessageProcessor._retrieve_exception(proc_task)
+
+    @staticmethod
+    def _retrieve_exception(proc_task: "asyncio.Task[None] | None") -> None:
+        """Mark a finished task's exception retrieved (no 'never retrieved' log)."""
+        if proc_task is None or not proc_task.done() or proc_task.cancelled():
+            return
+        with suppress(asyncio.InvalidStateError):
+            proc_task.exception()
 
     async def _watch_for_cancel(
         self,
@@ -383,6 +622,43 @@ class MessageProcessor:
         """Handle TEXT events — stream response to console."""
         ui.add_response(event.content, markdown=True)
         state.response_content.append(event.content)
+        # Text is already on screen and in the durable session: replaying the
+        # turn would emit it twice.
+        state.side_effects_seen = True
+
+    async def _handle_error(
+        self,
+        event: "WorkflowEvent",
+        state: _EventProcessingState,
+        ui: "ThinkingPromptSession",
+        settings: "BaseSettings",
+        workflow: object,
+    ) -> None:
+        """Handle ERROR events — render, and fail the turn unless recoverable.
+
+        ``WorkflowEvent.error(..., recoverable=True)`` means the backend
+        handled it and is carrying on (a retried tool, a degraded feature): it
+        is surfaced as a warning and the stream still decides the outcome.
+        Anything else is a failure the caller must see in the ``TurnResult``,
+        because a background-job coordinator keys durable state off
+        ``delivered`` — an unrendered, unreported error was recorded as a
+        successful delivery.
+        """
+        recoverable = bool(event.metadata.get("recoverable", False))
+        code = event.metadata.get("error_code")
+        suffix = f" [{code}]" if code else ""
+        if recoverable:
+            ui.add_warning(f"{event.content}{suffix}")
+            state.status_line = f"! {event.content}"
+            logger.warning("workflow_error_event", recoverable=True, code=code)
+            return
+
+        ui.add_error(f"{event.content}{suffix}")
+        state.status_line = f"x {event.content}"
+        logger.error("workflow_error_event", recoverable=False, code=code)
+        if state.fatal_error is None:
+            # Keep the first: later ones are usually the cascade.
+            state.fatal_error = event.content
 
     async def _handle_thinking(
         self,
@@ -409,6 +685,17 @@ class MessageProcessor:
         """Handle TOOL_CALL events — update status line."""
         tool_name = event.metadata.get("tool_name", "unknown")
         state.status_line = f"Calling: {tool_name}"
+        # A tool ran; the turn is no longer safe to replay wholesale.
+        state.side_effects_seen = True
+        # For the stateful executor, show the code being run (syntax-highlighted,
+        # first N lines) so the run is visible, not just a status blip.
+        if tool_name == "sandbox_execute":
+            from agentic_cli.cli.sandbox_render import render_sandbox_code
+
+            code = (event.metadata.get("tool_args") or {}).get("code", "")
+            block = render_sandbox_code(code)
+            if block is not None:
+                ui.add_rich(block)
 
     async def _handle_tool_result(
         self,
@@ -419,11 +706,22 @@ class MessageProcessor:
         workflow: object,
     ) -> None:
         """Handle TOOL_RESULT events — display result summary."""
+        state.side_effects_seen = True
         tool_name = event.metadata.get("tool_name", "unknown")
         success = event.metadata.get("success", True)
         duration = event.metadata.get("duration_ms")
         icon = "+" if success else "x"
         duration_str = f" ({duration}ms)" if duration else ""
+        # The stateful executor gets a single combined message: a +/x header with
+        # the run's output indented under a ╰ marker (mirrors the code block).
+        if tool_name == "sandbox_execute":
+            from agentic_cli.cli.sandbox_render import render_sandbox_result
+
+            result = event.metadata.get("result")
+            result_dict = result if isinstance(result, dict) else {}
+            state.status_line = f"{icon} {tool_name}{duration_str}"
+            ui.add_rich(render_sandbox_result(result_dict, success=success))
+            return
         lines = event.content.split("\n")
         first_line = lines[0]
         state.status_line = f"{icon} {tool_name}: {first_line}{duration_str}"
@@ -585,6 +883,7 @@ class MessageProcessor:
 
             cls._EVENT_DISPATCH = {
                 EventType.TEXT: cls._handle_text,
+                EventType.ERROR: cls._handle_error,
                 EventType.THINKING: cls._handle_thinking,
                 EventType.TOOL_CALL: cls._handle_tool_call,
                 EventType.TOOL_RESULT: cls._handle_tool_result,

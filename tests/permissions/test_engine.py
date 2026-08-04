@@ -7,6 +7,7 @@ import pytest
 
 from agentic_cli.workflow.permissions.capabilities import Capability
 from agentic_cli.workflow.permissions.engine import PermissionEngine
+from agentic_cli.workflow.permissions.prompt import ALLOW_ALWAYS_CHOICE
 from agentic_cli.workflow.permissions.rules import Effect, Rule, RuleSource
 from agentic_cli.workflow.permissions.store import PermissionContext
 
@@ -190,11 +191,12 @@ class TestEngineAskFlow:
         w.request_user_input.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_user_allow_always_writes_project_file(self, ctx, tmp_path, monkeypatch):
+    async def test_user_allow_always_writes_user_side_project_grants(self, ctx, tmp_path, monkeypatch):
         import json
         monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
         w = _stub_workflow()
-        w.request_user_input = AsyncMock(return_value="Allow always (save to project)")
+        w.request_user_input = AsyncMock(return_value=ALLOW_ALWAYS_CHOICE)
         engine = PermissionEngine(settings=_stub_settings(), workflow=w, ctx=ctx)
 
         result = await engine.check(
@@ -204,8 +206,12 @@ class TestEngineAskFlow:
         )
         assert result.allowed is True
 
-        data = json.loads((tmp_path / ".agentic/settings.json").read_text())
-        allow = data["permissions"]["allow"]
+        # Interactive grants persist to the USER-side, path-keyed grants file
+        # (keyed by the resolved project cwd), never into the repo.
+        grants = json.loads(
+            (tmp_path / "home" / ".agentic" / "project_grants.json").read_text()
+        )
+        allow = grants[str(ctx.workdir.resolve())]["permissions"]["allow"]
         assert len(allow) == 1
         assert allow[0]["capability"] == "http.read"
         assert "example.com" in allow[0]["target"]
@@ -281,6 +287,41 @@ class TestEngineConcurrency:
         assert ask_peak == 1  # never two asks in flight simultaneously
 
 
+class TestResolveListTargetArg:
+    def test_list_target_arg_resolves_per_item(self, ctx):
+        from agentic_cli.workflow.permissions.capabilities import ResolvedCapability
+        eng = PermissionEngine(settings=_stub_settings(), workflow=_stub_workflow(), ctx=ctx)
+        resolved = eng._resolve(
+            [Capability("filesystem.read", target_arg="inputs")],
+            {"inputs": ["/data/a.csv", "/data/b.csv"]},
+        )
+        assert all(isinstance(rc, ResolvedCapability) for rc in resolved)
+        targets = sorted(rc.target for rc in resolved)
+        assert len(resolved) == 2
+        assert any(t.endswith("a.csv") for t in targets)
+        assert any(t.endswith("b.csv") for t in targets)
+
+    def test_scalar_target_arg_still_yields_single_resolved(self, ctx):
+        """No regression: a scalar value must still produce exactly one ResolvedCapability."""
+        eng = PermissionEngine(settings=_stub_settings(), workflow=_stub_workflow(), ctx=ctx)
+        resolved = eng._resolve(
+            [Capability("filesystem.read", target_arg="path")],
+            {"path": "/data/x.csv"},
+        )
+        assert len(resolved) == 1
+        assert resolved[0].target.endswith("x.csv")
+
+    def test_none_target_arg_still_yields_star(self, ctx):
+        """No regression: target_arg=None must still produce a single ResolvedCapability with target='*'."""
+        eng = PermissionEngine(settings=_stub_settings(), workflow=_stub_workflow(), ctx=ctx)
+        resolved = eng._resolve(
+            [Capability("python.exec.stateful")],
+            {"code": "x = 1"},
+        )
+        assert len(resolved) == 1
+        assert resolved[0].target == "*"
+
+
 class TestTargetlessAllowAlwaysRegression:
     """Regression: after 'Allow always' on a targetless capability (target_arg=None),
     subsequent calls must not re-prompt.
@@ -294,8 +335,9 @@ class TestTargetlessAllowAlwaysRegression:
     @pytest.mark.asyncio
     async def test_http_read_allow_always_matches_next_call(self, ctx, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
         w = _stub_workflow()
-        w.request_user_input = AsyncMock(return_value="Allow always (save to project)")
+        w.request_user_input = AsyncMock(return_value=ALLOW_ALWAYS_CHOICE)
         engine = PermissionEngine(settings=_stub_settings(), workflow=w, ctx=ctx)
 
         # First call: no rule → ask → allow always (saves session + project rule)
@@ -333,11 +375,12 @@ class TestTargetlessAllowAlwaysRegression:
         """When user picks 'Allow always' for filesystem.write to /foo/bar.txt,
         the rule covers /foo/** — subsequent writes to /foo/baz.txt must not re-prompt."""
         monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
         outside = tmp_path / "out"
         outside.mkdir()
 
         w = _stub_workflow()
-        w.request_user_input = AsyncMock(return_value="Allow always (save to project)")
+        w.request_user_input = AsyncMock(return_value=ALLOW_ALWAYS_CHOICE)
         engine = PermissionEngine(settings=_stub_settings(), workflow=w, ctx=ctx)
 
         # First write → prompts → allow always.
@@ -412,24 +455,98 @@ class TestTargetlessAllowAlwaysRegression:
 
     @pytest.mark.asyncio
     async def test_reloaded_wildcard_rule_still_matches(self, ctx, tmp_path, monkeypatch):
-        """After the project JSON is reloaded (simulating next process run),
-        a rule stored with target='*' must still match a targetless capability."""
+        """A rule granted with target='*' must be stored with the wildcard
+        preserved (not mangled by matchers) so it can be reloaded correctly.
+
+        Verifies both the WRITE side (grants file persisted with '*' intact) and
+        the RELOAD side (a fresh engine reloads the persisted grant and allows
+        the same capability without prompting).
+        """
+        import json
         monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
 
         # Round 1: grant "allow always" so the rule is persisted.
         w1 = _stub_workflow()
-        w1.request_user_input = AsyncMock(return_value="Allow always (save to project)")
+        w1.request_user_input = AsyncMock(return_value=ALLOW_ALWAYS_CHOICE)
         engine1 = PermissionEngine(settings=_stub_settings(), workflow=w1, ctx=ctx)
-        await engine1.check("web_search", [Capability("http.read")], {"query": "x"})
+        result1 = await engine1.check("web_search", [Capability("http.read")], {"query": "x"})
+        assert result1.allowed is True
 
-        # Round 2: fresh engine reads rules from disk.
-        w2 = _stub_workflow()
-        w2.request_user_input = AsyncMock(return_value="Deny")  # would deny if re-asked
+        # The grants file must preserve the wildcard target ('*') so it
+        # survives serialisation and can be reloaded without corruption.
+        grants = json.loads(
+            (tmp_path / "home" / ".agentic" / "project_grants.json").read_text()
+        )
+        allow = grants[str(ctx.workdir.resolve())]["permissions"]["allow"]
+        assert len(allow) == 1
+        assert allow[0]["capability"] == "http.read"
+        assert allow[0]["target"] == "*"  # wildcard preserved, not mangled
+
+        # Round 2: a FRESH engine (same settings + ctx → same resolved project
+        # key) must reload the persisted wildcard grant from project_grants.json
+        # and allow the same capability WITHOUT prompting.
+        w2 = _stub_workflow()  # default response "Deny" — a prompt here fails the test
         engine2 = PermissionEngine(settings=_stub_settings(), workflow=w2, ctx=ctx)
-        result = await engine2.check(
-            "web_search",
-            [Capability("http.read")],
-            {"query": "y"},
+        result2 = await engine2.check("web_search", [Capability("http.read")], {"query": "y"})
+        assert result2.allowed is True
+        w2.request_user_input.assert_not_called()
+
+
+class TestOptionalCapability:
+    """A capability marked optional is only exercised when its target arg is
+    supplied — so a tool with an optional output/asset path doesn't prompt for a
+    write/read it isn't performing this call."""
+
+    def _engine(self, ctx):
+        return PermissionEngine(
+            settings=_stub_settings(), workflow=_stub_workflow(), ctx=ctx,
+        )
+
+    def test_optional_cap_skipped_when_arg_absent(self, ctx):
+        engine = self._engine(ctx)
+        resolved = engine._resolve(
+            [Capability("filesystem.write", target_arg="output_pdf", optional=True)],
+            {},  # output_pdf not supplied
+        )
+        assert resolved == []
+
+    def test_optional_cap_skipped_when_arg_empty(self, ctx):
+        engine = self._engine(ctx)
+        resolved = engine._resolve(
+            [Capability("filesystem.write", target_arg="output_pdf", optional=True)],
+            {"output_pdf": None},
+        )
+        assert resolved == []
+
+    def test_optional_cap_resolved_when_arg_present(self, ctx, tmp_path):
+        engine = self._engine(ctx)
+        target = str(tmp_path / "out.pdf")
+        resolved = engine._resolve(
+            [Capability("filesystem.write", target_arg="output_pdf", optional=True)],
+            {"output_pdf": target},
+        )
+        assert len(resolved) == 1
+        assert resolved[0].name == "filesystem.write"
+
+    def test_required_cap_still_resolves_when_arg_absent(self, ctx):
+        """Non-optional (default) behavior is unchanged: an absent target still
+        resolves (to be evaluated/asked), never silently skipped."""
+        engine = self._engine(ctx)
+        resolved = engine._resolve(
+            [Capability("filesystem.write", target_arg="path")],  # optional=False
+            {},
+        )
+        assert len(resolved) == 1
+
+    @pytest.mark.asyncio
+    async def test_check_allows_when_all_optional_caps_absent(self, ctx):
+        """All-optional caps with absent args resolve to [] — check() must not
+        crash (IndexError on outcomes[0]) and should allow (nothing to gate)."""
+        engine = self._engine(ctx)
+        result = await engine.check(
+            "some_tool",
+            [Capability("filesystem.write", target_arg="out", optional=True)],
+            {},
         )
         assert result.allowed is True
-        w2.request_user_input.assert_not_called()

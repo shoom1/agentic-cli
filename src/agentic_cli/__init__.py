@@ -25,8 +25,12 @@ Note: GoogleADKWorkflowManager and LangGraphWorkflowManager are lazy-loaded to a
 from agentic_cli.cli.app import BaseCLIApp
 from agentic_cli.workflow.factory import create_workflow_manager_from_settings
 from agentic_cli.cli.commands import Command, CommandRegistry
-from agentic_cli.workflow.config import AgentConfig
+from agentic_cli.cli.message_processor import TurnResult, TurnStatus
+from agentic_cli.cli.workflow_controller import WorkflowState
+from agentic_cli.workflow.config import AgentConfig, AgentGraphError
+from agentic_cli.workflow.model_settings import ModelSettings, ThinkingSettings
 from agentic_cli.workflow.events import WorkflowEvent, EventType
+from agentic_cli.workflow.sessions import SessionRef
 from agentic_cli.config import (
     BaseSettings,
     SettingsContext,
@@ -38,7 +42,7 @@ from agentic_cli.config import (
     validate_settings,
     reload_settings,
 )
-from agentic_cli.settings_persistence import SettingsPersistence
+from agentic_cli.settings_persistence import SettingsPersistence, SettingsSaveResult
 from agentic_cli.workflow.settings import WorkflowSettingsMixin
 from agentic_cli.settings_mixins import AppSettingsMixin, CLISettingsMixin
 
@@ -73,13 +77,22 @@ __all__ = [
     "GoogleADKWorkflowManager",  # lazy (Google ADK)
     "LangGraphWorkflowManager",  # lazy (requires langgraph extra)
     "AgentConfig",
+    "AgentGraphError",
+    "ModelSettings",
+    "ThinkingSettings",
     "WorkflowEvent",
     "EventType",
+    # Lifecycle / turn contracts
+    "SessionRef",
+    "TurnResult",
+    "TurnStatus",
+    "WorkflowState",
     # Settings
     "BaseSettings",
     "SettingsContext",
     "SettingsValidationError",
     "SettingsPersistence",
+    "SettingsSaveResult",
     "get_settings",
     "set_settings",
     "set_context_settings",
@@ -92,4 +105,4 @@ __all__ = [
     "CLISettingsMixin",
 ]
 
-__version__ = "0.5.3"
+__version__ = "0.6.0"

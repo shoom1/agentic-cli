@@ -8,6 +8,7 @@ This module provides the base CLI application that:
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Any
 
 from prompt_toolkit.completion import Completer, Completion
@@ -23,14 +24,21 @@ from agentic_cli.cli.usage_tracker import UsageTracker
 from agentic_cli.cli.workflow_controller import WorkflowController
 from agentic_cli.config import BaseSettings
 from agentic_cli.logging import Loggers, configure_logging
+from agentic_cli.settings_persistence import PROJECT_SETTABLE_KEYS
 
 if TYPE_CHECKING:
-    from pathlib import Path
+    from agentic_cli.settings_persistence import SettingsSaveResult
     from agentic_cli.workflow import GoogleADKWorkflowManager, EventType, WorkflowEvent
     from agentic_cli.workflow.base_manager import BaseWorkflowManager
     from agentic_cli.workflow.config import AgentConfig
 
 logger = Loggers.cli()
+
+# Synthetic dialog keys → the settings field their setter actually writes.
+# "model" is not a field; update_setting() routes it via set_model() to
+# default_model. A synthetic key without an entry here is treated as writing
+# a field of the same name.
+_UI_KEY_TARGET_FIELDS = {"model": "default_model"}
 
 
 # === Slash Command Completer ===
@@ -122,7 +130,13 @@ class BaseCLIApp:
             session_id: Optional session ID for save/resume. If provided,
                        the session will be loaded on startup and saved on exit.
         """
-        self._session_id = session_id
+        # Sessions are durable by default: a fresh id is generated when none is
+        # given (resumable later via /sessions or --session); an explicit id
+        # requests a resume.
+        import uuid
+
+        self._resume_requested = session_id is not None
+        self._session_id = session_id or uuid.uuid4().hex[:12]
         # === Configuration ===
         self._app_info = app_info
         self._settings = settings
@@ -143,6 +157,10 @@ class BaseCLIApp:
         )
         self._workflow_controller.usage_tracker = self._usage_tracker
         self._message_processor = MessageProcessor()
+
+        # Serializes turns: a user turn and a background-job resume turn must
+        # never overlap (shared session + thinking boxes).
+        self._turn_lock = asyncio.Lock()
 
         # === UI: ThinkingPromptSession ===
         completer = SlashCommandCompleter(self.command_registry.get_completions())
@@ -185,6 +203,11 @@ class BaseCLIApp:
         Override to customize which settings appear in the UI.
         Default: model, thinking_effort
 
+        Only project-scoped settings may appear: a key whose target field is
+        not in PROJECT_SETTABLE_KEYS is excluded by _build_ui_items (with a
+        warning), because a /settings edit to it would persist in the user
+        ~/.{app}/settings.json and apply across all projects of the app.
+
         Returns:
             List of field names that should appear in the settings UI
         """
@@ -205,6 +228,15 @@ class BaseCLIApp:
         items: list[tuple[int, Any]] = []
 
         for key in self.get_ui_setting_keys():
+            # Project-scope guard: the dialog may only expose settings the
+            # project file can persist (PROJECT_SETTABLE_KEYS). A user-scoped
+            # key would save to the user ~/.{app}/settings.json and leak the
+            # change across all projects of the app.
+            target_field = _UI_KEY_TARGET_FIELDS.get(key, key)
+            if target_field not in PROJECT_SETTABLE_KEYS:
+                logger.warning("user_scoped_setting_excluded_from_ui", key=key)
+                continue
+
             # Handle special 'model' field with dynamic options
             if key == "model":
                 available_models = list(self._settings.get_available_models())
@@ -247,16 +279,18 @@ class BaseCLIApp:
         # Sort by order and return items only
         return [item for _, item in sorted(items, key=lambda x: x[0])]
 
-    async def save_settings(self) -> "Path":
-        """Save current settings to project config file (./.{app_name}/settings.json).
+    async def save_settings(self) -> "SettingsSaveResult":
+        """Save current settings, split by trust.
 
-        Uses SettingsPersistence to save non-default settings to the
-        project-level config file. Secrets (API keys) are never saved.
+        Allowlisted keys go to the project config
+        (./.{app_name}/settings.json). User-scoped keys differing from their
+        defaults go to the user config (~/.{app_name}/settings.json), where
+        the loader trusts them — the project file may only carry allowlisted
+        keys since P0-1. Secrets (API keys) are never saved.
 
         Returns:
-            Path to the saved config file
+            SettingsSaveResult with the written path(s)
         """
-        from pathlib import Path
         from agentic_cli.settings_persistence import SettingsPersistence
 
         persistence = SettingsPersistence(self._settings.app_name)
@@ -314,7 +348,9 @@ class BaseCLIApp:
         needs_reinit = False
         new_model = changes.get("model")
 
-        reinit_settings = {"model", "thinking_effort"}
+        # `orchestrator` triggers a reinit too: the controller swaps the backend
+        # when it changes (otherwise the change only took effect on restart).
+        reinit_settings = {"model", "thinking_effort", "orchestrator"}
 
         for key, value in changes.items():
             try:
@@ -347,6 +383,8 @@ class BaseCLIApp:
             ExitCommand,
             StatusCommand,
             SandboxCommand,
+            JobsCommand,
+            ResumeCommand,
             PapersCommand,
             SessionsCommand,
         )
@@ -357,6 +395,8 @@ class BaseCLIApp:
         self.command_registry.register(ExitCommand())
         self.command_registry.register(StatusCommand())
         self.command_registry.register(SandboxCommand())
+        self.command_registry.register(JobsCommand())
+        self.command_registry.register(ResumeCommand())
         self.command_registry.register(SettingsCommand())
         self.command_registry.register(PapersCommand())
         self.command_registry.register(SessionsCommand())
@@ -416,45 +456,127 @@ class BaseCLIApp:
         # Echo user input for regular messages
         self.session.add_message("user", message)
 
-        # Delegate to message processor
-        await self._message_processor.process(
-            message=message,
-            workflow_controller=self._workflow_controller,
-            ui=self.session,
-            settings=self._settings,
-            usage_tracker=self._usage_tracker,
-        )
+        # Delegate to message processor (one turn at a time).
+        async with self._turn_lock:
+            await self._message_processor.process(
+                message=message,
+                workflow_controller=self._workflow_controller,
+                ui=self.session,
+                settings=self._settings,
+                usage_tracker=self._usage_tracker,
+                session_id=self._session_id,
+            )
 
-    async def _load_session_on_startup(self) -> None:
-        """Load a saved session after workflow initialization."""
-        if not self._session_id:
-            return
+        # At the turn boundary, auto-resume any finished background jobs that
+        # opted in (gated by the job_auto_resume setting).
+        if getattr(self._settings, "job_auto_resume", False):
+            await self.resume_finished_jobs()
 
-        if not await self._workflow_controller.ensure_initialized(self.session):
-            self.session.add_warning("Cannot load session — workflow not initialized.")
-            return
+    async def resume_finished_jobs(self) -> int:
+        """Resume the agent for each finished, resume-flagged background job.
 
-        workflow = self._workflow_controller.workflow
-        loaded = await workflow.load_session(self._session_id)
-        if loaded:
-            self.session.add_success(f"Session '{self._session_id}' resumed.")
-        else:
-            self.session.add_message("system", f"New session '{self._session_id}'.")
+        Each resume is a serialized turn (via the turn lock) so it never
+        overlaps a user turn or another resume. Used at turn boundaries (auto,
+        gated) and by the /resume command (explicit, ungated).
 
-    async def _save_session_on_exit(self) -> None:
-        """Save the current session on exit."""
-        if not self._session_id:
-            return
+        Delivery follows the job's resume lifecycle: the job is *claimed*
+        (pending → resuming) before the turn runs, so a crash cannot silently
+        re-deliver it, and only recorded delivered once the turn actually
+        completed — a failed or cancelled resume is recorded as such instead of
+        being dropped.
 
+        Returns:
+            The number of jobs a resume turn was run for (unchanged meaning:
+            "how many were picked up"). Whether each one was delivered is
+            recorded on the job and reported by ``/jobs``; a failed delivery is
+            surfaced to the user by the turn itself.
+        """
         if not self._workflow_controller.is_ready:
+            return 0
+        jm = getattr(self._workflow_controller.workflow, "job_manager", None)
+        if jm is None:
+            return 0
+
+        attempted = 0
+        for record in jm.awaiting_resume():
+            # Claim first: durable, so an interrupted delivery is recoverable
+            # and two coordinators can't both deliver the same result.
+            if not jm.begin_resume(record.job_id):
+                continue
+            attempted += 1
+            await self._deliver_resume(jm, record)
+        return attempted
+
+    async def _deliver_resume(self, jm, record) -> bool:
+        """Run one claimed job's resume turn and close out its transition.
+
+        Every exit path closes the claim, so no record can be left ``RESUMING``
+        in this process: a normal outcome records delivered/failed, an
+        exception records failed with the reason, and a cancellation records
+        failed before re-raising (cancellation still propagates).
+
+        Args:
+            jm: The JobManager holding the claim.
+            record: The claimed job record.
+
+        Returns:
+            True if the result was delivered to the agent.
+        """
+        try:
+            async with self._turn_lock:
+                result = await self._message_processor.process_resume(
+                    record=record,
+                    workflow_controller=self._workflow_controller,
+                    ui=self.session,
+                    settings=self._settings,
+                    usage_tracker=self._usage_tracker,
+                )
+        except asyncio.CancelledError:
+            jm.complete_resume(
+                record.job_id, delivered=False, error="resume cancelled"
+            )
+            logger.info("job_resume_cancelled", job_id=record.job_id)
+            raise
+        except Exception as exc:  # noqa: BLE001 - the claim must always close
+            jm.complete_resume(record.job_id, delivered=False, error=str(exc))
+            logger.warning(
+                "job_resume_raised", job_id=record.job_id, error=str(exc)
+            )
+            self.session.add_error(
+                f"Background job '{record.name}' could not be resumed: {exc}"
+            )
+            return False
+
+        jm.complete_resume(
+            record.job_id, delivered=result.delivered, error=result.error
+        )
+        if not result.delivered:
+            logger.info(
+                "job_resume_not_delivered",
+                job_id=record.job_id,
+                status=result.status.value,
+                error=result.error,
+            )
+        return result.delivered
+
+    async def _adopt_session_on_startup(self) -> None:
+        """Adopt this run's session id so the manager targets it from turn one.
+
+        Runs for every startup, not just ``--session``: a fresh auto-generated
+        id must be adopted too, otherwise turns fall back to the manager's
+        ``default_session`` and unnamed runs silently share one conversation.
+        """
+        if not await self._workflow_controller.ensure_initialized(self.session):
+            self.session.add_warning("Cannot adopt session — workflow not initialized.")
             return
 
         workflow = self._workflow_controller.workflow
-        result = await workflow.save_session(self._session_id)
-        if result.get("success"):
-            logger.info("session_saved_on_exit", session_id=self._session_id)
-        else:
-            logger.error("session_save_on_exit_failed", error=result.get("error"))
+        resumed = await workflow.load_session(self._session_id)
+        if resumed:
+            self.session.add_success(f"Session '{self._session_id}' resumed.")
+        elif self._resume_requested:
+            # An explicit --session that didn't exist yet: tell the user it's new.
+            self.session.add_message("system", f"New session '{self._session_id}'.")
 
     async def _extract_session_facts_on_exit(self) -> None:
         """Extract key facts from the session into memory on exit (if enabled).
@@ -483,9 +605,17 @@ class BaseCLIApp:
         """Run the main application loop."""
         logger.info("repl_starting")
 
+        from agentic_cli.cli.job_monitor import JobMonitor
+
+        job_monitor = JobMonitor(
+            self.session, self._workflow_controller, settings=self._settings
+        )
+
         async with self._workflow_controller.background_init(self.session):
-            if self._session_id:
-                await self._load_session_on_startup()
+            # Adopt this run's session id (generated or --session) so every turn
+            # targets it; a fresh id starts a new durable session rather than
+            # falling back to the shared 'default_session'.
+            await self._adopt_session_on_startup()
 
             # Register input handler
             @self.session.on_input
@@ -494,15 +624,18 @@ class BaseCLIApp:
                     return
                 await self.process_input(text)
 
-            # Run the session - user sees prompt immediately!
-            await self.session.run_async()
+            # Keep long-running jobs visible in the status bar while the
+            # session runs, independent of the agent loop.
+            async with job_monitor.running():
+                # Run the session - user sees prompt immediately!
+                await self.session.run_async()
 
-        # Extract session facts into memory on exit (if enabled)
-        await self._extract_session_facts_on_exit()
+            # Extract session facts into memory (if enabled) while the workflow
+            # is still alive: leaving this context closes the manager, and fact
+            # extraction needs the live session store and an LLM call.
+            await self._extract_session_facts_on_exit()
 
-        # Save persistent session on exit
-        if self._session_id:
-            await self._save_session_on_exit()
+        # No save-on-exit: durable session stores persist continuously per turn.
 
         logger.info("app_ending")
         self.session.add_message("system", "Goodbye!")

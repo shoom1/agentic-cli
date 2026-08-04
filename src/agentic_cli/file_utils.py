@@ -3,6 +3,8 @@
 import fcntl
 import json
 import os
+import re
+import stat
 import tempfile
 import time
 from contextlib import contextmanager
@@ -57,6 +59,73 @@ def sanitize_filename(name: str) -> str:
     Replaces any character that isn't alphanumeric, hyphen, or underscore with underscore.
     """
     return "".join(c if c.isalnum() or c in "-_" else "_" for c in name)
+
+
+def glob_pattern_escapes_root(pattern: str) -> bool:
+    """True if a glob pattern would search outside its base directory.
+
+    Rejects absolute patterns and any pattern containing a ``..`` path
+    component. ``pathlib.Path.glob`` does not normalize ``..``, so a pattern
+    like ``../*`` escapes the base directory even though the permission engine
+    only authorized that base. Callers should reject such patterns before
+    globbing.
+    """
+    if os.path.isabs(pattern):
+        return True
+    return ".." in re.split(r"[\\/]+", pattern)
+
+
+def path_is_within(path: Path, root: Path) -> bool:
+    """True if ``path`` resolves to a location inside ``root``.
+
+    Both operands are fully resolved (following symlinks) before the check, so
+    a symlink under ``root`` that points outside is correctly rejected. Returns
+    False on any resolution error (loop, permission) — fail closed.
+    """
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except (OSError, ValueError, RuntimeError):
+        return False
+
+
+def copy_regular_file_no_follow(src: Path, dst: Path) -> None:
+    """Copy a regular file src -> dst without following symlinks at either end.
+
+    Source: opened O_RDONLY | O_NOFOLLOW | O_NONBLOCK (final component); fstat
+    must be a regular file (rejects symlink / dir / FIFO / socket / device).
+    O_NOFOLLOW closes the check->open TOCTOU on the final component; O_NONBLOCK
+    ensures a FIFO/device source fails fast instead of blocking the open
+    (regular files ignore O_NONBLOCK for reads).
+    Dest: written to a private temp file in dst.parent, fsync'd, then
+    os.replace()'d over dst — a pre-planted symlink at dst is replaced, not
+    written through.
+
+    Raises OSError (source open incl. ELOOP for a final-component symlink) or
+    ValueError (source not a regular file). POSIX (macOS/Linux).
+    """
+    fd = os.open(src, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ValueError(f"not a regular file: {src}")
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        tfd, tmp = tempfile.mkstemp(dir=str(dst.parent), prefix=f".{dst.name}.", suffix=".tmp")
+        tmp_path = Path(tmp)
+        try:
+            with os.fdopen(tfd, "wb") as out:
+                while True:
+                    chunk = os.read(fd, 1 << 20)
+                    if not chunk:
+                        break
+                    out.write(chunk)
+                out.flush()
+                os.fsync(out.fileno())
+            os.replace(tmp_path, dst)
+        except BaseException:
+            tmp_path.unlink(missing_ok=True)
+            raise
+    finally:
+        os.close(fd)
 
 
 def _atomic_write(path: Path, content: str) -> None:

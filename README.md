@@ -6,15 +6,14 @@ A framework for building domain-specific agentic CLI applications powered by LLM
 
 Agentic CLI provides the core infrastructure for building interactive CLI applications that leverage LLM agents for complex tasks. It offers:
 
-- **Pluggable Orchestration**: Choose between Google ADK or LangGraph for agent workflows
+- **Pluggable Orchestration**: Choose between Google ADK (which runs both Gemini and Anthropic models) or LangGraph for agent workflows
 - **Rich Terminal UI**: Dual thinking boxes, markdown rendering, and streaming responses via `thinking-prompt`
 - **Declarative Agents**: Define agents with simple configuration objects
 - **Native Tool Architecture**: Backend-specific tool factories for ADK and LangGraph, with automatic HITL confirmation for dangerous tools
 - **Built-in Tools**: Python execution, stateful sandbox, file operations, web search, web fetch, arXiv search
 - **Knowledge Base**: Semantic + BM25 hybrid search with RRF fusion, per-document markdown sidecars, and agent-authored concept pages
 - **Semantic Memory**: Embedding-backed memory with lifecycle management, contradiction detection, and forgetting policy
-- **Tool Reflection**: Bounded per-tool heuristic memory learned from failures
-- **Session Save/Resume**: Persistent conversations across CLI restarts
+- **Durable Sessions**: Conversations persist continuously by default (SQLite; PostgreSQL or ephemeral memory optional) and resume across CLI restarts with `--session <id>`
 - **Context Window Management**: Native trim detection and token-usage visibility
 - **Dynamic Model Registry**: Live model discovery from provider APIs
 - **Type-safe Configuration**: Composable settings mixins (`pydantic-settings`)
@@ -57,7 +56,7 @@ Agentic CLI provides the core infrastructure for building interactive CLI applic
 
 ## Installation
 
-### Basic Installation (Google ADK)
+### Basic Installation (Google ADK — Gemini and Claude)
 
 ```bash
 pip install agentic-cli
@@ -186,9 +185,9 @@ Requires: `pip install agentic-cli[langgraph]`
 |---------|------------|-----------|
 | Setup complexity | Simple | Moderate |
 | Cyclical workflows | Limited | Native |
-| Multi-provider | Google only | OpenAI, Anthropic, Google (GenAI) |
-| State persistence | In-memory | Memory, PostgreSQL, or SQLite |
-| Thinking support | Native (Gemini) | Native (Claude & Gemini) |
+| Multi-provider | Gemini + Anthropic (Claude runs natively via `DirectAnthropicLlm`) | OpenAI, Anthropic, Google (GenAI) |
+| State persistence | SQLite (default), PostgreSQL, or memory | Memory, PostgreSQL, or SQLite |
+| Thinking support | Native (Gemini & Claude) | Native (Claude & Gemini) |
 | Retry handling | Built-in | Built-in with backoff |
 | Permission gate | PermissionPlugin | wrap_tool_for_permission |
 | Context trimming | Native | Native |
@@ -208,7 +207,7 @@ manager = create_workflow_manager_from_settings(agent_configs=AGENTS, settings=s
 
 Settings are organized into composable mixins (`AppSettingsMixin`, `CLISettingsMixin`, `WorkflowSettingsMixin`). `BaseSettings` composes all three.
 
-All settings can be configured via environment variables with the `AGENTIC_` prefix or in a `.env` file:
+All settings can be configured via environment variables with the `AGENTIC_` prefix, via constructor arguments, or from layered JSON/dotenv files:
 
 ```python
 from pathlib import Path
@@ -217,12 +216,36 @@ from agentic_cli import BaseSettings
 
 class MySettings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
+        # Absolute (user-level) paths stay trusted — see the trust note below.
+        env_file=str(Path.home() / ".my_app" / ".env"),
         env_prefix="MYAPP_",  # Custom prefix
     )
     app_name: str = "my_app"
     workspace_dir: Path = Path.home() / ".my_app"
 ```
+
+### Precedence and the trust boundary
+
+Sources are consulted highest-precedence first (JSON sources only when the file exists):
+
+1. **Constructor arguments** — `MySettings(google_api_key=...)`
+2. **Environment variables** — `MYAPP_*` / `AGENTIC_*`
+3. **Project config** — `./.{app_name}/settings.json` — **untrusted**
+4. **User config** — `~/.{app_name}/settings.json`
+5. **Dotenv** — whatever `env_file` points at
+6. **Field defaults**
+
+Levels 1, 2 and 4 are trusted; **level 3 is not**, and neither is a
+*cwd-relative* `env_file`. A cloned repository can ship both, so both are
+filtered down to an explicit allowlist of benign keys (model and behaviour
+settings, timeouts, sandbox *resource* limits, `session_store`, log verbosity).
+Security-relevant keys set from an untrusted source — executor backend, sandbox
+image/mounts/user, OS-sandbox policy, `skills_dirs`, shell sandbox settings,
+`workspace_dir`, `raw_llm_logging`, permission rules, and any credential — are
+dropped with a logged warning rather than applied.
+
+**Consequence:** put API keys in real environment variables or an
+absolute/user-level file. A key placed in a cwd `.env` is deliberately ignored.
 
 ### Key Settings
 
@@ -281,6 +304,11 @@ dynamic_agent = AgentConfig(
     tools=[tool_a, tool_b],
 )
 
+# A prompt factory may also take the manager's settings explicitly. Either way
+# it is evaluated under the manager's settings, not the global singleton.
+def get_scoped_prompt(settings):
+    return f"You are {settings.app_name}."
+
 # Coordinator with sub-agents
 coordinator = AgentConfig(
     name="coordinator",
@@ -310,12 +338,61 @@ configs = [coordinator, researcher, analyst]
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `name` | str | Unique identifier |
-| `prompt` | str \| Callable | System instruction |
+| `name` | str | Unique identifier (must be unique across the config list) |
+| `prompt` | str \| Callable | System instruction; a callable may take no arguments or a single `settings` argument |
 | `tools` | list[Callable] | Available tool functions |
 | `sub_agents` | list[str] | Names of agents this one can delegate to |
-| `description` | str | Short description for routing |
+| `description` | str | Short description for routing (defaults to `""`) |
 | `model` | str \| None | Model override (defaults to manager's model) |
+
+The agent graph is validated before anything is allocated — ahead of model
+discovery and service creation. Duplicate names, unknown `sub_agents`
+references, self-references, delegation cycles, a sub-agent shared by two
+parents, and **more than one root** raise `AgentGraphError` naming the
+offending agents. Exactly one agent may be unreferenced: the runner starts from
+a single root, so agents under any other root would never run. Agents are built
+in dependency order, so declaration order does not matter. A per-agent `model`
+override is validated against the configured provider credentials at startup,
+alongside `default_model`.
+
+A callable `prompt` may take **no arguments** (including all-defaulted ones) or
+**exactly one argument**, which receives the manager's settings. Other
+signatures, `async def` factories, and non-string results raise
+`AgentGraphError` naming the agent.
+
+### Turn and lifecycle contracts
+
+A workflow manager runs **one turn at a time**: `process()` and
+`resume_with_job_result()` serialize on a turn lock, and
+`initialize_services()`/`reinitialize()`/`cleanup()` take it too, so the backend
+is never torn down mid-stream. Admission also re-verifies the backend is live
+after acquiring the lock, so a turn queued behind a cleanup reinitializes (or
+fails cleanly) instead of running against released resources. Run separate
+managers for genuine parallelism.
+
+`MessageProcessor.process()` returns a `TurnResult` (`TurnStatus.COMPLETED` /
+`CANCELLED` / `FAILED` / `UNAVAILABLE`); a turn is never replayed by the
+harness, so a surfaced rate limit fails it explicitly. An `EventType.ERROR`
+event is rendered as it arrives — `recoverable=True` is a warning and the
+stream still decides the outcome, anything else makes the turn `FAILED`
+(`delivered` False). Cancelling the caller cancels and awaits the event
+consumer before the turn is torn down.
+
+The HITL input callback is **context-local**: `set_input_callback()` binds it
+for the calling context (and any task started from it), so two consumers of one
+manager cannot capture each other's prompts.
+
+`WorkflowController` exposes a derived `WorkflowState`
+(`uninitialized`/`initializing`/`ready`/`failed`/`closed`) that never reports
+`ready` over an uninitialized manager, and `controller.workflow` raises unless
+the state is `ready`. Lifecycle transitions (init, reinitialize, orchestrator
+swap, close) are serialized, so nothing is published after `close()`. A failed
+in-place reinitialization keeps the manager — it still owns the session service
+it preserved — and the next initialization revives it rather than discarding
+the conversation.
+
+`SessionRef(app_name, user_id, session_id)` is the conversation identity used by
+every session API. All of these are importable from `agentic_cli`.
 
 ## Tools
 
@@ -348,6 +425,45 @@ def search_database(query: str, limit: int = 10) -> dict:
 
 **Registration is required for a tool to run.** The permission engine is on by default, and any tool without a capability declaration is denied at call time (fail-closed) on both the ADK and LangGraph backends. You can still pass raw callables into `AgentConfig.tools`, but unless they are registered with `@register_tool` they will be blocked — register every tool with `capabilities=` (or `EXEMPT` for pure, side-effect-free functions). Registration also gives the tool registry metadata and tool-summary formatting.
 
+Identity is the *object the registry issued*, not the name: a callable the
+registry never issued is denied however it is named, and is left untouched by
+tool assembly.
+
+**A tool may declare the services it needs** with `requires=` — e.g.
+`@register_tool(..., requires="kb_manager")`, or a tuple for several. The
+manager builds only the services its agents' tools actually declare.
+
+**One name means one tool.** `register_tool()` raises on a name that is already
+registered. If a tool genuinely needs a per-backend implementation, declare the
+shared contract once and register each backend's version against it:
+
+```python
+from agentic_cli.tools import declare_tool, register_tool, ToolCategory
+from agentic_cli.workflow.permissions import EXEMPT
+
+# Declare the shared contract once, under a name your application owns.
+declare_tool(
+    "myapp_scratchpad",
+    description="Store a short note for the rest of this turn.",
+    capabilities=EXEMPT,
+    category=ToolCategory.OTHER,
+)
+
+# Then register one implementation per backend against that contract.
+@register_tool(
+    variant_of="myapp_scratchpad",
+    capabilities=EXEMPT,
+    category=ToolCategory.OTHER,
+)
+def myapp_scratchpad_adk(note: str) -> dict:
+    """Store a short note for the rest of this turn."""
+    return {"success": True, "note": note}
+```
+
+Variants share one identity and one permission contract while keeping their own
+signature and docstring, and a bare name that maps to several variants raises
+rather than silently picking one by import order.
+
 ### Capabilities
 
 Tool access is gated by the **permission engine** (see the HITL section below). Each registered tool declares what it touches via `capabilities=`:
@@ -375,6 +491,20 @@ from agentic_cli.tools.sandbox import sandbox_execute
 ```
 
 The `/sandbox` CLI command lists and resets sandbox sessions.
+
+#### Docker-isolated sandbox
+
+`sandbox_execute` can run inside a network-isolated Docker container:
+
+1. Ensure Docker (or podman) is installed and running, and pull the image once:
+   `docker pull quay.io/jupyter/scipy-notebook:python-3.12`
+2. In settings: `sandbox_execute_enabled = true`, `sandbox_backend = "jupyter_docker"`.
+
+Each session runs in its own container with `--network none`, a read-only
+rootfs, dropped Linux capabilities, and memory/CPU/PID caps. Stage data as
+files via `sandbox_data_mounts` (`"/host/path:name"` → `/workspace/data/name`,
+read-only). Live network access, package installs, and S3 are not supported in
+this mode.
 
 #### Web Search
 
@@ -530,22 +660,17 @@ from agentic_cli.tools import memory_tools
 - `ForgettingPolicy` with `apply_forgetting()` for bounded retention
 - Archive filtering and `load_all` with tag/source filters
 
-#### Tool Reflection
-
-Bounded heuristic memory learned from tool failures:
-
-```python
-from agentic_cli.tools import reflection_tools
-# save_reflection(tool_name, error_summary, heuristic)
-```
-
-Each tool keeps at most N reflections (FIFO eviction). Reflections can be injected into tool descriptions to help agents avoid repeating mistakes. Wired via session-end hook.
-
 #### HITL (Human-in-the-Loop)
 
-Tool calls are gated by the **permission engine** (`workflow/permissions/`). Each tool declares a list of capabilities (e.g. `filesystem.write(path=...)`); the engine evaluates them against rules from four sources (builtin defaults, user `~/.{app_name}/settings.json`, project `./.{app_name}/settings.json`, in-memory session). When no rule matches, the user is prompted with `Allow once / Allow for session / Allow always (save to project) / Deny`. Always-grants persist into the project settings file so the next run picks them up automatically.
+Tool calls are gated by the **permission engine** (`workflow/permissions/`). Each tool declares a list of capabilities (e.g. `filesystem.write(path=...)`); the engine evaluates them against rules from four sources (builtin defaults, user `~/.{app_name}/settings.json`, project `./.{app_name}/settings.json`, in-memory session). When no rule matches, the user is prompted with `Allow once` / `Allow for this session` / `Allow always for this project` / `Deny`.
 
-See `docs/superpowers/specs/2026-04-18-permissions-system-design.md` for the full design.
+**"Allow always" grants are user-owned, not project-owned.** They persist to
+`~/.{app_name}/project_grants.json`, keyed by the *resolved project path*, so
+they apply to that checkout on this machine only. They are deliberately not
+written into `./.{app_name}/settings.json`: a repository could otherwise ship
+pre-approved allow-rules that a clone would silently honour. A clone at a
+different path therefore starts with no grants, and a repo-committed grant file
+is never loaded.
 
 ## CLI Commands
 
@@ -559,10 +684,13 @@ Built-in slash commands available in all apps:
 | `/exit` | `/quit` | Exit the application |
 | `/settings` | | Interactive settings editor (with persistence) |
 | `/sandbox` | `/sb` | List / reset stateful sandbox sessions |
+| `/jobs` | | List and manage long-running background jobs (`/jobs all`, `/jobs <id>`, `/jobs cancel <id>`, `/jobs clean`) |
+| `/resume` | | Resume the agent with results from finished background jobs |
 | `/papers` | `/docs` | List knowledge-base documents (filter by source, query, --global) |
 | `/sessions` | `/sess` | List saved sessions (and delete with `--delete=<id>`) |
 
-Apps can add more. Examples like `research_demo` ship with commands like `/save`, `/resume`, and `/kb-backfill`.
+Apps can add more of their own. `research_demo`, for instance, registers
+`/memory`, `/files` and `/kb-backfill` on top of the built-ins above.
 
 ### Adding Custom Commands
 
@@ -656,7 +784,7 @@ See the `examples/` directory for complete working examples:
 - `websearch_demo.py` — Web search with multiple backends
 
 **Full Applications**
-- `research_demo/` — Full-featured research assistant with KB ingest + concept pages, semantic memory, sandbox execution, session save/resume. Installable as a console script.
+- `research_demo/` — Full-featured research assistant with KB ingest + concept pages, semantic memory, sandbox execution, and durable sessions. Installed as the `research-demo` console script.
 
 Run examples:
 
@@ -673,8 +801,17 @@ pip install agentic-cli[langgraph]
 python examples/hello_langgraph.py
 
 # Research demo (full features)
+research-demo                      # console script, installed with the package
+python -m research_demo            # equivalent module invocation
+python -m research_demo --session my-research   # resume a durable session by id
+
+# From a checkout without installing, run it from the repository root:
 python -m examples.research_demo
 ```
+
+Sessions are durable by default: every run gets a session id, `--session <id>`
+resumes a stored one, and `/sessions` lists or deletes them. The demo adds
+`/memory`, `/files` and `/kb-backfill` to the built-in commands.
 
 ## Development
 
@@ -756,7 +893,6 @@ agentic-cli/
 │   │   ├── webfetch_tool.py      # web_fetch (orchestrator)
 │   │   ├── pdf_utils.py          # PDF text extraction helpers
 │   │   ├── memory_tools.py       # save/search/update/delete + MemoryStore
-│   │   ├── reflection_tools.py   # save_reflection + ToolReflectionStore
 │   │   ├── _core/                # Shared planning/task logic
 │   │   │   ├── planning.py
 │   │   │   └── tasks.py
@@ -782,8 +918,9 @@ agentic-cli/
 │   │   ├── sidecar.py            # Per-doc markdown sidecar render/parse
 │   │   ├── sources.py            # SearchSource + ArxivSearchSource
 │   │   └── _mocks.py             # MockEmbeddingService, MockVectorStore, mock BM25
-│   └── persistence/
-│       └── session.py            # SessionPersistence (save/resume)
+│   └── persistence/              # (sessions are persisted natively by each
+│                                 #  orchestrator's store; the legacy JSON
+│                                 #  SessionPersistence layer was removed)
 ├── examples/
 │   ├── hello_agent.py            # Basic ADK example
 │   ├── hello_langgraph.py        # Basic LangGraph example

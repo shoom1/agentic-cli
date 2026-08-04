@@ -75,6 +75,9 @@ class OSSandboxPolicy:
             Always includes MANDATORY_DENY_WRITE entries.
         deny_read_paths: Paths to hide entirely from the sandboxed process.
         allow_network: Whether network access is allowed (Phase 2).
+        strict: When True, refuse to execute if sandboxing was requested but no
+            real backend is available (instead of falling back to the restricted
+            in-process executor).
     """
 
     enabled: bool = True
@@ -84,6 +87,7 @@ class OSSandboxPolicy:
     )
     deny_read_paths: list[str] = field(default_factory=list)
     allow_network: bool = False
+    strict: bool = False
 
     def resolved_writable_paths(self, working_dir: Path) -> list[Path]:
         """Resolve all writable paths to absolute, always including working_dir.

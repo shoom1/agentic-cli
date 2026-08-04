@@ -18,6 +18,34 @@ from __future__ import annotations
 from typing import Any, Callable
 
 
+def _issued(*pairs: "tuple[Callable, Callable]") -> list[Callable]:
+    """Stamp factory-built closures with the identity of the tool they re-bind.
+
+    Each pair is ``(variant, registered)`` — the closure this factory built,
+    and the module-level callable it is a service-bound version of. Identity
+    comes from that *exact* callable, never from a name lookup: if an
+    application has deliberately taken the name over
+    (``register_tool(..., replace=True)``), the framework's original is retired
+    and the variant is simply left unbound, so tool assembly keeps the
+    application's tool instead of quietly running a different implementation.
+
+    Args:
+        *pairs: ``(variant, registered)`` pairs, in the order to return.
+
+    Returns:
+        The variants, in order.
+    """
+    from agentic_cli.tools.registry import bind_tool_identity, identify_tool
+
+    variants: list[Callable] = []
+    for variant, registered in pairs:
+        definition = identify_tool(registered)
+        if definition is not None:
+            bind_tool_identity(variant, definition)
+        variants.append(variant)
+    return variants
+
+
 # ---------------------------------------------------------------------------
 # Memory tools
 # ---------------------------------------------------------------------------
@@ -87,7 +115,12 @@ def make_memory_tools(memory_store, embedding_service=None) -> list[Callable]:
     delete_memory.__name__ = "delete_memory"
     delete_memory.__doc__ = _orig_delete.__doc__
 
-    return [save_memory, search_memory, update_memory, delete_memory]
+    return _issued(
+        (save_memory, _orig_save),
+        (search_memory, _orig_search),
+        (update_memory, _orig_update),
+        (delete_memory, _orig_delete),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -251,16 +284,16 @@ def make_kb_tools(kb_manager, user_kb_manager=None) -> list[Callable]:
     kb_search_concepts.__name__ = "kb_search_concepts"
     kb_search_concepts.__doc__ = _orig_search_concepts.__doc__
 
-    return [
-        kb_search,
-        kb_ingest_text,
-        kb_ingest_file,
-        kb_ingest_url,
-        kb_read,
-        kb_list,
-        kb_write_concept,
-        kb_search_concepts,
-    ]
+    return _issued(
+        (kb_search, _orig_search),
+        (kb_ingest_text, _orig_ingest_text),
+        (kb_ingest_file, _orig_ingest_file),
+        (kb_ingest_url, _orig_ingest_url),
+        (kb_read, _orig_read),
+        (kb_list, _orig_list),
+        (kb_write_concept, _orig_write_concept),
+        (kb_search_concepts, _orig_search_concepts),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -341,18 +374,23 @@ def make_webfetch_tool(summarizer) -> Callable:
         }
 
     web_fetch.__name__ = "web_fetch"
-    return web_fetch
+    from agentic_cli.tools.webfetch_tool import web_fetch as _orig_web_fetch
+
+    return _issued((web_fetch, _orig_web_fetch))[0]
 
 
 # ---------------------------------------------------------------------------
 # Sandbox tool
 # ---------------------------------------------------------------------------
 
-def make_sandbox_tool(sandbox_manager) -> Callable:
+def make_sandbox_tool(sandbox_manager, workflow_manager=None) -> Callable:
     """Create sandbox_execute bound to a SandboxManager.
 
     Args:
         sandbox_manager: SandboxManager instance.
+        workflow_manager: The owning workflow manager, used to namespace the
+            default session to the active conversation (so distinct
+            conversations don't share one kernel/workspace).
 
     Returns:
         sandbox_execute function.
@@ -362,6 +400,7 @@ def make_sandbox_tool(sandbox_manager) -> Callable:
         code: str,
         session_id: str = "default",
         timeout_seconds: int = 120,
+        inputs: list[str] | None = None,
     ) -> dict[str, Any]:
         """Execute Python code in a stateful sandbox.
 
@@ -369,14 +408,35 @@ def make_sandbox_tool(sandbox_manager) -> Callable:
             code: Python code to execute.
             session_id: Session identifier for state persistence.
             timeout_seconds: Maximum execution time in seconds.
+            inputs: Optional list of host file paths to stage into
+                inputs/<basename> inside the session before execution.
 
         Returns:
             Dictionary with execution results.
         """
+        # Opt-in gate — the workflow binds THIS tool (base_manager), so the gate
+        # must live here, not only on the module-level tool. Without it the
+        # stateful_executor_backend setting is inert in the real path.
+        from agentic_cli.config import get_settings
+        from agentic_cli.tools.sandbox.manager import sandbox_disabled_reason
+
+        if getattr(get_settings(), "stateful_executor_backend", "none") == "none":
+            return {"success": False, "error": sandbox_disabled_reason(get_settings())}
+
+        # Namespace the default session to the active conversation so distinct
+        # conversations don't share one kernel/workspace. An explicit session_id
+        # is honored as-is (lets the model keep intentional sub-sessions).
+        sid = session_id
+        if sid == "default" and workflow_manager is not None:
+            active = getattr(workflow_manager, "active_session_id", None)
+            if active:
+                sid = f"conv-{active}"
+
         result = sandbox_manager.execute(
             code=code,
-            session_id=session_id,
+            session_id=sid,
             timeout_seconds=timeout_seconds,
+            inputs=inputs,
         )
         return {
             "success": result.success,
@@ -389,7 +449,9 @@ def make_sandbox_tool(sandbox_manager) -> Callable:
         }
 
     sandbox_execute.__name__ = "sandbox_execute"
-    return sandbox_execute
+    from agentic_cli.tools.sandbox import sandbox_execute as _orig_sandbox_execute
+
+    return _issued((sandbox_execute, _orig_sandbox_execute))[0]
 
 
 # ---------------------------------------------------------------------------
@@ -462,7 +524,15 @@ def make_arxiv_tools(arxiv_source) -> list[Callable]:
 
     search_arxiv.__name__ = "search_arxiv"
     fetch_arxiv_paper.__name__ = "fetch_arxiv_paper"
-    return [search_arxiv, fetch_arxiv_paper]
+    from agentic_cli.tools.arxiv_tools import (
+        fetch_arxiv_paper as _orig_fetch_paper,
+        search_arxiv as _orig_search_arxiv,
+    )
+
+    return _issued(
+        (search_arxiv, _orig_search_arxiv),
+        (fetch_arxiv_paper, _orig_fetch_paper),
+    )
 
 
 def make_ingest_arxiv_tool(arxiv_source, kb_manager) -> Callable:
@@ -501,7 +571,11 @@ def make_ingest_arxiv_tool(arxiv_source, kb_manager) -> Callable:
         )
 
     ingest_arxiv_paper.__name__ = "ingest_arxiv_paper"
-    return ingest_arxiv_paper
+    from agentic_cli.tools.arxiv_tools import (
+        ingest_arxiv_paper as _orig_ingest_paper,
+    )
+
+    return _issued((ingest_arxiv_paper, _orig_ingest_paper))[0]
 
 
 # ---------------------------------------------------------------------------
@@ -564,4 +638,8 @@ def make_interaction_tools(workflow_manager) -> list[Callable]:
         }
 
     ask_clarification.__name__ = "ask_clarification"
-    return [ask_clarification]
+    from agentic_cli.tools.interaction_tools import (
+        ask_clarification as _orig_ask_clarification,
+    )
+
+    return _issued((ask_clarification, _orig_ask_clarification))

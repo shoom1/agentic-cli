@@ -14,7 +14,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from agentic_cli.tools.sandbox.models import ExecutionResult
+from agentic_cli.tools.sandbox.models import ExecutionResult, SessionStatus
 from agentic_cli.tools.sandbox.backends.base import SandboxBackend
 from agentic_cli.tools.sandbox.manager import SandboxManager, SandboxSession
 from tests.conftest import MockContext
@@ -27,19 +27,22 @@ from tests.conftest import MockContext
 class MockSandboxBackend(SandboxBackend):
     """Test backend that returns configurable results."""
 
+    backend_name = "mock"
+
     def __init__(self, result: ExecutionResult | None = None) -> None:
         self._result = result or ExecutionResult(success=True, stdout="ok\n", result="42")
         self._sessions: set[str] = set()
         self.execute_calls: list[dict] = []
         self.reset_calls: list[str] = []
 
-    def execute(self, code, session_id, timeout_seconds=120, working_dir=None):
+    def execute(self, code, session_id, timeout_seconds=120, working_dir=None, inputs=None):
         self._sessions.add(session_id)
         self.execute_calls.append({
             "code": code,
             "session_id": session_id,
             "timeout_seconds": timeout_seconds,
             "working_dir": working_dir,
+            "inputs": inputs,
         })
         return self._result
 
@@ -52,6 +55,34 @@ class MockSandboxBackend(SandboxBackend):
 
     def has_session(self, session_id):
         return session_id in self._sessions
+
+
+# ---------------------------------------------------------------------------
+# SessionStatus
+# ---------------------------------------------------------------------------
+
+class TestSessionStatus:
+    def test_default_backend_status_ready_when_session_exists(self, tmp_path):
+        backend = MockSandboxBackend()
+        backend._sessions.add("s1")
+        st = backend.session_status("s1")
+        assert isinstance(st, SessionStatus)
+        assert st.state == "ready"
+        assert st.backend == "mock"
+        assert st.session_id == "s1"
+
+    def test_default_backend_status_absent_when_missing(self):
+        backend = MockSandboxBackend()
+        assert backend.session_status("nope").state == "absent"
+
+    def test_list_sessions_includes_state(self):
+        with MockContext() as ctx:
+            backend = MockSandboxBackend()
+            mgr = SandboxManager(ctx.settings, backend=backend)
+            mgr.execute("x=1", session_id="s1")
+            rows = mgr.list_sessions()
+            assert rows[0]["session_id"] == "s1"
+            assert rows[0]["state"] == "ready"
 
 
 # ---------------------------------------------------------------------------
@@ -131,6 +162,36 @@ class TestSandboxManager:
             assert len(mgr.list_sessions()) == 2
             mgr.cleanup()
 
+    def test_failed_start_does_not_consume_session_slots(self, tmp_path):
+        """A failed start (e.g. Docker unavailable) must not leave phantom
+        session metadata that fills sandbox_max_sessions with no real session."""
+        class _FailingBackend(SandboxBackend):
+            backend_name = "failing"
+            def execute(self, code, session_id, timeout_seconds=120, working_dir=None, inputs=None):
+                return ExecutionResult(success=False, error="Docker sandbox backend unavailable")
+            def reset_session(self, session_id): pass
+            def cleanup(self): pass
+            def has_session(self, session_id): return False
+
+        with MockContext(sandbox_max_sessions=2) as ctx:
+            mgr = SandboxManager(ctx.settings, backend=_FailingBackend())
+            for i in range(5):
+                r = mgr.execute("x = 1", session_id=f"s{i}")
+                assert r.success is False
+                assert "Maximum sessions" not in r.error  # never blocked by phantom slots
+            assert mgr.list_sessions() == []  # no slots consumed
+            mgr.cleanup()
+
+    def test_rejects_non_positive_timeout(self, tmp_path):
+        """A non-positive timeout must be rejected up front, not fall through to
+        the backend where it would raise and orphan a container."""
+        with MockContext() as ctx:
+            mgr = SandboxManager(ctx.settings, backend=MockSandboxBackend())
+            r = mgr.execute("x = 1", timeout_seconds=-5)
+            assert r.success is False
+            assert "timeout" in r.error.lower()
+            mgr.cleanup()
+
     def test_reset_active_session(self, tmp_path):
         with MockContext() as ctx:
             backend = MockSandboxBackend()
@@ -202,7 +263,7 @@ class TestSandboxManager:
 
 class TestSandboxTools:
     def test_sandbox_execute_success(self, tmp_path):
-        with MockContext() as ctx:
+        with MockContext(stateful_executor_backend="local") as ctx:
             from agentic_cli.workflow.service_registry import set_service_registry
 
             backend = MockSandboxBackend(
@@ -223,7 +284,7 @@ class TestSandboxTools:
                 mgr.cleanup()
 
     def test_sandbox_execute_no_manager(self, tmp_path):
-        with MockContext():
+        with MockContext(stateful_executor_backend="local"):
             from agentic_cli.workflow.service_registry import set_service_registry
 
             token = set_service_registry({})
@@ -235,11 +296,128 @@ class TestSandboxTools:
             finally:
                 token.var.reset(token)
 
+    def test_sandbox_execute_disabled_by_default(self, tmp_path):
+        """The Jupyter kernel is unsandboxed host RCE — it must be opt-in."""
+        with MockContext():
+            from agentic_cli.tools.sandbox import sandbox_execute
+            result = sandbox_execute("print('hi')")
+            assert result["success"] is False
+            assert "stateful" in result["error"].lower() or "backend" in result["error"].lower()
+
+    def test_factory_tool_respects_enabled_flag(self, tmp_path):
+        """CRITICAL regression: the workflow uses the factory-bound tool
+        (base_manager wires make_sandbox_tool), which must honor the
+        stateful_executor_backend opt-in — not just the module-level tool."""
+        from agentic_cli.tools.factories import make_sandbox_tool
+
+        with MockContext(stateful_executor_backend="none") as ctx:
+            mgr = SandboxManager(ctx.settings, backend=MockSandboxBackend())
+            tool = make_sandbox_tool(mgr)
+            r = tool(code="x = 1")
+            assert r["success"] is False, "factory tool executed despite disabled flag"
+            assert "stateful" in r["error"].lower() or "backend" in r["error"].lower()
+            mgr.cleanup()
+
+        with MockContext(stateful_executor_backend="local") as ctx:
+            mgr = SandboxManager(ctx.settings, backend=MockSandboxBackend())
+            tool = make_sandbox_tool(mgr)
+            r = tool(code="x = 1")
+            assert r["success"] is True
+            mgr.cleanup()
+
+    def test_factory_tool_namespaces_default_session_to_conversation(self, tmp_path):
+        """HIGH regression: with session_id='default', distinct conversations
+        must NOT share one kernel/workspace — the default is namespaced to the
+        active conversation. An explicit session_id is still honored verbatim."""
+        from agentic_cli.tools.factories import make_sandbox_tool
+
+        class _WF:
+            active_session_id = "conv-abc"
+
+        with MockContext(stateful_executor_backend="local") as ctx:
+            backend = MockSandboxBackend()
+            mgr = SandboxManager(ctx.settings, backend=backend)
+            tool = make_sandbox_tool(mgr, _WF())
+
+            tool(code="x = 1")  # default -> namespaced to the conversation
+            assert backend.execute_calls[-1]["session_id"] != "default"
+            assert "conv-abc" in backend.execute_calls[-1]["session_id"]
+
+            tool(code="y = 1", session_id="explicit")  # explicit id untouched
+            assert backend.execute_calls[-1]["session_id"] == "explicit"
+            mgr.cleanup()
+
+    def test_disabled_message_is_backend_aware(self, tmp_path):
+        """The disabled-tool message must reflect the selected backend."""
+        from agentic_cli.tools.sandbox import sandbox_execute
+        with MockContext(stateful_executor_backend="none"):
+            err = sandbox_execute("print('hi')")["error"].lower()
+            assert "stateful_executor_backend" in err
+
+    def test_description_makes_no_false_network_claim(self):
+        """The tool does NOT block network — the description must not claim it
+        does, since a false safety claim misleads both the model and the user."""
+        from agentic_cli.tools.registry import get_registry
+
+        definition = get_registry().get("sandbox_execute")
+        assert definition is not None
+        desc = definition.description.lower()
+        assert "blocked" not in desc
+        assert "host" in desc  # honest: runs with host privileges
+
+    def test_capability_distinct_from_execute_python(self):
+        """sandbox_execute must NOT share python.exec with execute_python — else
+        an 'Allow always' for the safe stateless tool silently authorizes the
+        unsandboxed stateful kernel."""
+        from agentic_cli.tools.registry import get_registry
+        from agentic_cli.tools.execution_tools import execute_python  # noqa: F401
+        from agentic_cli.workflow.permissions.matchers import _cap_matches
+
+        reg = get_registry()
+        sandbox_cap_names = [c.name for c in reg.get("sandbox_execute").capabilities]
+        exec_caps = [c.name for c in reg.get("execute_python").capabilities]
+
+        assert exec_caps == ["python.exec"]
+        assert "python.exec.stateful" in sandbox_cap_names
+        # An execute_python grant (rule 'python.exec') must not cover it.
+        assert _cap_matches("python.exec", "python.exec.stateful") is False
+        # A deliberate broad 'python.*' grant still covers both.
+        assert _cap_matches("python.*", "python.exec.stateful") is True
+
+    def test_inputs_declares_filesystem_read(self):
+        """sandbox_execute must declare filesystem.read for its inputs arg,
+        so each staged file path is permission-checked identically to read_file."""
+        from agentic_cli.tools.registry import get_registry
+        caps = {(c.name, c.target_arg) for c in get_registry().get("sandbox_execute").capabilities}
+        assert ("python.exec.stateful", None) in caps
+        assert ("filesystem.read", "inputs") in caps
+
 
 
 # ---------------------------------------------------------------------------
 # SandboxCommand
 # ---------------------------------------------------------------------------
+
+class TestBackendSelection:
+    def test_create_jupyter_docker_backend(self):
+        from agentic_cli.tools.sandbox.backends.jupyter_docker import JupyterDockerBackend
+        with MockContext(stateful_executor_backend="docker") as ctx:
+            mgr = SandboxManager(ctx.settings)
+            backend = mgr._create_backend("docker")
+            assert isinstance(backend, JupyterDockerBackend)
+
+    def test_unknown_backend_raises(self):
+        with MockContext() as ctx:
+            mgr = SandboxManager(ctx.settings)
+            with pytest.raises(ValueError):
+                mgr._create_backend("nope")
+
+    def test_description_mentions_backend_dependent_isolation(self):
+        from agentic_cli.tools.registry import get_registry
+        definition = get_registry().get("sandbox_execute")
+        desc = definition.description.lower()
+        assert "jupyter_docker" in desc or "backend" in desc
+
 
 class TestSandboxCommand:
     @pytest.fixture()
@@ -311,6 +489,35 @@ class TestSandboxCommand:
             await cmd.execute("reset", mock_app)
             mock_app.session.add_success.assert_called_once()
             assert len(mgr.list_sessions()) == 0
+
+    @pytest.mark.asyncio
+    async def test_reset_no_arg_resets_single_namespaced_session(self, mock_app):
+        """No-arg reset targets the current sandbox even when it is namespaced
+        (conv-<id>), not a literal 'default' — the regression from namespacing."""
+        with MockContext() as ctx:
+            from agentic_cli.cli.builtin_commands import SandboxCommand
+
+            mgr = self._make_manager(ctx, sessions=["conv-abc"])
+            mock_app.workflow.sandbox_manager = mgr
+            cmd = SandboxCommand()
+
+            await cmd.execute("reset", mock_app)
+            mock_app.session.add_success.assert_called_once()
+            assert len(mgr.list_sessions()) == 0
+            mgr.cleanup()
+
+    @pytest.mark.asyncio
+    async def test_reset_no_arg_multiple_sessions_asks_to_specify(self, mock_app):
+        with MockContext() as ctx:
+            from agentic_cli.cli.builtin_commands import SandboxCommand
+
+            mgr = self._make_manager(ctx, sessions=["conv-a", "conv-b"])
+            mock_app.workflow.sandbox_manager = mgr
+            cmd = SandboxCommand()
+
+            await cmd.execute("reset", mock_app)
+            mock_app.session.add_warning.assert_called_once()  # guidance, not a wrong reset
+            assert len(mgr.list_sessions()) == 2  # nothing reset
             mgr.cleanup()
 
     @pytest.mark.asyncio
@@ -369,12 +576,12 @@ class TestSandboxCommand:
 # ---------------------------------------------------------------------------
 
 class TestManagerAutoDetection:
-    def test_sandbox_detected_via_tool_service_map(self):
-        """Verify sandbox_execute is detected via _TOOL_SERVICE_MAP."""
-        from agentic_cli.workflow.base_manager import BaseWorkflowManager
+    def test_sandbox_execute_declares_the_sandbox_service(self):
+        """sandbox_execute carries its own service requirement in the registry."""
+        from agentic_cli.tools.registry import get_registry
+        from agentic_cli.tools.sandbox import sandbox_execute  # noqa: F401
 
-        assert "sandbox_execute" in BaseWorkflowManager._TOOL_SERVICE_MAP
-        assert BaseWorkflowManager._TOOL_SERVICE_MAP["sandbox_execute"] == "sandbox_manager"
+        assert get_registry().get("sandbox_execute").requires == ("sandbox_manager",)
 
     def test_base_manager_detects_sandbox(self, tmp_path):
         """BaseWorkflowManager picks up sandbox_manager from tool configs."""
@@ -504,6 +711,34 @@ class TestSandboxRestrictions:
             backend.cleanup()
 
 
+class TestStageInputs:
+    def test_copies_to_inputs_subdir(self, tmp_path):
+        from agentic_cli.tools.sandbox.manager import stage_inputs
+        src = tmp_path / "sales.csv"; src.write_text("a,b\n1,2\n")
+        sess = tmp_path / "sess"; sess.mkdir()
+        stage_inputs(sess, [str(src)])
+        assert (sess / "inputs" / "sales.csv").read_text() == "a,b\n1,2\n"
+
+    def test_missing_file_raises(self, tmp_path):
+        from agentic_cli.tools.sandbox.manager import stage_inputs
+        sess = tmp_path / "sess"; sess.mkdir()
+        with pytest.raises(ValueError):
+            stage_inputs(sess, [str(tmp_path / "nope.csv")])
+
+    def test_none_session_dir_raises_value_error(self, tmp_path):
+        from agentic_cli.tools.sandbox.manager import stage_inputs
+        with pytest.raises(ValueError, match="session_dir is required"):
+            stage_inputs(None, ["/x"])
+
+    def test_basename_collision_raises(self, tmp_path):
+        from agentic_cli.tools.sandbox.manager import stage_inputs
+        (tmp_path / "a").mkdir(); (tmp_path / "b").mkdir()
+        (tmp_path / "a" / "x.csv").write_text("1"); (tmp_path / "b" / "x.csv").write_text("2")
+        sess = tmp_path / "sess"; sess.mkdir()
+        with pytest.raises(ValueError):
+            stage_inputs(sess, [str(tmp_path / "a" / "x.csv"), str(tmp_path / "b" / "x.csv")])
+
+
 class TestJupyterLocalBackend:
     """Integration tests for JupyterLocalBackend."""
 
@@ -575,5 +810,21 @@ class TestJupyterLocalBackend:
             assert backend.has_session("test") is True
             backend.reset_session("test")
             assert backend.has_session("test") is False
+        finally:
+            backend.cleanup()
+
+    def test_outputs_dir_pre_created(self, tmp_path):
+        """outputs/ must be pre-created so open('outputs/x','w') works."""
+        from agentic_cli.tools.sandbox.backends.jupyter_local import JupyterLocalBackend
+
+        backend = JupyterLocalBackend()
+        try:
+            result = backend.execute(
+                "open('outputs/t.txt','w').write('hi'); print('ok')",
+                session_id="test",
+                working_dir=tmp_path,
+            )
+            assert result.success is True
+            assert (tmp_path / "outputs" / "t.txt").exists()
         finally:
             backend.cleanup()

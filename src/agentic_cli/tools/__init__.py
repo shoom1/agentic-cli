@@ -7,6 +7,7 @@ Tool System:
     - ToolDefinition: Metadata-rich tool definitions
     - ToolRegistry: Registry for tool management and discovery
     - register_tool: Decorator for easy tool registration
+    - declare_tool: Declare a tool implemented only by backend-native variants
 
 Framework Tools:
     - memory_tools: Working and long-term memory tools
@@ -50,7 +51,27 @@ from agentic_cli.tools.arxiv_tools import (
     fetch_arxiv_paper,
 )
 from agentic_cli.tools.execution_tools import execute_python
+from agentic_cli.tools.document import compile_document
 from agentic_cli.tools.interaction_tools import ask_clarification
+
+# Long-running job tools (generic observe-only management). Typed long-running
+# tools that *start* work (e.g. run_shell_job) are application-provided — see
+# examples/jobs_demo.py — because they choose what runs and how.
+from agentic_cli.tools.jobs import (
+    job_status,
+    job_result,
+    job_logs,
+    job_cancel,
+    job_list,
+)
+
+# Minimal companion to a typed long-running tool: job_status alone returns
+# state + stdout tail + result-when-finished, keeping the agent's tool surface
+# small (tool-selection quality drops past ~15-20 tools). Apps that want the
+# LLM to also enumerate/cancel jobs can use JOB_MANAGEMENT_TOOLS instead — but
+# listing/cancelling is usually a human job via the /jobs command.
+JOB_TOOLS = [job_status]
+JOB_MANAGEMENT_TOOLS = [job_status, job_result, job_logs, job_cancel, job_list]
 from agentic_cli.tools.search import web_search
 from agentic_cli.tools.webfetch_tool import web_fetch
 from agentic_cli.tools.registry import (
@@ -58,6 +79,7 @@ from agentic_cli.tools.registry import (
     ToolDefinition,
     ToolRegistry,
     get_registry,
+    declare_tool,
     register_tool,
 )
 
@@ -70,6 +92,7 @@ __all__ = [
     "ToolDefinition",
     "ToolRegistry",
     "get_registry",
+    "declare_tool",
     "register_tool",
     # Executor classes
     "SafePythonExecutor",
@@ -107,7 +130,16 @@ __all__ = [
     "search_arxiv",
     "fetch_arxiv_paper",
     "execute_python",
+    "compile_document",
     "ask_clarification",
+    # Long-running jobs (observe-only; typed starters are app-provided)
+    "job_status",
+    "job_result",
+    "job_logs",
+    "job_cancel",
+    "job_list",
+    "JOB_TOOLS",
+    "JOB_MANAGEMENT_TOOLS",
     # Framework tool modules (lazy loaded)
     "memory_tools",
     "sandbox_tools",

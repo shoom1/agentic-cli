@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agentic-cli"
-version = "0.5.3"
+version = "0.6.0"
 description = "A framework for building domain-specific agentic CLI applications"
 readme = "README.md"
 license = "MIT"
@@ -22,9 +22,15 @@ classifiers = [
 ]
 dependencies = [
     "thinking-prompt>=0.3.0",
-    "google-adk[genai]>=0.4.0",
+    "google-adk>=1.34,<2",  # >=1.34: Anthropic adaptive thinking (negative budget)
+    # ADK's Claude path (google.adk.models.anthropic_llm) and our DirectAnthropicLlm
+    # import `anthropic` at module load; google-adk only pulls it via optional extras,
+    # so declare it directly (>=0.78 matches google-adk's own floor).
+    "anthropic>=0.78",
+    "google-genai>=2.0,<3",  # imported directly (google.genai.types); was the adk[genai] extra
     "pydantic>=2.0.0",
     "pydantic-settings>=2.0.0",
+    "PyYAML>=6.0",
     "structlog>=24.0.0",
     "rich>=13.0.0",
     "prompt-toolkit>=3.0.0",
@@ -32,8 +38,13 @@ dependencies = [
     "numpy>=1.26.0,<2.0",
     "feedparser>=6.0.0",
     "pypdf>=4.0.0",
+    "html2text>=2020.1.16",  # eager import in tools/webfetch/converter.py
     "jupyter_client>=8.0.0",
     "ipykernel>=6.0.0",
+    # Durable sessions: ADK DatabaseSessionService (SQLAlchemy async) needs an
+    # async SQLite driver + greenlet; persistence is on by default.
+    "aiosqlite>=0.20.0",
+    "greenlet>=3.0.0",
 ]
 
 [project.optional-dependencies]
@@ -41,6 +52,10 @@ dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.24.0",
     "pytest-cov>=6.0.0",
+    # The console smoke tests drive the real prompt_toolkit application over a
+    # pty; it is available transitively today (via ipykernel), which is not a
+    # guarantee, so declare it.
+    "pexpect>=4.9.0",
 ]
 kb = [
     "torch>=2.2.0",
@@ -78,6 +93,9 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 markers = [
     "llm: tests that require real LLM API calls (deselect with -m 'not llm')",
+    "docker: tests that require a real container runtime (select with -m docker; set SANDBOX_REQUIRE_DOCKER=1 to fail instead of skip when absent)",
+    "latex: tests that require a host TeX engine (select with -m latex; set LATEX_REQUIRE=1 to fail instead of skip when absent)",
+    "wheel: acceptance tests that build and install the wheel (select with -m wheel; excluded from the offline suite because they download dependencies)",
 ]
 
 [tool.ruff]

@@ -131,6 +131,7 @@ class ReplayWorkflow:
     def __init__(self, events: list[WorkflowEvent]) -> None:
         self._events = list(events)
         self.input_callback = None
+        self.received_session_id: str | None = None
 
     def set_input_callback(self, callback: Any) -> None:
         self.input_callback = callback
@@ -139,6 +140,7 @@ class ReplayWorkflow:
         self.input_callback = None
 
     async def process(self, message: str, user_id: str, session_id: str | None = None):
+        self.received_session_id = session_id
         for event in self._events:
             yield event
 

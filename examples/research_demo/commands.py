@@ -10,7 +10,24 @@ from rich.table import Table
 from agentic_cli.cli.commands import Command, CommandCategory
 
 if TYPE_CHECKING:
+    from agentic_cli.workflow.base_manager import BaseWorkflowManager
+
     from examples.research_demo.app import ResearchDemoApp
+
+
+def _ready_workflow(app: "ResearchDemoApp") -> "BaseWorkflowManager | None":
+    """The workflow manager, or None while it is still coming up.
+
+    ``app.workflow`` raises until the controller reports READY, so a command
+    that touches it during background initialization would otherwise surface as
+    the generic "Error executing command" from ``BaseCLIApp._handle_command``.
+    Built-in commands use exactly this shape (see ``SessionsCommand``); the
+    caller is expected to warn and return.
+    """
+    try:
+        return app.workflow
+    except (RuntimeError, AttributeError):
+        return None
 
 
 class MemoryCommand(Command):
@@ -27,7 +44,15 @@ class MemoryCommand(Command):
         )
 
     async def execute(self, args: str, app: "ResearchDemoApp") -> None:
-        memory_store = app.workflow.memory_manager if app.workflow else None
+        workflow = _ready_workflow(app)
+        if workflow is None:
+            app.session.add_warning(
+                "Memory is not available yet — the workflow is still "
+                "initializing. Try /memory again in a moment."
+            )
+            return
+
+        memory_store = workflow.memory_manager
 
         table = Table(title="Persistent Memory", show_header=True)
         table.add_column("ID", style="dim", width=8)
@@ -123,9 +148,12 @@ class KbBackfillCommand(Command):
         from agentic_cli.knowledge_base.manager import BackfillAlreadyRunning
         from agentic_cli.workflow.service_registry import set_service_registry
 
-        workflow = app.workflow
+        workflow = _ready_workflow(app)
         if workflow is None:
-            app.session.add_error("Workflow not initialized")
+            app.session.add_warning(
+                "The knowledge base is not available yet — the workflow is "
+                "still initializing. Try /kb-backfill again in a moment."
+            )
             return
 
         project_kb = workflow.kb_manager

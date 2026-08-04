@@ -5,16 +5,24 @@ Provides pattern-based content search across files:
 """
 
 import functools
-import re
+import os
+import signal
 import subprocess
+import tempfile
+import re
 from pathlib import Path
 from typing import Any, Literal
 
+from agentic_cli.file_utils import glob_pattern_escapes_root, path_is_within
 from agentic_cli.tools.registry import (
     ToolCategory,
     register_tool,
 )
 from agentic_cli.workflow.permissions import Capability
+
+_MAX_FILES = 10_000        # cap the number of files the Python fallback scans
+_MAX_FILE_BYTES = 5_000_000  # skip files larger than this (avoid reading whole huge files)
+_MAX_RG_OUTPUT_BYTES = 10_000_000  # cap ripgrep JSON we read into memory
 
 
 @register_tool(
@@ -68,6 +76,18 @@ def grep(
             "success": False,
             "error": f"Path not found: {path}",
             "path": str(search_path),
+        }
+
+    # The permission engine authorizes only `path`; a file_pattern like "../*"
+    # or an absolute pattern would escape that authorized root, so reject it.
+    if file_pattern and glob_pattern_escapes_root(file_pattern):
+        return {
+            "success": False,
+            "error": f"File pattern escapes the search root: {file_pattern!r}",
+            "matches": [],
+            "total_matches": 0,
+            "files_searched": 0,
+            "truncated": False,
         }
 
     # Try to use ripgrep if available (faster, respects .gitignore)
@@ -145,22 +165,35 @@ def _grep_with_ripgrep(
     cmd.append("--")
     cmd.append(str(path))
 
+    # Drop RIPGREP_CONFIG_PATH so a host config can't inject flags (e.g.
+    # --follow, which would make rg traverse symlinks out of the authorized
+    # root). Containment below is the backstop; this removes the vector.
+    rg_env = {k: v for k, v in os.environ.items() if k != "RIPGREP_CONFIG_PATH"}
+    # Capture rg output to a temp file and read back at most _MAX_RG_OUTPUT_BYTES
+    # so a large tree can't allocate unbounded JSON in host memory.
+    rg_truncated = False
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-    except subprocess.TimeoutExpired:
-        return {
-            "success": False,
-            "error": "Search timed out after 30 seconds",
-            "matches": [],
-            "total_matches": 0,
-            "files_searched": 0,
-            "truncated": False,
-        }
+        with tempfile.TemporaryFile(mode="w+b") as out_f:
+            proc = subprocess.Popen(
+                cmd, stdout=out_f, stderr=subprocess.DEVNULL,
+                env=rg_env, start_new_session=True,
+            )
+            try:
+                proc.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                proc.wait()
+                return {
+                    "success": False,
+                    "error": "Search timed out after 30 seconds",
+                    "matches": [],
+                    "total_matches": 0,
+                    "files_searched": 0,
+                    "truncated": False,
+                }
+            out_f.seek(0)
+            raw = out_f.read(_MAX_RG_OUTPUT_BYTES)
+            rg_truncated = bool(out_f.read(1))  # more output than the cap remained
     except FileNotFoundError:
         # Ripgrep not found, fall back to Python
         return _grep_python(
@@ -175,6 +208,8 @@ def _grep_with_ripgrep(
             output_mode=output_mode,
         )
 
+    stdout_text = raw.decode("utf-8", errors="replace")
+
     # Parse ripgrep JSON output
     import json
 
@@ -183,7 +218,7 @@ def _grep_with_ripgrep(
     file_counts: dict[str, int] = {}
     total_matches = 0
 
-    for line in result.stdout.strip().split("\n"):
+    for line in stdout_text.strip().split("\n"):
         if not line:
             continue
         try:
@@ -194,6 +229,14 @@ def _grep_with_ripgrep(
         if data.get("type") == "match":
             match_data = data.get("data", {})
             file_path = match_data.get("path", {}).get("text", "")
+            # Drop files resolving outside the authorized root (e.g. a symlink
+            # rg followed) — parity with the Python fallback's containment. rg
+            # may report a path relative to the search root, so resolve it there.
+            if file_path:
+                fp = Path(file_path)
+                abs_fp = fp if fp.is_absolute() else (path / fp)
+                if not path_is_within(abs_fp, path):
+                    continue
             files_searched.add(file_path)
             file_counts[file_path] = file_counts.get(file_path, 0) + 1
             total_matches += 1
@@ -219,7 +262,7 @@ def _grep_with_ripgrep(
         "matches": matches,
         "total_matches": total_matches,
         "files_searched": len(files_searched),
-        "truncated": len(matches) >= max_results,
+        "truncated": rg_truncated or len(matches) >= max_results,
     }
 
 
@@ -257,23 +300,40 @@ def _grep_python(
     total_matches = 0
     file_counts: dict[str, int] = {}
 
-    # Get files to search
+    # Get files to search, capping how many we materialize.
     if path.is_file():
-        files = [path]
+        candidates = iter([path])
+    elif file_pattern:
+        candidates = path.rglob(file_pattern) if recursive else path.glob(file_pattern)
     else:
-        if file_pattern:
-            if recursive:
-                files = list(path.rglob(file_pattern))
-            else:
-                files = list(path.glob(file_pattern))
-        else:
-            if recursive:
-                files = [f for f in path.rglob("*") if f.is_file()]
-            else:
-                files = [f for f in path.iterdir() if f.is_file()]
+        candidates = path.rglob("*") if recursive else path.iterdir()
+
+    files = []
+    scan_truncated = False
+    for f in candidates:
+        # Count only files against the budget — directories must not exhaust it
+        # (otherwise dirs before the files silently drop matches).
+        if not f.is_file():
+            continue
+        files.append(f)
+        if len(files) >= _MAX_FILES:
+            scan_truncated = True
+            break
 
     for file_path in files:
         if not file_path.is_file():
+            continue
+
+        # Skip files resolving outside the authorized root (e.g. a symlink
+        # under `path` pointing elsewhere) — defense in depth.
+        if not path_is_within(file_path, path):
+            continue
+
+        # Skip files that are too large to read whole (reliability bound).
+        try:
+            if file_path.stat().st_size > _MAX_FILE_BYTES:
+                continue
+        except OSError:
             continue
 
         try:
@@ -325,5 +385,5 @@ def _grep_python(
         "matches": matches,
         "total_matches": total_matches,
         "files_searched": files_searched,
-        "truncated": total_matches > max_results,
+        "truncated": scan_truncated or total_matches > max_results,
     }

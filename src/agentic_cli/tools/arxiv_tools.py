@@ -125,6 +125,7 @@ async def _fetch_arxiv_paper_with_source(source, arxiv_id: str) -> dict[str, Any
 
     capabilities=[Capability("http.read")],
     description="Search arXiv for academic papers by query, category, or date range. Use this to find research papers on a topic.",
+    requires="arxiv_source",
 )
 def search_arxiv(
     query: str,
@@ -174,6 +175,7 @@ def search_arxiv(
 
     capabilities=[Capability("http.read")],
     description="Fetch metadata for a specific arXiv paper by ID or URL. Returns title, authors, abstract, categories, and PDF URL.",
+    requires="arxiv_source",
 )
 async def fetch_arxiv_paper(
     arxiv_id: str,
@@ -301,6 +303,7 @@ async def _ingest_arxiv_paper_with_services(
 
     capabilities=[Capability("http.read"), Capability("kb.write")],
     description="Download an arXiv paper's PDF, extract text, and ingest it into the knowledge base. Use this to add a specific arXiv paper to long-term storage so it can be searched later.",
+    requires=("arxiv_source", "kb_manager"),
 )
 async def ingest_arxiv_paper(
     arxiv_id: str,

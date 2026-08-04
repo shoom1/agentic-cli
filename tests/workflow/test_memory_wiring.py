@@ -42,13 +42,8 @@ class _FakeManager(BaseWorkflowManager):
     async def cleanup(self) -> None:
         pass
 
-    async def _extract_session_data(self, session_id: str) -> tuple[list[dict], str | None]:
-        return getattr(self, "_fake_messages", []), None
-
-    async def _inject_session_messages(
-        self, session_id: str, messages: list[dict], current_agent: str | None = None
-    ) -> None:
-        pass
+    async def recent_messages(self, session_id: str, limit: int = 20) -> list[dict]:
+        return getattr(self, "_fake_messages", [])
 
     def _get_state_tools(self) -> list:
         return []

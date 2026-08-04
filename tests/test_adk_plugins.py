@@ -80,8 +80,9 @@ class TestLLMLoggingPlugin:
 
     @pytest.fixture
     def plugin(self, tmp_path, monkeypatch):
-        """Create a plugin with log directory in tmp_path."""
+        """Create a plugin with log directory under a temp HOME."""
         monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
         return LLMLoggingPlugin(
             model_name="test-model",
             app_name="test_app",
@@ -92,10 +93,38 @@ class TestLLMLoggingPlugin:
         assert plugin.name == "llm_logging"
 
     def test_log_file_created(self, plugin, tmp_path):
-        """Log directory and file path should be set up."""
+        """Log directory and file path should be set up (under HOME)."""
         expected_dir = tmp_path / ".test_app" / "logs"
         assert expected_dir.exists()
         assert plugin.get_log_file_path() == expected_dir / "llm_events.jsonl"
+
+    def test_log_dir_under_home_not_cwd(self, tmp_path, monkeypatch):
+        """Conversation logs must live under the user's home, not the (often
+        git-tracked) project directory (P0-6)."""
+        home, proj = tmp_path / "home", tmp_path / "proj"
+        home.mkdir()
+        proj.mkdir()
+        monkeypatch.chdir(proj)
+        monkeypatch.setenv("HOME", str(home))
+        plugin = LLMLoggingPlugin(app_name="test_app")
+        log_path = str(plugin.get_log_file_path())
+        assert str(home) in log_path
+        assert str(proj) not in log_path
+
+    def test_log_file_has_restrictive_permissions(self, plugin):
+        """Full conversations may contain secrets — the file must be 0600."""
+        import stat
+
+        mode = stat.S_IMODE(plugin.get_log_file_path().stat().st_mode)
+        assert mode == 0o600
+
+    def test_secrets_redacted_in_written_log(self, plugin):
+        from agentic_cli.workflow.adk.plugins import _redact_secrets
+
+        line = "authorization: Bearer sk-ant-api03-ABCDEFGH1234567890ZYXW"
+        redacted = _redact_secrets(line)
+        assert "sk-ant-api03-ABCDEFGH1234567890ZYXW" not in redacted
+        assert "REDACTED" in redacted
 
     async def test_before_model_captures_request(self, plugin):
         """before_model_callback should capture request data and buffer an event."""

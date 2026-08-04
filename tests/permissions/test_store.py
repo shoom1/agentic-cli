@@ -116,64 +116,82 @@ class TestLoadRules:
 
 
 class TestAppendProjectRule:
-    def test_creates_file_when_absent(self, tmp_path, monkeypatch):
+    """Interactive 'Allow always' grants persist to the USER-side, path-keyed
+    ~/.{app}/project_grants.json (P0-1) — never into the repo, so a clone
+    carries no grants."""
+
+    def _grants_path(self, home: Path, app: str = "agentic") -> Path:
+        return home / f".{app}" / "project_grants.json"
+
+    def test_creates_user_grants_file_keyed_by_project(self, tmp_path, monkeypatch):
+        import json
         from agentic_cli.workflow.permissions.rules import Effect, Rule, RuleSource
         from agentic_cli.workflow.permissions.store import append_project_rule
 
-        monkeypatch.chdir(tmp_path)
+        home = tmp_path / "home"; proj = tmp_path / "proj"; proj.mkdir()
+        monkeypatch.setenv("HOME", str(home))
         rule = Rule("filesystem.write", "/abs/foo", Effect.ALLOW, RuleSource.PROJECT)
-        append_project_rule("agentic", rule)
+        append_project_rule("agentic", rule, proj)
 
-        import json
-        data = json.loads((tmp_path / ".agentic/settings.json").read_text())
-        assert data["permissions"]["allow"] == [
+        data = json.loads(self._grants_path(home).read_text())
+        assert data[str(proj.resolve())]["permissions"]["allow"] == [
             {"capability": "filesystem.write", "target": "/abs/foo"}
         ]
 
-    def test_preserves_other_settings_keys(self, tmp_path, monkeypatch):
-        import json
+    def test_writes_nothing_into_project_dir(self, tmp_path, monkeypatch):
         from agentic_cli.workflow.permissions.rules import Effect, Rule, RuleSource
         from agentic_cli.workflow.permissions.store import append_project_rule
 
-        monkeypatch.chdir(tmp_path)
-        (tmp_path / ".agentic").mkdir()
-        (tmp_path / ".agentic/settings.json").write_text(json.dumps({
-            "default_model": "claude-sonnet-4",
-            "thinking_effort": "medium",
-        }))
-
-        rule = Rule("filesystem.write", "/abs/foo", Effect.ALLOW, RuleSource.PROJECT)
-        append_project_rule("agentic", rule)
-
-        data = json.loads((tmp_path / ".agentic/settings.json").read_text())
-        assert data["default_model"] == "claude-sonnet-4"
-        assert data["thinking_effort"] == "medium"
-        assert data["permissions"]["allow"][0]["capability"] == "filesystem.write"
+        home = tmp_path / "home"; proj = tmp_path / "proj"; proj.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        append_project_rule(
+            "agentic",
+            Rule("filesystem.write", "/abs/foo", Effect.ALLOW, RuleSource.PROJECT),
+            proj,
+        )
+        assert not (proj / ".agentic").exists()  # nothing dropped inside the repo
 
     def test_deduplicates_identical_rules(self, tmp_path, monkeypatch):
         import json
         from agentic_cli.workflow.permissions.rules import Effect, Rule, RuleSource
         from agentic_cli.workflow.permissions.store import append_project_rule
 
-        monkeypatch.chdir(tmp_path)
+        home = tmp_path / "home"; proj = tmp_path / "proj"; proj.mkdir()
+        monkeypatch.setenv("HOME", str(home))
         rule = Rule("filesystem.write", "/abs/foo", Effect.ALLOW, RuleSource.PROJECT)
-        append_project_rule("agentic", rule)
-        append_project_rule("agentic", rule)
+        append_project_rule("agentic", rule, proj)
+        append_project_rule("agentic", rule, proj)
 
-        data = json.loads((tmp_path / ".agentic/settings.json").read_text())
-        assert len(data["permissions"]["allow"]) == 1
+        data = json.loads(self._grants_path(home).read_text())
+        assert len(data[str(proj.resolve())]["permissions"]["allow"]) == 1
+
+    def test_two_projects_kept_separate(self, tmp_path, monkeypatch):
+        import json
+        from agentic_cli.workflow.permissions.rules import Effect, Rule, RuleSource
+        from agentic_cli.workflow.permissions.store import append_project_rule
+
+        home = tmp_path / "home"; a = tmp_path / "a"; b = tmp_path / "b"
+        a.mkdir(); b.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        append_project_rule("agentic", Rule("http.read", "*", Effect.ALLOW, RuleSource.PROJECT), a)
+        append_project_rule("agentic", Rule("filesystem.write", "/x", Effect.ALLOW, RuleSource.PROJECT), b)
+
+        data = json.loads(self._grants_path(home).read_text())
+        assert set(data.keys()) == {str(a.resolve()), str(b.resolve())}
 
     def test_writes_deny_section_for_deny_effect(self, tmp_path, monkeypatch):
         import json
         from agentic_cli.workflow.permissions.rules import Effect, Rule, RuleSource
         from agentic_cli.workflow.permissions.store import append_project_rule
 
-        monkeypatch.chdir(tmp_path)
-        rule = Rule("filesystem.write", "/etc/foo", Effect.DENY, RuleSource.PROJECT)
-        append_project_rule("agentic", rule)
-
-        data = json.loads((tmp_path / ".agentic/settings.json").read_text())
-        assert data["permissions"]["deny"] == [
+        home = tmp_path / "home"; proj = tmp_path / "proj"; proj.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        append_project_rule(
+            "agentic",
+            Rule("filesystem.write", "/etc/foo", Effect.DENY, RuleSource.PROJECT),
+            proj,
+        )
+        data = json.loads(self._grants_path(home).read_text())
+        assert data[str(proj.resolve())]["permissions"]["deny"] == [
             {"capability": "filesystem.write", "target": "/etc/foo"}
         ]
-        assert "allow" not in data["permissions"] or data["permissions"]["allow"] == []

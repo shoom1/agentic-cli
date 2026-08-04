@@ -10,15 +10,25 @@ from __future__ import annotations
 from enum import Enum
 from typing import Literal, TYPE_CHECKING
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field, field_validator
 
+from agentic_cli.logging import Loggers
 from agentic_cli.workflow.models import ModelFamily, ModelRegistry
 
 if TYPE_CHECKING:
     pass
 
+logger = Loggers.config()
+
 # Thinking effort levels (module-level constant for backward compatibility)
 THINKING_EFFORT_LEVELS = ModelRegistry.THINKING_EFFORT_LEVELS
+
+# Which environment variable supplies each provider's credential (for error
+# messages — the value is never echoed).
+_PROVIDER_ENV_VAR = {
+    ModelFamily.GEMINI: "GOOGLE_API_KEY",
+    ModelFamily.CLAUDE: "ANTHROPIC_API_KEY",
+}
 
 
 class PermissionRuleConfig(BaseModel):
@@ -92,26 +102,38 @@ class WorkflowSettingsMixin:
         json_schema_extra={"ui_order": 27},
     )
 
-    # API Keys (common across all domains, never saved to JSON)
+    # API Keys (common across all domains, never saved to JSON).
+    #
+    # Each accepts BOTH the provider's environment variable name and its Python
+    # field name (``AliasChoices``): the bare env alias made
+    # ``BaseSettings(google_api_key=...)`` bind nothing at all — the value was
+    # dropped by ``extra="ignore"`` and the field kept its default. The env name
+    # is listed first, so a real environment variable still wins within a source.
+    # Values are kept out of ``repr()`` and out of every persisted file (see
+    # ``settings_persistence.SECRET_FIELDS``).
     google_api_key: str | None = Field(
         default=None,
         description="Google API key for Gemini models",
-        validation_alias="GOOGLE_API_KEY",
+        validation_alias=AliasChoices("GOOGLE_API_KEY", "google_api_key"),
+        repr=False,
     )
     anthropic_api_key: str | None = Field(
         default=None,
         description="Anthropic API key for Claude models",
-        validation_alias="ANTHROPIC_API_KEY",
+        validation_alias=AliasChoices("ANTHROPIC_API_KEY", "anthropic_api_key"),
+        repr=False,
     )
     tavily_api_key: str | None = Field(
         default=None,
         description="Tavily API key for web search",
-        validation_alias="TAVILY_API_KEY",
+        validation_alias=AliasChoices("TAVILY_API_KEY", "tavily_api_key"),
+        repr=False,
     )
     brave_api_key: str | None = Field(
         default=None,
         description="Brave Search API key for web search",
-        validation_alias="BRAVE_API_KEY",
+        validation_alias=AliasChoices("BRAVE_API_KEY", "brave_api_key"),
+        repr=False,
     )
 
     # Web search configuration
@@ -206,12 +228,6 @@ class WorkflowSettingsMixin:
         description="Workflow orchestrator backend",
         json_schema_extra={"ui_order": 100},  # Advanced setting
     )
-    langgraph_checkpointer: Literal["memory", "postgres"] | None = Field(
-        default="memory",
-        title="LangGraph Checkpointer",
-        description="LangGraph state persistence type",
-        json_schema_extra={"ui_order": 101},
-    )
 
     # Retry configuration
     retry_max_attempts: int = Field(
@@ -232,6 +248,16 @@ class WorkflowSettingsMixin:
         description="Multiplier for exponential backoff between retries",
         json_schema_extra={"ui_order": 112},
     )
+    anthropic_request_timeout: float = Field(
+        default=900.0,
+        title="Anthropic Request Timeout",
+        description=(
+            "Overall timeout (seconds) for direct-API Claude requests. A "
+            "non-default value lets high-thinking (large max_tokens) requests "
+            "run without the SDK's streaming-required guard."
+        ),
+        json_schema_extra={"ui_order": 113},
+    )
 
     # Python executor
     python_executor_timeout: int = Field(
@@ -248,11 +274,16 @@ class WorkflowSettingsMixin:
     )
 
     # Sandbox executor (stateful Jupyter-backed execution)
-    sandbox_backend: str = Field(
-        default="jupyter_local",
-        title="Sandbox Backend",
-        description="Backend for stateful sandbox execution",
-        json_schema_extra={"ui_order": 122},
+    stateful_executor_backend: Literal["none", "local", "docker"] = Field(
+        default="none",
+        title="Stateful Executor Backend",
+        description=(
+            "Backend for the stateful sandbox_execute tool. 'none' disables it; "
+            "'docker' runs in a network-isolated container (recommended); 'local' "
+            "runs a Jupyter kernel with host privileges (NOT OS-sandboxed). Future: "
+            "'modal', 'runpod'."
+        ),
+        json_schema_extra={"ui_order": 121},
     )
     sandbox_timeout: int = Field(
         default=120,
@@ -272,25 +303,108 @@ class WorkflowSettingsMixin:
         description="Additional pip packages to pre-install in sandbox sessions (informational for local backend, drives image build for Docker backend)",
         json_schema_extra={"ui_order": 125},
     )
+    sandbox_image: str = Field(
+        default="quay.io/jupyter/scipy-notebook:python-3.12",
+        title="Sandbox Image",
+        description="Container image for the jupyter_docker backend. Must contain ipykernel/jupyter_client. Pin to a digest in production.",
+        json_schema_extra={"ui_order": 126},
+    )
+    sandbox_memory_mb: int = Field(
+        default=2048,
+        title="Sandbox Memory (MB)",
+        description="Per-container memory cap for the docker backend; also disables swap.",
+        json_schema_extra={"ui_order": 127},
+    )
+    sandbox_cpus: float = Field(
+        default=2.0,
+        title="Sandbox CPUs",
+        description="Per-container CPU cap for the docker backend.",
+        json_schema_extra={"ui_order": 128},
+    )
+    sandbox_pids_limit: int = Field(
+        default=256,
+        title="Sandbox PID Limit",
+        description="Per-container process/thread cap for the docker backend.",
+        json_schema_extra={"ui_order": 129},
+    )
+    sandbox_network: str = Field(
+        default="none",
+        title="Sandbox Network",
+        description="Docker network mode for the docker backend. v1 supports 'none' only.",
+        json_schema_extra={"ui_order": 130},
+    )
+    sandbox_container_user: str = Field(
+        default="",
+        title="Sandbox Container User",
+        description="uid:gid to run the container as; empty uses the image default.",
+        json_schema_extra={"ui_order": 131},
+    )
+    sandbox_data_mounts: list[str] = Field(
+        default_factory=list,
+        title="Sandbox Data Mounts",
+        description="Read-only data staged into the container as 'host_path:mount_name' (mounted read-only under /data/).",
+        json_schema_extra={"ui_order": 132},
+    )
+    sandbox_start_timeout: int = Field(
+        default=180,
+        title="Sandbox Start Timeout",
+        description="Seconds to wait for container start + image pull + kernel readiness (docker backend).",
+        json_schema_extra={"ui_order": 133},
+    )
+    sandbox_outputs_dir: str = Field(
+        default="",
+        title="Sandbox Outputs Dir",
+        description="Shared host dir mounted at /workspace/outputs for FINAL deliverables (default: <workspace_dir>/artifacts).",
+        json_schema_extra={"ui_order": 134},
+    )
+
+    @field_validator("sandbox_network")
+    @classmethod
+    def _validate_sandbox_network(cls, v: str) -> str:
+        """Fail closed: the docker backend's no-egress isolation depends on
+        --network none, so reject any other value rather than silently
+        weakening it. (v1 supports 'none' only.)"""
+        if v != "none":
+            raise ValueError(
+                f"sandbox_network must be 'none' (got {v!r}). The docker sandbox's "
+                "network-isolation guarantee depends on it; other modes are not "
+                "supported in v1."
+            )
+        return v
 
     # OS-level sandboxing
     os_sandbox_enabled: bool = Field(
-        default=False,
+        default=True,
         title="OS Sandbox Enabled",
-        description="Enable OS-level sandboxing for shell and Python execution (requires sandbox-exec on macOS or bwrap on Linux)",
-        json_schema_extra={"ui_order": 130},
+        description=(
+            "Wrap Python execution in an OS-level sandbox when a backend is "
+            "available (sandbox-exec on macOS, bwrap on Linux). When no backend "
+            "is present, execution falls back to the restricted in-process "
+            "executor (see os_sandbox_strict) — only pure-computation modules "
+            "are importable in that case."
+        ),
+        json_schema_extra={"ui_order": 134},
+    )
+    os_sandbox_strict: bool = Field(
+        default=False,
+        title="OS Sandbox Strict",
+        description=(
+            "Refuse to run code when OS sandboxing is enabled but no backend is "
+            "available, instead of falling back to the in-process executor."
+        ),
+        json_schema_extra={"ui_order": 137},
     )
     os_sandbox_writable_paths: list[str] = Field(
         default_factory=list,
         title="OS Sandbox Writable Paths",
         description="Additional paths the sandboxed process can write to (working directory is always writable)",
-        json_schema_extra={"ui_order": 131},
+        json_schema_extra={"ui_order": 135},
     )
     os_sandbox_allow_network: bool = Field(
         default=False,
         title="OS Sandbox Allow Network",
         description="Allow network access from sandboxed processes",
-        json_schema_extra={"ui_order": 132},
+        json_schema_extra={"ui_order": 136},
     )
 
     # Permissions
@@ -298,53 +412,117 @@ class WorkflowSettingsMixin:
         default_factory=PermissionsConfig,
         title="Permissions",
         description="Declarative allow/deny rules for tool capabilities.",
-        json_schema_extra={"ui_order": 135},
+        json_schema_extra={"ui_order": 138},
     )
     permissions_enabled: bool = Field(
         default=True,
         title="Permissions Enabled",
         description="Master switch; when False, all tool calls are allowed.",
-        json_schema_extra={"ui_order": 136},
+        json_schema_extra={"ui_order": 139},
     )
+    max_concurrent_jobs: int = Field(
+        default=4,
+        ge=1,
+        title="Max Concurrent Jobs",
+        description="Maximum long-running jobs running at once; excess are queued.",
+        json_schema_extra={"ui_order": 140},
+    )
+    job_auto_resume: bool = Field(
+        default=False,
+        title="Auto-resume Finished Jobs",
+        description=(
+            "When True, a finished long-running job that opted in "
+            "(resume_on_complete) automatically resumes the agent with its "
+            "result at the next turn boundary (or via /resume)."
+        ),
+        json_schema_extra={"ui_order": 141},
+    )
+
+    # Session persistence — durable conversations across restarts.
+    # Drives BOTH backends: ADK uses DatabaseSessionService, LangGraph uses a
+    # persistent checkpointer (both keyed by session_id). "memory" = ephemeral.
+    session_store: Literal["memory", "sqlite", "postgres"] = Field(
+        default="sqlite",
+        title="Session Store",
+        description=(
+            "Where conversations are persisted: sqlite (default, a single file), "
+            "postgres (shared/multi-instance via Postgres URI), or memory (ephemeral)."
+        ),
+        json_schema_extra={"ui_order": 145},
+    )
+
+    # Skills (Agent Skills / SKILL.md folders)
+    skills_dirs: list[str] = Field(
+        default_factory=list,
+        title="Skills Directories",
+        description="Directories searched for named skills (Agent Skills / SKILL.md folders)",
+        json_schema_extra={"ui_order": 141},
+    )
+    # NOTE: ``skill_scripts_enabled`` was removed. Turning it on exposed ADK's
+    # ``run_skill_script`` while the supported manager path supplies no code
+    # executor, so every call answered ``NO_CODE_EXECUTOR``. Script execution is
+    # now enabled by passing a code executor to ``make_skill_toolset`` — the
+    # thing that actually makes it work — instead of by a switch that cannot.
 
     # Persistence settings (LangGraph)
     postgres_uri: str | None = Field(
         default=None,
         title="PostgreSQL URI",
         description="PostgreSQL connection URI for persistent storage",
-        json_schema_extra={"ui_order": 145},
+        json_schema_extra={"ui_order": 146},
     )
     sqlite_uri: str | None = Field(
         default=None,
         title="SQLite URI",
         description="SQLite connection URI or file path for persistent storage",
-        json_schema_extra={"ui_order": 146},
+        json_schema_extra={"ui_order": 147},
     )
     store_type: Literal["memory", "postgres"] | None = Field(
         default="memory",
         title="Store Type",
         description="Store type for long-term memory (memory or postgres)",
-        json_schema_extra={"ui_order": 147},
+        json_schema_extra={"ui_order": 148},
     )
+
+    def session_db_url(self) -> str | None:
+        """Async SQLAlchemy URL for the session store, or None when ephemeral.
+
+        Shared by both backends so ADK's DatabaseSessionService and LangGraph's
+        checkpointer persist to the same place. SQLite is the zero-config
+        default (``{workspace}/sessions/sessions.db``); Postgres via uri.
+        """
+        store = getattr(self, "session_store", "sqlite")
+        if store == "memory":
+            return None
+        if store == "postgres":
+            uri = self.postgres_uri
+            if not uri:
+                raise ValueError("session_store='postgres' requires postgres_uri")
+            return uri.replace("postgresql://", "postgresql+asyncpg://", 1)
+        # sqlite (default)
+        if self.sqlite_uri:
+            return self.sqlite_uri.replace("sqlite:///", "sqlite+aiosqlite:///", 1)
+        path = self.sessions_dir / "sessions.db"
+        return f"sqlite+aiosqlite:///{path}"
 
     # Shell execution settings (for shell middleware)
     shell_sandbox_type: Literal["host", "docker"] = Field(
         default="host",
         title="Shell Sandbox Type",
         description="Execution environment for shell commands",
-        json_schema_extra={"ui_order": 148},
+        json_schema_extra={"ui_order": 149},
     )
     shell_docker_image: str = Field(
         default="python:3.12-slim",
         title="Shell Docker Image",
         description="Docker image to use for sandboxed shell execution",
-        json_schema_extra={"ui_order": 149},
+        json_schema_extra={"ui_order": 150},
     )
     shell_timeout: int = Field(
         default=60,
         title="Shell Timeout",
         description="Default timeout in seconds for shell commands",
-        json_schema_extra={"ui_order": 150},
+        json_schema_extra={"ui_order": 151},
     )
 
     # LLM debugging settings
@@ -468,22 +646,68 @@ class WorkflowSettingsMixin:
         registry = self._get_registry()
         return registry.supports_thinking(model)
 
-    def set_model(self, model: str) -> None:
-        """Set the default model."""
+    def check_model(self, model: str, *, label: str = "model") -> str:
+        """Validate one model against credentials and discovery authority.
+
+        The single rule set shared by ``set_model()`` and ``validate_settings()``
+        so a model the setter accepts can never be rejected at startup (or the
+        reverse):
+
+        1. the provider must be derivable from the id;
+        2. that provider's credential must be configured;
+        3. a deprecated alias resolves to its replacement (warned);
+        4. an unknown model is rejected only when that provider's listing is
+           authoritative — a degraded/unattempted listing cannot disprove it,
+           and is logged instead.
+
+        Args:
+            model: Model identifier to check.
+            label: What is being checked, for the error message.
+
+        Returns:
+            The resolved model id (differs only for a deprecated alias).
+
+        Raises:
+            ValueError: With an actionable message; never includes a credential.
+        """
         registry = self._get_registry()
-        if registry.is_refreshed:
-            # Validate and possibly resolve deprecated models
-            resolved = registry.resolve_model(model)
-            object.__setattr__(self, "default_model", resolved)
-        else:
-            # Pre-refresh: validate against fallback list
-            available = self.get_available_models()
-            if model not in available:
-                raise ValueError(
-                    f"Model '{model}' is not available. "
-                    f"Available models: {', '.join(available)}"
-                )
-            object.__setattr__(self, "default_model", model)
+        try:
+            family = registry.get_family(model)
+        except ValueError:
+            raise ValueError(
+                f"Model '{model}' ({label}) is not available: its provider "
+                "cannot be determined from the model id."
+            ) from None
+
+        if not self._has_credential_for(family):
+            env_var = _PROVIDER_ENV_VAR.get(family, "the provider API key")
+            raise ValueError(
+                f"Model '{model}' ({label}) is not available: it needs a "
+                f"{family.value} credential. Set {env_var}."
+            )
+
+        resolved = registry.resolve_model(model)  # raises when authoritative
+        if resolved == model and model not in self.get_available_models():
+            # Not authoritative (else resolve_model would have raised), so the
+            # static list simply lags reality.
+            logger.warning("model_not_in_static_list", model=model, source=label)
+        return resolved
+
+    def _has_credential_for(self, family: ModelFamily) -> bool:
+        """Whether the credential a model family needs is configured."""
+        if family is ModelFamily.GEMINI:
+            return self.has_google_key
+        if family is ModelFamily.CLAUDE:
+            return self.has_anthropic_key
+        return False
+
+    def set_model(self, model: str) -> None:
+        """Set the default model, validating it exactly as startup would.
+
+        Raises:
+            ValueError: If the model is unusable (see :meth:`check_model`).
+        """
+        object.__setattr__(self, "default_model", self.check_model(model))
 
     def set_thinking_effort(self, effort: str) -> None:
         """Set the thinking effort level."""
@@ -495,11 +719,25 @@ class WorkflowSettingsMixin:
         object.__setattr__(self, "thinking_effort", effort)
 
     def export_api_keys_to_env(self) -> None:
-        """Export API keys to environment variables."""
+        """Export configured API keys to provider environment variables.
+
+        Provider SDKs used by the orchestrators (ADK's AnthropicLlm/Gemini,
+        LangChain clients) read credentials from process env vars. The export
+        OVERWRITES the env from this settings instance: the key fields bind
+        only via their env alias (real env vars are the highest-priority
+        source), so settings and env diverge only when the process env
+        changed after this instance loaded — e.g. an earlier manager's
+        export, or a key loaded from a class-specific env_file — and then
+        this instance's configured value must win. (The previous
+        set-if-absent guard let the first exporting manager pin credentials
+        for every later one.) A key unset in settings leaves the environment
+        untouched. Credentials are process-global; SettingsContext does not
+        isolate them.
+        """
         import os
 
-        if self.google_api_key and not os.environ.get("GOOGLE_API_KEY"):
+        if self.google_api_key:
             os.environ["GOOGLE_API_KEY"] = self.google_api_key
 
-        if self.anthropic_api_key and not os.environ.get("ANTHROPIC_API_KEY"):
+        if self.anthropic_api_key:
             os.environ["ANTHROPIC_API_KEY"] = self.anthropic_api_key

@@ -18,6 +18,7 @@ from agentic_cli.tools.webfetch import (
     HTMLToMarkdown,
     build_summarize_prompt,
 )
+from agentic_cli.tools.webfetch.transport import PinnedTransport
 from agentic_cli.workflow.service_registry import require_service, LLM_SUMMARIZER
 
 
@@ -60,11 +61,13 @@ def get_or_create_fetcher(settings=None) -> ContentFetcher:
         return _fetcher
 
     validator = URLValidator(blocked_domains=settings.webfetch_blocked_domains)
-    robots_checker = RobotsTxtChecker()
+    transport = PinnedTransport(validator)
+    robots_checker = RobotsTxtChecker(transport=transport)
 
     _fetcher = ContentFetcher(
         validator=validator,
         robots_checker=robots_checker,
+        transport=transport,
         cache_ttl_seconds=settings.webfetch_cache_ttl_seconds,
         max_content_bytes=settings.webfetch_max_content_bytes,
         max_pdf_bytes=settings.webfetch_max_pdf_bytes,
@@ -78,6 +81,7 @@ def get_or_create_fetcher(settings=None) -> ContentFetcher:
     category=ToolCategory.NETWORK,
     capabilities=[Capability("http.read", target_arg="url")],
     description="Fetch a web page, convert it to markdown, and summarize it using an LLM based on your prompt. Use this to extract specific information from a URL (e.g., documentation, articles).",
+    requires="llm_summarizer",
 )
 async def web_fetch(url: str, prompt: str, timeout: int = 30) -> dict[str, Any]:
     """Fetch web content and summarize it using an LLM.

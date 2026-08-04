@@ -518,6 +518,7 @@ def _delete_memory_with_store(
     category=ToolCategory.MEMORY,
     capabilities=[Capability("memory.write")],
     description="Save information to persistent memory that survives across sessions. Use this to remember user preferences, important facts, or learnings for future conversations.",
+    requires="memory_store",
 )
 def save_memory(
     content: str,
@@ -541,6 +542,7 @@ def save_memory(
     category=ToolCategory.MEMORY,
     capabilities=[Capability("memory.read")],
     description="Search persistent memory by keyword/substring. Use this to recall previously saved facts, preferences, or learnings.",
+    requires="memory_store",
 )
 def search_memory(
     query: str,
@@ -564,6 +566,7 @@ def search_memory(
     category=ToolCategory.MEMORY,
     capabilities=[Capability("memory.write")],
     description="Update an existing memory item",
+    requires="memory_store",
 )
 def update_memory(
     item_id: str,
@@ -587,6 +590,7 @@ def update_memory(
     category=ToolCategory.MEMORY,
     capabilities=[Capability("memory.write")],
     description="Delete a memory item",
+    requires="memory_store",
 )
 def delete_memory(
     item_id: str,
