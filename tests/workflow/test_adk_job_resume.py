@@ -187,7 +187,9 @@ async def test_can_resume_true_when_session_present():
 
 
 async def test_can_resume_false_when_session_missing():
-    # After a restart the in-memory session is gone → not resumable.
+    # Sessions are durable by default and survive a restart; this is the case
+    # where the conversation is genuinely gone — deleted, or an explicitly
+    # ephemeral session_store="memory" run whose process restarted.
     assert await _can_resume_manager(False).can_resume(_record()) is False
 
 

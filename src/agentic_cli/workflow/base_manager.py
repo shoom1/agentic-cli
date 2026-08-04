@@ -711,8 +711,13 @@ class BaseWorkflowManager(ABC):
         ``resume_with_job_result`` override this to report whether the
         originating conversation is still available — e.g. the ADK session that
         holds the pending call. Used by the harness to resume vs. surface a
-        "finished while its conversation was unavailable" notice (after a CLI
-        restart the default in-memory session is gone).
+        "finished while its conversation was unavailable" notice.
+
+        Sessions are durable by default (``session_store='sqlite'``), so a
+        conversation normally survives a CLI restart and stays resumable. It is
+        unavailable when, for example, it was deleted, the record is missing its
+        session/user/call identifiers, or the run used the explicitly ephemeral
+        ``session_store='memory'`` and the process restarted.
         """
         return False
 

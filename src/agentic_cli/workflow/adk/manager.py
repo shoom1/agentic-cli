@@ -1056,9 +1056,14 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
     async def can_resume(self, record) -> bool:
         """True iff the originating ADK session still exists to resume into.
 
-        Requires the resume ids and a live session holding the pending call.
-        After a CLI restart the in-memory session is gone, so this returns
-        False and the harness surfaces a notice instead of a dead resume turn.
+        Requires the resume ids and a session holding the pending call. The
+        session service is durable by default (``session_store='sqlite'``), so
+        the session normally survives a CLI restart and the job stays
+        resumable. This returns False — and the harness surfaces a notice
+        instead of a dead resume turn — when the session is genuinely gone: it
+        was deleted, the record lacks its session/user/call ids, or the run used
+        the explicitly ephemeral ``session_store='memory'`` and the process
+        restarted.
         """
         if not (record.session_id and record.user_id and record.call_id):
             return False

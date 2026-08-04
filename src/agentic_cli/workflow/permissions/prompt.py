@@ -17,13 +17,23 @@ _CODE_PREVIEW_MAX = 1000
 # Strings kept module-level so the UI and parser stay in sync.
 ALLOW_ONCE_CHOICE = "Allow once"
 ALLOW_SESSION_CHOICE = "Allow for this session"
-ALLOW_ALWAYS_CHOICE = "Allow always (save to project)"
+ALLOW_ALWAYS_CHOICE = "Allow always for this project"
 DENY_CHOICE = "Deny"
+
+# The label this choice used to display. It said "save to project", which
+# described the *scope* but implied the grant is written into the repository —
+# it is not: grants live in ``~/.{app}/project_grants.json``, keyed by the
+# resolved project path (see ``permissions/store.py``). Private: an internal
+# parser-compatibility detail, not API. It is still accepted so a response
+# captured or queued under the old wording keeps its meaning, but it is never
+# offered — callers should use ``ALLOW_ALWAYS_CHOICE``.
+_LEGACY_ALLOW_ALWAYS_CHOICE = "Allow always (save to project)"
 
 _CHOICE_TO_SCOPE = {
     ALLOW_ONCE_CHOICE: AskScope.ONCE,
     ALLOW_SESSION_CHOICE: AskScope.SESSION,
     ALLOW_ALWAYS_CHOICE: AskScope.PROJECT,
+    _LEGACY_ALLOW_ALWAYS_CHOICE: AskScope.PROJECT,
     DENY_CHOICE: AskScope.DENY,
 }
 
@@ -99,5 +109,11 @@ def _code_preview(
 
 
 def parse_response(text: str) -> AskScope:
-    """Parse a choice string into an ``AskScope``. Unknown values deny."""
+    """Parse a choice string into an ``AskScope``. Unknown values deny.
+
+    Besides the four labels this module offers, one superseded "allow always"
+    wording is still accepted, so renaming the displayed choice cannot turn a
+    user's "always" answer into a denial. That compatibility string is internal
+    and is never offered as a choice. Anything unrecognised denies.
+    """
     return _CHOICE_TO_SCOPE.get((text or "").strip(), AskScope.DENY)

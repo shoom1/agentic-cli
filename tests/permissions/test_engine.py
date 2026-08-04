@@ -7,6 +7,7 @@ import pytest
 
 from agentic_cli.workflow.permissions.capabilities import Capability
 from agentic_cli.workflow.permissions.engine import PermissionEngine
+from agentic_cli.workflow.permissions.prompt import ALLOW_ALWAYS_CHOICE
 from agentic_cli.workflow.permissions.rules import Effect, Rule, RuleSource
 from agentic_cli.workflow.permissions.store import PermissionContext
 
@@ -190,12 +191,12 @@ class TestEngineAskFlow:
         w.request_user_input.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_user_allow_always_writes_project_file(self, ctx, tmp_path, monkeypatch):
+    async def test_user_allow_always_writes_user_side_project_grants(self, ctx, tmp_path, monkeypatch):
         import json
         monkeypatch.chdir(tmp_path)
         monkeypatch.setenv("HOME", str(tmp_path / "home"))
         w = _stub_workflow()
-        w.request_user_input = AsyncMock(return_value="Allow always (save to project)")
+        w.request_user_input = AsyncMock(return_value=ALLOW_ALWAYS_CHOICE)
         engine = PermissionEngine(settings=_stub_settings(), workflow=w, ctx=ctx)
 
         result = await engine.check(
@@ -336,7 +337,7 @@ class TestTargetlessAllowAlwaysRegression:
         monkeypatch.chdir(tmp_path)
         monkeypatch.setenv("HOME", str(tmp_path / "home"))
         w = _stub_workflow()
-        w.request_user_input = AsyncMock(return_value="Allow always (save to project)")
+        w.request_user_input = AsyncMock(return_value=ALLOW_ALWAYS_CHOICE)
         engine = PermissionEngine(settings=_stub_settings(), workflow=w, ctx=ctx)
 
         # First call: no rule → ask → allow always (saves session + project rule)
@@ -379,7 +380,7 @@ class TestTargetlessAllowAlwaysRegression:
         outside.mkdir()
 
         w = _stub_workflow()
-        w.request_user_input = AsyncMock(return_value="Allow always (save to project)")
+        w.request_user_input = AsyncMock(return_value=ALLOW_ALWAYS_CHOICE)
         engine = PermissionEngine(settings=_stub_settings(), workflow=w, ctx=ctx)
 
         # First write → prompts → allow always.
@@ -467,7 +468,7 @@ class TestTargetlessAllowAlwaysRegression:
 
         # Round 1: grant "allow always" so the rule is persisted.
         w1 = _stub_workflow()
-        w1.request_user_input = AsyncMock(return_value="Allow always (save to project)")
+        w1.request_user_input = AsyncMock(return_value=ALLOW_ALWAYS_CHOICE)
         engine1 = PermissionEngine(settings=_stub_settings(), workflow=w1, ctx=ctx)
         result1 = await engine1.check("web_search", [Capability("http.read")], {"query": "x"})
         assert result1.allowed is True
