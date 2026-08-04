@@ -32,6 +32,42 @@ jobs:
       - name: Run offline test suite
         run: conda run -n agenticcli python -m pytest -m 'not llm and not docker' -q
 
+  wheel-acceptance:
+    name: Built-wheel acceptance (console smoke)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash -el {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up conda env (agenticcli)
+        uses: conda-incubator/setup-miniconda@v3
+        with:
+          miniforge-version: latest
+          environment-file: environment.yml
+          activate-environment: agenticcli
+
+      # pexpect drives the console over a pty. Installed explicitly via the dev
+      # extra rather than relied on transitively.
+      - name: Install dev extra (pexpect)
+        run: conda run -n agenticcli pip install -e '.[dev]'
+
+      # Its own step rather than part of the offline suite: it builds a wheel
+      # and installs that wheel's dependencies into a throwaway virtualenv, so
+      # it is slow and needs the network. The opt-in env var is what the tests
+      # gate on, so the offline selector stays fast and offline.
+      #
+      # Targets the file rather than `-m wheel` alone: a bare marker selection
+      # still *collects* the whole suite, which would need the langgraph extra
+      # installed only to collect tests this job does not run.
+      - name: Run built-wheel acceptance
+        env:
+          AGENTIC_WHEEL_ACCEPTANCE: "1"
+        run: >
+          conda run -n agenticcli python -m pytest
+          tests/examples/test_research_demo_wheel.py -m wheel -v
+
   docker-isolation:
     name: Docker isolation tests
     runs-on: ubuntu-latest

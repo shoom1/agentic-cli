@@ -12,12 +12,20 @@ class ResearchDemoSettings(BaseSettings):
 
     Demonstrates all P0/P1 features with memory, planning, and HITL.
 
-    Settings are loaded from (in order of precedence):
-    1. Environment variables (RESEARCH_DEMO_* prefix)
-    2. Project config (./settings.json)
-    3. User config (~/.research_demo/settings.json)
-    4. .env file (~/.research_demo/.env)
-    5. Default values
+    Settings are loaded from (highest precedence first):
+
+    1. Constructor arguments
+    2. Environment variables (``RESEARCH_DEMO_*`` prefix)
+    3. Project config ``./.research_demo/settings.json`` — **untrusted**: a
+       cloned repo can ship one, so only an explicit allowlist of benign keys
+       is honoured and security-sensitive keys are dropped with a warning
+    4. User config ``~/.research_demo/settings.json`` (trusted)
+    5. ``~/.research_demo/.env`` — trusted because the path is absolute; a
+       cwd-relative ``.env`` would be filtered like the project config, so put
+       API keys here or in real environment variables
+    6. Field defaults (including the ones set in ``model_post_init`` below)
+
+    JSON sources are only consulted when the file exists.
     """
 
     model_config = SettingsConfigDict(
