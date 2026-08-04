@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Deprecated
+- **`agentic_cli.tools.google_search_tool` — importable through 0.6.x, removed in 0.7.0.** The name only ever re-exported ADK's native `GoogleSearchTool` singleton under our namespace; it is backend-, model- and UI-specific rather than an end-to-end Agentic CLI integration. The framework does not trust it in the permission registry, translate its grounding events, or render its citations, and ADK's own model/tool constraints (a Gemini-only tool that cannot be mixed freely with function calling) still apply — so the re-export offered convenience without any of the integration it implied. Use **`agentic_cli.tools.web_search`**, the supported framework-level alternative (pluggable Tavily/Brave backends, permission-gated like every other framework tool). Applications that intentionally want native ADK Google Search should import the class directly (`from google.adk.tools.google_search_tool import GoogleSearchTool`), instantiate and configure it as ADK's documentation describes, and take on ADK's constraints, grounding metadata, citations and rendering Search Suggestions when returned themselves. Note the deprecated re-export was ADK's pre-built `google_search` *singleton*, not the configurable class. Nothing else changed: the name stays in `agentic_cli.tools.__all__`, still resolves to the exact ADK singleton, and now loads lazily through the package's `__getattr__` — importing `agentic_cli.tools` no longer imports it or warns, and the first access emits one `DeprecationWarning` attributed to the calling code, after which the resolved object is cached like the package's other lazy exports.
+
 ## [0.6.0] - 2026-08-04
 
 Long-running jobs, durable sessions, a Docker sandbox backend, five P0 security

@@ -83,9 +83,6 @@ from agentic_cli.tools.registry import (
     register_tool,
 )
 
-# Re-export google_search_tool from ADK for convenience
-from google.adk.tools import google_search as google_search_tool
-
 __all__ = [
     # Registry classes
     "ToolCategory",
@@ -114,7 +111,7 @@ __all__ = [
     "web_search",
     # Web fetch (content fetching and summarization)
     "web_fetch",
-    # Search (ADK built-in - note: can't mix with function calling)
+    # Search (deprecated ADK re-export - removed in 0.7.0; use web_search)
     "google_search_tool",
     # Standard tool functions (ready to use with agents)
     "kb_search",
@@ -152,13 +149,40 @@ _lazy_tool_modules = {
     "sandbox_tools": "agentic_cli.tools.sandbox",
 }
 
+# Deprecated (removed in 0.7.0): a bare re-export of ADK's GoogleSearchTool
+# singleton, never an Agentic CLI integration. Resolved lazily so importing this
+# package does not warn, and so the deprecation is charged to the code that
+# actually uses the name.
+_GOOGLE_SEARCH_TOOL_DEPRECATION = (
+    "agentic_cli.tools.google_search_tool is deprecated and will be removed in "
+    "0.7.0. It only re-exports ADK's native GoogleSearchTool singleton, so it is "
+    "backend-, model- and UI-specific rather than an end-to-end Agentic CLI "
+    "integration. Use agentic_cli.tools.web_search, the supported "
+    "framework-level alternative. Applications that intentionally want native "
+    "ADK Google Search should import the class directly from ADK "
+    "(from google.adk.tools.google_search_tool import GoogleSearchTool), "
+    "instantiate and configure it as ADK's documentation describes, and are "
+    "then responsible for ADK's model/tool constraints, grounding metadata, "
+    "citations and rendering Search Suggestions when returned."
+)
+
 
 def __getattr__(name: str):
-    """Lazy import for framework tool modules."""
+    """Lazy import for framework tool modules and deprecated re-exports."""
     if name in _lazy_tool_modules:
         import importlib
 
         module = importlib.import_module(_lazy_tool_modules[name])
         globals()[name] = module  # Cache for future access
         return module
+    if name == "google_search_tool":
+        import warnings
+
+        from google.adk.tools import google_search
+
+        warnings.warn(
+            _GOOGLE_SEARCH_TOOL_DEPRECATION, DeprecationWarning, stacklevel=2
+        )
+        globals()[name] = google_search  # Cache: one import warns once
+        return google_search
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
