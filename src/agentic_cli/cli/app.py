@@ -27,6 +27,8 @@ from agentic_cli.logging import Loggers, configure_logging
 from agentic_cli.settings_persistence import PROJECT_SETTABLE_KEYS
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from agentic_cli.settings_persistence import SettingsSaveResult
     from agentic_cli.workflow import GoogleADKWorkflowManager, EventType, WorkflowEvent
     from agentic_cli.workflow.base_manager import BaseWorkflowManager
@@ -279,8 +281,14 @@ class BaseCLIApp:
         # Sort by order and return items only
         return [item for _, item in sorted(items, key=lambda x: x[0])]
 
-    async def save_settings(self) -> "SettingsSaveResult":
+    async def save_settings(
+        self, keys: "Iterable[str] | None" = None
+    ) -> "SettingsSaveResult":
         """Save current settings, split by trust.
+
+        ``keys`` restricts the save to those fields (``/settings`` passes the
+        fields the user changed). Without it the whole live settings object is
+        saved, including values that came from the environment.
 
         Allowlisted keys go to the project config
         (./.{app_name}/settings.json). User-scoped keys differing from their
@@ -294,7 +302,7 @@ class BaseCLIApp:
         from agentic_cli.settings_persistence import SettingsPersistence
 
         persistence = SettingsPersistence(self._settings.app_name)
-        return persistence.save(self._settings)
+        return persistence.save(self._settings, keys=keys)
 
     @property
     def workflow(self) -> "BaseWorkflowManager":
