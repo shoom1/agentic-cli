@@ -123,7 +123,7 @@ class SeatbeltSandbox(OSSandbox):
             writable_paths=policy.resolved_writable_paths(working_dir),
             deny_write_paths=policy.resolved_deny_write_paths(working_dir),
             readable_paths=policy.resolved_readable_paths(),
-            deny_read_paths=policy.resolved_deny_read_paths(),
+            deny_read_paths=policy.resolved_deny_read_paths(working_dir),
             allow_network=policy.allow_network,
         )
 
