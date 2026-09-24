@@ -19,6 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Deprecated
 - **`agentic_cli.tools.google_search_tool` — deprecated, removed in 0.7.0.** It re-exported ADK's built-in `google_search`, which runs inside the model, so the permission engine never checks it. Use `agentic_cli.tools.web_search`. This reverses the 0.1.2 advice to use ADK's tool; the web search client removed then returned in 0.3.2. For native Google Search, import `GoogleSearchTool` from `google.adk.tools.google_search_tool`; in this framework it works only as an agent's sole tool, with `include_state_tools=False`. The name is no longer in `agentic_cli.tools.__all__`, importing the package loads no ADK code, every use warns, and a reference in agent configuration warns with a visible `FutureWarning`.
 
+### Fixed
+- **A tool result containing `[/…]` no longer fails the turn in the CLI.** Tool names and output were inserted into Rich markup unescaped, so an error such as `File not found: notes[/draft].md` raised a markup error after the tool had already run, and text like `[bold red]` restyled the output. They are now escaped and shown literally.
+
 ## [0.6.0] - 2026-08-04
 
 Long-running jobs, durable sessions, a Docker sandbox backend, five P0 security
