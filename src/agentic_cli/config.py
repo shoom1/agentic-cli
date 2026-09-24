@@ -49,6 +49,7 @@ from agentic_cli.settings_mixins import AppSettingsMixin, CLISettingsMixin
 # and the load-side filter below share one definition (and because the reverse
 # import would be circular). See its definition for the trust rationale.
 from agentic_cli.settings_persistence import (
+    CREDENTIAL_KEY_RE as _CREDENTIAL_KEY_RE,
     PROJECT_SETTABLE_KEYS as _PROJECT_SETTABLE_KEYS,
     get_project_config_path,
     get_user_config_path,
@@ -107,9 +108,10 @@ class _AllowlistFilterSource(PydanticBaseSettingsSource):
         return kept
 
 
-# Constructor kwargs matching this shape are credentials; an unrecognised one
-# must fail loudly instead of being swallowed by ``extra="ignore"``.
-_CREDENTIAL_KEY_RE = re.compile(r"(?i)(api_?key|secret|token|password|credential)")
+# Constructor kwargs matching _CREDENTIAL_KEY_RE (defined in
+# settings_persistence, which also uses it to never save credentials) are
+# credentials; an unrecognised one must fail loudly instead of being swallowed
+# by ``extra="ignore"``.
 
 
 def _accepted_input_names(settings_cls: Type[PydanticBaseSettings]) -> set[str]:

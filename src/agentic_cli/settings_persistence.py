@@ -11,15 +11,22 @@ silently dropped on the next start.
 """
 
 import json
+import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, get_args
 
 if TYPE_CHECKING:
     from pydantic_settings import BaseSettings
 
 
-# Fields that should never be saved to JSON (secrets)
+#: A settings field whose name matches this is a credential. It is never saved,
+#: whichever application defines it (see ``is_secret_field``).
+CREDENTIAL_KEY_RE = re.compile(r"(?i)(api_?key|secret|token|password|credential)")
+
+# Fields that should never be saved to JSON (secrets). Any field whose name
+# matches CREDENTIAL_KEY_RE or whose type is SecretStr is excluded as well.
 SECRET_FIELDS = frozenset({
     "google_api_key",
     "anthropic_api_key",
@@ -66,6 +73,26 @@ IDENTITY_FIELDS = frozenset({
 })
 
 
+def is_secret_field(name: str, field: Any | None = None) -> bool:
+    """Whether a settings field holds a credential and must never be saved.
+
+    True for ``SECRET_FIELDS``, for any name that looks like a credential
+    (``CREDENTIAL_KEY_RE``: an application's own ``openai_api_key``, say) and
+    for any field typed ``SecretStr``/``SecretBytes``.
+    """
+    if name in SECRET_FIELDS or CREDENTIAL_KEY_RE.search(name):
+        return True
+    return field is not None and _mentions_secret_type(getattr(field, "annotation", None))
+
+
+def _mentions_secret_type(annotation: Any) -> bool:
+    from pydantic import SecretBytes, SecretStr
+
+    if annotation in (SecretStr, SecretBytes):
+        return True
+    return any(_mentions_secret_type(arg) for arg in get_args(annotation))
+
+
 def get_project_config_path(app_name: str) -> Path:
     """Get path to project config file (./.{app_name}/settings.json)."""
     return Path.cwd() / f".{app_name}" / "settings.json"
@@ -89,6 +116,9 @@ class SettingsSaveResult:
     project_path: Path
     user_path: Path | None = None
     user_scoped_keys: tuple[str, ...] = ()
+    #: For a ``keys=`` save: the keys written to the project file (empty when
+    #: the project file was not touched). ``None`` for a full save.
+    project_keys: tuple[str, ...] | None = None
 
 
 def get_user_project_grants_path(app_name: str) -> Path:
@@ -143,8 +173,16 @@ class SettingsPersistence:
         self,
         settings: "BaseSettings",
         path: Path | None = None,
+        *,
+        keys: Iterable[str] | None = None,
     ) -> SettingsSaveResult:
         """Save settings, split by trust to match the load-side allowlist.
+
+        With ``keys``, only those fields are written, each merged into its
+        file (the ``/settings`` command passes the fields the user changed).
+        Without it, the whole live settings object is written as described
+        below, which also persists values that came from the environment or
+        were derived at startup.
 
         Default save writes two files:
 
@@ -162,7 +200,8 @@ class SettingsPersistence:
           manage (hand-stored secrets, unknown/domain keys) are preserved
           verbatim; a malformed user file raises rather than being clobbered.
 
-        Secrets (API keys) and identity fields are never written anywhere.
+        Secrets and identity fields are never written anywhere: see
+        ``is_secret_field``.
         With an explicit ``path=``, the legacy behavior is kept: one full
         dump (minus secrets/identity) to that file, no split.
 
@@ -175,9 +214,16 @@ class SettingsPersistence:
         """
         from agentic_cli.file_utils import atomic_write_text
 
+        fields = type(settings).model_fields
+        secret = {name for name, f in fields.items() if is_secret_field(name, f)}
+        secret |= SECRET_FIELDS
+
+        if keys is not None:
+            return self._save_keys(settings, set(keys) - secret - IDENTITY_FIELDS)
+
         # Get settings as dict, excluding secrets and identity fields
         data = settings.model_dump(
-            exclude=SECRET_FIELDS | IDENTITY_FIELDS,
+            exclude=secret | IDENTITY_FIELDS,
             exclude_none=True,
         )
 
@@ -199,32 +245,80 @@ class SettingsPersistence:
             project_path, json.dumps(project_data, indent=2, default=str)
         )
 
-        user_path = self.user_config_path
-        # Merge-write: never clobber keys we don't manage (e.g. hand-stored
-        # API keys). A malformed user file raises instead of being replaced.
-        existing: dict[str, Any] = {}
-        if user_path.exists():
-            existing = json.loads(user_path.read_text())
-            if not isinstance(existing, dict):
-                raise ValueError(
-                    f"User settings file is not a JSON object: {user_path}"
-                )
-        merged = dict(existing)
-        removed = tuple(k for k in sorted(user_removals) if k in existing)
-        for key in removed:
-            del merged[key]
-        merged.update(user_updates)
+        user_path, user_keys = self._merge_user(user_updates, user_removals)
+        return SettingsSaveResult(
+            project_path=project_path, user_path=user_path, user_scoped_keys=user_keys,
+        )
 
-        if merged == existing:
-            return SettingsSaveResult(project_path=project_path)
+    def _save_keys(self, settings: "BaseSettings", keys: set[str]) -> SettingsSaveResult:
+        """Write only ``keys``: project-settable ones merged into the project
+        file, the rest updated in (or, back at default, removed from) the
+        user file. Nothing else is touched."""
+        from pydantic_core import PydanticUndefined
 
-        user_path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write_text(user_path, json.dumps(merged, indent=2, default=str))
+        from agentic_cli.file_utils import atomic_write_text
+
+        fields = type(settings).model_fields
+        keys = {k for k in keys if k in fields}
+        dump = self._serialize_paths(settings.model_dump(include=keys))
+
+        project_path = self.project_config_path
+        project_updates = {k: dump[k] for k in sorted(keys) if k in PROJECT_SETTABLE_KEYS}
+        if project_updates:
+            existing = self._read_object(project_path)
+            # Keep the file's other allowlisted entries; drop stale ones the
+            # loader would ignore anyway.
+            merged = {k: v for k, v in existing.items() if k in PROJECT_SETTABLE_KEYS}
+            merged.update(project_updates)
+            project_path.parent.mkdir(parents=True, exist_ok=True)
+            atomic_write_text(project_path, json.dumps(merged, indent=2, default=str))
+
+        user_updates: dict[str, Any] = {}
+        user_removals: set[str] = set()
+        for key in keys - PROJECT_SETTABLE_KEYS:
+            default = fields[key].get_default(call_default_factory=True)
+            if default is not PydanticUndefined and getattr(settings, key) == default:
+                user_removals.add(key)
+            else:
+                user_updates[key] = dump[key]
+        user_path, user_keys = self._merge_user(user_updates, user_removals)
         return SettingsSaveResult(
             project_path=project_path,
             user_path=user_path,
-            user_scoped_keys=tuple(sorted(user_updates)) + removed,
+            user_scoped_keys=user_keys,
+            project_keys=tuple(project_updates),
         )
+
+    def _merge_user(
+        self, updates: dict[str, Any], removals: set[str]
+    ) -> tuple[Path | None, tuple[str, ...]]:
+        """Merge-write the user file; never clobber keys it does not manage
+        (e.g. hand-stored API keys). Returns (path written or None, keys)."""
+        from agentic_cli.file_utils import atomic_write_text
+
+        user_path = self.user_config_path
+        existing = self._read_object(user_path)
+        merged = dict(existing)
+        removed = tuple(k for k in sorted(removals) if k in existing)
+        for key in removed:
+            del merged[key]
+        merged.update(updates)
+        if merged == existing:
+            return None, ()
+        user_path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(user_path, json.dumps(merged, indent=2, default=str))
+        return user_path, tuple(sorted(updates)) + removed
+
+    @staticmethod
+    def _read_object(path: Path) -> dict[str, Any]:
+        """A settings file's JSON object, ``{}`` if absent. A malformed file
+        raises instead of being replaced."""
+        if not path.exists():
+            return {}
+        data = json.loads(path.read_text())
+        if not isinstance(data, dict):
+            raise ValueError(f"Settings file is not a JSON object: {path}")
+        return data
 
     def _split_user_scoped(
         self, settings: "BaseSettings", data: dict[str, Any]
