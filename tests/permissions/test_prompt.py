@@ -52,7 +52,7 @@ class TestBuildRequest:
         assert "file_a.txt" not in req.prompt
         assert "file_b.txt" not in req.prompt
         # And a hint explaining the widening:
-        assert "parent directory" in req.prompt
+        assert "whole directory" in req.prompt
 
     def test_prompt_preserves_exact_http_target(self):
         """Non-filesystem capabilities keep their exact display target."""
@@ -62,16 +62,17 @@ class TestBuildRequest:
         )
         assert "https://example.com/path" in req.prompt
         # No broadening hint when no filesystem capability is involved.
-        assert "parent directory" not in req.prompt
+        assert "whole directory" not in req.prompt
 
-    def test_prompt_handles_root_parent(self):
-        """A file directly under /: broadening collapses '//**' to '/**'."""
+    def test_prompt_never_widens_to_the_filesystem_root(self):
+        """A file directly under / is granted exactly: widening to its parent
+        would grant the whole filesystem."""
         req = build_request(
             "write_file",
             [ResolvedCapability("filesystem.write", "/hello.txt")],
         )
-        assert "filesystem.write → /**" in req.prompt
-        assert "//**" not in req.prompt
+        assert "filesystem.write → /hello.txt" in req.prompt
+        assert "/**" not in req.prompt
 
     def test_request_id_has_perm_prefix(self):
         req = build_request("x", [])

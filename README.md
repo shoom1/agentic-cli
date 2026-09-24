@@ -406,7 +406,7 @@ from agentic_cli.workflow.permissions import Capability, EXEMPT
 
 @register_tool(
     category=ToolCategory.NETWORK,
-    capabilities=[Capability("http.read")],
+    capabilities=[Capability("http.read", target="https://db.example.com/search")],
     description="Search the database for matching records.",
 )
 def search_database(query: str, limit: int = 10) -> dict:
@@ -469,6 +469,8 @@ rather than silently picking one by import order.
 Tool access is gated by the **permission engine** (see the HITL section below). Each registered tool declares what it touches via `capabilities=`:
 
 - **`Capability("namespace.action", target_arg="...")`** — e.g. `Capability("filesystem.write", target_arg="path")`, `Capability("http.read", target_arg="url")`, `Capability("shell.exec", target_arg="command")`. The engine resolves `target_arg` against the actual tool-call arguments and matches against rules.
+- **`Capability("namespace.action", target="...")`** — a fixed target, for a tool that always reaches the same resource, e.g. `Capability("http.read", target="https://export.arxiv.org/api/query")`.
+- Filesystem, network (`http.*`) and shell capabilities must name their resource with `target_arg` or `target`. Without one the target is the wildcard: the tool warns at registration, and every approval of it applies to that one call only, because remembering it would approve the capability for every resource.
 - **`EXEMPT`** — opts the tool out of the engine entirely. Use for tools that need no permission check: pure functions with no side effects, and backend-internal tools (e.g. ADK `transfer_to_agent`, backend state tools).
 
 ### Built-in Tools
@@ -662,7 +664,7 @@ from agentic_cli.tools import memory_tools
 
 #### HITL (Human-in-the-Loop)
 
-Tool calls are gated by the **permission engine** (`workflow/permissions/`). Each tool declares a list of capabilities (e.g. `filesystem.write(path=...)`); the engine evaluates them against rules from four sources (builtin defaults, user `~/.{app_name}/settings.json`, project `./.{app_name}/settings.json`, in-memory session). When no rule matches, the user is prompted with `Allow once` / `Allow for this session` / `Allow always for this project` / `Deny`.
+Tool calls are gated by the **permission engine** (`workflow/permissions/`). Each tool declares a list of capabilities (e.g. `filesystem.write(path=...)`); the engine evaluates them against rules from four sources (builtin defaults, user `~/.{app_name}/settings.json`, project `./.{app_name}/settings.json`, in-memory session). When no rule matches, the user is prompted with `Allow once` / `Allow for this session` / `Allow always for this project` / `Deny`. A filesystem grant covers the directory it names (or the directory a file is in), never the filesystem root or a directory above your home.
 
 **"Allow always" grants are user-owned, not project-owned.** They persist to
 `~/.{app_name}/project_grants.json`, keyed by the *resolved project path*, so

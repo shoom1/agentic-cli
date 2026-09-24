@@ -55,10 +55,12 @@ async def test_download_pdf_raises_when_fetch_blocked():
 
 
 async def test_download_pdf_blocks_internal_ip_end_to_end(mock_context):
-    """End-to-end: a metadata-IP pdf_url is rejected by the real SSRF guard.
+    """End-to-end: a metadata-IP pdf_url is rejected before any request.
 
-    No network is touched — URLValidator rejects 169.254.0.0/16 before any GET.
+    The download is pinned to https://arxiv.org/pdf/, so a non-arXiv URL is
+    refused before it reaches the fetcher (whose SSRF guard would also reject
+    169.254.0.0/16). No network is touched.
     """
     source = ArxivSearchSource()
-    with pytest.raises(RuntimeError, match="blocked or failed"):
+    with pytest.raises(RuntimeError, match="arxiv.org/pdf"):
         await source.download_pdf("http://169.254.169.254/latest/meta-data/")
