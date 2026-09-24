@@ -102,7 +102,7 @@ class PermissionEngine:
             rules.append(
                 Rule(
                     capability=r.capability,
-                    target=get_matcher(r.capability).canonicalize(r.target, self._ctx),
+                    target=get_matcher(r.capability).canonicalize_pattern(r.target, self._ctx),
                     effect=r.effect,
                     source=r.source,
                 )
@@ -143,7 +143,14 @@ class PermissionEngine:
         if not self._settings.permissions_enabled:
             return CheckResult(True, "permissions disabled")
 
-        resolved = self._resolve(capabilities, args)
+        try:
+            resolved = self._resolve(capabilities, args)
+        except ValueError as exc:
+            # A target that cannot name a location (e.g. an embedded NUL) is
+            # refused outright rather than raised into the turn or put to the
+            # user: there is nothing meaningful to approve.
+            logger.warning("permission_invalid_target", tool=tool_name, error=str(exc))
+            return CheckResult(False, f"invalid target: {exc}")
         outcomes = self._evaluate(resolved)
 
         # No capabilities to evaluate (e.g. every cap is optional and its target
@@ -172,6 +179,15 @@ class PermissionEngine:
     def _resolve(
         self, capabilities: list[Capability], args: dict
     ) -> list[ResolvedCapability]:
+        """Resolve each capability's target from the call arguments.
+
+        Arguments are *targets*, canonicalized with ``canonicalize_target``: no
+        ``${...}`` placeholder is expanded and a path is resolved exactly as the
+        tool resolves it, so the engine judges the location the tool acts on.
+
+        Raises:
+            ValueError: if an argument cannot be resolved to a target.
+        """
         resolved: list[ResolvedCapability] = []
         for cap in capabilities:
             if cap.target_arg is None:
@@ -185,7 +201,9 @@ class PermissionEngine:
             matcher = get_matcher(cap.name)
             items = value if isinstance(value, (list, tuple)) else [value]
             for item in items:
-                resolved.append(ResolvedCapability(cap.name, matcher.canonicalize(str(item), self._ctx)))
+                resolved.append(
+                    ResolvedCapability(cap.name, matcher.canonicalize_target(str(item), self._ctx))
+                )
         return resolved
 
     def _evaluate(

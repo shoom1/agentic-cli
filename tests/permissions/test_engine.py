@@ -122,7 +122,7 @@ class TestEngineRuleBased:
         engine._session_rules.append(
             Rule(
                 "filesystem.write",
-                get_matcher("filesystem.write").canonicalize("/etc/**", ctx),
+                get_matcher("filesystem.write").canonicalize_pattern("/etc/**", ctx),
                 Effect.ALLOW,
                 RuleSource.SESSION,
             )

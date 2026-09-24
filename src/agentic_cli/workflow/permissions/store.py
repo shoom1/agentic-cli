@@ -102,7 +102,7 @@ def load_rules(
         for entry in section.get(effect_name) or []:
             cap = entry["capability"]
             target_raw = entry["target"]
-            target = get_matcher(cap).canonicalize(target_raw, ctx)
+            target = get_matcher(cap).canonicalize_pattern(target_raw, ctx)
             rules.append(Rule(cap, target, effect, source))
     return rules
 
@@ -135,7 +135,12 @@ def load_project_grants(app_name: str, ctx: PermissionContext) -> list[Rule]:
     for effect_name, effect in (("allow", Effect.ALLOW), ("deny", Effect.DENY)):
         for entry in section.get(effect_name) or []:
             cap = entry["capability"]
-            target = get_matcher(cap).canonicalize(entry["target"], ctx)
+            # Grants are written by the engine from already-resolved targets, so
+            # they load as targets: expanding ${...} text here would turn a
+            # directory name into a different location. "*" is the stored
+            # wildcard of a targetless capability and stays one.
+            raw = entry["target"]
+            target = "*" if raw == "*" else get_matcher(cap).canonicalize_target(raw, ctx)
             rules.append(Rule(cap, target, effect, RuleSource.PROJECT))
     return rules
 

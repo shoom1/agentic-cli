@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from agentic_cli.file_utils import atomic_write_text
+from agentic_cli.paths import resolve_path
 from agentic_cli.tools.registry import (
     ToolCategory,
     register_tool,
@@ -47,7 +48,7 @@ def write_file(
         - size: File size in bytes after write
         - created: True if file was newly created, False if overwritten
     """
-    file_path = Path(path).resolve()
+    file_path = resolve_path(path)
     existed = file_path.exists()
 
     # Create parent directories if requested
@@ -118,7 +119,7 @@ def edit_file(
         - replacements: Number of replacements made
         - size: File size in bytes after edit
     """
-    file_path = Path(path).resolve()
+    file_path = resolve_path(path)
 
     if not file_path.exists():
         return {

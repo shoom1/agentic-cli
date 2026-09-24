@@ -6,9 +6,9 @@ Provides safe, read-only tools for file system access:
 """
 
 import difflib
-from pathlib import Path
 from typing import Any
 
+from agentic_cli.paths import resolve_path
 from agentic_cli.tools.registry import (
     ToolCategory,
     register_tool,
@@ -46,7 +46,7 @@ def read_file(
         - lines_read: Number of lines returned (if offset/limit used)
         - total_lines: Total lines in file (if offset/limit used)
     """
-    file_path = Path(path).resolve()
+    file_path = resolve_path(path)
 
     if not file_path.exists():
         return {
@@ -173,13 +173,17 @@ def diff_compare(
 
 
 def _get_content(source: str) -> str:
-    """Get content from a source (file path or raw text)."""
-    # Check if source is a file path
-    path = Path(source)
-    if path.exists() and path.is_file():
-        return path.read_text()
-    # Otherwise treat as raw text
-    return source
+    """Get content from a source (file path or raw text).
+
+    A source that names an existing file is read from the location the
+    permission engine checked (``resolve_path``); anything else is text.
+    """
+    try:
+        path = resolve_path(source)
+        is_file = path.is_file()
+    except (OSError, ValueError):  # cannot name a path, so it is text
+        return source
+    return path.read_text() if is_file else source
 
 
 def _unified_diff(lines_a: list[str], lines_b: list[str], context_lines: int) -> str:
