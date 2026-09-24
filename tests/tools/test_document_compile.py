@@ -232,25 +232,43 @@ def test_env_is_allowlisted_not_full_environ(monkeypatch, tmp_path):
     assert "/tmp/assets" in captured["env"]["TEXINPUTS"]
 
 
-def test_delivery_does_not_follow_output_symlink(monkeypatch, tmp_path):
-    """output_pdf may be an attacker-placed symlink; delivery must not write
-    through it to the link target."""
+def test_output_symlink_is_refused(monkeypatch, tmp_path):
+    """output_pdf may be an attacker-placed symlink. The permission engine
+    judges a path by its resolved location (the link target) while delivery
+    replaces the link itself, so writing would land where nothing was checked.
+    Refuse instead: neither the link nor its target is touched."""
     _fake_engine(monkeypatch)
     tex = tmp_path / "r.tex"; tex.write_text("x")
     outside = tmp_path / "outside.pdf"; outside.write_bytes(b"ORIGINAL")
     deliver = tmp_path / "deliver"; deliver.mkdir()
     link = deliver / "report.pdf"; link.symlink_to(outside)
+    ran = []
 
     def fake_run(argv, *, cwd, env, timeout):
+        ran.append(argv)
         (Path(cwd) / "r.pdf").write_bytes(b"%PDF-NEW")
         return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
 
     monkeypatch.setattr(mod, "_run", fake_run)
     r = compile_document(str(tex), output_pdf=str(link))
-    assert r["success"] is True
-    assert outside.read_bytes() == b"ORIGINAL"   # link target NOT overwritten
-    assert link.read_bytes() == b"%PDF-NEW"      # PDF delivered to the path
-    assert not link.is_symlink()                 # symlink replaced by a real file
+    assert r["success"] is False
+    assert "symlink" in r["error"]
+    assert ran == []                              # refused before compiling
+    assert outside.read_bytes() == b"ORIGINAL"    # link target NOT overwritten
+    assert link.is_symlink()                      # link left as it was
+
+
+def test_delivery_replaces_a_symlink_planted_after_the_check(tmp_path):
+    """A link that appears at dest after the refusal check (a race) is replaced
+    by the delivery, never written through."""
+    produced = tmp_path / "built.pdf"; produced.write_bytes(b"%PDF-NEW")
+    outside = tmp_path / "outside.pdf"; outside.write_bytes(b"ORIGINAL")
+    deliver = tmp_path / "deliver"; deliver.mkdir()
+    dest = deliver / "report.pdf"; dest.symlink_to(outside)
+    mod._deliver_no_follow(produced, dest)
+    assert outside.read_bytes() == b"ORIGINAL"
+    assert dest.read_bytes() == b"%PDF-NEW"
+    assert not dest.is_symlink()
 
 
 def test_capabilities_scope_assets_and_output():
@@ -478,3 +496,25 @@ def test_run_limits_child_file_size(monkeypatch, tmp_path):
     r = mod._run(argv, cwd=str(tmp_path), env={"PATH": _os.environ.get("PATH", "")}, timeout=30)
     assert r.returncode != 0                              # killed by the file-size limit
     assert (tmp_path / "big.bin").stat().st_size <= 4096 * 8   # capped, not 1MB
+
+
+def test_link_planted_during_compile_is_not_written_through(monkeypatch, tmp_path):
+    """The destination is fixed before compiling. A symlink that appears at
+    output_pdf while TeX runs must be replaced, not followed to its target."""
+    _fake_engine(monkeypatch)
+    tex = tmp_path / "r.tex"; tex.write_text("x")
+    outside = tmp_path / "outside.pdf"; outside.write_bytes(b"ORIGINAL")
+    deliver = tmp_path / "deliver"; deliver.mkdir()
+    out = deliver / "report.pdf"
+
+    def fake_run(argv, *, cwd, env, timeout):
+        (Path(cwd) / "r.pdf").write_bytes(b"%PDF-NEW")
+        out.symlink_to(outside)          # planted mid-compile
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(mod, "_run", fake_run)
+    r = compile_document(str(tex), output_pdf=str(out))
+    assert r["success"] is True, r
+    assert outside.read_bytes() == b"ORIGINAL"
+    assert out.read_bytes() == b"%PDF-NEW"
+    assert not out.is_symlink()

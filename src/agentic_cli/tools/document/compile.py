@@ -39,6 +39,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from agentic_cli.paths import resolve_path
 from agentic_cli.tools.registry import ToolCategory, register_tool
 from agentic_cli.workflow.permissions import Capability
 
@@ -95,11 +96,7 @@ def _build_env(assets_dir: str | None, source_dir: str | None = None) -> dict[st
         if k in _ENV_PASSTHROUGH or k in _TEXMF_VARS or k in _TEX_VARS
     }
     env.setdefault("PATH", os.defpath)
-    roots = [
-        str(Path(r).expanduser().resolve())
-        for r in (assets_dir, source_dir)
-        if r
-    ]
+    roots = [str(resolve_path(r)) for r in (assets_dir, source_dir) if r]
     if roots:
         # Trailing empty entry lets kpathsea append its default search path.
         env["TEXINPUTS"] = os.pathsep.join(roots) + os.pathsep
@@ -114,10 +111,12 @@ def _deliver_no_follow(produced: Path, dest: Path) -> None:
     symlink the link itself is replaced (not written through), so an
     attacker-placed symlink can't redirect the write outside the intended path.
 
-    This protects only the final path component. A symlinked ``dest.parent``
-    (or an ancestor) still redirects the write; the permission engine
-    canonicalizes ``output_pdf`` at check time, but a check→write window
-    remains. Full parent containment is deferred (spec §9, OS-sandbox).
+    ``compile_document`` refuses an ``output_pdf`` that is already a symlink
+    (the engine judged the link's target, not the link), so this guard covers a
+    link planted after that check. It protects only the final path component:
+    ``dest`` is resolved with the same resolver the engine uses, but a
+    check→write window remains for its parents. Full parent containment is
+    deferred (spec §9, OS-sandbox).
     """
     dest.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(
@@ -287,7 +286,7 @@ def compile_document(
         dict with success, pdf_path, engine, log_tail, errors, duration_ms, and
         (on setup/timeout failure) error.
     """
-    src = Path(source_path)
+    src = resolve_path(source_path)
     if not src.is_file():
         return {
             "success": False, "error": f"Source not found: {source_path}",
@@ -304,6 +303,20 @@ def compile_document(
             "pdf_path": None, "engine": None, "log_tail": "", "errors": [],
             "duration_ms": 0,
         }
+
+    if output_pdf and Path(output_pdf).expanduser().is_symlink():
+        # The permission engine judged output_pdf by its resolved location (the
+        # link target), but delivery replaces the link itself, so the write
+        # would land where nothing was checked. Refuse rather than guess.
+        return {
+            "success": False,
+            "error": f"output_pdf must not be a symlink: {output_pdf}",
+            "pdf_path": None, "engine": None, "log_tail": "", "errors": [],
+            "duration_ms": 0,
+        }
+    # Fixed now, before TeX runs: resolving at delivery time would follow a
+    # symlink planted at output_pdf during the compile.
+    dest = resolve_path(output_pdf) if output_pdf else (src.parent / (src.stem + ".pdf"))
 
     chosen = _detect_engine(engine)
     if chosen is None:
@@ -362,7 +375,6 @@ def compile_document(
                 "duration_ms": duration_ms, "error": None,
             }
 
-        dest = Path(output_pdf) if output_pdf else (src.parent / (src.stem + ".pdf"))
         try:
             _deliver_no_follow(produced, dest)
         except OSError as exc:
