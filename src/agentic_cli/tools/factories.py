@@ -406,7 +406,8 @@ def make_sandbox_tool(sandbox_manager, workflow_manager=None) -> Callable:
 
         Args:
             code: Python code to execute.
-            session_id: Session identifier for state persistence.
+            session_id: Session identifier for state persistence: 1-64 letters,
+                digits, "-" or "_".
             timeout_seconds: Maximum execution time in seconds.
             inputs: Optional list of host file paths to stage into
                 inputs/<basename> inside the session before execution.
