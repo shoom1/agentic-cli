@@ -198,7 +198,10 @@ def _get_backend(settings: Any) -> SearchBackend:
 
 @register_tool(
     category=ToolCategory.NETWORK,
-    capabilities=[Capability("http.read")],
+    # Its own capability: sending queries to the configured search provider is
+    # a different decision from fetching arbitrary URLs (http.read), and
+    # approving one must not approve the other.
+    capabilities=[Capability("search.web")],
     description="Search the web for current information using the configured backend (Tavily or Brave). Use this for questions about recent events, documentation, or facts not in your training data.",
 )
 async def web_search(

@@ -10,12 +10,14 @@ from enum import Enum
 from typing import Any, Callable
 import functools
 import inspect
+import warnings
 import weakref
 
 from agentic_cli.workflow.permissions.capabilities import (
     Capability,
     CapabilitiesSpec,
     EXEMPT,
+    is_resource_capability,
 )
 from agentic_cli.workflow.permissions.capabilities import _CapabilityExempt
 from agentic_cli.workflow.service_registry import (
@@ -159,6 +161,20 @@ def _validate_capabilities(caps: Any, tool_name: str) -> CapabilitiesSpec:
                 raise TypeError(
                     f"Tool {tool_name!r}: capabilities list items must be "
                     f"Capability instances, got {type(item)!r}."
+                )
+            if (
+                is_resource_capability(item.name)
+                and item.target_arg is None
+                and item.target is None
+            ):
+                warnings.warn(
+                    f"Tool {tool_name!r} declares {item.name!r} without a "
+                    "target. Name the resource with target_arg= (the argument "
+                    "holding it) or target= (a fixed value). Until then every "
+                    "approval of this tool applies to one call only; this will "
+                    "be an error in 0.7.0.",
+                    UserWarning,
+                    stacklevel=4,
                 )
         return caps
     raise TypeError(

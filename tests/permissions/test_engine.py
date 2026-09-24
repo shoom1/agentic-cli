@@ -333,40 +333,42 @@ class TestTargetlessAllowAlwaysRegression:
     """
 
     @pytest.mark.asyncio
-    async def test_http_read_allow_always_matches_next_call(self, ctx, tmp_path, monkeypatch):
+    async def test_targetless_allow_always_matches_next_call(self, ctx, tmp_path, monkeypatch):
+        """A targetless, non-resource capability remembers an 'Allow always'."""
         monkeypatch.chdir(tmp_path)
         monkeypatch.setenv("HOME", str(tmp_path / "home"))
         w = _stub_workflow()
         w.request_user_input = AsyncMock(return_value=ALLOW_ALWAYS_CHOICE)
         engine = PermissionEngine(settings=_stub_settings(), workflow=w, ctx=ctx)
 
-        # First call: no rule → ask → allow always (saves session + project rule)
-        result1 = await engine.check(
-            "web_search",
-            [Capability("http.read")],  # targetless
-            {"query": "test"},
-        )
+        result1 = await engine.check("execute_python", [Capability("python.exec")], {"code": "1"})
         assert result1.allowed is True
         assert w.request_user_input.await_count == 1
 
-        # Second call must match the session rule and NOT re-prompt.
-        result2 = await engine.check(
-            "web_search",
-            [Capability("http.read")],
-            {"query": "different query"},
-        )
+        result2 = await engine.check("execute_python", [Capability("python.exec")], {"code": "2"})
         assert result2.allowed is True
         assert w.request_user_input.await_count == 1
 
-        # Third call with a DIFFERENT tool that declares the same capability
-        # is also covered — same cap, still target=='*'.
-        result3 = await engine.check(
-            "search_arxiv",
-            [Capability("http.read")],
-            {"query": "papers"},
-        )
-        assert result3.allowed is True
-        assert w.request_user_input.await_count == 1
+    @pytest.mark.asyncio
+    async def test_targetless_resource_allow_always_is_not_remembered(
+        self, ctx, tmp_path, monkeypatch
+    ):
+        """A network capability with no target resolves to the wildcard, so
+        remembering it would allow every URL for every tool declaring it.
+        The answer applies to this call only."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        w = _stub_workflow()
+        w.request_user_input = AsyncMock(return_value=ALLOW_ALWAYS_CHOICE)
+        engine = PermissionEngine(settings=_stub_settings(), workflow=w, ctx=ctx)
+
+        result1 = await engine.check("third_party_search", [Capability("http.read")], {"q": "a"})
+        assert result1.allowed is True
+        result2 = await engine.check("third_party_search", [Capability("http.read")], {"q": "b"})
+        assert result2.allowed is True
+        assert w.request_user_input.await_count == 2
+        assert not [r for r in engine.rules if r.source is RuleSource.SESSION]
+        assert not (tmp_path / "home" / ".agentic" / "project_grants.json").exists()
 
     @pytest.mark.asyncio
     async def test_filesystem_grant_broadens_to_parent_directory(
@@ -470,7 +472,7 @@ class TestTargetlessAllowAlwaysRegression:
         w1 = _stub_workflow()
         w1.request_user_input = AsyncMock(return_value=ALLOW_ALWAYS_CHOICE)
         engine1 = PermissionEngine(settings=_stub_settings(), workflow=w1, ctx=ctx)
-        result1 = await engine1.check("web_search", [Capability("http.read")], {"query": "x"})
+        result1 = await engine1.check("execute_python", [Capability("python.exec")], {"code": "x"})
         assert result1.allowed is True
 
         # The grants file must preserve the wildcard target ('*') so it
@@ -480,7 +482,7 @@ class TestTargetlessAllowAlwaysRegression:
         )
         allow = grants[str(ctx.workdir.resolve())]["permissions"]["allow"]
         assert len(allow) == 1
-        assert allow[0]["capability"] == "http.read"
+        assert allow[0]["capability"] == "python.exec"
         assert allow[0]["target"] == "*"  # wildcard preserved, not mangled
 
         # Round 2: a FRESH engine (same settings + ctx → same resolved project
@@ -488,7 +490,7 @@ class TestTargetlessAllowAlwaysRegression:
         # and allow the same capability WITHOUT prompting.
         w2 = _stub_workflow()  # default response "Deny" — a prompt here fails the test
         engine2 = PermissionEngine(settings=_stub_settings(), workflow=w2, ctx=ctx)
-        result2 = await engine2.check("web_search", [Capability("http.read")], {"query": "y"})
+        result2 = await engine2.check("execute_python", [Capability("python.exec")], {"code": "y"})
         assert result2.allowed is True
         w2.request_user_input.assert_not_called()
 

@@ -15,6 +15,7 @@ capture it in a closure.
 
 from typing import Any
 
+from agentic_cli.tools.arxiv_source import ARXIV_API_URL, ARXIV_PDF_URL
 from agentic_cli.tools.arxiv_source import _clean_arxiv_id  # re-exported for tests/back-compat
 from agentic_cli.tools.pdf_utils import extract_pdf_text
 from agentic_cli.tools.registry import (
@@ -123,7 +124,7 @@ async def _fetch_arxiv_paper_with_source(source, arxiv_id: str) -> dict[str, Any
 @register_tool(
     category=ToolCategory.KNOWLEDGE,
 
-    capabilities=[Capability("http.read")],
+    capabilities=[Capability("http.read", target=ARXIV_API_URL)],
     description="Search arXiv for academic papers by query, category, or date range. Use this to find research papers on a topic.",
     requires="arxiv_source",
 )
@@ -173,7 +174,7 @@ def search_arxiv(
 @register_tool(
     category=ToolCategory.KNOWLEDGE,
 
-    capabilities=[Capability("http.read")],
+    capabilities=[Capability("http.read", target=ARXIV_API_URL)],
     description="Fetch metadata for a specific arXiv paper by ID or URL. Returns title, authors, abstract, categories, and PDF URL.",
     requires="arxiv_source",
 )
@@ -301,7 +302,11 @@ async def _ingest_arxiv_paper_with_services(
 @register_tool(
     category=ToolCategory.KNOWLEDGE,
 
-    capabilities=[Capability("http.read"), Capability("kb.write")],
+    capabilities=[
+        Capability("http.read", target=ARXIV_API_URL),
+        Capability("http.read", target=ARXIV_PDF_URL),
+        Capability("kb.write"),
+    ],
     description="Download an arXiv paper's PDF, extract text, and ingest it into the knowledge base. Use this to add a specific arXiv paper to long-term storage so it can be searched later.",
     requires=("arxiv_source", "kb_manager"),
 )
