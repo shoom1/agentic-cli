@@ -47,7 +47,8 @@ def sandbox_execute(
 
     Args:
         code: Python code to execute.
-        session_id: Session identifier for state persistence (default: "default").
+        session_id: Session identifier for state persistence (default: "default");
+            1-64 letters, digits, "-" or "_".
         timeout_seconds: Maximum execution time in seconds.
         inputs: Optional list of host file paths to stage into
             inputs/<basename> inside the session before execution.

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import secrets
 import stat
 import threading
 import time
@@ -209,6 +210,10 @@ class JupyterDockerBackend(SandboxBackend):
 
     def __init__(self, settings, runtime=None, detect_fn=None) -> None:
         self._settings = settings
+        # Per-instance suffix for container names: two app processes (or two
+        # managers) using the same session ID must not collide on
+        # `docker run --name`.
+        self._name_suffix = secrets.token_hex(4)
         self._detect = detect_fn or detect_docker
         self._runtime = runtime  # lazily created so detect can pick docker/podman
         self._sessions: dict[str, ContainerSession] = {}
@@ -296,7 +301,7 @@ class JupyterDockerBackend(SandboxBackend):
             user = f"{os.getuid()}:{os.getgid()}"
         return ContainerSpec(
             image=s.sandbox_image,
-            name=f"agentic-sbx-{sanitize_filename(session_id)}",
+            name=f"agentic-sbx-{sanitize_filename(session_id)}-{self._name_suffix}",
             command=["python", f"{_DRIVER_DIR}/driver.py"],
             network=s.sandbox_network,
             memory_mb=s.sandbox_memory_mb,
