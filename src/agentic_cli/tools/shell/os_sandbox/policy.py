@@ -41,6 +41,25 @@ MANDATORY_DENY_WRITE: list[str] = [
     "~/.claude/",
 ]
 
+# Credential stores: never readable or writable from the sandbox, whatever the
+# configured policy says. Reads are otherwise broad (interpreters need the
+# filesystem), so these must be named. See also the app's own config dir,
+# added per policy from ``app_name``.
+PROTECTED_HOME_PATHS: list[str] = [
+    "~/.ssh",
+    "~/.gnupg",
+    "~/.aws",
+    "~/.azure",
+    "~/.kube",
+    "~/.config/gcloud",
+    "~/.config/gh",
+    "~/.docker/config.json",
+    "~/.netrc",
+    "~/.git-credentials",
+    "~/.pypirc",
+    "~/.npmrc",
+]
+
 # Paths that are always readable (system libraries, interpreters, etc.)
 DEFAULT_READABLE: list[str] = [
     "/usr/",
@@ -75,6 +94,14 @@ class OSSandboxPolicy:
             Always includes MANDATORY_DENY_WRITE entries.
         deny_read_paths: Paths to hide entirely from the sandboxed process.
         allow_network: Whether network access is allowed (Phase 2).
+        app_name: The application's name. Its config dir (``~/.{app_name}``,
+            holding settings, permission grants and ``.env``) is hidden and
+            write-protected, and ``{working_dir}/.{app_name}`` is
+            write-protected.
+
+    Whatever the configured lists hold, the resolved deny lists always include
+    ``PROTECTED_HOME_PATHS``, the app's config dir, the whole ``.git``
+    directory and ``.env`` of the working directory.
         strict: When True, refuse to execute if sandboxing was requested but no
             real backend is available (instead of falling back to the restricted
             in-process executor).
@@ -88,9 +115,15 @@ class OSSandboxPolicy:
     deny_read_paths: list[str] = field(default_factory=list)
     allow_network: bool = False
     strict: bool = False
+    app_name: str | None = None
 
     def resolved_writable_paths(self, working_dir: Path) -> list[Path]:
-        """Resolve all writable paths to absolute, always including working_dir.
+        """Resolve all writable paths to absolute.
+
+        The working directory is writable unless it is the home directory, an
+        ancestor of it, or the filesystem root: started from ``~`` the whole
+        home would otherwise be writable. Explicitly configured paths are
+        always included.
 
         Args:
             working_dir: The command's working directory.
@@ -98,7 +131,11 @@ class OSSandboxPolicy:
         Returns:
             Deduplicated list of resolved absolute paths.
         """
-        paths = {working_dir.resolve()}
+        paths: set[Path] = set()
+        wd = working_dir.resolve()
+        home = Path.home().resolve()
+        if not (wd == Path(wd.anchor) or home.is_relative_to(wd)):
+            paths.add(wd)
         for p in self.writable_paths:
             paths.add(Path(p).expanduser().resolve())
         return sorted(paths)
@@ -106,8 +143,10 @@ class OSSandboxPolicy:
     def resolved_deny_write_paths(self, working_dir: Path | None = None) -> list[Path]:
         """Resolve all deny-write paths to absolute.
 
-        Adds .git/hooks/ and .git/config relative to working_dir
-        if a working directory is provided.
+        Always adds the protected home paths and the app's config dir, and,
+        given a working directory, its whole ``.git`` (protecting only
+        ``.git/hooks`` let the directory be moved aside and replaced) and
+        ``.{app_name}``.
 
         Args:
             working_dir: Working directory for resolving relative deny paths.
@@ -115,26 +154,38 @@ class OSSandboxPolicy:
         Returns:
             List of resolved absolute paths that must not be writable.
         """
-        paths: list[Path] = []
-        for p in self.deny_write_paths:
-            resolved = Path(p).expanduser().resolve()
-            paths.append(resolved)
-
-        # Add git-related deny paths relative to working_dir
+        paths = [Path(p).expanduser().resolve() for p in self.deny_write_paths]
+        paths += self._protected_home_paths()
         if working_dir is not None:
             wd = working_dir.resolve()
-            paths.append(wd / ".git" / "hooks")
-            paths.append(wd / ".git" / "config")
+            paths.append(wd / ".git")
+            if self.app_name:
+                paths.append(wd / f".{self.app_name}")
+        return _dedupe(paths)
 
-        return paths
-
-    def resolved_deny_read_paths(self) -> list[Path]:
+    def resolved_deny_read_paths(self, working_dir: Path | None = None) -> list[Path]:
         """Resolve all deny-read paths to absolute.
+
+        Always adds the protected home paths and the app's config dir, and,
+        given a working directory, its ``.env``.
+
+        Args:
+            working_dir: Working directory for resolving relative deny paths.
 
         Returns:
             List of resolved absolute paths to hide.
         """
-        return [Path(p).expanduser().resolve() for p in self.deny_read_paths]
+        paths = [Path(p).expanduser().resolve() for p in self.deny_read_paths]
+        paths += self._protected_home_paths()
+        if working_dir is not None:
+            paths.append(working_dir.resolve() / ".env")
+        return _dedupe(paths)
+
+    def _protected_home_paths(self) -> list[Path]:
+        entries = list(PROTECTED_HOME_PATHS)
+        if self.app_name:
+            entries.append(f"~/.{self.app_name}")
+        return [Path(p).expanduser().resolve() for p in entries]
 
     def resolved_readable_paths(self) -> list[Path]:
         """Resolve default readable paths.
@@ -149,3 +200,8 @@ class OSSandboxPolicy:
             # on all platforms (e.g., /lib64 on macOS)
             paths.append(path)
         return paths
+
+
+def _dedupe(paths: list[Path]) -> list[Path]:
+    """Drop repeated paths, keeping the first occurrence's position."""
+    return list(dict.fromkeys(paths))

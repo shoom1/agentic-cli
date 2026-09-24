@@ -55,6 +55,7 @@ def execute_python(
             writable_paths=getattr(settings, "os_sandbox_writable_paths", []),
             allow_network=getattr(settings, "os_sandbox_allow_network", False),
             strict=getattr(settings, "os_sandbox_strict", False),
+            app_name=getattr(settings, "app_name", None),
         )
 
     executor = SafePythonExecutor(
