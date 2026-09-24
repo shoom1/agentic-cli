@@ -1,226 +1,155 @@
 """``agentic_cli.tools.google_search_tool`` is a deprecated re-export.
 
-It was never an Agentic CLI integration — just ADK's ``GoogleSearchTool``
-singleton re-exported under our namespace, carrying ADK's model/tool
-constraints and leaving grounding metadata, citations and the required Search
-Suggestions UI entirely to the application. It stays importable through the
-0.6.x window and warns on first use; ``web_search`` is the supported
-alternative.
+It re-exports ADK's built-in ``google_search`` singleton, which runs inside
+the model and is never seen by the permission engine. It stays importable
+through 0.6.x and warns on use; ``web_search`` is the supported alternative.
 
-Every case runs in its own interpreter: the resolved object is cached in the
-module's globals, so the warning fires once *per process*. A sibling test that
-had already touched the attribute — or merely a different test order — would
-otherwise hide a missing warning entirely.
+The name is resolved on every access (nothing is cached), so each access site
+warns and these tests can run in-process. Only the claims about a *fresh*
+import (silent, loads no ADK) need a separate interpreter.
 """
 
 from __future__ import annotations
 
 import json
+import os
+import re
 import subprocess
 import sys
 import textwrap
+import types
+import warnings
 
-_PRELUDE = """
-import json, warnings
+import pytest
 
+import agentic_cli.tools as tools
 
-def summarize(caught):
-    return [
-        {
-            "category": w.category.__name__,
-            "message": str(w.message),
-            "filename": w.filename,
-        }
-        for w in caught
-    ]
+MESSAGE = re.compile(r"google_search_tool.*0\.7\.0.*web_search", re.S)
 
 
-def emit(payload):
-    print(json.dumps(payload))
-"""
+def _ours(caught) -> list[warnings.WarningMessage]:
+    return [w for w in caught if "google_search_tool" in str(w.message)]
 
 
-def _run(body: str) -> dict:
-    """Run ``body`` in a fresh interpreter, return the JSON payload it emits."""
-    script = _PRELUDE + textwrap.dedent(body)
+class TestAccess:
+    def test_returns_adks_singleton_and_warns(self):
+        from google.adk.tools import google_search
+
+        with pytest.warns(DeprecationWarning, match=MESSAGE) as caught:
+            obj = tools.google_search_tool
+        assert obj is google_search
+        assert len(_ours(caught)) == 1
+
+    def test_warning_is_attributed_to_the_accessing_code(self):
+        with pytest.warns(DeprecationWarning) as caught:
+            from agentic_cli.tools import google_search_tool  # noqa: F401
+        assert _ours(caught)[0].filename == __file__
+
+    def test_message_points_at_the_alternative_and_the_permission_gap(self):
+        with pytest.warns(DeprecationWarning) as caught:
+            tools.google_search_tool
+        message = str(_ours(caught)[0].message)
+        assert "GoogleSearchTool" in message
+        assert "permission engine" in message
+
+    def test_every_access_site_warns(self):
+        """Not cached: whichever code touches the name first must not consume
+        the only warning another caller would have seen."""
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            tools.google_search_tool
+            tools.google_search_tool
+        assert len(_ours(caught)) == 2
+        assert "google_search_tool" not in vars(tools)
+
+    def test_missing_adk_export_is_an_attribute_error(self, monkeypatch):
+        """PEP 562: a failed lookup must raise AttributeError, so hasattr() and
+        getattr(..., default) keep working."""
+        monkeypatch.setitem(sys.modules, "google.adk.tools", types.ModuleType("google.adk.tools"))
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            assert hasattr(tools, "google_search_tool") is False
+
+    def test_unknown_attribute_still_raises(self):
+        with pytest.raises(AttributeError, match="no_such_tool"):
+            tools.no_such_tool
+
+    def test_not_exported_by_star_import(self):
+        """In ``__all__`` a star-import would resolve (and warn about) a name
+        the caller never uses."""
+        assert "google_search_tool" not in tools.__all__
+        assert "web_search" in tools.__all__
+
+
+class TestConfigReferences:
+    """A dotted path in an AgentConfig or agents YAML is resolved by the
+    framework, so no frame of the application's own code is on the stack. A
+    DeprecationWarning attributed there is hidden by Python's default filters,
+    so the resolver re-issues it as a FutureWarning, which is shown."""
+
+    def test_dotted_path_emits_a_visible_future_warning(self):
+        from google.adk.tools import google_search
+        from agentic_cli.tools.tool_resolver import resolve_tool
+
+        with pytest.warns(FutureWarning, match=MESSAGE) as caught:
+            obj = resolve_tool("agentic_cli.tools.google_search_tool")
+        assert obj is google_search
+        assert not [w for w in caught if issubclass(w.category, DeprecationWarning)]
+
+    def test_future_warning_names_the_config_reference(self):
+        from agentic_cli.tools.tool_resolver import resolve_tool
+
+        with pytest.warns(FutureWarning) as caught:
+            resolve_tool("agentic_cli.tools.google_search_tool")
+        assert "tool reference 'agentic_cli.tools.google_search_tool'" in str(caught[0].message)
+
+    def test_error_filter_on_deprecations_does_not_break_resolution(self):
+        from agentic_cli.tools.tool_resolver import resolve_tool
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            warnings.simplefilter("ignore", FutureWarning)
+            assert resolve_tool("agentic_cli.tools.google_search_tool") is not None
+
+    def test_other_dotted_paths_are_unaffected(self):
+        from agentic_cli.tools.tool_resolver import resolve_tool
+        from agentic_cli.tools.search import web_search
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            assert resolve_tool("agentic_cli.tools.search.web_search") is web_search
+
+
+def _fresh(body: str) -> dict:
+    """Run ``body`` in a fresh interpreter and return the JSON it prints.
+
+    ``PYTHONWARNINGS`` is cleared so the parent's filters cannot change the
+    child's behaviour.
+    """
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONWARNINGS"}
     proc = subprocess.run(
-        [sys.executable, "-c", script], capture_output=True, text=True
+        [sys.executable, "-c", textwrap.dedent(body)],
+        capture_output=True, text=True, env=env,
     )
-    assert proc.returncode == 0, f"subprocess failed:\n{proc.stderr}"
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip(), f"child printed nothing; stderr:\n{proc.stderr}"
     return json.loads(proc.stdout.strip().splitlines()[-1])
 
 
-def _deprecations(result: dict) -> list[dict]:
-    """The recorded DeprecationWarnings that are about this re-export."""
-    return [
-        w
-        for w in result["warnings"]
-        if w["category"] == "DeprecationWarning"
-        and "google_search_tool" in w["message"]
-    ]
-
-
-class TestImportingThePackageIsSilent:
-    """Nobody pays for a deprecation they did not opt into."""
-
-    def test_importing_tools_emits_no_deprecation_warning(self):
-        result = _run(
-            """
-            with warnings.catch_warnings(record=True) as caught:
-                warnings.simplefilter("always")
-                import agentic_cli.tools
-            emit({"warnings": summarize(caught)})
-            """
-        )
-        assert _deprecations(result) == []
-
-    def test_name_stays_in_all_without_resolving_it(self):
-        """The export survives the window, and reading ``__all__`` is not use."""
-        result = _run(
-            """
-            with warnings.catch_warnings(record=True) as caught:
-                warnings.simplefilter("always")
-                import agentic_cli.tools
-                names = list(agentic_cli.tools.__all__)
-            emit({"warnings": summarize(caught), "all": names})
-            """
-        )
-        assert "google_search_tool" in result["all"]
-        assert _deprecations(result) == []
-
-
-class TestDeprecatedAccess:
-    def test_from_import_still_returns_adks_singleton(self):
-        result = _run(
-            """
-            with warnings.catch_warnings(record=True) as caught:
-                warnings.simplefilter("always")
-                from agentic_cli.tools import google_search_tool
-            from google.adk.tools import google_search
-            emit({
-                "warnings": summarize(caught),
-                "is_adk_singleton": google_search_tool is google_search,
-                "type": type(google_search_tool).__name__,
-            })
-            """
-        )
-        assert result["is_adk_singleton"] is True, (
-            "the shim must hand back ADK's existing object, not a copy or wrapper"
-        )
-        assert result["type"] == "GoogleSearchTool"
-        assert len(_deprecations(result)) == 1
-
-    def test_warning_names_the_removal_target_and_the_alternative(self):
-        result = _run(
-            """
-            with warnings.catch_warnings(record=True) as caught:
-                warnings.simplefilter("always")
-                from agentic_cli.tools import google_search_tool
-            emit({"warnings": summarize(caught)})
-            """
-        )
-        found = _deprecations(result)
-        assert len(found) == 1
-        message = found[0]["message"]
-
-        assert "agentic_cli.tools.google_search_tool" in message
-        assert "deprecated" in message.lower()
-        assert "0.7.0" in message, "the removal release must be stated"
-        assert "agentic_cli.tools.web_search" in message, (
-            "the supported framework-level alternative must be named"
-        )
-        assert (
-            "from google.adk.tools.google_search_tool import GoogleSearchTool"
-            in message
-        ), (
-            "the escape hatch must name the fully qualified import path of the "
-            "configurable GoogleSearchTool class"
-        )
-        assert "from google.adk.tools import google_search" not in message, (
-            "that path imports ADK's pre-built singleton, not the class callers "
-            "are told to instantiate and configure"
-        )
-        lowered = message.lower()
-        for responsibility in ("grounding", "citation"):
-            assert responsibility in lowered, (
-                f"the caller takes on ADK's {responsibility} obligations"
-            )
-        assert "search suggestions when returned" in lowered, (
-            "Search Suggestions are a conditional obligation — they are not "
-            "returned on every response"
-        )
-
-    def test_warning_is_attributed_to_the_importing_code(self):
-        """``stacklevel=2`` — the actionable frame is the caller's import."""
-        result = _run(
-            """
-            with warnings.catch_warnings(record=True) as caught:
-                warnings.simplefilter("always")
-                from agentic_cli.tools import google_search_tool
-            emit({"warnings": summarize(caught)})
-            """
-        )
-        filename = _deprecations(result)[0]["filename"]
-        assert filename == "<string>", (
-            f"warning was blamed on {filename!r} instead of the caller"
-        )
-
-
-class TestResolutionIsCached:
-    def test_repeated_access_is_the_same_object_and_warns_once(self):
-        result = _run(
-            """
-            with warnings.catch_warnings(record=True) as caught:
-                warnings.simplefilter("always")
-                import agentic_cli.tools
-                first = agentic_cli.tools.google_search_tool
-                second = agentic_cli.tools.google_search_tool
-                from agentic_cli.tools import google_search_tool as third
-            emit({
-                "warnings": summarize(caught),
-                "identical": first is second and second is third,
-            })
-            """
-        )
-        assert result["identical"] is True
-        assert len(_deprecations(result)) == 1, (
-            "the resolved object must be cached in module globals, as the "
-            "package's other lazy exports are, so one import warns once"
-        )
-
-
-class TestUnknownAttributesStillFail:
-    def test_attribute_error_is_unchanged(self):
-        result = _run(
-            """
-            import agentic_cli.tools
-            try:
-                agentic_cli.tools.no_such_tool
-            except AttributeError as exc:
-                emit({"warnings": [], "error": str(exc)})
-            """
-        )
-        assert "no_such_tool" in result["error"]
-
-
-class TestWebSearchIsUntouched:
-    def test_web_search_imports_silently_and_is_the_defining_object(self):
-        result = _run(
-            """
-            with warnings.catch_warnings(record=True) as caught:
-                warnings.simplefilter("always")
-                import agentic_cli.tools
-                from agentic_cli.tools import web_search
-            from agentic_cli.tools.search import web_search as defining
-            emit({
-                "warnings": summarize(caught),
-                "is_defining": web_search is defining,
-                "in_all": "web_search" in agentic_cli.tools.__all__,
-                "callable": callable(web_search),
-            })
-            """
-        )
-        assert result["is_defining"] is True
-        assert result["in_all"] is True
-        assert result["callable"] is True
-        assert _deprecations(result) == []
+@pytest.mark.parametrize(
+    "statement",
+    ["import agentic_cli.tools", "from agentic_cli.tools import *"],
+)
+def test_fresh_import_is_silent_and_loads_no_adk(statement):
+    result = _fresh(f"""
+        import json, sys, warnings
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            {statement}
+        print(json.dumps({{
+            "ours": [str(w.message) for w in caught if "google_search_tool" in str(w.message)],
+            "adk": sorted(m for m in sys.modules if m.startswith("google.adk")),
+        }}))
+    """)
+    assert result["ours"] == []
+    assert result["adk"] == [], "importing agentic_cli.tools must not load ADK"

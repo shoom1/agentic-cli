@@ -273,9 +273,11 @@ class BaseWorkflowManager(ABC):
         default registry issued — never by ``__name__``. A plain callable an
         application happens to name ``kb_search`` is not the framework's tool:
         substituting the service-bound variant for it would silently run
-        different code, and it is denied at permission time anyway. It is
-        therefore passed through untouched, as is a tool registered into some
-        other ``ToolRegistry``.
+        different code. It is therefore passed through untouched, as is a tool
+        registered into some other ``ToolRegistry``. A callable passed through
+        is denied at permission time; an ADK built-in tool (such as
+        ``GoogleSearchTool``) runs inside the model and never reaches the
+        permission check at all.
 
         Conversely ``register(func, name=...)`` leaves the caller holding a
         callable whose ``__name__`` is the private implementation name; that
