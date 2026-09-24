@@ -66,7 +66,6 @@ def make_memory_tools(memory_store, embedding_service=None) -> list[Callable]:
         [save_memory, search_memory, update_memory, delete_memory]
     """
     from agentic_cli.tools.memory_tools import (
-        _SENTINEL,
         _delete_memory_with_store,
         _save_memory_with_store,
         _search_memory_with_store,
@@ -96,7 +95,7 @@ def make_memory_tools(memory_store, embedding_service=None) -> list[Callable]:
     def update_memory(
         item_id: str,
         content: str | None = None,
-        tags: list[str] | None = _SENTINEL,
+        tags: list[str] | None = None,
     ) -> dict[str, Any]:
         return _update_memory_with_store(memory_store, item_id, content, tags)
 
