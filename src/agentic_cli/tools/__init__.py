@@ -111,8 +111,6 @@ __all__ = [
     "web_search",
     # Web fetch (content fetching and summarization)
     "web_fetch",
-    # Search (deprecated ADK re-export - removed in 0.7.0; use web_search)
-    "google_search_tool",
     # Standard tool functions (ready to use with agents)
     "kb_search",
     "kb_ingest_text",
@@ -149,21 +147,16 @@ _lazy_tool_modules = {
     "sandbox_tools": "agentic_cli.tools.sandbox",
 }
 
-# Deprecated (removed in 0.7.0): a bare re-export of ADK's GoogleSearchTool
-# singleton, never an Agentic CLI integration. Resolved lazily so importing this
-# package does not warn, and so the deprecation is charged to the code that
-# actually uses the name.
+# Deprecated (removed in 0.7.0). Resolved on every access, never cached or
+# listed in __all__: importing this package must not load ADK or warn, and
+# every caller that uses the name should see the warning, not only the first.
 _GOOGLE_SEARCH_TOOL_DEPRECATION = (
     "agentic_cli.tools.google_search_tool is deprecated and will be removed in "
-    "0.7.0. It only re-exports ADK's native GoogleSearchTool singleton, so it is "
-    "backend-, model- and UI-specific rather than an end-to-end Agentic CLI "
-    "integration. Use agentic_cli.tools.web_search, the supported "
-    "framework-level alternative. Applications that intentionally want native "
-    "ADK Google Search should import the class directly from ADK "
-    "(from google.adk.tools.google_search_tool import GoogleSearchTool), "
-    "instantiate and configure it as ADK's documentation describes, and are "
-    "then responsible for ADK's model/tool constraints, grounding metadata, "
-    "citations and rendering Search Suggestions when returned."
+    "0.7.0; use agentic_cli.tools.web_search. It re-exports ADK's built-in "
+    "google_search, which runs inside the model and is never checked by the "
+    "permission engine. For native Google Search, import GoogleSearchTool from "
+    "google.adk.tools.google_search_tool; here it works only as an agent's sole "
+    "tool (include_state_tools=False)."
 )
 
 
@@ -178,11 +171,15 @@ def __getattr__(name: str):
     if name == "google_search_tool":
         import warnings
 
-        from google.adk.tools import google_search
+        try:
+            from google.adk.tools import google_search
+        except ImportError as exc:  # PEP 562: a failed lookup is AttributeError
+            raise AttributeError(
+                f"module {__name__!r} has no attribute {name!r}"
+            ) from exc
 
         warnings.warn(
             _GOOGLE_SEARCH_TOOL_DEPRECATION, DeprecationWarning, stacklevel=2
         )
-        globals()[name] = google_search  # Cache: one import warns once
         return google_search
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
