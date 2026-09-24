@@ -493,9 +493,16 @@ def _update_memory_with_store(
     store: "MemoryStore",
     item_id: str,
     content: str | None,
-    tags: list[str] | None | object,
+    tags: list[str] | None,
 ) -> dict[str, Any]:
-    updated = store.update(item_id, content=content, tags=tags)
+    # Tool contract: None (or omitted) leaves tags alone, [] clears them.
+    # Models often send null for an optional argument they mean to omit, so
+    # null must not wipe tags; and the declaration default must be plain JSON.
+    if tags is None:
+        store_tags: list[str] | None | object = _SENTINEL
+    else:
+        store_tags = tags or None
+    updated = store.update(item_id, content=content, tags=store_tags)
     return {"success": True, "updated": updated}
 
 
@@ -571,14 +578,14 @@ def search_memory(
 def update_memory(
     item_id: str,
     content: str | None = None,
-    tags: list[str] | None = _SENTINEL,
+    tags: list[str] | None = None,
 ) -> dict[str, Any]:
     """Update an existing memory item.
 
     Args:
         item_id: ID of the memory to update.
         content: New content (optional).
-        tags: New tags. Omit to leave unchanged; pass None to clear.
+        tags: New tags. Omit to leave unchanged; pass an empty list to clear.
     """
     store = require_service(MEMORY_STORE)
     if isinstance(store, dict):
