@@ -40,7 +40,7 @@ from agentic_cli.workflow.permissions import Capability
 def sandbox_execute(
     code: str,
     session_id: str = "default",
-    timeout_seconds: int = 120,
+    timeout_seconds: int | None = None,
     inputs: list[str] | None = None,
 ) -> dict[str, Any]:
     """Execute Python code in a stateful sandbox.
@@ -49,7 +49,8 @@ def sandbox_execute(
         code: Python code to execute.
         session_id: Session identifier for state persistence (default: "default");
             1-64 letters, digits, "-" or "_".
-        timeout_seconds: Maximum execution time in seconds.
+        timeout_seconds: Maximum execution time in seconds. Omit to use the
+            configured default (``sandbox_timeout``).
         inputs: Optional list of host file paths to stage into
             inputs/<basename> inside the session before execution.
 
