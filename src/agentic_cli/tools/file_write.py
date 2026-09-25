@@ -51,10 +51,7 @@ def write_file(
     file_path = resolve_path(path)
     existed = file_path.exists()
 
-    # Create parent directories if requested
-    if create_dirs:
-        file_path.parent.mkdir(parents=True, exist_ok=True)
-    elif not file_path.parent.exists():
+    if not create_dirs and not file_path.parent.exists():
         return {
             "success": False,
             "error": f"Parent directory does not exist: {file_path.parent}",
@@ -62,6 +59,8 @@ def write_file(
         }
 
     try:
+        if create_dirs:
+            file_path.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_text(file_path, content)
         size = file_path.stat().st_size
 
@@ -160,10 +159,16 @@ def edit_file(
                 "error": f"Invalid regex pattern: {e}",
             }
 
-        if replace_all:
-            new_content, count = pattern.subn(new_text, content)
-        else:
-            new_content, count = pattern.subn(new_text, content, count=1)
+        try:
+            new_content, count = pattern.subn(
+                new_text, content, count=0 if replace_all else 1
+            )
+        except re.error as e:
+            return {
+                "success": False,
+                "error": f"Invalid regex replacement text: {e}",
+                "path": str(file_path),
+            }
     else:
         # Plain text replacement
         if replace_all:

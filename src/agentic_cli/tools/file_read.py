@@ -134,8 +134,11 @@ def diff_compare(
         - similarity: 0-1 ratio using SequenceMatcher
     """
     # Get content from sources (file paths or raw text)
-    content_a = _get_content(source_a)
-    content_b = _get_content(source_b)
+    try:
+        content_a = _get_content(source_a)
+        content_b = _get_content(source_b)
+    except _UnreadableSource as e:
+        return {"success": False, "error": str(e)}
 
     # Split into lines for comparison
     lines_a = content_a.splitlines(keepends=True)
@@ -172,18 +175,32 @@ def diff_compare(
     }
 
 
+class _UnreadableSource(Exception):
+    """A diff source names a file that cannot be read as text."""
+
+
 def _get_content(source: str) -> str:
     """Get content from a source (file path or raw text).
 
     A source that names an existing file is read from the location the
     permission engine checked (``resolve_path``); anything else is text.
+
+    Raises:
+        _UnreadableSource: the file exists but is binary or cannot be read.
     """
     try:
         path = resolve_path(source)
         is_file = path.is_file()
     except (OSError, ValueError):  # cannot name a path, so it is text
         return source
-    return path.read_text() if is_file else source
+    if not is_file:
+        return source
+    try:
+        return path.read_text()
+    except UnicodeDecodeError:
+        raise _UnreadableSource(f"Cannot read file as text (binary file?): {source}") from None
+    except OSError as e:
+        raise _UnreadableSource(f"Cannot read file {source}: {e.strerror or e}") from None
 
 
 def _unified_diff(lines_a: list[str], lines_b: list[str], context_lines: int) -> str:
