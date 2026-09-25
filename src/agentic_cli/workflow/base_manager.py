@@ -20,7 +20,11 @@ from abc import ABC, abstractmethod
 from contextvars import ContextVar, Token
 from typing import Any, AsyncGenerator, Awaitable, Callable, Iterator, TYPE_CHECKING
 
-from agentic_cli.workflow.events import WorkflowEvent, UserInputRequest
+from agentic_cli.workflow.events import (
+    UserInputRequest,
+    UserInputUnavailable,
+    WorkflowEvent,
+)
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.models import ModelRegistry
 from agentic_cli.workflow.sessions import (
@@ -1080,7 +1084,7 @@ class BaseWorkflowManager(ABC):
             User's response string.
 
         Raises:
-            RuntimeError: If no callback is registered.
+            UserInputUnavailable: If no callback is registered (a RuntimeError).
         """
         logger.debug(
             "user_input_requested",
@@ -1090,7 +1094,7 @@ class BaseWorkflowManager(ABC):
 
         callback = self._user_input_callback.get()
         if callback is None:
-            raise RuntimeError(
+            raise UserInputUnavailable(
                 "No user input callback registered. "
                 "Call set_input_callback() before invoking tools that require user input."
             )
