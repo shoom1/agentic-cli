@@ -54,6 +54,7 @@ agentic-cli/
 │   │   │   ├── event_processor.py  # ADKEventProcessor
 │   │   │   ├── permission_plugin.py # PermissionPlugin (gates tool calls)
 │   │   │   ├── task_progress_plugin.py # Emits TASK_PROGRESS events
+│   │   │   ├── tool_error_plugin.py # Tool exception → error result (turn survives)
 │   │   │   └── plugins.py    # LLM traffic logging (raw_llm_logging)
 │   │   └── langgraph/        # LangGraph orchestrator
 │   │       ├── manager.py    # LangGraphWorkflowManager
@@ -156,7 +157,7 @@ Workflow:
 - **UI-agnostic workflow**: WorkflowEvent objects can be consumed by any UI
 
 ### Key Design Patterns
-- **Tool error handling**: All tools return `{"success": bool, ...}` dicts. Never raise `ToolError`.
+- **Tool error handling**: All tools return `{"success": bool, ...}` dicts. Never raise `ToolError`. An exception that still escapes a tool is a bug, but it costs one call rather than the turn: on ADK, `workflow/adk/tool_error_plugin.py::ToolErrorPlugin` turns it (and a call to a tool name that does not exist) into an error dict; LangGraph's `ToolNode` runs with `handle_tool_errors=True`.
 - **Tool registration**: Use `@register_tool(category=..., capabilities=..., description=...)` decorator. `capabilities=` is required — pass `EXEMPT` for tools that need no permission check or a list of `Capability(name, target_arg=...)` tuples the engine matches against rules. Tools are auto-discovered via the global `ToolRegistry`.
 - **ADK transfer-tool description**: ADK builds `transfer_to_agent`'s model-visible description from its docstring, which through 1.37.0 tells the model to "use TransferToAgentTool instead of this function directly" — advice meant for Python callers that made Gemini emit the class name, which ADK then rejects. `workflow/adk/transfer_tool_description.py` is a `before_model_callback` plugin that rewrites that description on the prepared `LlmRequest`: only when the tool is the **exact** native `TransferToAgentTool` (an application tool sharing the name is untouched) and only while the misleading text is present, so it is idempotent and becomes a **no-op** once the installed ADK ships a corrected docstring (upstream fixed it in 2.x). Only `description` is written — declaration name, parameter schema, required fields and the agent-name enum are preserved, and the upstream function's `__doc__` is never mutated.
 - **Permissions**: `workflow/permissions/` holds a framework-independent engine that evaluates declared capabilities against rules from four sources (builtin, user `~/.{app_name}/settings.json`, project `./.{app_name}/settings.json`, in-memory session). Interactive "Allow always" grants persist to `~/.{app_name}/project_grants.json` keyed by resolved project path — user-owned, never into the project settings file a repo could ship. ADK + LangGraph gate tool calls via `workflow/adk/permission_plugin.py::PermissionPlugin` and `workflow/langgraph/permission_wrap.py::wrap_tool_for_permission`.

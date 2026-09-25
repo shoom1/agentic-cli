@@ -751,11 +751,14 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             List of BasePlugin instances to pass to Runner(plugins=...).
         """
         from agentic_cli.workflow.adk.task_progress_plugin import TaskProgressPlugin
+        from agentic_cli.workflow.adk.tool_error_plugin import ToolErrorPlugin
         from agentic_cli.workflow.adk.transfer_tool_description import (
             TransferToolDescriptionPlugin,
         )
 
-        plugins: list = [PermissionPlugin()]
+        # ToolErrorPlugin: ADK ends the turn when a tool raises; this turns the
+        # exception into an error result the model can read.
+        plugins: list = [PermissionPlugin(), ToolErrorPlugin()]
 
         # ADK's generated description for its own transfer tool tells the model
         # to call `TransferToAgentTool` — a name that does not exist as a tool.
