@@ -338,8 +338,13 @@ class BaseCLIApp:
         self.should_exit = True
         self.session.exit()
 
-    async def apply_settings(self, changes: dict[str, Any]) -> None:
+    async def apply_settings(self, changes: dict[str, Any]) -> bool:
         """Apply changed settings and reinitialize workflow if needed.
+
+        All or nothing: if any value is invalid, or the workflow cannot be
+        reinitialized with the new values, every field is restored and the
+        workflow is brought back on the model it was running, so nothing
+        unusable stays in memory to be saved by ``/settings``.
 
         Settings are applied in two ways:
         1. Special settings (model, thinking_effort) use dedicated setters
@@ -348,13 +353,17 @@ class BaseCLIApp:
 
         Args:
             changes: Dictionary of changed settings (key -> new_value)
+
+        Returns:
+            True if the changes were applied, False if they were rolled back.
         """
         if not changes:
             self.session.add_message("system", "No changes made.")
-            return
+            return True
 
         needs_reinit = False
         new_model = changes.get("model")
+        snapshot = _snapshot_settings(self._settings)
 
         # `orchestrator` triggers a reinit too: the controller swaps the backend
         # when it changes (otherwise the change only took effect on restart).
@@ -366,22 +375,40 @@ class BaseCLIApp:
                 if key in reinit_settings:
                     needs_reinit = True
             except ValueError as e:
+                _restore_settings(self._settings, snapshot)
                 label = key.replace("_", " ").title()
                 self.session.add_error(f"Failed to set {label}: {e}")
-                return
+                return False
 
         # Reinitialize workflow if needed
-        if needs_reinit and self._workflow_controller.is_ready:
+        controller = self._workflow_controller
+        if needs_reinit and controller.is_ready:
+            previous_model = controller.workflow.model
             try:
-                await self._workflow_controller.reinitialize(model=new_model)
+                await controller.reinitialize(model=new_model)
             except Exception as e:
-                self.session.add_error(f"Failed to reinitialize workflow: {e}")
-                return
+                _restore_settings(self._settings, snapshot)
+                self.session.add_error(
+                    f"Failed to reinitialize workflow: {e}. Settings were not changed."
+                )
+                # A failed orchestrator swap leaves the old manager running; a
+                # failed in-place reinitialize leaves it down, holding the new
+                # model. Bring it back on the model it had.
+                if not controller.is_ready:
+                    try:
+                        await controller.reinitialize(model=previous_model)
+                    except Exception as restore_error:
+                        self.session.add_error(
+                            f"Could not restart the workflow on {previous_model}: "
+                            f"{restore_error}"
+                        )
+                return False
 
         # Report changes
         for key, value in changes.items():
             label = key.replace("_", " ").title()
             self.session.add_success(f"{label}: {value}")
+        return True
 
     def _register_builtin_commands(self) -> None:
         """Register built-in commands."""
@@ -647,3 +674,23 @@ class BaseCLIApp:
 
         logger.info("app_ending")
         self.session.add_message("system", "Goodbye!")
+
+
+def _snapshot_settings(settings: BaseSettings) -> tuple[dict[str, Any], set[str]]:
+    """Capture every field value (and which were set) so a change can be undone."""
+    return dict(settings.__dict__), set(settings.__pydantic_fields_set__)
+
+
+def _restore_settings(
+    settings: BaseSettings, snapshot: tuple[dict[str, Any], set[str]]
+) -> None:
+    """Put back the values captured by :func:`_snapshot_settings`.
+
+    Written directly, like the dedicated setters do: they were valid when
+    captured, and revalidating could itself fail.
+    """
+    values, fields_set = snapshot
+    for key, value in values.items():
+        if settings.__dict__.get(key) is not value:
+            object.__setattr__(settings, key, value)
+    object.__setattr__(settings, "__pydantic_fields_set__", fields_set)
