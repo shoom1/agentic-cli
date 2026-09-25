@@ -21,14 +21,15 @@ from agentic_cli.workflow.permissions import Capability
 def execute_python(
     code: str,
     context: str = "",
-    timeout_seconds: int = 30,
+    timeout_seconds: int | None = None,
 ) -> dict[str, Any]:
     """Execute Python code safely.
 
     Args:
         code: Python code to execute
         context: Optional JSON string of variables to inject (e.g. '{"x": 5, "name": "test"}')
-        timeout_seconds: Maximum execution time in seconds
+        timeout_seconds: Maximum execution time in seconds. Omit to use the
+            configured default (``python_executor_timeout``).
 
     Returns:
         Dictionary with execution results

@@ -398,7 +398,7 @@ def make_sandbox_tool(sandbox_manager, workflow_manager=None) -> Callable:
     def sandbox_execute(
         code: str,
         session_id: str = "default",
-        timeout_seconds: int = 120,
+        timeout_seconds: int | None = None,
         inputs: list[str] | None = None,
     ) -> dict[str, Any]:
         """Execute Python code in a stateful sandbox.
@@ -407,7 +407,8 @@ def make_sandbox_tool(sandbox_manager, workflow_manager=None) -> Callable:
             code: Python code to execute.
             session_id: Session identifier for state persistence: 1-64 letters,
                 digits, "-" or "_".
-            timeout_seconds: Maximum execution time in seconds.
+            timeout_seconds: Maximum execution time in seconds. Omit to use
+                the configured default (``sandbox_timeout``).
             inputs: Optional list of host file paths to stage into
                 inputs/<basename> inside the session before execution.
 
