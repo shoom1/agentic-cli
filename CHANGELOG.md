@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - **A tool result containing `[/…]` no longer fails the turn in the CLI.** Tool names and output were inserted into Rich markup unescaped, so an error such as `File not found: notes[/draft].md` raised a markup error after the tool had already run, and text like `[bold red]` restyled the output. They are now escaped and shown literally.
 - **`update_memory` no longer breaks every Gemini request.** Its `tags` default was an internal `object()` marker, which ADK copied into the tool declaration, so any ADK agent on Gemini that included the tool failed before reaching the model. `tags` now defaults to `None`, which leaves tags unchanged, and an empty list clears them: models often send `null` for an argument they mean to omit, so `null` no longer wipes tags. A test now serializes every framework tool's declaration.
+- **A permission prompt nobody can answer now denies the call instead of ending the turn.** With no input callback installed (a headless run, or a script driving the manager directly), a tool call with no matching rule raised out of the permission check and aborted the turn. The engine now denies the call with a reason the model can read, and a prompt that fails for any other reason is also a denial; cancelling the turn still cancels it. `ask_clarification` returns an error result in the same situation. `request_user_input` now raises `UserInputUnavailable`, a `RuntimeError` subclass exported from `agentic_cli.workflow`.
 
 ## [0.6.0] - 2026-08-04
 

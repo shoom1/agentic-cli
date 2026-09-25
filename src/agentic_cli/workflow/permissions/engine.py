@@ -20,6 +20,7 @@ from agentic_cli.settings_persistence import (
     get_project_config_path,
     get_user_config_path,
 )
+from agentic_cli.workflow.events import UserInputUnavailable
 from agentic_cli.workflow.permissions.capabilities import (
     Capability,
     ResolvedCapability,
@@ -278,7 +279,19 @@ class PermissionEngine:
         unmatched = [cap for cap, r in outcomes if r is None]
         async with self._ask_lock:
             request = build_request(tool_name, resolved, args, home=self._ctx.home)
-            response = await self._workflow.request_user_input(request)
+            # Fail closed: a prompt nobody can answer is a denial the model can
+            # read, not an exception that aborts the turn. Cancellation is not
+            # an answer and propagates (it is not an Exception).
+            try:
+                response = await self._workflow.request_user_input(request)
+            except UserInputUnavailable:
+                logger.warning("permission_no_approver", tool=tool_name)
+                return CheckResult(False, "no rule + no interactive approver to ask")
+            except Exception as exc:
+                logger.warning(
+                    "permission_prompt_failed", tool=tool_name, error=repr(exc),
+                )
+                return CheckResult(False, f"no rule + approval prompt failed: {exc}")
             scope = parse_response(response)
 
         if scope is AskScope.DENY:
