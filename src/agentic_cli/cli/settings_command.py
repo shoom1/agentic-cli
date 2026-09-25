@@ -57,7 +57,8 @@ class SettingsCommand(Command):
         # live object also wrote values that came from the environment or were
         # derived at startup, making a one-run override permanent.
         before = app.settings.model_dump()
-        await app.apply_settings(result)
+        if await app.apply_settings(result) is False:
+            return  # rolled back (an override returning None is still diffed)
         after = app.settings.model_dump()
         changed = {k for k, v in after.items() if before.get(k) != v}
         if not changed:
