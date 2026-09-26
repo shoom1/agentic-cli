@@ -268,7 +268,7 @@ def compile_document(
     output_pdf: str | None = None,
     assets_dir: str | None = None,
     engine: str | None = None,
-    timeout_s: int = 120,
+    timeout_s: int = 300,
 ) -> dict[str, Any]:
     """Compile a LaTeX file to PDF (guarded subprocess; host TeX engine).
 
@@ -280,7 +280,8 @@ def compile_document(
             by bare name (e.g. an artifacts dir).
         engine: Force an engine ("latexmk"/"pdflatex"); default auto-detects
             (latexmk preferred).
-        timeout_s: Wall-clock timeout; the process is killed on expiry.
+        timeout_s: Wall-clock timeout for the whole build (all passes), in
+            seconds (default 300); the process group is killed on expiry.
 
     Returns:
         dict with success, pdf_path, engine, log_tail, errors, duration_ms, and
