@@ -518,3 +518,30 @@ def test_link_planted_during_compile_is_not_written_through(monkeypatch, tmp_pat
     assert outside.read_bytes() == b"ORIGINAL"
     assert out.read_bytes() == b"%PDF-NEW"
     assert not out.is_symlink()
+
+
+def _timeout_seen(monkeypatch, tmp_path, **kwargs) -> float:
+    """Run compile_document with a faked engine; return the timeout _run got."""
+    _fake_engine(monkeypatch)
+    tex = tmp_path / "r.tex"
+    tex.write_text("x")
+    seen = []
+
+    def fake_run(argv, *, cwd, env, timeout):
+        seen.append(timeout)
+        (Path(cwd) / "r.pdf").write_bytes(b"%PDF-1.5 fake")
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(mod, "_run", fake_run)
+    assert compile_document(str(tex), **kwargs)["success"] is True
+    return seen[0]
+
+
+def test_default_timeout_is_five_minutes(monkeypatch, tmp_path):
+    """A full latexmk build (several pdflatex passes plus bibtex/biber) of a
+    long or figure-heavy document can pass two minutes."""
+    assert _timeout_seen(monkeypatch, tmp_path) == 300
+
+
+def test_explicit_timeout_is_used_as_given(monkeypatch, tmp_path):
+    assert _timeout_seen(monkeypatch, tmp_path, timeout_s=900) == 900
