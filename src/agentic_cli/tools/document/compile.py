@@ -1,11 +1,16 @@
 """Compile a LaTeX document to PDF with a host TeX engine.
 
 ``compile_document`` is a narrow, permission-gated tool: it runs ``latexmk``
-(preferred) or ``pdflatex`` as a guarded subprocess with the two arbitrary-code
+(preferred) or ``pdflatex`` as a guarded subprocess with the arbitrary-code
 vectors disabled — ``latexmk`` with ``-norc`` (so no ``.latexmkrc`` Perl is read
-from the build directory or home) and ``pdflatex`` with ``-no-shell-escape`` (no
-``\\write18``).  It runs on the host (not the container sandbox — an intentional
-decoupling); OS-sandbox confinement of the build tree is deferred (spec §9).
+from the build directory or home), and shell escape (``\\write18``) off for every
+engine run (``-no-shell-escape`` on ``pdflatex``, plus ``shell_escape=f`` in the
+environment, which also covers the ``pdflatex`` runs ``latexmk`` makes).  TeX's
+own file access is paranoid (``openin_any``/``openout_any=p``): no absolute
+paths, no dotfiles, no ``..``, so a document can read only what it finds by
+relative name (the source's directory, ``assets_dir``, the TeX installation).
+It runs on the host (not the container sandbox — an intentional decoupling);
+OS-sandbox confinement of the build tree is deferred (spec §9).
 
 The tool runs with a wall-clock timeout and a private temp build dir, and
 returns a structured result.  It does not execute arbitrary host code by
@@ -70,12 +75,23 @@ _TEX_VARS = (
 )
 
 # The kpathsea TEXMF* configuration variables (exact — a strict secret boundary,
-# so a name like TEXMF_SECRET is not passed through).
+# so a name like TEXMF_SECRET is not passed through). Not TEXMFOUTPUT: paranoid
+# file access still allows absolute paths below it (a host TEXMFOUTPUT=/ would
+# reopen every file).
 _TEXMF_VARS = (
     "TEXMFHOME", "TEXMFVAR", "TEXMFCONFIG", "TEXMFCACHE", "TEXMFLOCAL",
     "TEXMFDIST", "TEXMFMAIN", "TEXMFSYSVAR", "TEXMFSYSCONFIG", "TEXMFDBS",
-    "TEXMFCNF", "TEXMFOUTPUT",
+    "TEXMFCNF",
 )
+
+# TeX's own security policy, pinned for the child. TeX reads these from
+# texmf.cnf and lets environment variables override that file, so they win
+# over the installation's settings and over anything the host has set.
+_TEX_POLICY = {
+    "shell_escape": "f",  # no \write18 at all (TeX Live defaults to restricted)
+    "openin_any": "p",    # reads: no absolute paths, no dotfiles, no ".."
+    "openout_any": "p",   # writes: the same
+}
 
 
 def _build_env(assets_dir: str | None, source_dir: str | None = None) -> dict[str, str]:
@@ -89,12 +105,14 @@ def _build_env(assets_dir: str | None, source_dir: str | None = None) -> dict[st
 
     ``assets_dir`` and ``source_dir`` become TEXINPUTS read roots so figures and
     ``\\input`` siblings resolve even though the build runs in a private temp dir.
+    TeX's security policy (``_TEX_POLICY``) is always set, overriding the host.
     """
     env = {
         k: v
         for k, v in os.environ.items()
         if k in _ENV_PASSTHROUGH or k in _TEXMF_VARS or k in _TEX_VARS
     }
+    env.update(_TEX_POLICY)
     env.setdefault("PATH", os.defpath)
     roots = [str(resolve_path(r)) for r in (assets_dir, source_dir) if r]
     if roots:
@@ -200,7 +218,8 @@ def _build_argv(engine: str, source: str) -> list[str]:
 
     latexmk runs with ``-norc`` so it won't read ``.latexmkrc`` (arbitrary
     Perl) from the build directory or home; pdflatex runs with
-    ``-no-shell-escape``. Neither path executes arbitrary host code by default.
+    ``-no-shell-escape``. Shell escape for the pdflatex runs latexmk makes is
+    turned off by ``shell_escape=f`` in the environment (``_TEX_POLICY``).
     """
     if engine == "latexmk":
         return [
@@ -257,10 +276,11 @@ def _read_log_tail(log_path: Path, fallback: str) -> str:
     ],
     description=(
         "Compile a LaTeX source file to PDF using a host TeX engine (latexmk or "
-        "pdflatex). Runs on the host: latexmk with -norc (no .latexmkrc) and "
-        "pdflatex with -no-shell-escape, so it does not execute arbitrary host "
-        "code by default. Returns the PDF path plus any compiler errors. "
-        "Requires TeX Live/MacTeX on PATH."
+        "pdflatex). Runs on the host with shell escape disabled and latexmk "
+        "without .latexmkrc, so it runs no other programs. The document can only "
+        "read files by relative name from its own directory, assets_dir and the "
+        "TeX installation (no absolute paths, dotfiles or '..'). Returns the PDF "
+        "path plus any compiler errors. Requires TeX Live/MacTeX on PATH."
     ),
 )
 def compile_document(
