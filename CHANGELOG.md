@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`kb_ingest_file` ingests text files.** Only a PDF had its text
+  extracted; any other file was stored with empty content, so a Markdown or
+  plain-text file was reported as ingested but never matched a search. UTF-8
+  text files are now ingested as text, and other binary files are refused
+  instead of stored unsearchable. A file that cannot be read returns an error
+  instead of raising.
+
 ## [0.6.1] - 2026-09-27
 
 Security and stability fixes for 0.6.0. The permission engine now judges the
