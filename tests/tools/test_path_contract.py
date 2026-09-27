@@ -169,7 +169,7 @@ class TestTildeAndRelativePaths:
     def test_compile_document_finds_the_source_it_was_checked_for(self, env):
         from agentic_cli.tools.document import compile_document
         (env["home"] / "doc.tex").write_text("\\documentclass{article}\n")
-        args = {"source_path": "~/doc.tex", "engine": "no-such-tex-engine"}
+        args = {"source_path": "~/doc.tex", "output_pdf": "~/doc.pdf", "engine": "no-such-tex-engine"}
         # source_path is gated as document.compile today; the tool must still
         # open the same location a path matcher would resolve.
         from agentic_cli.paths import resolve_path
@@ -181,14 +181,14 @@ class TestTildeAndRelativePaths:
     def test_compile_document_assets_dir_matches_the_checked_target(self, env):
         from agentic_cli.tools.document.compile import _build_env
         (env["home"] / "assets").mkdir()
-        [target] = checked(
+        targets = checked(
             "compile_document",
-            {"source_path": "doc.tex", "assets_dir": "~/assets"},
+            {"source_path": "doc.tex", "assets_dir": "~/assets", "output_pdf": "~/doc.pdf"},
             env,
         )
         roots = _build_env("~/assets")["TEXINPUTS"].split(":")
-        assert target == str(env["home"] / "assets")
-        assert target in roots
+        assert str(env["home"] / "assets") in targets
+        assert str(env["home"] / "assets") in roots
 
     def test_sandbox_inputs_stage_the_checked_file(self, env):
         from agentic_cli.tools.sandbox.manager import stage_inputs

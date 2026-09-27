@@ -14,17 +14,22 @@ def _fake_engine(monkeypatch, name="latexmk"):
     monkeypatch.setattr(mod, "_which", lambda n: f"/usr/bin/{n}" if n == name else None)
 
 
+def _out(tex) -> str:
+    """An explicit output_pdf for tests that don't care where the PDF goes."""
+    return str(Path(tex).parent / "out" / (Path(tex).stem + ".pdf"))
+
+
 def test_no_engine_returns_structured_error(monkeypatch, tmp_path):
     monkeypatch.setattr(mod, "_which", lambda n: None)
     tex = tmp_path / "r.tex"; tex.write_text("x")
-    r = compile_document(str(tex))
+    r = compile_document(str(tex), output_pdf=_out(tex))
     assert r["success"] is False
     assert "No LaTeX engine" in r["error"]
     assert r["engine"] is None
 
 
 def test_missing_source_returns_error(tmp_path):
-    r = compile_document(str(tmp_path / "nope.tex"))
+    r = compile_document(str(tmp_path / "nope.tex"), output_pdf=str(tmp_path / "out.pdf"))
     assert r["success"] is False and "not found" in r["error"]
 
 
@@ -59,7 +64,7 @@ def test_failure_parses_errors(monkeypatch, tmp_path):
         return subprocess.CompletedProcess(argv, 1, stdout="", stderr="")
 
     monkeypatch.setattr(mod, "_run", fake_run)
-    r = compile_document(str(tex))
+    r = compile_document(str(tex), output_pdf=_out(tex))
     assert r["success"] is False
     assert any("Undefined control sequence" in e for e in r["errors"])
     assert r["pdf_path"] is None
@@ -76,7 +81,7 @@ def test_argv_never_enables_shell_escape(monkeypatch, tmp_path):
         return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
 
     monkeypatch.setattr(mod, "_run", fake_run)
-    compile_document(str(tex), assets_dir="/tmp/assets")
+    compile_document(str(tex), output_pdf=_out(tex), assets_dir="/tmp/assets")
     assert "-shell-escape" not in captured["argv"]
     assert "-halt-on-error" in captured["argv"]
     assert captured["argv"][0] == "latexmk"
@@ -94,7 +99,7 @@ def test_pdflatex_uses_no_shell_escape_flag(monkeypatch, tmp_path):
         return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
 
     monkeypatch.setattr(mod, "_run", fake_run)
-    compile_document(str(tex))
+    compile_document(str(tex), output_pdf=_out(tex))
     assert captured["argv"][0] == "pdflatex"
     assert "-no-shell-escape" in captured["argv"]
 
@@ -107,7 +112,7 @@ def test_timeout_returns_structured_failure(monkeypatch, tmp_path):
         raise subprocess.TimeoutExpired(argv, timeout)
 
     monkeypatch.setattr(mod, "_run", fake_run)
-    r = compile_document(str(tex), timeout_s=1)
+    r = compile_document(str(tex), output_pdf=_out(tex), timeout_s=1)
     assert r["success"] is False and "timed out" in r["error"]
 
 
@@ -122,7 +127,7 @@ def test_run_raises_file_not_found_returns_structured_error(monkeypatch, tmp_pat
         raise FileNotFoundError("latexmk: not found")
 
     monkeypatch.setattr(mod, "_run", fake_run)
-    r = compile_document(str(tex))
+    r = compile_document(str(tex), output_pdf=_out(tex))
     assert r["success"] is False
     assert r["error"] is not None and len(r["error"]) > 0
     assert r["engine"] == "latexmk"
@@ -156,7 +161,7 @@ def test_forced_unsupported_engine_rejected(monkeypatch, tmp_path):
     """Finding 3: forcing engine='xelatex' (not in _ENGINES) must be rejected → No LaTeX engine error."""
     monkeypatch.setattr(mod, "_which", lambda n: f"/usr/bin/{n}" if n == "xelatex" else None)
     tex = tmp_path / "r.tex"; tex.write_text("x")
-    r = compile_document(str(tex), engine="xelatex")
+    r = compile_document(str(tex), output_pdf=_out(tex), engine="xelatex")
     assert r["success"] is False
     assert "No LaTeX engine" in r["error"]
 
@@ -225,7 +230,7 @@ def test_env_is_allowlisted_not_full_environ(monkeypatch, tmp_path):
         return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
 
     monkeypatch.setattr(mod, "_run", fake_run)
-    compile_document(str(tex), assets_dir="/tmp/assets")
+    compile_document(str(tex), output_pdf=_out(tex), assets_dir="/tmp/assets")
     assert "MY_SECRET_TOKEN" not in captured["env"]
     assert captured["env"]["PATH"] == "/custom/bin"
     assert captured["env"]["PERL5LIB"] == "/opt/perl/lib"
@@ -272,15 +277,15 @@ def test_delivery_replaces_a_symlink_planted_after_the_check(tmp_path):
 
 
 def test_capabilities_scope_assets_and_output():
-    """document.compile alone under-authorizes: reading assets_dir and writing
-    output_pdf need explicit (optional) filesystem capabilities."""
+    """document.compile alone under-authorizes: reading assets_dir (optional)
+    and writing output_pdf (always) need explicit filesystem capabilities."""
     from agentic_cli.tools.registry import get_registry
 
     defn = get_registry().get("compile_document")
     caps = {(c.name, c.target_arg, c.optional) for c in defn.capabilities}
     assert ("document.compile", "source_path", False) in caps
     assert ("filesystem.read", "assets_dir", True) in caps
-    assert ("filesystem.write", "output_pdf", True) in caps
+    assert ("filesystem.write", "output_pdf", False) in caps
 
 
 def test_env_passes_tex_config_but_not_texinputs(monkeypatch, tmp_path):
@@ -298,7 +303,7 @@ def test_env_passes_tex_config_but_not_texinputs(monkeypatch, tmp_path):
         return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
 
     monkeypatch.setattr(mod, "_run", fake_run)
-    compile_document(str(tex), assets_dir="/tmp/assets")
+    compile_document(str(tex), output_pdf=_out(tex), assets_dir="/tmp/assets")
     assert captured["env"].get("TEXMFHOME") == "/home/user/texmf"
     assert "/evil/inputs" not in captured["env"]["TEXINPUTS"]
     assert "/tmp/assets" in captured["env"]["TEXINPUTS"]
@@ -343,7 +348,7 @@ def test_env_excludes_nontex_vars_starting_with_tex(monkeypatch, tmp_path):
         return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
 
     monkeypatch.setattr(mod, "_run", fake_run)
-    compile_document(str(tex))
+    compile_document(str(tex), output_pdf=_out(tex))
     assert "TEXT_API_TOKEN" not in captured["env"]
     assert captured["env"].get("TEXMFHOME") == "/home/u/texmf"
 
@@ -362,7 +367,7 @@ def test_env_texmf_uses_exact_allowlist_not_prefix(monkeypatch, tmp_path):
         return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
 
     monkeypatch.setattr(mod, "_run", fake_run)
-    compile_document(str(tex))
+    compile_document(str(tex), output_pdf=_out(tex))
     assert captured["env"].get("TEXMFHOME") == "/home/u/texmf"
     assert "TEXMF_SECRET" not in captured["env"]
 
@@ -374,7 +379,7 @@ def test_assets_dir_with_path_separator_rejected(monkeypatch, tmp_path):
 
     _fake_engine(monkeypatch)
     tex = tmp_path / "r.tex"; tex.write_text("x")
-    r = compile_document(str(tex), assets_dir=f"assets{_os.pathsep}/etc")
+    r = compile_document(str(tex), output_pdf=_out(tex), assets_dir=f"assets{_os.pathsep}/etc")
     assert r["success"] is False
     assert "assets_dir" in r["error"].lower()
 
@@ -392,7 +397,7 @@ def test_latexmk_uses_norc(monkeypatch, tmp_path):
         return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
 
     monkeypatch.setattr(mod, "_run", fake_run)
-    compile_document(str(tex))
+    compile_document(str(tex), output_pdf=_out(tex))
     assert "-norc" in captured["argv"]
 
 
@@ -411,29 +416,10 @@ def test_option_like_source_name_not_treated_as_flag(monkeypatch, tmp_path):
         return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
 
     monkeypatch.setattr(mod, "_run", fake_run)
-    r = compile_document(str(tex))
+    r = compile_document(str(tex), output_pdf=_out(tex))
     assert "-pdflatex=evil.tex" not in captured["argv"]        # never a bare option-like token
     assert "./-pdflatex=evil.tex" in captured["argv"]          # anchored as a path
     assert r["success"] is True
-
-
-def test_default_delivery_to_source_dir_without_intermediates(monkeypatch, tmp_path):
-    """No output_pdf → PDF lands at <source dir>/<stem>.pdf, but the build's
-    intermediates never touch the source dir."""
-    _fake_engine(monkeypatch)
-    tex = tmp_path / "r.tex"; tex.write_text("x")
-
-    def fake_run(argv, *, cwd, env, timeout):
-        (Path(cwd) / "r.pdf").write_bytes(b"%PDF")
-        (Path(cwd) / "r.aux").write_text("aux")
-        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
-
-    monkeypatch.setattr(mod, "_run", fake_run)
-    r = compile_document(str(tex))                     # no output_pdf
-    assert r["success"] is True
-    assert r["pdf_path"] == str(tmp_path / "r.pdf")
-    assert (tmp_path / "r.pdf").is_file()              # delivered to source dir
-    assert not (tmp_path / "r.aux").exists()           # intermediate isolated in temp
 
 
 # --- P0-3 hardening: tail-read .log to bound memory on runaway compiler logs ---
@@ -478,7 +464,7 @@ def test_texinputs_roots_are_absolute_for_relative_source(monkeypatch, tmp_path)
         return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
 
     monkeypatch.setattr(mod, "_run", fake_run)
-    compile_document("r.tex", assets_dir="assets")  # relative paths
+    compile_document("r.tex", output_pdf="out.pdf", assets_dir="assets")  # relative paths
     entries = [e for e in captured["env"]["TEXINPUTS"].split(os.pathsep) if e]
     assert entries
     assert all(os.path.isabs(e) for e in entries)
@@ -533,7 +519,7 @@ def _timeout_seen(monkeypatch, tmp_path, **kwargs) -> float:
         return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
 
     monkeypatch.setattr(mod, "_run", fake_run)
-    assert compile_document(str(tex), **kwargs)["success"] is True
+    assert compile_document(str(tex), output_pdf=_out(tex), **kwargs)["success"] is True
     return seen[0]
 
 
@@ -564,3 +550,46 @@ def test_tex_environment_locks_down_shell_escape_and_file_access(monkeypatch):
     assert env["openin_any"] == "p"
     assert env["openout_any"] == "p"
     assert "TEXMFOUTPUT" not in env
+
+
+# --- output_pdf is required (the write is always permission-checked) ---------
+
+
+def test_output_pdf_is_required():
+    """Without output_pdf the PDF went next to the source with no
+    filesystem.write check (it could overwrite an existing PDF there)."""
+    import inspect
+
+    param = inspect.signature(compile_document).parameters["output_pdf"]
+    assert param.default is inspect.Parameter.empty
+
+
+def test_the_write_capability_is_always_checked():
+    from agentic_cli.tools.registry import get_registry
+
+    caps = get_registry().get("compile_document").capabilities
+    writes = [c for c in caps if c.name == "filesystem.write"]
+    assert [c.target_arg for c in writes] == ["output_pdf"]
+    assert writes[0].optional is False
+
+
+def test_output_pdf_is_required_in_the_model_declaration():
+    from google.adk.tools import FunctionTool
+
+    declaration = FunctionTool(compile_document)._get_declaration()
+    assert "output_pdf" in declaration.parameters.required
+
+
+def test_an_empty_output_pdf_is_refused(monkeypatch, tmp_path):
+    _fake_engine(monkeypatch)
+    tex = tmp_path / "r.tex"
+    tex.write_text("x")
+    ran = []
+    monkeypatch.setattr(mod, "_run", lambda *a, **k: ran.append(a))
+
+    r = compile_document(str(tex), output_pdf="")
+
+    assert r["success"] is False
+    assert "output_pdf" in r["error"]
+    assert ran == []
+    assert not (tmp_path / "r.pdf").exists()
