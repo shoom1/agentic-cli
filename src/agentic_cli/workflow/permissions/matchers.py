@@ -2,8 +2,25 @@
 """Matchers for capability targets.
 
 Each capability namespace (``filesystem.*``, ``http.*``, ``shell.*``) has a
-Matcher that knows how to canonicalize targets + patterns and compare them.
+Matcher that canonicalizes rule patterns and call targets and compares them.
 Unknown namespaces fall back to ``StringGlobMatcher``.
+
+Patterns and targets are canonicalized by **different** methods:
+
+* ``canonicalize_pattern`` is for rule targets (builtin rules, settings files).
+  It expands ``${workdir}``, ``${home}`` and ``${app_name}``, and anchors a
+  relative filesystem pattern to the project directory.
+* ``canonicalize_target`` is for values taken from a tool call's arguments.
+  It expands no placeholders, because the tool treats that text literally, and
+  it resolves a filesystem path exactly as the tool will
+  (:func:`agentic_cli.paths.resolve_path`). Using the pattern form here once
+  let the engine judge one location while the tool acted on another.
+
+``"*"`` is the wildcard only on the pattern side. As a *target* it is the
+sentinel a targetless capability resolves to (and what a grant for it widens
+to), so ``canonicalize_target`` never returns it for a real argument: a path
+``*`` is a file named ``*``, a URL is normalised, and a bare ``*`` command or
+string is rejected (``ValueError``), which the engine denies.
 """
 
 from __future__ import annotations
@@ -15,6 +32,7 @@ from pathlib import Path
 from typing import Protocol, runtime_checkable
 from urllib.parse import urlsplit, urlunsplit
 
+from agentic_cli.paths import resolve_path
 from agentic_cli.workflow.permissions.store import PermissionContext
 
 
@@ -22,23 +40,36 @@ from agentic_cli.workflow.permissions.store import PermissionContext
 class Matcher(Protocol):
     """Canonicalise and match targets for a capability namespace."""
 
-    def canonicalize(self, s: str, ctx: PermissionContext) -> str: ...
+    def canonicalize_pattern(self, s: str, ctx: PermissionContext) -> str: ...
+
+    def canonicalize_target(self, s: str, ctx: PermissionContext) -> str: ...
 
     def matches(self, pattern: str, target: str) -> bool: ...
 
 
 class StringGlobMatcher:
-    """Default fallback: ``${...}`` substitution + ``fnmatch``."""
+    """Default fallback: ``${...}`` substitution (patterns only) + ``fnmatch``."""
 
-    def canonicalize(self, s: str, ctx: PermissionContext) -> str:
+    def canonicalize_pattern(self, s: str, ctx: PermissionContext) -> str:
         if s == "*":
             return "*"
         return ctx.substitute(s).strip()
+
+    def canonicalize_target(self, s: str, ctx: PermissionContext) -> str:
+        return _literal_string_target(s)
 
     def matches(self, pattern: str, target: str) -> bool:
         if pattern == "*":
             return True
         return fnmatch.fnmatchcase(target, pattern)
+
+
+def _literal_string_target(s: str) -> str:
+    """A string argument as a target: stripped, never the wildcard sentinel."""
+    target = s.strip()
+    if target == "*":
+        raise ValueError("'*' is not a valid target")
+    return target
 
 
 @lru_cache(maxsize=512)
@@ -99,7 +130,7 @@ def _glob_to_regex(pattern: str) -> re.Pattern[str]:
 class PathMatcher:
     """Matcher for ``filesystem.*`` capabilities."""
 
-    def canonicalize(self, s: str, ctx: PermissionContext) -> str:
+    def canonicalize_pattern(self, s: str, ctx: PermissionContext) -> str:
         if s == "*":
             return "*"
         s = ctx.substitute(s)
@@ -107,6 +138,15 @@ class PathMatcher:
         if not p.is_absolute():
             p = ctx.workdir / p
         return str(Path(p).resolve(strict=False))
+
+    def canonicalize_target(self, s: str, ctx: PermissionContext) -> str:
+        """The location the tool will act on, via the shared resolver.
+
+        ``ctx`` is deliberately unused: a relative path is anchored where the
+        tool anchors it (the process's current directory), not at
+        ``ctx.workdir``. A ``*`` argument is a file named ``*``.
+        """
+        return str(resolve_path(s))
 
     def matches(self, pattern: str, target: str) -> bool:
         if pattern == "*":
@@ -119,10 +159,15 @@ class URLMatcher:
 
     _DEFAULT_PORTS = {"http": 80, "https": 443}
 
-    def canonicalize(self, s: str, ctx: PermissionContext) -> str:
+    def canonicalize_pattern(self, s: str, ctx: PermissionContext) -> str:
         if s == "*":
             return "*"
-        s = ctx.substitute(s)
+        return self._normalise(ctx.substitute(s))
+
+    def canonicalize_target(self, s: str, ctx: PermissionContext) -> str:
+        return self._normalise(s)
+
+    def _normalise(self, s: str) -> str:
         parts = urlsplit(s if "://" in s else f"https://{s}")
         scheme = parts.scheme.lower() or "https"
         host = (parts.hostname or "").lower()
@@ -159,10 +204,13 @@ class URLMatcher:
 class ShellMatcher:
     """Matcher for ``shell.*`` capabilities."""
 
-    def canonicalize(self, s: str, ctx: PermissionContext) -> str:
+    def canonicalize_pattern(self, s: str, ctx: PermissionContext) -> str:
         if s == "*":
             return "*"
         return ctx.substitute(s).strip()
+
+    def canonicalize_target(self, s: str, ctx: PermissionContext) -> str:
+        return _literal_string_target(s)
 
     def matches(self, pattern: str, target: str) -> bool:
         if pattern == "*":

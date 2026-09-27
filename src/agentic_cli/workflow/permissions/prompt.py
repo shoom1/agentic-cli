@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import uuid
+from pathlib import Path
 
 from agentic_cli.constants import truncate
 from agentic_cli.workflow.events import InputType, UserInputRequest
 from agentic_cli.workflow.permissions.capabilities import ResolvedCapability
-from agentic_cli.workflow.permissions.engine import broaden_target_for_grant
+from agentic_cli.workflow.permissions.engine import (
+    broaden_target_for_grant,
+    is_storable_grant,
+)
 from agentic_cli.workflow.permissions.rules import AskScope
 
 # Args that carry executable payloads, shown in the prompt for *.exec grants.
@@ -42,13 +46,18 @@ def build_request(
     tool_name: str,
     capabilities: list[ResolvedCapability],
     args: dict | None = None,
+    *,
+    home: Path | None = None,
 ) -> UserInputRequest:
     """Construct a ``UserInputRequest`` (CHOICE) describing the pending grant.
 
     The displayed target is the **effective grant scope** — i.e. what will be
     stored as a rule if the user picks Session or Always. For ``filesystem.*``
-    that's the parent directory (``/foo/**``) rather than the exact file, so
-    one grant covers every sibling/nested file.
+    that's a whole directory (``/foo/**``) rather than the exact file, so one
+    grant covers the files there (see ``broaden_target_for_grant``).
+
+    When nothing in the request can be remembered (a resource capability whose
+    tool named no target), only "Allow once" and "Deny" are offered.
 
     For code-execution capabilities (``*.exec``) the pending ``code``/``command``
     payload is shown: the capability target is ``*`` (allow-any-code), so the
@@ -57,7 +66,7 @@ def build_request(
     lines = [f"Tool `{tool_name}` wants:"]
     has_broadened_filesystem = False
     for cap in capabilities:
-        display_target = broaden_target_for_grant(cap)
+        display_target = broaden_target_for_grant(cap, home=home)
         if not display_target:
             display_target = "*"
         lines.append(f"  • {cap.name} → {display_target}")
@@ -65,7 +74,10 @@ def build_request(
             has_broadened_filesystem = True
     lines.append("")
     if has_broadened_filesystem:
-        lines.append("(Grant scope widened to the parent directory.)")
+        lines.append("(Grant scope widened to cover the whole directory.)")
+    rememberable = all(is_storable_grant(cap) for cap in capabilities)
+    if not rememberable:
+        lines.append("(This tool names no specific target, so approval applies to this call only.)")
     code_preview = _code_preview(capabilities, args)
     if code_preview:
         lines.append("Code to execute:")
@@ -79,12 +91,11 @@ def build_request(
         tool_name=tool_name,
         prompt=prompt,
         input_type=InputType.CHOICE,
-        choices=[
-            ALLOW_ONCE_CHOICE,
-            ALLOW_SESSION_CHOICE,
-            ALLOW_ALWAYS_CHOICE,
-            DENY_CHOICE,
-        ],
+        choices=(
+            [ALLOW_ONCE_CHOICE, ALLOW_SESSION_CHOICE, ALLOW_ALWAYS_CHOICE, DENY_CHOICE]
+            if rememberable
+            else [ALLOW_ONCE_CHOICE, DENY_CHOICE]
+        ),
         default=DENY_CHOICE,
     )
 

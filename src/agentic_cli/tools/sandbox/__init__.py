@@ -18,7 +18,10 @@ from agentic_cli.workflow.permissions import Capability
     # unsandboxed and stateful, so an "Allow always" for the stateless scratchpad
     # must NOT silently authorize it. A deliberate ``python.*`` grant still covers
     # both.
-    capabilities=[Capability("python.exec.stateful"), Capability("filesystem.read", target_arg="inputs")],
+    capabilities=[
+        Capability("python.exec.stateful"),
+        Capability("filesystem.read", target_arg="inputs", optional=True),
+    ],
     description=(
         "Execute Python code in a stateful session. "
         "State (variables, imports) persists across calls within the same session. "
@@ -37,15 +40,17 @@ from agentic_cli.workflow.permissions import Capability
 def sandbox_execute(
     code: str,
     session_id: str = "default",
-    timeout_seconds: int = 120,
+    timeout_seconds: int | None = None,
     inputs: list[str] | None = None,
 ) -> dict[str, Any]:
     """Execute Python code in a stateful sandbox.
 
     Args:
         code: Python code to execute.
-        session_id: Session identifier for state persistence (default: "default").
-        timeout_seconds: Maximum execution time in seconds.
+        session_id: Session identifier for state persistence (default: "default");
+            1-64 letters, digits, "-" or "_".
+        timeout_seconds: Maximum execution time in seconds. Omit to use the
+            configured default (``sandbox_timeout``).
         inputs: Optional list of host file paths to stage into
             inputs/<basename> inside the session before execution.
 

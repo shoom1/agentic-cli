@@ -294,12 +294,24 @@ class SafePythonExecutor:
         Args:
             code: Python code to execute.
             context: Optional variables to inject into namespace.
-            timeout_seconds: Maximum execution time.
+            timeout_seconds: Maximum execution time in seconds; ``None`` uses
+                ``default_timeout``.
 
         Returns:
             Dict with execution results.
         """
-        timeout = timeout_seconds or self.default_timeout
+        if timeout_seconds is not None and timeout_seconds <= 0:
+            return {
+                "success": False,
+                "output": "",
+                "result": None,
+                "error": (
+                    "timeout_seconds must be a positive number "
+                    f"(got {timeout_seconds!r})."
+                ),
+                "execution_time_ms": 0,
+            }
+        timeout = self.default_timeout if timeout_seconds is None else timeout_seconds
 
         # Validate code in-process for fast feedback
         logger.debug("python_executor.validation", code_length=len(code))

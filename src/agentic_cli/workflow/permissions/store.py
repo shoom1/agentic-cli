@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from agentic_cli.file_utils import atomic_write_text
+from agentic_cli.logging import Loggers
 from agentic_cli.settings_persistence import get_user_project_grants_path
 from agentic_cli.workflow.permissions.rules import Effect, Rule, RuleSource
 
@@ -102,7 +103,7 @@ def load_rules(
         for entry in section.get(effect_name) or []:
             cap = entry["capability"]
             target_raw = entry["target"]
-            target = get_matcher(cap).canonicalize(target_raw, ctx)
+            target = get_matcher(cap).canonicalize_pattern(target_raw, ctx)
             rules.append(Rule(cap, target, effect, source))
     return rules
 
@@ -117,6 +118,7 @@ def load_project_grants(app_name: str, ctx: PermissionContext) -> list[Rule]:
     on malformed JSON.
     """
     # Local import to avoid a cycle: matchers.py imports PermissionContext here.
+    from agentic_cli.workflow.permissions.capabilities import is_resource_capability  # noqa: PLC0415
     from agentic_cli.workflow.permissions.matchers import get_matcher  # noqa: PLC0415
 
     path = get_user_project_grants_path(app_name)
@@ -135,7 +137,20 @@ def load_project_grants(app_name: str, ctx: PermissionContext) -> list[Rule]:
     for effect_name, effect in (("allow", Effect.ALLOW), ("deny", Effect.DENY)):
         for entry in section.get(effect_name) or []:
             cap = entry["capability"]
-            target = get_matcher(cap).canonicalize(entry["target"], ctx)
+            # Grants are written by the engine from already-resolved targets, so
+            # they load as targets: expanding ${...} text here would turn a
+            # directory name into a different location. "*" is the stored
+            # wildcard of a targetless capability and stays one.
+            raw = entry["target"]
+            if raw == "*" and is_resource_capability(cap):
+                # Only a declaration naming no target produces this, and it
+                # approves the capability for every resource and every tool
+                # (0.6.0 stored one for web_search). Never honour it.
+                Loggers.workflow().warning(
+                    "permission_wildcard_grant_dropped", capability=cap, path=str(path)
+                )
+                continue
+            target = "*" if raw == "*" else get_matcher(cap).canonicalize_target(raw, ctx)
             rules.append(Rule(cap, target, effect, RuleSource.PROJECT))
     return rules
 

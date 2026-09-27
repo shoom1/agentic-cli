@@ -20,7 +20,12 @@ from agentic_cli.settings_persistence import (
     get_project_config_path,
     get_user_config_path,
 )
-from agentic_cli.workflow.permissions.capabilities import Capability, ResolvedCapability
+from agentic_cli.workflow.events import UserInputUnavailable
+from agentic_cli.workflow.permissions.capabilities import (
+    Capability,
+    ResolvedCapability,
+    is_resource_capability,
+)
 from agentic_cli.workflow.permissions.matchers import get_matcher
 from agentic_cli.workflow.permissions.rules import (
     AskScope,
@@ -43,14 +48,18 @@ if TYPE_CHECKING:
 logger = Loggers.workflow()
 
 
-def broaden_target_for_grant(cap: ResolvedCapability) -> str:
+def broaden_target_for_grant(cap: ResolvedCapability, home: Path | None = None) -> str:
     """Widen a resolved target before synthesising a session/persistent rule.
 
-    For ``filesystem.*`` capabilities we broaden to the parent directory
-    (glob) so one grant covers every file the agent writes/reads there —
-    otherwise each new file in the same directory would prompt again.
-    Other namespaces keep the exact resolved target (URL, command, etc.),
-    and the wildcard sentinel ``"*"`` passes through unchanged.
+    A ``filesystem.*`` grant covers a whole directory, so one approval covers
+    the files the agent works with there instead of prompting per file: a
+    directory target covers itself (``dir/**``), a file target covers the
+    directory it is in. A grant never widens to the filesystem root or to a
+    directory above ``home``: there the exact target is granted instead, since
+    ``/Users/**`` would cover every user's home.
+
+    Other namespaces keep the exact resolved target (URL, command, etc.), and
+    the wildcard sentinel ``"*"`` passes through unchanged.
 
     Used by both the engine (when installing a rule) and the prompt
     builder (when describing the pending grant) so the displayed scope
@@ -59,16 +68,34 @@ def broaden_target_for_grant(cap: ResolvedCapability) -> str:
     if cap.target == "*":
         return "*"
     if cap.name.startswith("filesystem."):
-        p = Path(cap.target)
-        parent = p.parent
-        # Already at the root: nothing to widen to.
-        if str(p) == str(parent):
-            return cap.target
-        # Avoid "//**" when the parent is the filesystem root.
-        if str(parent) == "/":
-            return "/**"
-        return f"{parent}/**"
+        target = Path(cap.target)
+        scope = target if target.is_dir() else target.parent
+        if _may_widen_to(scope, (home or Path.home()).resolve()):
+            return f"{scope}/**"
+        return cap.target
     return cap.target
+
+
+def _may_widen_to(directory: Path, home: Path) -> bool:
+    """Whether a grant may cover all of ``directory``.
+
+    Not the filesystem root, and not a proper ancestor of ``home`` (which
+    includes the root): those would reach far beyond what was asked for.
+    """
+    if directory == Path(directory.anchor):
+        return False
+    return not (home != directory and home.is_relative_to(directory))
+
+
+def is_storable_grant(cap: ResolvedCapability) -> bool:
+    """Whether approving ``cap`` may be remembered as a rule.
+
+    A resource capability (``filesystem``/``http``/``shell``) whose target is
+    the wildcard can only come from a declaration that names no target. Storing
+    it would approve that capability for every resource and every tool that
+    declares it, so such an approval applies to the current call only.
+    """
+    return not (cap.target == "*" and is_resource_capability(cap.name))
 
 
 class PermissionEngine:
@@ -102,7 +129,7 @@ class PermissionEngine:
             rules.append(
                 Rule(
                     capability=r.capability,
-                    target=get_matcher(r.capability).canonicalize(r.target, self._ctx),
+                    target=get_matcher(r.capability).canonicalize_pattern(r.target, self._ctx),
                     effect=r.effect,
                     source=r.source,
                 )
@@ -143,7 +170,14 @@ class PermissionEngine:
         if not self._settings.permissions_enabled:
             return CheckResult(True, "permissions disabled")
 
-        resolved = self._resolve(capabilities, args)
+        try:
+            resolved = self._resolve(capabilities, args)
+        except ValueError as exc:
+            # A target that cannot name a location (e.g. an embedded NUL) is
+            # refused outright rather than raised into the turn or put to the
+            # user: there is nothing meaningful to approve.
+            logger.warning("permission_invalid_target", tool=tool_name, error=str(exc))
+            return CheckResult(False, f"invalid target: {exc}")
         outcomes = self._evaluate(resolved)
 
         # No capabilities to evaluate (e.g. every cap is optional and its target
@@ -172,8 +206,23 @@ class PermissionEngine:
     def _resolve(
         self, capabilities: list[Capability], args: dict
     ) -> list[ResolvedCapability]:
+        """Resolve each capability's target from the call arguments.
+
+        Arguments are *targets*, canonicalized with ``canonicalize_target``: no
+        ``${...}`` placeholder is expanded and a path is resolved exactly as the
+        tool resolves it, so the engine judges the location the tool acts on.
+
+        Raises:
+            ValueError: if an argument cannot be resolved to a target.
+        """
         resolved: list[ResolvedCapability] = []
         for cap in capabilities:
+            if cap.target is not None:
+                matcher = get_matcher(cap.name)
+                resolved.append(
+                    ResolvedCapability(cap.name, matcher.canonicalize_target(cap.target, self._ctx))
+                )
+                continue
             if cap.target_arg is None:
                 resolved.append(ResolvedCapability(cap.name, "*"))
                 continue
@@ -185,7 +234,9 @@ class PermissionEngine:
             matcher = get_matcher(cap.name)
             items = value if isinstance(value, (list, tuple)) else [value]
             for item in items:
-                resolved.append(ResolvedCapability(cap.name, matcher.canonicalize(str(item), self._ctx)))
+                resolved.append(
+                    ResolvedCapability(cap.name, matcher.canonicalize_target(str(item), self._ctx))
+                )
         return resolved
 
     def _evaluate(
@@ -227,8 +278,20 @@ class PermissionEngine:
 
         unmatched = [cap for cap, r in outcomes if r is None]
         async with self._ask_lock:
-            request = build_request(tool_name, resolved, args)
-            response = await self._workflow.request_user_input(request)
+            request = build_request(tool_name, resolved, args, home=self._ctx.home)
+            # Fail closed: a prompt nobody can answer is a denial the model can
+            # read, not an exception that aborts the turn. Cancellation is not
+            # an answer and propagates (it is not an Exception).
+            try:
+                response = await self._workflow.request_user_input(request)
+            except UserInputUnavailable:
+                logger.warning("permission_no_approver", tool=tool_name)
+                return CheckResult(False, "no rule + no interactive approver to ask")
+            except Exception as exc:
+                logger.warning(
+                    "permission_prompt_failed", tool=tool_name, error=repr(exc),
+                )
+                return CheckResult(False, f"no rule + approval prompt failed: {exc}")
             scope = parse_response(response)
 
         if scope is AskScope.DENY:
@@ -243,12 +306,23 @@ class PermissionEngine:
             return CheckResult(True, "no rule + user allowed (once)")
 
         source = RuleSource.SESSION if scope is AskScope.SESSION else RuleSource.PROJECT
+        stored = 0
         for cap in unmatched:
-            target = broaden_target_for_grant(cap)
+            if not is_storable_grant(cap):
+                logger.warning(
+                    "permission_wildcard_grant_not_stored",
+                    tool=tool_name,
+                    capability=cap.name,
+                )
+                continue
+            target = broaden_target_for_grant(cap, home=self._ctx.home)
             rule = Rule(cap.name, target, Effect.ALLOW, source)
             self._session_rules.append(rule)
+            stored += 1
             if source is RuleSource.PROJECT:
                 append_project_rule(self._settings.app_name, rule, self._ctx.workdir)
 
+        if unmatched and not stored:
+            return CheckResult(True, "no rule + user allowed (once: nothing to remember)")
         label = "session" if source is RuleSource.SESSION else "always, saved to project"
         return CheckResult(True, f"no rule + user allowed ({label})")

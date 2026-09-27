@@ -7,6 +7,8 @@ from urllib.robotparser import RobotFileParser
 
 import httpx
 
+from agentic_cli.tools.webfetch._text import decode_body
+
 
 class RobotsTxtChecker:
     """Checks robots.txt compliance, fetching robots.txt through the shared
@@ -42,7 +44,7 @@ class RobotsTxtChecker:
                         buf.extend(chunk)
                         if len(buf) > self._MAX_ROBOTS_BYTES:
                             break
-                    text = buf.decode(response.charset_encoding or "utf-8", errors="replace")
+                    text = decode_body(bytes(buf), response.charset_encoding)
             parser = RobotFileParser()
             parser.parse(text.splitlines())
             return parser

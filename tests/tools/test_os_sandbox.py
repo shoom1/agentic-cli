@@ -94,17 +94,20 @@ class TestOSSandboxPolicy:
     def test_resolved_deny_write_paths_expands_and_resolves(self):
         policy = OSSandboxPolicy(deny_write_paths=["~/.bashrc", "/etc/"])
         resolved = policy.resolved_deny_write_paths()
-        assert len(resolved) == 2
-        home_bashrc = Path("~/.bashrc").expanduser().resolve()
-        assert home_bashrc in resolved
+        # The configured entries, expanded and resolved; the mandatory
+        # protected paths are appended (see test_os_sandbox_protected.py).
+        assert resolved[:2] == [
+            Path("~/.bashrc").expanduser().resolve(),
+            Path("/etc/").resolve(),
+        ]
         assert all(isinstance(p, Path) for p in resolved)
 
     def test_resolved_deny_read_paths(self):
         policy = OSSandboxPolicy(deny_read_paths=["~/.ssh/", "/secret"])
         resolved = policy.resolved_deny_read_paths()
-        assert len(resolved) == 2
-        home_ssh = Path("~/.ssh/").expanduser().resolve()
-        assert home_ssh in resolved
+        assert Path("~/.ssh/").expanduser().resolve() in resolved
+        assert Path("/secret").resolve() in resolved
+        assert len(resolved) == len(set(resolved)), "no duplicates"
 
     def test_resolved_readable_paths_returns_defaults(self):
         policy = OSSandboxPolicy()

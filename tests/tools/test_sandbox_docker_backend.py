@@ -96,7 +96,7 @@ def test_reset_session_kills_container(tmp_path):
         assert backend.has_session("s1")
         backend.reset_session("s1")
         assert not backend.has_session("s1")
-        assert any(name == "agentic-sbx-s1" for name, _ in rt.killed)
+        assert any(name.startswith("agentic-sbx-s1-") for name, _ in rt.killed)
     finally:
         ctx.__exit__(None, None, None)
 
@@ -114,7 +114,7 @@ def test_bad_startup_message_kills_container(tmp_path):
         rt.start = start_bad
         result = backend.execute("print(1)", "s1", timeout_seconds=5, working_dir=tmp_path)
         assert result.success is False
-        assert any(name == "agentic-sbx-s1" for name, _ in rt.killed)  # cleaned up, not orphaned
+        assert any(name.startswith("agentic-sbx-s1-") for name, _ in rt.killed)  # cleaned up, not orphaned
         assert not backend.has_session("s1")
     finally:
         ctx.__exit__(None, None, None)

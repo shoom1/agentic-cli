@@ -280,3 +280,70 @@ class TestSandboxExecuteRendering:
         ]
         ui, _, _ = await _render(events)
         assert len(ui.rich()) == 1, ui.rich()
+
+
+class TestToolResultMarkup:
+    """Tool output is data, not Rich markup. A path such as ``notes[/draft].md``
+    in an error message used to be parsed as a closing tag: MarkupError in the
+    consumer, and the turn failed after the tool had already run."""
+
+    class _MarkupRenderingSession(RecordingSession):
+        """Renders ``add_rich`` strings through Rich, as the real session does."""
+
+        def add_rich(self, renderable):
+            from thinking_prompt import rich_to_ansi
+
+            rich_to_ansi(renderable)  # raises MarkupError on bad markup
+            super().add_rich(renderable)
+
+    async def _render_markup(self, events):
+        mp = MessageProcessor()
+        ui = self._MarkupRenderingSession()
+        result = await mp.process(
+            message="hi",
+            workflow_controller=ReplayController(ReplayWorkflow(events)),
+            ui=ui,
+            settings=_settings(),
+        )
+        return ui, result
+
+    @pytest.mark.asyncio
+    async def test_bracketed_error_text_does_not_break_the_turn(self):
+        ui, result = await self._render_markup([
+            WorkflowEvent.tool_call("read_file", {"path": "notes[/draft].md"}),
+            WorkflowEvent.tool_result(
+                "read_file",
+                {"success": False, "error": "File not found: notes[/draft].md"},
+                success=False,
+            ),
+            WorkflowEvent.text("done"),
+        ])
+        assert result.delivered, result
+        from thinking_prompt import rich_to_ansi
+
+        text = "".join(str(rich_to_ansi(c[1])) for c in ui.calls if c[0] == "rich")
+        assert "notes[/draft].md" in text, text
+
+    @pytest.mark.asyncio
+    async def test_style_like_text_in_output_is_shown_literally(self):
+        ui, result = await self._render_markup([
+            WorkflowEvent.tool_call("custom_tool", {}),
+            WorkflowEvent.tool_result(
+                "custom_tool", "[bold red]x[/bold red]", success=True
+            ),
+            WorkflowEvent.text("done"),
+        ])
+        assert result.delivered, result
+        from thinking_prompt import rich_to_ansi
+
+        text = "".join(str(rich_to_ansi(c[1])) for c in ui.calls if c[0] == "rich")
+        assert "[bold red]" in text, text
+
+    @pytest.mark.asyncio
+    async def test_bracketed_tool_name_does_not_break_the_turn(self):
+        ui, result = await self._render_markup([
+            WorkflowEvent.tool_call("mcp[/x]", {}),
+            WorkflowEvent.tool_result("mcp[/x]", {"success": True}, success=True),
+            WorkflowEvent.text("done"),
+        ])
+        assert result.delivered, result

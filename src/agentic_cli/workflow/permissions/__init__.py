@@ -11,6 +11,7 @@ from agentic_cli.workflow.permissions.capabilities import (
     CapabilitiesSpec,
     EXEMPT,
     ResolvedCapability,
+    is_resource_capability,
 )
 from agentic_cli.workflow.permissions.engine import PermissionEngine
 from agentic_cli.workflow.permissions.rules import (
@@ -34,4 +35,5 @@ __all__ = [
     "ResolvedCapability",
     "Rule",
     "RuleSource",
+    "is_resource_capability",
 ]

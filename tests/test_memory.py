@@ -433,18 +433,33 @@ class TestMemoryToolParity:
             token.var.reset(token)
         assert registry_out == factory_out == {"success": True, "updated": True}
 
-    def test_update_output_parity_tags_cleared_with_none(self, mock_context):
+    def test_update_output_parity_tags_cleared_with_empty_list(self, mock_context):
         store, factory_tools, mt, token = self._ctx(mock_context)
         try:
             r = mt.save_memory(content="orig", tags=["clear-me"])
             item_id = r["item_id"]
-            # Both entry points must clear tags when explicitly passed None.
-            mt.update_memory(item_id=item_id, tags=None)
-            assert store._items[item_id].tags is None
+            # Both entry points clear tags when passed an empty list.
+            mt.update_memory(item_id=item_id, tags=[])
+            assert not store._items[item_id].tags
 
             r2 = mt.save_memory(content="orig2", tags=["clear-me-2"])
-            factory_tools[2](item_id=r2["item_id"], tags=None)
-            assert store._items[r2["item_id"]].tags is None
+            factory_tools[2](item_id=r2["item_id"], tags=[])
+            assert not store._items[r2["item_id"]].tags
+        finally:
+            token.var.reset(token)
+
+    def test_update_with_null_tags_leaves_them_unchanged(self, mock_context):
+        """Models often send null for an optional argument they mean to omit,
+        so None must not wipe the tags."""
+        store, factory_tools, mt, token = self._ctx(mock_context)
+        try:
+            r = mt.save_memory(content="orig", tags=["keep"])
+            mt.update_memory(item_id=r["item_id"], content="new", tags=None)
+            assert store._items[r["item_id"]].tags == ["keep"]
+
+            r2 = mt.save_memory(content="orig2", tags=["keep-2"])
+            factory_tools[2](item_id=r2["item_id"], content="new", tags=None)
+            assert store._items[r2["item_id"]].tags == ["keep-2"]
         finally:
             token.var.reset(token)
 

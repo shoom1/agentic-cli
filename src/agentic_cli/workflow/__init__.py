@@ -10,7 +10,12 @@ Submodules:
 """
 
 # Light imports - always available (fast)
-from agentic_cli.workflow.events import WorkflowEvent, EventType, UserInputRequest
+from agentic_cli.workflow.events import (
+    EventType,
+    UserInputRequest,
+    UserInputUnavailable,
+    WorkflowEvent,
+)
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.model_settings import ModelSettings, ThinkingSettings
 from agentic_cli.workflow.mcp import MCPServerConfig
@@ -60,6 +65,7 @@ __all__ = [
     "WorkflowEvent",
     "EventType",
     "UserInputRequest",
+    "UserInputUnavailable",
     # Factory
     "create_workflow_manager_from_settings",
     "create_workflow_manager_from_yaml",

@@ -22,7 +22,6 @@ The helpers (``_search_kbs``, ``_ingest_text_with_kb`` /
 managers as explicit args so both call paths stay in sync.
 """
 
-from pathlib import Path
 from typing import Any
 
 import structlog
@@ -30,6 +29,7 @@ import structlog
 logger = structlog.get_logger(__name__)
 
 from agentic_cli.constants import truncate
+from agentic_cli.paths import resolve_path
 from agentic_cli.tools.registry import (
     register_tool,
     ToolCategory,
@@ -355,7 +355,7 @@ async def _ingest_file_with_kb(
     if not path:
         return {"success": False, "error": "path is required"}
 
-    source_path = Path(path).expanduser().resolve()
+    source_path = resolve_path(path)
     if not source_path.exists() or not source_path.is_file():
         return {"success": False, "error": f"File not found: {path}"}
 

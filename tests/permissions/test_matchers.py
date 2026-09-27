@@ -20,7 +20,7 @@ def ctx(tmp_path: Path) -> PermissionContext:
 class TestStringGlobMatcher:
     def test_canonicalize_strips_and_substitutes(self, ctx):
         m = StringGlobMatcher()
-        assert m.canonicalize("  ${workdir}/foo  ", ctx) == f"{ctx.workdir}/foo"
+        assert m.canonicalize_pattern("  ${workdir}/foo  ", ctx) == f"{ctx.workdir}/foo"
 
     def test_matches_exact(self, ctx):
         m = StringGlobMatcher()
@@ -67,7 +67,7 @@ class TestPathMatcher:
     def test_canonicalize_substitutes_workdir(self, ctx):
         from agentic_cli.workflow.permissions.matchers import PathMatcher
         m = PathMatcher()
-        assert m.canonicalize("${workdir}/src/**", ctx) == f"{ctx.workdir}/src/**"
+        assert m.canonicalize_pattern("${workdir}/src/**", ctx) == f"{ctx.workdir}/src/**"
 
     def test_canonicalize_expands_home(self, ctx):
         from agentic_cli.workflow.permissions.matchers import PathMatcher
@@ -75,18 +75,18 @@ class TestPathMatcher:
         # ctx.home is a fake absolute path; expanduser() won't change it,
         # but an input like "~/x" should be expanded via the OS user's home
         # only when there isn't a ${home} substitution — we use ${home}.
-        assert m.canonicalize("${home}/.cache", ctx) == "/fake/home/.cache"
+        assert m.canonicalize_pattern("${home}/.cache", ctx) == "/fake/home/.cache"
 
     def test_canonicalize_anchors_relative_to_workdir(self, ctx):
         from agentic_cli.workflow.permissions.matchers import PathMatcher
         m = PathMatcher()
-        assert m.canonicalize("foo/bar", ctx) == f"{ctx.workdir}/foo/bar"
+        assert m.canonicalize_pattern("foo/bar", ctx) == f"{ctx.workdir}/foo/bar"
 
     def test_canonicalize_resolves_dotdot(self, ctx):
         from agentic_cli.workflow.permissions.matchers import PathMatcher
         m = PathMatcher()
         # ${workdir} is tmp_path; ../x resolves out of it.
-        out = m.canonicalize("${workdir}/a/../b", ctx)
+        out = m.canonicalize_pattern("${workdir}/a/../b", ctx)
         assert out == f"{ctx.workdir}/b"
 
     def test_match_single_star_is_single_segment(self, ctx):
@@ -119,23 +119,23 @@ class TestURLMatcher:
     def test_canonicalize_lowercases_scheme_and_host(self, ctx):
         from agentic_cli.workflow.permissions.matchers import URLMatcher
         m = URLMatcher()
-        assert m.canonicalize("HTTPS://API.GitHub.com/repos", ctx) == "https://api.github.com/repos"
+        assert m.canonicalize_pattern("HTTPS://API.GitHub.com/repos", ctx) == "https://api.github.com/repos"
 
     def test_canonicalize_strips_default_port(self, ctx):
         from agentic_cli.workflow.permissions.matchers import URLMatcher
         m = URLMatcher()
-        assert m.canonicalize("https://example.com:443/x", ctx) == "https://example.com/x"
-        assert m.canonicalize("http://example.com:80/x", ctx) == "http://example.com/x"
+        assert m.canonicalize_pattern("https://example.com:443/x", ctx) == "https://example.com/x"
+        assert m.canonicalize_pattern("http://example.com:80/x", ctx) == "http://example.com/x"
 
     def test_canonicalize_defaults_to_https(self, ctx):
         from agentic_cli.workflow.permissions.matchers import URLMatcher
         m = URLMatcher()
-        assert m.canonicalize("api.github.com/x", ctx) == "https://api.github.com/x"
+        assert m.canonicalize_pattern("api.github.com/x", ctx) == "https://api.github.com/x"
 
     def test_canonicalize_drops_fragment(self, ctx):
         from agentic_cli.workflow.permissions.matchers import URLMatcher
         m = URLMatcher()
-        assert m.canonicalize("https://example.com/x#frag", ctx) == "https://example.com/x"
+        assert m.canonicalize_pattern("https://example.com/x#frag", ctx) == "https://example.com/x"
 
     def test_matches_host_exact(self, ctx):
         from agentic_cli.workflow.permissions.matchers import URLMatcher
@@ -154,7 +154,7 @@ class TestShellMatcher:
     def test_canonicalize_trims_and_substitutes(self, ctx):
         from agentic_cli.workflow.permissions.matchers import ShellMatcher
         m = ShellMatcher()
-        assert m.canonicalize("  ls ${workdir}  ", ctx) == f"ls {ctx.workdir}"
+        assert m.canonicalize_pattern("  ls ${workdir}  ", ctx) == f"ls {ctx.workdir}"
 
     def test_matches_whole_command_glob(self, ctx):
         from agentic_cli.workflow.permissions.matchers import ShellMatcher
@@ -198,3 +198,83 @@ class TestCapMatches:
         from agentic_cli.workflow.permissions.matchers import _cap_matches
         assert _cap_matches("*", "filesystem.read")
         assert _cap_matches("*", "anything")
+
+
+class TestTargetCanonicalization:
+    """Call arguments are targets, not patterns.
+
+    ``canonicalize_pattern`` expands ``${workdir}``/``${home}``/``${app_name}``
+    because rules are written with them. ``canonicalize_target`` must not: the
+    tool treats that text literally, so expanding it would make the engine
+    judge a different location than the one the tool acts on.
+    """
+
+    @pytest.fixture
+    def cwd(self, tmp_path, monkeypatch):
+        work = tmp_path / "cwd"
+        work.mkdir()
+        monkeypatch.chdir(work)
+        return work.resolve()
+
+    def test_path_target_keeps_placeholder_text_literal(self, ctx, cwd):
+        from agentic_cli.workflow.permissions.matchers import PathMatcher
+        out = PathMatcher().canonicalize_target("${workdir}/f.txt", ctx)
+        assert out == str(cwd / "${workdir}" / "f.txt")
+
+    def test_path_target_uses_the_shared_resolver(self, ctx, cwd):
+        from agentic_cli.paths import resolve_path
+        from agentic_cli.workflow.permissions.matchers import PathMatcher
+        for raw in ("a/b.txt", "~/n.txt", "x/../y", str(cwd / "abs")):
+            assert PathMatcher().canonicalize_target(raw, ctx) == str(resolve_path(raw))
+
+    def test_path_target_is_relative_to_cwd_not_ctx_workdir(self, ctx, cwd):
+        """The tool opens relative paths against the process cwd, so the
+        engine must judge them there too, even when ``ctx.workdir`` differs."""
+        from agentic_cli.workflow.permissions.matchers import PathMatcher
+        assert ctx.workdir.resolve() != cwd
+        assert PathMatcher().canonicalize_target("f.txt", ctx) == str(cwd / "f.txt")
+
+    def test_path_pattern_still_anchors_to_ctx_workdir(self, ctx, cwd):
+        from agentic_cli.workflow.permissions.matchers import PathMatcher
+        assert PathMatcher().canonicalize_pattern("src/**", ctx) == f"{ctx.workdir}/src/**"
+
+    def test_url_target_keeps_placeholder_text_literal(self, ctx):
+        from agentic_cli.workflow.permissions.matchers import URLMatcher
+        out = URLMatcher().canonicalize_target("https://example.com/${home}/x", ctx)
+        assert out == "https://example.com/${home}/x"
+
+    def test_url_target_is_still_normalised(self, ctx):
+        from agentic_cli.workflow.permissions.matchers import URLMatcher
+        out = URLMatcher().canonicalize_target("HTTPS://Example.com:443/x#f", ctx)
+        assert out == "https://example.com/x"
+
+    def test_shell_target_keeps_placeholder_text_literal(self, ctx):
+        from agentic_cli.workflow.permissions.matchers import ShellMatcher
+        assert ShellMatcher().canonicalize_target(" ls ${workdir} ", ctx) == "ls ${workdir}"
+
+    def test_string_target_keeps_placeholder_text_literal(self, ctx):
+        assert StringGlobMatcher().canonicalize_target(" ${app_name} ", ctx) == "${app_name}"
+
+    def test_star_is_the_wildcard_only_in_patterns(self, ctx):
+        from agentic_cli.workflow.permissions.matchers import (
+            PathMatcher, ShellMatcher, URLMatcher,
+        )
+        for m in (PathMatcher(), URLMatcher(), ShellMatcher(), StringGlobMatcher()):
+            assert m.canonicalize_pattern("*", ctx) == "*"
+
+    def test_star_argument_is_a_literal_file_name(self, ctx, cwd):
+        """``"*"`` as a target is the wildcard sentinel (it is what a targetless
+        capability resolves to, and what a grant widens to). An argument that
+        happens to be ``*`` must not become it."""
+        from agentic_cli.workflow.permissions.matchers import PathMatcher
+        assert PathMatcher().canonicalize_target("*", ctx) == str(cwd / "*")
+
+    def test_star_url_argument_is_not_the_wildcard(self, ctx):
+        from agentic_cli.workflow.permissions.matchers import URLMatcher
+        assert URLMatcher().canonicalize_target("*", ctx) != "*"
+
+    def test_star_string_argument_is_rejected(self, ctx):
+        from agentic_cli.workflow.permissions.matchers import ShellMatcher
+        for m in (ShellMatcher(), StringGlobMatcher()):
+            with pytest.raises(ValueError):
+                m.canonicalize_target(" * ", ctx)

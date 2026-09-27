@@ -47,9 +47,17 @@ def validate_code(code: str) -> tuple[bool, str]:
     return True, ""
 
 
-def collect_execution(kc, msg_id: str, timeout: float, working_dir) -> dict:
-    """Collect iopub messages for one execution into a result dict."""
+def collect_execution(kc, msg_id: str, timeout: float | None, working_dir) -> dict:
+    """Collect iopub messages for one execution into a result dict.
+
+    ``timeout`` bounds the whole execution, not the gap between two messages
+    (a cell that prints steadily would otherwise never time out); ``None``
+    waits until the kernel reports idle. On expiry the result carries
+    ``timed_out=True`` and the cell is still running: stopping it is the
+    caller's job.
+    """
     start = time.monotonic()
+    deadline = None if timeout is None else start + timeout
     stdout_parts: list[str] = []
     stderr_parts: list[str] = []
     stdout_len = 0
@@ -58,19 +66,26 @@ def collect_execution(kc, msg_id: str, timeout: float, working_dir) -> dict:
     artifacts: list[str] = []
     error_text = ""
 
+    def _timed_out() -> dict:
+        return {
+            "success": False,
+            "stdout": "".join(stdout_parts),
+            "stderr": "".join(stderr_parts),
+            "result": result_value,
+            "artifacts": artifacts,
+            "execution_time": time.monotonic() - start,
+            "error": f"Execution timed out after {timeout}s",
+            "timed_out": True,
+        }
+
     while True:
+        remaining = None if deadline is None else deadline - time.monotonic()
+        if remaining is not None and remaining <= 0:
+            return _timed_out()
         try:
-            msg = kc.get_iopub_msg(timeout=timeout)
-        except (queue.Empty, TimeoutError):  # timeout waiting for kernel output
-            return {
-                "success": False,
-                "stdout": "".join(stdout_parts),
-                "stderr": "".join(stderr_parts),
-                "result": result_value,
-                "artifacts": artifacts,
-                "execution_time": time.monotonic() - start,
-                "error": f"Execution timed out after {timeout}s",
-            }
+            msg = kc.get_iopub_msg(timeout=remaining)
+        except (queue.Empty, TimeoutError):  # deadline reached waiting for output
+            return _timed_out()
 
         if msg.get("parent_header", {}).get("msg_id") != msg_id:
             continue
@@ -107,4 +122,5 @@ def collect_execution(kc, msg_id: str, timeout: float, working_dir) -> dict:
         "artifacts": artifacts,
         "execution_time": time.monotonic() - start,
         "error": error_text,
+        "timed_out": False,
     }

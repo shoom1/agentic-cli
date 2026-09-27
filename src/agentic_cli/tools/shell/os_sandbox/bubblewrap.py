@@ -142,7 +142,7 @@ class BubblewrapSandbox(OSSandbox):
                 args.extend(["--ro-bind", "/dev/null", str(dp)])
 
         # Hide denied read paths with empty tmpfs overlays
-        deny_reads = policy.resolved_deny_read_paths()
+        deny_reads = policy.resolved_deny_read_paths(working_dir)
         for drp in deny_reads:
             if drp.is_dir():
                 args.extend(["--tmpfs", str(drp)])

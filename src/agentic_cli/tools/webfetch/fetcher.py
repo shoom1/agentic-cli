@@ -8,6 +8,7 @@ from urllib.parse import urljoin, urlparse
 
 import httpx
 
+from agentic_cli.tools.webfetch._text import decode_body
 from agentic_cli.tools.webfetch.validator import URLValidator, BlockedAddressError
 from agentic_cli.tools.webfetch.robots import RobotsTxtChecker
 from agentic_cli.tools.webfetch.transport import PinnedTransport
@@ -29,6 +30,7 @@ class FetchResult:
     error: str | None = None
     truncated: bool = False
     from_cache: bool = False
+    status_code: int | None = None
 
 
 @dataclass
@@ -90,11 +92,12 @@ class ContentFetcher:
                 for _ in range(self.MAX_REDIRECTS + 1):
                     async with client.stream("GET", current_url, timeout=timeout) as response:
                         status = response.status_code
+                        reason = response.reason_phrase
                         headers = response.headers
                         content_type = headers.get("content-type", "text/html")
                         is_pdf = "application/pdf" in content_type.lower()
                         cap = self._max_pdf_bytes if is_pdf else self._max_content_bytes
-                        encoding = response.charset_encoding or "utf-8"
+                        charset = response.charset_encoding
                         buf = bytearray()
                         truncated = False
                         async for chunk in response.aiter_bytes():
@@ -128,10 +131,18 @@ class ContentFetcher:
                             continue
 
                     # Final response (non-redirect, or redirect without Location).
+                    # An error page is not the content asked for: never
+                    # returned as content, summarized, ingested or cached.
+                    if status >= 400:
+                        label = f"HTTP {status} {reason}".rstrip()
+                        return FetchResult(
+                            success=False, status_code=status,
+                            error=f"{label} for {current_url}",
+                        )
                     if is_pdf:
                         content: str | bytes = bytes(buf)
                     else:
-                        content = buf.decode(encoding, errors="replace")
+                        content = decode_body(bytes(buf), charset)
                         if truncated:
                             content += f"\n\n[Content truncated at {cap} bytes]"
                     self._cache[original_url] = CachedResponse(
@@ -140,7 +151,7 @@ class ContentFetcher:
                     )
                     return FetchResult(
                         success=True, content=content, content_type=content_type,
-                        truncated=truncated, from_cache=False,
+                        truncated=truncated, from_cache=False, status_code=status,
                     )
                 else:
                     return FetchResult(success=False, error=f"Too many redirects (max {self.MAX_REDIRECTS})")

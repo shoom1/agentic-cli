@@ -20,7 +20,11 @@ from abc import ABC, abstractmethod
 from contextvars import ContextVar, Token
 from typing import Any, AsyncGenerator, Awaitable, Callable, Iterator, TYPE_CHECKING
 
-from agentic_cli.workflow.events import WorkflowEvent, UserInputRequest
+from agentic_cli.workflow.events import (
+    UserInputRequest,
+    UserInputUnavailable,
+    WorkflowEvent,
+)
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.models import ModelRegistry
 from agentic_cli.workflow.sessions import (
@@ -273,9 +277,11 @@ class BaseWorkflowManager(ABC):
         default registry issued — never by ``__name__``. A plain callable an
         application happens to name ``kb_search`` is not the framework's tool:
         substituting the service-bound variant for it would silently run
-        different code, and it is denied at permission time anyway. It is
-        therefore passed through untouched, as is a tool registered into some
-        other ``ToolRegistry``.
+        different code. It is therefore passed through untouched, as is a tool
+        registered into some other ``ToolRegistry``. A callable passed through
+        is denied at permission time; an ADK built-in tool (such as
+        ``GoogleSearchTool``) runs inside the model and never reaches the
+        permission check at all.
 
         Conversely ``register(func, name=...)`` leaves the caller holding a
         callable whose ``__name__`` is the private implementation name; that
@@ -1078,7 +1084,7 @@ class BaseWorkflowManager(ABC):
             User's response string.
 
         Raises:
-            RuntimeError: If no callback is registered.
+            UserInputUnavailable: If no callback is registered (a RuntimeError).
         """
         logger.debug(
             "user_input_requested",
@@ -1088,7 +1094,7 @@ class BaseWorkflowManager(ABC):
 
         callback = self._user_input_callback.get()
         if callback is None:
-            raise RuntimeError(
+            raise UserInputUnavailable(
                 "No user input callback registered. "
                 "Call set_input_callback() before invoking tools that require user input."
             )

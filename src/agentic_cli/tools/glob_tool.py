@@ -6,10 +6,10 @@ Provides file discovery using glob patterns:
 
 import os
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Literal
 
 from agentic_cli.file_utils import glob_pattern_escapes_root, path_is_within
+from agentic_cli.paths import resolve_path
 from agentic_cli.tools.registry import (
     ToolCategory,
     register_tool,
@@ -59,7 +59,7 @@ def glob(
         - truncated: True if results were truncated
         - path: Resolved search path
     """
-    search_path = Path(path).resolve()
+    search_path = resolve_path(path)
 
     if not search_path.exists():
         return {

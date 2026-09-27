@@ -2,6 +2,9 @@
 """LangGraph tool wrapper that gates calls via PermissionEngine.
 
 Adapter check order matches ADK's PermissionPlugin:
+0. The tool is identified by the object the registry issued
+   (``identify_tool``), never by its name: a plain function that merely shares
+   a registered tool's name is not that tool and gets no capabilities.
 1. EXEMPT tool → returned unwrapped (no engine call ever).
 2. Tool has no capability declaration → wrapper returns deny dict at call time.
 3. Engine absent from service registry → fail closed (deny) when permissions
@@ -16,7 +19,7 @@ import functools
 from typing import Any, Callable
 
 from agentic_cli.logging import Loggers
-from agentic_cli.tools.registry import get_registry
+from agentic_cli.tools.registry import identify_tool
 from agentic_cli.workflow.permissions.capabilities import _CapabilityExempt
 from agentic_cli.workflow.service_registry import PERMISSION_ENGINE, get_service
 
@@ -27,11 +30,11 @@ def wrap_tool_for_permission(tool: Callable[..., Any]) -> Callable[..., Any]:
     """Wrap ``tool`` so every call goes through ``PermissionEngine.check``.
 
     Exempt tools (``capabilities=EXEMPT``) are returned unmodified.
-    Tools that never declared capabilities (``defn is None``) get a wrapper
-    that returns a deny error dict, mirroring ADK.
+    A tool the registry did not issue (``defn is None``), whatever it is named,
+    gets a wrapper that returns a deny error dict, mirroring ADK.
     """
-    name = getattr(tool, "__name__", str(tool))
-    defn = get_registry().get(name)
+    defn = identify_tool(tool)
+    name = defn.name if defn is not None else getattr(tool, "__name__", str(tool))
     caps = defn.capabilities if defn else None
 
     if isinstance(caps, _CapabilityExempt):

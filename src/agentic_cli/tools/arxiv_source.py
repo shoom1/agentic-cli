@@ -11,9 +11,34 @@ import threading
 import time
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlsplit
 
 from agentic_cli.knowledge_base.sources import SearchSource, SearchSourceResult
 from agentic_cli.logging import Loggers
+
+#: The arXiv API endpoint that search and metadata lookups query. The arXiv
+#: tools declare it as their fixed ``http.read`` target.
+ARXIV_API_URL = "https://export.arxiv.org/api/query"
+#: Where paper PDFs are downloaded from; ``download_pdf`` refuses anything else,
+#: so the tools' declared ``http.read`` target stays true.
+ARXIV_PDF_URL = "https://arxiv.org/pdf"
+
+
+def _is_arxiv_pdf_url(url: str) -> bool:
+    """True only for ``https://arxiv.org/pdf/...`` with no credentials or port."""
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError:
+        return False
+    return (
+        parts.scheme == "https"
+        and parts.hostname == "arxiv.org"
+        and port is None
+        and parts.username is None
+        and parts.password is None
+        and parts.path.startswith("/pdf/")
+    )
 
 logger = Loggers.knowledge_base()
 
@@ -246,6 +271,11 @@ class ArxivSearchSource(SearchSource):
         """
         from agentic_cli.tools.webfetch_tool import get_or_create_fetcher
 
+        # The URL comes from the feed. ingest_arxiv_paper declares ARXIV_PDF_URL
+        # as the location it reads, so anything else is refused, not fetched.
+        if not _is_arxiv_pdf_url(pdf_url):
+            raise RuntimeError(f"PDF URL must be under {ARXIV_PDF_URL}/: {pdf_url}")
+
         await self._wait_for_rate_limit_async()
 
         fetcher = get_or_create_fetcher()
@@ -258,7 +288,7 @@ class ArxivSearchSource(SearchSource):
             raise RuntimeError("PDF fetch returned no content")
         return content if isinstance(content, bytes) else content.encode("utf-8", "replace")
 
-    _API_BASE_URL = "https://export.arxiv.org/api/query"
+    _API_BASE_URL = ARXIV_API_URL
 
     @staticmethod
     def _extract_arxiv_id_from_entry(entry: Any) -> str:
@@ -423,7 +453,7 @@ class ArxivSearchSource(SearchSource):
         # Enforce rate limiting
         self.wait_for_rate_limit()
 
-        base_url = "https://export.arxiv.org/api/query?"
+        base_url = f"{ARXIV_API_URL}?"
 
         # Build search query
         query_parts = [f"all:{query}"]

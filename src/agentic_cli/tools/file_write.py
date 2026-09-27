@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from agentic_cli.file_utils import atomic_write_text
+from agentic_cli.paths import resolve_path
 from agentic_cli.tools.registry import (
     ToolCategory,
     register_tool,
@@ -47,13 +48,10 @@ def write_file(
         - size: File size in bytes after write
         - created: True if file was newly created, False if overwritten
     """
-    file_path = Path(path).resolve()
+    file_path = resolve_path(path)
     existed = file_path.exists()
 
-    # Create parent directories if requested
-    if create_dirs:
-        file_path.parent.mkdir(parents=True, exist_ok=True)
-    elif not file_path.parent.exists():
+    if not create_dirs and not file_path.parent.exists():
         return {
             "success": False,
             "error": f"Parent directory does not exist: {file_path.parent}",
@@ -61,7 +59,9 @@ def write_file(
         }
 
     try:
-        atomic_write_text(file_path, content)
+        if create_dirs:
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(file_path, content, preserve_mode=True)
         size = file_path.stat().st_size
 
         return {
@@ -118,7 +118,7 @@ def edit_file(
         - replacements: Number of replacements made
         - size: File size in bytes after edit
     """
-    file_path = Path(path).resolve()
+    file_path = resolve_path(path)
 
     if not file_path.exists():
         return {
@@ -159,10 +159,16 @@ def edit_file(
                 "error": f"Invalid regex pattern: {e}",
             }
 
-        if replace_all:
-            new_content, count = pattern.subn(new_text, content)
-        else:
-            new_content, count = pattern.subn(new_text, content, count=1)
+        try:
+            new_content, count = pattern.subn(
+                new_text, content, count=0 if replace_all else 1
+            )
+        except re.error as e:
+            return {
+                "success": False,
+                "error": f"Invalid regex replacement text: {e}",
+                "path": str(file_path),
+            }
     else:
         # Plain text replacement
         if replace_all:
@@ -181,7 +187,7 @@ def edit_file(
 
     # Write the modified content
     try:
-        atomic_write_text(file_path, new_content)
+        atomic_write_text(file_path, new_content, preserve_mode=True)
         size = file_path.stat().st_size
 
         return {

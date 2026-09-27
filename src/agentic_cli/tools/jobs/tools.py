@@ -138,6 +138,10 @@ def job_list(state: str = "", tag: str = "") -> dict:
         return jm
     from agentic_cli.tools.jobs.backends import JobState
 
-    state_filter = JobState(state) if state else None
+    try:
+        state_filter = JobState(state) if state else None
+    except ValueError:
+        valid = ", ".join(s.value for s in JobState)
+        return {"success": False, "error": f"unknown job state {state!r}; use one of: {valid}"}
     recs = jm.list(state=state_filter, tag=tag or None)
     return {"success": True, "jobs": [r.summary() for r in recs], "count": len(recs)}

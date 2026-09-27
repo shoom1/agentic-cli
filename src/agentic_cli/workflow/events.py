@@ -61,6 +61,15 @@ class InputType(str, Enum):
     CONFIRM = "confirm"
 
 
+class UserInputUnavailable(RuntimeError):
+    """No consumer is attached to answer a :class:`UserInputRequest`.
+
+    Raised by ``request_user_input`` when no input callback is installed (a
+    headless run, or a script driving the manager directly). A RuntimeError so
+    existing handlers keep catching it.
+    """
+
+
 @dataclass
 class UserInputRequest:
     """Request for user input from a tool.

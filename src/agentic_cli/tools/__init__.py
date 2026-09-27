@@ -83,9 +83,6 @@ from agentic_cli.tools.registry import (
     register_tool,
 )
 
-# Re-export google_search_tool from ADK for convenience
-from google.adk.tools import google_search as google_search_tool
-
 __all__ = [
     # Registry classes
     "ToolCategory",
@@ -114,8 +111,6 @@ __all__ = [
     "web_search",
     # Web fetch (content fetching and summarization)
     "web_fetch",
-    # Search (ADK built-in - note: can't mix with function calling)
-    "google_search_tool",
     # Standard tool functions (ready to use with agents)
     "kb_search",
     "kb_ingest_text",
@@ -152,13 +147,39 @@ _lazy_tool_modules = {
     "sandbox_tools": "agentic_cli.tools.sandbox",
 }
 
+# Deprecated (removed in 0.7.0). Resolved on every access, never cached or
+# listed in __all__: importing this package must not load ADK or warn, and
+# every caller that uses the name should see the warning, not only the first.
+_GOOGLE_SEARCH_TOOL_DEPRECATION = (
+    "agentic_cli.tools.google_search_tool is deprecated and will be removed in "
+    "0.7.0; use agentic_cli.tools.web_search. It re-exports ADK's built-in "
+    "google_search, which runs inside the model and is never checked by the "
+    "permission engine. For native Google Search, import GoogleSearchTool from "
+    "google.adk.tools.google_search_tool; here it works only as an agent's sole "
+    "tool (include_state_tools=False)."
+)
+
 
 def __getattr__(name: str):
-    """Lazy import for framework tool modules."""
+    """Lazy import for framework tool modules and deprecated re-exports."""
     if name in _lazy_tool_modules:
         import importlib
 
         module = importlib.import_module(_lazy_tool_modules[name])
         globals()[name] = module  # Cache for future access
         return module
+    if name == "google_search_tool":
+        import warnings
+
+        try:
+            from google.adk.tools import google_search
+        except ImportError as exc:  # PEP 562: a failed lookup is AttributeError
+            raise AttributeError(
+                f"module {__name__!r} has no attribute {name!r}"
+            ) from exc
+
+        warnings.warn(
+            _GOOGLE_SEARCH_TOOL_DEPRECATION, DeprecationWarning, stacklevel=2
+        )
+        return google_search
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

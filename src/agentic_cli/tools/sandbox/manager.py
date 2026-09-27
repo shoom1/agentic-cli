@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import atexit
 import os
+import re
 import stat
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -16,6 +17,11 @@ from typing import Any, TYPE_CHECKING
 from agentic_cli.logging import Loggers
 from agentic_cli.file_utils import copy_regular_file_no_follow, sanitize_filename
 from agentic_cli.tools.sandbox.models import ExecutionResult
+
+#: A session ID names a directory and a container, so it is validated rather
+#: than sanitized: sanitizing mapped "" to the directory holding every session
+#: and made different IDs (``a.b``, ``a_b``) share one.
+_SESSION_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
 if TYPE_CHECKING:
     from agentic_cli.config import BaseSettings
@@ -141,6 +147,14 @@ class SandboxManager:
         Returns:
             ExecutionResult with output and metadata.
         """
+        if not isinstance(session_id, str) or not _SESSION_ID.fullmatch(session_id):
+            return ExecutionResult(
+                success=False,
+                error=(
+                    "session_id must be 1-64 characters of letters, digits, '-' "
+                    f"or '_' (got {session_id!r})."
+                ),
+            )
         if timeout_seconds is not None and timeout_seconds <= 0:
             return ExecutionResult(
                 success=False,

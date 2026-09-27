@@ -726,9 +726,17 @@ class MessageProcessor:
         first_line = lines[0]
         state.status_line = f"{icon} {tool_name}: {first_line}{duration_str}"
         style = "green" if success else "red"
-        display = f"[{style}]{icon}[/{style}] {tool_name}: {first_line}{duration_str}"
+        # Tool names and output are data: escape them, or a path such as
+        # "notes[/draft].md" is parsed as a closing tag (MarkupError, failing
+        # the turn after the tool already ran) and "[bold]" text restyles it.
+        from rich.markup import escape
+
+        display = (
+            f"[{style}]{icon}[/{style}] {escape(tool_name)}: "
+            f"{escape(first_line)}{duration_str}"
+        )
         if len(lines) > 1:
-            display += "\n" + "\n".join(lines[1:])
+            display += "\n" + escape("\n".join(lines[1:]))
         ui.add_rich(display)
 
     async def _handle_code_execution(

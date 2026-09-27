@@ -50,7 +50,7 @@ async def ask_clarification(
             "response": None,
         }
 
-    from agentic_cli.workflow.events import InputType
+    from agentic_cli.workflow.events import InputType, UserInputUnavailable
 
     # Create user input request
     request = UserInputRequest(
@@ -62,7 +62,16 @@ async def ask_clarification(
     )
 
     # Request user input (this will block until CLI provides response)
-    response = await workflow.request_user_input(request)
+    try:
+        response = await workflow.request_user_input(request)
+    except UserInputUnavailable:
+        return {
+            "success": False,
+            "question": question,
+            "options": options or [],
+            "error": "No interactive user is attached to answer the question",
+            "response": None,
+        }
 
     return {
         "success": True,

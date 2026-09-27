@@ -66,7 +66,6 @@ def make_memory_tools(memory_store, embedding_service=None) -> list[Callable]:
         [save_memory, search_memory, update_memory, delete_memory]
     """
     from agentic_cli.tools.memory_tools import (
-        _SENTINEL,
         _delete_memory_with_store,
         _save_memory_with_store,
         _search_memory_with_store,
@@ -96,7 +95,7 @@ def make_memory_tools(memory_store, embedding_service=None) -> list[Callable]:
     def update_memory(
         item_id: str,
         content: str | None = None,
-        tags: list[str] | None = _SENTINEL,
+        tags: list[str] | None = None,
     ) -> dict[str, Any]:
         return _update_memory_with_store(memory_store, item_id, content, tags)
 
@@ -399,15 +398,17 @@ def make_sandbox_tool(sandbox_manager, workflow_manager=None) -> Callable:
     def sandbox_execute(
         code: str,
         session_id: str = "default",
-        timeout_seconds: int = 120,
+        timeout_seconds: int | None = None,
         inputs: list[str] | None = None,
     ) -> dict[str, Any]:
         """Execute Python code in a stateful sandbox.
 
         Args:
             code: Python code to execute.
-            session_id: Session identifier for state persistence.
-            timeout_seconds: Maximum execution time in seconds.
+            session_id: Session identifier for state persistence: 1-64 letters,
+                digits, "-" or "_".
+            timeout_seconds: Maximum execution time in seconds. Omit to use
+                the configured default (``sandbox_timeout``).
             inputs: Optional list of host file paths to stage into
                 inputs/<basename> inside the session before execution.
 

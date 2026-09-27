@@ -4,6 +4,7 @@ import fcntl
 import json
 import os
 import re
+import secrets
 import stat
 import tempfile
 import time
@@ -128,25 +129,54 @@ def copy_regular_file_no_follow(src: Path, dst: Path) -> None:
         os.close(fd)
 
 
-def _atomic_write(path: Path, content: str) -> None:
+def _open_temp_like_a_new_file(path: Path) -> tuple[int, Path]:
+    """Create a uniquely-named temp file beside ``path``, opened for writing,
+    with the mode a plain ``open()`` would give a new file (0666 minus the
+    umask: the kernel applies it). ``mkstemp`` would force 0600."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    for _ in range(100):
+        tmp_path = path.parent / f".{path.name}.{secrets.token_hex(6)}.tmp"
+        try:
+            return os.open(tmp_path, flags, 0o666), tmp_path
+        except FileExistsError:
+            continue
+    raise FileExistsError(f"could not create a temp file beside {path}")
+
+
+def _atomic_write(path: Path, content: str, *, preserve_mode: bool = False) -> None:
     """Write content to a file atomically and durably.
 
     Writes to a uniquely-named temp file in the same directory, flushes and
     fsyncs it, then atomically renames it over the target. Notes:
-    - Unique temp name (tempfile.mkstemp) so two concurrent writers can't
-      truncate each other's temp file the way a fixed ``.tmp`` name allows.
+    - Unique temp name so two concurrent writers can't truncate each other's
+      temp file the way a fixed ``.tmp`` name allows.
     - fsync before the rename so a crash can't persist the rename ahead of the
       data and leave a torn/empty file in place of the previously-good one.
     - Explicit UTF-8 so output doesn't depend on the locale (a C/POSIX locale
       would otherwise raise UnicodeEncodeError on non-ASCII content).
+    - Permissions: by default the file is private (0600), right for the
+      framework's own state. ``preserve_mode=True`` is for files the user
+      owns: an existing file keeps its permission bits and a new one gets the
+      process default, as with a plain write. Setuid/setgid are not carried
+      over (the kernel clears them when a non-root process writes a file).
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(
-        dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp"
-    )
-    tmp_path = Path(tmp_name)
+    existing = None
+    if preserve_mode:
+        try:
+            existing = stat.S_IMODE(os.stat(path).st_mode) & 0o777
+        except FileNotFoundError:
+            pass
+        fd, tmp_path = _open_temp_like_a_new_file(path)
+    else:
+        fd, tmp_name = tempfile.mkstemp(
+            dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp"
+        )
+        tmp_path = Path(tmp_name)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
+            if existing is not None:
+                os.fchmod(f.fileno(), existing)
             f.write(content)
             f.flush()
             os.fsync(f.fileno())
@@ -161,6 +191,10 @@ def atomic_write_json(path: Path, data: Any, indent: int = 2) -> None:
     _atomic_write(path, json.dumps(data, indent=indent))
 
 
-def atomic_write_text(path: Path, content: str) -> None:
-    """Write text to a file atomically."""
-    _atomic_write(path, content)
+def atomic_write_text(path: Path, content: str, *, preserve_mode: bool = False) -> None:
+    """Write text to a file atomically.
+
+    The file is private (0600) unless ``preserve_mode``: then an existing
+    file keeps its permission bits and a new one gets the process default.
+    """
+    _atomic_write(path, content, preserve_mode=preserve_mode)

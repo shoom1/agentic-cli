@@ -1,11 +1,16 @@
 """Compile a LaTeX document to PDF with a host TeX engine.
 
 ``compile_document`` is a narrow, permission-gated tool: it runs ``latexmk``
-(preferred) or ``pdflatex`` as a guarded subprocess with the two arbitrary-code
+(preferred) or ``pdflatex`` as a guarded subprocess with the arbitrary-code
 vectors disabled — ``latexmk`` with ``-norc`` (so no ``.latexmkrc`` Perl is read
-from the build directory or home) and ``pdflatex`` with ``-no-shell-escape`` (no
-``\\write18``).  It runs on the host (not the container sandbox — an intentional
-decoupling); OS-sandbox confinement of the build tree is deferred (spec §9).
+from the build directory or home), and shell escape (``\\write18``) off for every
+engine run (``-no-shell-escape`` on ``pdflatex``, plus ``shell_escape=f`` in the
+environment, which also covers the ``pdflatex`` runs ``latexmk`` makes).  TeX's
+own file access is paranoid (``openin_any``/``openout_any=p``): no absolute
+paths, no dotfiles, no ``..``, so a document can read only what it finds by
+relative name (the source's directory, ``assets_dir``, the TeX installation).
+It runs on the host (not the container sandbox — an intentional decoupling);
+OS-sandbox confinement of the build tree is deferred (spec §9).
 
 The tool runs with a wall-clock timeout and a private temp build dir, and
 returns a structured result.  It does not execute arbitrary host code by
@@ -39,6 +44,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from agentic_cli.paths import resolve_path
 from agentic_cli.tools.registry import ToolCategory, register_tool
 from agentic_cli.workflow.permissions import Capability
 
@@ -69,12 +75,23 @@ _TEX_VARS = (
 )
 
 # The kpathsea TEXMF* configuration variables (exact — a strict secret boundary,
-# so a name like TEXMF_SECRET is not passed through).
+# so a name like TEXMF_SECRET is not passed through). Not TEXMFOUTPUT: paranoid
+# file access still allows absolute paths below it (a host TEXMFOUTPUT=/ would
+# reopen every file).
 _TEXMF_VARS = (
     "TEXMFHOME", "TEXMFVAR", "TEXMFCONFIG", "TEXMFCACHE", "TEXMFLOCAL",
     "TEXMFDIST", "TEXMFMAIN", "TEXMFSYSVAR", "TEXMFSYSCONFIG", "TEXMFDBS",
-    "TEXMFCNF", "TEXMFOUTPUT",
+    "TEXMFCNF",
 )
+
+# TeX's own security policy, pinned for the child. TeX reads these from
+# texmf.cnf and lets environment variables override that file, so they win
+# over the installation's settings and over anything the host has set.
+_TEX_POLICY = {
+    "shell_escape": "f",  # no \write18 at all (TeX Live defaults to restricted)
+    "openin_any": "p",    # reads: no absolute paths, no dotfiles, no ".."
+    "openout_any": "p",   # writes: the same
+}
 
 
 def _build_env(assets_dir: str | None, source_dir: str | None = None) -> dict[str, str]:
@@ -88,18 +105,16 @@ def _build_env(assets_dir: str | None, source_dir: str | None = None) -> dict[st
 
     ``assets_dir`` and ``source_dir`` become TEXINPUTS read roots so figures and
     ``\\input`` siblings resolve even though the build runs in a private temp dir.
+    TeX's security policy (``_TEX_POLICY``) is always set, overriding the host.
     """
     env = {
         k: v
         for k, v in os.environ.items()
         if k in _ENV_PASSTHROUGH or k in _TEXMF_VARS or k in _TEX_VARS
     }
+    env.update(_TEX_POLICY)
     env.setdefault("PATH", os.defpath)
-    roots = [
-        str(Path(r).expanduser().resolve())
-        for r in (assets_dir, source_dir)
-        if r
-    ]
+    roots = [str(resolve_path(r)) for r in (assets_dir, source_dir) if r]
     if roots:
         # Trailing empty entry lets kpathsea append its default search path.
         env["TEXINPUTS"] = os.pathsep.join(roots) + os.pathsep
@@ -114,10 +129,12 @@ def _deliver_no_follow(produced: Path, dest: Path) -> None:
     symlink the link itself is replaced (not written through), so an
     attacker-placed symlink can't redirect the write outside the intended path.
 
-    This protects only the final path component. A symlinked ``dest.parent``
-    (or an ancestor) still redirects the write; the permission engine
-    canonicalizes ``output_pdf`` at check time, but a check→write window
-    remains. Full parent containment is deferred (spec §9, OS-sandbox).
+    ``compile_document`` refuses an ``output_pdf`` that is already a symlink
+    (the engine judged the link's target, not the link), so this guard covers a
+    link planted after that check. It protects only the final path component:
+    ``dest`` is resolved with the same resolver the engine uses, but a
+    check→write window remains for its parents. Full parent containment is
+    deferred (spec §9, OS-sandbox).
     """
     dest.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(
@@ -201,7 +218,8 @@ def _build_argv(engine: str, source: str) -> list[str]:
 
     latexmk runs with ``-norc`` so it won't read ``.latexmkrc`` (arbitrary
     Perl) from the build directory or home; pdflatex runs with
-    ``-no-shell-escape``. Neither path executes arbitrary host code by default.
+    ``-no-shell-escape``. Shell escape for the pdflatex runs latexmk makes is
+    turned off by ``shell_escape=f`` in the environment (``_TEX_POLICY``).
     """
     if engine == "latexmk":
         return [
@@ -251,43 +269,46 @@ def _read_log_tail(log_path: Path, fallback: str) -> str:
     category=ToolCategory.EXECUTION,
     capabilities=[
         Capability("document.compile", target_arg="source_path"),
-        # The tool also reads assets_dir and writes output_pdf when those are
-        # supplied; scope them explicitly (optional → not exercised when absent).
+        # The tool also reads assets_dir when supplied (optional → not
+        # exercised when absent) and always writes output_pdf.
         Capability("filesystem.read", target_arg="assets_dir", optional=True),
-        Capability("filesystem.write", target_arg="output_pdf", optional=True),
+        Capability("filesystem.write", target_arg="output_pdf"),
     ],
     description=(
         "Compile a LaTeX source file to PDF using a host TeX engine (latexmk or "
-        "pdflatex). Runs on the host: latexmk with -norc (no .latexmkrc) and "
-        "pdflatex with -no-shell-escape, so it does not execute arbitrary host "
-        "code by default. Returns the PDF path plus any compiler errors. "
-        "Requires TeX Live/MacTeX on PATH."
+        "pdflatex). Runs on the host with shell escape disabled and latexmk "
+        "without .latexmkrc, so it runs no other programs. The document can only "
+        "read files by relative name from its own directory, assets_dir and the "
+        "TeX installation (no absolute paths, dotfiles or '..'). Returns the PDF "
+        "path plus any compiler errors. Requires TeX Live/MacTeX on PATH."
     ),
 )
 def compile_document(
     source_path: str,
-    output_pdf: str | None = None,
+    output_pdf: str,
     assets_dir: str | None = None,
     engine: str | None = None,
-    timeout_s: int = 120,
+    timeout_s: int = 300,
 ) -> dict[str, Any]:
     """Compile a LaTeX file to PDF (guarded subprocess; host TeX engine).
 
     Args:
         source_path: Path to the .tex file to compile.
-        output_pdf: If set, the produced PDF is copied here (parents created);
-            build intermediates are isolated in a private temp dir.
+        output_pdf: Where to write the produced PDF (parents created). Required,
+            so the write is always permission-checked; build intermediates are
+            isolated in a private temp dir.
         assets_dir: Directory prepended to TEXINPUTS so figures/resources resolve
             by bare name (e.g. an artifacts dir).
         engine: Force an engine ("latexmk"/"pdflatex"); default auto-detects
             (latexmk preferred).
-        timeout_s: Wall-clock timeout; the process is killed on expiry.
+        timeout_s: Wall-clock timeout for the whole build (all passes), in
+            seconds (default 300); the process group is killed on expiry.
 
     Returns:
         dict with success, pdf_path, engine, log_tail, errors, duration_ms, and
         (on setup/timeout failure) error.
     """
-    src = Path(source_path)
+    src = resolve_path(source_path)
     if not src.is_file():
         return {
             "success": False, "error": f"Source not found: {source_path}",
@@ -304,6 +325,27 @@ def compile_document(
             "pdf_path": None, "engine": None, "log_tail": "", "errors": [],
             "duration_ms": 0,
         }
+
+    if not output_pdf:
+        return {
+            "success": False, "error": "output_pdf is required: where to write the PDF",
+            "pdf_path": None, "engine": None, "log_tail": "", "errors": [],
+            "duration_ms": 0,
+        }
+
+    if Path(output_pdf).expanduser().is_symlink():
+        # The permission engine judged output_pdf by its resolved location (the
+        # link target), but delivery replaces the link itself, so the write
+        # would land where nothing was checked. Refuse rather than guess.
+        return {
+            "success": False,
+            "error": f"output_pdf must not be a symlink: {output_pdf}",
+            "pdf_path": None, "engine": None, "log_tail": "", "errors": [],
+            "duration_ms": 0,
+        }
+    # Fixed now, before TeX runs: resolving at delivery time would follow a
+    # symlink planted at output_pdf during the compile.
+    dest = resolve_path(output_pdf)
 
     chosen = _detect_engine(engine)
     if chosen is None:
@@ -362,7 +404,6 @@ def compile_document(
                 "duration_ms": duration_ms, "error": None,
             }
 
-        dest = Path(output_pdf) if output_pdf else (src.parent / (src.stem + ".pdf"))
         try:
             _deliver_no_follow(produced, dest)
         except OSError as exc:

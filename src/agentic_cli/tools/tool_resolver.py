@@ -15,6 +15,7 @@ assembly, which key on ``tool.__name__``.
 from __future__ import annotations
 
 import difflib
+import warnings
 from importlib import import_module
 from typing import Any, Callable
 
@@ -48,12 +49,35 @@ def _import_dotted(path: str) -> Any:
         raise ValueError(
             f"Cannot import module {module_path!r} for tool {path!r}: {exc}"
         ) from exc
-    try:
-        return getattr(module, obj_name)
-    except AttributeError as exc:
-        raise ValueError(
-            f"Module {module_path!r} has no attribute {obj_name!r} (tool {path!r})"
-        ) from exc
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            obj = getattr(module, obj_name)
+        except AttributeError as exc:
+            raise ValueError(
+                f"Module {module_path!r} has no attribute {obj_name!r} (tool {path!r})"
+            ) from exc
+    _reissue(caught, path)
+    return obj
+
+
+def _reissue(caught: list[warnings.WarningMessage], path: str) -> None:
+    """Re-issue warnings raised while resolving a dotted tool reference.
+
+    The reference comes from configuration (an ``AgentConfig`` or agents
+    YAML), so no frame of the application's own code is on the stack. A
+    ``DeprecationWarning`` there would be attributed to this module and hidden
+    by Python's default filters, so it is re-issued as a ``FutureWarning``,
+    which is shown, and names the reference. Other warnings pass through as
+    they were raised.
+    """
+    for w in caught:
+        if issubclass(w.category, DeprecationWarning):
+            warnings.warn(
+                f"tool reference {path!r}: {w.message}", FutureWarning, stacklevel=4
+            )
+        else:
+            warnings.warn_explicit(w.message, w.category, w.filename, w.lineno)
 
 
 def _unknown_name_error(name: str, registry: ToolRegistry) -> ValueError:
