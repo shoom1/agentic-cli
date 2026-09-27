@@ -355,17 +355,27 @@ async def _ingest_file_with_kb(
     if not path:
         return {"success": False, "error": "path is required"}
 
-    source_path = resolve_path(path)
-    if not source_path.exists() or not source_path.is_file():
-        return {"success": False, "error": f"File not found: {path}"}
-
-    file_bytes = source_path.read_bytes()
+    try:
+        source_path = resolve_path(path)
+        if not source_path.is_file():
+            return {"success": False, "error": f"File not found: {path}"}
+        file_bytes = source_path.read_bytes()
+    except ValueError:
+        return {"success": False, "error": f"Not a valid path: {path!r}"}
+    except OSError as e:
+        return {"success": False, "error": f"Cannot read file {path}: {e.strerror or e}"}
     file_extension = source_path.suffix.lower() or ".bin"
 
-    content = ""
     if file_extension == ".pdf":
-        from agentic_cli.knowledge_base.manager import KnowledgeBaseManager
-        content = KnowledgeBaseManager.extract_text_from_pdf(source_path)
+        content = _extract_text_from_bytes(file_bytes)
+    else:
+        try:
+            content = file_bytes.decode("utf-8")
+        except UnicodeDecodeError:
+            return {
+                "success": False,
+                "error": f"Cannot ingest {path}: not a PDF or a UTF-8 text file",
+            }
 
     meta = _build_meta(authors, abstract, tags)
     meta["file_size_bytes"] = len(file_bytes)
@@ -756,9 +766,10 @@ async def kb_ingest_text(
         Capability("filesystem.read", target_arg="path"),
     ],
     description=(
-        "Ingest a local file into the knowledge base. PDFs have their text "
-        "extracted automatically. Triggers a filesystem.read permission "
-        "check for the supplied path."
+        "Ingest a local file into the knowledge base: a PDF, whose text is "
+        "extracted, or a UTF-8 text file (Markdown, plain text, source code). "
+        "Other binary files are refused. Triggers a filesystem.read "
+        "permission check for the supplied path."
     ),
     requires="kb_manager",
 )
@@ -771,10 +782,10 @@ async def kb_ingest_file(
     abstract: str = "",
     tags: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Ingest a local file into the knowledge base.
+    """Ingest a local PDF or UTF-8 text file into the knowledge base.
 
     Args:
-        path: Absolute or relative path to a local file.
+        path: Absolute or relative path to a PDF or a UTF-8 text file.
         title: Document title (defaults to file stem).
         source_type: Source type (defaults to ``local``).
         source_url: Optional URL of the source.

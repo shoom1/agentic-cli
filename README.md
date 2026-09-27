@@ -612,7 +612,7 @@ from agentic_cli.tools import (
 |------|---------|
 | `kb_search` | Hybrid BM25 + vector search with RRF fusion, filters by source/date |
 | `kb_ingest_text` | Ingest in-memory text content (no FS or network access) |
-| `kb_ingest_file` | Ingest a local file; declares `filesystem.read(path)` for the permission engine |
+| `kb_ingest_file` | Ingest a local PDF or UTF-8 text file; declares `filesystem.read(path)` for the permission engine |
 | `kb_ingest_url` | Ingest content from an http(s) URL; routed through the hardened `ContentFetcher` and declares `http.read(url)` |
 | `kb_read` | Return the per-document markdown sidecar (lazy-generated on first read) |
 | `kb_list` | List documents, optionally filtered |
