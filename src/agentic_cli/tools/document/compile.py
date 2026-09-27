@@ -269,10 +269,10 @@ def _read_log_tail(log_path: Path, fallback: str) -> str:
     category=ToolCategory.EXECUTION,
     capabilities=[
         Capability("document.compile", target_arg="source_path"),
-        # The tool also reads assets_dir and writes output_pdf when those are
-        # supplied; scope them explicitly (optional → not exercised when absent).
+        # The tool also reads assets_dir when supplied (optional → not
+        # exercised when absent) and always writes output_pdf.
         Capability("filesystem.read", target_arg="assets_dir", optional=True),
-        Capability("filesystem.write", target_arg="output_pdf", optional=True),
+        Capability("filesystem.write", target_arg="output_pdf"),
     ],
     description=(
         "Compile a LaTeX source file to PDF using a host TeX engine (latexmk or "
@@ -285,7 +285,7 @@ def _read_log_tail(log_path: Path, fallback: str) -> str:
 )
 def compile_document(
     source_path: str,
-    output_pdf: str | None = None,
+    output_pdf: str,
     assets_dir: str | None = None,
     engine: str | None = None,
     timeout_s: int = 300,
@@ -294,8 +294,9 @@ def compile_document(
 
     Args:
         source_path: Path to the .tex file to compile.
-        output_pdf: If set, the produced PDF is copied here (parents created);
-            build intermediates are isolated in a private temp dir.
+        output_pdf: Where to write the produced PDF (parents created). Required,
+            so the write is always permission-checked; build intermediates are
+            isolated in a private temp dir.
         assets_dir: Directory prepended to TEXINPUTS so figures/resources resolve
             by bare name (e.g. an artifacts dir).
         engine: Force an engine ("latexmk"/"pdflatex"); default auto-detects
@@ -325,7 +326,14 @@ def compile_document(
             "duration_ms": 0,
         }
 
-    if output_pdf and Path(output_pdf).expanduser().is_symlink():
+    if not output_pdf:
+        return {
+            "success": False, "error": "output_pdf is required: where to write the PDF",
+            "pdf_path": None, "engine": None, "log_tail": "", "errors": [],
+            "duration_ms": 0,
+        }
+
+    if Path(output_pdf).expanduser().is_symlink():
         # The permission engine judged output_pdf by its resolved location (the
         # link target), but delivery replaces the link itself, so the write
         # would land where nothing was checked. Refuse rather than guess.
@@ -337,7 +345,7 @@ def compile_document(
         }
     # Fixed now, before TeX runs: resolving at delivery time would follow a
     # symlink planted at output_pdf during the compile.
-    dest = resolve_path(output_pdf) if output_pdf else (src.parent / (src.stem + ".pdf"))
+    dest = resolve_path(output_pdf)
 
     chosen = _detect_engine(engine)
     if chosen is None:
