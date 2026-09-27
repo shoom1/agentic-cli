@@ -68,6 +68,38 @@ jobs:
           conda run -n agenticcli python -m pytest
           tests/examples/test_research_demo_wheel.py -m wheel -v
 
+  latex-engine:
+    name: LaTeX engine tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash -el {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      # compile_document's lockdown (no shell escape, paranoid file access) is
+      # enforced by TeX itself, so it can only be verified against a real engine.
+      - name: Install TeX Live (pdflatex + latexmk)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            texlive-latex-base texlive-latex-recommended latexmk
+
+      - name: Set up conda env (agenticcli)
+        uses: conda-incubator/setup-miniconda@v3
+        with:
+          miniforge-version: latest
+          environment-file: environment.yml
+          activate-environment: agenticcli
+
+      # Targets the file: a bare `-m latex` still collects the whole suite.
+      - name: Run LaTeX engine tests (fail if the engine is missing)
+        env:
+          LATEX_REQUIRE: "1"
+        run: >
+          conda run -n agenticcli python -m pytest
+          tests/tools/test_document_compile_latex.py -m latex -v
+
   docker-isolation:
     name: Docker isolation tests
     runs-on: ubuntu-latest

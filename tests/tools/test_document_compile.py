@@ -545,3 +545,22 @@ def test_default_timeout_is_five_minutes(monkeypatch, tmp_path):
 
 def test_explicit_timeout_is_used_as_given(monkeypatch, tmp_path):
     assert _timeout_seen(monkeypatch, tmp_path, timeout_s=900) == 900
+
+
+def test_tex_environment_locks_down_shell_escape_and_file_access(monkeypatch):
+    """TeX reads its policy from texmf.cnf, and environment variables override
+    it. The child env pins it, whatever the host has set: no shell escape at
+    all (latexmk's pdflatex otherwise gets TeX Live's restricted default), and
+    paranoid file access (no absolute paths, no dotfiles, no `..`)."""
+    monkeypatch.setenv("shell_escape", "t")
+    monkeypatch.setenv("openin_any", "a")
+    monkeypatch.setenv("openout_any", "a")
+    # Under paranoid mode, absolute paths below TEXMFOUTPUT stay readable.
+    monkeypatch.setenv("TEXMFOUTPUT", "/")
+
+    env = mod._build_env(None, source_dir="/tmp/src")
+
+    assert env["shell_escape"] == "f"
+    assert env["openin_any"] == "p"
+    assert env["openout_any"] == "p"
+    assert "TEXMFOUTPUT" not in env
