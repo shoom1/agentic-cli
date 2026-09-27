@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-09-27
+
+Security and stability fixes for 0.6.0. The permission engine now judges the
+location a tool actually acts on, approving a search tool no longer approves
+every URL, the OS sandbox protects credentials, the app's config and `.git`,
+and `compile_document` can no longer read files outside the project or run
+other programs. Tool errors, unanswerable permission prompts and HTTP error
+pages no longer end a turn or pose as content, and the Python timeouts take
+effect. Two interface changes, see *Changed*: `web_search` declares
+`search.web`, and `compile_document` requires `output_pdf`.
+
 ### Security
 - **The permission engine now judges the location a tool actually acts on.** `${workdir}`, `${home}` and `${app_name}` were expanded in tool arguments as well as in rules, so a crafted path could be judged inside the project while the tool acted outside it; and the engine expanded `~` and anchored relative paths to the project while the file tools did neither. Both sides now resolve arguments with one function, `agentic_cli.paths.resolve_path`: placeholders expand only in rule patterns, `~` expands in the tools too, relative paths resolve against the process's current directory, saved grants load literally, an argument of `*` is a literal name rather than the wildcard (so approving it can no longer grant every read), and an argument that cannot name a path is denied. `compile_document` also refuses an `output_pdf` that is a symlink and fixes its destination before compiling.
 - **Approving a search tool no longer approves every URL.** `web_search` and the arXiv tools declared `http.read` with no target, so an approval was saved as `http.read *` and silently covered `web_fetch` and `kb_ingest_url` for any URL. The arXiv tools now declare their fixed arXiv endpoints with the new `Capability(..., target=...)`, and the PDF download refuses anything outside `https://arxiv.org/pdf/`. Filesystem, network and shell capabilities with no target warn at registration (an error in 0.7.0) and are approved one call at a time, and `http.read *`-style grants saved by 0.6.0 are dropped on load. A filesystem grant now covers the directory it names instead of that directory's parent, and never the filesystem root or a directory above home.
