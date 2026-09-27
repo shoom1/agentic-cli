@@ -61,7 +61,7 @@ def write_file(
     try:
         if create_dirs:
             file_path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write_text(file_path, content)
+        atomic_write_text(file_path, content, preserve_mode=True)
         size = file_path.stat().st_size
 
         return {
@@ -187,7 +187,7 @@ def edit_file(
 
     # Write the modified content
     try:
-        atomic_write_text(file_path, new_content)
+        atomic_write_text(file_path, new_content, preserve_mode=True)
         size = file_path.stat().st_size
 
         return {
