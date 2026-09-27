@@ -10,6 +10,10 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+# Every backend's index file name (each keeps its own), so a knowledge base
+# can remove an index that another backend saved.
+INDEX_FILES = ("bm25s_sidecar.json", "bm25_rank.json", "bm25_index.json")
+
 
 def create_bm25_index(use_mock: bool = False):
     """Create the best available BM25 index.

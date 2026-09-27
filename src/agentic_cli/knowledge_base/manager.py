@@ -209,7 +209,9 @@ class KnowledgeBaseManager:
             if self._bm25_index.size != len(self._chunks):
                 # Each backend keeps its own index file, so one saved by
                 # another backend (a library installed or removed since) is
-                # not loaded: index the chunks again.
+                # not loaded: index the chunks again, and drop the old file,
+                # which would keep the text of documents deleted later.
+                self._remove_bm25_files()
                 self._bm25_index.rebuild(
                     list(self._chunks),
                     [chunk.content for chunk in self._chunks.values()],
@@ -330,6 +332,13 @@ class KnowledgeBaseManager:
         path = self._sidecar_path(doc_id)
         if path.exists():
             path.unlink()
+
+    def _remove_bm25_files(self) -> None:
+        """Remove every backend's keyword index file (they hold chunk text)."""
+        from agentic_cli.knowledge_base.bm25_index import INDEX_FILES
+
+        for name in INDEX_FILES:
+            (self.embeddings_dir / name).unlink(missing_ok=True)
 
     def get_or_create_sidecar_lock(self, doc_id: str) -> asyncio.Lock:
         """Return the per-doc async lock used to serialize sidecar writes.
@@ -499,6 +508,28 @@ class KnowledgeBaseManager:
             if abs_path.exists():
                 return abs_path
         return None
+
+    def _delete_stored_file(self, doc: Document) -> None:
+        """Delete a document's stored file.
+
+        ``file_path`` comes from metadata.json, which a project can ship with
+        its knowledge base, so only a file directly inside ``files_dir`` is
+        removed.
+        """
+        if not doc.file_path:
+            return
+        name = doc.file_path.name
+        if name in ("", ".", "..") or Path(name) != doc.file_path:
+            logger.warning(
+                "kb_stored_file_outside_files_dir",
+                doc_id=doc.id,
+                file_path=str(doc.file_path),
+            )
+            return
+        try:
+            (self.files_dir / name).unlink(missing_ok=True)
+        except OSError as e:
+            logger.warning("kb_stored_file_not_deleted", doc_id=doc.id, error=str(e))
 
     @staticmethod
     def extract_text_from_pdf(file_path: Path) -> str:
@@ -994,6 +1025,7 @@ class KnowledgeBaseManager:
             # Persist
             self._delete_document_content(doc_id)
             self._delete_sidecar(doc_id)
+            self._delete_stored_file(doc)
             self._rebuild_index_md()
             self._append_ingest_log("delete", doc)
             self._save_metadata()
@@ -1028,15 +1060,20 @@ class KnowledgeBaseManager:
     def clear(self) -> None:
         """Clear all documents from the knowledge base."""
         with self._lock:
-            # Delete per-document content files and sidecars
-            for doc_id in list(self._documents):
+            # Delete per-document content files, sidecars and stored files
+            for doc_id, doc in list(self._documents.items()):
                 self._delete_document_content(doc_id)
                 self._delete_sidecar(doc_id)
+                self._delete_stored_file(doc)
 
             self._documents = {}
             self._chunks = {}
             self._sidecar_locks.clear()
             self._vector_store.clear()
+            bm25_index = getattr(self, "_bm25_index", None)
+            if bm25_index is not None:
+                bm25_index.rebuild([], [])
+            self._remove_bm25_files()
             self._save_metadata()
             self._vector_store.save()
             self._rebuild_index_md()
