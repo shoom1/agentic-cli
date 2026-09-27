@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Knowledge-base search works without the `kb` extra.** The BM25 factory
+  chose the bm25s backend whenever its class imported, which it always did,
+  since bm25s is imported only on the first search, so every `kb_search`
+  raised `ModuleNotFoundError`. It now checks that the library imports and
+  falls back to rank_bm25, then to the built-in index. A knowledge base whose
+  keyword index was saved by another backend is re-indexed when it is opened.
+
 ## [0.6.1] - 2026-09-27
 
 Security and stability fixes for 0.6.0. The permission engine now judges the

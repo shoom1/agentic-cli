@@ -206,6 +206,15 @@ class KnowledgeBaseManager:
             self._bm25_index = create_bm25_index(use_mock=use_mock)
             if self.embeddings_dir.exists():
                 self._bm25_index.load(self.embeddings_dir)
+            if self._bm25_index.size != len(self._chunks):
+                # Each backend keeps its own index file, so one saved by
+                # another backend (a library installed or removed since) is
+                # not loaded: index the chunks again.
+                self._bm25_index.rebuild(
+                    list(self._chunks),
+                    [chunk.content for chunk in self._chunks.values()],
+                )
+                self._bm25_index.save(self.embeddings_dir)
         except Exception:
             logger.debug("bm25_init_skipped")
 
