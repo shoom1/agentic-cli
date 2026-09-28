@@ -493,31 +493,15 @@ class KnowledgeBaseManager:
         dest.write_bytes(file_bytes)
         return Path(filename)
 
-    def get_file_path(self, doc_id: str) -> Path | None:
-        """Get the absolute file path for a document's stored file.
-
-        Args:
-            doc_id: Document ID.
-
-        Returns:
-            Absolute Path if file exists, None otherwise.
-        """
-        doc = self._documents.get(doc_id)
-        if doc and doc.file_path:
-            abs_path = self.files_dir / doc.file_path
-            if abs_path.exists():
-                return abs_path
-        return None
-
-    def _delete_stored_file(self, doc: Document) -> None:
-        """Delete a document's stored file.
+    def _stored_file_name(self, doc: Document) -> str | None:
+        """The stored file's name, if ``file_path`` names a file directly
+        inside ``files_dir``.
 
         ``file_path`` comes from metadata.json, which a project can ship with
-        its knowledge base, so only a file directly inside ``files_dir`` is
-        removed.
+        its knowledge base, so any other path is refused.
         """
         if not doc.file_path:
-            return
+            return None
         name = doc.file_path.name
         if name in ("", ".", "..") or Path(name) != doc.file_path:
             logger.warning(
@@ -525,6 +509,44 @@ class KnowledgeBaseManager:
                 doc_id=doc.id,
                 file_path=str(doc.file_path),
             )
+            return None
+        return name
+
+    def get_file_path(self, doc_id: str) -> Path | None:
+        """Get the absolute file path for a document's stored file.
+
+        A project can ship ``files/`` or a stored file as a symlink, so links
+        are followed and the result must still be a file inside the knowledge
+        base.
+
+        Args:
+            doc_id: Document ID.
+
+        Returns:
+            The resolved Path if the stored file is inside the knowledge base,
+            None otherwise.
+        """
+        doc = self._documents.get(doc_id)
+        name = self._stored_file_name(doc) if doc else None
+        if name is None:
+            return None
+        try:
+            resolved = (self.files_dir / name).resolve()
+            inside = resolved.is_relative_to(self.kb_dir.resolve())
+            if inside and resolved.is_file():
+                return resolved
+        except (OSError, RuntimeError):  # a symlink loop, or unreadable
+            return None
+        if not inside:
+            logger.warning(
+                "kb_stored_file_outside_kb_dir", doc_id=doc_id, resolved=str(resolved)
+            )
+        return None
+
+    def _delete_stored_file(self, doc: Document) -> None:
+        """Delete a document's stored file (see :meth:`_stored_file_name`)."""
+        name = self._stored_file_name(doc)
+        if name is None:
             return
         try:
             (self.files_dir / name).unlink(missing_ok=True)
