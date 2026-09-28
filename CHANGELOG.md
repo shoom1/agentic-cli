@@ -60,6 +60,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ignored. Filters now come first, the two knowledge bases are merged newest
   first and cut at `limit`, and an unknown `source_type` is an error.
   `KnowledgeBaseManager.list_documents(limit=None)` lists every document.
+- **A document deleted while its summary was being built stays deleted.**
+  `kb_read` and `backfill_sidecars` build a missing summary file by calling
+  the LLM, then write it. A `delete_document` during that call was followed
+  by the write, so the summary, derived from the document's text, came back
+  and `kb_read` returned it. The write now happens only if the document still
+  exists, under the lock deletion holds.
 
 ## [0.6.1] - 2026-09-27
 

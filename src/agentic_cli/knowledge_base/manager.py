@@ -331,6 +331,26 @@ class KnowledgeBaseManager:
         atomic_write_text(path, render_sidecar_markdown(doc, payload))
         return path
 
+    def _write_sidecar_if_present(
+        self, doc: Document, payload: dict[str, Any]
+    ) -> bool:
+        """Write a sidecar built outside the lock, unless the document is gone.
+
+        The payload comes from an LLM call made without holding ``_lock``, and
+        is derived from the document's text, so a ``delete_document`` (or
+        ``clear``) during that call must not be followed by the write. Both
+        hold ``_lock`` while removing a document, and so does this check and
+        write, so they cannot interleave.
+
+        Returns:
+            True if the sidecar was written.
+        """
+        with self._lock:
+            if self._documents.get(doc.id) is not doc:
+                return False
+            self._write_sidecar(doc, payload)
+            return True
+
     def _delete_sidecar(self, doc_id: str) -> None:
         path = self._sidecar_path(doc_id)
         if path.exists():
@@ -1182,8 +1202,8 @@ class KnowledgeBaseManager:
                     payload = await self.generate_sidecar_payload(
                         doc.content, title=doc.title
                     )
-                    self._write_sidecar(doc, payload)
-                    written += 1
+                    if self._write_sidecar_if_present(doc, payload):
+                        written += 1
             return written
         finally:
             with self._lock:
