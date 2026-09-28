@@ -25,6 +25,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   document whose ID is not 1-64 letters, digits, `-` or `_` is now skipped
   when the knowledge base loads; the framework has only ever assigned UUIDs.
 
+### Changed
+
+- **The arXiv tools no longer ask for permission.** `search_arxiv`,
+  `fetch_arxiv_paper` and `ingest_arxiv_paper` can reach only the arXiv API
+  and `https://arxiv.org/pdf`, and since 0.6.1 declare those endpoints, so
+  answering "Allow once" meant a prompt per search, per paper and per
+  ingestion. Built-in rules now allow exactly those two endpoints, as they
+  allow knowledge-base writes. Any other URL, including other arxiv.org pages
+  through `web_fetch`, still asks, and a deny rule in user or project
+  settings still wins.
+
 ### Fixed
 
 - **Knowledge-base search works without the `kb` extra.** The BM25 factory
