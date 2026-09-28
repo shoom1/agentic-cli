@@ -53,6 +53,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   None of these depends on the model. With `preserve_sessions=True`, which
   the CLI uses, they are carried over on both backends, also through a switch
   that fails, so restoring the previous model keeps them.
+- **A document deleted while its summary was being built stays deleted.**
+  `kb_read` and `backfill_sidecars` build a missing summary file by calling
+  the LLM, then write it. A `delete_document` during that call was followed
+  by the write, so the summary, derived from the document's text, came back
+  and `kb_read` returned it. The write now happens only if the document still
+  exists, under the lock deletion holds.
 
 ## [0.6.1] - 2026-09-27
 

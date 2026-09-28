@@ -522,7 +522,9 @@ async def _read_document_from_kbs(
                 payload = await source_kb.generate_sidecar_payload(
                     content_for_payload, title=doc.title
                 )
-                source_kb._write_sidecar(doc, payload)
+                # Deleted during the LLM call: do not write it back.
+                if not source_kb._write_sidecar_if_present(doc, payload):
+                    return {"success": False, "error": f"Document not found: {doc_id_or_title}"}
 
     sidecar_text = sidecar_path.read_text()
     return {
