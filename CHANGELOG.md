@@ -21,6 +21,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   text files are now ingested as text, and other binary files are refused
   instead of stored unsearchable. A file that cannot be read returns an error
   instead of raising.
+- **Deleting from the knowledge base removes the data from disk.**
+  `delete_document` left the document's stored file, and `clear` left every
+  stored file plus the keyword index, which holds the text of every chunk;
+  `clear` also kept that index in memory, so the next ingest wrote the cleared
+  text back. An index file left by another BM25 backend is removed too.
+  Deletion removes only a file directly inside the files directory, since a
+  project can ship its knowledge base's `metadata.json`.
 
 ## [0.6.1] - 2026-09-27
 
