@@ -53,6 +53,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   None of these depends on the model. With `preserve_sessions=True`, which
   the CLI uses, they are carried over on both backends, also through a switch
   that fails, so restoring the previous model keeps them.
+- **`kb_list` lists what was asked for.** It took the `limit` newest
+  documents and only then applied `query`, so a match outside the newest 20
+  was never listed; it returned up to `limit` documents from the project and
+  again from the user knowledge base; and an unknown `source_type` was
+  ignored. Filters now come first, the two knowledge bases are merged newest
+  first and cut at `limit`, and an unknown `source_type` is an error.
+  `KnowledgeBaseManager.list_documents(limit=None)` lists every document.
 
 ## [0.6.1] - 2026-09-27
 

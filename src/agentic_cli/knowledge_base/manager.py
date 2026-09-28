@@ -1004,13 +1004,13 @@ class KnowledgeBaseManager:
     def list_documents(
         self,
         source_type: SourceType | None = None,
-        limit: int = 100,
+        limit: int | None = 100,
     ) -> list[Document]:
-        """List documents with optional filtering.
+        """List documents with optional filtering, newest first.
 
         Args:
             source_type: Optional source type filter.
-            limit: Maximum number of documents to return.
+            limit: Maximum number of documents to return; None for all.
 
         Returns:
             List of documents.
@@ -1023,7 +1023,7 @@ class KnowledgeBaseManager:
         # Sort by updated_at descending
         docs.sort(key=lambda d: d.updated_at, reverse=True)
 
-        return docs[:limit]
+        return docs if limit is None else docs[:limit]
 
     def delete_document(self, doc_id: str) -> bool:
         """Remove a document from the knowledge base.
