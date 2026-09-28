@@ -308,13 +308,15 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         holding a half-built runner that would answer as if it were ready. The
         caller (``WorkflowController``) turns that into a FAILED state. A
         preserved session service survives both outcomes, so a retry can still
-        continue the same conversations.
+        continue the same conversations; so do the services scoped to them
+        (session grants, sandbox kernels, jobs — see ``_carrying_services``).
 
         Args:
             model: Optional new model to use. If None, re-resolves from settings.
             preserve_sessions: If True, keeps the existing session service
-                (default) and reuses it for the new runner. If False, the old
-                one is closed and a fresh one created.
+                (default) and the services (permission engine, sandbox, jobs,
+                knowledge bases) and reuses them for the new runner. If False,
+                they are released and fresh ones created.
 
         Raises:
             Exception: Whatever initialization raised, after rollback.
@@ -328,21 +330,22 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         async with self._lifecycle_lock:
             async with self._turn_lock:
                 preserved = self._session_service if preserve_sessions else None
-                await self._release_resources(keep_session_service=preserve_sessions)
-                self._reset_model(model)
-                self._session_service_pinned = preserve_sessions
-                try:
-                    # _do_initialize reuses self._session_service when set, so
-                    # no replacement service is built for a preserved one.
-                    await self._initialize_locked()
-                except BaseException:
-                    # _initialize_locked already rolled back what it created;
-                    # restore the preserved service so a retry can use it.
-                    if preserved is not None:
-                        self._session_service = preserved
-                    raise
-                finally:
-                    self._session_service_pinned = False
+                with self._carrying_services(preserve_sessions):
+                    await self._release_resources(keep_session_service=preserve_sessions)
+                    self._reset_model(model)
+                    self._session_service_pinned = preserve_sessions
+                    try:
+                        # _do_initialize reuses self._session_service when set, so
+                        # no replacement service is built for a preserved one.
+                        await self._initialize_locked()
+                    except BaseException:
+                        # _initialize_locked already rolled back what it created;
+                        # restore the preserved service so a retry can use it.
+                        if preserved is not None:
+                            self._session_service = preserved
+                        raise
+                    finally:
+                        self._session_service_pinned = False
 
         logger.info(
             "workflow_manager_reinitialized",

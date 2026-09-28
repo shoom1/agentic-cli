@@ -28,6 +28,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   text back. An index file left by another BM25 backend is removed too.
   Deletion removes only a file directly inside the files directory, since a
   project can ship its knowledge base's `metadata.json`.
+- **Switching models keeps the session's grants, sandbox and jobs.**
+  `reinitialize` released every service and built new ones, so a model change
+  in `/settings` asked again for everything allowed "for this session", shut
+  down the sandbox kernels with their variables, and closed the job manager.
+  None of these depends on the model. With `preserve_sessions=True`, which
+  the CLI uses, they are carried over on both backends, also through a switch
+  that fails, so restoring the previous model keeps them.
 
 ## [0.6.1] - 2026-09-27
 

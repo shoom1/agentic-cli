@@ -259,15 +259,18 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
             else None
         )
 
-        await self.cleanup()
+        # Session grants, sandbox kernels and jobs belong to the conversation,
+        # not the model: carry them over with it (see _carrying_services).
+        with self._carrying_services(preserve_sessions):
+            await self.cleanup()
 
-        # Update model
-        self._reset_model(model)
+            # Update model
+            self._reset_model(model)
 
-        # Set preserved checkpointer before init so _do_initialize can reuse it
-        self._preserved_checkpointer = old_checkpointer
-        await self.initialize_services()
-        self._preserved_checkpointer = None
+            # Set preserved checkpointer before init so _do_initialize can reuse it
+            self._preserved_checkpointer = old_checkpointer
+            await self.initialize_services()
+            self._preserved_checkpointer = None
 
         logger.info(
             "langgraph_workflow_manager_reinitialized",

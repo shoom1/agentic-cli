@@ -156,6 +156,9 @@ class BaseWorkflowManager(ABC):
         # Plan/task state lives in native backend state (ToolContext.state
         # for ADK, graph state for LangGraph), not here.
         self._services: dict[str, Any] = {}
+        # Keys of services a reinitialize is carrying over; see
+        # _carrying_services().
+        self._carried_service_keys: frozenset[str] = frozenset()
 
     def set_input_callback(
         self, callback: Callable[[UserInputRequest], Awaitable[str]]
@@ -808,11 +811,43 @@ class BaseWorkflowManager(ABC):
         Only services this manager created are released (see
         ``_build_services``). Idempotent: the registry is emptied, so a second
         call finds nothing. The registry is cleared regardless of failures.
+
+        Services a reinitialize is carrying over (:meth:`_carrying_services`)
+        stay published and open.
         """
+        carried = {
+            key: service
+            for key, service in self._services.items()
+            if key in self._carried_service_keys
+        }
         try:
-            self._close_services(self._services)
+            self._close_services({
+                key: service
+                for key, service in self._services.items()
+                if key not in carried
+            })
         finally:
-            self._services = {}
+            self._services = carried
+
+    @contextlib.contextmanager
+    def _carrying_services(self, carry: bool) -> Iterator[None]:
+        """Keep the live services through a reinitialize when ``carry`` is set.
+
+        Session grants (the permission engine), sandbox kernels, the job
+        manager and loaded embedding models belong to the conversation, not to
+        the model, so a model switch that preserves sessions must not release
+        them. Inside this block a release, including the rollback of a failed
+        attempt, leaves them published, and initialization reuses them: it
+        builds only the services that are missing. After a failed attempt they
+        stay with the manager, for a retry to reuse or ``cleanup()`` to release.
+        """
+        self._carried_service_keys = (
+            frozenset(self._services) if carry else frozenset()
+        )
+        try:
+            yield
+        finally:
+            self._carried_service_keys = frozenset()
 
     @property
     @abstractmethod
