@@ -66,6 +66,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   by the write, so the summary, derived from the document's text, came back
   and `kb_read` returned it. The write now happens only if the document still
   exists, under the lock deletion holds.
+- **`update_memory` with only new tags keeps the memory findable.** Every
+  update cleared the memory's embedding, but only a content change computed
+  a new one, so after a tags-only update semantic search skipped the memory
+  until the next restart. The embedding is now replaced only when the content
+  changes.
 
 ## [0.6.1] - 2026-09-27
 
