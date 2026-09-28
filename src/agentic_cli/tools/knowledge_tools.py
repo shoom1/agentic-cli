@@ -544,51 +544,48 @@ def _list_documents_in_kbs(
     source_type: str = "",
     limit: int = 20,
 ) -> dict[str, Any]:
-    """Shared implementation for kb_list."""
+    """Shared implementation for kb_list.
+
+    Filters first, then merges the project and user knowledge bases newest
+    first and cuts the result at ``limit``.
+    """
     from agentic_cli.knowledge_base.models import SourceType as ST
 
-    # Parse source_type filter
     st_filter = None
     if source_type:
         try:
             st_filter = ST(source_type)
         except ValueError:
-            pass
+            valid = ", ".join(t.value for t in ST)
+            return {
+                "success": False,
+                "error": f"Invalid source_type: {source_type!r}. Valid: {valid}",
+            }
 
-    docs = kb_manager.list_documents(source_type=st_filter, limit=limit)
+    query_lower = query.lower()
 
-    # Apply query filter
-    if query:
-        query_lower = query.lower()
-        docs = [
+    def _matching(manager) -> list:
+        docs = manager.list_documents(source_type=st_filter, limit=None)
+        if not query_lower:
+            return docs
+        return [
             d for d in docs
             if query_lower in d.title.lower()
             or any(query_lower in a.lower() for a in d.metadata.get("authors", []))
         ]
 
-    items = []
-    seen_ids: set[str] = set()
-    for d in docs:
-        items.append(_build_document_item(d, "project"))
-        seen_ids.add(d.id)
-
-    # Merge user KB documents
+    scoped = [(d, "project") for d in _matching(kb_manager)]
     if user_kb_manager is not None and user_kb_manager is not kb_manager:
         try:
-            user_docs = user_kb_manager.list_documents(source_type=st_filter, limit=limit)
-            if query:
-                query_lower = query.lower()
-                user_docs = [
-                    d for d in user_docs
-                    if query_lower in d.title.lower()
-                    or any(query_lower in a.lower() for a in d.metadata.get("authors", []))
-                ]
-            for d in user_docs:
-                if d.id not in seen_ids:
-                    items.append(_build_document_item(d, "user"))
-                    seen_ids.add(d.id)
+            seen_ids = {d.id for d, _ in scoped}
+            scoped += [
+                (d, "user") for d in _matching(user_kb_manager) if d.id not in seen_ids
+            ]
         except Exception:
             logger.debug("user_kb_list_documents_failed", exc_info=True)
+
+    scoped.sort(key=lambda pair: pair[0].updated_at, reverse=True)
+    items = [_build_document_item(d, scope) for d, scope in scoped[:limit]]
 
     return {
         "success": True,
