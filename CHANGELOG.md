@@ -53,6 +53,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   None of these depends on the model. With `preserve_sessions=True`, which
   the CLI uses, they are carried over on both backends, also through a switch
   that fails, so restoring the previous model keeps them.
+- **`update_memory` with only new tags keeps the memory findable.** Every
+  update cleared the memory's embedding, but only a content change computed
+  a new one, so after a tags-only update semantic search skipped the memory
+  until the next restart. The embedding is now replaced only when the content
+  changes.
 
 ## [0.6.1] - 2026-09-27
 
