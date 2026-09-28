@@ -17,6 +17,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   symlink, or a stored file that is a symlink put the text of a PDF elsewhere
   on disk into the model's context, through `kb_read(full=True)` and through
   the summary built for a document that has none.
+- **A document ID from `metadata.json` can no longer name a path.** A
+  document's ID names its text file and its summary file. An ID such as
+  `../../elsewhere/notes` in a repository's knowledge base made `kb_read`
+  return the text of a Markdown or JSON file elsewhere on disk and create new
+  files outside the knowledge base (deleting that document removed them). A
+  document whose ID is not 1-64 letters, digits, `-` or `_` is now skipped
+  when the knowledge base loads; the framework has only ever assigned UUIDs.
 
 ### Fixed
 

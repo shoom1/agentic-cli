@@ -40,6 +40,9 @@ if TYPE_CHECKING:
 
 logger = Loggers.knowledge_base()
 
+# Every document ID the framework assigns is a UUID; see _load_metadata.
+_PLAIN_DOC_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
+
 # Current persistence format version
 _FORMAT_VERSION = 3
 
@@ -411,6 +414,13 @@ class KnowledgeBaseManager:
             version = data.get("version", 1)
 
             for doc_data in data.get("documents", []):
+                # A document's ID names its files (documents/{id}.json,
+                # documents/{id}.md). metadata.json can arrive with the
+                # project, so an ID that is not a plain name is skipped
+                # before anything turns it into a path.
+                if not _PLAIN_DOC_ID.fullmatch(str(doc_data.get("id", ""))):
+                    logger.warning("kb_document_id_refused", doc_id=repr(doc_data.get("id")))
+                    continue
                 if version >= 2:
                     # v2/v3: Load header from index, content from per-doc file
                     doc = Document.from_dict(doc_data)
