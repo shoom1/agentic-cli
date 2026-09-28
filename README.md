@@ -664,7 +664,7 @@ from agentic_cli.tools import memory_tools
 
 #### HITL (Human-in-the-Loop)
 
-Tool calls are gated by the **permission engine** (`workflow/permissions/`). Each tool declares a list of capabilities (e.g. `filesystem.write(path=...)`); the engine evaluates them against rules from four sources (builtin defaults, user `~/.{app_name}/settings.json`, project `./.{app_name}/settings.json`, in-memory session). When no rule matches, the user is prompted with `Allow once` / `Allow for this session` / `Allow always for this project` / `Deny`. A filesystem grant covers the directory it names (or the directory a file is in), never the filesystem root or a directory above your home.
+Tool calls are gated by the **permission engine** (`workflow/permissions/`). Each tool declares a list of capabilities (e.g. `filesystem.write(path=...)`); the engine evaluates them against rules from four sources (builtin defaults, user `~/.{app_name}/settings.json`, project `./.{app_name}/settings.json`, in-memory session). The builtin defaults allow reads inside the project, the knowledge base and memory, and the arXiv tools' two fixed endpoints (the API and `https://arxiv.org/pdf`), and deny writes to system and credential directories and to the app's own config. When no rule matches, the user is prompted with `Allow once` / `Allow for this session` / `Allow always for this project` / `Deny`. A filesystem grant covers the directory it names (or the directory a file is in), never the filesystem root or a directory above your home.
 
 **"Allow always" grants are user-owned, not project-owned.** They persist to
 `~/.{app_name}/project_grants.json`, keyed by the *resolved project path*, so

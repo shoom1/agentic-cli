@@ -49,6 +49,13 @@ BUILTIN_RULES: list[Rule] = [
     Rule("memory.*", "*", Effect.ALLOW, RuleSource.BUILTIN),
     Rule("kb.*",     "*", Effect.ALLOW, RuleSource.BUILTIN),
 
+    # The arXiv tools' two fixed endpoints (tools/arxiv_source.py:
+    # ARXIV_API_URL, ARXIV_PDF_URL; download_pdf refuses any other URL). A URL
+    # rule matches its exact path, so web_fetch of any other arxiv.org page
+    # still asks.
+    Rule("http.read", "https://export.arxiv.org/api/query", Effect.ALLOW, RuleSource.BUILTIN),
+    Rule("http.read", "https://arxiv.org/pdf",              Effect.ALLOW, RuleSource.BUILTIN),
+
     # System locations — writes always denied.
     Rule("filesystem.write", "/etc/**",    Effect.DENY, RuleSource.BUILTIN),
     Rule("filesystem.write", "/usr/**",    Effect.DENY, RuleSource.BUILTIN),
