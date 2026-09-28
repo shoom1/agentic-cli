@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **`kb_read` reads a document's stored file only from inside the knowledge
+  base.** A document with no text of its own is read from its stored PDF,
+  named by `file_path` in `metadata.json`. The project knowledge base lives in
+  the project, so a cloned repository can ship that file, and `file_path` was
+  used unchecked: a `..` or absolute path, a `files` directory that is a
+  symlink, or a stored file that is a symlink put the text of a PDF elsewhere
+  on disk into the model's context, through `kb_read(full=True)` and through
+  the summary built for a document that has none.
+
 ### Fixed
 
 - **Knowledge-base search works without the `kb` extra.** The BM25 factory
