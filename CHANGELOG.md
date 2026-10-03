@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-10-03
+
+Knowledge-base, permission and stability fixes for 0.6.1. A knowledge base a
+repository ships can no longer make `kb_read` read or create files outside
+it. Knowledge-base search works without the `kb` extra, text files can be
+ingested, deleting removes the data from disk, `kb_list` and tags-only memory
+updates behave, and switching models keeps the session's grants, sandbox and
+jobs. Two permission changes, see *Changed*: the arXiv tools no longer ask,
+and approving a URL for the session or always covers its site.
+
 ### Security
 
 - **`kb_read` reads a document's stored file only from inside the knowledge
