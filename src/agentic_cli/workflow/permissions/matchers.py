@@ -171,6 +171,8 @@ class URLMatcher:
         parts = urlsplit(s if "://" in s else f"https://{s}")
         scheme = parts.scheme.lower() or "https"
         host = (parts.hostname or "").lower()
+        if ":" in host:  # an IPv6 literal keeps its brackets, or it is unparseable
+            host = f"[{host}]"
         port = parts.port
         if port is not None and port == self._DEFAULT_PORTS.get(scheme):
             netloc = host
@@ -194,7 +196,13 @@ class URLMatcher:
             return False
         if pp.port and pp.port != tt.port:
             return False
-        if not _glob_to_regex(pp.path or "/").match(tt.path or "/"):
+        path_re = _glob_to_regex(pp.path or "/")
+        path = tt.path or "/"
+        # ``/docs/**`` covers ``/docs/`` too (and ``/**`` the site root ``/``):
+        # the trailing slash is the folder itself, not another segment.
+        if not path_re.match(path) and not (
+            pp.path.endswith("/**") and path.endswith("/") and path_re.match(path.rstrip("/"))
+        ):
             return False
         if pp.query and not fnmatch.fnmatchcase(tt.query, pp.query):
             return False

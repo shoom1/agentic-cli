@@ -54,7 +54,8 @@ def build_request(
     The displayed target is the **effective grant scope** — i.e. what will be
     stored as a rule if the user picks Session or Always. For ``filesystem.*``
     that's a whole directory (``/foo/**``) rather than the exact file, so one
-    grant covers the files there (see ``broaden_target_for_grant``).
+    grant covers the files there (see ``broaden_target_for_grant``). For a URL
+    it is the site, shown next to the exact URL the call reads.
 
     When nothing in the request can be remembered (a resource capability whose
     tool named no target), only "Allow once" and "Deny" are offered.
@@ -69,6 +70,12 @@ def build_request(
         display_target = broaden_target_for_grant(cap, home=home)
         if not display_target:
             display_target = "*"
+        if cap.name.startswith("http.") and display_target != cap.target:
+            # The exact URL is what this call reads (and any data the URL
+            # carries); a session or "always" approval covers its site.
+            lines.append(f"  • {cap.name} → {cap.target}")
+            lines.append(f"    (for this session / always: all of {display_target})")
+            continue
         lines.append(f"  • {cap.name} → {display_target}")
         if cap.name.startswith("filesystem.") and display_target != cap.target:
             has_broadened_filesystem = True

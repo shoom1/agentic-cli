@@ -12,8 +12,10 @@ the full decision flow. This file implements:
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 from pathlib import Path
 from typing import TYPE_CHECKING
+from urllib.parse import urlsplit
 
 from agentic_cli.logging import Loggers
 from agentic_cli.settings_persistence import (
@@ -58,7 +60,11 @@ def broaden_target_for_grant(cap: ResolvedCapability, home: Path | None = None) 
     directory above ``home``: there the exact target is granted instead, since
     ``/Users/**`` would cover every user's home.
 
-    Other namespaces keep the exact resolved target (URL, command, etc.), and
+    An ``http.read`` grant covers the URL's site (see ``site_scope``), so one
+    approval covers the pages read there; a URL with no site scope keeps its
+    exact target.
+
+    Other namespaces keep the exact resolved target (command, etc.), and
     the wildcard sentinel ``"*"`` passes through unchanged.
 
     Used by both the engine (when installing a rule) and the prompt
@@ -73,7 +79,33 @@ def broaden_target_for_grant(cap: ResolvedCapability, home: Path | None = None) 
         if _may_widen_to(scope, (home or Path.home()).resolve()):
             return f"{scope}/**"
         return cap.target
+    if cap.name == "http.read":
+        return site_scope(cap.target) or cap.target
     return cap.target
+
+
+def site_scope(url: str) -> str | None:
+    """``https://host[:port]/**``: the site a URL grant may cover, if any.
+
+    Only HTTPS, and only a DNS name with a dot: the exact host (no other
+    subdomain) and port. A plain-HTTP URL, an IP address, ``localhost`` or a
+    single-label name gets None, so its grant stays the exact URL.
+    """
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError:
+        return None
+    host = (parts.hostname or "").lower()
+    if parts.scheme != "https" or "." not in host or host.endswith(".localhost"):
+        return None
+    try:
+        ipaddress.ip_address(host)
+        return None
+    except ValueError:
+        pass
+    netloc = host if port in (None, 443) else f"{host}:{port}"
+    return f"https://{netloc}/**"
 
 
 def _may_widen_to(directory: Path, home: Path) -> bool:

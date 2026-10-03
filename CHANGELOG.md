@@ -27,6 +27,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Approving a URL for the session, or always, covers its site.** `web_fetch`
+  and `kb_ingest_url` grants were stored for the exact URL, so reading ten
+  pages of one site asked ten times whatever the answer. A session or
+  "always" approval now covers `https://host/**`: the exact host (not its
+  other subdomains), HTTPS only; a plain-HTTP URL, an IP address or a local
+  name keeps the exact-URL grant. "Allow once" still approves one URL, and the
+  prompt shows both the URL being read and the site an approval covers. A URL
+  rule ending in `/**` now also matches its folder's trailing-slash form
+  (`/docs/**` covers `/docs/`), so a deny rule no longer misses it, and a
+  grant for an IPv6 URL no longer breaks the next check of that address.
 - **The arXiv tools no longer ask for permission.** `search_arxiv`,
   `fetch_arxiv_paper` and `ingest_arxiv_paper` can reach only the arXiv API
   and `https://arxiv.org/pdf`, and since 0.6.1 declare those endpoints, so
