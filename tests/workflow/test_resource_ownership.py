@@ -60,6 +60,7 @@ def _manager(session_service) -> GoogleADKWorkflowManager:
     mgr._model = "gemini-2.5-flash"
     mgr._model_resolved = True
     mgr._session_service_pinned = False
+    mgr._carried_service_keys = frozenset()
     mgr._lifecycle_lock = asyncio.Lock()
     mgr._turn_lock = asyncio.Lock()
     return mgr

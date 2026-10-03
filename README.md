@@ -612,7 +612,7 @@ from agentic_cli.tools import (
 |------|---------|
 | `kb_search` | Hybrid BM25 + vector search with RRF fusion, filters by source/date |
 | `kb_ingest_text` | Ingest in-memory text content (no FS or network access) |
-| `kb_ingest_file` | Ingest a local file; declares `filesystem.read(path)` for the permission engine |
+| `kb_ingest_file` | Ingest a local PDF or UTF-8 text file; declares `filesystem.read(path)` for the permission engine |
 | `kb_ingest_url` | Ingest content from an http(s) URL; routed through the hardened `ContentFetcher` and declares `http.read(url)` |
 | `kb_read` | Return the per-document markdown sidecar (lazy-generated on first read) |
 | `kb_list` | List documents, optionally filtered |
@@ -664,7 +664,7 @@ from agentic_cli.tools import memory_tools
 
 #### HITL (Human-in-the-Loop)
 
-Tool calls are gated by the **permission engine** (`workflow/permissions/`). Each tool declares a list of capabilities (e.g. `filesystem.write(path=...)`); the engine evaluates them against rules from four sources (builtin defaults, user `~/.{app_name}/settings.json`, project `./.{app_name}/settings.json`, in-memory session). When no rule matches, the user is prompted with `Allow once` / `Allow for this session` / `Allow always for this project` / `Deny`. A filesystem grant covers the directory it names (or the directory a file is in), never the filesystem root or a directory above your home.
+Tool calls are gated by the **permission engine** (`workflow/permissions/`). Each tool declares a list of capabilities (e.g. `filesystem.write(path=...)`); the engine evaluates them against rules from four sources (builtin defaults, user `~/.{app_name}/settings.json`, project `./.{app_name}/settings.json`, in-memory session). The builtin defaults allow reads inside the project, the knowledge base and memory, and the arXiv tools' two fixed endpoints (the API and `https://arxiv.org/pdf`), and deny writes to system and credential directories and to the app's own config. When no rule matches, the user is prompted with `Allow once` / `Allow for this session` / `Allow always for this project` / `Deny`. A filesystem grant covers the directory it names (or the directory a file is in), never the filesystem root or a directory above your home. A URL grant (`web_fetch`, `kb_ingest_url`) answered "for this session" or "always" covers that site, `https://host/**`: the exact host, not its other subdomains, and HTTPS only (a plain-HTTP URL, an IP address or a local name keeps an exact-URL grant). "Allow once" approves one URL, and the prompt shows both the URL and the site. To pre-approve a site, add a rule to `~/.{app_name}/settings.json`: `{"permissions": {"allow": [{"capability": "http.read", "target": "https://docs.python.org/**"}]}}`.
 
 **"Allow always" grants are user-owned, not project-owned.** They persist to
 `~/.{app_name}/project_grants.json`, keyed by the *resolved project path*, so

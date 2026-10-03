@@ -40,6 +40,9 @@ if TYPE_CHECKING:
 
 logger = Loggers.knowledge_base()
 
+# Every document ID the framework assigns is a UUID; see _load_metadata.
+_PLAIN_DOC_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
+
 # Current persistence format version
 _FORMAT_VERSION = 3
 
@@ -206,6 +209,17 @@ class KnowledgeBaseManager:
             self._bm25_index = create_bm25_index(use_mock=use_mock)
             if self.embeddings_dir.exists():
                 self._bm25_index.load(self.embeddings_dir)
+            if self._bm25_index.size != len(self._chunks):
+                # Each backend keeps its own index file, so one saved by
+                # another backend (a library installed or removed since) is
+                # not loaded: index the chunks again, and drop the old file,
+                # which would keep the text of documents deleted later.
+                self._remove_bm25_files()
+                self._bm25_index.rebuild(
+                    list(self._chunks),
+                    [chunk.content for chunk in self._chunks.values()],
+                )
+                self._bm25_index.save(self.embeddings_dir)
         except Exception:
             logger.debug("bm25_init_skipped")
 
@@ -317,10 +331,37 @@ class KnowledgeBaseManager:
         atomic_write_text(path, render_sidecar_markdown(doc, payload))
         return path
 
+    def _write_sidecar_if_present(
+        self, doc: Document, payload: dict[str, Any]
+    ) -> bool:
+        """Write a sidecar built outside the lock, unless the document is gone.
+
+        The payload comes from an LLM call made without holding ``_lock``, and
+        is derived from the document's text, so a ``delete_document`` (or
+        ``clear``) during that call must not be followed by the write. Both
+        hold ``_lock`` while removing a document, and so does this check and
+        write, so they cannot interleave.
+
+        Returns:
+            True if the sidecar was written.
+        """
+        with self._lock:
+            if self._documents.get(doc.id) is not doc:
+                return False
+            self._write_sidecar(doc, payload)
+            return True
+
     def _delete_sidecar(self, doc_id: str) -> None:
         path = self._sidecar_path(doc_id)
         if path.exists():
             path.unlink()
+
+    def _remove_bm25_files(self) -> None:
+        """Remove every backend's keyword index file (they hold chunk text)."""
+        from agentic_cli.knowledge_base.bm25_index import INDEX_FILES
+
+        for name in INDEX_FILES:
+            (self.embeddings_dir / name).unlink(missing_ok=True)
 
     def get_or_create_sidecar_lock(self, doc_id: str) -> asyncio.Lock:
         """Return the per-doc async lock used to serialize sidecar writes.
@@ -393,6 +434,13 @@ class KnowledgeBaseManager:
             version = data.get("version", 1)
 
             for doc_data in data.get("documents", []):
+                # A document's ID names its files (documents/{id}.json,
+                # documents/{id}.md). metadata.json can arrive with the
+                # project, so an ID that is not a plain name is skipped
+                # before anything turns it into a path.
+                if not _PLAIN_DOC_ID.fullmatch(str(doc_data.get("id", ""))):
+                    logger.warning("kb_document_id_refused", doc_id=repr(doc_data.get("id")))
+                    continue
                 if version >= 2:
                     # v2/v3: Load header from index, content from per-doc file
                     doc = Document.from_dict(doc_data)
@@ -475,21 +523,65 @@ class KnowledgeBaseManager:
         dest.write_bytes(file_bytes)
         return Path(filename)
 
+    def _stored_file_name(self, doc: Document) -> str | None:
+        """The stored file's name, if ``file_path`` names a file directly
+        inside ``files_dir``.
+
+        ``file_path`` comes from metadata.json, which a project can ship with
+        its knowledge base, so any other path is refused.
+        """
+        if not doc.file_path:
+            return None
+        name = doc.file_path.name
+        if name in ("", ".", "..") or Path(name) != doc.file_path:
+            logger.warning(
+                "kb_stored_file_outside_files_dir",
+                doc_id=doc.id,
+                file_path=str(doc.file_path),
+            )
+            return None
+        return name
+
     def get_file_path(self, doc_id: str) -> Path | None:
         """Get the absolute file path for a document's stored file.
+
+        A project can ship ``files/`` or a stored file as a symlink, so links
+        are followed and the result must still be a file inside the knowledge
+        base.
 
         Args:
             doc_id: Document ID.
 
         Returns:
-            Absolute Path if file exists, None otherwise.
+            The resolved Path if the stored file is inside the knowledge base,
+            None otherwise.
         """
         doc = self._documents.get(doc_id)
-        if doc and doc.file_path:
-            abs_path = self.files_dir / doc.file_path
-            if abs_path.exists():
-                return abs_path
+        name = self._stored_file_name(doc) if doc else None
+        if name is None:
+            return None
+        try:
+            resolved = (self.files_dir / name).resolve()
+            inside = resolved.is_relative_to(self.kb_dir.resolve())
+            if inside and resolved.is_file():
+                return resolved
+        except (OSError, RuntimeError):  # a symlink loop, or unreadable
+            return None
+        if not inside:
+            logger.warning(
+                "kb_stored_file_outside_kb_dir", doc_id=doc_id, resolved=str(resolved)
+            )
         return None
+
+    def _delete_stored_file(self, doc: Document) -> None:
+        """Delete a document's stored file (see :meth:`_stored_file_name`)."""
+        name = self._stored_file_name(doc)
+        if name is None:
+            return
+        try:
+            (self.files_dir / name).unlink(missing_ok=True)
+        except OSError as e:
+            logger.warning("kb_stored_file_not_deleted", doc_id=doc.id, error=str(e))
 
     @staticmethod
     def extract_text_from_pdf(file_path: Path) -> str:
@@ -932,13 +1024,13 @@ class KnowledgeBaseManager:
     def list_documents(
         self,
         source_type: SourceType | None = None,
-        limit: int = 100,
+        limit: int | None = 100,
     ) -> list[Document]:
-        """List documents with optional filtering.
+        """List documents with optional filtering, newest first.
 
         Args:
             source_type: Optional source type filter.
-            limit: Maximum number of documents to return.
+            limit: Maximum number of documents to return; None for all.
 
         Returns:
             List of documents.
@@ -951,7 +1043,7 @@ class KnowledgeBaseManager:
         # Sort by updated_at descending
         docs.sort(key=lambda d: d.updated_at, reverse=True)
 
-        return docs[:limit]
+        return docs if limit is None else docs[:limit]
 
     def delete_document(self, doc_id: str) -> bool:
         """Remove a document from the knowledge base.
@@ -985,6 +1077,7 @@ class KnowledgeBaseManager:
             # Persist
             self._delete_document_content(doc_id)
             self._delete_sidecar(doc_id)
+            self._delete_stored_file(doc)
             self._rebuild_index_md()
             self._append_ingest_log("delete", doc)
             self._save_metadata()
@@ -1019,15 +1112,20 @@ class KnowledgeBaseManager:
     def clear(self) -> None:
         """Clear all documents from the knowledge base."""
         with self._lock:
-            # Delete per-document content files and sidecars
-            for doc_id in list(self._documents):
+            # Delete per-document content files, sidecars and stored files
+            for doc_id, doc in list(self._documents.items()):
                 self._delete_document_content(doc_id)
                 self._delete_sidecar(doc_id)
+                self._delete_stored_file(doc)
 
             self._documents = {}
             self._chunks = {}
             self._sidecar_locks.clear()
             self._vector_store.clear()
+            bm25_index = getattr(self, "_bm25_index", None)
+            if bm25_index is not None:
+                bm25_index.rebuild([], [])
+            self._remove_bm25_files()
             self._save_metadata()
             self._vector_store.save()
             self._rebuild_index_md()
@@ -1104,8 +1202,8 @@ class KnowledgeBaseManager:
                     payload = await self.generate_sidecar_payload(
                         doc.content, title=doc.title
                     )
-                    self._write_sidecar(doc, payload)
-                    written += 1
+                    if self._write_sidecar_if_present(doc, payload):
+                        written += 1
             return written
         finally:
             with self._lock:

@@ -423,7 +423,7 @@ class TestTargetlessAllowAlwaysRegression:
 
     @pytest.mark.asyncio
     async def test_filesystem_broaden_preserves_other_namespaces(self, ctx, tmp_path, monkeypatch):
-        """Non-filesystem capabilities keep their exact resolved target."""
+        """A URL grant covers its site (since 0.6.2), not a filesystem-style parent."""
         monkeypatch.chdir(tmp_path)
         w = _stub_workflow()
         w.request_user_input = AsyncMock(return_value="Allow for this session")
@@ -437,8 +437,7 @@ class TestTargetlessAllowAlwaysRegression:
 
         http_session = [r for r in engine.rules if r.capability == "http.read" and r.source is RuleSource.SESSION]
         assert http_session
-        # URL stays exact (host + path), NOT broadened.
-        assert all(r.target == "https://example.com/a" for r in http_session)
+        assert all(r.target == "https://example.com/**" for r in http_session)
 
     @pytest.mark.asyncio
     async def test_memory_and_kb_allowed_by_builtin(self, ctx, tmp_path):

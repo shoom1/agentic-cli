@@ -7,6 +7,102 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-10-03
+
+Knowledge-base, permission and stability fixes for 0.6.1. A knowledge base a
+repository ships can no longer make `kb_read` read or create files outside
+it. Knowledge-base search works without the `kb` extra, text files can be
+ingested, deleting removes the data from disk, `kb_list` and tags-only memory
+updates behave, and switching models keeps the session's grants, sandbox and
+jobs. Two permission changes, see *Changed*: the arXiv tools no longer ask,
+and approving a URL for the session or always covers its site.
+
+### Security
+
+- **`kb_read` reads a document's stored file only from inside the knowledge
+  base.** A document with no text of its own is read from its stored PDF,
+  named by `file_path` in `metadata.json`. The project knowledge base lives in
+  the project, so a cloned repository can ship that file, and `file_path` was
+  used unchecked: a `..` or absolute path, a `files` directory that is a
+  symlink, or a stored file that is a symlink put the text of a PDF elsewhere
+  on disk into the model's context, through `kb_read(full=True)` and through
+  the summary built for a document that has none.
+- **A document ID from `metadata.json` can no longer name a path.** A
+  document's ID names its text file and its summary file. An ID such as
+  `../../elsewhere/notes` in a repository's knowledge base made `kb_read`
+  return the text of a Markdown or JSON file elsewhere on disk and create new
+  files outside the knowledge base (deleting that document removed them). A
+  document whose ID is not 1-64 letters, digits, `-` or `_` is now skipped
+  when the knowledge base loads; the framework has only ever assigned UUIDs.
+
+### Changed
+
+- **Approving a URL for the session, or always, covers its site.** `web_fetch`
+  and `kb_ingest_url` grants were stored for the exact URL, so reading ten
+  pages of one site asked ten times whatever the answer. A session or
+  "always" approval now covers `https://host/**`: the exact host (not its
+  other subdomains), HTTPS only; a plain-HTTP URL, an IP address or a local
+  name keeps the exact-URL grant. "Allow once" still approves one URL, and the
+  prompt shows both the URL being read and the site an approval covers. A URL
+  rule ending in `/**` now also matches its folder's trailing-slash form
+  (`/docs/**` covers `/docs/`), so a deny rule no longer misses it, and a
+  grant for an IPv6 URL no longer breaks the next check of that address.
+- **The arXiv tools no longer ask for permission.** `search_arxiv`,
+  `fetch_arxiv_paper` and `ingest_arxiv_paper` can reach only the arXiv API
+  and `https://arxiv.org/pdf`, and since 0.6.1 declare those endpoints, so
+  answering "Allow once" meant a prompt per search, per paper and per
+  ingestion. Built-in rules now allow exactly those two endpoints, as they
+  allow knowledge-base writes. Any other URL, including other arxiv.org pages
+  through `web_fetch`, still asks, and a deny rule in user or project
+  settings still wins.
+
+### Fixed
+
+- **Knowledge-base search works without the `kb` extra.** The BM25 factory
+  chose the bm25s backend whenever its class imported, which it always did,
+  since bm25s is imported only on the first search, so every `kb_search`
+  raised `ModuleNotFoundError`. It now checks that the library imports and
+  falls back to rank_bm25, then to the built-in index. A knowledge base whose
+  keyword index was saved by another backend is re-indexed when it is opened.
+- **`kb_ingest_file` ingests text files.** Only a PDF had its text
+  extracted; any other file was stored with empty content, so a Markdown or
+  plain-text file was reported as ingested but never matched a search. UTF-8
+  text files are now ingested as text, and other binary files are refused
+  instead of stored unsearchable. A file that cannot be read returns an error
+  instead of raising.
+- **Deleting from the knowledge base removes the data from disk.**
+  `delete_document` left the document's stored file, and `clear` left every
+  stored file plus the keyword index, which holds the text of every chunk;
+  `clear` also kept that index in memory, so the next ingest wrote the cleared
+  text back. An index file left by another BM25 backend is removed too.
+  Deletion removes only a file directly inside the files directory, since a
+  project can ship its knowledge base's `metadata.json`.
+- **Switching models keeps the session's grants, sandbox and jobs.**
+  `reinitialize` released every service and built new ones, so a model change
+  in `/settings` asked again for everything allowed "for this session", shut
+  down the sandbox kernels with their variables, and closed the job manager.
+  None of these depends on the model. With `preserve_sessions=True`, which
+  the CLI uses, they are carried over on both backends, also through a switch
+  that fails, so restoring the previous model keeps them.
+- **`kb_list` lists what was asked for.** It took the `limit` newest
+  documents and only then applied `query`, so a match outside the newest 20
+  was never listed; it returned up to `limit` documents from the project and
+  again from the user knowledge base; and an unknown `source_type` was
+  ignored. Filters now come first, the two knowledge bases are merged newest
+  first and cut at `limit`, and an unknown `source_type` is an error.
+  `KnowledgeBaseManager.list_documents(limit=None)` lists every document.
+- **A document deleted while its summary was being built stays deleted.**
+  `kb_read` and `backfill_sidecars` build a missing summary file by calling
+  the LLM, then write it. A `delete_document` during that call was followed
+  by the write, so the summary, derived from the document's text, came back
+  and `kb_read` returned it. The write now happens only if the document still
+  exists, under the lock deletion holds.
+- **`update_memory` with only new tags keeps the memory findable.** Every
+  update cleared the memory's embedding, but only a content change computed
+  a new one, so after a tags-only update semantic search skipped the memory
+  until the next restart. The embedding is now replaced only when the content
+  changes.
+
 ## [0.6.1] - 2026-09-27
 
 Security and stability fixes for 0.6.0. The permission engine now judges the
