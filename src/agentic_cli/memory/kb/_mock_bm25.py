@@ -8,6 +8,7 @@ from collections import Counter
 from pathlib import Path
 
 from agentic_cli.memory._core.io import atomic_write_json
+from agentic_cli.memory.kb._tokenize import TOKENIZER, tokenize
 
 
 class MockBM25Index:
@@ -76,6 +77,7 @@ class MockBM25Index:
 
     def save(self, path: Path) -> None:
         data = {
+            "tokenizer": TOKENIZER,
             "chunk_ids": self._chunk_ids,
             "documents": self._documents,
         }
@@ -85,9 +87,11 @@ class MockBM25Index:
         index_path = path / "bm25_index.json"
         if index_path.exists():
             data = json.loads(index_path.read_text())
+            if data.get("tokenizer") != TOKENIZER:
+                return  # tokenized another way: the knowledge base re-indexes
             self._chunk_ids = data["chunk_ids"]
             self._documents = data["documents"]
 
     @staticmethod
     def _tokenize(text: str) -> list[str]:
-        return text.lower().split()
+        return tokenize(text)

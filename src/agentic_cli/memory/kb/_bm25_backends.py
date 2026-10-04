@@ -1,8 +1,9 @@
 """Real BM25 index backends (bm25s, rank_bm25).
 
 Both implement the same interface as MockBM25Index so create_bm25_index()
-can return any of them interchangeably. Tokenization is lowercase whitespace
-split to match MockBM25Index; the scoring model is the library's own BM25.
+can return any of them interchangeably. They tokenize with the shared
+``_tokenize.tokenize``, as MockBM25Index does; the scoring model is the
+library's own BM25.
 
 Neither underlying library supports true incremental add/remove, so we keep
 tokenized docs + chunk_ids in memory and rebuild the model lazily on search.
@@ -14,10 +15,8 @@ import json
 from pathlib import Path
 
 from agentic_cli.memory._core.io import atomic_write_json
-
-
-def _tokenize(text: str) -> list[str]:
-    return text.lower().split()
+from agentic_cli.memory.kb._tokenize import TOKENIZER
+from agentic_cli.memory.kb._tokenize import tokenize as _tokenize
 
 
 class _BM25BackendBase:
@@ -61,7 +60,11 @@ class _BM25BackendBase:
         path.mkdir(parents=True, exist_ok=True)
         atomic_write_json(
             path / self._INDEX_FILE,
-            {"chunk_ids": self._chunk_ids, "tokenized": self._tokenized},
+            {
+                "tokenizer": TOKENIZER,
+                "chunk_ids": self._chunk_ids,
+                "tokenized": self._tokenized,
+            },
         )
 
     def load(self, path: Path) -> None:
@@ -69,6 +72,8 @@ class _BM25BackendBase:
         if not index_path.exists():
             return
         data = json.loads(index_path.read_text())
+        if data.get("tokenizer") != TOKENIZER:
+            return  # tokenized another way: the knowledge base re-indexes
         self._chunk_ids = data["chunk_ids"]
         self._tokenized = data["tokenized"]
         self._model = None

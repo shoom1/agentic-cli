@@ -63,6 +63,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `isinstance` checks against it fail for knowledge bases the workflow
   builds.
 
+### Fixed
+
+- **Knowledge-base search without the `kb` extra returns only documents that
+  match.** Without the extra's libraries (or with `knowledge_base_use_mock`)
+  the knowledge base embeds text as a hash of it, which carries no meaning;
+  search mixed those "semantic" hits in with the keyword hits, so most
+  results in the session that ingested the documents were unrelated. Search
+  is now keyword-only in that mode.
+- **Keyword search ignores punctuation.** Every keyword index split text on
+  whitespace only, so `orchestras` did not match "…in orchestras." and
+  `squares` did not match "sixty-four squares.". Words are now split on
+  punctuation as well; an index saved before this change is rebuilt the
+  first time its knowledge base opens.
+
 ## [0.6.2] - 2026-10-03
 
 Knowledge-base, permission and stability fixes for 0.6.1. A knowledge base a
