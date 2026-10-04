@@ -76,6 +76,14 @@ def _module_name(path: Path) -> str:
     return ".".join(parts)
 
 
+def _module_name_for_outside(path: Path) -> str:
+    """Module name for files outside src/ (tests/, examples/), relative to repo root."""
+    parts = list(path.relative_to(ROOT).with_suffix("").parts)
+    if parts[-1] == "__init__":
+        parts.pop()
+    return ".".join(parts)
+
+
 def _kind(module: str) -> str:
     if module == "agentic_cli.memory":
         return "root"
@@ -130,7 +138,10 @@ def outside_violations() -> set[tuple[str, str]]:
     files += sorted((ROOT / "examples").rglob("*.py"))
     bad = set()
     for path in files:
-        module = _module_name(path) if SRC in path.parents else None
+        if SRC in path.parents:
+            module = _module_name(path)
+        else:
+            module = _module_name_for_outside(path)
         for target, names in imports_of(path, module):
             inside = target == "agentic_cli.memory" or target.startswith("agentic_cli.memory.")
             if (inside and target not in PUBLIC_MODULES) or _deprecated(target, names):
@@ -154,5 +165,6 @@ def test_the_rest_of_agentic_cli_uses_the_public_api():
 def test_the_package_tests_depend_only_on_the_package():
     bad = set()
     for path in sorted(TESTS.rglob("*.py")):
-        bad |= _violations(path, {"root", "_core", "store", "kb", "tests"}, TEST_LIBRARIES, None)
+        module = _module_name_for_outside(path)
+        bad |= _violations(path, {"root", "_core", "store", "kb", "tests"}, TEST_LIBRARIES, module)
     assert bad == set()
