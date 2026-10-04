@@ -88,9 +88,10 @@ class TestMockVectorStore:
         )
         store.save()
 
-        # Load into new store
+        # Load into new store — no explicit .load(): construction itself
+        # picks up the saved index (matching the real, FAISS-backed
+        # VectorStore's auto-load-on-construct behavior).
         store2 = MockVectorStore(index_path=index_path, embedding_dim=4)
-        store2.load()
         assert store2.size == 2
 
         results = store2.search([1.0, 0.0, 0.0, 0.0], top_k=1)

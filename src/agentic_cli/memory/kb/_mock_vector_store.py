@@ -6,6 +6,9 @@ from pathlib import Path
 import numpy as np
 
 from agentic_cli.file_utils import atomic_write_json
+from agentic_cli.memory._core.log import get_logger
+
+logger = get_logger("agentic_cli.memory.kb")
 
 
 class MockVectorStore:
@@ -85,10 +88,24 @@ class MockVectorStore:
         atomic_write_json(self.index_path, data)
 
     def load(self) -> None:
-        if self.index_path.exists():
+        if not self.index_path.exists():
+            return
+        try:
             data = json.loads(self.index_path.read_text())
             self._vectors = data["vectors"]
             self.embedding_dim = data["embedding_dim"]
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            # A project can ship its knowledge base (the project KB lives
+            # under the repo), so a corrupt or foreign-shaped index.mock
+            # (garbage, empty, wrong JSON shape) must not take the whole
+            # knowledge base down with it — start empty instead, same as a
+            # missing file.
+            logger.warning(
+                "mock_vector_store_index_unreadable",
+                path=str(self.index_path),
+                error=str(e),
+            )
+            self._vectors = {}
 
     def clear(self) -> None:
         self._vectors = {}

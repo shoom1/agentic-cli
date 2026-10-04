@@ -46,6 +46,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `agentic_cli.knowledge_base.bm25_index.create_bm25_index`) no longer reaches
   the code; patch the new module.
 
+### Fixed
+
+- **A knowledge base without the `kb` extra (or with
+  `knowledge_base_use_mock`) keeps its vectors.** It did not load its saved
+  vectors when reopened, so search in a later session matched by keyword
+  only, and the next ingest or delete overwrote the saved vectors with that
+  session's alone.
+
 ## [0.6.2] - 2026-10-03
 
 Knowledge-base, permission and stability fixes for 0.6.1. A knowledge base a

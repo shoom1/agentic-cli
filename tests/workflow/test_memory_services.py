@@ -59,6 +59,16 @@ async def test_the_setting_decides_whether_the_summarizer_is_passed(tmp_path):
     assert (await user_off.generate_sidecar_payload("Body.", title="T"))["summary"] == "Body."
 
 
+def test_build_knowledge_base_uses_the_settings_embedding_model(tmp_path):
+    settings = BaseSettings(
+        workspace_dir=tmp_path / "w", embedding_model="m-x", knowledge_base_use_mock=True
+    )
+
+    kb = memory_services.build_knowledge_base(settings, tmp_path / "kb")
+
+    assert kb.get_stats()["embedding_model"] == "m-x"
+
+
 def test_the_memory_store_lives_in_the_workspace(settings):
     store = memory_services.build_memory_store(settings)
     store.store("a fact")

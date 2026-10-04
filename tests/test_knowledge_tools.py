@@ -434,7 +434,7 @@ class TestKBSummaryGeneration:
         assert doc.summary == content
 
     async def test_ingest_tool_uses_the_given_summarizer_when_available(self, kb):
-        """Tool-level ingest should invoke the registered async LLM summarizer
+        """Tool-level ingest should invoke the knowledge base's summarizer
         and store its output in Document.summary (not the truncate fallback)."""
         from agentic_cli.tools.knowledge_tools import _ingest_text_with_kb
 

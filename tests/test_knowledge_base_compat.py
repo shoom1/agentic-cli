@@ -111,6 +111,19 @@ def test_the_old_signature_reads_paths_and_embedding_from_settings(tmp_path):
     assert kb.get_stats()["embedding_model"] == "m-legacy"
 
 
+def test_base_dir_overrides_settings_paths(tmp_path):
+    """base_dir still wins over settings' paths when both are given (it did
+    before the new constructor; a mutation that let settings override
+    base_dir passed the whole suite otherwise)."""
+    settings = BaseSettings(workspace_dir=tmp_path / "workspace", embedding_model="m-legacy")
+
+    kb = _old_class()(settings=settings, base_dir=tmp_path / "kb", use_mock=True)
+
+    assert kb.kb_dir == tmp_path / "kb"
+    assert not settings.knowledge_base_dir.exists()
+    assert kb.get_stats()["embedding_model"] == "m-legacy"
+
+
 def test_the_old_default_directory_without_settings(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
 

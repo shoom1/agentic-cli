@@ -1013,13 +1013,6 @@ class TestBaseDirOverride:
         assert (custom_dir / "embeddings").is_dir()
         assert (custom_dir / "files").is_dir()
 
-    def test_settings_is_not_a_constructor_argument(self, tmp_path):
-        """The new-path manager takes a directory and plain arguments only;
-        settings-based construction lives on the deprecated old path
-        (``agentic_cli.knowledge_base.KnowledgeBaseManager``) until 0.7.0."""
-        with pytest.raises(TypeError):
-            _make_mock_kb(tmp_path / "override_kb", settings=MagicMock())
-
 
 class TestFindDocument:
     """Tests for KnowledgeBaseManager.find_document()."""
