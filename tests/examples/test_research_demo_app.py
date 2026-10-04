@@ -311,3 +311,203 @@ class TestRecoveryAfterFailure:
         await demo_app.process_input("carry on")
         assert workflow.messages == ["carry on"]
         assert "still working" in demo_app.session.responses()
+
+
+class TestKbBackfillCommand:
+    """Pin the /kb-backfill command's per-KB loop.
+
+    Covers: per-KB progress and result messages, a KB that is already
+    backfilling, a KB that fails, nothing left to write, and one KB shared
+    by both scopes (project and user resolve to the same manager).
+    """
+
+    async def test_both_kbs_write_sidecars(self):
+        """Both project and user KBs write sidecars → two success messages."""
+        from examples.research_demo.commands import KbBackfillCommand
+        from types import SimpleNamespace
+
+        class FakeKB:
+            def __init__(self, name: str):
+                self.kb_dir = f"/tmp/{name}"
+                self.name = name
+
+            async def backfill_sidecars(self, progress_cb=None):
+                if progress_cb:
+                    progress_cb(0, 1, SimpleNamespace(title=f"Paper from {self.name}"))
+                return 1
+
+        project_kb = FakeKB("project")
+        user_kb = FakeKB("user")
+        app = SimpleNamespace(
+            workflow=SimpleNamespace(
+                kb_manager=project_kb,
+                user_kb_manager=user_kb,
+            ),
+            session=RecordingSession(),
+        )
+
+        cmd = KbBackfillCommand()
+        await cmd.execute("", app)
+
+        successes = app.session.of("success")
+        assert len(successes) == 2, f"Expected 2 success messages, got {len(successes)}"
+        assert any("project" in s[1].lower() for s in successes), "Missing project KB success"
+        assert any("user" in s[1].lower() for s in successes), "Missing user KB success"
+        assert app.session.errors() == []
+        messages_text = [m[2] for m in app.session.of("message")]
+        assert not any("All documents already have sidecars" in m for m in messages_text), (
+            "Should not show 'All documents already have sidecars' when sidecars were written"
+        )
+        assert messages_text.count("[project KB] 1/1: Paper from project") == 1, (
+            f"Expected the project KB's progress message exactly once, got {messages_text}"
+        )
+
+    async def test_project_kb_raises_backfill_already_running(self):
+        """Project KB raises BackfillAlreadyRunning → warning, user KB still processes.
+
+        The project KB is processed first in the loop, so this pins that the
+        loop keeps going (``continue``) past a failing earlier KB rather than
+        stopping (``return``) before the later one is ever tried.
+        """
+        from examples.research_demo.commands import KbBackfillCommand
+        from agentic_cli.knowledge_base.manager import BackfillAlreadyRunning
+        from types import SimpleNamespace
+
+        class FakeKB:
+            def __init__(self, name: str):
+                self.kb_dir = f"/tmp/{name}"
+                self.name = name
+
+            async def backfill_sidecars(self, progress_cb=None):
+                if self.name == "project":
+                    raise BackfillAlreadyRunning()
+                return 1
+
+        project_kb = FakeKB("project")
+        user_kb = FakeKB("user")
+        app = SimpleNamespace(
+            workflow=SimpleNamespace(
+                kb_manager=project_kb,
+                user_kb_manager=user_kb,
+            ),
+            session=RecordingSession(),
+        )
+
+        cmd = KbBackfillCommand()
+        await cmd.execute("", app)
+
+        warnings = app.session.warnings()
+        assert len(warnings) == 1, f"Expected 1 warning, got {len(warnings)}"
+        assert "already in progress" in warnings[0].lower()
+
+        successes = app.session.of("success")
+        assert len(successes) == 1, "User KB should still report success"
+        assert "user" in successes[0][1].lower()
+        assert app.session.errors() == []
+
+    async def test_one_kb_raises_runtime_error(self):
+        """Project KB raises RuntimeError → error, user KB still processes.
+
+        The project KB is processed first in the loop, so this pins that the
+        loop keeps going (``continue``) past a failing earlier KB rather than
+        stopping (``return``) before the later one is ever tried.
+        """
+        from examples.research_demo.commands import KbBackfillCommand
+        from types import SimpleNamespace
+
+        class FakeKB:
+            def __init__(self, name: str):
+                self.kb_dir = f"/tmp/{name}"
+                self.name = name
+
+            async def backfill_sidecars(self, progress_cb=None):
+                if self.name == "project":
+                    raise RuntimeError("boom")
+                return 1
+
+        project_kb = FakeKB("project")
+        user_kb = FakeKB("user")
+        app = SimpleNamespace(
+            workflow=SimpleNamespace(
+                kb_manager=project_kb,
+                user_kb_manager=user_kb,
+            ),
+            session=RecordingSession(),
+        )
+
+        cmd = KbBackfillCommand()
+        await cmd.execute("", app)
+
+        errors = app.session.errors()
+        assert len(errors) == 1, f"Expected 1 error, got {len(errors)}"
+        assert "boom" in errors[0]
+
+        successes = app.session.of("success")
+        assert len(successes) == 1, "User KB should still report success"
+        assert "user" in successes[0][1].lower()
+
+    async def test_both_kbs_return_zero_sidecars(self):
+        """Both KBs return 0 → "All documents already have sidecars." message, exactly once."""
+        from examples.research_demo.commands import KbBackfillCommand
+        from types import SimpleNamespace
+
+        class FakeKB:
+            def __init__(self, name: str):
+                self.kb_dir = f"/tmp/{name}"
+                self.name = name
+
+            async def backfill_sidecars(self, progress_cb=None):
+                return 0
+
+        project_kb = FakeKB("project")
+        user_kb = FakeKB("user")
+        app = SimpleNamespace(
+            workflow=SimpleNamespace(
+                kb_manager=project_kb,
+                user_kb_manager=user_kb,
+            ),
+            session=RecordingSession(),
+        )
+
+        cmd = KbBackfillCommand()
+        await cmd.execute("", app)
+
+        messages_text = [m[2] for m in app.session.of("message")]
+        occurrences = messages_text.count("All documents already have sidecars.")
+        assert occurrences == 1, (
+            f"Expected the 'all documents...' message exactly once, got {occurrences} "
+            f"in {messages_text}"
+        )
+        assert app.session.errors() == []
+        assert app.session.warnings() == []
+
+    async def test_user_kb_same_as_project_kb_called_once(self):
+        """When user_kb_manager is same object as kb_manager → backfill called once."""
+        from examples.research_demo.commands import KbBackfillCommand
+        from types import SimpleNamespace
+
+        call_count = [0]
+
+        class FakeKB:
+            def __init__(self):
+                self.kb_dir = "/tmp/kb"
+
+            async def backfill_sidecars(self, progress_cb=None):
+                call_count[0] += 1
+                return 1
+
+        kb = FakeKB()
+        app = SimpleNamespace(
+            workflow=SimpleNamespace(
+                kb_manager=kb,
+                user_kb_manager=kb,  # Same object
+            ),
+            session=RecordingSession(),
+        )
+
+        cmd = KbBackfillCommand()
+        await cmd.execute("", app)
+
+        assert call_count[0] == 1, f"backfill_sidecars should be called once, was called {call_count[0]} times"
+        successes = app.session.of("success")
+        assert len(successes) == 1, "Should report success once"

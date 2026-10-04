@@ -21,7 +21,7 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 from agentic_cli.knowledge_base.embeddings import EmbeddingService
 from agentic_cli.knowledge_base.models import (
@@ -45,6 +45,22 @@ _PLAIN_DOC_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
 # Current persistence format version
 _FORMAT_VERSION = 3
+
+
+class Summarizer(Protocol):
+    """What a knowledge base calls to write summaries and sidecars.
+
+    ``prompt`` is the full instruction the knowledge base wants answered for
+    ``content``. Whether answering it means an LLM call is up to the
+    implementation.
+    """
+
+    async def summarize(self, content: str, prompt: str) -> str: ...
+
+
+# Default for ``summarizer=``: look the summarizer up in the service registry
+# of the turn in progress, as before. An explicit ``None`` means no summarizer.
+_FROM_TURN_REGISTRY: Any = object()
 
 
 def _utc_iso_now() -> str:
@@ -128,6 +144,8 @@ class KnowledgeBaseManager:
         base_dir: Path | None = None,
         embedding_service: Any = None,
         vector_store: Any = None,
+        *,
+        summarizer: "Summarizer | None" = _FROM_TURN_REGISTRY,
     ) -> None:
         """Initialize the knowledge base manager.
 
@@ -140,11 +158,13 @@ class KnowledgeBaseManager:
                 model and batch size still come from settings for consistency.
             embedding_service: Optional pre-configured embedding service.
             vector_store: Optional pre-configured vector store.
+            summarizer: Called to write summaries and sidecars. None: no summarizer (store previews). Omitted: the workflow's summarizer from the turn in progress.
         """
         self._lock = threading.Lock()
         self._sidecar_locks: dict[str, asyncio.Lock] = {}
         self._backfill_running: bool = False
         self._concepts_store: "ConceptStore | None" = None
+        self._summarizer = summarizer
         self._settings = settings
         self._use_mock = use_mock
 
@@ -597,6 +617,14 @@ class KnowledgeBaseManager:
 
         return extract_pdf_text(file_path)
 
+    def _current_summarizer(self) -> "Summarizer | None":
+        """The summarizer to call now, or None to store previews."""
+        if self._summarizer is not _FROM_TURN_REGISTRY:
+            return self._summarizer
+        from agentic_cli.workflow.service_registry import LLM_SUMMARIZER, get_service
+
+        return get_service(LLM_SUMMARIZER)
+
     @staticmethod
     def _truncate_summary(content: str) -> str:
         """Return the deterministic fallback summary (first ~500 chars)."""
@@ -617,10 +645,10 @@ class KnowledgeBaseManager:
     )
 
     async def generate_summary(self, content: str, title: str = "") -> str:
-        """Generate a document summary via the registered LLM summarizer.
+        """Generate a document summary via the summarizer given at construction.
 
-        Falls back to the first ~500 chars of ``content`` if no summarizer
-        is registered, if the summarizer raises, or if it returns empty.
+        Falls back to the first ~500 chars of ``content`` if there is no
+        summarizer, if the summarizer raises, or if it returns empty.
 
         Args:
             content: Full document text.
@@ -633,12 +661,7 @@ class KnowledgeBaseManager:
             return ""
 
         try:
-            from agentic_cli.workflow.service_registry import (
-                get_service,
-                LLM_SUMMARIZER,
-            )
-
-            summarizer = get_service(LLM_SUMMARIZER)
+            summarizer = self._current_summarizer()
             if summarizer is not None:
                 capped = content[: self._SUMMARY_INPUT_CHAR_LIMIT]
                 prompt = self._SUMMARY_PROMPT_TEMPLATE.format(
@@ -693,8 +716,8 @@ class KnowledgeBaseManager:
 
         Returns a dict with keys ``summary`` (str), ``claims`` (list[str]),
         and ``entities`` (dict[str, list[str]]). Falls back to
-        ``{summary: truncate(content), claims: [], entities: {}}`` if no
-        summarizer is registered or the LLM call fails.
+        ``{summary: truncate(content), claims: [], entities: {}}`` if there
+        is no summarizer or the LLM call fails.
         """
         fallback = {
             "summary": self._truncate_summary(content),
@@ -705,12 +728,7 @@ class KnowledgeBaseManager:
             return fallback
 
         try:
-            from agentic_cli.workflow.service_registry import (
-                get_service,
-                LLM_SUMMARIZER,
-            )
-
-            summarizer = get_service(LLM_SUMMARIZER)
+            summarizer = self._current_summarizer()
             if summarizer is None:
                 return fallback
 
@@ -1137,7 +1155,7 @@ class KnowledgeBaseManager:
         """Generate missing sidecars for all documents in the KB.
 
         Iterates the in-memory document set, generates a sidecar payload
-        via the registered LLM summarizer for any doc that doesn't have a
+        via the knowledge base's summarizer for any doc that doesn't have a
         sidecar file, and writes it. Returns the count of sidecars written.
         Existing sidecars are not touched.
 

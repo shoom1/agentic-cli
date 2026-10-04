@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Knowledge-base summaries no longer depend on `web_fetch`.** A knowledge
+  base had the LLM write a document's summary and sidecar only when some agent
+  in the app had `web_fetch`; otherwise every ingestion silently stored the
+  first ~500 characters. The workflow now gives its knowledge bases a
+  summarizer whenever the new `knowledge_base_summarize` setting is on, which
+  is the default. Apps whose agents have knowledge-base tools but not
+  `web_fetch` now make one summarizer call per ingested document; set
+  `"knowledge_base_summarize": false` in `~/.{app_name}/settings.json` to keep
+  previews. A project's settings file cannot change it.
+
+### Added
+
+- **`KnowledgeBaseManager(summarizer=...)`.** `generate_summary`,
+  `generate_sidecar_payload` and `backfill_sidecars` call the summarizer the
+  knowledge base was given (anything with `async summarize(content, prompt)`);
+  with `None` they store previews.
+
 ## [0.6.2] - 2026-10-03
 
 Knowledge-base, permission and stability fixes for 0.6.1. A knowledge base a

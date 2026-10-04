@@ -51,7 +51,7 @@ class TestIndexMdLoadTimeMaterialization:
     when documents exist but the file is absent."""
 
     def test_load_materializes_missing_index_md(self, tmp_path):
-        from agentic_cli.knowledge_base.manager import KnowledgeBaseManager
+        from agentic_cli.knowledge_base.manager import KnowledgeBaseManager, _FROM_TURN_REGISTRY
 
         # First manager: ingest, confirm index.md exists, then delete it
         kb = _make_kb(tmp_path)
@@ -77,6 +77,7 @@ class TestIndexMdLoadTimeMaterialization:
         kb2.metadata_path = kb.metadata_path
         kb2._embedding_service = kb._embedding_service
         kb2._vector_store = kb._vector_store
+        kb2._summarizer = _FROM_TURN_REGISTRY
         kb2._documents = {}
         kb2._chunks = {}
         kb2._load_metadata()

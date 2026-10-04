@@ -647,6 +647,8 @@ await kb.backfill_sidecars()                           # regenerate markdown sum
 
 The KB also maintains `index.md` and an append-only `ingest_log.md` audit trail. Source-type constants (`arxiv`, `ssrn`, `web`, `internal`, `user`, `local`) live on `SourceType`.
 
+Ingesting a document writes a summary and a sidecar with the workflow's LLM when `knowledge_base_summarize` is on (the default; one call per document). Turn it off in `~/.{app_name}/settings.json` to store the first ~500 characters instead. A knowledge base you build yourself calls the `summarizer=` you pass it in `generate_summary`, `generate_sidecar_payload` and `backfill_sidecars`; `ingest_document` stores the summary and sidecar payload you give it, or a preview.
+
 #### Memory Tools
 
 Semantic, lifecycle-aware memory:
