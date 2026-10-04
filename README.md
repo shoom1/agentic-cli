@@ -870,6 +870,7 @@ agentic-cli/
 │   │   ├── settings.py           # WorkflowSettingsMixin
 │   │   ├── retry.py              # Exponential-backoff retry
 │   │   ├── tool_summaries.py     # Tool result one-liner summaries
+│   │   ├── memory_services.py    # Settings → agentic_cli.memory arguments
 │   │   ├── adk/
 │   │   │   ├── manager.py                # GoogleADKWorkflowManager
 │   │   │   ├── event_processor.py
@@ -907,7 +908,7 @@ agentic-cli/
 │   │   ├── search.py             # web_search (Tavily / Brave)
 │   │   ├── webfetch_tool.py      # web_fetch (orchestrator)
 │   │   ├── pdf_utils.py          # PDF text extraction helpers
-│   │   ├── memory_tools.py       # save/search/update/delete + MemoryStore
+│   │   ├── memory_tools.py       # save/search/update/delete (store: agentic_cli.memory)
 │   │   ├── _core/                # Shared planning/task logic
 │   │   │   ├── planning.py
 │   │   │   └── tasks.py

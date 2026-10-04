@@ -136,9 +136,9 @@ class TestMemoryStore:
         store = MemoryStore(tmp_path / "memory")
         store.store("Test data")
 
-        # Verify no .tmp file left behind
-        leftover = tmp_path / "memory" / "memories.tmp"
-        assert not leftover.exists()
+        # The writer's temp file (``.memories.json.<random>.tmp``) must not
+        # survive; without an embedding service there's no embeddings file.
+        assert sorted(p.name for p in (tmp_path / "memory").iterdir()) == ["memories.json"]
 
     def test_created_at_is_set(self, tmp_path):
         from agentic_cli.memory import MemoryStore

@@ -87,9 +87,9 @@ class ForgettingPolicy:
 class MemoryStore:
     """Simple persistent memory store.
 
-    Appends memories to a JSON file in the workspace directory.
-    Supports substring search and optional semantic search when an
-    embedding_service is provided.
+    Keeps memories in ``memories.json`` in its directory (embeddings in
+    ``memories_embeddings.json``), searched by substring or, with an
+    embedding service, by semantic similarity.
 
     Example:
         >>> store = MemoryStore(Path("memory"))
