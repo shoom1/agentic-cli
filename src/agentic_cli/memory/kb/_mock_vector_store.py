@@ -5,7 +5,7 @@ from pathlib import Path
 
 import numpy as np
 
-from agentic_cli.file_utils import atomic_write_json
+from agentic_cli.memory._core.io import atomic_write_json
 from agentic_cli.memory._core.log import get_logger
 
 logger = get_logger("agentic_cli.memory.kb")

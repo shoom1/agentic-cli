@@ -31,11 +31,10 @@ from agentic_cli.memory.kb.models import (
     SourceType,
 )
 from agentic_cli.memory.kb.vector_store import VectorStore
-from agentic_cli.constants import truncate
-from agentic_cli.logging import Loggers
-from agentic_cli.file_utils import atomic_write_json, atomic_write_text
+from agentic_cli.memory._core.io import atomic_write_json, atomic_write_text
+from agentic_cli.memory._core.log import get_logger
 
-logger = Loggers.knowledge_base()
+logger = get_logger("agentic_cli.memory.kb")
 
 # Every document ID the framework assigns is a UUID; see _load_metadata.
 _PLAIN_DOC_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
@@ -59,6 +58,13 @@ def _utc_iso_now() -> str:
     """Return current UTC time as ISO-8601 with a trailing 'Z'."""
     from datetime import timezone
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _truncate(text: str, max_length: int = 200) -> str:
+    """``text`` cut to ``max_length`` characters, with "..." when cut."""
+    if len(text) > max_length:
+        return text[:max_length] + "..."
+    return text
 
 
 def matches_document_filters(doc: Document, filters: dict[str, Any]) -> bool:
@@ -567,7 +573,7 @@ class KnowledgeBaseManager:
     @staticmethod
     def _truncate_summary(content: str) -> str:
         """Return the deterministic fallback summary (first ~500 chars)."""
-        return truncate(content, 500) if content else ""
+        return _truncate(content, 500) if content else ""
 
     # Cap the amount of content we hand to the LLM summarizer. Long PDFs
     # can easily exceed sensible prompt budgets, and the summary only
@@ -896,7 +902,7 @@ class KnowledgeBaseManager:
                 if filters and not self._matches_filters(doc, filters):
                     continue
                 seen_docs.add(doc.id)
-                highlight = truncate(chunk.content)
+                highlight = _truncate(chunk.content)
                 results.append(
                     SearchResult(
                         document=doc,
