@@ -631,19 +631,31 @@ reader     = AgentConfig(name="reader",     prompt=..., tools=KB_READER_TOOLS)
 Direct manager API for embedding in custom flows:
 
 ```python
+from pathlib import Path
+from agentic_cli.memory import EmbeddingConfig
 from agentic_cli.memory.kb import KnowledgeBaseManager, SourceType
 
-kb = KnowledgeBaseManager(settings=settings)
-doc = await kb.ingest_document(
-    content="Machine learning is...",
+kb = KnowledgeBaseManager(
+    Path("~/.myapp/knowledge_base").expanduser(),
+    embedding=EmbeddingConfig(model_name="all-MiniLM-L6-v2"),
+    summarizer=my_summarizer,  # optional: anything with `async summarize(content, prompt) -> str`
+)
+content = "Machine learning is..."
+payload = await kb.generate_sidecar_payload(content, title="ML Introduction")  # calls the summarizer
+doc = kb.ingest_document(
+    content=content,
     title="ML Introduction",
     source_type=SourceType.WEB,
     source_url="https://example.com/ml",
+    summary=payload["summary"] or None,
+    sidecar_payload=payload,
 )
 results = kb.search("neural networks", top_k=5)        # hybrid by default
 concepts = kb.concepts.search("attention")             # concept pages
 await kb.backfill_sidecars()                           # regenerate markdown summaries
 ```
+
+`ingest_document` is synchronous and never calls the summarizer itself; without `summary`/`sidecar_payload` it stores a preview of `content` instead.
 
 The KB also maintains `index.md` and an append-only `ingest_log.md` audit trail. Source-type constants (`arxiv`, `ssrn`, `web`, `internal`, `user`, `local`) live on `SourceType`.
 

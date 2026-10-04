@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from agentic_cli.memory import ForgettingPolicy, MemoryItem, MemoryStore
+from agentic_cli.memory import ForgettingPolicy, MemoryItem, MemoryStore, MockEmbeddingService
 
 
 def test_the_store_keeps_its_files_in_the_directory_it_is_given(tmp_path):
@@ -349,3 +349,103 @@ class TestForgettingPolicy:
         store.store("memory")
         result = store.apply_forgetting(ForgettingPolicy())
         assert result["archived_count"] == 0
+
+
+class TestMemorySemanticSearch:
+    """Tests for semantic search in MemoryStore."""
+
+    def test_semantic_search_returns_results(self, tmp_path):
+        emb = MockEmbeddingService()
+        store = MemoryStore(tmp_path / "memory", embedding_service=emb)
+        store.store("Python is a programming language")
+        store.store("The weather is sunny today")
+        store.store("Machine learning uses Python")
+        results = store.search("Python programming", limit=10)
+        assert len(results) > 0
+        # All results should have embeddings now
+        for item in store._items.values():
+            assert item.embedding is not None
+
+    def test_semantic_search_updates_access_tracking(self, tmp_path):
+        emb = MockEmbeddingService()
+        store = MemoryStore(tmp_path / "memory", embedding_service=emb)
+        item_id = store.store("important fact")
+        results = store.search("fact")
+        assert len(results) == 1
+        item = store._items[item_id]
+        assert item.access_count == 1
+        assert item.last_accessed_at >= item.created_at
+
+    def test_fallback_to_substring_without_embeddings(self, tmp_path):
+        store = MemoryStore(tmp_path / "memory")  # no embedding service
+        store.store("Python is great")
+        store.store("Java is also good")
+        results = store.search("Python")
+        assert len(results) == 1
+        assert results[0].content == "Python is great"
+
+    def test_importance_and_recency_affect_ranking(self, tmp_path):
+        emb = MockEmbeddingService()
+        store = MemoryStore(tmp_path / "memory", embedding_service=emb)
+        store.store("important Python fact", importance=9)
+        store.store("trivial Python fact", importance=1)
+        results = store.search("Python fact", limit=2)
+        assert results[0].importance >= results[1].importance
+
+    def test_embeddings_persisted_separately(self, tmp_path):
+        emb = MockEmbeddingService()
+        store = MemoryStore(tmp_path / "memory", embedding_service=emb)
+        store.store("test content")
+        emb_path = store._embeddings_path
+        assert emb_path.exists()
+        import json
+        main_data = json.loads(store._path.read_text())
+        for item_data in main_data:
+            assert "embedding" not in item_data
+
+    def test_embedding_migration_on_load(self, tmp_path):
+        """Existing memories without embeddings get embedded on load."""
+        store1 = MemoryStore(tmp_path / "memory")
+        store1.store("old memory without embedding")
+        store2 = MemoryStore(tmp_path / "memory", embedding_service=MockEmbeddingService())
+        items = list(store2._items.values())
+        assert len(items) == 1
+        assert items[0].embedding is not None
+
+
+class TestMemoryContradictionDetection:
+
+    def test_find_similar_on_store(self, tmp_path):
+        emb = MockEmbeddingService()
+        store = MemoryStore(tmp_path / "memory", embedding_service=emb)
+        store.store("The user prefers dark mode")
+        # MockEmbeddingService uses MD5 hashing — use the same text so
+        # similarity is 1.0 (well above threshold), which is enough to
+        # verify the detection logic without requiring real semantic embeddings.
+        result = store.store_with_similarity_check(
+            "The user prefers dark mode",
+            similarity_threshold=0.5,
+        )
+        assert result["stored"] is True
+        assert result["item_id"] is not None
+        assert len(result["similar_existing"]) > 0
+        assert result["similar_existing"][0]["content"] == "The user prefers dark mode"
+
+    def test_no_similar_when_different(self, tmp_path):
+        emb = MockEmbeddingService()
+        store = MemoryStore(tmp_path / "memory", embedding_service=emb)
+        store.store("The user prefers dark mode")
+        result = store.store_with_similarity_check(
+            "Python is a programming language",
+            similarity_threshold=0.99,
+        )
+        assert result["stored"] is True
+        assert result["similar_existing"] == []
+
+    def test_no_similarity_check_without_embeddings(self, tmp_path):
+        store = MemoryStore(tmp_path / "memory")
+        result = store.store_with_similarity_check("some content")
+        assert result["stored"] is True
+        assert result["similar_existing"] == []
+
+
