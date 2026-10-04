@@ -57,6 +57,11 @@ def _make_kb(tmp_path, summarizer=None):
     manager._backfill_running = False
     manager._concepts_store = None
     manager._summarizer = summarizer
+    # A real mock-mode knowledge base always has a keyword index
+    # (create_bm25_index falls back to MockBM25Index); search uses only it.
+    from agentic_cli.memory.kb._mock_bm25 import MockBM25Index
+
+    manager._bm25_index = MockBM25Index()
     return manager
 
 
@@ -1006,7 +1011,7 @@ class TestTwoTierKnowledgeBase:
             result = kb_search("attention transformers")
             assert result["success"] is True
             scopes = {r.get("scope") for r in result["results"]}
-            assert "project" in scopes or "user" in scopes
+            assert scopes == {"project", "user"}
             # Both KBs should contribute results
             assert result["total_matches"] >= 1
         finally:

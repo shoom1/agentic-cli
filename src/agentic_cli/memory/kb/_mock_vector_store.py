@@ -24,13 +24,10 @@ class MockVectorStore:
         self._vectors: dict[str, list[float]] = {}
 
         # Unlike the real, FAISS-based VectorStore, this store does NOT
-        # auto-load on construction. In production, MockVectorStore only
-        # ever pairs with MockEmbeddingService, whose "embeddings" are the
-        # MD5 hash of the chunk text — meaningless noise with no semantic
-        # content. On a reopen, search is otherwise keyword-only (via BM25)
-        # and precise; auto-loading the noise vectors back in lets them get
-        # fused into results via RRF, degrading search on every install
-        # without the `kb` extra (or with `knowledge_base_use_mock`). Callers
+        # auto-load on construction. In production it only ever pairs with
+        # MockEmbeddingService, whose "embeddings" are the MD5 hash of the
+        # chunk text, and KnowledgeBaseManager.search does not search those
+        # (it is keyword-only then); not loading them is a backstop. Callers
         # that do want the saved vectors call `load()` explicitly.
 
     @property

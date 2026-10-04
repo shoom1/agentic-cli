@@ -1096,7 +1096,22 @@ class TestHybridSearch:
         assert "c4" in ids
 
     def test_hybrid_search_bm25_graceful_degradation(self, tmp_path):
-        kb = _make_mock_kb(tmp_path)
+        """Without a keyword index, a meaningful embedder still finds documents."""
+
+        class _StandInEmbedder:
+            """Not MockEmbeddingService, so the KB searches its vectors."""
+
+            def __init__(self) -> None:
+                self._inner = MockEmbeddingService()
+
+            def __getattr__(self, name):
+                return getattr(self._inner, name)
+
+        kb = KnowledgeBaseManager(
+            base_dir=tmp_path,
+            embedding_service=_StandInEmbedder(),
+            vector_store=MockVectorStore(index_path=tmp_path / "embeddings" / "index.mock"),
+        )
         kb.ingest_document(
             title="Test",
             content="Some test content for searching",
@@ -1105,6 +1120,17 @@ class TestHybridSearch:
         kb._bm25_index = None  # Force BM25 unavailable
         results = kb.search("test content", top_k=5)
         assert len(results["results"]) > 0  # Semantic-only still works
+
+    def test_hash_embeddings_without_a_keyword_index_find_nothing(self, tmp_path):
+        """MockEmbeddingService vectors carry no meaning: no noise in their place."""
+        kb = _make_mock_kb(tmp_path)
+        kb.ingest_document(
+            title="Test",
+            content="Some test content for searching",
+            source_type=SourceType.USER,
+        )
+        kb._bm25_index = None  # Force BM25 unavailable
+        assert kb.search("test content", top_k=5)["results"] == []
 
 
 class TestStructureAwareChunking:

@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from agentic_cli.memory._core.embeddings import EmbeddingConfig, EmbeddingService
+from agentic_cli.memory._core.mock_embeddings import MockEmbeddingService
 from agentic_cli.memory.kb.models import (
     Document,
     DocumentChunk,
@@ -201,7 +202,13 @@ class KnowledgeBaseManager:
             from agentic_cli.memory.kb.bm25_index import create_bm25_index
             self._bm25_index = create_bm25_index(use_mock=use_mock)
             if self.embeddings_dir.exists():
-                self._bm25_index.load(self.embeddings_dir)
+                try:
+                    self._bm25_index.load(self.embeddings_dir)
+                except Exception:
+                    # Unreadable: start empty so the chunks are indexed again
+                    # below, rather than leaving keyword search with nothing.
+                    logger.warning("bm25_index_unreadable", path=str(self.embeddings_dir))
+                    self._bm25_index = create_bm25_index(use_mock=use_mock)
             if self._bm25_index.size != len(self._chunks):
                 # Each backend keeps its own index file, so one saved by
                 # another backend (a library installed or removed since) is
@@ -246,7 +253,6 @@ class KnowledgeBaseManager:
                 pass
         self._use_mock = True
 
-        from agentic_cli.memory._core.mock_embeddings import MockEmbeddingService
         from agentic_cli.memory.kb._mock_vector_store import MockVectorStore
 
         emb = MockEmbeddingService(
@@ -868,18 +874,25 @@ class KnowledgeBaseManager:
 
         Uses both semantic (vector) and keyword (BM25) search, merged via
         Reciprocal Rank Fusion. Falls back to semantic-only if BM25 is unavailable.
+
+        With MockEmbeddingService (no ``kb`` extra, or ``use_mock``) the search
+        is keyword-only: its vectors are hashes of the text, so their nearest
+        neighbours are arbitrary chunks that would pad every result list.
         """
         start_time = time.time()
 
         # Semantic search
-        embed_start = time.time()
-        query_embedding = self._embedding_service.embed_text(query)
-        embed_time = (time.time() - embed_start) * 1000
+        semantic_results: list[tuple[str, float]] = []
+        embed_time = search_time = 0.0
+        if not isinstance(self._embedding_service, MockEmbeddingService):
+            embed_start = time.time()
+            query_embedding = self._embedding_service.embed_text(query)
+            embed_time = (time.time() - embed_start) * 1000
 
-        with self._lock:
-            search_start = time.time()
-            semantic_results = self._vector_store.search(query_embedding, top_k * 2)
-            search_time = (time.time() - search_start) * 1000
+            with self._lock:
+                search_start = time.time()
+                semantic_results = self._vector_store.search(query_embedding, top_k * 2)
+                search_time = (time.time() - search_start) * 1000
 
         # BM25 search
         bm25_results = []
