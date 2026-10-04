@@ -32,6 +32,7 @@ from agentic_cli.knowledge_base.models import Document, DocumentChunk, SourceTyp
 def _make_kb(tmp_path):
     """Create a KB manager with mock services in a temp dir."""
     from agentic_cli.knowledge_base._mocks import MockEmbeddingService, MockVectorStore
+    from agentic_cli.knowledge_base.manager import _FROM_TURN_REGISTRY
 
     manager = KnowledgeBaseManager.__new__(KnowledgeBaseManager)
     manager._lock = __import__("threading").Lock()
@@ -56,6 +57,7 @@ def _make_kb(tmp_path):
     manager._sidecar_locks = {}
     manager._backfill_running = False
     manager._concepts_store = None
+    manager._summarizer = _FROM_TURN_REGISTRY
     return manager
 
 
@@ -235,6 +237,7 @@ class TestKBManagerMigrationV1ToV2:
 
     def _make_kb_manager(self, kb_dir):
         from agentic_cli.knowledge_base._mocks import MockEmbeddingService, MockVectorStore
+        from agentic_cli.knowledge_base.manager import _FROM_TURN_REGISTRY
 
         manager = KnowledgeBaseManager.__new__(KnowledgeBaseManager)
         manager._lock = __import__("threading").Lock()
@@ -254,6 +257,8 @@ class TestKBManagerMigrationV1ToV2:
         manager._chunks = {}
         manager._sidecar_locks = {}
         manager._backfill_running = False
+        manager._concepts_store = None
+        manager._summarizer = _FROM_TURN_REGISTRY
         return manager
 
     def test_v1_loaded_correctly(self, kb_dir):
