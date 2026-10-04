@@ -349,7 +349,6 @@ class PapersCommand(Command):
     async def execute(self, args: str, app: Any) -> None:
         """Display knowledge base documents in a table."""
         from pathlib import Path
-        from agentic_cli.knowledge_base import KnowledgeBaseManager
         from agentic_cli.knowledge_base.models import SourceType
         from agentic_cli.constants import format_size
 
@@ -379,10 +378,12 @@ class PapersCommand(Command):
             pass
 
         if kb is None:
-            kb = KnowledgeBaseManager(
-                settings=app.settings,
+            from agentic_cli.workflow.memory_services import build_knowledge_base
+
+            kb = build_knowledge_base(
+                app.settings,
+                kb_dir,
                 use_mock=getattr(app.settings, "knowledge_base_use_mock", True),
-                base_dir=kb_dir,
             )
 
         # Parse source type filter

@@ -658,6 +658,17 @@ from agentic_cli.tools import memory_tools
 # save_memory, search_memory, update_memory, delete_memory
 ```
 
+The store itself is `agentic_cli.memory.MemoryStore`, part of the memory
+package that depends on nothing else in agentic-cli:
+
+```python
+from pathlib import Path
+from agentic_cli.memory import MemoryStore
+
+store = MemoryStore(Path("~/.myapp/memory").expanduser())
+store.store("User prefers metric units", tags=["preference"])
+```
+
 `MemoryStore` features:
 - Embedding-backed semantic search
 - Contradiction detection via `store_with_similarity_check`
@@ -859,6 +870,7 @@ agentic-cli/
 │   │   ├── settings.py           # WorkflowSettingsMixin
 │   │   ├── retry.py              # Exponential-backoff retry
 │   │   ├── tool_summaries.py     # Tool result one-liner summaries
+│   │   ├── memory_services.py    # Settings → agentic_cli.memory arguments
 │   │   ├── adk/
 │   │   │   ├── manager.py                # GoogleADKWorkflowManager
 │   │   │   ├── event_processor.py
@@ -896,7 +908,7 @@ agentic-cli/
 │   │   ├── search.py             # web_search (Tavily / Brave)
 │   │   ├── webfetch_tool.py      # web_fetch (orchestrator)
 │   │   ├── pdf_utils.py          # PDF text extraction helpers
-│   │   ├── memory_tools.py       # save/search/update/delete + MemoryStore
+│   │   ├── memory_tools.py       # save/search/update/delete (store: agentic_cli.memory)
 │   │   ├── _core/                # Shared planning/task logic
 │   │   │   ├── planning.py
 │   │   │   └── tasks.py
