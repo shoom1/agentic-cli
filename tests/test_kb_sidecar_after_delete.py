@@ -40,9 +40,8 @@ def _document_without_summary(tmp_path) -> tuple[KnowledgeBaseManager, str]:
 
 async def test_kb_read_does_not_bring_a_deleted_document_back(tmp_path):
     kb, doc_id = _document_without_summary(tmp_path)
-    token = set_service_registry(
-        {"kb_manager": kb, "llm_summarizer": _DeletingSummarizer(kb, doc_id)}
-    )
+    kb._summarizer = _DeletingSummarizer(kb, doc_id)
+    token = set_service_registry({"kb_manager": kb})
     try:
         result = await kb_read(doc_id)
     finally:
@@ -55,11 +54,8 @@ async def test_kb_read_does_not_bring_a_deleted_document_back(tmp_path):
 
 async def test_backfill_does_not_bring_a_deleted_document_back(tmp_path):
     kb, doc_id = _document_without_summary(tmp_path)
-    token = set_service_registry({"llm_summarizer": _DeletingSummarizer(kb, doc_id)})
-    try:
-        written = await kb.backfill_sidecars()
-    finally:
-        token.var.reset(token)
+    kb._summarizer = _DeletingSummarizer(kb, doc_id)
+    written = await kb.backfill_sidecars()
 
     assert written == 0
     assert not kb._sidecar_path(doc_id).exists()

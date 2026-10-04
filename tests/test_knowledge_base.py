@@ -1013,24 +1013,12 @@ class TestBaseDirOverride:
         assert (custom_dir / "embeddings").is_dir()
         assert (custom_dir / "files").is_dir()
 
-    def test_base_dir_with_settings(self, tmp_path):
-        """base_dir overrides settings paths but uses settings embedding config."""
-        custom_dir = tmp_path / "override_kb"
-        mock_settings = MagicMock()
-        mock_settings.knowledge_base_dir = tmp_path / "settings_kb"
-        mock_settings.knowledge_base_documents_dir = tmp_path / "settings_kb" / "documents"
-        mock_settings.knowledge_base_embeddings_dir = tmp_path / "settings_kb" / "embeddings"
-        mock_settings.embedding_model = "test-model"
-        mock_settings.embedding_batch_size = 16
-        mock_settings.knowledge_base_use_mock = True
-
-        kb = _make_mock_kb(custom_dir, settings=mock_settings)
-
-        # Paths come from base_dir, not settings
-        assert kb.kb_dir == custom_dir
-        assert kb.documents_dir == custom_dir / "documents"
-        # Settings KB dir was NOT used
-        assert not (tmp_path / "settings_kb").exists()
+    def test_settings_is_not_a_constructor_argument(self, tmp_path):
+        """The new-path manager takes a directory and plain arguments only;
+        settings-based construction lives on the deprecated old path
+        (``agentic_cli.knowledge_base.KnowledgeBaseManager``) until 0.7.0."""
+        with pytest.raises(TypeError):
+            _make_mock_kb(tmp_path / "override_kb", settings=MagicMock())
 
 
 class TestFindDocument:

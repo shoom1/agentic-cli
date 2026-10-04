@@ -20,6 +20,13 @@ class MockVectorStore:
         self.embedding_dim = embedding_dim
         self._vectors: dict[str, list[float]] = {}
 
+        # Load an existing index if available, matching VectorStore's
+        # (the real, FAISS-based implementation) behavior: a manager that
+        # reopens a persisted knowledge base sees its vectors without an
+        # explicit reload.
+        if self.index_path.exists():
+            self.load()
+
     @property
     def size(self) -> int:
         return len(self._vectors)

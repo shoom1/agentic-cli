@@ -52,12 +52,9 @@ KNOWN_VIOLATIONS: set[tuple[str, str]] = {
     ("src/agentic_cli/memory/kb/_mock_bm25.py", "agentic_cli.file_utils"),
     ("src/agentic_cli/memory/kb/_mock_vector_store.py", "agentic_cli.file_utils"),
     ("src/agentic_cli/memory/kb/concepts.py", "agentic_cli.file_utils"),
-    ("src/agentic_cli/memory/kb/manager.py", "agentic_cli.config"),
     ("src/agentic_cli/memory/kb/manager.py", "agentic_cli.constants"),
     ("src/agentic_cli/memory/kb/manager.py", "agentic_cli.file_utils"),
     ("src/agentic_cli/memory/kb/manager.py", "agentic_cli.logging"),
-    ("src/agentic_cli/memory/kb/manager.py", "agentic_cli.tools.pdf_utils"),
-    ("src/agentic_cli/memory/kb/manager.py", "agentic_cli.workflow.service_registry"),
     ("src/agentic_cli/memory/kb/vector_store.py", "agentic_cli.file_utils"),
 }
 

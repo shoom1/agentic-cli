@@ -484,8 +484,9 @@ async def _read_document_from_kbs(
         if not content and doc.file_path:
             file_path = source_kb.get_file_path(doc.id)
             if file_path and str(file_path).endswith(".pdf"):
-                from agentic_cli.memory.kb import KnowledgeBaseManager
-                content = KnowledgeBaseManager.extract_text_from_pdf(file_path)
+                from agentic_cli.tools.pdf_utils import extract_pdf_text
+
+                content = extract_pdf_text(file_path)
         truncated = len(content) > max_chars
         if truncated:
             content = content[:max_chars]
@@ -513,10 +514,9 @@ async def _read_document_from_kbs(
                 if not content_for_payload and doc.file_path:
                     file_path = source_kb.get_file_path(doc.id)
                     if file_path and str(file_path).endswith(".pdf"):
-                        from agentic_cli.memory.kb import KnowledgeBaseManager
-                        content_for_payload = (
-                            KnowledgeBaseManager.extract_text_from_pdf(file_path)
-                        )
+                        from agentic_cli.tools.pdf_utils import extract_pdf_text
+
+                        content_for_payload = extract_pdf_text(file_path)
                 payload = await source_kb.generate_sidecar_payload(
                     content_for_payload, title=doc.title
                 )

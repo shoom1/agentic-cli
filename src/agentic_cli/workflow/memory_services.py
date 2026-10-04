@@ -12,13 +12,24 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from agentic_cli.config import BaseSettings
-    from agentic_cli.memory import MemoryStore
+    from agentic_cli.memory import EmbeddingConfig, MemoryStore
     from agentic_cli.memory.kb import KnowledgeBaseManager
 
 
 def project_kb_dir(settings: "BaseSettings") -> Path:
     """The project's knowledge base: ``./.{app_name}/knowledge_base``."""
     return Path.cwd() / f".{settings.app_name}" / "knowledge_base"
+
+
+def embedding_config(settings: "BaseSettings") -> "EmbeddingConfig":
+    """The embedding model the settings name."""
+    from agentic_cli.memory import EmbeddingConfig
+
+    return EmbeddingConfig(
+        model_name=settings.embedding_model,
+        batch_size=settings.embedding_batch_size,
+        device=settings.embedding_device,
+    )
 
 
 def build_knowledge_base(
@@ -34,7 +45,7 @@ def build_knowledge_base(
     if use_mock is None:
         use_mock = settings.knowledge_base_use_mock
     return KnowledgeBaseManager(
-        settings=settings, use_mock=use_mock, base_dir=base_dir, summarizer=summarizer
+        base_dir, embedding=embedding_config(settings), summarizer=summarizer, use_mock=use_mock
     )
 
 
@@ -72,10 +83,9 @@ def build_memory_store(settings: "BaseSettings") -> "MemoryStore":
     else:
         from agentic_cli.memory import EmbeddingService
 
+        config = embedding_config(settings)
         if EmbeddingService.is_available():
             embedding_service = EmbeddingService(
-                model_name=settings.embedding_model,
-                batch_size=settings.embedding_batch_size,
-                device=settings.embedding_device,
+                model_name=config.model_name, batch_size=config.batch_size, device=config.device
             )
     return MemoryStore(settings.workspace_dir / "memory", embedding_service=embedding_service)

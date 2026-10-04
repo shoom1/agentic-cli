@@ -21,9 +21,9 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import Any, Protocol
 
-from agentic_cli.memory._core.embeddings import EmbeddingService
+from agentic_cli.memory._core.embeddings import EmbeddingConfig, EmbeddingService
 from agentic_cli.memory.kb.models import (
     Document,
     DocumentChunk,
@@ -34,9 +34,6 @@ from agentic_cli.memory.kb.vector_store import VectorStore
 from agentic_cli.constants import truncate
 from agentic_cli.logging import Loggers
 from agentic_cli.file_utils import atomic_write_json, atomic_write_text
-
-if TYPE_CHECKING:
-    from agentic_cli.config import BaseSettings
 
 logger = Loggers.knowledge_base()
 
@@ -56,11 +53,6 @@ class Summarizer(Protocol):
     """
 
     async def summarize(self, content: str, prompt: str) -> str: ...
-
-
-# Default for ``summarizer=``: look the summarizer up in the service registry
-# of the turn in progress, as before. An explicit ``None`` means no summarizer.
-_FROM_TURN_REGISTRY: Any = object()
 
 
 def _utc_iso_now() -> str:
@@ -139,65 +131,38 @@ class KnowledgeBaseManager:
 
     def __init__(
         self,
-        settings: "BaseSettings | None" = None,
+        base_dir: Path,
+        *,
+        embedding: EmbeddingConfig | None = None,
+        summarizer: "Summarizer | None" = None,
         use_mock: bool = False,
-        base_dir: Path | None = None,
         embedding_service: Any = None,
         vector_store: Any = None,
-        *,
-        summarizer: "Summarizer | None" = _FROM_TURN_REGISTRY,
     ) -> None:
-        """Initialize the knowledge base manager.
+        """Open (or create) the knowledge base kept in ``base_dir``.
 
         Args:
-            settings: Application settings. Required for paths configuration.
-            use_mock: If True, use mock services (for testing without ML models).
-            base_dir: Optional override for all KB paths. When provided, all
-                paths (kb_dir, documents_dir, embeddings_dir, files_dir) are
-                derived from this directory instead of from settings. Embedding
-                model and batch size still come from settings for consistency.
-            embedding_service: Optional pre-configured embedding service.
-            vector_store: Optional pre-configured vector store.
-            summarizer: Called to write summaries and sidecars. None: no summarizer (store previews). Omitted: the workflow's summarizer from the turn in progress.
+            base_dir: Directory holding the knowledge base (``documents/``,
+                ``embeddings/``, ``files/``, ``concepts/`` and ``metadata.json``).
+            embedding: Model to load when the knowledge base builds its own
+                embedding service. Defaults to ``EmbeddingConfig()``.
+            summarizer: Called to write summaries and sidecars. Without one,
+                the summary is the document's first ~500 characters.
+            use_mock: Use the mock embedding service and vector store (no ML
+                libraries needed).
+            embedding_service: A ready embedding service (with ``vector_store``).
+            vector_store: A ready vector store (with ``embedding_service``).
         """
         self._lock = threading.Lock()
         self._sidecar_locks: dict[str, asyncio.Lock] = {}
         self._backfill_running: bool = False
         self._concepts_store: "ConceptStore | None" = None
         self._summarizer = summarizer
-        self._settings = settings
         self._use_mock = use_mock
 
-        if base_dir is not None:
-            # Override: derive all paths from base_dir
-            self.kb_dir = base_dir
-            self.documents_dir = base_dir / "documents"
-            self.embeddings_dir = base_dir / "embeddings"
-            # Embedding config still from settings
-            if settings:
-                embedding_model = settings.embedding_model
-                batch_size = settings.embedding_batch_size
-                embedding_device = settings.embedding_device
-            else:
-                embedding_model = "all-MiniLM-L6-v2"
-                batch_size = 32
-                embedding_device = "auto"
-        elif settings:
-            # Get paths from settings
-            self.kb_dir = settings.knowledge_base_dir
-            self.documents_dir = settings.knowledge_base_documents_dir
-            self.embeddings_dir = settings.knowledge_base_embeddings_dir
-            embedding_model = settings.embedding_model
-            batch_size = settings.embedding_batch_size
-            embedding_device = settings.embedding_device
-        else:
-            # Fallback defaults for standalone use
-            self.kb_dir = Path.home() / ".agentic" / "knowledge_base"
-            self.documents_dir = self.kb_dir / "documents"
-            self.embeddings_dir = self.kb_dir / "embeddings"
-            embedding_model = "all-MiniLM-L6-v2"
-            batch_size = 32
-            embedding_device = "auto"
+        self.kb_dir = base_dir
+        self.documents_dir = base_dir / "documents"
+        self.embeddings_dir = base_dir / "embeddings"
 
         self.metadata_path = self.kb_dir / "metadata.json"
         self.files_dir = self.kb_dir / "files"
@@ -214,7 +179,7 @@ class KnowledgeBaseManager:
             self._vector_store = vector_store
         else:
             self._embedding_service, self._vector_store = self._create_services(
-                embedding_model, batch_size, embedding_device
+                embedding or EmbeddingConfig()
             )
 
         # Load document metadata
@@ -251,9 +216,7 @@ class KnowledgeBaseManager:
             self._concepts_store = ConceptStore(self.kb_dir / "concepts")
         return self._concepts_store
 
-    def _create_services(
-        self, embedding_model: str, batch_size: int, embedding_device: str = "auto"
-    ) -> tuple[Any, Any]:
+    def _create_services(self, embedding: EmbeddingConfig) -> tuple[Any, Any]:
         """Create embedding service and vector store.
 
         Tries real implementations first; falls back to mocks if
@@ -262,9 +225,9 @@ class KnowledgeBaseManager:
         if not self._use_mock and EmbeddingService.is_available():
             try:
                 emb = EmbeddingService(
-                    model_name=embedding_model,
-                    batch_size=batch_size,
-                    device=embedding_device,
+                    model_name=embedding.model_name,
+                    batch_size=embedding.batch_size,
+                    device=embedding.device,
                 )
                 vs = VectorStore(
                     index_path=self.embeddings_dir / "index.faiss",
@@ -279,8 +242,8 @@ class KnowledgeBaseManager:
         from agentic_cli.memory.kb._mock_vector_store import MockVectorStore
 
         emb = MockEmbeddingService(
-            model_name=embedding_model,
-            batch_size=batch_size,
+            model_name=embedding.model_name,
+            batch_size=embedding.batch_size,
         )
         vs = MockVectorStore(
             index_path=self.embeddings_dir / "index.mock",
@@ -602,28 +565,6 @@ class KnowledgeBaseManager:
             logger.warning("kb_stored_file_not_deleted", doc_id=doc.id, error=str(e))
 
     @staticmethod
-    def extract_text_from_pdf(file_path: Path) -> str:
-        """Extract text from a PDF file.
-
-        Args:
-            file_path: Path to the PDF file.
-
-        Returns:
-            Extracted text, or empty string on failure.
-        """
-        from agentic_cli.tools.pdf_utils import extract_pdf_text
-
-        return extract_pdf_text(file_path)
-
-    def _current_summarizer(self) -> "Summarizer | None":
-        """The summarizer to call now, or None to store previews."""
-        if self._summarizer is not _FROM_TURN_REGISTRY:
-            return self._summarizer
-        from agentic_cli.workflow.service_registry import LLM_SUMMARIZER, get_service
-
-        return get_service(LLM_SUMMARIZER)
-
-    @staticmethod
     def _truncate_summary(content: str) -> str:
         """Return the deterministic fallback summary (first ~500 chars)."""
         return truncate(content, 500) if content else ""
@@ -659,7 +600,7 @@ class KnowledgeBaseManager:
             return ""
 
         try:
-            summarizer = self._current_summarizer()
+            summarizer = self._summarizer
             if summarizer is not None:
                 capped = content[: self._SUMMARY_INPUT_CHAR_LIMIT]
                 prompt = self._SUMMARY_PROMPT_TEMPLATE.format(
@@ -726,7 +667,7 @@ class KnowledgeBaseManager:
             return fallback
 
         try:
-            summarizer = self._current_summarizer()
+            summarizer = self._summarizer
             if summarizer is None:
                 return fallback
 
@@ -1112,9 +1053,7 @@ class KnowledgeBaseManager:
             source = doc.source_type.value
             source_counts[source] = source_counts.get(source, 0) + 1
 
-        embedding_model = "unknown"
-        if self._settings:
-            embedding_model = self._settings.embedding_model
+        embedding_model = getattr(self._embedding_service, "model_name", "unknown")
 
         return {
             "document_count": len(self._documents),

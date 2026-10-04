@@ -65,13 +65,14 @@ async def test_no_summarizer_means_the_preview_even_inside_a_turn(tmp_path):
     assert registered.calls == 0
 
 
-async def test_without_the_argument_the_turn_registry_is_still_used(tmp_path):
-    """Today's behavior; PR 4 moves it to the deprecated old import path."""
+async def test_without_the_argument_the_turn_registry_is_not_consulted(tmp_path):
+    registered = _Summarizer()
     kb = _kb(tmp_path)
-    token = set_service_registry({LLM_SUMMARIZER: _Summarizer()})
+    token = set_service_registry({LLM_SUMMARIZER: registered})
     try:
         payload = await kb.generate_sidecar_payload("Body text.", title="T")
     finally:
         token.var.reset(token)
 
-    assert payload["summary"] == "Injected summary."
+    assert payload["summary"] == "Body text."
+    assert registered.calls == 0
