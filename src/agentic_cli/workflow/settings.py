@@ -184,6 +184,18 @@ class WorkflowSettingsMixin:
         ),
         json_schema_extra={"ui_order": 61},
     )
+    webfetch_saved_max_age_days: int = Field(
+        default=7,
+        title="Saved Pages Max Age",
+        description="Pages web_fetch saved in ./.{app_name}/fetched are deleted after this many days",
+        json_schema_extra={"ui_order": 62},
+    )
+    webfetch_saved_max_mb: int = Field(
+        default=200,
+        title="Saved Pages Max Size",
+        description="The oldest saved pages are deleted when ./.{app_name}/fetched grows past this many megabytes",
+        json_schema_extra={"ui_order": 63},
+    )
 
     # Knowledge Base configuration
     embedding_model: str = Field(
