@@ -1011,7 +1011,7 @@ class TestTwoTierKnowledgeBase:
             result = kb_search("attention transformers")
             assert result["success"] is True
             scopes = {r.get("scope") for r in result["results"]}
-            assert "project" in scopes or "user" in scopes
+            assert scopes == {"project", "user"}
             # Both KBs should contribute results
             assert result["total_matches"] >= 1
         finally:

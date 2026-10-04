@@ -69,18 +69,15 @@ def build_knowledge_bases(
 def build_memory_store(settings: "BaseSettings") -> "MemoryStore":
     """The memory store in ``workspace_dir/memory``.
 
-    With ``knowledge_base_use_mock`` it gets the mock embedder; otherwise the
-    real one when sentence-transformers is installed, else none (substring
-    search).
+    It gets the real embedder when sentence-transformers is installed and
+    ``knowledge_base_use_mock`` is off; otherwise none, and it searches by
+    substring. (The mock embedder's vectors are hashes of the text: ranking
+    memories by them would return arbitrary ones.)
     """
     from agentic_cli.memory import MemoryStore
 
     embedding_service = None
-    if settings.knowledge_base_use_mock:
-        from agentic_cli.memory import MockEmbeddingService
-
-        embedding_service = MockEmbeddingService()
-    else:
+    if not settings.knowledge_base_use_mock:
         from agentic_cli.memory import EmbeddingService
 
         config = embedding_config(settings)

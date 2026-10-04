@@ -11,6 +11,9 @@ matched the query "orchestras".
 from __future__ import annotations
 
 import json
+import sys
+import types
+import unicodedata
 from pathlib import Path
 
 import pytest
@@ -19,6 +22,7 @@ from agentic_cli.memory import MockEmbeddingService
 from agentic_cli.memory.kb import KnowledgeBaseManager, MockVectorStore, SourceType
 from agentic_cli.memory.kb._bm25_backends import BM25sIndex, RankBM25Index
 from agentic_cli.memory.kb._mock_bm25 import MockBM25Index
+from agentic_cli.memory.kb._tokenize import tokenize
 
 TOPICS = {
     "Otters": "Otters are semiaquatic mammals that eat fish and live near rivers.",
@@ -158,3 +162,79 @@ def test_an_index_saved_by_the_old_tokenizer_loads_empty(tmp_path, index_cls, fi
     index.load(tmp_path)
 
     assert index.size == 0
+
+
+def _nfc(words: list[str]) -> list[str]:
+    return [unicodedata.normalize("NFC", word).casefold() for word in words]
+
+
+@pytest.mark.parametrize(
+    "text, words",
+    [
+        ("मुझे किताब पसंद है", ["मुझे", "किताब", "पसंद", "है"]),  # Devanagari vowel signs
+        ("தமிழ் மொழி", ["தமிழ்", "மொழி"]),  # Tamil virama
+        ("مُحَمَّد", ["مُحَمَّد"]),  # Arabic harakat
+        ("می‌خواهم", ["می‌خواهم"]),  # Persian zero-width non-joiner
+    ],
+)
+def test_words_with_combining_marks_stay_whole(text, words):
+    """Whitespace splitting kept these words whole; splitting at \\w must too."""
+    assert tokenize(text) == _nfc(words)
+
+
+def test_composed_and_decomposed_accents_are_the_same_word():
+    composed = "Résumé"
+    decomposed = unicodedata.normalize("NFD", composed)
+
+    assert tokenize(decomposed) == tokenize(composed) == ["résumé"]
+
+
+def test_a_word_with_combining_marks_does_not_match_its_fragments(tmp_path):
+    kb = KnowledgeBaseManager(tmp_path / "kb", use_mock=True)
+    kb.ingest_document(content="मुझे किताब पसंद है", title="Book", source_type=SourceType.USER)
+    kb.ingest_document(content="सब ठीक है", title="Fine", source_type=SourceType.USER)
+
+    assert _titles(kb, "किताब") == ["Book"]
+
+
+def test_the_real_backends_tokenize_the_query_the_same_way(monkeypatch):
+    """The query side, which saved-index tests cannot see (CI has no kb extra)."""
+    seen: dict[str, list[str]] = {}
+
+    class _BM25Plus:
+        def __init__(self, corpus):
+            pass
+
+        def get_scores(self, query_tokens):
+            seen["rank_bm25"] = list(query_tokens)
+            return [1.0]
+
+    class _BM25:
+        def index(self, corpus, show_progress=False):
+            pass
+
+        def retrieve(self, queries, k, show_progress=False):
+            seen["bm25s"] = list(queries[0])
+            return [[0]], [[1.0]]
+
+    monkeypatch.setitem(sys.modules, "rank_bm25", types.SimpleNamespace(BM25Plus=_BM25Plus))
+    monkeypatch.setitem(sys.modules, "bm25s", types.SimpleNamespace(BM25=_BM25))
+
+    for index_cls in (RankBM25Index, BM25sIndex):
+        index = index_cls()
+        index.add_documents(["c1"], ["Played on sixty-four squares."])
+        assert index.search("Sixty-Four squares!", top_k=1) == [("c1", 1.0)]
+
+    assert seen == {
+        "rank_bm25": ["sixty", "four", "squares"],
+        "bm25s": ["sixty", "four", "squares"],
+    }
+
+
+def test_a_corrupt_keyword_index_is_rebuilt_on_open(tmp_path):
+    _mock_kb(tmp_path / "kb")
+    (tmp_path / "kb" / "embeddings" / "bm25_index.json").write_text("{not json")
+
+    reopened = KnowledgeBaseManager(tmp_path / "kb", use_mock=True)
+
+    assert _titles(reopened, "volcanoes") == ["Volcanoes"]

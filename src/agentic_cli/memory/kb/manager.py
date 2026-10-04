@@ -202,7 +202,13 @@ class KnowledgeBaseManager:
             from agentic_cli.memory.kb.bm25_index import create_bm25_index
             self._bm25_index = create_bm25_index(use_mock=use_mock)
             if self.embeddings_dir.exists():
-                self._bm25_index.load(self.embeddings_dir)
+                try:
+                    self._bm25_index.load(self.embeddings_dir)
+                except Exception:
+                    # Unreadable: start empty so the chunks are indexed again
+                    # below, rather than leaving keyword search with nothing.
+                    logger.warning("bm25_index_unreadable", path=str(self.embeddings_dir))
+                    self._bm25_index = create_bm25_index(use_mock=use_mock)
             if self._bm25_index.size != len(self._chunks):
                 # Each backend keeps its own index file, so one saved by
                 # another backend (a library installed or removed since) is

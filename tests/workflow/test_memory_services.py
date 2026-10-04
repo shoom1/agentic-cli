@@ -77,9 +77,16 @@ def test_the_memory_store_lives_in_the_workspace(settings):
     assert (settings.workspace_dir / "memory" / "memories.json").is_file()
 
 
-def test_the_mock_setting_gives_the_memory_store_the_mock_embedder(settings):
-    from agentic_cli.memory import MockEmbeddingService
-
+def test_the_mock_setting_gives_the_memory_store_no_embedder(settings):
+    """Hash embeddings carry no meaning, so the store searches by substring."""
     store = memory_services.build_memory_store(settings)
 
-    assert isinstance(store._embedding_service, MockEmbeddingService)
+    assert store._embedding_service is None
+
+
+def test_memory_search_in_mock_mode_finds_the_matching_memory(settings):
+    store = memory_services.build_memory_store(settings)
+    for text in ("Project uses Python 3.12", "User prefers dark mode", "The team mascot is an otter"):
+        store.store(text)
+
+    assert [item.content for item in store.search("otter", limit=2)] == ["The team mascot is an otter"]
