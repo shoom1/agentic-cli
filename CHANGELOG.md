@@ -21,9 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **`KnowledgeBaseManager(summarizer=...)`.** A knowledge base calls the
-  summarizer it was given (anything with `async summarize(content, prompt)`)
-  and stores previews when given `None`.
+- **`KnowledgeBaseManager(summarizer=...)`.** `generate_summary`,
+  `generate_sidecar_payload` and `backfill_sidecars` call the summarizer the
+  knowledge base was given (anything with `async summarize(content, prompt)`);
+  with `None` they store previews.
 
 ## [0.6.2] - 2026-10-03
 

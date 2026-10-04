@@ -1155,7 +1155,7 @@ class KnowledgeBaseManager:
         """Generate missing sidecars for all documents in the KB.
 
         Iterates the in-memory document set, generates a sidecar payload
-        via the registered LLM summarizer for any doc that doesn't have a
+        via the knowledge base's summarizer for any doc that doesn't have a
         sidecar file, and writes it. Returns the count of sidecars written.
         Existing sidecars are not touched.
 
