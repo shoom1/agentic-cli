@@ -34,6 +34,7 @@ def _settings_key(settings) -> tuple:
         settings.webfetch_cache_ttl_seconds,
         settings.webfetch_max_content_bytes,
         settings.webfetch_max_pdf_bytes,
+        settings.webfetch_max_download_bytes,
     )
 
 
@@ -71,6 +72,7 @@ def get_or_create_fetcher(settings=None) -> ContentFetcher:
         cache_ttl_seconds=settings.webfetch_cache_ttl_seconds,
         max_content_bytes=settings.webfetch_max_content_bytes,
         max_pdf_bytes=settings.webfetch_max_pdf_bytes,
+        max_download_bytes=settings.webfetch_max_download_bytes,
     )
     _fetcher_settings_snapshot = current_key
 

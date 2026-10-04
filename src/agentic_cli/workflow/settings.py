@@ -166,7 +166,7 @@ class WorkflowSettingsMixin:
     webfetch_max_content_bytes: int = Field(
         default=102400,
         title="WebFetch Max Content",
-        description="Maximum content size in bytes (default: 100KB)",
+        description="How much of a page the summarizer sees, in bytes (default: 100KB)",
         json_schema_extra={"ui_order": 59},
     )
     webfetch_max_pdf_bytes: int = Field(
@@ -174,6 +174,15 @@ class WorkflowSettingsMixin:
         title="WebFetch Max PDF Size",
         description="Maximum PDF size in bytes (default: 5MB). Separate from HTML limit because PDFs are larger but extracted text is compact.",
         json_schema_extra={"ui_order": 60},
+    )
+    webfetch_max_download_bytes: int = Field(
+        default=5242880,
+        title="WebFetch Max Download",
+        description=(
+            "Largest page or text body read and saved, in bytes (default: 5MB). "
+            "The summarizer sees only the first webfetch_max_content_bytes of it."
+        ),
+        json_schema_extra={"ui_order": 61},
     )
 
     # Knowledge Base configuration

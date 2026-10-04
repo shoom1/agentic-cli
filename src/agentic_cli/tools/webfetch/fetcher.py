@@ -23,6 +23,15 @@ class RedirectInfo:
 
 @dataclass
 class FetchResult:
+    """The outcome of a fetch.
+
+    ``content`` is what the summarizer sees: for text, the first
+    ``max_content_bytes`` decoded, with a marker when cut (``truncated``); for
+    a PDF, the bytes. ``raw`` is the body as received, up to the download
+    limit (``raw_truncated`` when it went over), with its ``charset`` and the
+    ``final_url`` after same-host redirects.
+    """
+
     success: bool
     content: str | bytes | None = None
     content_type: str | None = None
@@ -31,14 +40,20 @@ class FetchResult:
     truncated: bool = False
     from_cache: bool = False
     status_code: int | None = None
+    raw: bytes | None = None
+    charset: str | None = None
+    final_url: str | None = None
+    raw_truncated: bool = False
 
 
 @dataclass
 class CachedResponse:
-    content: str | bytes
+    raw: bytes
     content_type: str
+    charset: str | None
+    final_url: str
     timestamp: float
-    truncated: bool = False
+    raw_truncated: bool = False
 
 
 class ContentFetcher:
@@ -54,6 +69,7 @@ class ContentFetcher:
         cache_ttl_seconds: int = 900,
         max_content_bytes: int = 102400,
         max_pdf_bytes: int = 5242880,
+        max_download_bytes: int = 5242880,
     ) -> None:
         self._validator = validator
         self._robots = robots_checker
@@ -61,6 +77,9 @@ class ContentFetcher:
         self._cache_ttl = cache_ttl_seconds
         self._max_content_bytes = max_content_bytes
         self._max_pdf_bytes = max_pdf_bytes
+        # A text body is read whole up to this limit, never less than what
+        # the summarizer gets.
+        self._max_download_bytes = max(max_download_bytes, max_content_bytes)
         self._cache: dict[str, CachedResponse] = {}
 
     async def fetch(self, url: str, timeout: int = 30) -> FetchResult:
@@ -72,10 +91,7 @@ class ContentFetcher:
         """
         cached = self._get_cached(url)
         if cached is not None:
-            return FetchResult(
-                success=True, content=cached.content, content_type=cached.content_type,
-                truncated=cached.truncated, from_cache=True,
-            )
+            return self._result(cached, from_cache=True)
 
         validation = self._validator.validate(url)
         if not validation.valid:
@@ -96,15 +112,15 @@ class ContentFetcher:
                         headers = response.headers
                         content_type = headers.get("content-type", "text/html")
                         is_pdf = "application/pdf" in content_type.lower()
-                        cap = self._max_pdf_bytes if is_pdf else self._max_content_bytes
+                        cap = self._max_pdf_bytes if is_pdf else self._max_download_bytes
                         charset = response.charset_encoding
                         buf = bytearray()
-                        truncated = False
+                        raw_truncated = False
                         async for chunk in response.aiter_bytes():
                             buf.extend(chunk)
                             if len(buf) > cap:
                                 del buf[cap:]
-                                truncated = True
+                                raw_truncated = True
                                 break
 
                     if status in (301, 302, 303, 307, 308):
@@ -139,20 +155,13 @@ class ContentFetcher:
                             success=False, status_code=status,
                             error=f"{label} for {current_url}",
                         )
-                    if is_pdf:
-                        content: str | bytes = bytes(buf)
-                    else:
-                        content = decode_body(bytes(buf), charset)
-                        if truncated:
-                            content += f"\n\n[Content truncated at {cap} bytes]"
-                    self._cache[original_url] = CachedResponse(
-                        content=content, content_type=content_type,
-                        timestamp=time.time(), truncated=truncated,
+                    cached = CachedResponse(
+                        raw=bytes(buf), content_type=content_type, charset=charset,
+                        final_url=current_url, timestamp=time.time(),
+                        raw_truncated=raw_truncated,
                     )
-                    return FetchResult(
-                        success=True, content=content, content_type=content_type,
-                        truncated=truncated, from_cache=False, status_code=status,
-                    )
+                    self._cache[original_url] = cached
+                    return self._result(cached, from_cache=False, status_code=status)
                 else:
                     return FetchResult(success=False, error=f"Too many redirects (max {self.MAX_REDIRECTS})")
 
@@ -162,6 +171,26 @@ class ContentFetcher:
             return FetchResult(success=False, error=f"Request timeout after {timeout}s")
         except httpx.RequestError as e:
             return FetchResult(success=False, error=f"Request failed: {e}")
+
+    def _result(
+        self, cached: CachedResponse, *, from_cache: bool, status_code: int | None = None,
+    ) -> FetchResult:
+        """Build a result; ``content`` is what the summarizer sees."""
+        if "application/pdf" in cached.content_type.lower():
+            content: str | bytes = cached.raw
+            truncated = cached.raw_truncated
+        else:
+            limit = self._max_content_bytes
+            truncated = cached.raw_truncated or len(cached.raw) > limit
+            content = decode_body(cached.raw[:limit], cached.charset)
+            if truncated:
+                content += f"\n\n[Content truncated at {limit} bytes]"
+        return FetchResult(
+            success=True, content=content, content_type=cached.content_type,
+            truncated=truncated, from_cache=from_cache, status_code=status_code,
+            raw=cached.raw, charset=cached.charset, final_url=cached.final_url,
+            raw_truncated=cached.raw_truncated,
+        )
 
     def _get_cached(self, url: str) -> CachedResponse | None:
         if url not in self._cache:

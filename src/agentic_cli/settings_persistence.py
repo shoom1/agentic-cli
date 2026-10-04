@@ -60,6 +60,7 @@ PROJECT_SETTABLE_KEYS = frozenset({
     # non-exec tool config
     "search_backend",
     "webfetch_cache_ttl_seconds", "webfetch_max_content_bytes", "webfetch_max_pdf_bytes",
+    "webfetch_max_download_bytes",
     # persistence backend selection (NOT the credential-bearing postgres_uri)
     "session_store",
     # display / logging verbosity (NOT raw_llm_logging)
