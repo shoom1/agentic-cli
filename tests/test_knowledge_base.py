@@ -9,13 +9,12 @@ from agentic_cli.memory.kb.manager import KnowledgeBaseManager
 from agentic_cli.memory.kb.models import (
     Document,
     DocumentChunk,
-    PaperResult,
     SearchResult,
     SourceType,
-    WebResult,
 )
 from agentic_cli.memory._core.mock_embeddings import MockEmbeddingService
 from agentic_cli.memory.kb._mock_vector_store import MockVectorStore
+from agentic_cli.tools.search_sources import PaperResult, WebResult
 
 
 def _make_mock_kb(base_dir: Path, **kwargs) -> KnowledgeBaseManager:
@@ -1012,25 +1011,6 @@ class TestBaseDirOverride:
         assert (custom_dir / "documents").is_dir()
         assert (custom_dir / "embeddings").is_dir()
         assert (custom_dir / "files").is_dir()
-
-    def test_base_dir_with_settings(self, tmp_path):
-        """base_dir overrides settings paths but uses settings embedding config."""
-        custom_dir = tmp_path / "override_kb"
-        mock_settings = MagicMock()
-        mock_settings.knowledge_base_dir = tmp_path / "settings_kb"
-        mock_settings.knowledge_base_documents_dir = tmp_path / "settings_kb" / "documents"
-        mock_settings.knowledge_base_embeddings_dir = tmp_path / "settings_kb" / "embeddings"
-        mock_settings.embedding_model = "test-model"
-        mock_settings.embedding_batch_size = 16
-        mock_settings.knowledge_base_use_mock = True
-
-        kb = _make_mock_kb(custom_dir, settings=mock_settings)
-
-        # Paths come from base_dir, not settings
-        assert kb.kb_dir == custom_dir
-        assert kb.documents_dir == custom_dir / "documents"
-        # Settings KB dir was NOT used
-        assert not (tmp_path / "settings_kb").exists()
 
 
 class TestFindDocument:

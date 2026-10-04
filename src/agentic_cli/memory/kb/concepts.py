@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from agentic_cli.file_utils import atomic_write_text
+from agentic_cli.memory._core.io import atomic_write_text
 
 
 _SLUG_INVALID_CHARS = re.compile(r"[^a-z0-9\s-]")

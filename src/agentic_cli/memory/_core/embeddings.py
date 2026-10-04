@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import platform
 import re
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -44,6 +45,15 @@ def resolve_embedding_device(preference: str = "auto") -> str:
     if platform.machine() == "arm64" and torch.backends.mps.is_available():
         return "mps"
     return "cpu"
+
+
+@dataclass(frozen=True)
+class EmbeddingConfig:
+    """Which sentence-transformers model to load, and how."""
+
+    model_name: str = "all-MiniLM-L6-v2"
+    batch_size: int = 32
+    device: str = "auto"
 
 
 class EmbeddingService:

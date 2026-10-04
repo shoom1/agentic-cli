@@ -91,11 +91,11 @@ agentic-cli/
 │   │   └── webfetch/        # Fetcher, converter, validator, robots, summarizer
 │   ├── knowledge_base/       # Deprecated forwarding modules → memory.kb (removed in 0.7.0)
 │   ├── memory/               # Knowledge base + memory store; imports nothing else from agentic_cli
-│   │   ├── __init__.py       # MemoryStore, MemoryItem, ForgettingPolicy, EmbeddingService, MockEmbeddingService
+│   │   ├── __init__.py       # MemoryStore, MemoryItem, ForgettingPolicy, EmbeddingService, EmbeddingConfig, MockEmbeddingService
 │   │   ├── _core/            # Shared, private: embeddings.py, mock_embeddings.py, io.py, log.py
 │   │   ├── store.py          # MemoryStore
 │   │   └── kb/               # Knowledge base (agentic_cli.memory.kb)
-│   │       ├── manager.py    # KnowledgeBaseManager (+ .concepts), Summarizer
+│   │       ├── manager.py    # KnowledgeBaseManager(base_dir, embedding=, summarizer=), Summarizer
 │   │       ├── models.py     # Document, SearchResult, SourceType
 │   │       ├── vector_store.py, bm25_index.py (+ _bm25_backends.py), concepts.py, sidecar.py
 │   │       └── _mock_vector_store.py, _mock_bm25.py
@@ -174,6 +174,7 @@ Workflow:
 - **Session identity**: durable sessions are addressed by `SessionRef(app_name, user_id, session_id)` (`workflow/sessions.py`). Every session hook (`session_exists`/`list_sessions`/`delete_session`/`recent_messages`/`load_session`) takes an optional `user_id`, defaulting to `settings.default_user` only when the caller omits it. Backends without a session store leave `supports_sessions` False, and the base hooks raise `NotImplementedError` rather than answering with a misleading `False`/`[]`.
 - **Active turn**: the in-flight `(user, session)` is a `ContextVar` (`workflow/sessions.py::get_active_turn`), set with a token by `_workflow_context()` — concurrent turns on one manager stay isolated and nesting restores the outer turn.
 - **Resource ownership**: `cleanup()` is idempotent and awaits an async `close()` on owned resources (`BaseWorkflowManager._aclose_owned`); `WorkflowController.close()` is the single shutdown path (cancel init → shut executor → clean manager). `reinitialize(preserve_sessions=True)` (a model switch) carries the services over inside `_carrying_services()`: session grants, sandbox kernels, jobs and knowledge bases belong to the conversation, not the model, so neither the release nor a failed attempt's rollback closes them.
+- **Memory package boundary**: `agentic_cli/memory/` (the knowledge base in `memory/kb/`, the memory store in `memory/store.py`, shared embeddings and atomic writes in `memory/_core/`) imports nothing from the rest of agentic-cli, and `kb` and `store` never import each other. The rest of agentic-cli uses only `agentic_cli.memory` and `agentic_cli.memory.kb`; `workflow/memory_services.py` is the one place settings become package arguments. `tests/memory/test_boundary.py` enforces all of it, and tests under `tests/memory/` import only the package. A knowledge base summarizes only with the `summarizer=` it was given; the workflow passes itself when `knowledge_base_summarize` is on. `agentic_cli.knowledge_base` and `tools.memory_tools.MemoryStore(settings)` are deprecated forwarding paths, removed in 0.7.0. This only covers the package's own imports: importing `agentic_cli.memory` still runs `agentic_cli/__init__.py`, which loads other agentic_cli modules.
 - **Atomic writes**: Use `atomic_write_json`/`atomic_write_text` from `file_utils.py` for file persistence. They create files private (0600), right for the framework's own state; a write to a file the user owns (`write_file`, `edit_file`) passes `preserve_mode=True`, which keeps an existing file's permission bits and gives a new file the process default.
 
 ### Console Output

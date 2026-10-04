@@ -29,15 +29,13 @@ from agentic_cli.memory.kb.models import Document, DocumentChunk, SourceType
 # ============================================================================
 
 
-def _make_kb(tmp_path):
+def _make_kb(tmp_path, summarizer=None):
     """Create a KB manager with mock services in a temp dir."""
     from agentic_cli.memory._core.mock_embeddings import MockEmbeddingService
     from agentic_cli.memory.kb._mock_vector_store import MockVectorStore
-    from agentic_cli.memory.kb.manager import _FROM_TURN_REGISTRY
 
     manager = KnowledgeBaseManager.__new__(KnowledgeBaseManager)
     manager._lock = __import__("threading").Lock()
-    manager._settings = None
     manager._use_mock = True
     manager.kb_dir = tmp_path / "kb"
     manager.documents_dir = manager.kb_dir / "documents"
@@ -58,7 +56,7 @@ def _make_kb(tmp_path):
     manager._sidecar_locks = {}
     manager._backfill_running = False
     manager._concepts_store = None
-    manager._summarizer = _FROM_TURN_REGISTRY
+    manager._summarizer = summarizer
     return manager
 
 
@@ -239,11 +237,9 @@ class TestKBManagerMigrationV1ToV2:
     def _make_kb_manager(self, kb_dir):
         from agentic_cli.memory._core.mock_embeddings import MockEmbeddingService
         from agentic_cli.memory.kb._mock_vector_store import MockVectorStore
-        from agentic_cli.memory.kb.manager import _FROM_TURN_REGISTRY
 
         manager = KnowledgeBaseManager.__new__(KnowledgeBaseManager)
         manager._lock = __import__("threading").Lock()
-        manager._settings = None
         manager._use_mock = True
         manager.kb_dir = kb_dir
         manager.documents_dir = kb_dir / "documents"
@@ -260,7 +256,7 @@ class TestKBManagerMigrationV1ToV2:
         manager._sidecar_locks = {}
         manager._backfill_running = False
         manager._concepts_store = None
-        manager._summarizer = _FROM_TURN_REGISTRY
+        manager._summarizer = None
         return manager
 
     def test_v1_loaded_correctly(self, kb_dir):
@@ -437,13 +433,9 @@ class TestKBSummaryGeneration:
 
         assert doc.summary == content
 
-    async def test_ingest_tool_uses_llm_summarizer_when_available(self, kb):
-        """Tool-level ingest should invoke the registered async LLM summarizer
+    async def test_ingest_tool_uses_the_given_summarizer_when_available(self, kb):
+        """Tool-level ingest should invoke the knowledge base's summarizer
         and store its output in Document.summary (not the truncate fallback)."""
-        from agentic_cli.workflow.service_registry import (
-            set_service_registry,
-            LLM_SUMMARIZER,
-        )
         from agentic_cli.tools.knowledge_tools import _ingest_text_with_kb
 
         received: dict = {}
@@ -454,17 +446,14 @@ class TestKBSummaryGeneration:
                 received["prompt"] = prompt
                 return "SUMMARY: FAKE_LLM_SUMMARY"
 
-        token = set_service_registry({LLM_SUMMARIZER: FakeSummarizer()})
-        try:
-            long_content = "This is a lengthy body. " * 50
-            result = await _ingest_text_with_kb(
-                kb,
-                content=long_content,
-                title="Test Paper",
-                source_type="user",
-            )
-        finally:
-            token.var.reset(token)
+        kb._summarizer = FakeSummarizer()
+        long_content = "This is a lengthy body. " * 50
+        result = await _ingest_text_with_kb(
+            kb,
+            content=long_content,
+            title="Test Paper",
+            source_type="user",
+        )
 
         assert result["success"] is True
         assert result["summary"] == "FAKE_LLM_SUMMARY"
@@ -478,27 +467,20 @@ class TestKBSummaryGeneration:
     async def test_ingest_tool_falls_back_when_summarizer_errors(self, kb):
         """If the LLM summarizer raises, ingest should fall back to truncation
         rather than losing the document."""
-        from agentic_cli.workflow.service_registry import (
-            set_service_registry,
-            LLM_SUMMARIZER,
-        )
         from agentic_cli.tools.knowledge_tools import _ingest_text_with_kb
 
         class BrokenSummarizer:
             async def summarize(self, content: str, prompt: str) -> str:
                 raise RuntimeError("LLM unavailable")
 
-        token = set_service_registry({LLM_SUMMARIZER: BrokenSummarizer()})
-        try:
-            content = "Fallback test content that should survive summarizer errors."
-            result = await _ingest_text_with_kb(
-                kb,
-                content=content,
-                title="Fallback Test",
-                source_type="user",
-            )
-        finally:
-            token.var.reset(token)
+        kb._summarizer = BrokenSummarizer()
+        content = "Fallback test content that should survive summarizer errors."
+        result = await _ingest_text_with_kb(
+            kb,
+            content=content,
+            title="Fallback Test",
+            source_type="user",
+        )
 
         assert result["success"] is True
         # Fallback is the first 500 chars of content.

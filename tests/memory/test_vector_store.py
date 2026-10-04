@@ -88,7 +88,11 @@ class TestMockVectorStore:
         )
         store.save()
 
-        # Load into new store
+        # Load into a new store. Unlike the real, FAISS-backed VectorStore,
+        # MockVectorStore does NOT auto-load on construction (its
+        # "embeddings" are meaningless MD5 noise, and auto-loading them back
+        # in degrades search — see _mock_vector_store.py), so the caller
+        # loads explicitly.
         store2 = MockVectorStore(index_path=index_path, embedding_dim=4)
         store2.load()
         assert store2.size == 2

@@ -112,3 +112,51 @@ class SearchSource(ABC):
             key = getattr(settings, self.requires_api_key, None)
             return bool(key)
         return True
+
+
+@dataclass
+class PaperResult:
+    """Academic paper search result from ArXiv or SSRN."""
+
+    title: str
+    authors: list[str]
+    abstract: str
+    url: str
+    published_date: str
+    source: str  # "arxiv" or "ssrn"
+    categories: list[str] = field(default_factory=list)
+    pdf_url: str | None = None
+    arxiv_id: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary."""
+        return {
+            "title": self.title,
+            "authors": self.authors,
+            "abstract": self.abstract,
+            "url": self.url,
+            "published_date": self.published_date,
+            "source": self.source,
+            "categories": self.categories,
+            "pdf_url": self.pdf_url,
+            "arxiv_id": self.arxiv_id,
+        }
+
+
+@dataclass
+class WebResult:
+    """Web search result."""
+
+    title: str
+    url: str
+    snippet: str
+    domain: str
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary."""
+        return {
+            "title": self.title,
+            "url": self.url,
+            "snippet": self.snippet,
+            "domain": self.domain,
+        }

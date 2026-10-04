@@ -17,7 +17,11 @@ parent module after importing it (e.g. ``memory_tools.MemoryStore(...)``
 after ``from agentic_cli.tools import memory_tools`` — no name from the
 memory package is ever imported there). The ``DeprecationWarning`` the old
 paths raise is the backstop for that case. Fixtures pulled in from conftest
-are not imports either, and are invisible here too.
+are not imports either, and are invisible here too. Importing
+``agentic_cli.memory`` still runs ``agentic_cli/__init__.py``, which loads
+other agentic_cli modules; the boundary covers only the package's own
+imports, not what importing it transitively pulls in through the top-level
+package.
 """
 
 from __future__ import annotations
@@ -45,21 +49,6 @@ ALLOWED_INSIDE = {
 
 # Old-path modules that forward to the package until 0.7.0 (rule 3 exempt).
 COMPAT_DIRS: set[Path] = {SRC / "agentic_cli" / "knowledge_base"}
-
-# Host imports still to be removed: (file relative to the repo, imported module).
-KNOWN_VIOLATIONS: set[tuple[str, str]] = {
-    ("src/agentic_cli/memory/kb/_bm25_backends.py", "agentic_cli.file_utils"),
-    ("src/agentic_cli/memory/kb/_mock_bm25.py", "agentic_cli.file_utils"),
-    ("src/agentic_cli/memory/kb/_mock_vector_store.py", "agentic_cli.file_utils"),
-    ("src/agentic_cli/memory/kb/concepts.py", "agentic_cli.file_utils"),
-    ("src/agentic_cli/memory/kb/manager.py", "agentic_cli.config"),
-    ("src/agentic_cli/memory/kb/manager.py", "agentic_cli.constants"),
-    ("src/agentic_cli/memory/kb/manager.py", "agentic_cli.file_utils"),
-    ("src/agentic_cli/memory/kb/manager.py", "agentic_cli.logging"),
-    ("src/agentic_cli/memory/kb/manager.py", "agentic_cli.tools.pdf_utils"),
-    ("src/agentic_cli/memory/kb/manager.py", "agentic_cli.workflow.service_registry"),
-    ("src/agentic_cli/memory/kb/vector_store.py", "agentic_cli.file_utils"),
-}
 
 
 def _deprecated(module: str, names: list[str]) -> bool:
@@ -220,12 +209,7 @@ def outside_violations() -> set[tuple[str, str]]:
 
 
 def test_the_package_depends_only_on_itself_and_its_libraries():
-    assert package_violations() - KNOWN_VIOLATIONS == set()
-
-
-def test_every_known_violation_still_exists():
-    """Delete an entry once its import is gone, so the list only shrinks."""
-    assert KNOWN_VIOLATIONS - package_violations() == set()
+    assert package_violations() == set()
 
 
 def test_the_rest_of_agentic_cli_uses_the_public_api():

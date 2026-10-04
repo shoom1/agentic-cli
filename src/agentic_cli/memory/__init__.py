@@ -9,11 +9,12 @@ agentic-cli, and its components do not import each other
 - ``agentic_cli.memory.kb``: the knowledge base.
 """
 
-from agentic_cli.memory._core.embeddings import EmbeddingService
+from agentic_cli.memory._core.embeddings import EmbeddingConfig, EmbeddingService
 from agentic_cli.memory._core.mock_embeddings import MockEmbeddingService
 from agentic_cli.memory.store import ForgettingPolicy, MemoryItem, MemoryStore
 
 __all__ = [
+    "EmbeddingConfig",
     "EmbeddingService",
     "ForgettingPolicy",
     "MemoryItem",

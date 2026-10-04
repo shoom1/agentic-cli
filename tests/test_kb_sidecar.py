@@ -95,11 +95,6 @@ class TestGenerateSidecarPayload:
         return _make_kb(tmp_path)
 
     async def test_returns_structured_payload_from_llm(self, kb):
-        from agentic_cli.workflow.service_registry import (
-            set_service_registry,
-            LLM_SUMMARIZER,
-        )
-
         class FakeSummarizer:
             async def summarize(self, content: str, prompt: str) -> str:
                 return (
@@ -112,14 +107,11 @@ class TestGenerateSidecarPayload:
                     "Datasets: WMT14\n"
                 )
 
-        token = set_service_registry({LLM_SUMMARIZER: FakeSummarizer()})
-        try:
-            payload = await kb.generate_sidecar_payload(
-                "Long body text here.",
-                title="Attention Is All You Need",
-            )
-        finally:
-            token.var.reset(token)
+        kb._summarizer = FakeSummarizer()
+        payload = await kb.generate_sidecar_payload(
+            "Long body text here.",
+            title="Attention Is All You Need",
+        )
 
         assert payload["summary"] == "Self-attention suffices."
         assert "Self-attention alone is enough." in payload["claims"]
@@ -134,30 +126,17 @@ class TestGenerateSidecarPayload:
         assert payload["entities"] == {}
 
     async def test_falls_back_when_summarizer_errors(self, kb):
-        from agentic_cli.workflow.service_registry import (
-            set_service_registry,
-            LLM_SUMMARIZER,
-        )
-
         class BoomSummarizer:
             async def summarize(self, content: str, prompt: str) -> str:
                 raise RuntimeError("boom")
 
-        token = set_service_registry({LLM_SUMMARIZER: BoomSummarizer()})
-        try:
-            payload = await kb.generate_sidecar_payload("body text", title="t")
-        finally:
-            token.var.reset(token)
+        kb._summarizer = BoomSummarizer()
+        payload = await kb.generate_sidecar_payload("body text", title="t")
         assert payload["summary"] == "body text"
         assert payload["claims"] == []
         assert payload["entities"] == {}
 
     async def test_parser_tolerates_whitespace_and_bullet_prefixes(self, kb):
-        from agentic_cli.workflow.service_registry import (
-            set_service_registry,
-            LLM_SUMMARIZER,
-        )
-
         class WonkySummarizer:
             async def summarize(self, content: str, prompt: str) -> str:
                 # Leading whitespace on headers; bullet-prefixed entity lines.
@@ -169,11 +148,8 @@ class TestGenerateSidecarPayload:
                     "- Models: A, B\n"
                 )
 
-        token = set_service_registry({LLM_SUMMARIZER: WonkySummarizer()})
-        try:
-            payload = await kb.generate_sidecar_payload("body", title="t")
-        finally:
-            token.var.reset(token)
+        kb._summarizer = WonkySummarizer()
+        payload = await kb.generate_sidecar_payload("body", title="t")
 
         assert payload["summary"] == "ok."
         assert payload["claims"] == ["one"]
@@ -182,11 +158,6 @@ class TestGenerateSidecarPayload:
     async def test_multi_paragraph_summary_preserves_blank_lines(self, kb):
         """Summary spanning multiple paragraphs keeps paragraph breaks
         and is not collapsed into a single line."""
-        from agentic_cli.workflow.service_registry import (
-            set_service_registry,
-            LLM_SUMMARIZER,
-        )
-
         class ProseSummarizer:
             async def summarize(self, content: str, prompt: str) -> str:
                 return (
@@ -201,11 +172,8 @@ class TestGenerateSidecarPayload:
                     "- Some claim.\n"
                 )
 
-        token = set_service_registry({LLM_SUMMARIZER: ProseSummarizer()})
-        try:
-            payload = await kb.generate_sidecar_payload("body", title="t")
-        finally:
-            token.var.reset(token)
+        kb._summarizer = ProseSummarizer()
+        payload = await kb.generate_sidecar_payload("body", title="t")
 
         assert "First paragraph talks about problem." in payload["summary"]
         assert "Second paragraph talks about approach." in payload["summary"]
@@ -217,11 +185,6 @@ class TestGenerateSidecarPayload:
     async def test_parser_tolerates_markdown_bolded_headers(self, kb):
         """LLMs sometimes bold-wrap section headers despite the 'no markdown'
         instruction; the parser should still split sections correctly."""
-        from agentic_cli.workflow.service_registry import (
-            set_service_registry,
-            LLM_SUMMARIZER,
-        )
-
         class BoldSummarizer:
             async def summarize(self, content: str, prompt: str) -> str:
                 return (
@@ -232,11 +195,8 @@ class TestGenerateSidecarPayload:
                     "Models: X\n"
                 )
 
-        token = set_service_registry({LLM_SUMMARIZER: BoldSummarizer()})
-        try:
-            payload = await kb.generate_sidecar_payload("body", title="t")
-        finally:
-            token.var.reset(token)
+        kb._summarizer = BoldSummarizer()
+        payload = await kb.generate_sidecar_payload("body", title="t")
 
         assert payload["summary"] == "Bold header summary."
         assert payload["claims"] == ["A claim."]
@@ -249,10 +209,6 @@ class TestSidecarWrittenOnIngest:
         return _make_kb(tmp_path)
 
     async def test_ingest_writes_sidecar_with_llm_payload(self, kb):
-        from agentic_cli.workflow.service_registry import (
-            set_service_registry,
-            LLM_SUMMARIZER,
-        )
         from agentic_cli.tools.knowledge_tools import _ingest_text_with_kb
 
         class FakeSummarizer:
@@ -263,13 +219,10 @@ class TestSidecarWrittenOnIngest:
                     "ENTITIES:\nModels: Foo\n"
                 )
 
-        token = set_service_registry({LLM_SUMMARIZER: FakeSummarizer()})
-        try:
-            result = await _ingest_text_with_kb(
-                kb, content="body", title="Test", source_type="user",
-            )
-        finally:
-            token.var.reset(token)
+        kb._summarizer = FakeSummarizer()
+        result = await _ingest_text_with_kb(
+            kb, content="body", title="Test", source_type="user",
+        )
 
         assert result["success"] is True
         sidecar_path = kb.documents_dir / f"{result['document_id']}.md"
@@ -297,23 +250,16 @@ class TestSidecarWrittenOnIngest:
     async def test_empty_summary_in_payload_falls_back_to_truncation(self, kb):
         """If the LLM returns CLAIMS but no SUMMARY:, doc.summary should
         fall back to truncated content rather than being persisted as ''."""
-        from agentic_cli.workflow.service_registry import (
-            set_service_registry,
-            LLM_SUMMARIZER,
-        )
         from agentic_cli.tools.knowledge_tools import _ingest_text_with_kb
 
         class ClaimsOnlySummarizer:
             async def summarize(self, content: str, prompt: str) -> str:
                 return "CLAIMS:\n- one\n- two\n"  # no SUMMARY: line
 
-        token = set_service_registry({LLM_SUMMARIZER: ClaimsOnlySummarizer()})
-        try:
-            result = await _ingest_text_with_kb(
-                kb, content="raw body for fallback", title="X", source_type="user",
-            )
-        finally:
-            token.var.reset(token)
+        kb._summarizer = ClaimsOnlySummarizer()
+        result = await _ingest_text_with_kb(
+            kb, content="raw body for fallback", title="X", source_type="user",
+        )
 
         assert result["success"] is True
         doc = kb.get_document(result["document_id"])
@@ -329,19 +275,19 @@ class TestBackfillSidecars:
     async def test_backfill_writes_missing_sidecars(self, kb):
         d1 = kb.ingest_document(content="a", title="One", source_type=SourceType.USER)
         d2 = kb.ingest_document(content="b", title="Two", source_type=SourceType.USER)
-        kb._sidecar_path(d1.id).unlink()
-        kb._sidecar_path(d2.id).unlink()
+        kb.sidecar_path(d1.id).unlink()
+        kb.sidecar_path(d2.id).unlink()
 
         n = await kb.backfill_sidecars()
 
         assert n == 2
-        assert kb._sidecar_path(d1.id).exists()
-        assert kb._sidecar_path(d2.id).exists()
+        assert kb.sidecar_path(d1.id).exists()
+        assert kb.sidecar_path(d2.id).exists()
 
     async def test_backfill_skips_existing(self, kb):
         d1 = kb.ingest_document(content="a", title="Has Sidecar", source_type=SourceType.USER)
         # Mtime sentinel
-        sidecar = kb._sidecar_path(d1.id)
+        sidecar = kb.sidecar_path(d1.id)
         original = sidecar.read_text()
 
         n = await kb.backfill_sidecars()
@@ -353,7 +299,7 @@ class TestBackfillSidecars:
         kb.ingest_document(content="a", title="One", source_type=SourceType.USER)
         kb.ingest_document(content="b", title="Two", source_type=SourceType.USER)
         for doc in list(kb._documents.values()):
-            kb._sidecar_path(doc.id).unlink()
+            kb.sidecar_path(doc.id).unlink()
 
         calls: list[tuple[int, int, str]] = []
 
@@ -371,13 +317,9 @@ class TestBackfillSidecars:
         BackfillAlreadyRunning, not silently corrupt state."""
         import asyncio
         from agentic_cli.memory.kb.manager import BackfillAlreadyRunning
-        from agentic_cli.workflow.service_registry import (
-            set_service_registry,
-            LLM_SUMMARIZER,
-        )
 
         d = kb.ingest_document(content="body", title="One", source_type=SourceType.USER)
-        kb._sidecar_path(d.id).unlink()
+        kb.sidecar_path(d.id).unlink()
 
         gate = asyncio.Event()
 
@@ -386,19 +328,16 @@ class TestBackfillSidecars:
                 await gate.wait()
                 return "SUMMARY: done."
 
-        token = set_service_registry({LLM_SUMMARIZER: BlockingSummarizer()})
-        try:
-            first = asyncio.create_task(kb.backfill_sidecars())
-            # Let the first call enter backfill_sidecars and hit the LLM await
-            await asyncio.sleep(0.01)
+        kb._summarizer = BlockingSummarizer()
+        first = asyncio.create_task(kb.backfill_sidecars())
+        # Let the first call enter backfill_sidecars and hit the LLM await
+        await asyncio.sleep(0.01)
 
-            with pytest.raises(BackfillAlreadyRunning):
-                await kb.backfill_sidecars()
+        with pytest.raises(BackfillAlreadyRunning):
+            await kb.backfill_sidecars()
 
-            gate.set()
-            n = await first
-        finally:
-            token.var.reset(token)
+        gate.set()
+        n = await first
 
         assert n == 1
         assert kb._backfill_running is False
@@ -406,24 +345,16 @@ class TestBackfillSidecars:
     async def test_backfill_clears_running_flag_on_exception(self, kb):
         """Even if the inner LLM call raises, the in-progress flag resets
         so a retry is possible."""
-        from agentic_cli.workflow.service_registry import (
-            set_service_registry,
-            LLM_SUMMARIZER,
-        )
-
         d = kb.ingest_document(content="body", title="One", source_type=SourceType.USER)
-        kb._sidecar_path(d.id).unlink()
+        kb.sidecar_path(d.id).unlink()
 
         class ExplodingCallback:
             def __call__(self, done, total, doc):
                 raise RuntimeError("progress_cb said no")
 
-        token = set_service_registry({LLM_SUMMARIZER: None})
-        try:
-            with pytest.raises(RuntimeError, match="progress_cb"):
-                await kb.backfill_sidecars(progress_cb=ExplodingCallback())
-        finally:
-            token.var.reset(token)
+        kb._summarizer = None
+        with pytest.raises(RuntimeError, match="progress_cb"):
+            await kb.backfill_sidecars(progress_cb=ExplodingCallback())
 
         assert kb._backfill_running is False
 
@@ -477,21 +408,18 @@ class TestKbReadLazySidecar:
             content="body", title="Y", source_type=SourceType.USER,
         )
         # Simulate legacy doc: remove sidecar
-        kb._sidecar_path(doc.id).unlink()
-        assert not kb._sidecar_path(doc.id).exists()
+        kb.sidecar_path(doc.id).unlink()
+        assert not kb.sidecar_path(doc.id).exists()
 
         result = await _read_document_from_kbs(kb, None, doc.id)
         assert result["success"] is True
         # Sidecar should have been generated
-        assert kb._sidecar_path(doc.id).exists()
+        assert kb.sidecar_path(doc.id).exists()
 
     async def test_kb_read_concurrent_reads_serialize(self, kb):
         """Two concurrent first-reads on the same doc must not double-LLM."""
         import asyncio
         from agentic_cli.memory.kb.models import SourceType
-        from agentic_cli.workflow.service_registry import (
-            set_service_registry, LLM_SUMMARIZER,
-        )
         from agentic_cli.tools.knowledge_tools import _read_document_from_kbs
 
         call_count = {"n": 0}
@@ -503,16 +431,13 @@ class TestKbReadLazySidecar:
                 return "SUMMARY: lazy summary."
 
         doc = kb.ingest_document(content="body", title="Z", source_type=SourceType.USER)
-        kb._sidecar_path(doc.id).unlink()
+        kb.sidecar_path(doc.id).unlink()
 
-        token = set_service_registry({LLM_SUMMARIZER: CountingSummarizer()})
-        try:
-            await asyncio.gather(
-                _read_document_from_kbs(kb, None, doc.id),
-                _read_document_from_kbs(kb, None, doc.id),
-            )
-        finally:
-            token.var.reset(token)
+        kb._summarizer = CountingSummarizer()
+        await asyncio.gather(
+            _read_document_from_kbs(kb, None, doc.id),
+            _read_document_from_kbs(kb, None, doc.id),
+        )
 
         assert call_count["n"] == 1, "lock did not serialize concurrent first-reads"
 
@@ -520,10 +445,6 @@ class TestKbReadLazySidecar:
         """Lazy sidecar gen for a legacy PDF doc (empty doc.content) should
         extract text from the file rather than caching a useless empty sidecar."""
         from agentic_cli.memory.kb.models import SourceType
-        from agentic_cli.workflow.service_registry import (
-            set_service_registry,
-            LLM_SUMMARIZER,
-        )
         from agentic_cli.tools.knowledge_tools import _read_document_from_kbs
         from unittest.mock import patch
 
@@ -537,7 +458,7 @@ class TestKbReadLazySidecar:
             file_bytes=fake_pdf_bytes,
             file_extension=".pdf",
         )
-        kb._sidecar_path(doc.id).unlink()
+        kb.sidecar_path(doc.id).unlink()
         kb._documents[doc.id].content = ""  # legacy: no in-memory content
 
         captured = {}
@@ -547,18 +468,15 @@ class TestKbReadLazySidecar:
                 captured["content"] = content
                 return "SUMMARY: extracted from pdf."
 
-        token = set_service_registry({LLM_SUMMARIZER: CapturingSummarizer()})
-        try:
-            with patch(
-                "agentic_cli.memory.kb.manager.KnowledgeBaseManager.extract_text_from_pdf",
-                return_value="EXTRACTED PDF TEXT",
-            ):
-                result = await _read_document_from_kbs(kb, None, doc.id)
-        finally:
-            token.var.reset(token)
+        kb._summarizer = CapturingSummarizer()
+        with patch(
+            "agentic_cli.tools.pdf_utils.extract_pdf_text",
+            return_value="EXTRACTED PDF TEXT",
+        ):
+            result = await _read_document_from_kbs(kb, None, doc.id)
 
         assert result["success"] is True
-        assert kb._sidecar_path(doc.id).exists()
+        assert kb.sidecar_path(doc.id).exists()
         # The PDF text should have been the input to the LLM
         assert "EXTRACTED PDF TEXT" in captured["content"]
 
@@ -571,13 +489,13 @@ class TestClearCleansArtifacts:
     def test_clear_removes_sidecars(self, kb):
         d1 = kb.ingest_document(content="a", title="One", source_type=SourceType.USER)
         d2 = kb.ingest_document(content="b", title="Two", source_type=SourceType.USER)
-        assert kb._sidecar_path(d1.id).exists()
-        assert kb._sidecar_path(d2.id).exists()
+        assert kb.sidecar_path(d1.id).exists()
+        assert kb.sidecar_path(d2.id).exists()
 
         kb.clear()
 
-        assert not kb._sidecar_path(d1.id).exists()
-        assert not kb._sidecar_path(d2.id).exists()
+        assert not kb.sidecar_path(d1.id).exists()
+        assert not kb.sidecar_path(d2.id).exists()
 
     def test_clear_rebuilds_empty_index_md(self, kb):
         kb.ingest_document(content="a", title="One", source_type=SourceType.USER)
@@ -596,7 +514,7 @@ class TestDeleteCleansLockDict:
 
         d = kb.ingest_document(content="body", title="X", source_type=SourceType.USER)
         # Force a lazy-read to populate the lock dict
-        kb._sidecar_path(d.id).unlink()
+        kb.sidecar_path(d.id).unlink()
         await _read_document_from_kbs(kb, None, d.id)
         assert d.id in kb._sidecar_locks
 
@@ -660,7 +578,7 @@ class TestGetOrCreateSidecarLock:
         doc = kb.ingest_document(
             content="body", title="X", source_type=SourceType.USER,
         )
-        kb._sidecar_path(doc.id).unlink()
+        kb.sidecar_path(doc.id).unlink()
 
         original = kb.get_or_create_sidecar_lock
         seen: list[str] = []

@@ -7,7 +7,7 @@ import math
 from collections import Counter
 from pathlib import Path
 
-from agentic_cli.file_utils import atomic_write_json
+from agentic_cli.memory._core.io import atomic_write_json
 
 
 class MockBM25Index:
