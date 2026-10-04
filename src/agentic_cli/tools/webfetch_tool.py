@@ -1,25 +1,40 @@
-"""Web fetch tool for fetching and summarizing web content.
+"""Web fetch tool: fetch a page, save it, and summarize it with an LLM.
 
-Provides the main web_fetch tool that orchestrates content fetching,
-markdown conversion, and LLM summarization.
+``fetch_and_summarize`` is the body of both ``web_fetch`` variants: the
+registered tool here and the one ``tools.factories.make_webfetch_tool`` builds.
 """
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
 from typing import Any
+
+import structlog
 
 from agentic_cli.config import get_settings
 from agentic_cli.tools.registry import register_tool, ToolCategory
 from agentic_cli.workflow.permissions import Capability
 from agentic_cli.tools.webfetch import (
     ContentFetcher,
+    FetchResult,
     URLValidator,
     RobotsTxtChecker,
     HTMLToMarkdown,
     build_summarize_prompt,
 )
+from agentic_cli.tools.webfetch.saved import (
+    SaveError,
+    cleanup_saved_pages,
+    page_name,
+    save_page,
+    saved_page_extension,
+    saved_pages_dir,
+)
 from agentic_cli.tools.webfetch.transport import PinnedTransport
 from agentic_cli.workflow.service_registry import require_service, LLM_SUMMARIZER
+
+logger = structlog.get_logger(__name__)
 
 
 # Module-level fetcher state (lazy-created, invalidated on settings change)
@@ -79,17 +94,104 @@ def get_or_create_fetcher(settings=None) -> ContentFetcher:
     return _fetcher
 
 
+def save_fetched_page(url: str, result: FetchResult) -> dict[str, Any]:
+    """Save a fetched page in the project's saved-pages folder.
+
+    Returns ``{"saved_path": ...}`` (relative to the current directory),
+    ``{"save_error": ...}``, or ``{}`` when the result carries no body or
+    pages of its type are not saved.
+    """
+    if not isinstance(result.raw, bytes) or saved_page_extension(result.content_type) is None:
+        return {}
+    settings = get_settings()
+    folder = saved_pages_dir(settings.app_name)
+    try:
+        page = save_page(
+            folder,
+            url=url,
+            final_url=result.final_url or url,
+            content_type=result.content_type or "",
+            charset=result.charset,
+            data=result.raw,
+            truncated=result.raw_truncated,
+        )
+    except SaveError as e:
+        logger.warning("webfetch_page_not_saved", url=url, error=str(e))
+        return {"save_error": str(e)}
+    cleanup_saved_pages(
+        folder,
+        max_age_days=settings.webfetch_saved_max_age_days,
+        max_bytes=settings.webfetch_saved_max_mb * 1024 * 1024,
+        keep=page_name(url),
+    )
+    return {"saved_path": os.path.relpath(page, Path.cwd())}
+
+
+async def fetch_and_summarize(url: str, prompt: str, timeout: int, summarizer) -> dict[str, Any]:
+    """Fetch ``url``, save the page, and summarize it with ``summarizer``."""
+    fetcher = get_or_create_fetcher()
+    fetch_result = await fetcher.fetch(url, timeout=timeout)
+
+    if not fetch_result.success:
+        if fetch_result.redirect is not None:
+            return {
+                "success": False,
+                "redirect": True,
+                "redirect_url": fetch_result.redirect.to_url,
+                "redirect_host": fetch_result.redirect.to_host,
+                "message": f"Redirect to different host: {fetch_result.redirect.to_host}",
+                "url": url,
+            }
+        return {
+            "success": False,
+            "error": fetch_result.error,
+            "url": url,
+        }
+
+    saved = save_fetched_page(url, fetch_result)
+
+    markdown_content = HTMLToMarkdown().convert(
+        fetch_result.content,
+        fetch_result.content_type or "text/html",
+    )
+    full_prompt = build_summarize_prompt(markdown_content, prompt)
+    try:
+        summary = await summarizer.summarize(markdown_content, full_prompt)
+    except Exception as e:
+        return {
+            "success": False,
+            "error": f"LLM summarization failed: {e}",
+            "url": url,
+            **saved,
+        }
+
+    return {
+        "success": True,
+        "summary": summary,
+        "url": url,
+        "truncated": fetch_result.truncated,
+        "cached": fetch_result.from_cache,
+        **saved,
+    }
+
+
 @register_tool(
     category=ToolCategory.NETWORK,
     capabilities=[Capability("http.read", target_arg="url")],
-    description="Fetch a web page, convert it to markdown, and summarize it using an LLM based on your prompt. Use this to extract specific information from a URL (e.g., documentation, articles).",
+    description=(
+        "Fetch a web page, convert it to markdown, and summarize it using an LLM "
+        "based on your prompt. The full page is saved (saved_path), so "
+        "kb_ingest_file can add it to the knowledge base."
+    ),
     requires="llm_summarizer",
 )
 async def web_fetch(url: str, prompt: str, timeout: int = 30) -> dict[str, Any]:
     """Fetch web content and summarize it using an LLM.
 
-    Fetches content from the specified URL, converts it to markdown,
-    and uses an LLM to summarize based on the provided prompt.
+    Fetches content from the specified URL, converts it to markdown, and uses
+    an LLM to summarize it based on the provided prompt. The full page is
+    saved: pass ``saved_path`` to ``kb_ingest_file`` to add it to the
+    knowledge base, or read a saved HTML or text page with ``read_file``.
 
     Args:
         url: The URL to fetch content from.
@@ -101,65 +203,14 @@ async def web_fetch(url: str, prompt: str, timeout: int = 30) -> dict[str, Any]:
         - success: Whether the operation succeeded
         - summary: The LLM-generated summary (if successful)
         - url: The fetched URL
-        - truncated: Whether content was truncated
+        - truncated: Whether the summarized content was truncated
         - cached: Whether content came from cache
+        - saved_path: Where the full page was saved (HTML, text, JSON, XML and PDF pages)
+        - save_error: Why the page could not be saved (the summary is still returned)
         - error: Error message (if failed)
         - redirect: Redirect info (if cross-host redirect occurred)
     """
-    # Get the LLM summarizer from context
     summarizer = require_service(LLM_SUMMARIZER)
     if isinstance(summarizer, dict):
         return summarizer
-
-    # Get the fetcher
-    fetcher = get_or_create_fetcher()
-
-    # Fetch the content
-    fetch_result = await fetcher.fetch(url, timeout=timeout)
-
-    # Handle fetch failure
-    if not fetch_result.success:
-        # Check for redirect
-        if fetch_result.redirect is not None:
-            return {
-                "success": False,
-                "redirect": True,
-                "redirect_url": fetch_result.redirect.to_url,
-                "redirect_host": fetch_result.redirect.to_host,
-                "message": f"Redirect to different host: {fetch_result.redirect.to_host}",
-                "url": url,
-            }
-        # Other fetch error
-        return {
-            "success": False,
-            "error": fetch_result.error,
-            "url": url,
-        }
-
-    # Convert HTML to markdown
-    converter = HTMLToMarkdown()
-    markdown_content = converter.convert(
-        fetch_result.content,
-        fetch_result.content_type or "text/html",
-    )
-
-    # Build the summarization prompt
-    full_prompt = build_summarize_prompt(markdown_content, prompt)
-
-    # Summarize using the LLM
-    try:
-        summary = await summarizer.summarize(markdown_content, full_prompt)
-    except Exception as e:
-        return {
-            "success": False,
-            "error": f"LLM summarization failed: {e}",
-            "url": url,
-        }
-
-    return {
-        "success": True,
-        "summary": summary,
-        "url": url,
-        "truncated": fetch_result.truncated,
-        "cached": fetch_result.from_cache,
-    }
+    return await fetch_and_summarize(url, prompt, timeout, summarizer)

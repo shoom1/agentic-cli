@@ -308,11 +308,14 @@ def make_webfetch_tool(summarizer) -> Callable:
     Returns:
         Async web_fetch function.
     """
-    from agentic_cli.tools.webfetch_tool import get_or_create_fetcher
-    from agentic_cli.tools.webfetch import HTMLToMarkdown, build_summarize_prompt
+    from agentic_cli.tools.webfetch_tool import fetch_and_summarize
 
     async def web_fetch(url: str, prompt: str, timeout: int = 30) -> dict[str, Any]:
         """Fetch web content and summarize it using an LLM.
+
+        The full page is saved: pass ``saved_path`` to ``kb_ingest_file`` to
+        add it to the knowledge base, or read a saved HTML or text page with
+        ``read_file``.
 
         Args:
             url: The URL to fetch content from.
@@ -320,57 +323,10 @@ def make_webfetch_tool(summarizer) -> Callable:
             timeout: Request timeout in seconds (default: 30).
 
         Returns:
-            Dictionary with success, summary, url, truncated, cached keys.
+            Dictionary with success, summary, url, truncated, cached keys, plus
+            saved_path (or save_error) when the page is a type that is saved.
         """
-        fetcher = get_or_create_fetcher()
-
-        # Fetch the content
-        fetch_result = await fetcher.fetch(url, timeout=timeout)
-
-        # Handle fetch failure
-        if not fetch_result.success:
-            if fetch_result.redirect is not None:
-                return {
-                    "success": False,
-                    "redirect": True,
-                    "redirect_url": fetch_result.redirect.to_url,
-                    "redirect_host": fetch_result.redirect.to_host,
-                    "message": f"Redirect to different host: {fetch_result.redirect.to_host}",
-                    "url": url,
-                }
-            return {
-                "success": False,
-                "error": fetch_result.error,
-                "url": url,
-            }
-
-        # Convert HTML to markdown
-        converter = HTMLToMarkdown()
-        markdown_content = converter.convert(
-            fetch_result.content,
-            fetch_result.content_type or "text/html",
-        )
-
-        # Build the summarization prompt
-        full_prompt = build_summarize_prompt(markdown_content, prompt)
-
-        # Summarize using the LLM
-        try:
-            summary = await summarizer.summarize(markdown_content, full_prompt)
-        except Exception as e:
-            return {
-                "success": False,
-                "error": f"LLM summarization failed: {e}",
-                "url": url,
-            }
-
-        return {
-            "success": True,
-            "summary": summary,
-            "url": url,
-            "truncated": fetch_result.truncated,
-            "cached": fetch_result.from_cache,
-        }
+        return await fetch_and_summarize(url, prompt, timeout, summarizer)
 
     web_fetch.__name__ = "web_fetch"
     from agentic_cli.tools.webfetch_tool import web_fetch as _orig_web_fetch

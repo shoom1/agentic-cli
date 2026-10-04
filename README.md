@@ -263,6 +263,9 @@ absolute/user-level file. A key placed in a cwd `.env` is deliberately ignored.
 | `brave_api_key` | `BRAVE_API_KEY` | None | Brave Search API key |
 | `search_backend` | `AGENTIC_SEARCH_BACKEND` | Auto | Web search provider (tavily/brave) |
 | `webfetch_model` | `AGENTIC_WEBFETCH_MODEL` | Auto | Model for web content summarization |
+| `webfetch_max_download_bytes` | `AGENTIC_WEBFETCH_MAX_DOWNLOAD_BYTES` | 5242880 | Largest page body read and saved |
+| `webfetch_saved_max_age_days` | `AGENTIC_WEBFETCH_SAVED_MAX_AGE_DAYS` | 7 | Saved pages older than this are deleted |
+| `webfetch_saved_max_mb` | `AGENTIC_WEBFETCH_SAVED_MAX_MB` | 200 | Oldest saved pages are deleted past this size |
 | `retry_max_attempts` | `AGENTIC_RETRY_MAX_ATTEMPTS` | 3 | Max retries on transient errors |
 | `retry_initial_delay` | `AGENTIC_RETRY_INITIAL_DELAY` | 2.0 | Initial retry backoff (seconds) |
 
@@ -536,6 +539,8 @@ result = await web_fetch(
 ```
 
 Features: URL validation, robots.txt compliance, SSRF protection, content caching, PDF extraction (including arXiv).
+
+Every page `web_fetch` reads is saved as received in `./.{app_name}/fetched/` (a folder git ignores), and the result's `saved_path` names it. Pass `saved_path` to `kb_ingest_file` to add the page to the knowledge base. Pages are read up to `webfetch_max_download_bytes` (5 MB); the summarizer sees the first `webfetch_max_content_bytes` (100 KB). Saved pages older than `webfetch_saved_max_age_days` (7) are deleted, then the oldest until the folder is under `webfetch_saved_max_mb` (200).
 
 #### ArXiv Search
 
@@ -936,7 +941,7 @@ agentic-cli/
 │   │   │   ├── executor.py
 │   │   │   ├── os_sandbox/       # macOS seatbelt / Linux namespace sandboxes
 │   │   │   └── ...               # tokenizer, classifier, sandbox, audit
-│   │   └── webfetch/             # Fetcher, converter, validator, robots, summarizer
+│   │   └── webfetch/             # Fetcher, converter, validator, robots, summarizer, saved pages
 │   ├── knowledge_base/           # Deprecated forwarding modules → memory.kb (removed in 0.7.0)
 │   ├── memory/                   # Knowledge base + memory store; imports nothing else from agentic_cli
 │   │   ├── __init__.py           # MemoryStore, MemoryItem, ForgettingPolicy, EmbeddingService, EmbeddingConfig, MockEmbeddingService

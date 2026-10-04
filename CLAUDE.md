@@ -88,7 +88,7 @@ agentic-cli/
 │   │   ├── langgraph/state_tools.py # LangGraph-native plan/task tools (Command/InjectedState)
 │   │   ├── sandbox/         # Stateful code-execution sandbox (sandbox_execute)
 │   │   ├── shell/           # 8-layer shell security (+ os_sandbox/)
-│   │   └── webfetch/        # Fetcher, converter, validator, robots, summarizer
+│   │   └── webfetch/        # Fetcher, converter, validator, robots, summarizer, saved pages
 │   ├── knowledge_base/       # Deprecated forwarding modules → memory.kb (removed in 0.7.0)
 │   ├── memory/               # Knowledge base + memory store; imports nothing else from agentic_cli
 │   │   ├── __init__.py       # MemoryStore, MemoryItem, ForgettingPolicy, EmbeddingService, EmbeddingConfig, MockEmbeddingService

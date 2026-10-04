@@ -39,6 +39,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Log names:** the knowledge base logs as `agentic_cli.memory.kb` (was
   `agentic_cli.knowledge_base`) and the memory store as
   `agentic_cli.memory.store` (was `agentic_cli.tools.memory`).
+- **`web_fetch` reads a page up to `webfetch_max_download_bytes` (5 MB)**
+  instead of stopping at `webfetch_max_content_bytes` (100 KB), so a saved
+  page is complete. The summarizer still sees only the first
+  `webfetch_max_content_bytes`.
 
 ### Added
 
@@ -46,6 +50,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `generate_sidecar_payload` and `backfill_sidecars` call the summarizer the
   knowledge base was given (anything with `async summarize(content, prompt)`);
   with `None` they store previews.
+- **`web_fetch` saves every page it reads** in `./.{app_name}/fetched/` and
+  returns its `saved_path`, so the page can be added to the knowledge base
+  later or read in full. The body is saved as received, with a `.meta.json`
+  beside it naming the URL, content type and charset. The folder has its own
+  `.gitignore`. Pages older than `webfetch_saved_max_age_days` (7) are
+  deleted, then the oldest until the folder is under `webfetch_saved_max_mb`
+  (200). A page that cannot be saved is reported as `save_error`, and the
+  summary is still returned.
 
 ### Deprecated
 
