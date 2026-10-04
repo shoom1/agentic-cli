@@ -66,14 +66,19 @@ def test_old_names_are_the_moved_objects(old, new, name):
     assert getattr(_old(old), name) is getattr(importlib.import_module(new), name)
 
 
-def test_the_first_import_of_the_old_package_warns():
+@pytest.mark.parametrize("import_statement", [
+    "import agentic_cli.knowledge_base",
+    "import agentic_cli.knowledge_base.manager",
+])
+def test_the_first_import_of_the_old_package_warns(import_statement):
     code = (
         "import warnings\n"
         "with warnings.catch_warnings(record=True) as caught:\n"
         "    warnings.simplefilter('always')\n"
-        "    import agentic_cli.knowledge_base\n"
-        "print([str(w.message) for w in caught if w.category is DeprecationWarning])\n"
+        f"    {import_statement}\n"
+        "warnings_list = [w for w in caught if w.category is DeprecationWarning and 'agentic_cli.memory.kb' in str(w.message)]\n"
+        "print(len(warnings_list))\n"
     )
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
 
-    assert "agentic_cli.memory.kb" in out.stdout
+    assert out.stdout.strip() == "1", f"Expected exactly 1 DeprecationWarning, got: {out.stdout}"

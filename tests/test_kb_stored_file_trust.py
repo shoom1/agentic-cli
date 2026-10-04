@@ -20,7 +20,6 @@ from pathlib import Path
 import pytest
 
 from agentic_cli.memory._core.mock_embeddings import MockEmbeddingService
-
 from agentic_cli.memory.kb._mock_vector_store import MockVectorStore
 from agentic_cli.memory.kb.manager import KnowledgeBaseManager
 from agentic_cli.memory.kb.models import SourceType

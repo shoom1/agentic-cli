@@ -16,6 +16,8 @@ from agentic_cli.memory.kb.models import (
 )
 from agentic_cli.memory._core.mock_embeddings import MockEmbeddingService
 from agentic_cli.memory.kb._mock_vector_store import MockVectorStore
+
+
 def _make_mock_kb(base_dir: Path, **kwargs) -> KnowledgeBaseManager:
     """Create a KnowledgeBaseManager with mock services injected."""
     emb = MockEmbeddingService()
