@@ -501,50 +501,16 @@ class BaseWorkflowManager(ABC):
     ) -> None:
         """Construct the required services into ``s``. See :meth:`_build_services`."""
         if "memory_store" in self._required_managers and MEMORY_STORE not in existing:
-            from agentic_cli.memory import MemoryStore
+            from agentic_cli.workflow.memory_services import build_memory_store
 
-            embedding_service = None
-            if not self._settings.knowledge_base_use_mock:
-                from agentic_cli.knowledge_base.embeddings import EmbeddingService
-                if EmbeddingService.is_available():
-                    embedding_service = EmbeddingService(
-                        model_name=self._settings.embedding_model,
-                        batch_size=self._settings.embedding_batch_size,
-                        device=self._settings.embedding_device,
-                    )
-            else:
-                from agentic_cli.knowledge_base._mocks import MockEmbeddingService
-                embedding_service = MockEmbeddingService()
-
-            s[MEMORY_STORE] = MemoryStore(
-                self._settings.workspace_dir / "memory", embedding_service=embedding_service
-            )
+            s[MEMORY_STORE] = build_memory_store(self._settings)
 
         if "kb_manager" in self._required_managers and KB_MANAGER not in existing:
-            from pathlib import Path
-            from agentic_cli.knowledge_base import KnowledgeBaseManager
+            from agentic_cli.workflow.memory_services import build_knowledge_bases
 
-            use_mock = self._settings.knowledge_base_use_mock
-            summarizer = self if self._settings.knowledge_base_summarize else None
-            project_kb_dir = Path.cwd() / f".{self._settings.app_name}" / "knowledge_base"
-            user_kb_dir = self._settings.knowledge_base_dir
-
-            s[KB_MANAGER] = KnowledgeBaseManager(
-                settings=self._settings,
-                use_mock=use_mock,
-                base_dir=project_kb_dir,
-                summarizer=summarizer,
+            s[KB_MANAGER], s[USER_KB_MANAGER] = build_knowledge_bases(
+                self._settings, summarizer=self
             )
-
-            if project_kb_dir.resolve() != user_kb_dir.resolve():
-                s[USER_KB_MANAGER] = KnowledgeBaseManager(
-                    settings=self._settings,
-                    use_mock=use_mock,
-                    base_dir=user_kb_dir,
-                    summarizer=summarizer,
-                )
-            else:
-                s[USER_KB_MANAGER] = s[KB_MANAGER]
 
         if "llm_summarizer" in self._required_managers and LLM_SUMMARIZER not in existing:
             s[LLM_SUMMARIZER] = self
