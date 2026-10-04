@@ -50,7 +50,7 @@ from agentic_cli.logging import Loggers
 if TYPE_CHECKING:
     from agentic_cli.config import BaseSettings
     from agentic_cli.memory import MemoryStore
-    from agentic_cli.knowledge_base import KnowledgeBaseManager
+    from agentic_cli.memory.kb import KnowledgeBaseManager
     from agentic_cli.tools.sandbox.manager import SandboxManager
 
 logger = Loggers.workflow()

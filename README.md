@@ -548,7 +548,7 @@ results = search_arxiv("transformer attention", max_results=10, categories=["cs.
 paper = fetch_arxiv_paper("1706.03762")  # "Attention Is All You Need"
 ```
 
-The `ArxivSearchSource` (in `knowledge_base/sources.py`) is cached via the service registry and reused across tools. To pull a paper into the KB, use `ingest_arxiv_paper(arxiv_id)` — it composes the arxiv source with `kb_manager`.
+The `ArxivSearchSource` (in `tools/arxiv_source.py`) is cached via the service registry and reused across tools. To pull a paper into the KB, use `ingest_arxiv_paper(arxiv_id)` — it composes the arxiv source with `kb_manager`.
 
 #### File Operations
 
@@ -631,7 +631,7 @@ reader     = AgentConfig(name="reader",     prompt=..., tools=KB_READER_TOOLS)
 Direct manager API for embedding in custom flows:
 
 ```python
-from agentic_cli.knowledge_base import KnowledgeBaseManager, SourceType
+from agentic_cli.memory.kb import KnowledgeBaseManager, SourceType
 
 kb = KnowledgeBaseManager(settings=settings)
 doc = await kb.ingest_document(
@@ -896,6 +896,7 @@ agentic-cli/
 │   │   ├── executor.py           # SafePythonExecutor
 │   │   ├── arxiv_tools.py        # search_arxiv, fetch_arxiv_paper, ingest_arxiv_paper
 │   │   ├── arxiv_source.py       # ArxivSearchSource (service-registered)
+│   │   ├── search_sources.py     # SearchSource, SearchSourceResult
 │   │   ├── execution_tools.py    # execute_python
 │   │   ├── interaction_tools.py  # ask_clarification
 │   │   ├── knowledge_tools.py    # kb_search / kb_ingest_text / kb_ingest_file /
@@ -924,16 +925,16 @@ agentic-cli/
 │   │   │   ├── os_sandbox/       # macOS seatbelt / Linux namespace sandboxes
 │   │   │   └── ...               # tokenizer, classifier, sandbox, audit
 │   │   └── webfetch/             # Fetcher, converter, validator, robots, summarizer
-│   ├── knowledge_base/
-│   │   ├── manager.py            # KnowledgeBaseManager (+ .concepts)
-│   │   ├── models.py             # Document, SearchResult, SourceType, …
-│   │   ├── embeddings.py         # EmbeddingService
-│   │   ├── vector_store.py       # FAISS-backed vector store
-│   │   ├── bm25_index.py         # BM25 index (hybrid search)
-│   │   ├── concepts.py           # ConceptStore (agent-authored pages)
-│   │   ├── sidecar.py            # Per-doc markdown sidecar render/parse
-│   │   ├── sources.py            # SearchSource + ArxivSearchSource
-│   │   └── _mocks.py             # MockEmbeddingService, MockVectorStore, mock BM25
+│   ├── knowledge_base/           # Deprecated forwarding modules → memory.kb (removed in 0.7.0)
+│   ├── memory/                   # Knowledge base + memory store; imports nothing else from agentic_cli
+│   │   ├── __init__.py           # MemoryStore, MemoryItem, ForgettingPolicy, EmbeddingService, MockEmbeddingService
+│   │   ├── _core/                # Shared, private: embeddings.py, mock_embeddings.py, io.py, log.py
+│   │   ├── store.py              # MemoryStore
+│   │   └── kb/                   # Knowledge base (agentic_cli.memory.kb)
+│   │       ├── manager.py                # KnowledgeBaseManager (+ .concepts), Summarizer
+│   │       ├── models.py                 # Document, SearchResult, SourceType
+│   │       ├── vector_store.py, bm25_index.py (+ _bm25_backends.py), concepts.py, sidecar.py
+│   │       └── _mock_vector_store.py, _mock_bm25.py
 │   └── persistence/              # (sessions are persisted natively by each
 │                                 #  orchestrator's store; the legacy JSON
 │                                 #  SessionPersistence layer was removed)

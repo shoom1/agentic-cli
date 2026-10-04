@@ -68,7 +68,7 @@ def test_the_memory_store_lives_in_the_workspace(settings):
 
 
 def test_the_mock_setting_gives_the_memory_store_the_mock_embedder(settings):
-    from agentic_cli.knowledge_base._mocks import MockEmbeddingService
+    from agentic_cli.memory import MockEmbeddingService
 
     store = memory_services.build_memory_store(settings)
 

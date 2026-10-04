@@ -7,8 +7,8 @@ back to the first ~500 characters of the document.
 
 from __future__ import annotations
 
-from agentic_cli.knowledge_base.manager import KnowledgeBaseManager
-from agentic_cli.knowledge_base.models import SourceType
+from agentic_cli.memory.kb.manager import KnowledgeBaseManager
+from agentic_cli.memory.kb.models import SourceType
 from agentic_cli.workflow.service_registry import LLM_SUMMARIZER, set_service_registry
 
 SIDECAR = "SUMMARY: Injected summary.\nCLAIMS:\n- Injected claim.\n"

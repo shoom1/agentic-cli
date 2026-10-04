@@ -6,7 +6,7 @@ write concept citing the doc → search concepts → find it.
 
 import pytest
 
-from agentic_cli.knowledge_base.models import SourceType
+from agentic_cli.memory.kb.models import SourceType
 
 
 class TestKbResearchFlow:

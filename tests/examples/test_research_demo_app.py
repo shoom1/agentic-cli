@@ -370,7 +370,7 @@ class TestKbBackfillCommand:
         stopping (``return``) before the later one is ever tried.
         """
         from examples.research_demo.commands import KbBackfillCommand
-        from agentic_cli.knowledge_base.manager import BackfillAlreadyRunning
+        from agentic_cli.memory.kb.manager import BackfillAlreadyRunning
         from types import SimpleNamespace
 
         class FakeKB:

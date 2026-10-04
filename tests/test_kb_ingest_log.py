@@ -2,7 +2,7 @@
 
 import pytest
 
-from agentic_cli.knowledge_base.models import SourceType
+from agentic_cli.memory.kb.models import SourceType
 from tests.test_knowledge_tools import _make_kb
 
 

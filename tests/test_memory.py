@@ -3,7 +3,7 @@
 import pytest
 
 from agentic_cli.memory import MemoryStore
-from agentic_cli.knowledge_base._mocks import MockEmbeddingService
+from agentic_cli.memory._core.mock_embeddings import MockEmbeddingService
 
 
 @pytest.fixture

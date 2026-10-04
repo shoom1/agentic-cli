@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import pytest
 
-from agentic_cli.knowledge_base._mocks import MockEmbeddingService
+from agentic_cli.memory._core.mock_embeddings import MockEmbeddingService
 from agentic_cli.memory import MemoryStore
 from agentic_cli.tools.memory_tools import _update_memory_with_store
 

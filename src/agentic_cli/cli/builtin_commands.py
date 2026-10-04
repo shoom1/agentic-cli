@@ -349,7 +349,7 @@ class PapersCommand(Command):
     async def execute(self, args: str, app: Any) -> None:
         """Display knowledge base documents in a table."""
         from pathlib import Path
-        from agentic_cli.knowledge_base.models import SourceType
+        from agentic_cli.memory.kb import SourceType
         from agentic_cli.constants import format_size
 
         parsed = self.parse_args(args)

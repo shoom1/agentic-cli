@@ -17,11 +17,11 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from agentic_cli.knowledge_base.manager import (
+from agentic_cli.memory.kb.manager import (
     KnowledgeBaseManager,
     _FORMAT_VERSION,
 )
-from agentic_cli.knowledge_base.models import Document, DocumentChunk, SourceType
+from agentic_cli.memory.kb.models import Document, DocumentChunk, SourceType
 
 
 # ============================================================================
@@ -31,8 +31,9 @@ from agentic_cli.knowledge_base.models import Document, DocumentChunk, SourceTyp
 
 def _make_kb(tmp_path):
     """Create a KB manager with mock services in a temp dir."""
-    from agentic_cli.knowledge_base._mocks import MockEmbeddingService, MockVectorStore
-    from agentic_cli.knowledge_base.manager import _FROM_TURN_REGISTRY
+    from agentic_cli.memory._core.mock_embeddings import MockEmbeddingService
+    from agentic_cli.memory.kb._mock_vector_store import MockVectorStore
+    from agentic_cli.memory.kb.manager import _FROM_TURN_REGISTRY
 
     manager = KnowledgeBaseManager.__new__(KnowledgeBaseManager)
     manager._lock = __import__("threading").Lock()
@@ -236,8 +237,9 @@ class TestKBManagerMigrationV1ToV2:
         return metadata
 
     def _make_kb_manager(self, kb_dir):
-        from agentic_cli.knowledge_base._mocks import MockEmbeddingService, MockVectorStore
-        from agentic_cli.knowledge_base.manager import _FROM_TURN_REGISTRY
+        from agentic_cli.memory._core.mock_embeddings import MockEmbeddingService
+        from agentic_cli.memory.kb._mock_vector_store import MockVectorStore
+        from agentic_cli.memory.kb.manager import _FROM_TURN_REGISTRY
 
         manager = KnowledgeBaseManager.__new__(KnowledgeBaseManager)
         manager._lock = __import__("threading").Lock()

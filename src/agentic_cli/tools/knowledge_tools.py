@@ -269,7 +269,7 @@ async def _finalize_ingest(
 
     Shared tail used by all three ingest entry points (text/file/url).
     """
-    from agentic_cli.knowledge_base.models import SourceType
+    from agentic_cli.memory.kb import SourceType
 
     if not content and not file_bytes:
         return {
@@ -484,7 +484,7 @@ async def _read_document_from_kbs(
         if not content and doc.file_path:
             file_path = source_kb.get_file_path(doc.id)
             if file_path and str(file_path).endswith(".pdf"):
-                from agentic_cli.knowledge_base.manager import KnowledgeBaseManager
+                from agentic_cli.memory.kb import KnowledgeBaseManager
                 content = KnowledgeBaseManager.extract_text_from_pdf(file_path)
         truncated = len(content) > max_chars
         if truncated:
@@ -513,9 +513,7 @@ async def _read_document_from_kbs(
                 if not content_for_payload and doc.file_path:
                     file_path = source_kb.get_file_path(doc.id)
                     if file_path and str(file_path).endswith(".pdf"):
-                        from agentic_cli.knowledge_base.manager import (
-                            KnowledgeBaseManager,
-                        )
+                        from agentic_cli.memory.kb import KnowledgeBaseManager
                         content_for_payload = (
                             KnowledgeBaseManager.extract_text_from_pdf(file_path)
                         )
@@ -551,7 +549,7 @@ def _list_documents_in_kbs(
     Filters first, then merges the project and user knowledge bases newest
     first and cuts the result at ``limit``.
     """
-    from agentic_cli.knowledge_base.models import SourceType as ST
+    from agentic_cli.memory.kb import SourceType as ST
 
     st_filter = None
     if source_type:

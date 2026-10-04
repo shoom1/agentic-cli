@@ -3,7 +3,7 @@
 from datetime import datetime
 from pathlib import Path
 
-from agentic_cli.knowledge_base.models import Document, SourceType
+from agentic_cli.memory.kb.models import Document, SourceType
 
 
 def _make_doc(**overrides):
@@ -24,7 +24,7 @@ def _make_doc(**overrides):
 
 class TestRenderSidecarMarkdown:
     def test_renders_yaml_frontmatter_then_body(self):
-        from agentic_cli.knowledge_base.sidecar import render_sidecar_markdown
+        from agentic_cli.memory.kb.sidecar import render_sidecar_markdown
 
         doc = _make_doc()
         payload = {
@@ -53,7 +53,7 @@ class TestRenderSidecarMarkdown:
         assert "Models: Transformer" in md
 
     def test_summary_only_when_payload_missing_claims_and_entities(self):
-        from agentic_cli.knowledge_base.sidecar import render_sidecar_markdown
+        from agentic_cli.memory.kb.sidecar import render_sidecar_markdown
 
         doc = _make_doc()
         md = render_sidecar_markdown(doc, {"summary": doc.summary, "claims": [], "entities": {}})
@@ -66,7 +66,7 @@ class TestRenderSidecarMarkdown:
 
 class TestParseSidecarFrontmatter:
     def test_round_trips_with_render(self):
-        from agentic_cli.knowledge_base.sidecar import (
+        from agentic_cli.memory.kb.sidecar import (
             render_sidecar_markdown,
             parse_sidecar_frontmatter,
         )
@@ -80,7 +80,7 @@ class TestParseSidecarFrontmatter:
         assert fm["source_type"] == "arxiv"
 
     def test_returns_empty_dict_when_no_frontmatter(self):
-        from agentic_cli.knowledge_base.sidecar import parse_sidecar_frontmatter
+        from agentic_cli.memory.kb.sidecar import parse_sidecar_frontmatter
         assert parse_sidecar_frontmatter("# Just a heading\n\nbody") == {}
 
 
@@ -370,7 +370,7 @@ class TestBackfillSidecars:
         """Second backfill on the same KB while first is running must raise
         BackfillAlreadyRunning, not silently corrupt state."""
         import asyncio
-        from agentic_cli.knowledge_base.manager import BackfillAlreadyRunning
+        from agentic_cli.memory.kb.manager import BackfillAlreadyRunning
         from agentic_cli.workflow.service_registry import (
             set_service_registry,
             LLM_SUMMARIZER,
@@ -445,7 +445,7 @@ class TestKbReadLazySidecar:
         return _make_kb(tmp_path)
 
     async def test_kb_read_default_returns_sidecar_payload(self, kb):
-        from agentic_cli.knowledge_base.models import SourceType
+        from agentic_cli.memory.kb.models import SourceType
         from agentic_cli.tools.knowledge_tools import _read_document_from_kbs
 
         doc = kb.ingest_document(
@@ -459,7 +459,7 @@ class TestKbReadLazySidecar:
         assert "content" not in result or not result.get("content")
 
     async def test_kb_read_full_returns_raw_text(self, kb):
-        from agentic_cli.knowledge_base.models import SourceType
+        from agentic_cli.memory.kb.models import SourceType
         from agentic_cli.tools.knowledge_tools import _read_document_from_kbs
 
         doc = kb.ingest_document(
@@ -470,7 +470,7 @@ class TestKbReadLazySidecar:
         assert result["content"] == "raw body content"
 
     async def test_kb_read_lazily_generates_missing_sidecar(self, kb):
-        from agentic_cli.knowledge_base.models import SourceType
+        from agentic_cli.memory.kb.models import SourceType
         from agentic_cli.tools.knowledge_tools import _read_document_from_kbs
 
         doc = kb.ingest_document(
@@ -488,7 +488,7 @@ class TestKbReadLazySidecar:
     async def test_kb_read_concurrent_reads_serialize(self, kb):
         """Two concurrent first-reads on the same doc must not double-LLM."""
         import asyncio
-        from agentic_cli.knowledge_base.models import SourceType
+        from agentic_cli.memory.kb.models import SourceType
         from agentic_cli.workflow.service_registry import (
             set_service_registry, LLM_SUMMARIZER,
         )
@@ -519,7 +519,7 @@ class TestKbReadLazySidecar:
     async def test_kb_read_lazy_gen_extracts_pdf_when_content_empty(self, kb, tmp_path):
         """Lazy sidecar gen for a legacy PDF doc (empty doc.content) should
         extract text from the file rather than caching a useless empty sidecar."""
-        from agentic_cli.knowledge_base.models import SourceType
+        from agentic_cli.memory.kb.models import SourceType
         from agentic_cli.workflow.service_registry import (
             set_service_registry,
             LLM_SUMMARIZER,
@@ -550,7 +550,7 @@ class TestKbReadLazySidecar:
         token = set_service_registry({LLM_SUMMARIZER: CapturingSummarizer()})
         try:
             with patch(
-                "agentic_cli.knowledge_base.manager.KnowledgeBaseManager.extract_text_from_pdf",
+                "agentic_cli.memory.kb.manager.KnowledgeBaseManager.extract_text_from_pdf",
                 return_value="EXTRACTED PDF TEXT",
             ):
                 result = await _read_document_from_kbs(kb, None, doc.id)

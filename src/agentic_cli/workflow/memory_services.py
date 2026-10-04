@@ -12,8 +12,8 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from agentic_cli.config import BaseSettings
-    from agentic_cli.knowledge_base import KnowledgeBaseManager
     from agentic_cli.memory import MemoryStore
+    from agentic_cli.memory.kb import KnowledgeBaseManager
 
 
 def project_kb_dir(settings: "BaseSettings") -> Path:
@@ -29,7 +29,7 @@ def build_knowledge_base(
     use_mock: bool | None = None,
 ) -> "KnowledgeBaseManager":
     """One knowledge base in ``base_dir``; ``use_mock`` defaults to the setting."""
-    from agentic_cli.knowledge_base import KnowledgeBaseManager
+    from agentic_cli.memory.kb import KnowledgeBaseManager
 
     if use_mock is None:
         use_mock = settings.knowledge_base_use_mock
@@ -66,11 +66,11 @@ def build_memory_store(settings: "BaseSettings") -> "MemoryStore":
 
     embedding_service = None
     if settings.knowledge_base_use_mock:
-        from agentic_cli.knowledge_base._mocks import MockEmbeddingService
+        from agentic_cli.memory import MockEmbeddingService
 
         embedding_service = MockEmbeddingService()
     else:
-        from agentic_cli.knowledge_base.embeddings import EmbeddingService
+        from agentic_cli.memory import EmbeddingService
 
         if EmbeddingService.is_available():
             embedding_service = EmbeddingService(

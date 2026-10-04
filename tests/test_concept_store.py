@@ -8,23 +8,23 @@ import pytest
 
 class TestSlugFromTitle:
     def test_basic_title(self):
-        from agentic_cli.knowledge_base.concepts import slug_from_title
+        from agentic_cli.memory.kb.concepts import slug_from_title
         assert slug_from_title("Diffusion Models") == "diffusion-models"
 
     def test_strips_punctuation(self):
-        from agentic_cli.knowledge_base.concepts import slug_from_title
+        from agentic_cli.memory.kb.concepts import slug_from_title
         assert slug_from_title("What is RAG?") == "what-is-rag"
 
     def test_collapses_whitespace(self):
-        from agentic_cli.knowledge_base.concepts import slug_from_title
+        from agentic_cli.memory.kb.concepts import slug_from_title
         assert slug_from_title("   Multi\tWord\n  Title  ") == "multi-word-title"
 
     def test_strips_non_ascii(self):
-        from agentic_cli.knowledge_base.concepts import slug_from_title
+        from agentic_cli.memory.kb.concepts import slug_from_title
         assert slug_from_title("Café résumé naïve") == "cafe-resume-naive"
 
     def test_truncates_at_80_chars(self):
-        from agentic_cli.knowledge_base.concepts import slug_from_title
+        from agentic_cli.memory.kb.concepts import slug_from_title
         long = "word " * 50
         slug = slug_from_title(long)
         assert len(slug) <= 80
@@ -32,14 +32,14 @@ class TestSlugFromTitle:
         assert not slug.endswith("-")
 
     def test_empty_title_returns_untitled(self):
-        from agentic_cli.knowledge_base.concepts import slug_from_title
+        from agentic_cli.memory.kb.concepts import slug_from_title
         assert slug_from_title("") == "untitled"
         assert slug_from_title("!!!") == "untitled"
 
 
 class TestRenderConceptMarkdown:
     def test_renders_frontmatter_and_body(self):
-        from agentic_cli.knowledge_base.concepts import render_concept_markdown
+        from agentic_cli.memory.kb.concepts import render_concept_markdown
 
         md = render_concept_markdown(
             slug="diffusion-models",
@@ -63,7 +63,7 @@ class TestRenderConceptMarkdown:
 
 class TestParseConceptMarkdown:
     def test_round_trips(self):
-        from agentic_cli.knowledge_base.concepts import (
+        from agentic_cli.memory.kb.concepts import (
             render_concept_markdown,
             parse_concept_markdown,
         )
@@ -85,7 +85,7 @@ class TestParseConceptMarkdown:
         assert "Second paragraph." in parsed["body"]
 
     def test_empty_sources(self):
-        from agentic_cli.knowledge_base.concepts import (
+        from agentic_cli.memory.kb.concepts import (
             render_concept_markdown,
             parse_concept_markdown,
         )
@@ -99,13 +99,13 @@ class TestParseConceptMarkdown:
         assert parsed["sources"] == []
 
     def test_missing_frontmatter_returns_none(self):
-        from agentic_cli.knowledge_base.concepts import parse_concept_markdown
+        from agentic_cli.memory.kb.concepts import parse_concept_markdown
         assert parse_concept_markdown("# Just a heading\n\nbody") is None
 
 
 class TestConceptStoreWrite:
     def test_write_creates_new_concept(self, tmp_path):
-        from agentic_cli.knowledge_base.concepts import ConceptStore
+        from agentic_cli.memory.kb.concepts import ConceptStore
 
         store = ConceptStore(tmp_path / "concepts")
         result = store.write(
@@ -126,7 +126,7 @@ class TestConceptStoreWrite:
         assert "sources: [doc-a]" in on_disk
 
     def test_write_creates_directory_if_missing(self, tmp_path):
-        from agentic_cli.knowledge_base.concepts import ConceptStore
+        from agentic_cli.memory.kb.concepts import ConceptStore
 
         base = tmp_path / "does-not-exist-yet" / "concepts"
         store = ConceptStore(base)
@@ -136,7 +136,7 @@ class TestConceptStoreWrite:
     def test_write_timestamps_are_utc_with_z_suffix(self, tmp_path):
         """Concept timestamps must use UTC with trailing Z (matches Phase 1
         sidecar/ingest_log format; avoids timezone drift across machines)."""
-        from agentic_cli.knowledge_base.concepts import ConceptStore
+        from agentic_cli.memory.kb.concepts import ConceptStore
 
         store = ConceptStore(tmp_path / "concepts")
         store.write(title="X", body="b", sources=["a"], slug="x")
@@ -151,7 +151,7 @@ class TestConceptStoreWrite:
 
     def test_failure_returns_uniform_dict_shape(self, tmp_path):
         """Failure path must include slug/path/action keys for safe access."""
-        from agentic_cli.knowledge_base.concepts import ConceptStore
+        from agentic_cli.memory.kb.concepts import ConceptStore
 
         store = ConceptStore(tmp_path / "concepts")
         result = store.write(title="X", body="b", sources=[])
@@ -183,7 +183,7 @@ class TestConceptStoreWrite:
         """Explicit slugs that could escape base_dir or otherwise look unsafe
         must be rejected — agents writing concept pages should not be able to
         clobber files outside the concepts directory."""
-        from agentic_cli.knowledge_base.concepts import ConceptStore
+        from agentic_cli.memory.kb.concepts import ConceptStore
 
         base = tmp_path / "concepts"
         store = ConceptStore(base)
@@ -202,7 +202,7 @@ class TestConceptStoreWrite:
 
 class TestConceptStoreSlugCollisions:
     def test_auto_slug_collision_appends_suffix(self, tmp_path):
-        from agentic_cli.knowledge_base.concepts import ConceptStore
+        from agentic_cli.memory.kb.concepts import ConceptStore
 
         store = ConceptStore(tmp_path / "concepts")
         r1 = store.write(title="Attention", body="b", sources=["a"])
@@ -222,7 +222,7 @@ class TestConceptStoreSlugCollisions:
         assert (dir_ / "attention-3.md").exists()
 
     def test_explicit_slug_existing_overwrites_not_collides(self, tmp_path):
-        from agentic_cli.knowledge_base.concepts import ConceptStore
+        from agentic_cli.memory.kb.concepts import ConceptStore
 
         store = ConceptStore(tmp_path / "concepts")
         store.write(title="A", body="first body", sources=["a"], slug="foo")
@@ -240,7 +240,7 @@ class TestConceptStoreSlugCollisions:
 
 class TestConceptStoreSourcesValidation:
     def test_empty_sources_fails(self, tmp_path):
-        from agentic_cli.knowledge_base.concepts import ConceptStore
+        from agentic_cli.memory.kb.concepts import ConceptStore
 
         store = ConceptStore(tmp_path / "concepts")
         result = store.write(title="X", body="b", sources=[])
@@ -250,7 +250,7 @@ class TestConceptStoreSourcesValidation:
         assert not (tmp_path / "concepts" / "x.md").exists()
 
     def test_invalid_ids_dropped_with_warning(self, tmp_path):
-        from agentic_cli.knowledge_base.concepts import ConceptStore
+        from agentic_cli.memory.kb.concepts import ConceptStore
 
         store = ConceptStore(tmp_path / "concepts")
         known = {"good-id-1", "good-id-2"}
@@ -267,7 +267,7 @@ class TestConceptStoreSourcesValidation:
         assert read["sources"] == ["good-id-1", "good-id-2"]
 
     def test_all_invalid_fails(self, tmp_path):
-        from agentic_cli.knowledge_base.concepts import ConceptStore
+        from agentic_cli.memory.kb.concepts import ConceptStore
 
         store = ConceptStore(tmp_path / "concepts")
         result = store.write(
@@ -279,7 +279,7 @@ class TestConceptStoreSourcesValidation:
         assert result["invalid_sources"] == ["bad1", "bad2"]
 
     def test_duplicate_sources_deduplicated(self, tmp_path):
-        from agentic_cli.knowledge_base.concepts import ConceptStore
+        from agentic_cli.memory.kb.concepts import ConceptStore
 
         store = ConceptStore(tmp_path / "concepts")
         result = store.write(
@@ -293,7 +293,7 @@ class TestConceptStoreSourcesValidation:
 
 class TestConceptStoreOverwriteMerge:
     def test_overwrite_merges_sources_union(self, tmp_path):
-        from agentic_cli.knowledge_base.concepts import ConceptStore
+        from agentic_cli.memory.kb.concepts import ConceptStore
 
         store = ConceptStore(tmp_path / "concepts")
         store.write(title="X", body="v1", sources=["a", "b"], slug="x")
@@ -307,7 +307,7 @@ class TestConceptStoreOverwriteMerge:
         assert "v1" not in read["body"]
 
     def test_overwrite_preserves_created_at_bumps_updated_at(self, tmp_path):
-        from agentic_cli.knowledge_base.concepts import ConceptStore
+        from agentic_cli.memory.kb.concepts import ConceptStore
 
         store = ConceptStore(tmp_path / "concepts")
         store.write(title="X", body="v1", sources=["a"], slug="x")
@@ -322,12 +322,12 @@ class TestConceptStoreOverwriteMerge:
 
 class TestConceptStoreList:
     def test_list_empty_dir(self, tmp_path):
-        from agentic_cli.knowledge_base.concepts import ConceptStore
+        from agentic_cli.memory.kb.concepts import ConceptStore
         store = ConceptStore(tmp_path / "concepts")
         assert store.list() == []
 
     def test_list_returns_summaries_sorted_by_updated_desc(self, tmp_path):
-        from agentic_cli.knowledge_base.concepts import ConceptStore
+        from agentic_cli.memory.kb.concepts import ConceptStore
         import time
 
         store = ConceptStore(tmp_path / "concepts")
@@ -345,7 +345,7 @@ class TestConceptStoreList:
             assert "sources" in it
 
     def test_list_ignores_non_md_files(self, tmp_path):
-        from agentic_cli.knowledge_base.concepts import ConceptStore
+        from agentic_cli.memory.kb.concepts import ConceptStore
 
         store = ConceptStore(tmp_path / "concepts")
         store.write(title="One", body="b", sources=["a"], slug="one")
@@ -361,12 +361,12 @@ class TestConceptStoreList:
 
 class TestConceptStoreSearch:
     def test_search_empty_store_returns_empty(self, tmp_path):
-        from agentic_cli.knowledge_base.concepts import ConceptStore
+        from agentic_cli.memory.kb.concepts import ConceptStore
         store = ConceptStore(tmp_path / "concepts")
         assert store.search("anything") == []
 
     def test_search_matches_title(self, tmp_path):
-        from agentic_cli.knowledge_base.concepts import ConceptStore
+        from agentic_cli.memory.kb.concepts import ConceptStore
 
         store = ConceptStore(tmp_path / "concepts")
         store.write(title="Diffusion Models", body="Unrelated body.", sources=["a"])
@@ -378,7 +378,7 @@ class TestConceptStoreSearch:
         assert "Diffusion" in hits[0]["snippet"]
 
     def test_search_matches_body(self, tmp_path):
-        from agentic_cli.knowledge_base.concepts import ConceptStore
+        from agentic_cli.memory.kb.concepts import ConceptStore
 
         store = ConceptStore(tmp_path / "concepts")
         store.write(
@@ -391,7 +391,7 @@ class TestConceptStoreSearch:
         assert "attention" in hits[0]["snippet"].lower()
 
     def test_title_hits_rank_above_body_hits(self, tmp_path):
-        from agentic_cli.knowledge_base.concepts import ConceptStore
+        from agentic_cli.memory.kb.concepts import ConceptStore
 
         store = ConceptStore(tmp_path / "concepts")
         store.write(
@@ -414,7 +414,7 @@ class TestConceptStoreSearch:
         assert hits[1]["slug"] == "animals"
 
     def test_search_is_case_insensitive(self, tmp_path):
-        from agentic_cli.knowledge_base.concepts import ConceptStore
+        from agentic_cli.memory.kb.concepts import ConceptStore
 
         store = ConceptStore(tmp_path / "concepts")
         store.write(title="FooBar", body="Body text", sources=["a"])
@@ -422,7 +422,7 @@ class TestConceptStoreSearch:
         assert len(store.search("FOOBAR")) == 1
 
     def test_search_snippet_centered_on_match(self, tmp_path):
-        from agentic_cli.knowledge_base.concepts import ConceptStore
+        from agentic_cli.memory.kb.concepts import ConceptStore
 
         store = ConceptStore(tmp_path / "concepts")
         long_body = "x" * 300 + " needle " + "y" * 300
@@ -436,7 +436,7 @@ class TestConceptStoreSearch:
         assert len(snippet) <= 350  # ±150 + the word + some leeway
 
     def test_search_limit_respected(self, tmp_path):
-        from agentic_cli.knowledge_base.concepts import ConceptStore
+        from agentic_cli.memory.kb.concepts import ConceptStore
 
         store = ConceptStore(tmp_path / "concepts")
         for i in range(5):
@@ -447,7 +447,7 @@ class TestConceptStoreSearch:
         assert len(hits) == 3
 
     def test_search_whitespace_only_query_returns_empty(self, tmp_path):
-        from agentic_cli.knowledge_base.concepts import ConceptStore
+        from agentic_cli.memory.kb.concepts import ConceptStore
 
         store = ConceptStore(tmp_path / "concepts")
         store.write(title="Has a space in body", body="body text", sources=["a"])

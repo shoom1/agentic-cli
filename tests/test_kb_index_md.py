@@ -2,7 +2,7 @@
 
 import pytest
 
-from agentic_cli.knowledge_base.models import SourceType
+from agentic_cli.memory.kb.models import SourceType
 from tests.test_knowledge_tools import _make_kb
 
 
@@ -51,7 +51,7 @@ class TestIndexMdLoadTimeMaterialization:
     when documents exist but the file is absent."""
 
     def test_load_materializes_missing_index_md(self, tmp_path):
-        from agentic_cli.knowledge_base.manager import KnowledgeBaseManager, _FROM_TURN_REGISTRY
+        from agentic_cli.memory.kb.manager import KnowledgeBaseManager, _FROM_TURN_REGISTRY
 
         # First manager: ingest, confirm index.md exists, then delete it
         kb = _make_kb(tmp_path)

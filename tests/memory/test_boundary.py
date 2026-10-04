@@ -44,15 +44,29 @@ ALLOWED_INSIDE = {
 }
 
 # Old-path modules that forward to the package until 0.7.0 (rule 3 exempt).
-COMPAT_DIRS: set[Path] = set()
+COMPAT_DIRS: set[Path] = {SRC / "agentic_cli" / "knowledge_base"}
 
 # Host imports still to be removed: (file relative to the repo, imported module).
-KNOWN_VIOLATIONS: set[tuple[str, str]] = set()
+KNOWN_VIOLATIONS: set[tuple[str, str]] = {
+    ("src/agentic_cli/memory/kb/_bm25_backends.py", "agentic_cli.file_utils"),
+    ("src/agentic_cli/memory/kb/_mock_bm25.py", "agentic_cli.file_utils"),
+    ("src/agentic_cli/memory/kb/_mock_vector_store.py", "agentic_cli.file_utils"),
+    ("src/agentic_cli/memory/kb/concepts.py", "agentic_cli.file_utils"),
+    ("src/agentic_cli/memory/kb/manager.py", "agentic_cli.config"),
+    ("src/agentic_cli/memory/kb/manager.py", "agentic_cli.constants"),
+    ("src/agentic_cli/memory/kb/manager.py", "agentic_cli.file_utils"),
+    ("src/agentic_cli/memory/kb/manager.py", "agentic_cli.logging"),
+    ("src/agentic_cli/memory/kb/manager.py", "agentic_cli.tools.pdf_utils"),
+    ("src/agentic_cli/memory/kb/manager.py", "agentic_cli.workflow.service_registry"),
+    ("src/agentic_cli/memory/kb/vector_store.py", "agentic_cli.file_utils"),
+}
 
 
 def _deprecated(module: str, names: list[str]) -> bool:
     """An import of a path the compatibility layer keeps until 0.7.0."""
-    return module == "agentic_cli.tools.memory_tools" and "MemoryStore" in names
+    if module == "agentic_cli.tools.memory_tools" and "MemoryStore" in names:
+        return True
+    return module == "agentic_cli.knowledge_base" or module.startswith("agentic_cli.knowledge_base.")
 
 
 def _is_real_module(dotted: str) -> bool:
