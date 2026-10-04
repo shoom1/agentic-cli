@@ -137,7 +137,7 @@ class KnowledgeBaseManager:
 
     def __init__(
         self,
-        base_dir: Path,
+        base_dir: Path | str,
         *,
         embedding: EmbeddingConfig | None = None,
         summarizer: "Summarizer | None" = None,
@@ -159,6 +159,8 @@ class KnowledgeBaseManager:
             embedding_service: A ready embedding service (with ``vector_store``).
             vector_store: A ready vector store (with ``embedding_service``).
         """
+        base_dir = Path(base_dir)
+
         self._lock = threading.Lock()
         self._sidecar_locks: dict[str, asyncio.Lock] = {}
         self._backfill_running: bool = False

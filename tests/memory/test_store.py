@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from agentic_cli.memory import ForgettingPolicy, MemoryItem, MemoryStore, MockEmbeddingService
 
 
@@ -14,6 +16,18 @@ def test_the_store_keeps_its_files_in_the_directory_it_is_given(tmp_path):
     assert [item.content for item in reloaded.search("markdown")] == [
         "User prefers markdown output"
     ]
+
+
+def test_a_string_base_dir_works(tmp_path):
+    store = MemoryStore(str(tmp_path / "memory"))
+    store.store("User prefers markdown output", tags=["preference"])
+
+    assert (tmp_path / "memory" / "memories.json").is_file()
+
+
+def test_a_non_path_base_dir_raises_typeerror():
+    with pytest.raises(TypeError):
+        MemoryStore(object())
 
 
 def test_the_public_names_are_the_store_types():

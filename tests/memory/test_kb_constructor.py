@@ -16,6 +16,17 @@ def test_the_knowledge_base_lives_under_the_directory_it_is_given(tmp_path):
         assert (tmp_path / "kb" / sub).is_dir()
 
 
+def test_a_string_base_dir_works(tmp_path):
+    kb = KnowledgeBaseManager(str(tmp_path / "kb"), use_mock=True)
+
+    assert kb.kb_dir == tmp_path / "kb"
+
+
+def test_a_non_path_base_dir_raises_typeerror():
+    with pytest.raises(TypeError):
+        KnowledgeBaseManager(object(), use_mock=True)
+
+
 def test_a_directory_is_required(tmp_path, monkeypatch):
     # The old constructor defaulted to ~/.agentic/knowledge_base: keep a RED
     # run out of the real home directory.

@@ -17,7 +17,11 @@ parent module after importing it (e.g. ``memory_tools.MemoryStore(...)``
 after ``from agentic_cli.tools import memory_tools`` — no name from the
 memory package is ever imported there). The ``DeprecationWarning`` the old
 paths raise is the backstop for that case. Fixtures pulled in from conftest
-are not imports either, and are invisible here too.
+are not imports either, and are invisible here too. Importing
+``agentic_cli.memory`` still runs ``agentic_cli/__init__.py``, which loads
+other agentic_cli modules; the boundary covers only the package's own
+imports, not what importing it transitively pulls in through the top-level
+package.
 """
 
 from __future__ import annotations
@@ -45,7 +49,6 @@ ALLOWED_INSIDE = {
 
 # Old-path modules that forward to the package until 0.7.0 (rule 3 exempt).
 COMPAT_DIRS: set[Path] = {SRC / "agentic_cli" / "knowledge_base"}
-
 
 
 def _deprecated(module: str, names: list[str]) -> bool:

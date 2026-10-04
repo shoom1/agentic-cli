@@ -655,7 +655,7 @@ concepts = kb.concepts.search("attention")             # concept pages
 await kb.backfill_sidecars()                           # regenerate markdown summaries
 ```
 
-`ingest_document` is synchronous and never calls the summarizer itself; without `summary`/`sidecar_payload` it stores a preview of `content` instead.
+`ingest_document` is synchronous and never calls the summarizer itself.
 
 The KB also maintains `index.md` and an append-only `ingest_log.md` audit trail. Source-type constants (`arxiv`, `ssrn`, `web`, `internal`, `user`, `local`) live on `SourceType`.
 
@@ -939,11 +939,11 @@ agentic-cli/
 │   │   └── webfetch/             # Fetcher, converter, validator, robots, summarizer
 │   ├── knowledge_base/           # Deprecated forwarding modules → memory.kb (removed in 0.7.0)
 │   ├── memory/                   # Knowledge base + memory store; imports nothing else from agentic_cli
-│   │   ├── __init__.py           # MemoryStore, MemoryItem, ForgettingPolicy, EmbeddingService, MockEmbeddingService
+│   │   ├── __init__.py           # MemoryStore, MemoryItem, ForgettingPolicy, EmbeddingService, EmbeddingConfig, MockEmbeddingService
 │   │   ├── _core/                # Shared, private: embeddings.py, mock_embeddings.py, io.py, log.py
 │   │   ├── store.py              # MemoryStore
 │   │   └── kb/                   # Knowledge base (agentic_cli.memory.kb)
-│   │       ├── manager.py                # KnowledgeBaseManager (+ .concepts), Summarizer
+│   │       ├── manager.py                # KnowledgeBaseManager(base_dir, embedding=, summarizer=), Summarizer
 │   │       ├── models.py                 # Document, SearchResult, SourceType
 │   │       ├── vector_store.py, bm25_index.py (+ _bm25_backends.py), concepts.py, sidecar.py
 │   │       └── _mock_vector_store.py, _mock_bm25.py

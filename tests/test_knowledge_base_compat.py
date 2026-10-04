@@ -160,7 +160,9 @@ def test_data_written_through_the_old_class_opens_with_the_new_one(tmp_path):
     from agentic_cli.memory.kb import SourceType
 
     old = _old_class()(base_dir=tmp_path / "kb", use_mock=True)
-    doc = old.ingest_document(content="Shared text about otters.", title="Otters", source_type=SourceType.USER)
+    doc = old.ingest_document(
+        content="Shared text about otters and rivers.", title="Otters", source_type=SourceType.USER
+    )
 
     new = New(tmp_path / "kb", use_mock=True)
     assert new.get_document(doc.id).title == "Otters"

@@ -6,9 +6,10 @@ These modules keep the old import paths working until 0.7.0.
 import warnings
 
 warnings.warn(
-    "agentic_cli.knowledge_base is deprecated and will be removed in 0.7.0; import "
-    "from agentic_cli.memory.kb (EmbeddingService from agentic_cli.memory, "
-    "SearchSource from agentic_cli.tools.search_sources)",
+    "agentic_cli.knowledge_base is deprecated and will be removed in 0.7.0: the "
+    "knowledge base is now in agentic_cli.memory.kb, EmbeddingService is in "
+    "agentic_cli.memory, and SearchSource, SearchSourceResult, PaperResult and "
+    "WebResult are in agentic_cli.tools.search_sources",
     DeprecationWarning,
     stacklevel=2,
 )

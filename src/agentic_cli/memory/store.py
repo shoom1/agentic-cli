@@ -99,7 +99,7 @@ class MemoryStore:
         User prefers markdown output
     """
 
-    def __init__(self, base_dir: Path, embedding_service=None) -> None:
+    def __init__(self, base_dir: Path | str, embedding_service=None) -> None:
         """Open (or create) the store kept in ``base_dir``.
 
         Args:
@@ -107,6 +107,7 @@ class MemoryStore:
             embedding_service: Optional; anything with ``embed_text`` and
                 ``embed_batch``. Without it, search is by substring.
         """
+        base_dir = Path(base_dir)
         self._embedding_service = embedding_service
         base_dir.mkdir(parents=True, exist_ok=True)
         self._path = base_dir / "memories.json"

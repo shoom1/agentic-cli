@@ -27,11 +27,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `agentic_cli.tools.search_sources`. `EmbeddingService` and
   `MockEmbeddingService` are in `agentic_cli.memory`, `MockVectorStore` in
   `agentic_cli.memory.kb`.
-- **`KnowledgeBaseManager` takes a directory and plain arguments, never
-  settings:** `KnowledgeBaseManager(base_dir, *, embedding=EmbeddingConfig(...),
-  summarizer=None, use_mock=False, embedding_service=None, vector_store=None)`.
-  Without a summarizer it stores previews; it no longer looks one up in the
-  turn in progress. `EmbeddingConfig` is in `agentic_cli.memory`.
+- **`agentic_cli.memory.kb.KnowledgeBaseManager` takes a directory and plain
+  arguments, never settings:** `KnowledgeBaseManager(base_dir, *,
+  embedding=EmbeddingConfig(...), summarizer=None, use_mock=False,
+  embedding_service=None, vector_store=None)`. It no longer looks a
+  summarizer up in the turn in progress. `EmbeddingConfig` is in
+  `agentic_cli.memory`.
 - **`sidecar_path()` and `write_sidecar_if_present()` are public**
   knowledge-base methods.
 - **`PaperResult` and `WebResult` moved to `agentic_cli.tools.search_sources`.**
@@ -60,16 +61,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `(settings=None, use_mock=False, base_dir=None, ...)` signature, the
   summarizer of the turn in progress and `extract_text_from_pdf` until 0.7.0.
   `isinstance` checks against it fail for knowledge bases the workflow
-  builds, and patches through `agentic_cli.knowledge_base.<module>` no longer
-  reach the code.
-
-### Fixed
-
-- **A knowledge base without the `kb` extra (or with
-  `knowledge_base_use_mock`) keeps its vectors.** It did not load its saved
-  vectors when reopened, so search in a later session matched by keyword
-  only, and the next ingest or delete overwrote the saved vectors with that
-  session's alone.
+  builds.
 
 ## [0.6.2] - 2026-10-03
 

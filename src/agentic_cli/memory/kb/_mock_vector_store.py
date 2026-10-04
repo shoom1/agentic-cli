@@ -23,12 +23,15 @@ class MockVectorStore:
         self.embedding_dim = embedding_dim
         self._vectors: dict[str, list[float]] = {}
 
-        # Load an existing index if available, matching VectorStore's
-        # (the real, FAISS-based implementation) behavior: a manager that
-        # reopens a persisted knowledge base sees its vectors without an
-        # explicit reload.
-        if self.index_path.exists():
-            self.load()
+        # Unlike the real, FAISS-based VectorStore, this store does NOT
+        # auto-load on construction. In production, MockVectorStore only
+        # ever pairs with MockEmbeddingService, whose "embeddings" are the
+        # MD5 hash of the chunk text — meaningless noise with no semantic
+        # content. On a reopen, search is otherwise keyword-only (via BM25)
+        # and precise; auto-loading the noise vectors back in lets them get
+        # fused into results via RRF, degrading search on every install
+        # without the `kb` extra (or with `knowledge_base_use_mock`). Callers
+        # that do want the saved vectors call `load()` explicitly.
 
     @property
     def size(self) -> int:
