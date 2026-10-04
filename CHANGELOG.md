@@ -18,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `web_fetch` now make one summarizer call per ingested document; set
   `"knowledge_base_summarize": false` in `~/.{app_name}/settings.json` to keep
   previews. A project's settings file cannot change it.
+- **`MemoryStore` moved to `agentic_cli.memory` and takes a directory:**
+  `MemoryStore(base_dir, embedding_service=None)`. The workflow keeps it in
+  `workspace_dir/memory`, the same files as before.
 
 ### Added
 
@@ -25,6 +28,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `generate_sidecar_payload` and `backfill_sidecars` call the summarizer the
   knowledge base was given (anything with `async summarize(content, prompt)`);
   with `None` they store previews.
+
+### Deprecated
+
+- **`agentic_cli.tools.memory_tools.MemoryStore(settings)`** still works, with
+  a `DeprecationWarning`, until 0.7.0. Use
+  `agentic_cli.memory.MemoryStore(settings.workspace_dir / "memory")`.
 
 ## [0.6.2] - 2026-10-03
 

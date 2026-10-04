@@ -44,6 +44,7 @@ agentic-cli/
 │   │   ├── settings.py       # Workflow/tool settings schema
 │   │   ├── retry.py          # Rate-limit retry helpers
 │   │   ├── tool_summaries.py
+│   │   ├── memory_services.py # Settings → agentic_cli.memory arguments (KBs, memory store)
 │   │   ├── permissions/      # Framework-independent capability engine
 │   │   │   ├── engine.py     # PermissionEngine (deny-wins, default-ASK)
 │   │   │   ├── capabilities.py # Capability, EXEMPT
@@ -78,7 +79,7 @@ agentic-cli/
 │   │   ├── grep_tool.py      # grep
 │   │   ├── search.py         # web_search (Tavily/Brave backends)
 │   │   ├── webfetch_tool.py  # web_fetch + get_or_create_fetcher (orchestrator)
-│   │   ├── memory_tools.py   # save_memory, search_memory, update_memory, delete_memory + MemoryStore
+│   │   ├── memory_tools.py   # save_memory, search_memory, update_memory, delete_memory (store: agentic_cli.memory)
 │   │   ├── _core/           # Backend-neutral tool logic
 │   │   │   ├── planning.py  # save_plan/get_plan core (+ checkbox parsing)
 │   │   │   └── tasks.py     # save_tasks/get_tasks core (+ progress parsing)
@@ -97,6 +98,10 @@ agentic-cli/
 │   │   ├── sources.py
 │   │   ├── _mocks.py         # MockEmbeddingService, MockVectorStore (+ _mock_bm25.py)
 │   │   └── manager.py        # KnowledgeBaseManager
+│   ├── memory/               # Knowledge base + memory store; imports nothing else from agentic_cli
+│   │   ├── __init__.py       # MemoryStore, MemoryItem, ForgettingPolicy
+│   │   ├── _core/            # Shared, private: io.py (atomic writes), log.py
+│   │   └── store.py          # MemoryStore
 │   └── persistence/
 │       └── session.py        # SessionPersistence
 ├── tests/
