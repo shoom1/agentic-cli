@@ -450,7 +450,7 @@ class TestSettingsJsonLoading:
 def test_package_exports_new_modules():
     """Test that new modules are exported from package."""
     # Memory
-    from agentic_cli.tools.memory_tools import MemoryStore, MemoryItem
+    from agentic_cli.memory import MemoryItem, MemoryStore
 
     # Tools
     from agentic_cli.tools import shell_executor, read_file, write_file, diff_compare

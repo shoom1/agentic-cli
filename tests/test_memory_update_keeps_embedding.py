@@ -13,12 +13,15 @@ from __future__ import annotations
 import pytest
 
 from agentic_cli.knowledge_base._mocks import MockEmbeddingService
-from agentic_cli.tools.memory_tools import MemoryStore, _update_memory_with_store
+from agentic_cli.memory import MemoryStore
+from agentic_cli.tools.memory_tools import _update_memory_with_store
 
 
 @pytest.fixture
 def store(mock_context):
-    return MemoryStore(mock_context.settings, embedding_service=MockEmbeddingService())
+    return MemoryStore(
+        mock_context.settings.workspace_dir / "memory", embedding_service=MockEmbeddingService()
+    )
 
 
 def _found(store: MemoryStore, query: str) -> list[str]:

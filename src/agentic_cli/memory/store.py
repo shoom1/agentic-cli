@@ -1,0 +1,431 @@
+"""The memory store: short facts an agent keeps across sessions.
+
+Memories persist to ``memories.json`` in the store's directory (embeddings in
+``memories_embeddings.json``). Search is by substring, or by semantic
+similarity when the store has an embedding service.
+"""
+
+import json
+import math
+import threading
+import uuid
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+from agentic_cli.memory._core.io import atomic_write_json
+from agentic_cli.memory._core.log import get_logger
+
+logger = get_logger("agentic_cli.memory.store")
+
+
+# ---------------------------------------------------------------------------
+# MemoryItem / MemoryStore – simple file-based memory persistence
+# ---------------------------------------------------------------------------
+
+_SENTINEL = object()
+
+
+@dataclass
+class MemoryItem:
+    """A single memory entry."""
+
+    id: str
+    content: str
+    tags: list[str] | None = None
+    created_at: str = ""
+    updated_at: str = ""
+    last_accessed_at: str = ""
+    access_count: int = 0
+    importance: int = 5
+    embedding: list[float] | None = None
+    archived: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to dict. Excludes embedding (stored separately)."""
+        return {
+            "id": self.id,
+            "content": self.content,
+            "tags": self.tags,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "last_accessed_at": self.last_accessed_at,
+            "access_count": self.access_count,
+            "importance": self.importance,
+            "archived": self.archived,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "MemoryItem":
+        """Deserialize from dict. Backward-compatible with old format."""
+        created_at = data.get("created_at", "")
+        return cls(
+            id=data["id"],
+            content=data["content"],
+            tags=data.get("tags"),
+            created_at=created_at,
+            updated_at=data.get("updated_at", created_at),
+            last_accessed_at=data.get("last_accessed_at", created_at),
+            access_count=data.get("access_count", 0),
+            importance=data.get("importance", 5),
+            embedding=data.get("embedding"),
+            archived=data.get("archived", False),
+        )
+
+
+@dataclass
+class ForgettingPolicy:
+    """Configurable policy for archiving old/unused memories."""
+
+    max_age_days: int | None = None
+    max_inactive_days: int | None = None
+    budget_top_n: int | None = None
+    min_importance: int | None = None
+
+
+class MemoryStore:
+    """Simple persistent memory store.
+
+    Appends memories to a JSON file in the workspace directory.
+    Supports substring search and optional semantic search when an
+    embedding_service is provided.
+
+    Example:
+        >>> store = MemoryStore(Path("memory"))
+        >>> item_id = store.store("User prefers markdown output", tags=["preference"])
+        >>> results = store.search("markdown")
+        >>> print(results[0].content)
+        User prefers markdown output
+    """
+
+    def __init__(self, base_dir: Path, embedding_service=None) -> None:
+        """Open (or create) the store kept in ``base_dir``.
+
+        Args:
+            base_dir: Directory holding ``memories.json``.
+            embedding_service: Optional; anything with ``embed_text`` and
+                ``embed_batch``. Without it, search is by substring.
+        """
+        self._embedding_service = embedding_service
+        base_dir.mkdir(parents=True, exist_ok=True)
+        self._path = base_dir / "memories.json"
+        self._embeddings_path = base_dir / "memories_embeddings.json"
+        self._items: dict[str, MemoryItem] = {}
+        # Guards self._items and _save() — LangGraph's ToolNode runs sync tools
+        # concurrently in executor threads, so store/update/delete/search (and
+        # the full-file rewrite in _save) must not interleave.
+        self._lock = threading.Lock()
+        self._load()
+        if self._embedding_service:
+            self._ensure_embeddings()
+
+    def _load(self) -> None:
+        if self._path.exists():
+            try:
+                data = json.loads(self._path.read_text())
+                # Support both flat list (new format) and {"items": [...]} (old format)
+                if isinstance(data, dict):
+                    items_list = data.get("items", [])
+                else:
+                    items_list = data
+                for item_data in items_list:
+                    item = MemoryItem.from_dict(item_data)
+                    self._items[item.id] = item
+            except (json.JSONDecodeError, KeyError):
+                logger.warning("corrupted_memory_file", path=str(self._path))
+                self._items = {}
+        if self._embeddings_path.exists():
+            try:
+                emb_data = json.loads(self._embeddings_path.read_text())
+                for item_id, embedding in emb_data.items():
+                    if item_id in self._items:
+                        self._items[item_id].embedding = embedding
+            except (json.JSONDecodeError, KeyError):
+                logger.warning("corrupted_embeddings_file", path=str(self._embeddings_path))
+
+    def _save(self) -> None:
+        data = [item.to_dict() for item in self._items.values()]
+        atomic_write_json(self._path, data)
+        self._save_embeddings()
+
+    def _save_embeddings(self) -> None:
+        emb_data = {}
+        for item_id, item in self._items.items():
+            if item.embedding is not None:
+                emb_data[item_id] = item.embedding
+        if emb_data:
+            atomic_write_json(self._embeddings_path, emb_data)
+
+    def _ensure_embeddings(self) -> None:
+        """Batch-embed any items missing embeddings."""
+        to_embed = [item for item in self._items.values() if item.embedding is None]
+        if not to_embed:
+            return
+        texts = [item.content for item in to_embed]
+        embeddings = self._embedding_service.embed_batch(texts)
+        for item, emb in zip(to_embed, embeddings):
+            item.embedding = emb
+        self._save_embeddings()
+
+    def store(self, content: str, tags: list[str] | None = None, importance: int = 5) -> str:
+        """Append a memory to the persistent store.
+
+        Args:
+            content: The text content to remember.
+            tags: Optional tags for categorization.
+            importance: Importance level from 1-10 (default 5).
+
+        Returns:
+            The unique ID of the stored memory.
+        """
+        now = datetime.now().isoformat()
+        item = MemoryItem(
+            id=str(uuid.uuid4()),
+            content=content,
+            tags=tags,
+            created_at=now,
+            updated_at=now,
+            last_accessed_at=now,
+            access_count=0,
+            importance=max(1, min(10, importance)),
+        )
+        # Embed outside the lock — it can be slow (model/network) and doesn't
+        # touch shared state.
+        if self._embedding_service:
+            item.embedding = self._embedding_service.embed_text(content)
+        with self._lock:
+            self._items[item.id] = item
+            self._save()
+        return item.id
+
+    def update(self, item_id: str, content: str | None = None, tags: list[str] | None = _SENTINEL) -> bool:
+        """Update an existing memory item.
+
+        Args:
+            item_id: The ID of the memory to update.
+            content: New content, or None to leave unchanged.
+            tags: New tags, or _SENTINEL to leave unchanged. Pass None to clear tags.
+
+        Returns:
+            True if updated, False if item not found.
+        """
+        with self._lock:
+            item = self._items.get(item_id)
+            if item is None:
+                return False
+            if content is not None:
+                item.content = content
+                # The embedding is of the content, so only new content
+                # replaces it.
+                item.embedding = (
+                    self._embedding_service.embed_text(content)
+                    if self._embedding_service
+                    else None
+                )
+            if tags is not _SENTINEL:
+                item.tags = tags
+            item.updated_at = datetime.now().isoformat()
+            self._save()
+            return True
+
+    def delete(self, item_id: str, purge: bool = False) -> bool:
+        """Delete or archive a memory item.
+
+        Args:
+            item_id: The ID of the memory to delete.
+            purge: If True, permanently remove. If False (default), soft-delete (archive).
+
+        Returns:
+            True if deleted/archived, False if item not found.
+        """
+        with self._lock:
+            item = self._items.get(item_id)
+            if item is None:
+                return False
+            if purge:
+                del self._items[item_id]
+            else:
+                item.archived = True
+            self._save()
+            return True
+
+    def search(self, query: str, limit: int = 10, include_archived: bool = False) -> list[MemoryItem]:
+        """Search memories by substring or semantic similarity.
+
+        When an embedding_service is available and items have embeddings,
+        uses cosine similarity with recency-importance-relevance scoring.
+        Otherwise falls back to case-insensitive substring match.
+
+        Args:
+            query: The search query. Empty string matches all (substring mode).
+            limit: Maximum results to return.
+            include_archived: If True, include archived (soft-deleted) items.
+
+        Returns:
+            List of matching MemoryItem objects.
+        """
+        with self._lock:
+            candidates = [
+                item for item in self._items.values()
+                if include_archived or not item.archived
+            ]
+            if not candidates:
+                return []
+            if self._embedding_service and any(item.embedding for item in candidates):
+                results = self._semantic_search(query, candidates, limit)
+            else:
+                results = self._substring_search(query, candidates, limit)
+            # Update access tracking (search is a writer)
+            now = datetime.now().isoformat()
+            for item in results:
+                item.access_count += 1
+                item.last_accessed_at = now
+            self._save()
+            return results
+
+    def _substring_search(self, query: str, candidates: list[MemoryItem], limit: int) -> list[MemoryItem]:
+        """Case-insensitive substring search."""
+        q = query.lower()
+        if not q:
+            return candidates[:limit]
+        return [item for item in candidates if q in item.content.lower()][:limit]
+
+    def _semantic_search(self, query: str, candidates: list[MemoryItem], limit: int) -> list[MemoryItem]:
+        """Cosine similarity search scored with recency and importance."""
+        query_embedding = self._embedding_service.embed_text(query)
+        now = datetime.now()
+        scored = []
+        for item in candidates:
+            if item.embedding is None:
+                continue
+            relevance = self._cosine_similarity(query_embedding, item.embedding)
+            try:
+                last_access = datetime.fromisoformat(item.last_accessed_at)
+                hours_since = max(0, (now - last_access).total_seconds() / 3600)
+            except (ValueError, TypeError):
+                hours_since = 0
+            recency = math.exp(-0.01 * hours_since)  # decay=0.01, ~3 day half-life
+            importance_norm = item.importance / 10.0
+            score = 0.7 * relevance + 0.15 * recency + 0.15 * importance_norm
+            scored.append((score, item))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [item for _, item in scored[:limit]]
+
+    @staticmethod
+    def _cosine_similarity(a: list[float], b: list[float]) -> float:
+        """Compute cosine similarity between two vectors."""
+        dot = sum(x * y for x, y in zip(a, b))
+        norm_a = math.sqrt(sum(x * x for x in a))
+        norm_b = math.sqrt(sum(x * x for x in b))
+        if norm_a == 0 or norm_b == 0:
+            return 0.0
+        return dot / (norm_a * norm_b)
+
+    def store_with_similarity_check(
+        self,
+        content: str,
+        tags: list[str] | None = None,
+        importance: int = 5,
+        similarity_threshold: float = 0.85,
+    ) -> dict[str, Any]:
+        """Store a memory and report any similar existing memories."""
+        similar = []
+        if self._embedding_service:
+            new_embedding = self._embedding_service.embed_text(content)
+            for item in self._items.values():
+                if item.archived or item.embedding is None:
+                    continue
+                sim = self._cosine_similarity(new_embedding, item.embedding)
+                if sim >= similarity_threshold:
+                    similar.append({
+                        "id": item.id,
+                        "content": item.content,
+                        "similarity": round(sim, 4),
+                    })
+            similar.sort(key=lambda x: x["similarity"], reverse=True)
+
+        item_id = self.store(content, tags=tags, importance=importance)
+        return {
+            "stored": True,
+            "item_id": item_id,
+            "similar_existing": similar,
+        }
+
+    def load_all(self) -> str:
+        """Load all non-archived memories as a formatted string for system prompt injection.
+
+        Returns:
+            Formatted string of all non-archived memories, or empty string if none.
+        """
+        if not self._items:
+            return ""
+        lines = []
+        for item in self._items.values():
+            if item.archived:
+                continue
+            tag_str = f" [{', '.join(item.tags)}]" if item.tags else ""
+            lines.append(f"- {item.content}{tag_str}")
+        if not lines:
+            return ""
+        return "Stored memories:\n" + "\n".join(lines)
+
+    def apply_forgetting(self, policy: ForgettingPolicy) -> dict[str, Any]:
+        """Apply a forgetting policy to archive memories.
+
+        Args:
+            policy: The forgetting policy to apply.
+
+        Returns:
+            Dict with archived_count and remaining_count.
+        """
+        now = datetime.now()
+        archived_count = 0
+        candidates = [item for item in self._items.values() if not item.archived]
+
+        for item in candidates:
+            should_archive = False
+
+            if policy.max_age_days is not None:
+                try:
+                    created = datetime.fromisoformat(item.created_at)
+                    age_days = (now - created).days
+                    if age_days > policy.max_age_days:
+                        should_archive = True
+                except (ValueError, TypeError):
+                    pass
+
+            if policy.max_inactive_days is not None:
+                try:
+                    last_access = datetime.fromisoformat(item.last_accessed_at)
+                    inactive_days = (now - last_access).days
+                    if inactive_days > policy.max_inactive_days:
+                        should_archive = True
+                except (ValueError, TypeError):
+                    pass
+
+            if policy.min_importance is not None:
+                if item.importance < policy.min_importance:
+                    should_archive = True
+
+            if should_archive:
+                item.archived = True
+                archived_count += 1
+
+        # Budget cap: keep only top N by importance (after other filters)
+        if policy.budget_top_n is not None:
+            remaining = [item for item in self._items.values() if not item.archived]
+            if len(remaining) > policy.budget_top_n:
+                remaining.sort(key=lambda x: x.importance, reverse=True)
+                for item in remaining[policy.budget_top_n:]:
+                    item.archived = True
+                    archived_count += 1
+
+        remaining_count = sum(1 for item in self._items.values() if not item.archived)
+        if archived_count > 0:
+            self._save()
+
+        return {
+            "archived_count": archived_count,
+            "remaining_count": remaining_count,
+        }

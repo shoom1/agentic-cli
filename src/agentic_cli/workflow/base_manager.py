@@ -49,7 +49,7 @@ from agentic_cli.logging import Loggers
 
 if TYPE_CHECKING:
     from agentic_cli.config import BaseSettings
-    from agentic_cli.tools.memory_tools import MemoryStore
+    from agentic_cli.memory import MemoryStore
     from agentic_cli.knowledge_base import KnowledgeBaseManager
     from agentic_cli.tools.sandbox.manager import SandboxManager
 
@@ -501,7 +501,7 @@ class BaseWorkflowManager(ABC):
     ) -> None:
         """Construct the required services into ``s``. See :meth:`_build_services`."""
         if "memory_store" in self._required_managers and MEMORY_STORE not in existing:
-            from agentic_cli.tools.memory_tools import MemoryStore
+            from agentic_cli.memory import MemoryStore
 
             embedding_service = None
             if not self._settings.knowledge_base_use_mock:
@@ -516,7 +516,9 @@ class BaseWorkflowManager(ABC):
                 from agentic_cli.knowledge_base._mocks import MockEmbeddingService
                 embedding_service = MockEmbeddingService()
 
-            s[MEMORY_STORE] = MemoryStore(self._settings, embedding_service=embedding_service)
+            s[MEMORY_STORE] = MemoryStore(
+                self._settings.workspace_dir / "memory", embedding_service=embedding_service
+            )
 
         if "kb_manager" in self._required_managers and KB_MANAGER not in existing:
             from pathlib import Path

@@ -14,7 +14,7 @@ Usage:
 import tempfile
 from pathlib import Path
 
-from agentic_cli.tools.memory_tools import MemoryStore, MemoryItem
+from agentic_cli.memory import MemoryItem, MemoryStore
 from agentic_cli.config import BaseSettings
 
 
@@ -38,7 +38,7 @@ def main():
 
         # --- Store memories ---
         print("\n  Storing memories:")
-        store = MemoryStore(settings)
+        store = MemoryStore(settings.workspace_dir / "memory")
 
         id1 = store.store("User prefers markdown output", tags=["preference"])
         print(f"    Stored: {id1[:8]}... [preference]")
@@ -64,7 +64,7 @@ def main():
 
         # --- Persistence ---
         print("\n  Persistence test:")
-        store2 = MemoryStore(settings)
+        store2 = MemoryStore(settings.workspace_dir / "memory")
         results = store2.search("")
         print(f"    New instance loaded {len(results)} memories")
         assert len(results) == 3

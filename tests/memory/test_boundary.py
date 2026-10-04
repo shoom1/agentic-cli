@@ -44,7 +44,7 @@ KNOWN_VIOLATIONS: set[tuple[str, str]] = set()
 
 def _deprecated(module: str, names: list[str]) -> bool:
     """An import of a path the compatibility layer keeps until 0.7.0."""
-    return False
+    return module == "agentic_cli.tools.memory_tools" and "MemoryStore" in names
 
 
 def imports_of(path: Path, module: str | None) -> list[tuple[str, list[str]]]:

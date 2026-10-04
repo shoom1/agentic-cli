@@ -8,3 +8,7 @@ agentic-cli, and its components do not import each other
   components share.
 - ``agentic_cli.memory.kb``: the knowledge base.
 """
+
+from agentic_cli.memory.store import ForgettingPolicy, MemoryItem, MemoryStore
+
+__all__ = ["ForgettingPolicy", "MemoryItem", "MemoryStore"]
