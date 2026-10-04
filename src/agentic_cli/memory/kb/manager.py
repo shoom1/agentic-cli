@@ -299,7 +299,12 @@ class KnowledgeBaseManager:
         if path.exists():
             path.unlink()
 
-    def _sidecar_path(self, doc_id: str) -> Path:
+    def sidecar_path(self, doc_id: str) -> Path:
+        """Path to a document's markdown sidecar, whether or not it exists.
+
+        Public so a host can check for a sidecar (and read it) without
+        generating one — the lazy-sidecar pattern ``kb_read`` uses.
+        """
         return self.documents_dir / f"{doc_id}.md"
 
     def _write_sidecar(
@@ -314,20 +319,22 @@ class KnowledgeBaseManager:
 
         if payload is None:
             payload = {"summary": doc.summary or "", "claims": [], "entities": {}}
-        path = self._sidecar_path(doc.id)
+        path = self.sidecar_path(doc.id)
         atomic_write_text(path, render_sidecar_markdown(doc, payload))
         return path
 
-    def _write_sidecar_if_present(
+    def write_sidecar_if_present(
         self, doc: Document, payload: dict[str, Any]
     ) -> bool:
-        """Write a sidecar built outside the lock, unless the document is gone.
+        """Write a sidecar payload a host built outside the lock, unless the
+        document is gone.
 
-        The payload comes from an LLM call made without holding ``_lock``, and
-        is derived from the document's text, so a ``delete_document`` (or
-        ``clear``) during that call must not be followed by the write. Both
-        hold ``_lock`` while removing a document, and so does this check and
-        write, so they cannot interleave.
+        Public for hosts that generate the payload themselves (an LLM call
+        made without holding ``_lock``, derived from the document's text) and
+        then need to write it back safely — the pattern ``kb_read`` uses: a
+        ``delete_document`` (or ``clear``) during that call must not be
+        followed by the write. Both hold ``_lock`` while removing a document,
+        and so does this check and write, so they cannot interleave.
 
         Returns:
             True if the sidecar was written.
@@ -339,7 +346,7 @@ class KnowledgeBaseManager:
             return True
 
     def _delete_sidecar(self, doc_id: str) -> None:
-        path = self._sidecar_path(doc_id)
+        path = self.sidecar_path(doc_id)
         if path.exists():
             path.unlink()
 
@@ -1136,7 +1143,7 @@ class KnowledgeBaseManager:
             todo = [
                 doc
                 for doc in self._documents.values()
-                if not self._sidecar_path(doc.id).exists()
+                if not self.sidecar_path(doc.id).exists()
             ]
         try:
             written = 0
@@ -1153,7 +1160,7 @@ class KnowledgeBaseManager:
                 async with lock:
                     # Double-check inside the lock — another task may
                     # have written it (e.g. lazy kb_read fallback).
-                    if self._sidecar_path(doc.id).exists():
+                    if self.sidecar_path(doc.id).exists():
                         continue
                     with self._lock:
                         if doc.id not in self._documents:
@@ -1163,7 +1170,7 @@ class KnowledgeBaseManager:
                     payload = await self.generate_sidecar_payload(
                         doc.content, title=doc.title
                     )
-                    if self._write_sidecar_if_present(doc, payload):
+                    if self.write_sidecar_if_present(doc, payload):
                         written += 1
             return written
         finally:

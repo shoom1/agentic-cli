@@ -34,7 +34,7 @@ def _document_without_summary(tmp_path) -> tuple[KnowledgeBaseManager, str]:
     doc = kb.ingest_document(
         content="a plan for airships", title="Plan", source_type=SourceType.USER
     )
-    kb._sidecar_path(doc.id).unlink()  # as a document from before summaries
+    kb.sidecar_path(doc.id).unlink()  # as a document from before summaries
     return kb, doc.id
 
 
@@ -49,7 +49,7 @@ async def test_kb_read_does_not_bring_a_deleted_document_back(tmp_path):
 
     assert result["success"] is False
     assert "not found" in result["error"].lower()
-    assert not kb._sidecar_path(doc_id).exists()
+    assert not kb.sidecar_path(doc_id).exists()
 
 
 async def test_backfill_does_not_bring_a_deleted_document_back(tmp_path):
@@ -58,4 +58,4 @@ async def test_backfill_does_not_bring_a_deleted_document_back(tmp_path):
     written = await kb.backfill_sidecars()
 
     assert written == 0
-    assert not kb._sidecar_path(doc_id).exists()
+    assert not kb.sidecar_path(doc_id).exists()

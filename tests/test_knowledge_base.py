@@ -9,13 +9,12 @@ from agentic_cli.memory.kb.manager import KnowledgeBaseManager
 from agentic_cli.memory.kb.models import (
     Document,
     DocumentChunk,
-    PaperResult,
     SearchResult,
     SourceType,
-    WebResult,
 )
 from agentic_cli.memory._core.mock_embeddings import MockEmbeddingService
 from agentic_cli.memory.kb._mock_vector_store import MockVectorStore
+from agentic_cli.tools.search_sources import PaperResult, WebResult
 
 
 def _make_mock_kb(base_dir: Path, **kwargs) -> KnowledgeBaseManager:

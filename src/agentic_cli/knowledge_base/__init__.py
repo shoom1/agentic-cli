@@ -19,12 +19,15 @@ from agentic_cli.knowledge_base.manager import KnowledgeBaseManager  # noqa: E40
 from agentic_cli.knowledge_base.models import (  # noqa: E402
     Document,
     DocumentChunk,
-    PaperResult,
     SearchResult,
     SourceType,
+)
+from agentic_cli.knowledge_base.sources import (  # noqa: E402
+    PaperResult,
+    SearchSource,
+    SearchSourceResult,
     WebResult,
 )
-from agentic_cli.knowledge_base.sources import SearchSource, SearchSourceResult  # noqa: E402
 from agentic_cli.knowledge_base.vector_store import VectorStore  # noqa: E402
 
 __all__ = [

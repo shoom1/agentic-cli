@@ -46,10 +46,10 @@ async def test_generate_summary_uses_the_given_summarizer(tmp_path):
 async def test_backfill_uses_the_given_summarizer(tmp_path):
     kb = _kb(tmp_path, summarizer=_Summarizer())
     doc = kb.ingest_document(content="Body text.", title="T", source_type=SourceType.USER)
-    kb._sidecar_path(doc.id).unlink()
+    kb.sidecar_path(doc.id).unlink()
 
     assert await kb.backfill_sidecars() == 1
-    assert "Injected summary." in kb._sidecar_path(doc.id).read_text()
+    assert "Injected summary." in kb.sidecar_path(doc.id).read_text()
 
 
 async def test_no_summarizer_means_the_preview_even_inside_a_turn(tmp_path):

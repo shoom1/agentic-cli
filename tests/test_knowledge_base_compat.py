@@ -168,6 +168,15 @@ def test_data_written_through_the_old_class_opens_with_the_new_one(tmp_path):
     assert [hit["document_title"] for hit in hits] == ["Otters"]
 
 
+def test_search_result_types_moved_to_the_tools():
+    from agentic_cli.memory.kb import models
+    from agentic_cli.tools import search_sources
+
+    assert not hasattr(models, "PaperResult") and not hasattr(models, "WebResult")
+    assert _old("agentic_cli.knowledge_base").PaperResult is search_sources.PaperResult
+    assert _old("agentic_cli.knowledge_base.models").WebResult is search_sources.WebResult
+
+
 async def test_the_old_class_with_an_explicit_none_summarizer_stores_the_preview(tmp_path):
     """Controller ruling: the old path also accepts ``summarizer=`` directly,
     overriding the default turn-registry lookup."""

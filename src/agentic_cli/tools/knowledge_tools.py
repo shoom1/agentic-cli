@@ -502,7 +502,7 @@ async def _read_document_from_kbs(
         }
 
     # Sidecar mode (default). Lazily generate if missing.
-    sidecar_path = source_kb._sidecar_path(doc.id)
+    sidecar_path = source_kb.sidecar_path(doc.id)
     if not sidecar_path.exists():
         lock = source_kb.get_or_create_sidecar_lock(doc.id)
         async with lock:
@@ -521,7 +521,7 @@ async def _read_document_from_kbs(
                     content_for_payload, title=doc.title
                 )
                 # Deleted during the LLM call: do not write it back.
-                if not source_kb._write_sidecar_if_present(doc, payload):
+                if not source_kb.write_sidecar_if_present(doc, payload):
                     return {"success": False, "error": f"Document not found: {doc_id_or_title}"}
 
     sidecar_text = sidecar_path.read_text()

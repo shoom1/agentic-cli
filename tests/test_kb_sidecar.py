@@ -275,19 +275,19 @@ class TestBackfillSidecars:
     async def test_backfill_writes_missing_sidecars(self, kb):
         d1 = kb.ingest_document(content="a", title="One", source_type=SourceType.USER)
         d2 = kb.ingest_document(content="b", title="Two", source_type=SourceType.USER)
-        kb._sidecar_path(d1.id).unlink()
-        kb._sidecar_path(d2.id).unlink()
+        kb.sidecar_path(d1.id).unlink()
+        kb.sidecar_path(d2.id).unlink()
 
         n = await kb.backfill_sidecars()
 
         assert n == 2
-        assert kb._sidecar_path(d1.id).exists()
-        assert kb._sidecar_path(d2.id).exists()
+        assert kb.sidecar_path(d1.id).exists()
+        assert kb.sidecar_path(d2.id).exists()
 
     async def test_backfill_skips_existing(self, kb):
         d1 = kb.ingest_document(content="a", title="Has Sidecar", source_type=SourceType.USER)
         # Mtime sentinel
-        sidecar = kb._sidecar_path(d1.id)
+        sidecar = kb.sidecar_path(d1.id)
         original = sidecar.read_text()
 
         n = await kb.backfill_sidecars()
@@ -299,7 +299,7 @@ class TestBackfillSidecars:
         kb.ingest_document(content="a", title="One", source_type=SourceType.USER)
         kb.ingest_document(content="b", title="Two", source_type=SourceType.USER)
         for doc in list(kb._documents.values()):
-            kb._sidecar_path(doc.id).unlink()
+            kb.sidecar_path(doc.id).unlink()
 
         calls: list[tuple[int, int, str]] = []
 
@@ -319,7 +319,7 @@ class TestBackfillSidecars:
         from agentic_cli.memory.kb.manager import BackfillAlreadyRunning
 
         d = kb.ingest_document(content="body", title="One", source_type=SourceType.USER)
-        kb._sidecar_path(d.id).unlink()
+        kb.sidecar_path(d.id).unlink()
 
         gate = asyncio.Event()
 
@@ -346,7 +346,7 @@ class TestBackfillSidecars:
         """Even if the inner LLM call raises, the in-progress flag resets
         so a retry is possible."""
         d = kb.ingest_document(content="body", title="One", source_type=SourceType.USER)
-        kb._sidecar_path(d.id).unlink()
+        kb.sidecar_path(d.id).unlink()
 
         class ExplodingCallback:
             def __call__(self, done, total, doc):
@@ -408,13 +408,13 @@ class TestKbReadLazySidecar:
             content="body", title="Y", source_type=SourceType.USER,
         )
         # Simulate legacy doc: remove sidecar
-        kb._sidecar_path(doc.id).unlink()
-        assert not kb._sidecar_path(doc.id).exists()
+        kb.sidecar_path(doc.id).unlink()
+        assert not kb.sidecar_path(doc.id).exists()
 
         result = await _read_document_from_kbs(kb, None, doc.id)
         assert result["success"] is True
         # Sidecar should have been generated
-        assert kb._sidecar_path(doc.id).exists()
+        assert kb.sidecar_path(doc.id).exists()
 
     async def test_kb_read_concurrent_reads_serialize(self, kb):
         """Two concurrent first-reads on the same doc must not double-LLM."""
@@ -431,7 +431,7 @@ class TestKbReadLazySidecar:
                 return "SUMMARY: lazy summary."
 
         doc = kb.ingest_document(content="body", title="Z", source_type=SourceType.USER)
-        kb._sidecar_path(doc.id).unlink()
+        kb.sidecar_path(doc.id).unlink()
 
         kb._summarizer = CountingSummarizer()
         await asyncio.gather(
@@ -458,7 +458,7 @@ class TestKbReadLazySidecar:
             file_bytes=fake_pdf_bytes,
             file_extension=".pdf",
         )
-        kb._sidecar_path(doc.id).unlink()
+        kb.sidecar_path(doc.id).unlink()
         kb._documents[doc.id].content = ""  # legacy: no in-memory content
 
         captured = {}
@@ -476,7 +476,7 @@ class TestKbReadLazySidecar:
             result = await _read_document_from_kbs(kb, None, doc.id)
 
         assert result["success"] is True
-        assert kb._sidecar_path(doc.id).exists()
+        assert kb.sidecar_path(doc.id).exists()
         # The PDF text should have been the input to the LLM
         assert "EXTRACTED PDF TEXT" in captured["content"]
 
@@ -489,13 +489,13 @@ class TestClearCleansArtifacts:
     def test_clear_removes_sidecars(self, kb):
         d1 = kb.ingest_document(content="a", title="One", source_type=SourceType.USER)
         d2 = kb.ingest_document(content="b", title="Two", source_type=SourceType.USER)
-        assert kb._sidecar_path(d1.id).exists()
-        assert kb._sidecar_path(d2.id).exists()
+        assert kb.sidecar_path(d1.id).exists()
+        assert kb.sidecar_path(d2.id).exists()
 
         kb.clear()
 
-        assert not kb._sidecar_path(d1.id).exists()
-        assert not kb._sidecar_path(d2.id).exists()
+        assert not kb.sidecar_path(d1.id).exists()
+        assert not kb.sidecar_path(d2.id).exists()
 
     def test_clear_rebuilds_empty_index_md(self, kb):
         kb.ingest_document(content="a", title="One", source_type=SourceType.USER)
@@ -514,7 +514,7 @@ class TestDeleteCleansLockDict:
 
         d = kb.ingest_document(content="body", title="X", source_type=SourceType.USER)
         # Force a lazy-read to populate the lock dict
-        kb._sidecar_path(d.id).unlink()
+        kb.sidecar_path(d.id).unlink()
         await _read_document_from_kbs(kb, None, d.id)
         assert d.id in kb._sidecar_locks
 
@@ -578,7 +578,7 @@ class TestGetOrCreateSidecarLock:
         doc = kb.ingest_document(
             content="body", title="X", source_type=SourceType.USER,
         )
-        kb._sidecar_path(doc.id).unlink()
+        kb.sidecar_path(doc.id).unlink()
 
         original = kb.get_or_create_sidecar_lock
         seen: list[str] = []
