@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from agentic_cli.knowledge_base.manager import KnowledgeBaseManager
-from agentic_cli.knowledge_base.models import (
+from agentic_cli.memory.kb.manager import KnowledgeBaseManager
+from agentic_cli.memory.kb.models import (
     Document,
     DocumentChunk,
     PaperResult,
@@ -14,7 +14,8 @@ from agentic_cli.knowledge_base.models import (
     SourceType,
     WebResult,
 )
-from agentic_cli.knowledge_base._mocks import MockEmbeddingService, MockVectorStore
+from agentic_cli.memory._core.mock_embeddings import MockEmbeddingService
+from agentic_cli.memory.kb._mock_vector_store import MockVectorStore
 
 
 def _make_mock_kb(base_dir: Path, **kwargs) -> KnowledgeBaseManager:
@@ -417,7 +418,7 @@ class TestWebResult:
 # Search Sources Tests
 # ============================================================================
 
-from agentic_cli.knowledge_base.sources import (
+from agentic_cli.tools.search_sources import (
     SearchSource,
     SearchSourceResult,
 )
@@ -1105,7 +1106,7 @@ class TestHybridSearch:
         assert results["results"][0]["document_title"] == "Config Doc"
 
     def test_rrf_fusion(self):
-        from agentic_cli.knowledge_base.manager import KnowledgeBaseManager
+        from agentic_cli.memory.kb.manager import KnowledgeBaseManager
         semantic = [("c1", 0.9), ("c2", 0.8), ("c3", 0.7)]
         bm25 = [("c3", 5.0), ("c1", 3.0), ("c4", 1.0)]
         fused = KnowledgeBaseManager._fuse_results(semantic, bm25)
@@ -1129,7 +1130,7 @@ class TestHybridSearch:
 class TestStructureAwareChunking:
 
     def test_code_block_not_split(self):
-        from agentic_cli.knowledge_base.embeddings import EmbeddingService
+        from agentic_cli.memory._core.embeddings import EmbeddingService
         # Use the real EmbeddingService methods (static/class methods only, no model needed)
         content = (
             "Here is an example:\n"
@@ -1148,7 +1149,7 @@ class TestStructureAwareChunking:
         assert "return True" in code_chunk[0]
 
     def test_markdown_heading_boundary(self):
-        from agentic_cli.knowledge_base.embeddings import EmbeddingService
+        from agentic_cli.memory._core.embeddings import EmbeddingService
         content = (
             "# Section One\n"
             "Content of section one with some details.\n\n"
@@ -1161,14 +1162,14 @@ class TestStructureAwareChunking:
         assert any("Section" in c for c in chunks)
 
     def test_fallback_for_plain_text(self):
-        from agentic_cli.knowledge_base.embeddings import EmbeddingService
+        from agentic_cli.memory._core.embeddings import EmbeddingService
         content = "Simple sentence one. Simple sentence two. Simple sentence three."
         svc = EmbeddingService.__new__(EmbeddingService)
         chunks = svc.chunk_document(content, chunk_size=100)
         assert len(chunks) >= 1
 
     def test_empty_content(self):
-        from agentic_cli.knowledge_base.embeddings import EmbeddingService
+        from agentic_cli.memory._core.embeddings import EmbeddingService
         svc = EmbeddingService.__new__(EmbeddingService)
         assert svc.chunk_document("") == []
         assert svc.chunk_document("   ") == []

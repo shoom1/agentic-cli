@@ -18,12 +18,13 @@ from pathlib import Path
 
 import pytest
 
-from agentic_cli.knowledge_base._bm25_backends import RankBM25Index
-from agentic_cli.knowledge_base._mock_bm25 import MockBM25Index
-from agentic_cli.knowledge_base._mocks import MockEmbeddingService, MockVectorStore
-from agentic_cli.knowledge_base.bm25_index import create_bm25_index
-from agentic_cli.knowledge_base.manager import KnowledgeBaseManager
-from agentic_cli.knowledge_base.models import SourceType
+from agentic_cli.memory.kb._bm25_backends import RankBM25Index
+from agentic_cli.memory.kb._mock_bm25 import MockBM25Index
+from agentic_cli.memory._core.mock_embeddings import MockEmbeddingService
+from agentic_cli.memory.kb._mock_vector_store import MockVectorStore
+from agentic_cli.memory.kb.bm25_index import create_bm25_index
+from agentic_cli.memory.kb.manager import KnowledgeBaseManager
+from agentic_cli.memory.kb.models import SourceType
 
 
 @pytest.fixture

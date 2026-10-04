@@ -145,7 +145,7 @@ class KbBackfillCommand(Command):
         )
 
     async def execute(self, args: str, app: "ResearchDemoApp") -> None:
-        from agentic_cli.knowledge_base.manager import BackfillAlreadyRunning
+        from agentic_cli.memory.kb import BackfillAlreadyRunning
 
         workflow = _ready_workflow(app)
         if workflow is None:

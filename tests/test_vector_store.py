@@ -7,7 +7,7 @@ from unittest import mock
 import numpy as np
 import pytest
 
-from agentic_cli.knowledge_base._mocks import MockVectorStore
+from agentic_cli.memory.kb._mock_vector_store import MockVectorStore
 
 
 class TestMockVectorStore:
@@ -113,7 +113,7 @@ class TestVectorStoreWithFAISS:
 
     @pytest.fixture
     def store(self, tmp_path: Path):
-        from agentic_cli.knowledge_base.vector_store import VectorStore
+        from agentic_cli.memory.kb.vector_store import VectorStore
         return VectorStore(index_path=tmp_path / "index.faiss", embedding_dim=4)
 
     def test_add_and_search(self, store):
@@ -165,7 +165,7 @@ class TestVectorStoreWithFAISS:
         )
         store.save()
 
-        from agentic_cli.knowledge_base.vector_store import VectorStore
+        from agentic_cli.memory.kb.vector_store import VectorStore
         store2 = VectorStore(index_path=tmp_path / "index.faiss", embedding_dim=4)
         assert store2.size == 2
 
@@ -207,6 +207,6 @@ class TestVectorStoreWithFAISS:
         assert leftovers == []
 
         # And the surviving index still loads cleanly.
-        from agentic_cli.knowledge_base.vector_store import VectorStore
+        from agentic_cli.memory.kb.vector_store import VectorStore
         reloaded = VectorStore(index_path=index_path, embedding_dim=4)
         assert reloaded.size == 2

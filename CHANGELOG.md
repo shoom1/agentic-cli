@@ -21,6 +21,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`MemoryStore` moved to `agentic_cli.memory` and takes a directory:**
   `MemoryStore(base_dir, embedding_service=None)`. The workflow keeps it in
   `workspace_dir/memory`, the same files as before.
+- **The knowledge base moved to `agentic_cli.memory.kb`**, next to the memory
+  store, in a package that depends on nothing else in agentic-cli.
+  `SearchSource` and `SearchSourceResult` moved to
+  `agentic_cli.tools.search_sources`. `EmbeddingService` and
+  `MockEmbeddingService` are in `agentic_cli.memory`, `MockVectorStore` in
+  `agentic_cli.memory.kb`.
 
 ### Added
 
@@ -34,6 +40,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`agentic_cli.tools.memory_tools.MemoryStore(settings)`** still works, with
   a `DeprecationWarning`, until 0.7.0. Use
   `agentic_cli.memory.MemoryStore(settings.workspace_dir / "memory")`.
+- **`agentic_cli.knowledge_base`** and its modules forward to the new
+  locations, with one `DeprecationWarning`, until 0.7.0. Patching a
+  module-level name through an old module path (for example
+  `agentic_cli.knowledge_base.bm25_index.create_bm25_index`) no longer reaches
+  the code; patch the new module.
 
 ## [0.6.2] - 2026-10-03
 

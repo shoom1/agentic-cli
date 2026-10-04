@@ -221,7 +221,7 @@ async def _ingest_arxiv_paper_with_services(
     6. On PDF download failure, fall back to ingesting the abstract so
        the agent at least has searchable content.
     """
-    from agentic_cli.knowledge_base.models import SourceType
+    from agentic_cli.memory.kb import SourceType
 
     arxiv_id = _clean_arxiv_id(arxiv_id)
 

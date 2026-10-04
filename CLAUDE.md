@@ -71,6 +71,7 @@ agentic-cli/
 │   │   ├── knowledge_tools.py # kb_search, kb_ingest_{text,file,url}, kb_list, kb_read, kb_write_concept, kb_search_concepts
 │   │   ├── arxiv_tools.py    # search_arxiv, fetch_arxiv_paper, ingest_arxiv_paper
 │   │   ├── arxiv_source.py   # ArxivSearchSource (feed fetch, download_pdf)
+│   │   ├── search_sources.py # SearchSource, SearchSourceResult
 │   │   ├── pdf_utils.py      # extract_pdf_text
 │   │   ├── interaction_tools.py # ask_clarification
 │   │   ├── file_read.py      # read_file, diff_compare
@@ -88,20 +89,16 @@ agentic-cli/
 │   │   ├── sandbox/         # Stateful code-execution sandbox (sandbox_execute)
 │   │   ├── shell/           # 8-layer shell security (+ os_sandbox/)
 │   │   └── webfetch/        # Fetcher, converter, validator, robots, summarizer
-│   ├── knowledge_base/
-│   │   ├── models.py         # Document, SearchResult
-│   │   ├── embeddings.py     # EmbeddingService
-│   │   ├── vector_store.py   # VectorStore (FAISS)
-│   │   ├── bm25_index.py     # BM25 index (+ _bm25_backends.py: bm25s / rank_bm25)
-│   │   ├── concepts.py       # ConceptStore (concept pages)
-│   │   ├── sidecar.py        # Markdown sidecar rendering
-│   │   ├── sources.py
-│   │   ├── _mocks.py         # MockEmbeddingService, MockVectorStore (+ _mock_bm25.py)
-│   │   └── manager.py        # KnowledgeBaseManager
+│   ├── knowledge_base/       # Deprecated forwarding modules → memory.kb (removed in 0.7.0)
 │   ├── memory/               # Knowledge base + memory store; imports nothing else from agentic_cli
-│   │   ├── __init__.py       # MemoryStore, MemoryItem, ForgettingPolicy
-│   │   ├── _core/            # Shared, private: io.py (atomic writes), log.py
-│   │   └── store.py          # MemoryStore
+│   │   ├── __init__.py       # MemoryStore, MemoryItem, ForgettingPolicy, EmbeddingService, MockEmbeddingService
+│   │   ├── _core/            # Shared, private: embeddings.py, mock_embeddings.py, io.py, log.py
+│   │   ├── store.py          # MemoryStore
+│   │   └── kb/               # Knowledge base (agentic_cli.memory.kb)
+│   │       ├── manager.py    # KnowledgeBaseManager (+ .concepts), Summarizer
+│   │       ├── models.py     # Document, SearchResult, SourceType
+│   │       ├── vector_store.py, bm25_index.py (+ _bm25_backends.py), concepts.py, sidecar.py
+│   │       └── _mock_vector_store.py, _mock_bm25.py
 │   └── persistence/
 │       └── session.py        # SessionPersistence
 ├── tests/
@@ -195,7 +192,7 @@ Available session methods:
 
 - **Framework**: pytest with `asyncio_mode = "auto"`
 - **MockContext**: From `tests/conftest.py` — provides isolated settings and temp dirs for all tests
-- **MockVectorStore** and **MockEmbeddingService**: In `knowledge_base/_mocks.py` for testing without ML dependencies
+- **MockVectorStore** (`agentic_cli.memory.kb`) and **MockEmbeddingService** (`agentic_cli.memory`): for testing without ML dependencies
 - **FAISS tests**: Guard with `pytest.importorskip("faiss")` since FAISS is not installed in dev env
 - **Integration tests**: `tests/integration/` covers ADK and LangGraph pipeline tests
 

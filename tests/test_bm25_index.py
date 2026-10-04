@@ -8,7 +8,7 @@ class TestMockBM25Index:
     """Tests using mock BM25 (no bm25s dependency needed)."""
 
     def test_add_and_search(self, tmp_path):
-        from agentic_cli.knowledge_base._mock_bm25 import MockBM25Index
+        from agentic_cli.memory.kb._mock_bm25 import MockBM25Index
 
         index = MockBM25Index()
         index.add_documents(
@@ -21,7 +21,7 @@ class TestMockBM25Index:
         assert results[0][1] > 0
 
     def test_remove_documents(self, tmp_path):
-        from agentic_cli.knowledge_base._mock_bm25 import MockBM25Index
+        from agentic_cli.memory.kb._mock_bm25 import MockBM25Index
 
         index = MockBM25Index()
         index.add_documents(["c1", "c2"], ["hello world", "goodbye world"])
@@ -31,7 +31,7 @@ class TestMockBM25Index:
         assert "c1" not in chunk_ids
 
     def test_save_and_load(self, tmp_path):
-        from agentic_cli.knowledge_base._mock_bm25 import MockBM25Index
+        from agentic_cli.memory.kb._mock_bm25 import MockBM25Index
 
         index = MockBM25Index()
         index.add_documents(["c1"], ["test document content"])
@@ -43,14 +43,14 @@ class TestMockBM25Index:
         assert results[0][0] == "c1"
 
     def test_empty_search(self, tmp_path):
-        from agentic_cli.knowledge_base._mock_bm25 import MockBM25Index
+        from agentic_cli.memory.kb._mock_bm25 import MockBM25Index
 
         index = MockBM25Index()
         results = index.search("anything", top_k=5)
         assert results == []
 
     def test_size_property(self, tmp_path):
-        from agentic_cli.knowledge_base._mock_bm25 import MockBM25Index
+        from agentic_cli.memory.kb._mock_bm25 import MockBM25Index
 
         index = MockBM25Index()
         assert index.size == 0
@@ -58,7 +58,7 @@ class TestMockBM25Index:
         assert index.size == 2
 
     def test_rebuild(self, tmp_path):
-        from agentic_cli.knowledge_base._mock_bm25 import MockBM25Index
+        from agentic_cli.memory.kb._mock_bm25 import MockBM25Index
 
         index = MockBM25Index()
         index.rebuild(["c1", "c2"], ["new doc one", "new doc two"])
@@ -69,13 +69,13 @@ class TestMockBM25Index:
 
 def _rank_bm25_cls():
     pytest.importorskip("rank_bm25")
-    from agentic_cli.knowledge_base._bm25_backends import RankBM25Index
+    from agentic_cli.memory.kb._bm25_backends import RankBM25Index
     return RankBM25Index
 
 
 def _bm25s_cls():
     pytest.importorskip("bm25s")
-    from agentic_cli.knowledge_base._bm25_backends import BM25sIndex
+    from agentic_cli.memory.kb._bm25_backends import BM25sIndex
     return BM25sIndex
 
 
@@ -172,8 +172,8 @@ class TestCreateBM25IndexPicksRealBackend:
 
     def test_prefers_bm25s_when_available(self):
         pytest.importorskip("bm25s")
-        from agentic_cli.knowledge_base.bm25_index import create_bm25_index
-        from agentic_cli.knowledge_base._bm25_backends import BM25sIndex
+        from agentic_cli.memory.kb.bm25_index import create_bm25_index
+        from agentic_cli.memory.kb._bm25_backends import BM25sIndex
 
         index = create_bm25_index()
         assert isinstance(index, BM25sIndex), (
@@ -181,8 +181,8 @@ class TestCreateBM25IndexPicksRealBackend:
         )
 
     def test_use_mock_flag_returns_mock(self):
-        from agentic_cli.knowledge_base.bm25_index import create_bm25_index
-        from agentic_cli.knowledge_base._mock_bm25 import MockBM25Index
+        from agentic_cli.memory.kb.bm25_index import create_bm25_index
+        from agentic_cli.memory.kb._mock_bm25 import MockBM25Index
 
         index = create_bm25_index(use_mock=True)
         assert isinstance(index, MockBM25Index)

@@ -2,8 +2,8 @@
 
 import pytest
 
-from agentic_cli.knowledge_base.embeddings import EmbeddingService
-from agentic_cli.knowledge_base._mocks import MockEmbeddingService
+from agentic_cli.memory._core.embeddings import EmbeddingService
+from agentic_cli.memory._core.mock_embeddings import MockEmbeddingService
 
 
 class TestMockEmbeddingService:
@@ -161,20 +161,20 @@ class TestResolveEmbeddingDevice:
     """Tests for the device-resolution autodetect helper."""
 
     def test_explicit_cpu_passes_through(self):
-        from agentic_cli.knowledge_base.embeddings import resolve_embedding_device
+        from agentic_cli.memory._core.embeddings import resolve_embedding_device
         assert resolve_embedding_device("cpu") == "cpu"
 
     def test_explicit_mps_passes_through(self):
-        from agentic_cli.knowledge_base.embeddings import resolve_embedding_device
+        from agentic_cli.memory._core.embeddings import resolve_embedding_device
         assert resolve_embedding_device("mps") == "mps"
 
     def test_explicit_cuda_passes_through(self):
-        from agentic_cli.knowledge_base.embeddings import resolve_embedding_device
+        from agentic_cli.memory._core.embeddings import resolve_embedding_device
         assert resolve_embedding_device("cuda") == "cuda"
 
     def test_auto_returns_cpu_when_torch_unavailable(self, monkeypatch):
         import builtins
-        from agentic_cli.knowledge_base.embeddings import resolve_embedding_device
+        from agentic_cli.memory._core.embeddings import resolve_embedding_device
 
         real_import = builtins.__import__
 
@@ -187,7 +187,7 @@ class TestResolveEmbeddingDevice:
         assert resolve_embedding_device("auto") == "cpu"
 
     def test_auto_prefers_cuda_when_available(self, monkeypatch):
-        from agentic_cli.knowledge_base import embeddings as emb_mod
+        from agentic_cli.memory._core import embeddings as emb_mod
 
         class FakeBackends:
             class mps:
@@ -209,7 +209,7 @@ class TestResolveEmbeddingDevice:
         assert emb_mod.resolve_embedding_device("auto") == "cuda"
 
     def test_auto_picks_mps_only_on_apple_silicon(self, monkeypatch):
-        from agentic_cli.knowledge_base import embeddings as emb_mod
+        from agentic_cli.memory._core import embeddings as emb_mod
 
         class FakeBackends:
             class mps:
@@ -236,7 +236,7 @@ class TestResolveEmbeddingDevice:
         assert emb_mod.resolve_embedding_device("auto") == "cpu"
 
     def test_embedding_service_resolves_device_at_init(self, monkeypatch):
-        from agentic_cli.knowledge_base import embeddings as emb_mod
+        from agentic_cli.memory._core import embeddings as emb_mod
 
         monkeypatch.setattr(emb_mod, "resolve_embedding_device", lambda p: "cpu")
         svc = EmbeddingService(device="auto")
