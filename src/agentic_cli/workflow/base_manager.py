@@ -523,6 +523,7 @@ class BaseWorkflowManager(ABC):
             from agentic_cli.knowledge_base import KnowledgeBaseManager
 
             use_mock = self._settings.knowledge_base_use_mock
+            summarizer = self if self._settings.knowledge_base_summarize else None
             project_kb_dir = Path.cwd() / f".{self._settings.app_name}" / "knowledge_base"
             user_kb_dir = self._settings.knowledge_base_dir
 
@@ -530,6 +531,7 @@ class BaseWorkflowManager(ABC):
                 settings=self._settings,
                 use_mock=use_mock,
                 base_dir=project_kb_dir,
+                summarizer=summarizer,
             )
 
             if project_kb_dir.resolve() != user_kb_dir.resolve():
@@ -537,6 +539,7 @@ class BaseWorkflowManager(ABC):
                     settings=self._settings,
                     use_mock=use_mock,
                     base_dir=user_kb_dir,
+                    summarizer=summarizer,
                 )
             else:
                 s[USER_KB_MANAGER] = s[KB_MANAGER]

@@ -206,6 +206,16 @@ class WorkflowSettingsMixin:
         description="Use mock knowledge base (no ML dependencies required)",
         json_schema_extra={"ui_order": 152},
     )
+    knowledge_base_summarize: bool = Field(
+        default=True,
+        title="Summarize Knowledge-Base Documents",
+        description=(
+            "Give knowledge bases the workflow's summarizer, so ingesting a "
+            "document writes an LLM summary and sidecar (one summarizer call "
+            "per document). Off: store the first ~500 characters instead."
+        ),
+        json_schema_extra={"ui_order": 153},
+    )
     auto_extract_session_facts: bool = Field(
         default=False,
         title="Auto-Extract Session Facts",
