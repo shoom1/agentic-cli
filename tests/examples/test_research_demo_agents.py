@@ -35,3 +35,10 @@ def test_report_writer_skills_dir_configured():
 
     s = ResearchDemoSettings()
     assert any(str(p).rstrip("/").endswith("skills") for p in s.skills_dirs)
+
+
+def test_the_arxiv_specialist_ingests_web_pages_through_web_fetch():
+    from research_demo.agents import ARXIV_SPECIALIST_PROMPT
+
+    assert "kb_ingest_url" not in ARXIV_SPECIALIST_PROMPT
+    assert "saved_path" in ARXIV_SPECIALIST_PROMPT

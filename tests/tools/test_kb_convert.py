@@ -187,3 +187,72 @@ def test_an_unknown_charset_label_decodes_as_utf8():
     doc = convert_document(b"caf\xc3\xa9", content_type="text/plain", extension=".txt",
                            charset="x-no-such-charset")
     assert doc.text == "café"
+
+
+# ---------------------------------------------------------------------------
+# Carried fix: parse HTML with trafilatura's own loader, not lxml.html
+# directly, before stripping table spans. ``lxml.html.fromstring`` doesn't
+# understand an XML declaration, drops text after an inline comment, and
+# trafilatura picks up dates planted inside HTML comments when fed that tree.
+# ---------------------------------------------------------------------------
+
+XHTML_WITH_DECLARATION = (
+    '<?xml version="1.0" encoding="UTF-8"?>\n'
+    '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Volcano notes</title></head>'
+    "<body><nav><a href='/'>Home</a> <a href='/about'>About us</a></nav>"
+    "<article><h1>Volcanoes</h1><p>"
+    + "Magma rises through the crust and erupts as lava. " * 12
+    + "</p></article></body></html>"
+)
+
+
+def test_an_xhtml_page_with_an_xml_declaration_uses_trafilatura():
+    pytest.importorskip("trafilatura")
+    doc = convert_document(
+        XHTML_WITH_DECLARATION.encode(), content_type="application/xhtml+xml",
+        extension=".xhtml", charset="utf-8",
+    )
+    assert doc.extractor == "trafilatura"
+    assert "Home" not in doc.text and "About us" not in doc.text
+    assert "Magma rises through the crust" in doc.text
+
+
+HTML_WITH_INLINE_COMMENT = (
+    "<html><body><article><p>"
+    + "Magma rises through the crust and erupts as lava. " * 12
+    + "<!-- ad --> Second sentence about pumice."
+    "</p></article></body></html>"
+)
+
+
+def test_text_after_an_inline_comment_is_kept():
+    pytest.importorskip("trafilatura")
+    doc = convert_document(
+        HTML_WITH_INLINE_COMMENT.encode(), content_type="text/html",
+        extension=".html", charset="utf-8",
+    )
+    assert "Second sentence about pumice" in doc.text
+
+
+HTML_WITH_DATE_ONLY_IN_COMMENT = (
+    "<html><body><article><p>"
+    + "Magma rises through the crust and erupts as lava. " * 12
+    + "</p><!-- 1999-12-31 --></article></body></html>"
+)
+
+
+def test_a_date_planted_inside_a_comment_is_not_published():
+    pytest.importorskip("trafilatura")
+    doc = convert_document(
+        HTML_WITH_DATE_ONLY_IN_COMMENT.encode(), content_type="text/html",
+        extension=".html", charset="utf-8",
+    )
+    assert doc.published is None
+
+
+def test_empty_html_falls_back_to_html2text_without_calling_extract(log):
+    pytest.importorskip("trafilatura")
+    doc = convert_document(b"", content_type="text/html", extension=".html", charset="utf-8")
+
+    assert doc.extractor == "html2text"
+    assert {"event": "kb_convert_html", "extractor": "html2text", "reason": "no_main_text"} in log.events

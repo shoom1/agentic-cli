@@ -618,7 +618,7 @@ from agentic_cli.tools import (
 | `kb_search` | Hybrid BM25 + vector search with RRF fusion, filters by source/date; keyword-only without the `kb` extra or with `knowledge_base_use_mock` |
 | `kb_ingest_text` | Ingest in-memory text content (no FS or network access) |
 | `kb_ingest_file` | Ingest a local PDF, HTML or UTF-8 text file, or a page `web_fetch` saved (`saved_path`, recorded with its URL); HTML goes in as its main text. Declares `filesystem.read(path)` |
-| `kb_ingest_url` | Ingest content from an http(s) URL; routed through the hardened `ContentFetcher` and declares `http.read(url)` |
+| `kb_ingest_url` | Deprecated (removed in 0.7.0): use `web_fetch`, then `kb_ingest_file(saved_path)`. Fetches a URL through the hardened `ContentFetcher` and ingests it; declares `http.read(url)` |
 | `kb_read` | Return the per-document markdown sidecar (lazy-generated on first read) |
 | `kb_list` | List documents, optionally filtered |
 | `kb_write_concept` | Agent-authored concept/summary page (slugged, merged on overwrite) |

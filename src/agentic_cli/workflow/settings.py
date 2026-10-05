@@ -191,7 +191,7 @@ class WorkflowSettingsMixin:
         default=7,
         ge=0,
         title="Saved Pages Max Age",
-        description="Pages web_fetch saved in ./.{app_name}/fetched are deleted after this many days",
+        description="Saved pages in ./.{app_name}/fetched are deleted after this many days",
         json_schema_extra={"ui_order": 62},
     )
     webfetch_saved_max_mb: int = Field(

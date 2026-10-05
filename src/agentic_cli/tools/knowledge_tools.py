@@ -3,8 +3,9 @@
 Provides tools for managing documents in the unified knowledge base:
 - kb_ingest_text / kb_ingest_file / kb_ingest_url: Ingest content into KB.
   Three separate tools so each declares the right capability for the
-  permissions engine — text-only (kb.write), local file (kb.write +
-  filesystem.read), and URL (kb.write + http.read, hardened fetcher).
+  permissions engine — text-only (kb.write), local file or a page web_fetch
+  saved (kb.write + filesystem.read), and URL (kb.write + http.read; deprecated
+  until 0.7.0, use web_fetch then kb_ingest_file).
 - kb_search: Semantic search across all documents
 - kb_read: Read a stored document (sidecar by default, full text with full=True)
 - kb_list: List documents with summaries
@@ -23,6 +24,8 @@ managers as explicit args so both call paths stay in sync.
 """
 
 import asyncio
+import warnings
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import unquote, urlparse
 
@@ -89,28 +92,6 @@ def _build_document_item(d, scope: str) -> dict[str, Any]:
     if d.file_path:
         item["has_file"] = True
     return item
-
-
-def _extract_text_from_bytes(pdf_bytes: bytes) -> str:
-    """Extract text from PDF bytes."""
-    from agentic_cli.tools.pdf_utils import extract_pdf_text
-
-    return extract_pdf_text(pdf_bytes)
-
-
-def _detect_extension(url: str, content_type: str = "") -> str:
-    """Detect file extension from URL and/or Content-Type header.
-
-    The Content-Type header is the authoritative source; URL suffix is
-    a fallback. Many services (arxiv, S3, CDNs) serve PDFs from URLs
-    that don't end in ``.pdf``.
-    """
-    if "application/pdf" in content_type:
-        return ".pdf"
-    path = url.split("?")[0].split("#")[0]
-    if path.endswith(".pdf"):
-        return ".pdf"
-    return ".bin"
 
 
 # ---------------------------------------------------------------------------
@@ -285,8 +266,9 @@ async def _finalize_ingest(
             "success": False,
             "error": (
                 "No content or file provided. "
-                "Pass non-empty content (kb_ingest_text), a readable file "
-                "(kb_ingest_file), or a fetchable URL (kb_ingest_url). "
+                "Pass non-empty content (kb_ingest_text) or a readable file "
+                "(kb_ingest_file); for a web page, read it with web_fetch and "
+                "pass its saved_path to kb_ingest_file. "
                 "For ArXiv papers, use ingest_arxiv_paper instead."
             ),
         }
@@ -369,6 +351,9 @@ async def _ingest_bytes_with_kb(
     except UnsupportedDocument as e:
         return {"success": False, "error": f"Cannot ingest {display_name}: {e}"}
     except Exception as e:  # a future converter may raise something else; never escape the tool
+        logger.warning(
+            "kb_convert_failed", file=display_name, error=type(e).__name__, exc_info=True
+        )
         return {
             "success": False,
             "error": f"Cannot ingest {display_name}: could not convert it ({type(e).__name__})",
@@ -492,25 +477,34 @@ async def _ingest_url_with_kb(
     kb_manager,
     url: str,
     title: str = "",
-    source_type: str = "web",
+    source_type: str = "",
     source_url: str | None = None,
     authors: list[str] | None = None,
     abstract: str = "",
     tags: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Ingest a remote URL through the hardened ``ContentFetcher``.
+    """Fetch a URL, save the page, and ingest it (deprecated until 0.7.0).
 
-    Routes the download through ``ContentFetcher`` (URLValidator + manual
-    redirect validation + DNS-rebinding revalidation + cross-host detection)
-    instead of an unvalidated httpx call. Caller's permissions engine has
-    already gated ``http.read`` for ``url``."""
+    Routes the download through ``ContentFetcher`` (URL validation, redirect
+    revalidation, DNS pinning); the caller's permissions engine has already
+    gated ``http.read`` for ``url``. The page is saved as ``web_fetch`` saves
+    it and converted like ``kb_ingest_file`` converts a saved page.
+    """
+    warnings.warn(
+        "kb_ingest_url is deprecated and will be removed in 0.7.0; "
+        "use web_fetch, then kb_ingest_file(saved_path)",
+        DeprecationWarning,
+        stacklevel=3,
+    )
+    logger.warning("kb_ingest_url_deprecated", host=urlparse(url).hostname)
     if not url or not url.startswith(("http://", "https://")):
         return {
             "success": False,
             "error": "url must be an http:// or https:// URL",
         }
 
-    from agentic_cli.tools.webfetch_tool import get_or_create_fetcher
+    from agentic_cli.tools.webfetch.saved import saved_page_extension
+    from agentic_cli.tools.webfetch_tool import get_or_create_fetcher, save_fetched_page
 
     fetcher = get_or_create_fetcher()
     fetch_result = await fetcher.fetch(url, timeout=60)
@@ -529,33 +523,43 @@ async def _ingest_url_with_kb(
             }
         return {"success": False, "error": fetch_result.error or "fetch failed"}
 
-    content_bytes_or_str = fetch_result.content
-    content_type = fetch_result.content_type or ""
-    file_extension = _detect_extension(url, content_type)
+    content_type = fetch_result.content_type or "text/html"
+    extension = saved_page_extension(content_type)
+    if extension is None:
+        return {
+            "success": False,
+            "error": f"Cannot ingest {url}: {content_type} is not a type the knowledge base can ingest",
+        }
 
-    if isinstance(content_bytes_or_str, bytes):
-        file_bytes: bytes | None = content_bytes_or_str
-        if file_extension == ".pdf":
-            content = _extract_text_from_bytes(file_bytes)
-        else:
-            try:
-                content = file_bytes.decode("utf-8", errors="replace")
-            except Exception:
-                content = ""
+    if isinstance(fetch_result.raw, bytes):
+        data = fetch_result.raw
+    elif isinstance(fetch_result.content, bytes):
+        data = fetch_result.content
     else:
-        file_bytes = None
-        content = content_bytes_or_str or ""
+        data = (fetch_result.content or "").encode("utf-8")
 
-    return await _finalize_ingest(
+    # Off the event loop, same as web_fetch's own save.
+    saved = await asyncio.to_thread(save_fetched_page, url, fetch_result)
+    result = await _ingest_bytes_with_kb(
         kb_manager,
-        content=content,
-        title=title or (url.split("/")[-1] or url),
+        data,
+        extension=extension,
+        content_type=content_type,
+        charset=fetch_result.charset or "utf-8",
+        page_url=url,
+        fetched_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        truncated=fetch_result.raw_truncated,
+        fallback_title=url,
+        fallback_source_url=url,
+        display_name=url,
+        title=title,
         source_type=source_type,
-        source_url=source_url or url,
-        meta=_build_meta(authors, abstract, tags),
-        file_bytes=file_bytes,
-        file_extension=file_extension,
+        source_url=source_url,
+        authors=authors,
+        abstract=abstract,
+        tags=tags,
     )
+    return {**result, **saved}
 
 
 async def _read_document_from_kbs(
@@ -813,7 +817,7 @@ def kb_search(
     description=(
         "Ingest text content into the knowledge base. Use this for content "
         "you already have in memory; use kb_ingest_file for local files and "
-        "kb_ingest_url for remote URLs."
+        "for pages web_fetch saved."
     ),
     requires="kb_manager",
 )
@@ -916,10 +920,9 @@ async def kb_ingest_file(
         Capability("http.read", target_arg="url"),
     ],
     description=(
-        "Ingest content fetched from an http(s) URL into the knowledge "
-        "base. Routed through the hardened web fetcher (SSRF protection, "
-        "redirect revalidation, DNS-rebinding mitigation). For arXiv "
-        "papers, prefer ingest_arxiv_paper. Triggers an http.read "
+        "Deprecated, removed in 0.7.0: use web_fetch, then "
+        "kb_ingest_file(saved_path). Fetches an http(s) URL through the "
+        "hardened web fetcher and ingests it. Triggers an http.read "
         "permission check for the supplied URL."
     ),
     requires="kb_manager",
@@ -927,17 +930,19 @@ async def kb_ingest_file(
 async def kb_ingest_url(
     url: str,
     title: str = "",
-    source_type: str = "web",
+    source_type: str = "",
     source_url: str | None = None,
     authors: list[str] | None = None,
     abstract: str = "",
     tags: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Ingest a remote URL into the knowledge base.
+    """Deprecated, removed in 0.7.0: use web_fetch, then kb_ingest_file(saved_path).
+
+    Fetches a URL and ingests it into the knowledge base.
 
     Args:
         url: An ``http://`` or ``https://`` URL.
-        title: Document title (defaults to the URL's last path segment).
+        title: Document title (defaults to the page title, else the URL's last segment).
         source_type: Source type (defaults to ``web``).
         source_url: Optional URL of the source (defaults to ``url``).
         authors: Optional list of author names.

@@ -87,6 +87,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   summarizer of the turn in progress and `extract_text_from_pdf` until 0.7.0.
   `isinstance` checks against it fail for knowledge bases the workflow
   builds.
+- **`kb_ingest_url`** works until 0.7.0. Use `web_fetch`, then
+  `kb_ingest_file(saved_path)`: the page is fetched once, under one permission
+  decision, and ingested after the model has read its summary. It stays in
+  `KB_WRITER_TOOLS` until then, and each call logs a warning.
 
 ### Fixed
 
@@ -106,6 +110,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   decomposed accents) stay whole, and case is folded. An index saved before
   this change, or one that cannot be read, is rebuilt the next time its
   knowledge base opens.
+- **`kb_ingest_url` stored a web page's raw HTML.** It now converts the page
+  like `kb_ingest_file`, saves it as `web_fetch` does, and refuses types the
+  knowledge base cannot ingest (images, archives) instead of storing them as
+  text. It also stored only the first 100 KB of a page, with the truncation
+  marker inside the text; it now ingests the whole page (up to
+  `webfetch_max_download_bytes`).
+- **`web_fetch` raised when html2text could not convert a page** (for
+  example an `<ol start>` list); it now returns `success: false` (the page
+  is still saved).
 
 ## [0.6.2] - 2026-10-03
 
