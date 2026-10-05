@@ -113,7 +113,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`kb_ingest_url` stored a web page's raw HTML.** It now converts the page
   like `kb_ingest_file`, saves it as `web_fetch` does, and refuses types the
   knowledge base cannot ingest (images, archives) instead of storing them as
-  text.
+  text. It also stored only the first 100 KB of a page, with the truncation
+  marker inside the text; it now ingests the whole page (up to
+  `webfetch_max_download_bytes`).
+- **`web_fetch` raised when html2text could not convert a page** (for
+  example an `<ol start>` list); it now returns `success: false` (the page
+  is still saved).
 
 ## [0.6.2] - 2026-10-03
 

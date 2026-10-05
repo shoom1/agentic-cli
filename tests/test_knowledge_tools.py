@@ -680,20 +680,17 @@ class TestIngestDocumentTool:
                     content_type="text/html",
                 )
 
-        monkeypatch.setattr(
-            "agentic_cli.tools.knowledge_tools.get_or_create_fetcher",
-            lambda: _StubFetcher(),
-            raising=False,
-        )
-        # The import inside the helper happens lazily; patch the source too.
+        # The import inside the helper happens lazily; patch the source.
         import agentic_cli.tools.webfetch_tool as wft
         monkeypatch.setattr(wft, "get_or_create_fetcher", lambda: _StubFetcher())
 
         with tempfile.TemporaryDirectory() as tmp:
+            monkeypatch.chdir(tmp)
             kb = _make_kb(Path(tmp))
             token = set_service_registry({"kb_manager": kb})
             try:
-                result = await kb_ingest_url(url="https://example.com/article")
+                with pytest.warns(DeprecationWarning, match="kb_ingest_url"):
+                    result = await kb_ingest_url(url="https://example.com/article")
                 assert result["success"] is True
                 assert called_urls == ["https://example.com/article"]
             finally:
@@ -709,7 +706,8 @@ class TestIngestDocumentTool:
             kb = _make_kb(Path(tmp))
             token = set_service_registry({"kb_manager": kb})
             try:
-                result = await kb_ingest_url(url="file:///etc/passwd")
+                with pytest.warns(DeprecationWarning, match="kb_ingest_url"):
+                    result = await kb_ingest_url(url="file:///etc/passwd")
                 assert result["success"] is False
                 assert "http" in result["error"].lower()
             finally:

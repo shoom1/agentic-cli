@@ -88,7 +88,7 @@ async def test_each_call_logs_the_deprecation(kb, monkeypatch):
 
     class _Log:
         def warning(self, event, **kw):
-            events.append(event)
+            events.append((event, kw))
 
         debug = info = warning
 
@@ -96,7 +96,36 @@ async def test_each_call_logs_the_deprecation(kb, monkeypatch):
     with pytest.warns(DeprecationWarning):
         await _ingest(_page())
 
-    assert "kb_ingest_url_deprecated" in events
+    assert ("kb_ingest_url_deprecated", {"host": "example.com"}) in events
+
+
+async def test_the_deprecation_log_does_not_carry_the_full_url(kb, monkeypatch):
+    """A query string can carry tokens; only the host is logged (as
+    webfetch_page_not_saved does), never the full URL."""
+    from agentic_cli.tools import knowledge_tools
+
+    events = []
+
+    class _Log:
+        def warning(self, event, **kw):
+            events.append(kw)
+
+        debug = info = warning
+
+    monkeypatch.setattr(knowledge_tools, "logger", _Log())
+    with pytest.warns(DeprecationWarning):
+        await _ingest(_page())
+
+    assert all("url" not in kw for kw in events)
+
+
+async def test_the_warning_is_attributed_to_the_caller(kb):
+    """Under PEP 565's default filters a DeprecationWarning only shows when
+    attributed to the caller, not to knowledge_tools.py's own wrapper."""
+    with pytest.warns(DeprecationWarning) as record:
+        await _ingest(_page())
+
+    assert record[0].filename == __file__
 
 
 async def test_a_type_the_knowledge_base_cannot_ingest_is_refused(kb):

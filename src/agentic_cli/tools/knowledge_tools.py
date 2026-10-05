@@ -494,9 +494,9 @@ async def _ingest_url_with_kb(
         "kb_ingest_url is deprecated and will be removed in 0.7.0; "
         "use web_fetch, then kb_ingest_file(saved_path)",
         DeprecationWarning,
-        stacklevel=2,
+        stacklevel=3,
     )
-    logger.warning("kb_ingest_url_deprecated", url=url)
+    logger.warning("kb_ingest_url_deprecated", host=urlparse(url).hostname)
     if not url or not url.startswith(("http://", "https://")):
         return {
             "success": False,
@@ -547,7 +547,7 @@ async def _ingest_url_with_kb(
         content_type=content_type,
         charset=fetch_result.charset or "utf-8",
         page_url=url,
-        fetched_at=datetime.now(timezone.utc).isoformat(),
+        fetched_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
         truncated=fetch_result.raw_truncated,
         fallback_title=url,
         fallback_source_url=url,
