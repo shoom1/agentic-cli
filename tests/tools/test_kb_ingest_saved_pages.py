@@ -106,6 +106,20 @@ async def test_a_saved_page_without_a_title_is_named_after_its_url(kb, monkeypat
     assert kb.get_document(result["document_id"]).title == "volcanoes"
 
 
+async def test_a_saved_page_without_a_title_is_named_from_its_percent_encoded_url(kb, monkeypatch):
+    monkeypatch.setitem(sys.modules, "trafilatura", None)
+    url = "https://example.com/wiki/caf%C3%A9"
+    page = b"<html><body><p>No title here, only text about espresso.</p></body></html>"
+    saved = save_page(
+        saved_pages_dir(get_settings().app_name), url=url, final_url=url,
+        content_type="text/html; charset=utf-8", charset="utf-8", data=page, truncated=False,
+    )
+
+    result = await kb_ingest_file(path=str(saved))
+
+    assert kb.get_document(result["document_id"]).title == "café"
+
+
 async def test_a_saved_page_is_decoded_with_its_charset(kb):
     page = (
         "<html><body><article><p>"
@@ -117,6 +131,21 @@ async def test_a_saved_page_is_decoded_with_its_charset(kb):
     result = await kb_ingest_file(path=str(path))
 
     assert "Магма поднимается" in kb.get_document(result["document_id"]).content
+
+
+async def test_a_saved_pdf_is_ingested_as_a_web_document(kb, monkeypatch):
+    from agentic_cli.tools import pdf_utils
+
+    monkeypatch.setattr(pdf_utils, "extract_pdf_text", lambda data, **kw: "pdf text about volcanoes")
+    saved = _saved(data=b"%PDF-1.4", content_type="application/pdf", charset=None)
+
+    result = await kb_ingest_file(path=str(saved))
+
+    assert result["success"] is True
+    doc = kb.get_document(result["document_id"])
+    assert doc.source_url == URL
+    assert doc.source_type.value == "web"
+    assert doc.content == "pdf text about volcanoes"
 
 
 async def test_a_truncated_saved_page_is_reported(kb):

@@ -48,11 +48,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   file went into the knowledge base as raw HTML, tags, scripts and menus
   included. Ingestion now has its own converter: with trafilatura installed
   (added to the `kb` extra) a page's main text is kept and its menus,
-  sidebars and footers are dropped, and its title, authors, date and
-  description fill in what the call left empty; without it, html2text
-  converts the whole page. For a page `web_fetch` saved (`saved_path`), the
-  document records the page's URL and source type `web`. `source_type` now
-  defaults to `web` for a saved page and `local` otherwise.
+  sidebars and footers are dropped, and its title, authors and description
+  fill in what the call left empty; its date is stored as `published`.
+  Without trafilatura, html2text converts the whole page. For a page
+  `web_fetch` saved (`saved_path`), the document records the page's URL and
+  source type `web`. `source_type` now defaults to `web` for a saved page
+  and `local` otherwise. Hostile HTML cannot make ingestion raise or hang: a
+  table's `colspan`/`rowspan` attributes are ignored, and an unusual charset
+  label decodes as UTF-8 instead of raising or running pathologically slowly.
 
 ### Added
 
