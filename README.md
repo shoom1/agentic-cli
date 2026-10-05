@@ -540,7 +540,7 @@ result = await web_fetch(
 
 Features: URL validation, robots.txt compliance, SSRF protection, content caching, PDF extraction (including arXiv).
 
-Every page `web_fetch` reads is saved as received in `./.{app_name}/fetched/` (a folder git ignores), and the result's `saved_path` names it. Pass `saved_path` to `kb_ingest_file` to add the page to the knowledge base. Pages are read up to `webfetch_max_download_bytes` (5 MB); the summarizer sees the first `webfetch_max_content_bytes` (100 KB). Saved pages older than `webfetch_saved_max_age_days` (7) are deleted, then the oldest until the folder is under `webfetch_saved_max_mb` (200).
+Every HTML, text, Markdown, JSON, XML or PDF page `web_fetch` reads is saved as received in `./.{app_name}/fetched/` (a folder git ignores), and the result's `saved_path` names it. Pass `saved_path` to `kb_ingest_file` to add the page to the knowledge base. HTML, text, Markdown, JSON and XML pages are read up to `webfetch_max_download_bytes` (5 MB; PDFs use `webfetch_max_pdf_bytes` instead); the summarizer sees the first `webfetch_max_content_bytes` (100 KB). Saved pages older than `webfetch_saved_max_age_days` (7) are deleted, then the oldest until the folder is under `webfetch_saved_max_mb` (200).
 
 #### ArXiv Search
 
