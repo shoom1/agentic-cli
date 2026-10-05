@@ -1,0 +1,176 @@
+"""Turn a file's bytes into the text the knowledge base stores.
+
+Ingestion owns this converter; ``web_fetch`` keeps its own for summaries.
+
+- HTML goes through trafilatura when it is installed (the ``kb`` extra): it
+  keeps a page's main text as Markdown, drops menus, sidebars, footers, links
+  and images, and reads the page's title, author, date and description.
+  Without trafilatura, or when it finds no main text, html2text converts the
+  whole page and the title comes from the ``<title>`` element.
+- PDFs go through pypdf (``pdf_utils.extract_pdf_text``).
+- Anything else is decoded as text: leniently with the given ``charset`` for a
+  fetched page, strictly as UTF-8 for a local file.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from html.parser import HTMLParser
+
+import structlog
+
+logger = structlog.get_logger(__name__)
+
+_HTML_TYPES = ("text/html", "application/xhtml+xml")
+_HTML_EXTENSIONS = (".html", ".htm", ".xhtml")
+
+
+class UnsupportedDocument(ValueError):
+    """The bytes are not a format the knowledge base can ingest."""
+
+
+@dataclass(frozen=True)
+class ConvertedDocument:
+    """A document's text plus what the page says about itself."""
+
+    text: str
+    title: str | None = None
+    authors: tuple[str, ...] = ()
+    published: str | None = None
+    description: str | None = None
+    extractor: str = "text"
+
+
+def convert_document(
+    data: bytes,
+    *,
+    content_type: str | None,
+    extension: str,
+    charset: str | None = None,
+    url: str | None = None,
+) -> ConvertedDocument:
+    """Convert ``data`` to the text the knowledge base stores.
+
+    Args:
+        data: The file's bytes.
+        content_type: The page's Content-Type, or None for a local file.
+        extension: The file's extension, for example ``.html``.
+        charset: The fetched page's charset. Given, the bytes are decoded
+            with it and undecodable bytes are replaced. None means a local
+            file, which must be UTF-8 unless it is a PDF.
+        url: The page's URL, which helps trafilatura.
+
+    Raises:
+        UnsupportedDocument: a local file that is neither a PDF nor UTF-8.
+    """
+    media = (content_type or "").split(";", 1)[0].strip().lower()
+    ext = extension.lower()
+    if media == "application/pdf" or ext == ".pdf":
+        from agentic_cli.tools import pdf_utils
+
+        return ConvertedDocument(text=pdf_utils.extract_pdf_text(data), extractor="pypdf")
+
+    text = _decode(data, charset)
+    if media in _HTML_TYPES or ext in _HTML_EXTENSIONS:
+        return _convert_html(text, url)
+    return ConvertedDocument(text=text, extractor="text")
+
+
+def _decode(data: bytes, charset: str | None) -> str:
+    if charset is None:
+        try:
+            return data.decode("utf-8")
+        except UnicodeDecodeError:
+            raise UnsupportedDocument("not a PDF or a UTF-8 text file") from None
+    try:
+        return data.decode(charset, errors="replace")
+    except (LookupError, UnicodeError):
+        return data.decode("utf-8", errors="replace")
+
+
+def _convert_html(html: str, url: str | None) -> ConvertedDocument:
+    try:
+        import trafilatura
+    except ImportError:
+        reason = "not_installed"
+    else:
+        try:
+            main = trafilatura.extract(
+                html,
+                url=url,
+                output_format="markdown",
+                include_links=False,
+                include_images=False,
+                include_tables=True,
+                include_formatting=True,
+                include_comments=False,
+            )
+            meta = trafilatura.extract_metadata(html, default_url=url) if main and main.strip() else None
+        except Exception as e:  # a third-party parser; fall back rather than fail ingestion
+            logger.warning("kb_convert_trafilatura_failed", error=str(e))
+            main, meta, reason = None, None, "error"
+        else:
+            reason = "no_main_text"
+        if main and main.strip():
+            logger.debug("kb_convert_html", extractor="trafilatura")
+            return ConvertedDocument(
+                text=main.strip(),
+                title=_clean(getattr(meta, "title", None)),
+                authors=_split_authors(getattr(meta, "author", None)),
+                published=_clean(getattr(meta, "date", None)),
+                description=_clean(getattr(meta, "description", None)),
+                extractor="trafilatura",
+            )
+    logger.info("kb_convert_html", extractor="html2text", reason=reason)
+    return ConvertedDocument(text=_html2text(html), title=_html_title(html), extractor="html2text")
+
+
+def _clean(value: str | None) -> str | None:
+    value = " ".join((value or "").split())
+    return value or None
+
+
+def _split_authors(value: str | None) -> tuple[str, ...]:
+    return tuple(name for name in (_clean(part) for part in (value or "").split(";")) if name)
+
+
+def _html2text(html: str) -> str:
+    import html2text
+
+    converter = html2text.HTML2Text()
+    converter.ignore_links = True
+    converter.ignore_images = True
+    converter.body_width = 0
+    converter.single_line_break = True
+    return converter.handle(html).strip()
+
+
+class _TitleParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+        self._inside = False
+        self._done = False
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "title" and not self._done:
+            self._inside = True
+
+    def handle_endtag(self, tag):
+        if tag == "title" and self._inside:
+            self._inside = False
+            self._done = True
+
+    def handle_data(self, data):
+        if self._inside:
+            self.parts.append(data)
+
+
+def _html_title(html: str) -> str | None:
+    parser = _TitleParser()
+    try:
+        parser.feed(html)
+        parser.close()
+    except Exception:  # html.parser is lenient; a title is optional
+        pass
+    return _clean("".join(parser.parts))
