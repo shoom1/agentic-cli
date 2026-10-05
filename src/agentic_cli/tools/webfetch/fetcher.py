@@ -9,6 +9,7 @@ from urllib.parse import urljoin, urlparse
 import httpx
 
 from agentic_cli.tools.webfetch._text import decode_body
+from agentic_cli.tools.webfetch.saved import saved_page_extension
 from agentic_cli.tools.webfetch.validator import URLValidator, BlockedAddressError
 from agentic_cli.tools.webfetch.robots import RobotsTxtChecker
 from agentic_cli.tools.webfetch.transport import PinnedTransport
@@ -112,7 +113,17 @@ class ContentFetcher:
                         headers = response.headers
                         content_type = headers.get("content-type", "text/html")
                         is_pdf = "application/pdf" in content_type.lower()
-                        cap = self._max_pdf_bytes if is_pdf else self._max_download_bytes
+                        # Only types that are actually saved (saved.py's own
+                        # list) get the generous download cap; everything
+                        # else (images, archives, octet-stream, redirect and
+                        # error bodies, ...) is capped at what the summarizer
+                        # would see anyway, since it is never saved.
+                        if is_pdf:
+                            cap = self._max_pdf_bytes
+                        elif saved_page_extension(content_type) is not None:
+                            cap = self._max_download_bytes
+                        else:
+                            cap = self._max_content_bytes
                         charset = response.charset_encoding
                         buf = bytearray()
                         raw_truncated = False
@@ -160,6 +171,7 @@ class ContentFetcher:
                         final_url=current_url, timestamp=time.time(),
                         raw_truncated=raw_truncated,
                     )
+                    self._sweep_expired_cache()
                     self._cache[original_url] = cached
                     return self._result(cached, from_cache=False, status_code=status)
                 else:
@@ -203,3 +215,12 @@ class ContentFetcher:
 
     def clear_cache(self) -> None:
         self._cache.clear()
+
+    def _sweep_expired_cache(self) -> None:
+        """Drop expired entries so memory does not grow for the life of the
+        process when distinct URLs are fetched (expiry was previously lazy:
+        an entry was only dropped when that same URL was requested again)."""
+        now = time.time()
+        expired = [u for u, c in self._cache.items() if now - c.timestamp > self._cache_ttl]
+        for u in expired:
+            del self._cache[u]

@@ -13,6 +13,7 @@ import socket
 from unittest.mock import AsyncMock
 
 import httpx
+import pytest
 
 URL = "https://example.com/page"
 
@@ -135,3 +136,57 @@ def test_the_download_limit_setting():
 
     assert BaseSettings().webfetch_max_download_bytes == 5242880
     assert "webfetch_max_download_bytes" in PROJECT_SETTABLE_KEYS
+
+
+def test_an_out_of_range_download_limit_is_rejected():
+    from pydantic import ValidationError
+
+    from agentic_cli.config import BaseSettings
+
+    with pytest.raises(ValidationError):
+        BaseSettings(webfetch_max_download_bytes=0)
+    with pytest.raises(ValidationError):
+        BaseSettings(webfetch_max_download_bytes=104857600 + 1)
+
+
+# -- I-2(a): only types that are saved get the generous download cap. --
+
+
+async def test_a_type_that_is_not_saved_is_capped_at_the_content_limit(monkeypatch):
+    body = b"\x89PNG" + b"z" * 5000
+    fetcher = _fetcher(
+        monkeypatch, _html(body, "image/png"), max_content_bytes=1000, max_download_bytes=10_000,
+    )
+    result = await fetcher.fetch(URL)
+
+    assert len(result.raw) == 1000
+    assert result.raw_truncated is True
+
+
+async def test_a_type_that_is_saved_still_gets_the_download_cap(monkeypatch):
+    body = b"<p>" + b"z" * 5000
+    fetcher = _fetcher(
+        monkeypatch, _html(body, "text/html"), max_content_bytes=1000, max_download_bytes=10_000,
+    )
+    result = await fetcher.fetch(URL)
+
+    assert len(result.raw) == len(body)
+    assert result.raw_truncated is False
+
+
+# -- I-2(b): an expired cache entry is swept when a different URL is cached,
+# not just when that same URL is re-requested. --
+
+
+async def test_an_expired_entry_is_swept_when_another_url_is_fetched(monkeypatch):
+    def handler(req):
+        return httpx.Response(200, content=b"body", headers={"content-type": "text/html"})
+
+    fetcher = _fetcher(monkeypatch, handler, cache_ttl_seconds=1000)
+    await fetcher.fetch("https://example.com/a")
+    fetcher._cache["https://example.com/a"].timestamp -= 2000  # older than the TTL
+
+    await fetcher.fetch("https://example.com/b")
+
+    assert "https://example.com/a" not in fetcher._cache
+    assert "https://example.com/b" in fetcher._cache
