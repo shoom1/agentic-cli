@@ -18,6 +18,7 @@ import pytest
 
 from agentic_cli.file_utils import atomic_write_bytes
 from agentic_cli.tools.webfetch.saved import (
+    MAX_META_BYTES,
     SaveError,
     cleanup_saved_pages,
     is_saved_page_metadata,
@@ -300,3 +301,116 @@ def test_the_cleanup_settings():
     assert settings.webfetch_saved_max_age_days == 7
     assert settings.webfetch_saved_max_mb == 200
     assert {"webfetch_saved_max_age_days", "webfetch_saved_max_mb"} <= PROJECT_SETTABLE_KEYS
+
+
+def test_negative_saved_page_settings_are_rejected():
+    from pydantic import ValidationError
+
+    from agentic_cli.config import BaseSettings
+
+    with pytest.raises(ValidationError):
+        BaseSettings(webfetch_saved_max_age_days=-1)
+    with pytest.raises(ValidationError):
+        BaseSettings(webfetch_saved_max_mb=-1)
+
+
+# -- I-1: a planted metadata file must never make cleanup or a read raise. --
+
+
+def test_this_pythons_json_blows_the_recursion_limit_on_deeply_nested_input():
+    """Confirms the probe payload actually triggers RecursionError here,
+    before relying on that in the tests below."""
+    nested = "[" * 100_000 + "]" * 100_000
+    with pytest.raises(RecursionError):
+        json.loads(nested)
+
+
+def test_cleanup_survives_a_planted_deeply_nested_json_metadata_file(folder):
+    old = _save(folder, url="https://example.com/old")
+    _age(folder, "https://example.com/old", 30)
+    planted = folder / f"{'f' * 16}{'.meta.json'}"
+    planted.write_text("[" * 100_000 + "]" * 100_000)
+
+    cleanup_saved_pages(folder, max_age_days=7, max_bytes=10**9, keep="0" * 16)
+
+    assert not old.exists()
+    assert not _meta_path(folder, "https://example.com/old").exists()
+
+
+def test_read_saved_page_meta_is_none_for_a_pathological_size(folder):
+    page = _save(folder)
+    path = _meta_path(folder)
+    data = json.loads(path.read_text())
+    data["size"] = 1e999
+    path.write_text(json.dumps(data))
+
+    assert read_saved_page_meta(page, folder) is None
+
+
+def test_read_saved_page_meta_is_none_for_an_oversized_metadata_file(folder):
+    page = _save(folder)
+    path = _meta_path(folder)
+    data = json.loads(path.read_text())
+    data["padding"] = "x" * (MAX_META_BYTES + 1)
+    assert len(json.dumps(data)) > MAX_META_BYTES
+    path.write_text(json.dumps(data))
+
+    assert read_saved_page_meta(page, folder) is None
+
+
+# -- M-3: final_url is validated like url; a naive fetched_at is UTC. --
+
+
+def test_a_non_http_final_url_falls_back_to_url(folder):
+    page = _save(folder)
+    path = _meta_path(folder)
+    data = json.loads(path.read_text())
+    data["final_url"] = "ftp://example.com/guide"
+    path.write_text(json.dumps(data))
+
+    meta = read_saved_page_meta(page, folder)
+
+    assert meta is not None
+    assert meta.final_url == URL
+
+
+def test_a_naive_fetched_at_is_treated_as_utc(folder):
+    page = _save(folder)
+    path = _meta_path(folder)
+    data = json.loads(path.read_text())
+    data["fetched_at"] = "2026-01-01T00:00:00"
+    path.write_text(json.dumps(data))
+
+    meta = read_saved_page_meta(page, folder)
+
+    assert meta is not None
+    assert meta.fetched_at == datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+
+# -- M-7: a refetch/gitignore write never goes through a planted symlink. --
+
+
+def test_a_refetch_leaves_a_symlinked_other_extension_alone(folder, tmp_path):
+    _save(folder, data=b"<p>old</p>")  # saved as .html
+    outside = tmp_path / "outside.txt"
+    outside.write_text("do not touch")
+    link = folder / f"{page_name(URL)}.txt"
+    link.symlink_to(outside)
+
+    page = _save(folder, data=b"%PDF-1.4 new", content_type="application/pdf", charset=None)
+
+    assert page == folder / f"{page_name(URL)}.pdf"
+    assert link.is_symlink()
+    assert outside.read_text() == "do not touch"
+
+
+def test_a_symlinked_gitignore_is_not_written_through(folder, tmp_path):
+    folder.mkdir(parents=True)
+    outside = tmp_path / "outside-gitignore"
+    outside.write_text("do not touch")
+    (folder / ".gitignore").symlink_to(outside)
+
+    _save(folder)
+
+    assert (folder / ".gitignore").is_symlink()
+    assert outside.read_text() == "do not touch"

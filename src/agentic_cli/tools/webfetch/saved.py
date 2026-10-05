@@ -33,6 +33,11 @@ logger = structlog.get_logger(__name__)
 FOLDER_NAME = "fetched"
 META_SUFFIX = ".meta.json"
 META_VERSION = 1
+# A metadata file is never bigger than this in normal use; anything past it
+# (a planted file, for example) is treated as invalid without being parsed,
+# so a pathological payload (deeply nested JSON, say) is never handed to
+# json.loads in the first place.
+MAX_META_BYTES = 64 * 1024
 
 # Media type (lower-case, without parameters) -> extension of the saved page.
 _EXTENSIONS = {
@@ -143,6 +148,11 @@ def save_page(
     page = folder / f"{name}{ext}"
     try:
         _prepare_folder(folder)
+        # Unlink the old metadata before writing the new page: otherwise a
+        # refetch leaves a window where the new page sits beside the old,
+        # still-valid metadata (wrong content type/charset/size until the new
+        # metadata lands).
+        _unlink_regular(folder / f"{name}{META_SUFFIX}")
         atomic_write_bytes(page, data)
         for other in PAGE_EXTENSIONS - {ext}:
             _unlink_regular(folder / f"{name}{other}")
@@ -191,21 +201,38 @@ def read_saved_page_meta(path: Path, folder: Path) -> SavedPageMeta | None:
         if match is None or path.name.endswith(META_SUFFIX):
             return None
         meta_path = folder / f"{match.group(1)}{META_SUFFIX}"
-        if not stat.S_ISREG(os.lstat(meta_path).st_mode):
+        meta_stat = os.lstat(meta_path)
+        if not stat.S_ISREG(meta_stat.st_mode):
+            return None
+        if meta_stat.st_size > MAX_META_BYTES:
+            # Never parse a metadata file this large: a planted file with a
+            # pathological payload (deeply nested JSON) must not even reach
+            # json.loads.
             return None
         data = json.loads(meta_path.read_text(encoding="utf-8"))
         if data.get("version") != META_VERSION:
             return None
+        url = str(data["url"])
+        final_url = str(data.get("final_url") or url)
+        if not final_url.startswith(("http://", "https://")):
+            final_url = url
+        fetched_at = datetime.fromisoformat(data["fetched_at"])
+        if fetched_at.tzinfo is None:
+            fetched_at = fetched_at.replace(tzinfo=timezone.utc)
         meta = SavedPageMeta(
-            url=str(data["url"]),
-            final_url=str(data.get("final_url") or data["url"]),
+            url=url,
+            final_url=final_url,
             content_type=str(data["content_type"]),
             charset=str(data["charset"]) if data.get("charset") else None,
-            fetched_at=datetime.fromisoformat(data["fetched_at"]),
+            fetched_at=fetched_at,
             size=int(data["size"]),
             truncated=bool(data.get("truncated", False)),
         )
-    except (OSError, SaveError, ValueError, KeyError, TypeError, AttributeError):
+    except Exception:
+        # A planted or corrupt metadata file (bad JSON, a value nothing can
+        # coerce, a payload pathological enough to blow the recursion limit,
+        # ...) is not a saved page. It is never a bug in the caller, so
+        # nothing escapes here.
         return None
     if saved_page_extension(meta.content_type) != path.suffix:
         return None
@@ -249,19 +276,24 @@ def cleanup_saved_pages(folder: Path, *, max_age_days: float, max_bytes: int, ke
                 continue
             total -= sum(size for _, size, _ in pairs[name])
             _delete_pair(pairs.pop(name))
-    except (OSError, SaveError) as e:
+    except Exception as e:
+        # A planted or corrupt file anywhere in the folder (bad metadata,
+        # a pathological payload, a permission error, ...) must never stop
+        # cleanup from running, or stop web_fetch from reporting its result.
         logger.warning("saved_pages_cleanup_failed", folder=str(folder), error=str(e))
 
 
 def _saved_at(files: list[tuple[Path, int, float]]) -> float:
     """When a pair was saved: its metadata's ``fetched_at``, else its newest file time."""
-    meta = next((path for path, _, _ in files if path.name.endswith(META_SUFFIX)), None)
-    if meta is not None:
-        try:
-            data = json.loads(meta.read_text(encoding="utf-8"))
-            return datetime.fromisoformat(data["fetched_at"]).timestamp()
-        except (OSError, ValueError, KeyError, TypeError, AttributeError):
-            pass
+    for path, size, _ in files:
+        if path.name.endswith(META_SUFFIX):
+            if size <= MAX_META_BYTES:
+                try:
+                    data = json.loads(path.read_text(encoding="utf-8"))
+                    return datetime.fromisoformat(data["fetched_at"]).timestamp()
+                except Exception:
+                    pass
+            break
     return max(mtime for _, _, mtime in files)
 
 

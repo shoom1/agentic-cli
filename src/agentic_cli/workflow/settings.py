@@ -177,21 +177,26 @@ class WorkflowSettingsMixin:
     )
     webfetch_max_download_bytes: int = Field(
         default=5242880,
+        ge=1,
+        le=104857600,
         title="WebFetch Max Download",
         description=(
-            "Largest page or text body read and saved, in bytes (default: 5MB). "
+            "Largest HTML, text, Markdown, JSON or XML page read and saved, in "
+            "bytes (default: 5MB; PDFs use webfetch_max_pdf_bytes instead). "
             "The summarizer sees only the first webfetch_max_content_bytes of it."
         ),
         json_schema_extra={"ui_order": 61},
     )
     webfetch_saved_max_age_days: int = Field(
         default=7,
+        ge=0,
         title="Saved Pages Max Age",
         description="Pages web_fetch saved in ./.{app_name}/fetched are deleted after this many days",
         json_schema_extra={"ui_order": 62},
     )
     webfetch_saved_max_mb: int = Field(
         default=200,
+        ge=0,
         title="Saved Pages Max Size",
         description="The oldest saved pages are deleted when ./.{app_name}/fetched grows past this many megabytes",
         json_schema_extra={"ui_order": 63},

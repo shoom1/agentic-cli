@@ -193,6 +193,36 @@ def test_the_descriptions_point_to_kb_ingest_file():
     assert "kb_ingest_file" in get_registry().get("web_fetch").description
 
 
+async def test_a_planted_nested_json_metadata_does_not_break_the_fetch(summarizer):
+    """I-1: a cloned repository can plant anything under ./.<app>/fetched/;
+    it must never make web_fetch fail."""
+    folder = _folder()
+    folder.mkdir(parents=True)
+    (folder / f"{'f' * 16}.meta.json").write_text("[" * 100_000 + "]" * 100_000)
+
+    result = await _web_fetch(_ok())
+
+    assert result["success"] is True
+    assert result["summary"] == "summary"
+    assert "saved_path" in result
+    assert Path(result["saved_path"]).read_bytes() == PAGE
+
+
+async def test_a_raising_cleanup_still_returns_the_summary_and_saved_path(summarizer, monkeypatch):
+    from agentic_cli.tools import webfetch_tool
+
+    def _boom(folder, **kw):
+        raise RuntimeError("cleanup exploded")
+
+    monkeypatch.setattr(webfetch_tool, "cleanup_saved_pages", _boom)
+
+    result = await _web_fetch(_ok())
+
+    assert result["success"] is True
+    assert result["summary"] == "summary"
+    assert Path(result["saved_path"]).read_bytes() == PAGE
+
+
 async def test_a_real_fetch_saves_the_whole_page(summarizer, monkeypatch):
     """Through the real fetcher, a page over the summary limit is saved whole."""
     from agentic_cli.tools.webfetch.fetcher import ContentFetcher

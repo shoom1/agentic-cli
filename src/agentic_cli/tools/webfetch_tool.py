@@ -6,9 +6,11 @@ registered tool here and the one ``tools.factories.make_webfetch_tool`` builds.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import structlog
 
@@ -100,6 +102,12 @@ def save_fetched_page(url: str, result: FetchResult) -> dict[str, Any]:
     Returns ``{"saved_path": ...}`` (relative to the current directory),
     ``{"save_error": ...}``, or ``{}`` when the result carries no body or
     pages of its type are not saved.
+
+    A planted file in the saved-pages folder (a cloned repository controls
+    it) must never make this raise, so saving, computing the saved path, and
+    the cleanup sweep are each guarded. A cleanup failure after a successful
+    save is logged but never turns the result into a ``save_error`` — the
+    page was already saved.
     """
     if not isinstance(result.raw, bytes) or saved_page_extension(result.content_type) is None:
         return {}
@@ -115,16 +123,23 @@ def save_fetched_page(url: str, result: FetchResult) -> dict[str, Any]:
             data=result.raw,
             truncated=result.raw_truncated,
         )
-    except SaveError as e:
-        logger.warning("webfetch_page_not_saved", url=url, error=str(e))
+        saved_path = os.path.relpath(page, Path.cwd())
+    except Exception as e:
+        logger.warning("webfetch_page_not_saved", host=urlparse(url).hostname or url, error=str(e))
         return {"save_error": str(e)}
-    cleanup_saved_pages(
-        folder,
-        max_age_days=settings.webfetch_saved_max_age_days,
-        max_bytes=settings.webfetch_saved_max_mb * 1024 * 1024,
-        keep=page_name(url),
-    )
-    return {"saved_path": os.path.relpath(page, Path.cwd())}
+    try:
+        cleanup_saved_pages(
+            folder,
+            max_age_days=settings.webfetch_saved_max_age_days,
+            max_bytes=settings.webfetch_saved_max_mb * 1024 * 1024,
+            keep=page_name(url),
+        )
+    except Exception as e:
+        # cleanup_saved_pages is already non-raising; this guards the call
+        # itself (and any future change to that contract) without turning a
+        # cleanup failure into a save_error for a page that did get saved.
+        logger.warning("saved_pages_cleanup_failed", folder=str(folder), error=str(e))
+    return {"saved_path": saved_path}
 
 
 async def fetch_and_summarize(url: str, prompt: str, timeout: int, summarizer) -> dict[str, Any]:
@@ -148,7 +163,7 @@ async def fetch_and_summarize(url: str, prompt: str, timeout: int, summarizer) -
             "url": url,
         }
 
-    saved = save_fetched_page(url, fetch_result)
+    saved = await asyncio.to_thread(save_fetched_page, url, fetch_result)
 
     markdown_content = HTMLToMarkdown().convert(
         fetch_result.content,
