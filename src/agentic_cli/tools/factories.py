@@ -212,7 +212,7 @@ def make_kb_tools(kb_manager, user_kb_manager=None) -> list[Callable]:
     async def kb_ingest_url(
         url: str,
         title: str = "",
-        source_type: str = "web",
+        source_type: str = "",
         source_url: str | None = None,
         authors: list[str] | None = None,
         abstract: str = "",
