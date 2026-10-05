@@ -143,7 +143,7 @@ def _open_temp_like_a_new_file(path: Path) -> tuple[int, Path]:
     raise FileExistsError(f"could not create a temp file beside {path}")
 
 
-def _atomic_write(path: Path, content: str, *, preserve_mode: bool = False) -> None:
+def _atomic_write(path: Path, content: str | bytes, *, preserve_mode: bool = False) -> None:
     """Write content to a file atomically and durably.
 
     Writes to a uniquely-named temp file in the same directory, flushes and
@@ -152,8 +152,9 @@ def _atomic_write(path: Path, content: str, *, preserve_mode: bool = False) -> N
       temp file the way a fixed ``.tmp`` name allows.
     - fsync before the rename so a crash can't persist the rename ahead of the
       data and leave a torn/empty file in place of the previously-good one.
-    - Explicit UTF-8 so output doesn't depend on the locale (a C/POSIX locale
-      would otherwise raise UnicodeEncodeError on non-ASCII content).
+    - Explicit UTF-8 for text, so output doesn't depend on the locale (a
+      C/POSIX locale would otherwise raise UnicodeEncodeError on non-ASCII
+      content).
     - Permissions: by default the file is private (0600), right for the
       framework's own state. ``preserve_mode=True`` is for files the user
       owns: an existing file keeps its permission bits and a new one gets the
@@ -173,11 +174,12 @@ def _atomic_write(path: Path, content: str, *, preserve_mode: bool = False) -> N
             dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp"
         )
         tmp_path = Path(tmp_name)
+    data = content.encode("utf-8") if isinstance(content, str) else content
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
+        with os.fdopen(fd, "wb") as f:
             if existing is not None:
                 os.fchmod(f.fileno(), existing)
-            f.write(content)
+            f.write(data)
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp_path, path)
@@ -198,3 +200,8 @@ def atomic_write_text(path: Path, content: str, *, preserve_mode: bool = False) 
     file keeps its permission bits and a new one gets the process default.
     """
     _atomic_write(path, content, preserve_mode=preserve_mode)
+
+
+def atomic_write_bytes(path: Path, data: bytes) -> None:
+    """Write bytes to a file atomically. The file is private (0600)."""
+    _atomic_write(path, data)
