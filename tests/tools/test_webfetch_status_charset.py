@@ -114,6 +114,18 @@ class TestCharset:
         result = await _fetcher(monkeypatch, lambda req: page).fetch(URL)
         assert result.content == "café"
 
+    async def test_pathologically_slow_charset_decodes_as_utf8(self, monkeypatch):
+        """``punycode`` is a real codec codecs.lookup resolves, but decoding
+        with it runs quadratically in input size; it must never be used."""
+        body = b"-aaaa"
+        page = httpx.Response(
+            200, content=body, headers={"content-type": "text/plain; charset=punycode"},
+        )
+        result = await _fetcher(monkeypatch, lambda req: page).fetch(URL)
+
+        assert result.success is True
+        assert result.content == "-aaaa"
+
     async def test_robots_rules_apply_despite_an_unknown_charset(self, monkeypatch):
         """robots.txt treated a decode failure as 'no robots.txt' and allowed
         everything; its rules must still apply."""

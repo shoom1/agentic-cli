@@ -97,3 +97,60 @@ async def test_a_path_that_cannot_name_a_file_returns_an_error(kb):
     result = await kb_ingest_file(path="notes\x00.md")
 
     assert result["success"] is False
+
+
+async def test_hostile_html_is_refused_not_raised(kb, tmp_path, monkeypatch):
+    """I-1: html2text fails an assert on ``<ol start>`` (an attribute with no
+    value); that must come back as a refusal, not an exception out of the
+    tool, and nothing must be stored."""
+    import sys
+
+    monkeypatch.setitem(sys.modules, "trafilatura", None)
+    evil = tmp_path / "evil.html"
+    evil.write_text("<html><body><ol start><li>x</li></ol></body></html>")
+
+    result = await kb_ingest_file(path=str(evil))
+
+    assert result["success"] is False
+    assert "evil.html" in result["error"]
+    assert kb.list_documents() == []
+
+
+async def test_any_other_conversion_failure_is_also_refused(kb, tmp_path, monkeypatch):
+    """Defensive: whatever a future converter raises besides
+    ``UnsupportedDocument`` must still come back as a refusal, not an
+    exception out of the tool."""
+    from agentic_cli.tools import knowledge_tools
+
+    def _boom(*a, **kw):
+        raise RuntimeError("converter exploded")
+
+    monkeypatch.setattr(knowledge_tools, "convert_document", _boom)
+    notes = tmp_path / "notes.md"
+    notes.write_text("# Notes\n")
+
+    result = await kb_ingest_file(path=str(notes))
+
+    assert result["success"] is False
+    assert "notes.md" in result["error"]
+    assert "RuntimeError" in result["error"]
+    assert kb.list_documents() == []
+
+
+async def test_a_cwd_that_cannot_be_statted_is_treated_as_a_local_file(kb, tmp_path, monkeypatch):
+    """M-1: ``saved_pages_dir`` reads ``Path.cwd()``; with a deleted working
+    directory an absolute-path ``kb_ingest_file`` must still ingest the file
+    as local, not raise."""
+    from agentic_cli.tools import knowledge_tools
+
+    def _raise_cwd_gone(app_name):
+        raise FileNotFoundError("cwd deleted")
+
+    monkeypatch.setattr(knowledge_tools, "saved_pages_dir", _raise_cwd_gone)
+    notes = tmp_path / "notes.md"
+    notes.write_text("# Notes\n\nSome text about dirigibles.\n")
+
+    result = await kb_ingest_file(path=str(notes))
+
+    assert result["success"] is True
+    assert "dirigibles" in kb.get_document(result["document_id"]).content

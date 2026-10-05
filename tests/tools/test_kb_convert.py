@@ -126,6 +126,64 @@ def test_a_local_file_that_is_not_utf8_is_refused():
         convert_document(b"\x89PNG\r\n\x1a\n\xff\xfe", content_type=None, extension=".png")
 
 
+def test_html2text_failure_is_refused_not_raised(no_trafilatura, log):
+    """``<ol start>`` (an attribute with no value) makes html2text fail an
+    assert; that must become a refusal, not an exception out of the tool."""
+    bad = b"<html><body><ol start><li>x</li></ol></body></html>"
+
+    with pytest.raises(UnsupportedDocument, match="could not convert this HTML page"):
+        convert_document(bad, content_type=None, extension=".html")
+
+    failures = [e for e in log.events if e["event"] == "kb_convert_html_failed"]
+    assert failures and failures[0]["error"] == "AssertionError"
+
+
+def test_trafilatura_error_falls_back_to_html2text(log):
+    pytest.importorskip("trafilatura")
+    import trafilatura
+
+    def _boom(*a, **kw):
+        raise RuntimeError("boom")
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(trafilatura, "extract", _boom)
+        doc = convert_document(ARTICLE.encode(), content_type="text/html", extension=".html", charset="utf-8")
+
+    assert doc.extractor == "html2text"
+    assert {"event": "kb_convert_html", "extractor": "html2text", "reason": "error"} in log.events
+
+
+def test_hostile_table_spans_are_stripped_before_extraction():
+    """trafilatura 2.3.0's table handling blows up on colspan/rowspan: a
+    10x20-cell table with colspan=100 rowspan=100 took ~1.25s and produced
+    ~330K chars of output. Stripping the span attributes before extraction
+    must keep this fast and small."""
+    pytest.importorskip("trafilatura")
+    row = "".join(f'<td colspan="100" rowspan="100">x</td>' for _ in range(20))
+    table = "".join(f"<tr>{row}</tr>" for _ in range(10))
+    html = (
+        "<html><body><article><p>"
+        + "Magma rises through the crust and erupts as lava. " * 12
+        + f"</p><table>{table}</table></article></body></html>"
+    )
+
+    doc = convert_document(html.encode(), content_type="text/html", extension=".html", charset="utf-8")
+
+    assert doc.extractor == "trafilatura"
+    assert len(doc.text) < len(html)
+
+
 def test_a_fetched_text_page_is_decoded_leniently():
     doc = convert_document(b"caf\xe9", content_type="text/plain", extension=".txt", charset="latin-1")
+    assert doc.text == "café"
+
+
+def test_a_pathologically_slow_charset_label_decodes_as_utf8():
+    doc = convert_document(b"-aaaaaaaaaa", content_type="text/plain", extension=".txt", charset="punycode")
+    assert doc.text == "-aaaaaaaaaa"
+
+
+def test_an_unknown_charset_label_decodes_as_utf8():
+    doc = convert_document(b"caf\xc3\xa9", content_type="text/plain", extension=".txt",
+                           charset="x-no-such-charset")
     assert doc.text == "café"

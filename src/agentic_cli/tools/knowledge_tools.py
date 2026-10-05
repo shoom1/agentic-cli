@@ -22,8 +22,9 @@ The helpers (``_search_kbs``, ``_ingest_text_with_kb`` /
 managers as explicit args so both call paths stay in sync.
 """
 
+import asyncio
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 import structlog
 
@@ -326,9 +327,10 @@ async def _finalize_ingest(
 
 
 def _url_title(url: str) -> str:
-    """A title from a URL: its last path segment, else its host."""
+    """A title from a URL: its last path segment (percent-decoded), else its host."""
     parsed = urlparse(url)
-    return parsed.path.rstrip("/").rsplit("/", 1)[-1] or parsed.netloc or url
+    segment = parsed.path.rstrip("/").rsplit("/", 1)[-1]
+    return unquote(segment) if segment else (parsed.netloc or url)
 
 
 async def _ingest_bytes_with_kb(
@@ -360,11 +362,17 @@ async def _ingest_bytes_with_kb(
     unless it is a PDF. Arguments the model passed always win.
     """
     try:
-        converted = convert_document(
+        converted = await asyncio.to_thread(
+            convert_document,
             data, content_type=content_type, extension=extension, charset=charset, url=page_url,
         )
     except UnsupportedDocument as e:
         return {"success": False, "error": f"Cannot ingest {display_name}: {e}"}
+    except Exception as e:  # a future converter may raise something else; never escape the tool
+        return {
+            "success": False,
+            "error": f"Cannot ingest {display_name}: could not convert it ({type(e).__name__})",
+        }
 
     meta = _build_meta(authors or list(converted.authors), abstract or converted.description or "", tags)
     meta["file_size_bytes"] = len(data)
@@ -374,7 +382,7 @@ async def _ingest_bytes_with_kb(
         meta["fetched_at"] = fetched_at
 
     if page_url:
-        default_title = converted.title or _url_title(page_url) or fallback_title
+        default_title = converted.title or _url_title(page_url)
         default_type, default_source = "web", page_url
     else:
         default_title = converted.title or fallback_title
@@ -443,13 +451,21 @@ async def _ingest_file_with_kb(
     except OSError as e:
         return {"success": False, "error": f"Cannot read file {path}: {e.strerror or e}"}
 
-    folder = saved_pages_dir(get_settings().app_name)
-    if is_saved_page_metadata(source_path, folder):
-        return {
-            "success": False,
-            "error": f"{path} is a saved page's metadata; pass the page itself",
-        }
-    saved = read_saved_page_meta(source_path, folder)
+    try:
+        folder = saved_pages_dir(get_settings().app_name)
+    except OSError:
+        # saved_pages_dir reads Path.cwd(); a deleted working directory
+        # must not stop an absolute-path ingest. Treat the file as local.
+        folder = None
+
+    saved = None
+    if folder is not None:
+        if is_saved_page_metadata(source_path, folder):
+            return {
+                "success": False,
+                "error": f"{path} is a saved page's metadata; pass the page itself",
+            }
+        saved = read_saved_page_meta(source_path, folder)
 
     return await _ingest_bytes_with_kb(
         kb_manager,

@@ -14,10 +14,13 @@ Ingestion owns this converter; ``web_fetch`` keeps its own for summaries.
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 from html.parser import HTMLParser
 
 import structlog
+
+from agentic_cli.tools._charset import text_codec
 
 logger = structlog.get_logger(__name__)
 
@@ -83,7 +86,7 @@ def _decode(data: bytes, charset: str | None) -> str:
         except UnicodeDecodeError:
             raise UnsupportedDocument("not a PDF or a UTF-8 text file") from None
     try:
-        return data.decode(charset, errors="replace")
+        return data.decode(text_codec(charset), errors="replace")
     except (LookupError, UnicodeError):
         return data.decode("utf-8", errors="replace")
 
@@ -95,8 +98,25 @@ def _convert_html(html: str, url: str | None) -> ConvertedDocument:
         reason = "not_installed"
     else:
         try:
+            from lxml import html as lxml_html
+
+            # Parse once (also avoids trafilatura's own double parse of the
+            # same markup). trafilatura 2.3.0's table handling is
+            # pathological on colspan/rowspan (quadratic in row count: a
+            # 10x20-cell table with colspan=100 rowspan=100 took ~1.25s and
+            # produced ~330K chars of output); stripping the span attributes
+            # keeps ordinary tables intact and turns that into ~0s / ~1K
+            # chars. ``fromstring("")`` raises ParserError on an empty
+            # document, caught below like any other parse failure.
+            tree = lxml_html.fromstring(html)
+            for cell in tree.iter("td", "th"):
+                cell.attrib.pop("colspan", None)
+                cell.attrib.pop("rowspan", None)
+            # trafilatura may modify the tree it is given, so metadata
+            # extraction gets its own copy taken before extract() runs.
+            tree_for_meta = copy.deepcopy(tree)
             main = trafilatura.extract(
-                html,
+                tree,
                 url=url,
                 output_format="markdown",
                 include_links=False,
@@ -105,7 +125,10 @@ def _convert_html(html: str, url: str | None) -> ConvertedDocument:
                 include_formatting=True,
                 include_comments=False,
             )
-            meta = trafilatura.extract_metadata(html, default_url=url) if main and main.strip() else None
+            meta = (
+                trafilatura.extract_metadata(tree_for_meta, default_url=url)
+                if main and main.strip() else None
+            )
         except Exception as e:  # a third-party parser; fall back rather than fail ingestion
             logger.warning("kb_convert_trafilatura_failed", error=str(e))
             main, meta, reason = None, None, "error"
@@ -122,7 +145,12 @@ def _convert_html(html: str, url: str | None) -> ConvertedDocument:
                 extractor="trafilatura",
             )
     logger.info("kb_convert_html", extractor="html2text", reason=reason)
-    return ConvertedDocument(text=_html2text(html), title=_html_title(html), extractor="html2text")
+    try:
+        text = _html2text(html)
+    except Exception as e:  # html2text is a third-party parser; never raise out of ingestion
+        logger.warning("kb_convert_html_failed", error=type(e).__name__)
+        raise UnsupportedDocument("could not convert this HTML page") from e
+    return ConvertedDocument(text=text, title=_html_title(html), extractor="html2text")
 
 
 def _clean(value: str | None) -> str | None:

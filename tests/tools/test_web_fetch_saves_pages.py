@@ -111,6 +111,25 @@ async def test_a_result_without_the_raw_body_is_not_saved(summarizer):
     assert not _folder().exists()
 
 
+async def test_a_cwd_that_cannot_be_statted_is_a_save_error(summarizer, monkeypatch):
+    """M-1: ``saved_pages_dir`` reads ``Path.cwd()``; with a deleted working
+    directory the save must become a ``save_error``, not an exception out
+    of web_fetch."""
+    from agentic_cli.tools import webfetch_tool
+
+    def _raise_cwd_gone(app_name):
+        raise FileNotFoundError("cwd deleted")
+
+    monkeypatch.setattr(webfetch_tool, "saved_pages_dir", _raise_cwd_gone)
+
+    result = await _web_fetch(_ok())
+
+    assert result["success"] is True
+    assert result["summary"] == "summary"
+    assert "saved_path" not in result
+    assert result["save_error"]
+
+
 async def test_a_failed_save_still_returns_the_summary(summarizer):
     _folder().parent.write_text("a file where the app folder should be")
 
@@ -156,6 +175,19 @@ async def test_saving_runs_cleanup(summarizer, monkeypatch):
         "max_bytes": s.webfetch_saved_max_mb * 1024 * 1024,
         "keep": page_name(URL),
     })]
+
+
+async def test_a_page_html2text_cannot_convert_is_a_failure(summarizer):
+    """Pre-existing, same class as I-1: html2text fails an assert on
+    ``<ol start>``; that must come back as a failure, not an exception out
+    of web_fetch, and the page must still be reported as saved."""
+    page = b"<html><body><ol start><li>x</li></ol></body></html>"
+    result = await _web_fetch(_ok(raw=page))
+
+    assert result["success"] is False
+    assert "AssertionError" in result["error"]
+    assert "saved_path" in result
+    assert Path(result["saved_path"]).read_bytes() == page
 
 
 async def test_a_failed_summary_still_reports_the_saved_page():

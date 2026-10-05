@@ -111,9 +111,11 @@ def save_fetched_page(url: str, result: FetchResult) -> dict[str, Any]:
     """
     if not isinstance(result.raw, bytes) or saved_page_extension(result.content_type) is None:
         return {}
-    settings = get_settings()
-    folder = saved_pages_dir(settings.app_name)
     try:
+        settings = get_settings()
+        # saved_pages_dir reads Path.cwd(); a deleted working directory
+        # must become a save_error rather than raise out of this thread.
+        folder = saved_pages_dir(settings.app_name)
         page = save_page(
             folder,
             url=url,
@@ -165,10 +167,18 @@ async def fetch_and_summarize(url: str, prompt: str, timeout: int, summarizer) -
 
     saved = await asyncio.to_thread(save_fetched_page, url, fetch_result)
 
-    markdown_content = HTMLToMarkdown().convert(
-        fetch_result.content,
-        fetch_result.content_type or "text/html",
-    )
+    try:
+        markdown_content = HTMLToMarkdown().convert(
+            fetch_result.content,
+            fetch_result.content_type or "text/html",
+        )
+    except Exception as e:  # html2text is a third-party parser; never raise out of web_fetch
+        return {
+            "success": False,
+            "error": f"Could not convert the page ({type(e).__name__})",
+            "url": url,
+            **saved,
+        }
     full_prompt = build_summarize_prompt(markdown_content, prompt)
     try:
         summary = await summarizer.summarize(markdown_content, full_prompt)
