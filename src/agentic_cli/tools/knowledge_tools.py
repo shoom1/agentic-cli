@@ -369,6 +369,9 @@ async def _ingest_bytes_with_kb(
     except UnsupportedDocument as e:
         return {"success": False, "error": f"Cannot ingest {display_name}: {e}"}
     except Exception as e:  # a future converter may raise something else; never escape the tool
+        logger.warning(
+            "kb_convert_failed", file=display_name, error=type(e).__name__, exc_info=True
+        )
         return {
             "success": False,
             "error": f"Cannot ingest {display_name}: could not convert it ({type(e).__name__})",

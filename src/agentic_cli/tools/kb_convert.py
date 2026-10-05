@@ -98,42 +98,49 @@ def _convert_html(html: str, url: str | None) -> ConvertedDocument:
         reason = "not_installed"
     else:
         try:
-            from lxml import html as lxml_html
-
-            # Parse once (also avoids trafilatura's own double parse of the
-            # same markup). trafilatura 2.3.0's table handling is
-            # pathological on colspan/rowspan (quadratic in row count: a
-            # 10x20-cell table with colspan=100 rowspan=100 took ~1.25s and
-            # produced ~330K chars of output); stripping the span attributes
-            # keeps ordinary tables intact and turns that into ~0s / ~1K
-            # chars. ``fromstring("")`` raises ParserError on an empty
-            # document, caught below like any other parse failure.
-            tree = lxml_html.fromstring(html)
-            for cell in tree.iter("td", "th"):
-                cell.attrib.pop("colspan", None)
-                cell.attrib.pop("rowspan", None)
-            # trafilatura may modify the tree it is given, so metadata
-            # extraction gets its own copy taken before extract() runs.
-            tree_for_meta = copy.deepcopy(tree)
-            main = trafilatura.extract(
-                tree,
-                url=url,
-                output_format="markdown",
-                include_links=False,
-                include_images=False,
-                include_tables=True,
-                include_formatting=True,
-                include_comments=False,
-            )
-            meta = (
-                trafilatura.extract_metadata(tree_for_meta, default_url=url)
-                if main and main.strip() else None
-            )
+            # trafilatura's own loader, not lxml.html.fromstring directly: it
+            # handles an XML declaration (typical for XHTML, which
+            # lxml.html.fromstring refuses with "Unicode strings with
+            # encoding declaration are not supported") and keeps text after
+            # an inline comment, which lxml.html.fromstring silently drops.
+            tree = trafilatura.load_html(html)
+            if tree is None:
+                # An empty or unparseable page: no main text, and nothing
+                # here to call extract() on.
+                main, meta, reason = None, None, "no_main_text"
+            else:
+                # Spans are removed, not preserved: trafilatura 2.3.0's table
+                # handling is pathological on colspan/rowspan (quadratic in
+                # row count: a 10x20-cell table with colspan=100 rowspan=100
+                # took ~1.25s and produced ~330K chars of output). Stripping
+                # the span attributes turns that into ~0s / ~1K chars, at the
+                # cost that a legitimate rowspan/colspan shifts which cells
+                # land in which row (accepted trade-off — trafilatura's span
+                # expansion is unbounded).
+                for cell in tree.iter("td", "th"):
+                    cell.attrib.pop("colspan", None)
+                    cell.attrib.pop("rowspan", None)
+                # trafilatura may modify the tree it is given, so metadata
+                # extraction gets its own copy taken before extract() runs.
+                tree_for_meta = copy.deepcopy(tree)
+                main = trafilatura.extract(
+                    tree,
+                    url=url,
+                    output_format="markdown",
+                    include_links=False,
+                    include_images=False,
+                    include_tables=True,
+                    include_formatting=True,
+                    include_comments=False,
+                )
+                meta = (
+                    trafilatura.extract_metadata(tree_for_meta, default_url=url)
+                    if main and main.strip() else None
+                )
+                reason = "no_main_text"
         except Exception as e:  # a third-party parser; fall back rather than fail ingestion
             logger.warning("kb_convert_trafilatura_failed", error=str(e))
             main, meta, reason = None, None, "error"
-        else:
-            reason = "no_main_text"
         if main and main.strip():
             logger.debug("kb_convert_html", extractor="trafilatura")
             return ConvertedDocument(
