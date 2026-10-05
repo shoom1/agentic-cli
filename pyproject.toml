@@ -63,6 +63,9 @@ kb = [
     "faiss-cpu>=1.7.0",
     "bm25s>=0.2.0",
     "rank-bm25>=0.2.2",
+    # Keeps a web page's main text for ingestion (tools/kb_convert.py);
+    # without it, ingestion falls back to html2text.
+    "trafilatura>=2.0",
 ]
 langgraph = [
     "langgraph>=0.2.0",

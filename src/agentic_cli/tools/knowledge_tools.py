@@ -22,17 +22,26 @@ The helpers (``_search_kbs``, ``_ingest_text_with_kb`` /
 managers as explicit args so both call paths stay in sync.
 """
 
+import asyncio
 from typing import Any
+from urllib.parse import unquote, urlparse
 
 import structlog
 
 logger = structlog.get_logger(__name__)
 
+from agentic_cli.config import get_settings
 from agentic_cli.constants import truncate
 from agentic_cli.paths import resolve_path
+from agentic_cli.tools.kb_convert import UnsupportedDocument, convert_document
 from agentic_cli.tools.registry import (
     register_tool,
     ToolCategory,
+)
+from agentic_cli.tools.webfetch.saved import (
+    is_saved_page_metadata,
+    read_saved_page_meta,
+    saved_pages_dir,
 )
 from agentic_cli.workflow.permissions import Capability
 from agentic_cli.workflow.service_registry import (
@@ -317,6 +326,83 @@ async def _finalize_ingest(
     }
 
 
+def _url_title(url: str) -> str:
+    """A title from a URL: its last path segment (percent-decoded), else its host."""
+    parsed = urlparse(url)
+    segment = parsed.path.rstrip("/").rsplit("/", 1)[-1]
+    return unquote(segment) if segment else (parsed.netloc or url)
+
+
+async def _ingest_bytes_with_kb(
+    kb_manager,
+    data: bytes,
+    *,
+    extension: str,
+    content_type: str | None,
+    charset: str | None,
+    page_url: str | None,
+    fetched_at: str | None,
+    truncated: bool,
+    fallback_title: str,
+    fallback_source_url: str,
+    display_name: str,
+    title: str,
+    source_type: str,
+    source_url: str | None,
+    authors: list[str] | None,
+    abstract: str,
+    tags: list[str] | None,
+) -> dict[str, Any]:
+    """Convert ``data`` and ingest it.
+
+    Shared by ``kb_ingest_file`` and ``kb_ingest_url``. ``page_url`` marks a
+    web page (a saved page or a fetched URL): it defaults to source type
+    ``web``, the page URL as source, and the page's title, else the URL's
+    last segment. ``charset`` None means a local file, which must be UTF-8
+    unless it is a PDF. Arguments the model passed always win.
+    """
+    try:
+        converted = await asyncio.to_thread(
+            convert_document,
+            data, content_type=content_type, extension=extension, charset=charset, url=page_url,
+        )
+    except UnsupportedDocument as e:
+        return {"success": False, "error": f"Cannot ingest {display_name}: {e}"}
+    except Exception as e:  # a future converter may raise something else; never escape the tool
+        return {
+            "success": False,
+            "error": f"Cannot ingest {display_name}: could not convert it ({type(e).__name__})",
+        }
+
+    meta = _build_meta(authors or list(converted.authors), abstract or converted.description or "", tags)
+    meta["file_size_bytes"] = len(data)
+    if converted.published:
+        meta["published"] = converted.published
+    if fetched_at:
+        meta["fetched_at"] = fetched_at
+
+    if page_url:
+        default_title = converted.title or _url_title(page_url)
+        default_type, default_source = "web", page_url
+    else:
+        default_title = converted.title or fallback_title
+        default_type, default_source = "local", fallback_source_url
+
+    result = await _finalize_ingest(
+        kb_manager,
+        content=converted.text,
+        title=title or default_title,
+        source_type=source_type or default_type,
+        source_url=source_url or default_source,
+        meta=meta,
+        file_bytes=data,
+        file_extension=extension,
+    )
+    if truncated and result.get("success"):
+        result["truncated"] = True
+    return result
+
+
 async def _ingest_text_with_kb(
     kb_manager,
     content: str,
@@ -344,14 +430,14 @@ async def _ingest_file_with_kb(
     kb_manager,
     path: str,
     title: str = "",
-    source_type: str = "local",
+    source_type: str = "",
     source_url: str | None = None,
     authors: list[str] | None = None,
     abstract: str = "",
     tags: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Ingest a local file. Caller's permissions engine has already gated
-    ``filesystem.read`` for ``path``."""
+    """Ingest a local file, or a page ``web_fetch`` saved. Caller's
+    permissions engine has already gated ``filesystem.read`` for ``path``."""
     if not path:
         return {"success": False, "error": "path is required"}
 
@@ -364,31 +450,41 @@ async def _ingest_file_with_kb(
         return {"success": False, "error": f"Not a valid path: {path!r}"}
     except OSError as e:
         return {"success": False, "error": f"Cannot read file {path}: {e.strerror or e}"}
-    file_extension = source_path.suffix.lower() or ".bin"
 
-    if file_extension == ".pdf":
-        content = _extract_text_from_bytes(file_bytes)
-    else:
-        try:
-            content = file_bytes.decode("utf-8")
-        except UnicodeDecodeError:
+    try:
+        folder = saved_pages_dir(get_settings().app_name)
+    except OSError:
+        # saved_pages_dir reads Path.cwd(); a deleted working directory
+        # must not stop an absolute-path ingest. Treat the file as local.
+        folder = None
+
+    saved = None
+    if folder is not None:
+        if is_saved_page_metadata(source_path, folder):
             return {
                 "success": False,
-                "error": f"Cannot ingest {path}: not a PDF or a UTF-8 text file",
+                "error": f"{path} is a saved page's metadata; pass the page itself",
             }
+        saved = read_saved_page_meta(source_path, folder)
 
-    meta = _build_meta(authors, abstract, tags)
-    meta["file_size_bytes"] = len(file_bytes)
-
-    return await _finalize_ingest(
+    return await _ingest_bytes_with_kb(
         kb_manager,
-        content=content,
-        title=title or source_path.stem,
+        file_bytes,
+        extension=source_path.suffix.lower() or ".bin",
+        content_type=saved.content_type if saved else None,
+        charset=(saved.charset or "utf-8") if saved else None,
+        page_url=saved.url if saved else None,
+        fetched_at=saved.fetched_at.isoformat() if saved else None,
+        truncated=saved.truncated if saved else False,
+        fallback_title=source_path.stem,
+        fallback_source_url=str(source_path),
+        display_name=path,
+        title=title,
         source_type=source_type,
-        source_url=source_url or str(source_path),
-        meta=meta,
-        file_bytes=file_bytes,
-        file_extension=file_extension,
+        source_url=source_url,
+        authors=authors,
+        abstract=abstract,
+        tags=tags,
     )
 
 
@@ -763,31 +859,39 @@ async def kb_ingest_text(
         Capability("filesystem.read", target_arg="path"),
     ],
     description=(
-        "Ingest a local file into the knowledge base: a PDF, whose text is "
-        "extracted, or a UTF-8 text file (Markdown, plain text, source code). "
-        "Other binary files are refused. Triggers a filesystem.read "
-        "permission check for the supplied path."
+        "Ingest a local file, or a page web_fetch saved (its saved_path), into "
+        "the knowledge base: a PDF's text, an HTML page's main text, or a UTF-8 "
+        "text file as it is. Other binary files are refused. Triggers a "
+        "filesystem.read permission check for the supplied path."
     ),
     requires="kb_manager",
 )
 async def kb_ingest_file(
     path: str,
     title: str = "",
-    source_type: str = "local",
+    source_type: str = "",
     source_url: str | None = None,
     authors: list[str] | None = None,
     abstract: str = "",
     tags: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Ingest a local PDF or UTF-8 text file into the knowledge base.
+    """Ingest a local file, or a page web_fetch saved, into the knowledge base.
+
+    A PDF's text is extracted; an HTML page goes in as its main text; any
+    other UTF-8 text file (Markdown, plain text, JSON, source code) goes in
+    as it is. Other binary files are refused. For a page web_fetch saved
+    (pass its ``saved_path``), the page's URL, title, authors and description
+    fill in what you leave empty.
 
     Args:
-        path: Absolute or relative path to a PDF or a UTF-8 text file.
-        title: Document title (defaults to file stem).
-        source_type: Source type (defaults to ``local``).
-        source_url: Optional URL of the source.
-        authors: Optional list of author names.
-        abstract: Optional paper abstract.
+        path: Path to the file, or a ``saved_path`` from web_fetch.
+        title: Document title (defaults to the page title, else the file name).
+        source_type: Source type (defaults to ``web`` for a saved page,
+            ``local`` otherwise).
+        source_url: URL of the source (defaults to the page URL for a saved
+            page, the file path otherwise).
+        authors: Author names (default: the page's authors, if any).
+        abstract: Abstract (default: the page's description, if any).
         tags: Optional tags for categorization.
     """
     kb = get_service(KB_MANAGER)

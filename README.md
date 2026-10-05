@@ -617,7 +617,7 @@ from agentic_cli.tools import (
 |------|---------|
 | `kb_search` | Hybrid BM25 + vector search with RRF fusion, filters by source/date; keyword-only without the `kb` extra or with `knowledge_base_use_mock` |
 | `kb_ingest_text` | Ingest in-memory text content (no FS or network access) |
-| `kb_ingest_file` | Ingest a local PDF or UTF-8 text file; declares `filesystem.read(path)` for the permission engine |
+| `kb_ingest_file` | Ingest a local PDF, HTML or UTF-8 text file, or a page `web_fetch` saved (`saved_path`, recorded with its URL); HTML goes in as its main text. Declares `filesystem.read(path)` |
 | `kb_ingest_url` | Ingest content from an http(s) URL; routed through the hardened `ContentFetcher` and declares `http.read(url)` |
 | `kb_read` | Return the per-document markdown sidecar (lazy-generated on first read) |
 | `kb_list` | List documents, optionally filtered |
@@ -625,6 +625,8 @@ from agentic_cli.tools import (
 | `kb_search_concepts` | Search concept pages (title-weighted, case-insensitive) |
 
 The single `kb_ingest` tool was split in 0.5.2 so each entry point declares the right capability — text-only stays under `kb.write`, while file and URL ingestion correctly trip `filesystem.read` / `http.read` checks. For arXiv papers, prefer `ingest_arxiv_paper(arxiv_id)`.
+
+Ingestion converts files with its own converter (`tools/kb_convert.py`): PDFs through pypdf, HTML through trafilatura, which keeps a page's main text and drops menus, sidebars and footers. trafilatura comes with the `kb` extra (`pip install agentic-cli[kb]`), or on its own (`pip install trafilatura`); without it, html2text converts the whole page.
 
 Bundle convenience:
 
@@ -919,6 +921,7 @@ agentic-cli/
 │   │   ├── knowledge_tools.py    # kb_search / kb_ingest_text / kb_ingest_file /
 │   │   │                         #   kb_ingest_url / kb_read / kb_list /
 │   │   │                         #   kb_write_concept / kb_search_concepts
+│   │   ├── kb_convert.py         # Ingestion converter: trafilatura / html2text, pypdf, text
 │   │   ├── file_read.py          # read_file, diff_compare
 │   │   ├── file_write.py         # write_file, edit_file (atomic)
 │   │   ├── grep_tool.py          # grep
