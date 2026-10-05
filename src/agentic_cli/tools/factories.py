@@ -192,7 +192,7 @@ def make_kb_tools(kb_manager, user_kb_manager=None) -> list[Callable]:
     async def kb_ingest_file(
         path: str,
         title: str = "",
-        source_type: str = "local",
+        source_type: str = "",
         source_url: str | None = None,
         authors: list[str] | None = None,
         abstract: str = "",

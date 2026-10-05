@@ -69,6 +69,7 @@ agentic-cli/
 │   │   ├── executor.py       # SafePythonExecutor (CORE_MODULES; SANDBOXED_MODULES gated on OS sandbox)
 │   │   ├── execution_tools.py # execute_python
 │   │   ├── knowledge_tools.py # kb_search, kb_ingest_{text,file,url}, kb_list, kb_read, kb_write_concept, kb_search_concepts
+│   │   ├── kb_convert.py     # Ingestion converter (HTML main text via trafilatura, html2text fallback; pypdf)
 │   │   ├── arxiv_tools.py    # search_arxiv, fetch_arxiv_paper, ingest_arxiv_paper
 │   │   ├── arxiv_source.py   # ArxivSearchSource (feed fetch, download_pdf)
 │   │   ├── search_sources.py # SearchSource, SearchSourceResult
