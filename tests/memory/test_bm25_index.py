@@ -3,6 +3,8 @@
 import pytest
 from pathlib import Path
 
+from tests.memory.kb_extra import require_kb_module
+
 
 class TestMockBM25Index:
     """Tests using mock BM25 (no bm25s dependency needed)."""
@@ -68,13 +70,13 @@ class TestMockBM25Index:
 
 
 def _rank_bm25_cls():
-    pytest.importorskip("rank_bm25")
+    require_kb_module("rank_bm25")
     from agentic_cli.memory.kb._bm25_backends import RankBM25Index
     return RankBM25Index
 
 
 def _bm25s_cls():
-    pytest.importorskip("bm25s")
+    require_kb_module("bm25s")
     from agentic_cli.memory.kb._bm25_backends import BM25sIndex
     return BM25sIndex
 
@@ -171,7 +173,7 @@ class TestCreateBM25IndexPicksRealBackend:
     not the mock."""
 
     def test_prefers_bm25s_when_available(self):
-        pytest.importorskip("bm25s")
+        require_kb_module("bm25s")
         from agentic_cli.memory.kb.bm25_index import create_bm25_index
         from agentic_cli.memory.kb._bm25_backends import BM25sIndex
 

@@ -14,6 +14,8 @@ import pytest
 
 from agentic_cli.tools.kb_convert import UnsupportedDocument, convert_document
 
+from tests.memory.kb_extra import require_kb_module
+
 ARTICLE = (
     "<html><head><title>Volcano notes</title>"
     '<meta name="author" content="Ada Lovelace; Mary Somerville">'
@@ -57,7 +59,7 @@ def log(monkeypatch):
 
 
 def test_html_main_text_with_trafilatura():
-    pytest.importorskip("trafilatura")
+    require_kb_module("trafilatura")
     doc = convert_document(ARTICLE.encode(), content_type="text/html", extension=".html",
                            charset="utf-8", url="https://example.com/volcanoes")
 
@@ -85,7 +87,7 @@ def test_html_falls_back_to_html2text_without_trafilatura(no_trafilatura, log):
 
 
 def test_html_falls_back_when_trafilatura_finds_no_main_text(log):
-    pytest.importorskip("trafilatura")
+    require_kb_module("trafilatura")
     shell = b"<html><head><title>App</title></head><body><div id='root'></div><script>start()</script></body></html>"
     doc = convert_document(shell, content_type="text/html", extension=".html", charset="utf-8")
 
@@ -139,7 +141,7 @@ def test_html2text_failure_is_refused_not_raised(no_trafilatura, log):
 
 
 def test_trafilatura_error_falls_back_to_html2text(log):
-    pytest.importorskip("trafilatura")
+    require_kb_module("trafilatura")
     import trafilatura
 
     def _boom(*a, **kw):
@@ -158,7 +160,7 @@ def test_hostile_table_spans_are_stripped_before_extraction():
     10x20-cell table with colspan=100 rowspan=100 took ~1.25s and produced
     ~330K chars of output. Stripping the span attributes before extraction
     must keep this fast and small."""
-    pytest.importorskip("trafilatura")
+    require_kb_module("trafilatura")
     row = "".join(f'<td colspan="100" rowspan="100">x</td>' for _ in range(20))
     table = "".join(f"<tr>{row}</tr>" for _ in range(10))
     html = (
@@ -207,7 +209,7 @@ XHTML_WITH_DECLARATION = (
 
 
 def test_an_xhtml_page_with_an_xml_declaration_uses_trafilatura():
-    pytest.importorskip("trafilatura")
+    require_kb_module("trafilatura")
     doc = convert_document(
         XHTML_WITH_DECLARATION.encode(), content_type="application/xhtml+xml",
         extension=".xhtml", charset="utf-8",
@@ -226,7 +228,7 @@ HTML_WITH_INLINE_COMMENT = (
 
 
 def test_text_after_an_inline_comment_is_kept():
-    pytest.importorskip("trafilatura")
+    require_kb_module("trafilatura")
     doc = convert_document(
         HTML_WITH_INLINE_COMMENT.encode(), content_type="text/html",
         extension=".html", charset="utf-8",
@@ -242,7 +244,7 @@ HTML_WITH_DATE_ONLY_IN_COMMENT = (
 
 
 def test_a_date_planted_inside_a_comment_is_not_published():
-    pytest.importorskip("trafilatura")
+    require_kb_module("trafilatura")
     doc = convert_document(
         HTML_WITH_DATE_ONLY_IN_COMMENT.encode(), content_type="text/html",
         extension=".html", charset="utf-8",
@@ -251,7 +253,7 @@ def test_a_date_planted_inside_a_comment_is_not_published():
 
 
 def test_empty_html_falls_back_to_html2text_without_calling_extract(log):
-    pytest.importorskip("trafilatura")
+    require_kb_module("trafilatura")
     doc = convert_document(b"", content_type="text/html", extension=".html", charset="utf-8")
 
     assert doc.extractor == "html2text"
