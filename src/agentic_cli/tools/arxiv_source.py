@@ -40,7 +40,7 @@ def _is_arxiv_pdf_url(url: str) -> bool:
         and parts.path.startswith("/pdf/")
     )
 
-logger = Loggers.knowledge_base()
+logger = Loggers.tools()
 
 _VERSION_SUFFIX_RE = re.compile(r"v\d+$")
 _NEW_FORMAT_ID_RE = re.compile(r"(\d{4}\.\d{4,5})")

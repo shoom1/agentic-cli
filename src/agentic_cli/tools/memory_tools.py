@@ -61,7 +61,7 @@ class MemoryStore(_MemoryStore):
 
 
 def _save_memory_with_store(
-    store: "MemoryStore",
+    store: _MemoryStore,
     content: str,
     tags: list[str] | None,
     importance: int,
@@ -78,7 +78,7 @@ def _save_memory_with_store(
 
 
 def _search_memory_with_store(
-    store: "MemoryStore",
+    store: _MemoryStore,
     query: str,
     limit: int,
     include_archived: bool,
@@ -102,7 +102,7 @@ def _search_memory_with_store(
 
 
 def _update_memory_with_store(
-    store: "MemoryStore",
+    store: _MemoryStore,
     item_id: str,
     content: str | None,
     tags: list[str] | None,
@@ -118,7 +118,7 @@ def _update_memory_with_store(
 
 
 def _delete_memory_with_store(
-    store: "MemoryStore",
+    store: _MemoryStore,
     item_id: str,
     purge: bool,
 ) -> dict[str, Any]:

@@ -53,6 +53,18 @@ class TestBaseSettings:
         assert settings.sessions_dir == temp_workspace / "sessions"
         assert settings.knowledge_base_dir == temp_workspace / "knowledge_base"
 
+    def test_knowledge_base_layout_paths_are_deprecated(self, temp_workspace: Path):
+        """The knowledge base lays out its own folder; settings name only the
+        folder. The two layout paths keep working, with a warning, until 0.7.0."""
+        with patch.dict(os.environ, {}, clear=True):
+            settings = BaseSettings(workspace_dir=temp_workspace)
+        kb_dir = temp_workspace / "knowledge_base"
+
+        with pytest.warns(DeprecationWarning, match="knowledge_base_documents_dir"):
+            assert settings.knowledge_base_documents_dir == kb_dir / "documents"
+        with pytest.warns(DeprecationWarning, match="knowledge_base_embeddings_dir"):
+            assert settings.knowledge_base_embeddings_dir == kb_dir / "embeddings"
+
 
 class TestAPIKeyManagement:
     """Tests for API key detection and management."""
