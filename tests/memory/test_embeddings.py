@@ -160,6 +160,14 @@ class TestEmbeddingServiceChunking:
 class TestResolveEmbeddingDevice:
     """Tests for the device-resolution autodetect helper."""
 
+    def test_is_public_in_agentic_cli_memory(self):
+        """Its old public path (agentic_cli.knowledge_base.embeddings) goes in 0.7.0."""
+        import agentic_cli.memory as memory
+        from agentic_cli.memory._core.embeddings import resolve_embedding_device
+
+        assert memory.resolve_embedding_device is resolve_embedding_device
+        assert "resolve_embedding_device" in memory.__all__
+
     def test_explicit_cpu_passes_through(self):
         from agentic_cli.memory._core.embeddings import resolve_embedding_device
         assert resolve_embedding_device("cpu") == "cpu"

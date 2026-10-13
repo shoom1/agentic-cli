@@ -37,8 +37,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   knowledge-base methods.
 - **`PaperResult` and `WebResult` moved to `agentic_cli.tools.search_sources`.**
 - **Log names:** the knowledge base logs as `agentic_cli.memory.kb` (was
-  `agentic_cli.knowledge_base`) and the memory store as
-  `agentic_cli.memory.store` (was `agentic_cli.tools.memory`).
+  `agentic_cli.knowledge_base`), the memory store as
+  `agentic_cli.memory.store` (was `agentic_cli.tools.memory`), and the arXiv
+  search source as `agentic_cli.tools` (was `agentic_cli.knowledge_base`).
 - **`web_fetch` reads an HTML, text, Markdown, JSON or XML page up to
   `webfetch_max_download_bytes` (5 MB)** instead of stopping at
   `webfetch_max_content_bytes` (100 KB), so a saved page is complete (PDFs
@@ -95,6 +96,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `kb_ingest_file(saved_path)`: the page is fetched once, under one permission
   decision, and ingested after the model has read its summary. It stays in
   `KB_WRITER_TOOLS` until then, and each call logs a warning.
+- **`settings.knowledge_base_documents_dir` and
+  `settings.knowledge_base_embeddings_dir`** warn until 0.7.0. Nothing used
+  them: the knowledge base lays out its own folder,
+  `settings.knowledge_base_dir`.
+- **`resolve_embedding_device`** is now exported from `agentic_cli.memory`; its
+  old path, `agentic_cli.knowledge_base.embeddings`, goes in 0.7.0.
 
 ### Fixed
 
