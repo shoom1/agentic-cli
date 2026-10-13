@@ -71,6 +71,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `webfetch_saved_max_age_days` (7) are deleted, then the oldest until the
   folder is under `webfetch_saved_max_mb` (200). A page that cannot be saved
   is reported as `save_error`, and the summary is still returned.
+- **CI runs the offline suite with the `kb` extra installed** (CPU-only
+  torch), so the real search backends (faiss, bm25s, rank-bm25) and
+  trafilatura are tested, not only their fakes. There a missing `kb` library
+  fails its tests instead of skipping them.
 
 ### Deprecated
 
