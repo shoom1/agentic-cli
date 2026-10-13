@@ -36,6 +36,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`sidecar_path()` and `write_sidecar_if_present()` are public**
   knowledge-base methods.
 - **`PaperResult` and `WebResult` moved to `agentic_cli.tools.search_sources`.**
+- **`import agentic_cli` no longer loads the CLI and the workflow.** The names
+  it exports load on first use, so `from agentic_cli import BaseCLIApp` works
+  as before, and importing `agentic_cli.memory` loads no other part of
+  agentic-cli. A missing dependency of an exported name now raises when the
+  name is first used, not when `agentic_cli` is imported.
 - **Log names:** the knowledge base logs as `agentic_cli.memory.kb` (was
   `agentic_cli.knowledge_base`), the memory store as
   `agentic_cli.memory.store` (was `agentic_cli.tools.memory`), and the arXiv

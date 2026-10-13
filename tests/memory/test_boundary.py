@@ -17,11 +17,9 @@ parent module after importing it (e.g. ``memory_tools.MemoryStore(...)``
 after ``from agentic_cli.tools import memory_tools`` — no name from the
 memory package is ever imported there). The ``DeprecationWarning`` the old
 paths raise is the backstop for that case. Fixtures pulled in from conftest
-are not imports either, and are invisible here too. Importing
-``agentic_cli.memory`` still runs ``agentic_cli/__init__.py``, which loads
-other agentic_cli modules; the boundary covers only the package's own
-imports, not what importing it transitively pulls in through the top-level
-package.
+are not imports either, and are invisible here too. What importing the
+package loads at runtime, through ``agentic_cli/__init__.py``, is checked by
+``test_loads_alone.py``.
 """
 
 from __future__ import annotations
