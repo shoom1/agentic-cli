@@ -26,6 +26,8 @@ from agentic_cli.memory.kb.bm25_index import create_bm25_index
 from agentic_cli.memory.kb.manager import KnowledgeBaseManager
 from agentic_cli.memory.kb.models import SourceType
 
+from tests.memory.kb_extra import require_kb_module
+
 
 @pytest.fixture
 def without_bm25s(monkeypatch):
@@ -44,7 +46,7 @@ def _keyword_hits(index) -> list[str]:
 
 
 def test_without_bm25s_rank_bm25_is_used(without_bm25s):
-    pytest.importorskip("rank_bm25")
+    require_kb_module("rank_bm25")
 
     index = create_bm25_index()
 

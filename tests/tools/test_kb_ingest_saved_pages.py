@@ -22,6 +22,8 @@ from agentic_cli.tools.knowledge_tools import kb_ingest_file
 from agentic_cli.tools.webfetch.saved import page_name, save_page, saved_pages_dir
 from agentic_cli.workflow.service_registry import set_service_registry
 
+from tests.memory.kb_extra import require_kb_module
+
 URL = "https://example.com/articles/volcanoes"
 ARTICLE = (
     "<html><head><title>Volcano notes</title>"
@@ -73,7 +75,7 @@ async def test_a_saved_page_is_ingested_as_a_web_document(kb):
 
 
 async def test_a_saved_page_supplies_title_authors_and_abstract(kb):
-    pytest.importorskip("trafilatura")
+    require_kb_module("trafilatura")
     result = await kb_ingest_file(path=str(_saved()))
 
     doc = kb.get_document(result["document_id"])
@@ -224,7 +226,7 @@ async def test_ingesting_a_saved_page_asks_nothing(tmp_path, monkeypatch):
 
 
 async def test_fetch_then_ingest_then_search(kb):
-    pytest.importorskip("trafilatura")
+    require_kb_module("trafilatura")
     from agentic_cli.tools.webfetch.fetcher import FetchResult
     from agentic_cli.tools.webfetch_tool import web_fetch
     from agentic_cli.workflow.service_registry import LLM_SUMMARIZER

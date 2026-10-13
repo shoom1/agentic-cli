@@ -9,6 +9,8 @@ import pytest
 
 from agentic_cli.memory.kb._mock_vector_store import MockVectorStore
 
+from tests.memory.kb_extra import require_kb_module
+
 
 class TestMockVectorStore:
     """Tests for MockVectorStore."""
@@ -113,7 +115,7 @@ class TestVectorStoreWithFAISS:
 
     @pytest.fixture(autouse=True)
     def _require_faiss(self):
-        pytest.importorskip("faiss")
+        require_kb_module("faiss")
 
     @pytest.fixture
     def store(self, tmp_path: Path):

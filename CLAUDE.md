@@ -195,7 +195,7 @@ Available session methods:
 - **Framework**: pytest with `asyncio_mode = "auto"`
 - **MockContext**: From `tests/conftest.py` — provides isolated settings and temp dirs for all tests
 - **MockVectorStore** (`agentic_cli.memory.kb`) and **MockEmbeddingService** (`agentic_cli.memory`): for testing without ML dependencies
-- **FAISS tests**: Guard with `pytest.importorskip("faiss")` since FAISS is not installed in dev env
+- **`kb` extra tests**: import faiss, bm25s, rank_bm25, sentence_transformers or trafilatura with `require_kb_module(name)` (`tests/memory/kb_extra.py`), not `pytest.importorskip`. Without the extra the test skips; CI's `kb-extra` job installs it and sets `KB_REQUIRE_EXTRA=1`, so a missing library fails there instead of skipping. No offline test loads an embedding model.
 - **Integration tests**: `tests/integration/` covers ADK and LangGraph pipeline tests
 
 ### Live LLM tests (real API calls)
