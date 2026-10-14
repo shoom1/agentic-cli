@@ -150,6 +150,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the research scenarios' leak check errored after other integration tests,
   and `TestFixtureIsolation` failed after `tests/workflow`. Every test now
   starts and ends with no global or context settings.
+- **The live multi-turn test no longer depends on the model keeping a name.**
+  It told the model "My name is TestBot" and asked for it back, and Gemini
+  2.5 Flash often declined to remember personal information (1 pass in 6).
+  It now asks for a project name given in the first turn (6 passes in 6).
 
 ## [0.6.2] - 2026-10-03
 
