@@ -139,6 +139,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`web_fetch` raised when html2text could not convert a page** (for
   example an `<ol start>` list); it now returns `success: false` (the page
   is still saved).
+- **The live test of a background job resuming its conversation ran again.**
+  Since 0.6.0 it errored before reaching the model, because its setup still
+  patched the tool-to-service table that 0.6.0 replaced with
+  `@register_tool(requires=...)`. Only live runs reach it, so CI never saw
+  it. Its probe tool now declares `requires="job_manager"`.
 
 ## [0.6.2] - 2026-10-03
 
