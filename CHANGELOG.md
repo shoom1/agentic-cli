@@ -36,6 +36,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`sidecar_path()` and `write_sidecar_if_present()` are public**
   knowledge-base methods.
 - **`PaperResult` and `WebResult` moved to `agentic_cli.tools.search_sources`.**
+- **Knowledge-base tests build the knowledge base with its constructor**
+  instead of assembling one attribute by attribute, so opening an existing
+  knowledge base (migration, `index.md`) is tested the way an app does it.
+  Those that use only the package moved to `tests/memory/`.
 - **`import agentic_cli` no longer loads the CLI and the workflow.** The names
   it exports load on first use, so `from agentic_cli import BaseCLIApp` works
   as before, and importing `agentic_cli.memory` loads no other part of

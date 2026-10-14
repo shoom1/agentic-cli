@@ -2,14 +2,13 @@
 
 import pytest
 
-from agentic_cli.memory.kb.models import SourceType
-from tests.test_knowledge_tools import _make_kb
+from agentic_cli.memory.kb import KnowledgeBaseManager, SourceType
 
 
 class TestIngestLog:
     @pytest.fixture
     def kb(self, tmp_path):
-        return _make_kb(tmp_path)
+        return KnowledgeBaseManager(tmp_path / "kb", use_mock=True)
 
     def test_log_appends_one_line_per_ingest(self, kb):
         kb.ingest_document(content="a", title="One", source_type=SourceType.USER)
