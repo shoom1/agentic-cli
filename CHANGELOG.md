@@ -144,6 +144,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   patched the tool-to-service table that 0.6.0 replaced with
   `@register_tool(requires=...)`. Only live runs reach it, so CI never saw
   it. Its probe tool now declares `requires="job_manager"`.
+- **Tests no longer see settings another test left behind.** A test that set
+  the global settings, or asked for them and so created the default ones,
+  left them for every later test, so some results depended on test order:
+  the research scenarios' leak check errored after other integration tests,
+  and `TestFixtureIsolation` failed after `tests/workflow`. Every test now
+  starts and ends with no global or context settings.
 
 ## [0.6.2] - 2026-10-03
 
