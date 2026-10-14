@@ -457,9 +457,9 @@ class TestConceptStoreSearch:
 
 class TestManagerConceptsProperty:
     def test_manager_exposes_concepts_pointing_at_kb_dir(self, tmp_path):
-        from tests.test_knowledge_tools import _make_kb
+        from agentic_cli.memory.kb import KnowledgeBaseManager
 
-        kb = _make_kb(tmp_path)
+        kb = KnowledgeBaseManager(tmp_path / "kb", use_mock=True)
         store = kb.concepts
         assert store.base_dir == kb.kb_dir / "concepts"
         # Idempotent — returns the same instance
