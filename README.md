@@ -263,6 +263,9 @@ absolute/user-level file. A key placed in a cwd `.env` is deliberately ignored.
 | `brave_api_key` | `BRAVE_API_KEY` | None | Brave Search API key |
 | `search_backend` | `AGENTIC_SEARCH_BACKEND` | Auto | Web search provider (tavily/brave) |
 | `webfetch_model` | `AGENTIC_WEBFETCH_MODEL` | Auto | Model for web content summarization |
+| `webfetch_max_download_bytes` | `AGENTIC_WEBFETCH_MAX_DOWNLOAD_BYTES` | 5242880 | Largest page body read and saved |
+| `webfetch_saved_max_age_days` | `AGENTIC_WEBFETCH_SAVED_MAX_AGE_DAYS` | 7 | Saved pages older than this are deleted |
+| `webfetch_saved_max_mb` | `AGENTIC_WEBFETCH_SAVED_MAX_MB` | 200 | Oldest saved pages are deleted past this size |
 | `retry_max_attempts` | `AGENTIC_RETRY_MAX_ATTEMPTS` | 3 | Max retries on transient errors |
 | `retry_initial_delay` | `AGENTIC_RETRY_INITIAL_DELAY` | 2.0 | Initial retry backoff (seconds) |
 
@@ -537,6 +540,8 @@ result = await web_fetch(
 
 Features: URL validation, robots.txt compliance, SSRF protection, content caching, PDF extraction (including arXiv).
 
+Every HTML, text, Markdown, JSON, XML or PDF page `web_fetch` reads is saved as received in `./.{app_name}/fetched/` (a folder git ignores), and the result's `saved_path` names it. Pass `saved_path` to `kb_ingest_file` to add the page to the knowledge base. HTML, text, Markdown, JSON and XML pages are read up to `webfetch_max_download_bytes` (5 MB; PDFs use `webfetch_max_pdf_bytes` instead); the summarizer sees the first `webfetch_max_content_bytes` (100 KB). Saved pages older than `webfetch_saved_max_age_days` (7) are deleted, then the oldest until the folder is under `webfetch_saved_max_mb` (200).
+
 #### ArXiv Search
 
 Search and fetch academic papers:
@@ -548,7 +553,7 @@ results = search_arxiv("transformer attention", max_results=10, categories=["cs.
 paper = fetch_arxiv_paper("1706.03762")  # "Attention Is All You Need"
 ```
 
-The `ArxivSearchSource` (in `knowledge_base/sources.py`) is cached via the service registry and reused across tools. To pull a paper into the KB, use `ingest_arxiv_paper(arxiv_id)` — it composes the arxiv source with `kb_manager`.
+The `ArxivSearchSource` (in `tools/arxiv_source.py`) is cached via the service registry and reused across tools. To pull a paper into the KB, use `ingest_arxiv_paper(arxiv_id)` — it composes the arxiv source with `kb_manager`.
 
 #### File Operations
 
@@ -610,16 +615,18 @@ from agentic_cli.tools import (
 
 | Tool | Purpose |
 |------|---------|
-| `kb_search` | Hybrid BM25 + vector search with RRF fusion, filters by source/date |
+| `kb_search` | Hybrid BM25 + vector search with RRF fusion, filters by source/date; keyword-only without the `kb` extra or with `knowledge_base_use_mock` |
 | `kb_ingest_text` | Ingest in-memory text content (no FS or network access) |
-| `kb_ingest_file` | Ingest a local PDF or UTF-8 text file; declares `filesystem.read(path)` for the permission engine |
-| `kb_ingest_url` | Ingest content from an http(s) URL; routed through the hardened `ContentFetcher` and declares `http.read(url)` |
+| `kb_ingest_file` | Ingest a local PDF, HTML or UTF-8 text file, or a page `web_fetch` saved (`saved_path`, recorded with its URL); HTML goes in as its main text. Declares `filesystem.read(path)` |
+| `kb_ingest_url` | Deprecated (removed in 0.7.0): use `web_fetch`, then `kb_ingest_file(saved_path)`. Fetches a URL through the hardened `ContentFetcher` and ingests it; declares `http.read(url)` |
 | `kb_read` | Return the per-document markdown sidecar (lazy-generated on first read) |
 | `kb_list` | List documents, optionally filtered |
 | `kb_write_concept` | Agent-authored concept/summary page (slugged, merged on overwrite) |
 | `kb_search_concepts` | Search concept pages (title-weighted, case-insensitive) |
 
 The single `kb_ingest` tool was split in 0.5.2 so each entry point declares the right capability — text-only stays under `kb.write`, while file and URL ingestion correctly trip `filesystem.read` / `http.read` checks. For arXiv papers, prefer `ingest_arxiv_paper(arxiv_id)`.
+
+Ingestion converts files with its own converter (`tools/kb_convert.py`): PDFs through pypdf, HTML through trafilatura, which keeps a page's main text and drops menus, sidebars and footers. trafilatura comes with the `kb` extra (`pip install agentic-cli[kb]`), or on its own (`pip install trafilatura`); without it, html2text converts the whole page.
 
 Bundle convenience:
 
@@ -631,21 +638,35 @@ reader     = AgentConfig(name="reader",     prompt=..., tools=KB_READER_TOOLS)
 Direct manager API for embedding in custom flows:
 
 ```python
-from agentic_cli.knowledge_base import KnowledgeBaseManager, SourceType
+from pathlib import Path
+from agentic_cli.memory import EmbeddingConfig
+from agentic_cli.memory.kb import KnowledgeBaseManager, SourceType
 
-kb = KnowledgeBaseManager(settings=settings)
-doc = await kb.ingest_document(
-    content="Machine learning is...",
+kb = KnowledgeBaseManager(
+    Path("~/.myapp/knowledge_base").expanduser(),
+    embedding=EmbeddingConfig(model_name="all-MiniLM-L6-v2"),
+    summarizer=my_summarizer,  # optional: anything with `async summarize(content, prompt) -> str`
+)
+content = "Machine learning is..."
+payload = await kb.generate_sidecar_payload(content, title="ML Introduction")  # calls the summarizer
+doc = kb.ingest_document(
+    content=content,
     title="ML Introduction",
     source_type=SourceType.WEB,
     source_url="https://example.com/ml",
+    summary=payload["summary"] or None,
+    sidecar_payload=payload,
 )
 results = kb.search("neural networks", top_k=5)        # hybrid by default
 concepts = kb.concepts.search("attention")             # concept pages
 await kb.backfill_sidecars()                           # regenerate markdown summaries
 ```
 
+`ingest_document` is synchronous and never calls the summarizer itself.
+
 The KB also maintains `index.md` and an append-only `ingest_log.md` audit trail. Source-type constants (`arxiv`, `ssrn`, `web`, `internal`, `user`, `local`) live on `SourceType`.
+
+Ingesting a document writes a summary and a sidecar with the workflow's LLM when `knowledge_base_summarize` is on (the default; one call per document). Turn it off in `~/.{app_name}/settings.json` to store the first ~500 characters instead. A knowledge base you build yourself calls the `summarizer=` you pass it in `generate_summary`, `generate_sidecar_payload` and `backfill_sidecars`; `ingest_document` stores the summary and sidecar payload you give it, or a preview.
 
 #### Memory Tools
 
@@ -654,6 +675,17 @@ Semantic, lifecycle-aware memory:
 ```python
 from agentic_cli.tools import memory_tools
 # save_memory, search_memory, update_memory, delete_memory
+```
+
+The store itself is `agentic_cli.memory.MemoryStore`, part of the memory
+package that depends on nothing else in agentic-cli:
+
+```python
+from pathlib import Path
+from agentic_cli.memory import MemoryStore
+
+store = MemoryStore(Path("~/.myapp/memory").expanduser())
+store.store("User prefers metric units", tags=["preference"])
 ```
 
 `MemoryStore` features:
@@ -857,6 +889,7 @@ agentic-cli/
 │   │   ├── settings.py           # WorkflowSettingsMixin
 │   │   ├── retry.py              # Exponential-backoff retry
 │   │   ├── tool_summaries.py     # Tool result one-liner summaries
+│   │   ├── memory_services.py    # Settings → agentic_cli.memory arguments
 │   │   ├── adk/
 │   │   │   ├── manager.py                # GoogleADKWorkflowManager
 │   │   │   ├── event_processor.py
@@ -882,11 +915,13 @@ agentic-cli/
 │   │   ├── executor.py           # SafePythonExecutor
 │   │   ├── arxiv_tools.py        # search_arxiv, fetch_arxiv_paper, ingest_arxiv_paper
 │   │   ├── arxiv_source.py       # ArxivSearchSource (service-registered)
+│   │   ├── search_sources.py     # SearchSource, SearchSourceResult
 │   │   ├── execution_tools.py    # execute_python
 │   │   ├── interaction_tools.py  # ask_clarification
 │   │   ├── knowledge_tools.py    # kb_search / kb_ingest_text / kb_ingest_file /
 │   │   │                         #   kb_ingest_url / kb_read / kb_list /
 │   │   │                         #   kb_write_concept / kb_search_concepts
+│   │   ├── kb_convert.py         # Ingestion converter: trafilatura / html2text, pypdf, text
 │   │   ├── file_read.py          # read_file, diff_compare
 │   │   ├── file_write.py         # write_file, edit_file (atomic)
 │   │   ├── grep_tool.py          # grep
@@ -894,7 +929,7 @@ agentic-cli/
 │   │   ├── search.py             # web_search (Tavily / Brave)
 │   │   ├── webfetch_tool.py      # web_fetch (orchestrator)
 │   │   ├── pdf_utils.py          # PDF text extraction helpers
-│   │   ├── memory_tools.py       # save/search/update/delete + MemoryStore
+│   │   ├── memory_tools.py       # save/search/update/delete (store: agentic_cli.memory)
 │   │   ├── _core/                # Shared planning/task logic
 │   │   │   ├── planning.py
 │   │   │   └── tasks.py
@@ -909,17 +944,17 @@ agentic-cli/
 │   │   │   ├── executor.py
 │   │   │   ├── os_sandbox/       # macOS seatbelt / Linux namespace sandboxes
 │   │   │   └── ...               # tokenizer, classifier, sandbox, audit
-│   │   └── webfetch/             # Fetcher, converter, validator, robots, summarizer
-│   ├── knowledge_base/
-│   │   ├── manager.py            # KnowledgeBaseManager (+ .concepts)
-│   │   ├── models.py             # Document, SearchResult, SourceType, …
-│   │   ├── embeddings.py         # EmbeddingService
-│   │   ├── vector_store.py       # FAISS-backed vector store
-│   │   ├── bm25_index.py         # BM25 index (hybrid search)
-│   │   ├── concepts.py           # ConceptStore (agent-authored pages)
-│   │   ├── sidecar.py            # Per-doc markdown sidecar render/parse
-│   │   ├── sources.py            # SearchSource + ArxivSearchSource
-│   │   └── _mocks.py             # MockEmbeddingService, MockVectorStore, mock BM25
+│   │   └── webfetch/             # Fetcher, converter, validator, robots, summarizer, saved pages
+│   ├── knowledge_base/           # Deprecated forwarding modules → memory.kb (removed in 0.7.0)
+│   ├── memory/                   # Knowledge base + memory store; imports nothing else from agentic_cli
+│   │   ├── __init__.py           # MemoryStore, MemoryItem, ForgettingPolicy, EmbeddingService, EmbeddingConfig, MockEmbeddingService
+│   │   ├── _core/                # Shared, private: embeddings.py, mock_embeddings.py, io.py, log.py
+│   │   ├── store.py              # MemoryStore
+│   │   └── kb/                   # Knowledge base (agentic_cli.memory.kb)
+│   │       ├── manager.py                # KnowledgeBaseManager(base_dir, embedding=, summarizer=), Summarizer
+│   │       ├── models.py                 # Document, SearchResult, SourceType
+│   │       ├── vector_store.py, bm25_index.py (+ _bm25_backends.py), concepts.py, sidecar.py
+│   │       └── _mock_vector_store.py, _mock_bm25.py
 │   └── persistence/              # (sessions are persisted natively by each
 │                                 #  orchestrator's store; the legacy JSON
 │                                 #  SessionPersistence layer was removed)

@@ -24,6 +24,7 @@ from unittest.mock import patch
 
 import pytest
 
+from agentic_cli import config as _config
 from agentic_cli.config import (
     BaseSettings,
     reload_settings,
@@ -127,6 +128,26 @@ class MockContext:
         if self._temp_dir is None:
             raise RuntimeError("MockContext not entered")
         return Path(self._temp_dir.name)
+
+
+def _clear_settings() -> None:
+    _config._settings_instance = None
+    set_context_settings(None)
+
+
+@pytest.fixture(autouse=True)
+def _no_settings_from_other_tests() -> Generator[None, None, None]:
+    """Start and end every test without global or context settings.
+
+    ``set_settings()`` has no teardown and ``get_settings()`` creates a default
+    singleton on first use, so whatever one test left there answered
+    ``get_settings()`` in the next, and results depended on test order.
+    Autouse fixtures set up before the ones a test requests and tear down
+    after them, so a fixture's own leak check still sees what its test left.
+    """
+    _clear_settings()
+    yield
+    _clear_settings()
 
 
 @pytest.fixture

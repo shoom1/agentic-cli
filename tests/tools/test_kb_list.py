@@ -15,8 +15,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from agentic_cli.knowledge_base.manager import KnowledgeBaseManager
-from agentic_cli.knowledge_base.models import SourceType
+from agentic_cli.memory.kb.manager import KnowledgeBaseManager
+from agentic_cli.memory.kb.models import SourceType
 from agentic_cli.tools.knowledge_tools import kb_list
 from agentic_cli.workflow.service_registry import set_service_registry
 

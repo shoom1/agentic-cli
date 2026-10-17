@@ -21,9 +21,9 @@ class TestConcurrentMemoryStore:
 
     async def test_concurrent_writes(self, mock_context):
         """Parallel stores should not lose data."""
-        from agentic_cli.tools.memory_tools import MemoryStore
+        from agentic_cli.memory import MemoryStore
 
-        store = MemoryStore(mock_context.settings)
+        store = MemoryStore(mock_context.settings.workspace_dir / "memory")
 
         async def write_memory(i: int) -> str:
             return store.store(f"memory-{i}", tags=[f"tag-{i}"])
@@ -38,9 +38,9 @@ class TestConcurrentMemoryStore:
 
     async def test_concurrent_read_write(self, mock_context):
         """Reads during writes should not raise or return corrupt data."""
-        from agentic_cli.tools.memory_tools import MemoryStore
+        from agentic_cli.memory import MemoryStore
 
-        store = MemoryStore(mock_context.settings)
+        store = MemoryStore(mock_context.settings.workspace_dir / "memory")
         # Seed some data
         for i in range(5):
             store.store(f"seed-{i}")

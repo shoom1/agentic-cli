@@ -7,6 +7,178 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-10-17
+
+The knowledge base and the memory store move into `agentic_cli.memory`, a
+package that depends on nothing else in agentic-cli; the old import paths
+keep working, with a warning, until 0.7.0. `web_fetch` now saves every page
+it reads, and `kb_ingest_file` adds a saved page to the knowledge base as its
+main text; `kb_ingest_url` is deprecated. Search without the `kb` extra
+returns only matching documents, keyword search ignores punctuation, and
+`thinking-prompt` is capped below 0.4, which made apps fail at startup. One
+change costs model calls, see *Changed*: apps whose agents have
+knowledge-base tools but not `web_fetch` now summarize each ingested
+document.
+
+### Changed
+
+- **Knowledge-base summaries no longer depend on `web_fetch`.** A knowledge
+  base had the LLM write a document's summary and sidecar only when some agent
+  in the app had `web_fetch`; otherwise every ingestion silently stored the
+  first ~500 characters. The workflow now gives its knowledge bases a
+  summarizer whenever the new `knowledge_base_summarize` setting is on, which
+  is the default. Apps whose agents have knowledge-base tools but not
+  `web_fetch` now make one summarizer call per ingested document; set
+  `"knowledge_base_summarize": false` in `~/.{app_name}/settings.json` to keep
+  previews. A project's settings file cannot change it.
+- **`MemoryStore` moved to `agentic_cli.memory` and takes a directory:**
+  `MemoryStore(base_dir, embedding_service=None)`. The workflow keeps it in
+  `workspace_dir/memory`, the same files as before.
+- **The knowledge base moved to `agentic_cli.memory.kb`**, next to the memory
+  store, in a package that depends on nothing else in agentic-cli.
+  `SearchSource` and `SearchSourceResult` moved to
+  `agentic_cli.tools.search_sources`. `EmbeddingService` and
+  `MockEmbeddingService` are in `agentic_cli.memory`, `MockVectorStore` in
+  `agentic_cli.memory.kb`.
+- **`agentic_cli.memory.kb.KnowledgeBaseManager` takes a directory and plain
+  arguments, never settings:** `KnowledgeBaseManager(base_dir, *,
+  embedding=EmbeddingConfig(...), summarizer=None, use_mock=False,
+  embedding_service=None, vector_store=None)`. It no longer looks a
+  summarizer up in the turn in progress. `EmbeddingConfig` is in
+  `agentic_cli.memory`.
+- **`sidecar_path()` and `write_sidecar_if_present()` are public**
+  knowledge-base methods.
+- **`PaperResult` and `WebResult` moved to `agentic_cli.tools.search_sources`.**
+- **Knowledge-base tests build the knowledge base with its constructor**
+  instead of assembling one attribute by attribute, so opening an existing
+  knowledge base (migration, `index.md`) is tested the way an app does it.
+  Those that use only the package moved to `tests/memory/`.
+- **`import agentic_cli` no longer loads the CLI and the workflow.** The names
+  it exports load on first use, so `from agentic_cli import BaseCLIApp` works
+  as before, and importing `agentic_cli.memory` loads no other part of
+  agentic-cli. A missing dependency of an exported name now raises when the
+  name is first used, not when `agentic_cli` is imported.
+- **Log names:** the knowledge base logs as `agentic_cli.memory.kb` (was
+  `agentic_cli.knowledge_base`), the memory store as
+  `agentic_cli.memory.store` (was `agentic_cli.tools.memory`), and the arXiv
+  search source as `agentic_cli.tools` (was `agentic_cli.knowledge_base`).
+- **`web_fetch` reads an HTML, text, Markdown, JSON or XML page up to
+  `webfetch_max_download_bytes` (5 MB)** instead of stopping at
+  `webfetch_max_content_bytes` (100 KB), so a saved page is complete (PDFs
+  already used `webfetch_max_pdf_bytes`). The summarizer still sees only the
+  first `webfetch_max_content_bytes`.
+- **`kb_ingest_file` stores a web page's main text, not its HTML.** An `.html`
+  file went into the knowledge base as raw HTML, tags, scripts and menus
+  included. Ingestion now has its own converter: with trafilatura installed
+  (added to the `kb` extra) a page's main text is kept and its menus,
+  sidebars and footers are dropped, and its title, authors and description
+  fill in what the call left empty; its date is stored as `published`.
+  Without trafilatura, html2text converts the whole page. For a page
+  `web_fetch` saved (`saved_path`), the document records the page's URL and
+  source type `web`. `source_type` now defaults to `web` for a saved page
+  and `local` otherwise. Hostile HTML cannot make ingestion raise or hang: a
+  table's `colspan`/`rowspan` attributes are ignored, and an unusual charset
+  label decodes as UTF-8 instead of raising or running pathologically slowly.
+
+### Added
+
+- **`KnowledgeBaseManager(summarizer=...)`.** `generate_summary`,
+  `generate_sidecar_payload` and `backfill_sidecars` call the summarizer the
+  knowledge base was given (anything with `async summarize(content, prompt)`);
+  with `None` they store previews.
+- **`web_fetch` saves every HTML, text, Markdown, JSON, XML or PDF page it
+  reads** in `./.{app_name}/fetched/` and returns its `saved_path`, so the
+  page can be added to the knowledge base later or read in full. The body is
+  saved as received, with a `.meta.json` beside it naming the URL, content
+  type and charset. The folder has its own `.gitignore`. Pages older than
+  `webfetch_saved_max_age_days` (7) are deleted, then the oldest until the
+  folder is under `webfetch_saved_max_mb` (200). A page that cannot be saved
+  is reported as `save_error`, and the summary is still returned.
+- **CI runs the offline suite with the `kb` extra installed** (CPU-only
+  torch), so the real search backends (faiss, bm25s, rank-bm25) and
+  trafilatura are tested, not only their fakes. There a missing `kb` library
+  fails its tests instead of skipping them.
+
+### Deprecated
+
+- **`agentic_cli.tools.memory_tools.MemoryStore(settings)`** still works, with
+  a `DeprecationWarning`, until 0.7.0. Use
+  `agentic_cli.memory.MemoryStore(settings.workspace_dir / "memory")`.
+- **`agentic_cli.knowledge_base`** and its modules forward to the new
+  locations, with one `DeprecationWarning`, until 0.7.0. Patching a
+  module-level name through an old module path (for example
+  `agentic_cli.knowledge_base.bm25_index.create_bm25_index`) no longer reaches
+  the code; patch the new module.
+- **`agentic_cli.knowledge_base.KnowledgeBaseManager`** keeps the old
+  `(settings=None, use_mock=False, base_dir=None, ...)` signature, the
+  summarizer of the turn in progress and `extract_text_from_pdf` until 0.7.0.
+  `isinstance` checks against it fail for knowledge bases the workflow
+  builds.
+- **`kb_ingest_url`** works until 0.7.0. Use `web_fetch`, then
+  `kb_ingest_file(saved_path)`: the page is fetched once, under one permission
+  decision, and ingested after the model has read its summary. It stays in
+  `KB_WRITER_TOOLS` until then, and each call logs a warning.
+- **`settings.knowledge_base_documents_dir` and
+  `settings.knowledge_base_embeddings_dir`** warn until 0.7.0. Nothing used
+  them: the knowledge base lays out its own folder,
+  `settings.knowledge_base_dir`.
+- **`resolve_embedding_device`** is now exported from `agentic_cli.memory`; its
+  old path, `agentic_cli.knowledge_base.embeddings`, goes in 0.7.0.
+
+### Fixed
+
+- **Apps failed at startup with thinking-prompt 0.4.** agentic-cli asked for
+  `thinking-prompt>=0.3.0`, so a fresh install got 0.4.0 (released
+  2026-10-17), which removes `SettingsDialog` and moves `AppInfo`'s display
+  settings to the session; `BaseCLIApp` could not start. The requirement is
+  now `>=0.3.0,<0.4`. If you stay on 0.6.2, add `thinking-prompt<0.4` to your
+  own requirements. Support for 0.4 is planned for a later release.
+- **Knowledge-base search without the `kb` extra returns only documents that
+  match.** Without the extra's libraries (or with `knowledge_base_use_mock`)
+  the knowledge base embeds text as a hash of it, which carries no meaning;
+  search mixed those "semantic" hits in with the keyword hits, so most
+  results in the session that ingested the documents were unrelated. Search
+  is now keyword-only in that mode. With `knowledge_base_use_mock`, memory
+  search likewise ranked memories by those hashes and could miss the one that
+  matched; the memory store now gets no embedder then and matches by
+  substring, as it does without the extra.
+- **Keyword search ignores punctuation.** Every keyword index split text on
+  whitespace only, so `orchestras` did not match "…in orchestras." and
+  `squares` did not match "sixty-four squares.". Words are now split on
+  punctuation as well, words with combining marks (Hindi, Tamil, Arabic,
+  decomposed accents) stay whole, and case is folded. An index saved before
+  this change, or one that cannot be read, is rebuilt the next time its
+  knowledge base opens.
+- **`kb_ingest_url` stored a web page's raw HTML.** It now converts the page
+  like `kb_ingest_file`, saves it as `web_fetch` does, and refuses types the
+  knowledge base cannot ingest (images, archives) instead of storing them as
+  text. It also stored only the first 100 KB of a page, with the truncation
+  marker inside the text; it now ingests the whole page (up to
+  `webfetch_max_download_bytes`).
+- **`web_fetch` raised when html2text could not convert a page** (for
+  example an `<ol start>` list); it now returns `success: false` (the page
+  is still saved).
+- **The live test of a background job resuming its conversation ran again.**
+  Since 0.6.0 it errored before reaching the model, because its setup still
+  patched the tool-to-service table that 0.6.0 replaced with
+  `@register_tool(requires=...)`. Only live runs reach it, so CI never saw
+  it. Its probe tool now declares `requires="job_manager"`.
+- **Tests no longer see settings another test left behind.** A test that set
+  the global settings, or asked for them and so created the default ones,
+  left them for every later test, so some results depended on test order:
+  the research scenarios' leak check errored after other integration tests,
+  and `TestFixtureIsolation` failed after `tests/workflow`. Every test now
+  starts and ends with no global or context settings.
+- **The live multi-turn test no longer depends on the model keeping a name.**
+  It told the model "My name is TestBot" and asked for it back, and Gemini
+  2.5 Flash often declined to remember personal information (1 pass in 6).
+  It now asks for a project name given in the first turn (6 passes in 6).
+- **The live durable-session tests no longer ask the model to remember a
+  codeword.** Asked after a restart which codeword it had been given, Gemini
+  sometimes answered that it cannot remember arbitrary information, although
+  the stored session was found (a failure in 4 of 10 runs). They now give a
+  project name and ask for it back, as the multi-turn test does (6 of 6).
+
 ## [0.6.2] - 2026-10-03
 
 Knowledge-base, permission and stability fixes for 0.6.1. A knowledge base a

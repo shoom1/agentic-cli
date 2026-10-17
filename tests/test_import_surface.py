@@ -8,7 +8,52 @@ from a private module path.
 
 from __future__ import annotations
 
+import subprocess
+import sys
+
 import pytest
+
+import agentic_cli
+
+
+def _run_fresh(code: str) -> str:
+    """Run ``code`` in a fresh interpreter, which has imported nothing yet."""
+    run = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert run.returncode == 0, run.stderr
+    return run.stdout.strip()
+
+
+class TestLazyPackageRoot:
+    """``agentic_cli`` loads what it exports on first use, so importing one
+    part of the framework (``agentic_cli.memory``) does not load the CLI and
+    the workflow with it."""
+
+    def test_importing_the_root_loads_nothing_else(self):
+        loaded = _run_fresh(
+            "import sys, agentic_cli; "
+            "print(sorted(m for m in sys.modules if m.startswith('agentic_cli')))"
+        )
+        assert loaded == "['agentic_cli']"
+
+    @pytest.mark.parametrize("name", agentic_cli.__all__)
+    def test_every_exported_name_resolves(self, name: str):
+        if name == "LangGraphWorkflowManager":
+            pytest.importorskip("langgraph")
+        assert getattr(agentic_cli, name) is not None
+
+    def test_subpackages_stay_reachable_as_attributes(self):
+        """``import agentic_cli`` used to load these, so code may reach them
+        through the root without importing them."""
+        found = _run_fresh(
+            "import agentic_cli; "
+            "print(agentic_cli.cli.app.BaseCLIApp.__name__, "
+            "agentic_cli.workflow.factory.__name__, agentic_cli.config.get_settings.__name__)"
+        )
+        assert found == "BaseCLIApp agentic_cli.workflow.factory get_settings"
+
+    def test_an_unknown_name_is_an_attribute_error(self):
+        with pytest.raises(AttributeError, match="no_such_name"):
+            agentic_cli.no_such_name  # noqa: B018
 
 
 class TestTopLevelExports:

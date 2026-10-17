@@ -8,12 +8,11 @@ interleave — otherwise iteration over self._items races mutation, raising
 
 import threading
 
-from agentic_cli.config import BaseSettings
-from agentic_cli.tools.memory_tools import MemoryStore
+from agentic_cli.memory import MemoryStore
 
 
 def test_concurrent_store_and_search_no_corruption(tmp_path):
-    store = MemoryStore(BaseSettings(workspace_dir=tmp_path))  # substring mode
+    store = MemoryStore(tmp_path / "memory")  # substring mode
     errors: list[Exception] = []
 
     def worker(i: int) -> None:
@@ -37,5 +36,5 @@ def test_concurrent_store_and_search_no_corruption(tmp_path):
     assert len(results) == 200
 
     # On-disk file is valid and complete after the concurrent churn.
-    reloaded = MemoryStore(BaseSettings(workspace_dir=tmp_path))
+    reloaded = MemoryStore(tmp_path / "memory")
     assert len(reloaded.search("memory", limit=100000)) == 200

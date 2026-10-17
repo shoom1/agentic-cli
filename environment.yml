@@ -9,5 +9,6 @@ dependencies:
   - pip:
     - pypdf>=4.0.0
     - sympy>=1.13
+    - trafilatura>=2.0
     - -e .
     - -e .[dev]

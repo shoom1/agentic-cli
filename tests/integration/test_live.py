@@ -100,10 +100,11 @@ class TestLiveMultiTurn:
             settings=live_settings,
         )
 
-        # First message
+        # First message. A project fact, not the user's name: Gemini sometimes
+        # declines to remember personal information, which made this flaky.
         events1 = await collect_events(
             manager,
-            "My name is TestBot. Remember that.",
+            "The project we are discussing is named Quillfeather. Reply OK.",
             session_id="multi-turn-test",
         )
         text1 = find_events(events1, EventType.TEXT)
@@ -112,13 +113,13 @@ class TestLiveMultiTurn:
         # Second message referencing the first
         events2 = await collect_events(
             manager,
-            "What is my name?",
+            "What is the project's name? Reply with the name only.",
             session_id="multi-turn-test",
         )
         text2 = find_events(events2, EventType.TEXT)
         assert len(text2) > 0
 
         full_text = "".join(e.content for e in text2)
-        assert "testbot" in full_text.lower()
+        assert "quillfeather" in full_text.lower()
 
         await manager.cleanup()

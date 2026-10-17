@@ -48,6 +48,7 @@ from tests.integration.helpers import (
     find_tool_calls,
     find_tool_results,
 )
+from tests.memory.kb_extra import require_kb_module
 
 # Make the `examples` namespace package importable (no __init__.py).
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -344,8 +345,8 @@ class TestKnowledgeBaseScenario:
 
     @pytest.fixture(autouse=True)
     def _require_embeddings(self):
-        pytest.importorskip("faiss")
-        pytest.importorskip("sentence_transformers")
+        require_kb_module("faiss")
+        require_kb_module("sentence_transformers")
 
     async def test_bounded_ingest_then_bounded_readback(self, research_settings):
         """Two bounded operations in one persistent conversation.

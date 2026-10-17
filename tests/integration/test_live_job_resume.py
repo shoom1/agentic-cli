@@ -29,7 +29,6 @@ import pytest
 
 from agentic_cli.config import BaseSettings, set_settings
 from agentic_cli.tools.registry import ToolCategory, register_tool
-from agentic_cli.workflow.base_manager import BaseWorkflowManager
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.events import EventType
 from agentic_cli.workflow.factory import create_workflow_manager_from_settings
@@ -54,6 +53,7 @@ _TOKEN = "RESUME_TOKEN_8731"
 @register_tool(
     category=ToolCategory.EXECUTION,
     capabilities=[Capability("longrunning.live_resume_probe")],
+    requires=JOB_MANAGER,
     long_running=True,
     description="Start a background shell job; returns a job_id immediately.",
 )
@@ -88,18 +88,11 @@ _AGENT = AgentConfig(
 
 @pytest.fixture
 def live_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """Isolated settings + a job tool mapped to the JobManager service."""
+    """Isolated settings in a temporary workspace."""
     app_name = "agentic_cli_live_resume_test"
     workspace = tmp_path / "ws"
     workspace.mkdir(parents=True)
     monkeypatch.chdir(workspace)
-
-    # Make the probe tool require the JobManager (detection is by tool name).
-    monkeypatch.setattr(
-        BaseWorkflowManager,
-        "_TOOL_SERVICE_MAP",
-        {**BaseWorkflowManager._TOOL_SERVICE_MAP, "live_resume_probe": "job_manager"},
-    )
 
     settings = BaseSettings(
         app_name=app_name, workspace_dir=workspace, permissions_enabled=False

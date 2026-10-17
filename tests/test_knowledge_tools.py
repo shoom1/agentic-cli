@@ -1,27 +1,25 @@
-"""Tests for knowledge_tools and KnowledgeBaseManager persistence.
+"""Tests for knowledge_tools.
 
 Covers:
 - E1: Error handling in kb_ingest
 - E2: success key in kb_search
 - E4: ContextVar-based KB manager lifecycle
-- E5: Content separation and v1→v2→v3 migration
 - New tools: kb_read, kb_list
-- File storage and summary generation
+- Summaries written by the ingest tools
 - Paper store migration
+
+How the knowledge base itself stores documents is tested in
+``tests/memory/test_kb_manager.py``.
 """
 
-import json
 import tempfile
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 import pytest
 
-from agentic_cli.knowledge_base.manager import (
-    KnowledgeBaseManager,
-    _FORMAT_VERSION,
-)
-from agentic_cli.knowledge_base.models import Document, DocumentChunk, SourceType
+from agentic_cli.memory.kb.manager import KnowledgeBaseManager
+from agentic_cli.memory.kb.models import Document, DocumentChunk, SourceType
 
 
 # ============================================================================
@@ -29,371 +27,9 @@ from agentic_cli.knowledge_base.models import Document, DocumentChunk, SourceTyp
 # ============================================================================
 
 
-def _make_kb(tmp_path):
+def _make_kb(tmp_path, summarizer=None):
     """Create a KB manager with mock services in a temp dir."""
-    from agentic_cli.knowledge_base._mocks import MockEmbeddingService, MockVectorStore
-
-    manager = KnowledgeBaseManager.__new__(KnowledgeBaseManager)
-    manager._lock = __import__("threading").Lock()
-    manager._settings = None
-    manager._use_mock = True
-    manager.kb_dir = tmp_path / "kb"
-    manager.documents_dir = manager.kb_dir / "documents"
-    manager.embeddings_dir = manager.kb_dir / "embeddings"
-    manager.files_dir = manager.kb_dir / "files"
-    manager.metadata_path = manager.kb_dir / "metadata.json"
-    manager.kb_dir.mkdir(parents=True, exist_ok=True)
-    manager.documents_dir.mkdir(parents=True, exist_ok=True)
-    manager.embeddings_dir.mkdir(parents=True, exist_ok=True)
-    manager.files_dir.mkdir(parents=True, exist_ok=True)
-    manager._embedding_service = MockEmbeddingService()
-    manager._vector_store = MockVectorStore(
-        index_path=manager.embeddings_dir / "index.mock",
-        embedding_dim=384,
-    )
-    manager._documents = {}
-    manager._chunks = {}
-    manager._sidecar_locks = {}
-    manager._backfill_running = False
-    manager._concepts_store = None
-    return manager
-
-
-# ============================================================================
-# KnowledgeBaseManager persistence tests (E5)
-# ============================================================================
-
-
-class TestKBManagerPersistenceV2:
-    """Tests for v2/v3 persistence format (content in per-document files)."""
-
-    @pytest.fixture
-    def kb(self, tmp_path):
-        return _make_kb(tmp_path)
-
-    def test_ingest_creates_per_doc_file(self, kb):
-        """Ingesting a document creates a per-document content file."""
-        doc = kb.ingest_document(
-            content="Hello world. This is a test.",
-            title="Test Doc",
-            source_type=SourceType.USER,
-        )
-
-        content_path = kb.documents_dir / f"{doc.id}.json"
-        assert content_path.exists()
-
-        data = json.loads(content_path.read_text())
-        assert data["content"] == "Hello world. This is a test."
-        assert len(data["chunks"]) > 0
-
-    def test_metadata_index_has_no_content(self, kb):
-        """Metadata index should not contain document or chunk content."""
-        kb.ingest_document(
-            content="Some test content for the knowledge base.",
-            title="Test",
-            source_type=SourceType.USER,
-        )
-
-        data = json.loads(kb.metadata_path.read_text())
-        assert data["version"] == _FORMAT_VERSION
-
-        for doc_data in data["documents"]:
-            assert "content" not in doc_data
-            for chunk_data in doc_data.get("chunks", []):
-                assert "content" not in chunk_data
-
-    def test_metadata_index_has_structure(self, kb):
-        """Metadata index should contain document structure (id, title, etc)."""
-        doc = kb.ingest_document(
-            content="Test content.",
-            title="My Document",
-            source_type=SourceType.ARXIV,
-            source_url="https://arxiv.org/abs/1234",
-        )
-
-        data = json.loads(kb.metadata_path.read_text())
-        assert len(data["documents"]) == 1
-
-        header = data["documents"][0]
-        assert header["id"] == doc.id
-        assert header["title"] == "My Document"
-        assert header["source_type"] == "arxiv"
-        assert header["source_url"] == "https://arxiv.org/abs/1234"
-        assert "created_at" in header
-        assert len(header["chunks"]) > 0
-
-    def test_metadata_index_has_summary(self, kb):
-        """Metadata index should include summary field."""
-        doc = kb.ingest_document(
-            content="Test content for summary generation.",
-            title="Summary Doc",
-            source_type=SourceType.USER,
-        )
-
-        data = json.loads(kb.metadata_path.read_text())
-        header = data["documents"][0]
-        assert "summary" in header
-        assert doc.summary  # Should have a summary
-
-    def test_load_roundtrip(self, kb):
-        """Documents survive save/load cycle with v3 format."""
-        doc = kb.ingest_document(
-            content="Roundtrip test content. With multiple sentences.",
-            title="Roundtrip Doc",
-            source_type=SourceType.WEB,
-            source_url="https://example.com",
-        )
-        original_content = doc.content
-        original_chunk_count = len(doc.chunks)
-        original_summary = doc.summary
-
-        # Create fresh manager pointing at same directory
-        kb2 = _make_kb(kb.kb_dir.parent)
-        kb2.kb_dir = kb.kb_dir
-        kb2.documents_dir = kb.documents_dir
-        kb2.embeddings_dir = kb.embeddings_dir
-        kb2.files_dir = kb.files_dir
-        kb2.metadata_path = kb.metadata_path
-        kb2._load_metadata()
-
-        loaded_doc = kb2.get_document(doc.id)
-        assert loaded_doc is not None
-        assert loaded_doc.content == original_content
-        assert loaded_doc.title == "Roundtrip Doc"
-        assert loaded_doc.summary == original_summary
-        assert len(loaded_doc.chunks) == original_chunk_count
-        for chunk in loaded_doc.chunks:
-            assert chunk.content, f"Chunk {chunk.id} has no content"
-
-    def test_delete_removes_content_file(self, kb):
-        """Deleting a document removes its per-document content file."""
-        doc = kb.ingest_document(
-            content="Delete me.",
-            title="To Delete",
-            source_type=SourceType.USER,
-        )
-        content_path = kb.documents_dir / f"{doc.id}.json"
-        assert content_path.exists()
-
-        kb.delete_document(doc.id)
-        assert not content_path.exists()
-
-    def test_clear_removes_all_content_files(self, kb):
-        """Clearing KB removes all per-document content files."""
-        kb.ingest_document(content="Doc 1.", title="D1", source_type=SourceType.USER)
-        kb.ingest_document(content="Doc 2.", title="D2", source_type=SourceType.USER)
-
-        doc_files = list(kb.documents_dir.glob("*.json"))
-        assert len(doc_files) == 2
-
-        kb.clear()
-
-        doc_files = list(kb.documents_dir.glob("*.json"))
-        assert len(doc_files) == 0
-
-
-class TestKBManagerMigrationV1ToV2:
-    """Tests for automatic migration from v1 to v3 format."""
-
-    @pytest.fixture
-    def kb_dir(self, tmp_path):
-        kb = tmp_path / "kb"
-        kb.mkdir()
-        (kb / "documents").mkdir()
-        (kb / "embeddings").mkdir()
-        (kb / "files").mkdir()
-        return kb
-
-    def _make_v1_metadata(self, kb_dir):
-        metadata = {
-            "documents": [
-                {
-                    "id": "doc-v1-001",
-                    "title": "V1 Document",
-                    "content": "This is old-format content.",
-                    "source_type": "user",
-                    "source_url": None,
-                    "file_path": None,
-                    "created_at": "2024-06-01T12:00:00",
-                    "updated_at": "2024-06-01T12:00:00",
-                    "metadata": {},
-                    "chunks": [
-                        {
-                            "id": "chunk-v1-001",
-                            "document_id": "doc-v1-001",
-                            "content": "This is old-format content.",
-                            "chunk_index": 0,
-                            "metadata": {"title": "V1 Document"},
-                        }
-                    ],
-                }
-            ],
-            "updated_at": "2024-06-01T12:00:00",
-        }
-        (kb_dir / "metadata.json").write_text(json.dumps(metadata))
-        return metadata
-
-    def _make_kb_manager(self, kb_dir):
-        from agentic_cli.knowledge_base._mocks import MockEmbeddingService, MockVectorStore
-
-        manager = KnowledgeBaseManager.__new__(KnowledgeBaseManager)
-        manager._lock = __import__("threading").Lock()
-        manager._settings = None
-        manager._use_mock = True
-        manager.kb_dir = kb_dir
-        manager.documents_dir = kb_dir / "documents"
-        manager.embeddings_dir = kb_dir / "embeddings"
-        manager.files_dir = kb_dir / "files"
-        manager.metadata_path = kb_dir / "metadata.json"
-        manager._embedding_service = MockEmbeddingService()
-        manager._vector_store = MockVectorStore(
-            index_path=manager.embeddings_dir / "index.mock",
-            embedding_dim=384,
-        )
-        manager._documents = {}
-        manager._chunks = {}
-        manager._sidecar_locks = {}
-        manager._backfill_running = False
-        return manager
-
-    def test_v1_loaded_correctly(self, kb_dir):
-        """V1 format loads documents with content."""
-        self._make_v1_metadata(kb_dir)
-        kb = self._make_kb_manager(kb_dir)
-        kb._load_metadata()
-
-        doc = kb.get_document("doc-v1-001")
-        assert doc is not None
-        assert doc.title == "V1 Document"
-        assert doc.content == "This is old-format content."
-        assert len(doc.chunks) == 1
-        assert doc.chunks[0].content == "This is old-format content."
-
-    def test_v1_auto_migrated_to_v3(self, kb_dir):
-        """V1 format is auto-migrated to v3 on load."""
-        self._make_v1_metadata(kb_dir)
-        kb = self._make_kb_manager(kb_dir)
-        kb._load_metadata()
-
-        # Per-document file should be created
-        content_path = kb.documents_dir / "doc-v1-001.json"
-        assert content_path.exists()
-
-        content_data = json.loads(content_path.read_text())
-        assert content_data["content"] == "This is old-format content."
-        assert "chunk-v1-001" in content_data["chunks"]
-
-        # Metadata index should be rewritten as v3
-        meta_data = json.loads(kb.metadata_path.read_text())
-        assert meta_data["version"] == _FORMAT_VERSION
-        for doc_data in meta_data["documents"]:
-            assert "content" not in doc_data
-            for chunk_data in doc_data.get("chunks", []):
-                assert "content" not in chunk_data
-
-    def test_v2_not_re_migrated(self, kb_dir):
-        """V2 format is loaded and upgraded to v3 (metadata rewrite only)."""
-        metadata = {
-            "version": 2,
-            "documents": [
-                {
-                    "id": "doc-v2-001",
-                    "title": "V2 Document",
-                    "source_type": "user",
-                    "source_url": None,
-                    "file_path": None,
-                    "created_at": "2024-06-01T12:00:00",
-                    "updated_at": "2024-06-01T12:00:00",
-                    "metadata": {},
-                    "chunks": [
-                        {
-                            "id": "chunk-v2-001",
-                            "document_id": "doc-v2-001",
-                            "chunk_index": 0,
-                            "metadata": {"title": "V2 Document"},
-                        }
-                    ],
-                }
-            ],
-            "updated_at": "2024-06-01T12:00:00",
-        }
-        (kb_dir / "metadata.json").write_text(json.dumps(metadata))
-
-        content_data = {
-            "content": "V2 content here.",
-            "chunks": {"chunk-v2-001": "V2 content here."},
-        }
-        (kb_dir / "documents" / "doc-v2-001.json").write_text(json.dumps(content_data))
-
-        kb = self._make_kb_manager(kb_dir)
-        kb._load_metadata()
-
-        doc = kb.get_document("doc-v2-001")
-        assert doc is not None
-        assert doc.content == "V2 content here."
-        assert doc.chunks[0].content == "V2 content here."
-
-
-# ============================================================================
-# File storage tests
-# ============================================================================
-
-
-class TestKBFileStorage:
-    """Tests for file storage in KnowledgeBaseManager."""
-
-    @pytest.fixture
-    def kb(self, tmp_path):
-        return _make_kb(tmp_path)
-
-    def test_store_file(self, kb):
-        """Test storing a file for a document."""
-        file_bytes = b"%PDF-1.4 fake content"
-        rel_path = kb.store_file("doc-123", file_bytes, ".pdf")
-
-        assert rel_path == Path("doc-123.pdf")
-        stored = kb.files_dir / "doc-123.pdf"
-        assert stored.exists()
-        assert stored.read_bytes() == file_bytes
-
-    def test_get_file_path(self, kb):
-        """Test getting file path for a stored document."""
-        doc = kb.ingest_document(
-            content="Test content",
-            title="Test",
-            source_type=SourceType.USER,
-            file_bytes=b"fake pdf",
-            file_extension=".pdf",
-        )
-
-        file_path = kb.get_file_path(doc.id)
-        assert file_path is not None
-        assert file_path.exists()
-        assert file_path.read_bytes() == b"fake pdf"
-
-    def test_get_file_path_no_file(self, kb):
-        """Test getting file path for document without file."""
-        doc = kb.ingest_document(
-            content="Text only",
-            title="No File",
-            source_type=SourceType.USER,
-        )
-
-        file_path = kb.get_file_path(doc.id)
-        assert file_path is None
-
-    def test_ingest_with_file_bytes(self, kb):
-        """Test ingesting document with file bytes stores the file."""
-        doc = kb.ingest_document(
-            content="Extracted text from PDF.",
-            title="PDF Document",
-            source_type=SourceType.ARXIV,
-            file_bytes=b"%PDF-1.4 content",
-            file_extension=".pdf",
-        )
-
-        assert doc.file_path is not None
-        assert (kb.files_dir / str(doc.file_path)).exists()
+    return KnowledgeBaseManager(tmp_path / "kb", summarizer=summarizer, use_mock=True)
 
 
 # ============================================================================
@@ -408,35 +44,9 @@ class TestKBSummaryGeneration:
     def kb(self, tmp_path):
         return _make_kb(tmp_path)
 
-    def test_summary_generated_on_ingest(self, kb):
-        """Summary should be generated when ingesting a document."""
-        doc = kb.ingest_document(
-            content="This is a test document with some content that should be summarized.",
-            title="Summary Test",
-            source_type=SourceType.USER,
-        )
-
-        assert doc.summary != ""
-        assert len(doc.summary) <= 503  # 500 + "..."
-
-    def test_summary_fallback_to_truncation(self, kb):
-        """Without LLM summarizer, summary falls back to truncated content."""
-        content = "Short content."
-        doc = kb.ingest_document(
-            content=content,
-            title="Short Doc",
-            source_type=SourceType.USER,
-        )
-
-        assert doc.summary == content
-
-    async def test_ingest_tool_uses_llm_summarizer_when_available(self, kb):
-        """Tool-level ingest should invoke the registered async LLM summarizer
+    async def test_ingest_tool_uses_the_given_summarizer_when_available(self, kb):
+        """Tool-level ingest should invoke the knowledge base's summarizer
         and store its output in Document.summary (not the truncate fallback)."""
-        from agentic_cli.workflow.service_registry import (
-            set_service_registry,
-            LLM_SUMMARIZER,
-        )
         from agentic_cli.tools.knowledge_tools import _ingest_text_with_kb
 
         received: dict = {}
@@ -447,17 +57,14 @@ class TestKBSummaryGeneration:
                 received["prompt"] = prompt
                 return "SUMMARY: FAKE_LLM_SUMMARY"
 
-        token = set_service_registry({LLM_SUMMARIZER: FakeSummarizer()})
-        try:
-            long_content = "This is a lengthy body. " * 50
-            result = await _ingest_text_with_kb(
-                kb,
-                content=long_content,
-                title="Test Paper",
-                source_type="user",
-            )
-        finally:
-            token.var.reset(token)
+        kb._summarizer = FakeSummarizer()
+        long_content = "This is a lengthy body. " * 50
+        result = await _ingest_text_with_kb(
+            kb,
+            content=long_content,
+            title="Test Paper",
+            source_type="user",
+        )
 
         assert result["success"] is True
         assert result["summary"] == "FAKE_LLM_SUMMARY"
@@ -471,27 +78,20 @@ class TestKBSummaryGeneration:
     async def test_ingest_tool_falls_back_when_summarizer_errors(self, kb):
         """If the LLM summarizer raises, ingest should fall back to truncation
         rather than losing the document."""
-        from agentic_cli.workflow.service_registry import (
-            set_service_registry,
-            LLM_SUMMARIZER,
-        )
         from agentic_cli.tools.knowledge_tools import _ingest_text_with_kb
 
         class BrokenSummarizer:
             async def summarize(self, content: str, prompt: str) -> str:
                 raise RuntimeError("LLM unavailable")
 
-        token = set_service_registry({LLM_SUMMARIZER: BrokenSummarizer()})
-        try:
-            content = "Fallback test content that should survive summarizer errors."
-            result = await _ingest_text_with_kb(
-                kb,
-                content=content,
-                title="Fallback Test",
-                source_type="user",
-            )
-        finally:
-            token.var.reset(token)
+        kb._summarizer = BrokenSummarizer()
+        content = "Fallback test content that should survive summarizer errors."
+        result = await _ingest_text_with_kb(
+            kb,
+            content=content,
+            title="Fallback Test",
+            source_type="user",
+        )
 
         assert result["success"] is True
         # Fallback is the first 500 chars of content.
@@ -686,20 +286,17 @@ class TestIngestDocumentTool:
                     content_type="text/html",
                 )
 
-        monkeypatch.setattr(
-            "agentic_cli.tools.knowledge_tools.get_or_create_fetcher",
-            lambda: _StubFetcher(),
-            raising=False,
-        )
-        # The import inside the helper happens lazily; patch the source too.
+        # The import inside the helper happens lazily; patch the source.
         import agentic_cli.tools.webfetch_tool as wft
         monkeypatch.setattr(wft, "get_or_create_fetcher", lambda: _StubFetcher())
 
         with tempfile.TemporaryDirectory() as tmp:
+            monkeypatch.chdir(tmp)
             kb = _make_kb(Path(tmp))
             token = set_service_registry({"kb_manager": kb})
             try:
-                result = await kb_ingest_url(url="https://example.com/article")
+                with pytest.warns(DeprecationWarning, match="kb_ingest_url"):
+                    result = await kb_ingest_url(url="https://example.com/article")
                 assert result["success"] is True
                 assert called_urls == ["https://example.com/article"]
             finally:
@@ -715,7 +312,8 @@ class TestIngestDocumentTool:
             kb = _make_kb(Path(tmp))
             token = set_service_registry({"kb_manager": kb})
             try:
-                result = await kb_ingest_url(url="file:///etc/passwd")
+                with pytest.warns(DeprecationWarning, match="kb_ingest_url"):
+                    result = await kb_ingest_url(url="file:///etc/passwd")
                 assert result["success"] is False
                 assert "http" in result["error"].lower()
             finally:
@@ -1017,7 +615,7 @@ class TestTwoTierKnowledgeBase:
             result = kb_search("attention transformers")
             assert result["success"] is True
             scopes = {r.get("scope") for r in result["results"]}
-            assert "project" in scopes or "user" in scopes
+            assert scopes == {"project", "user"}
             # Both KBs should contribute results
             assert result["total_matches"] >= 1
         finally:

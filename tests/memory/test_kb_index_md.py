@@ -2,14 +2,13 @@
 
 import pytest
 
-from agentic_cli.knowledge_base.models import SourceType
-from tests.test_knowledge_tools import _make_kb
+from agentic_cli.memory.kb import KnowledgeBaseManager, SourceType
 
 
 class TestIndexMdRebuild:
     @pytest.fixture
     def kb(self, tmp_path):
-        return _make_kb(tmp_path)
+        return KnowledgeBaseManager(tmp_path / "kb", use_mock=True)
 
     def test_index_md_created_on_first_ingest(self, kb):
         doc = kb.ingest_document(
@@ -51,10 +50,8 @@ class TestIndexMdLoadTimeMaterialization:
     when documents exist but the file is absent."""
 
     def test_load_materializes_missing_index_md(self, tmp_path):
-        from agentic_cli.knowledge_base.manager import KnowledgeBaseManager
-
         # First manager: ingest, confirm index.md exists, then delete it
-        kb = _make_kb(tmp_path)
+        kb = KnowledgeBaseManager(tmp_path / "kb", use_mock=True)
         kb.ingest_document(
             content="legacy body",
             title="Legacy Doc",
@@ -65,21 +62,8 @@ class TestIndexMdLoadTimeMaterialization:
         index_path.unlink()
         assert not index_path.exists()
 
-        # Second manager pointing at the same dir: load should re-create it
-        kb2 = KnowledgeBaseManager.__new__(KnowledgeBaseManager)
-        kb2._lock = __import__("threading").Lock()
-        kb2._settings = None
-        kb2._use_mock = True
-        kb2.kb_dir = kb.kb_dir
-        kb2.documents_dir = kb.documents_dir
-        kb2.embeddings_dir = kb.embeddings_dir
-        kb2.files_dir = kb.files_dir
-        kb2.metadata_path = kb.metadata_path
-        kb2._embedding_service = kb._embedding_service
-        kb2._vector_store = kb._vector_store
-        kb2._documents = {}
-        kb2._chunks = {}
-        kb2._load_metadata()
+        # Opening the same directory again should re-create it
+        KnowledgeBaseManager(tmp_path / "kb", use_mock=True)
 
         assert index_path.exists()
         text = index_path.read_text()

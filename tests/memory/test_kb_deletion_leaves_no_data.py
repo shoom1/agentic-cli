@@ -16,12 +16,13 @@ from pathlib import Path
 
 import pytest
 
-from agentic_cli.knowledge_base._bm25_backends import BM25sIndex, RankBM25Index
-from agentic_cli.knowledge_base._mock_bm25 import MockBM25Index
-from agentic_cli.knowledge_base._mocks import MockEmbeddingService, MockVectorStore
-from agentic_cli.knowledge_base.bm25_index import INDEX_FILES
-from agentic_cli.knowledge_base.manager import KnowledgeBaseManager
-from agentic_cli.knowledge_base.models import SourceType
+from agentic_cli.memory.kb._bm25_backends import BM25sIndex, RankBM25Index
+from agentic_cli.memory.kb._mock_bm25 import MockBM25Index
+from agentic_cli.memory._core.mock_embeddings import MockEmbeddingService
+from agentic_cli.memory.kb._mock_vector_store import MockVectorStore
+from agentic_cli.memory.kb.bm25_index import INDEX_FILES
+from agentic_cli.memory.kb.manager import KnowledgeBaseManager
+from agentic_cli.memory.kb.models import SourceType
 
 MARKER = "quixotic"  # appears only in the deleted document's text
 
@@ -105,7 +106,7 @@ def test_delete_removes_only_a_file_inside_the_files_directory(tmp_path):
 
 def _use_backend(monkeypatch, backend_cls):
     monkeypatch.setattr(
-        "agentic_cli.knowledge_base.bm25_index.create_bm25_index",
+        "agentic_cli.memory.kb.bm25_index.create_bm25_index",
         lambda use_mock=False: backend_cls(),
     )
 

@@ -5,16 +5,18 @@ from pathlib import Path
 
 import pytest
 
-from agentic_cli.knowledge_base.manager import KnowledgeBaseManager
-from agentic_cli.knowledge_base.models import (
+from agentic_cli.memory.kb.manager import KnowledgeBaseManager
+from agentic_cli.memory.kb.models import (
     Document,
     DocumentChunk,
-    PaperResult,
     SearchResult,
     SourceType,
-    WebResult,
 )
-from agentic_cli.knowledge_base._mocks import MockEmbeddingService, MockVectorStore
+from agentic_cli.memory._core.mock_embeddings import MockEmbeddingService
+from agentic_cli.memory.kb._mock_vector_store import MockVectorStore
+from agentic_cli.tools.search_sources import PaperResult, WebResult
+
+from tests.memory.kb_extra import require_kb_module
 
 
 def _make_mock_kb(base_dir: Path, **kwargs) -> KnowledgeBaseManager:
@@ -417,7 +419,7 @@ class TestWebResult:
 # Search Sources Tests
 # ============================================================================
 
-from agentic_cli.knowledge_base.sources import (
+from agentic_cli.tools.search_sources import (
     SearchSource,
     SearchSourceResult,
 )
@@ -1012,25 +1014,6 @@ class TestBaseDirOverride:
         assert (custom_dir / "embeddings").is_dir()
         assert (custom_dir / "files").is_dir()
 
-    def test_base_dir_with_settings(self, tmp_path):
-        """base_dir overrides settings paths but uses settings embedding config."""
-        custom_dir = tmp_path / "override_kb"
-        mock_settings = MagicMock()
-        mock_settings.knowledge_base_dir = tmp_path / "settings_kb"
-        mock_settings.knowledge_base_documents_dir = tmp_path / "settings_kb" / "documents"
-        mock_settings.knowledge_base_embeddings_dir = tmp_path / "settings_kb" / "embeddings"
-        mock_settings.embedding_model = "test-model"
-        mock_settings.embedding_batch_size = 16
-        mock_settings.knowledge_base_use_mock = True
-
-        kb = _make_mock_kb(custom_dir, settings=mock_settings)
-
-        # Paths come from base_dir, not settings
-        assert kb.kb_dir == custom_dir
-        assert kb.documents_dir == custom_dir / "documents"
-        # Settings KB dir was NOT used
-        assert not (tmp_path / "settings_kb").exists()
-
 
 class TestFindDocument:
     """Tests for KnowledgeBaseManager.find_document()."""
@@ -1088,7 +1071,7 @@ class TestHybridSearch:
     def test_hybrid_search_finds_exact_match(self, tmp_path):
         # Searching builds the real BM25 model (bm25s), unlike the other
         # TestHybridSearch cases which don't search or null out the index.
-        pytest.importorskip("bm25s")
+        require_kb_module("bm25s")
         kb = _make_mock_kb(tmp_path)
         kb.ingest_document(
             title="Config Doc",
@@ -1105,7 +1088,7 @@ class TestHybridSearch:
         assert results["results"][0]["document_title"] == "Config Doc"
 
     def test_rrf_fusion(self):
-        from agentic_cli.knowledge_base.manager import KnowledgeBaseManager
+        from agentic_cli.memory.kb.manager import KnowledgeBaseManager
         semantic = [("c1", 0.9), ("c2", 0.8), ("c3", 0.7)]
         bm25 = [("c3", 5.0), ("c1", 3.0), ("c4", 1.0)]
         fused = KnowledgeBaseManager._fuse_results(semantic, bm25)
@@ -1115,7 +1098,22 @@ class TestHybridSearch:
         assert "c4" in ids
 
     def test_hybrid_search_bm25_graceful_degradation(self, tmp_path):
-        kb = _make_mock_kb(tmp_path)
+        """Without a keyword index, a meaningful embedder still finds documents."""
+
+        class _StandInEmbedder:
+            """Not MockEmbeddingService, so the KB searches its vectors."""
+
+            def __init__(self) -> None:
+                self._inner = MockEmbeddingService()
+
+            def __getattr__(self, name):
+                return getattr(self._inner, name)
+
+        kb = KnowledgeBaseManager(
+            base_dir=tmp_path,
+            embedding_service=_StandInEmbedder(),
+            vector_store=MockVectorStore(index_path=tmp_path / "embeddings" / "index.mock"),
+        )
         kb.ingest_document(
             title="Test",
             content="Some test content for searching",
@@ -1125,11 +1123,22 @@ class TestHybridSearch:
         results = kb.search("test content", top_k=5)
         assert len(results["results"]) > 0  # Semantic-only still works
 
+    def test_hash_embeddings_without_a_keyword_index_find_nothing(self, tmp_path):
+        """MockEmbeddingService vectors carry no meaning: no noise in their place."""
+        kb = _make_mock_kb(tmp_path)
+        kb.ingest_document(
+            title="Test",
+            content="Some test content for searching",
+            source_type=SourceType.USER,
+        )
+        kb._bm25_index = None  # Force BM25 unavailable
+        assert kb.search("test content", top_k=5)["results"] == []
+
 
 class TestStructureAwareChunking:
 
     def test_code_block_not_split(self):
-        from agentic_cli.knowledge_base.embeddings import EmbeddingService
+        from agentic_cli.memory._core.embeddings import EmbeddingService
         # Use the real EmbeddingService methods (static/class methods only, no model needed)
         content = (
             "Here is an example:\n"
@@ -1148,7 +1157,7 @@ class TestStructureAwareChunking:
         assert "return True" in code_chunk[0]
 
     def test_markdown_heading_boundary(self):
-        from agentic_cli.knowledge_base.embeddings import EmbeddingService
+        from agentic_cli.memory._core.embeddings import EmbeddingService
         content = (
             "# Section One\n"
             "Content of section one with some details.\n\n"
@@ -1161,14 +1170,14 @@ class TestStructureAwareChunking:
         assert any("Section" in c for c in chunks)
 
     def test_fallback_for_plain_text(self):
-        from agentic_cli.knowledge_base.embeddings import EmbeddingService
+        from agentic_cli.memory._core.embeddings import EmbeddingService
         content = "Simple sentence one. Simple sentence two. Simple sentence three."
         svc = EmbeddingService.__new__(EmbeddingService)
         chunks = svc.chunk_document(content, chunk_size=100)
         assert len(chunks) >= 1
 
     def test_empty_content(self):
-        from agentic_cli.knowledge_base.embeddings import EmbeddingService
+        from agentic_cli.memory._core.embeddings import EmbeddingService
         svc = EmbeddingService.__new__(EmbeddingService)
         assert svc.chunk_document("") == []
         assert svc.chunk_document("   ") == []

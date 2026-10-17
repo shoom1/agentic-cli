@@ -32,6 +32,50 @@ jobs:
       - name: Run offline test suite
         run: conda run -n agenticcli python -m pytest -m 'not llm and not docker' -q
 
+  kb-extra:
+    name: Offline tests with the kb extra
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash -el {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up conda env (agenticcli)
+        uses: conda-incubator/setup-miniconda@v3
+        with:
+          miniforge-version: latest
+          environment-file: environment.yml
+          activate-environment: agenticcli
+
+      - name: Cache pip downloads (torch is large)
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-kb-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'environment.yml') }}
+
+      # The CPU build of torch first: from PyPI, the kb extra would pull the
+      # CUDA build, gigabytes the tests never use.
+      - name: Install CPU-only torch
+        run: >
+          conda run -n agenticcli pip install torch
+          --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Install kb and langgraph extras
+        run: conda run -n agenticcli pip install -e '.[kb,langgraph]'
+
+      # The whole offline suite, so the real backends (faiss, bm25s,
+      # rank_bm25, trafilatura) run where the other jobs use fakes.
+      # KB_REQUIRE_EXTRA makes a missing kb library fail its tests rather
+      # than skip them. The HF variables make loading an embedding model an
+      # error: no offline test needs one, so none is downloaded or cached.
+      - name: Run offline test suite (fail if the kb extra is missing)
+        env:
+          KB_REQUIRE_EXTRA: "1"
+          HF_HUB_OFFLINE: "1"
+          TRANSFORMERS_OFFLINE: "1"
+        run: conda run -n agenticcli python -m pytest -m 'not llm and not docker' -q -rs
+
   wheel-acceptance:
     name: Built-wheel acceptance (console smoke)
     runs-on: ubuntu-latest

@@ -10,7 +10,7 @@ class TestKbWriteConcept:
         return _make_kb(tmp_path)
 
     async def test_write_creates_concept_citing_existing_doc(self, kb):
-        from agentic_cli.knowledge_base.models import SourceType
+        from agentic_cli.memory.kb.models import SourceType
         from agentic_cli.tools.knowledge_tools import _write_concept_with_kb
 
         d = kb.ingest_document(
@@ -30,7 +30,7 @@ class TestKbWriteConcept:
         assert concept_path.exists()
 
     async def test_write_drops_invalid_source_ids(self, kb):
-        from agentic_cli.knowledge_base.models import SourceType
+        from agentic_cli.memory.kb.models import SourceType
         from agentic_cli.tools.knowledge_tools import _write_concept_with_kb
 
         d = kb.ingest_document(
@@ -58,7 +58,7 @@ class TestKbWriteConcept:
         assert "at least one valid source" in result["error"]
 
     async def test_write_overwrites_explicit_slug(self, kb):
-        from agentic_cli.knowledge_base.models import SourceType
+        from agentic_cli.memory.kb.models import SourceType
         from agentic_cli.tools.knowledge_tools import _write_concept_with_kb
 
         d = kb.ingest_document(content="body", title="P", source_type=SourceType.ARXIV)
@@ -85,7 +85,7 @@ class TestKbSearchConcepts:
         return _make_kb(tmp_path)
 
     async def test_search_finds_written_concept(self, kb):
-        from agentic_cli.knowledge_base.models import SourceType
+        from agentic_cli.memory.kb.models import SourceType
         from agentic_cli.tools.knowledge_tools import (
             _write_concept_with_kb,
             _search_concepts_with_kb,
@@ -113,7 +113,7 @@ class TestKbSearchConcepts:
         assert result["concepts"] == []
 
     async def test_search_respects_limit(self, kb):
-        from agentic_cli.knowledge_base.models import SourceType
+        from agentic_cli.memory.kb.models import SourceType
         from agentic_cli.tools.knowledge_tools import (
             _write_concept_with_kb,
             _search_concepts_with_kb,

@@ -22,7 +22,7 @@ Usage:
 import sys
 import time
 
-from agentic_cli.knowledge_base.sources import SearchSourceResult
+from agentic_cli.tools.search_sources import SearchSourceResult
 from agentic_cli.tools.arxiv_source import ArxivSearchSource
 
 

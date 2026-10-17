@@ -44,6 +44,7 @@ agentic-cli/
 │   │   ├── settings.py       # Workflow/tool settings schema
 │   │   ├── retry.py          # Rate-limit retry helpers
 │   │   ├── tool_summaries.py
+│   │   ├── memory_services.py # Settings → agentic_cli.memory arguments (KBs, memory store)
 │   │   ├── permissions/      # Framework-independent capability engine
 │   │   │   ├── engine.py     # PermissionEngine (deny-wins, default-ASK)
 │   │   │   ├── capabilities.py # Capability, EXEMPT
@@ -67,9 +68,11 @@ agentic-cli/
 │   │   ├── factories.py      # Service-bound tool builders (per-manager flavors)
 │   │   ├── executor.py       # SafePythonExecutor (CORE_MODULES; SANDBOXED_MODULES gated on OS sandbox)
 │   │   ├── execution_tools.py # execute_python
-│   │   ├── knowledge_tools.py # kb_search, kb_ingest_{text,file,url}, kb_list, kb_read, kb_write_concept, kb_search_concepts
+│   │   ├── knowledge_tools.py # kb_search, kb_ingest_{text,file}, kb_ingest_url (deprecated), kb_list, kb_read, kb_write_concept, kb_search_concepts
+│   │   ├── kb_convert.py     # Ingestion converter (HTML main text via trafilatura, html2text fallback; pypdf)
 │   │   ├── arxiv_tools.py    # search_arxiv, fetch_arxiv_paper, ingest_arxiv_paper
 │   │   ├── arxiv_source.py   # ArxivSearchSource (feed fetch, download_pdf)
+│   │   ├── search_sources.py # SearchSource, SearchSourceResult
 │   │   ├── pdf_utils.py      # extract_pdf_text
 │   │   ├── interaction_tools.py # ask_clarification
 │   │   ├── file_read.py      # read_file, diff_compare
@@ -78,7 +81,7 @@ agentic-cli/
 │   │   ├── grep_tool.py      # grep
 │   │   ├── search.py         # web_search (Tavily/Brave backends)
 │   │   ├── webfetch_tool.py  # web_fetch + get_or_create_fetcher (orchestrator)
-│   │   ├── memory_tools.py   # save_memory, search_memory, update_memory, delete_memory + MemoryStore
+│   │   ├── memory_tools.py   # save_memory, search_memory, update_memory, delete_memory (store: agentic_cli.memory)
 │   │   ├── _core/           # Backend-neutral tool logic
 │   │   │   ├── planning.py  # save_plan/get_plan core (+ checkbox parsing)
 │   │   │   └── tasks.py     # save_tasks/get_tasks core (+ progress parsing)
@@ -86,17 +89,17 @@ agentic-cli/
 │   │   ├── langgraph/state_tools.py # LangGraph-native plan/task tools (Command/InjectedState)
 │   │   ├── sandbox/         # Stateful code-execution sandbox (sandbox_execute)
 │   │   ├── shell/           # 8-layer shell security (+ os_sandbox/)
-│   │   └── webfetch/        # Fetcher, converter, validator, robots, summarizer
-│   ├── knowledge_base/
-│   │   ├── models.py         # Document, SearchResult
-│   │   ├── embeddings.py     # EmbeddingService
-│   │   ├── vector_store.py   # VectorStore (FAISS)
-│   │   ├── bm25_index.py     # BM25 index (+ _bm25_backends.py: bm25s / rank_bm25)
-│   │   ├── concepts.py       # ConceptStore (concept pages)
-│   │   ├── sidecar.py        # Markdown sidecar rendering
-│   │   ├── sources.py
-│   │   ├── _mocks.py         # MockEmbeddingService, MockVectorStore (+ _mock_bm25.py)
-│   │   └── manager.py        # KnowledgeBaseManager
+│   │   └── webfetch/        # Fetcher, converter, validator, robots, summarizer, saved pages
+│   ├── knowledge_base/       # Deprecated forwarding modules → memory.kb (removed in 0.7.0)
+│   ├── memory/               # Knowledge base + memory store; imports nothing else from agentic_cli
+│   │   ├── __init__.py       # MemoryStore, MemoryItem, ForgettingPolicy, EmbeddingService, EmbeddingConfig, MockEmbeddingService
+│   │   ├── _core/            # Shared, private: embeddings.py, mock_embeddings.py, io.py, log.py
+│   │   ├── store.py          # MemoryStore
+│   │   └── kb/               # Knowledge base (agentic_cli.memory.kb)
+│   │       ├── manager.py    # KnowledgeBaseManager(base_dir, embedding=, summarizer=), Summarizer
+│   │       ├── models.py     # Document, SearchResult, SourceType
+│   │       ├── vector_store.py, bm25_index.py (+ _bm25_backends.py), concepts.py, sidecar.py
+│   │       └── _mock_vector_store.py, _mock_bm25.py
 │   └── persistence/
 │       └── session.py        # SessionPersistence
 ├── tests/
@@ -160,7 +163,7 @@ Workflow:
 - **Tool error handling**: All tools return `{"success": bool, ...}` dicts. Never raise `ToolError`. An exception that still escapes a tool is a bug, but it costs one call rather than the turn: on ADK, `workflow/adk/tool_error_plugin.py::ToolErrorPlugin` turns it (and a call to a tool name that does not exist) into an error dict; LangGraph's `ToolNode` runs with `handle_tool_errors=True`.
 - **Tool registration**: Use `@register_tool(category=..., capabilities=..., description=...)` decorator. `capabilities=` is required — pass `EXEMPT` for tools that need no permission check or a list of `Capability(name, target_arg=...)` tuples the engine matches against rules. Tools are auto-discovered via the global `ToolRegistry`.
 - **ADK transfer-tool description**: ADK builds `transfer_to_agent`'s model-visible description from its docstring, which through 1.37.0 tells the model to "use TransferToAgentTool instead of this function directly" — advice meant for Python callers that made Gemini emit the class name, which ADK then rejects. `workflow/adk/transfer_tool_description.py` is a `before_model_callback` plugin that rewrites that description on the prepared `LlmRequest`: only when the tool is the **exact** native `TransferToAgentTool` (an application tool sharing the name is untouched) and only while the misleading text is present, so it is idempotent and becomes a **no-op** once the installed ADK ships a corrected docstring (upstream fixed it in 2.x). Only `description` is written — declaration name, parameter schema, required fields and the agent-name enum are preserved, and the upstream function's `__doc__` is never mutated.
-- **Permissions**: `workflow/permissions/` holds a framework-independent engine that evaluates declared capabilities against rules from four sources (builtin, user `~/.{app_name}/settings.json`, project `./.{app_name}/settings.json`, in-memory session). Interactive "Allow always" grants persist to `~/.{app_name}/project_grants.json` keyed by resolved project path — user-owned, never into the project settings file a repo could ship. ADK + LangGraph gate tool calls via `workflow/adk/permission_plugin.py::PermissionPlugin` and `workflow/langgraph/permission_wrap.py::wrap_tool_for_permission`.
+- **Permissions**: `workflow/permissions/` holds a framework-independent engine that evaluates declared capabilities against rules from four sources (builtin, user `~/.{app_name}/settings.json`, project `./.{app_name}/settings.json`, in-memory session). Interactive "Allow always" grants persist to `~/.{app_name}/project_grants.json` keyed by resolved project path — user-owned, never into the project settings file a repo could ship. ADK + LangGraph gate tool calls via `workflow/adk/permission_plugin.py::PermissionPlugin` and `workflow/langgraph/permission_wrap.py::wrap_tool_for_permission`. `web_fetch` (and the deprecated `kb_ingest_url`) saves every page it reads into `./.{app_name}/fetched/` (`tools/webfetch/saved.py`) as framework state, without a filesystem capability check: the location is fixed (the model never chooses it), a symlinked folder is refused, and cleanup only ever touches its own file names — so the builtin write deny on `.{app_name}/**` is about tools reaching into that path, not about this.
 - **Permission targets vs. patterns**: a tool argument is a *target*, a rule's target is a *pattern*. Matchers canonicalize them with different methods: `canonicalize_pattern` expands `${workdir}`/`${home}`/`${app_name}` and anchors relative filesystem patterns to the project; `canonicalize_target` expands nothing and resolves a path exactly as the tool will. Any tool that takes a path argument must resolve it with `agentic_cli.paths.resolve_path` (the same function `PathMatcher.canonicalize_target` uses), so the engine judges the location the tool acts on. `tests/tools/test_path_contract.py` fails when a new filesystem tool has no contract case. Filesystem, `http.*` and shell capabilities must name their resource (`target_arg=` or a fixed `target=`): a targetless one resolves to the wildcard, so it warns at registration and is never remembered as a grant, and saved `http.read *`-style grants are dropped on load. Filesystem grants cover the named directory (a file's own directory), never `/` or anything above home; an `http.read` grant covers the URL's site (`engine.site_scope`: `https://host/**`, exact host, HTTPS, no IP literals or local names).
 - **Service registry**: Tools access services and shared state via `get_service(key)` from `workflow.service_registry`. A single ContextVar holds a `dict[str, Any]` set by the workflow manager during processing. Complex services (KBManager, SandboxManager, MemoryStore) are lazily created; simple state (plan string, task list) lives directly in the registry dict.
 - **Manager detection**: tools declare their own service needs — `@register_tool(..., requires="kb_manager")` (or a tuple for several) — and the key is validated against `service_registry.KNOWN_SERVICE_KEYS` at registration (only *constructible* services are declarable; `user_kb_manager` is created together with `kb_manager`). `BaseWorkflowManager._detect_required_managers()` reads that metadata off the registry for each agent's tools (by registry identity, so `register(func, name=...)`'s original callable still declares its services); `_build_services()` then lazily constructs only the services actually needed, into a local dict that is released in full if a later constructor raises (nothing is published, so nothing else could close it). A downstream tool may request any framework-provided service without editing the framework; there is no mechanism for registering new service *types*, and no central name→service map.
@@ -172,7 +175,8 @@ Workflow:
 - **Session identity**: durable sessions are addressed by `SessionRef(app_name, user_id, session_id)` (`workflow/sessions.py`). Every session hook (`session_exists`/`list_sessions`/`delete_session`/`recent_messages`/`load_session`) takes an optional `user_id`, defaulting to `settings.default_user` only when the caller omits it. Backends without a session store leave `supports_sessions` False, and the base hooks raise `NotImplementedError` rather than answering with a misleading `False`/`[]`.
 - **Active turn**: the in-flight `(user, session)` is a `ContextVar` (`workflow/sessions.py::get_active_turn`), set with a token by `_workflow_context()` — concurrent turns on one manager stay isolated and nesting restores the outer turn.
 - **Resource ownership**: `cleanup()` is idempotent and awaits an async `close()` on owned resources (`BaseWorkflowManager._aclose_owned`); `WorkflowController.close()` is the single shutdown path (cancel init → shut executor → clean manager). `reinitialize(preserve_sessions=True)` (a model switch) carries the services over inside `_carrying_services()`: session grants, sandbox kernels, jobs and knowledge bases belong to the conversation, not the model, so neither the release nor a failed attempt's rollback closes them.
-- **Atomic writes**: Use `atomic_write_json`/`atomic_write_text` from `file_utils.py` for file persistence. They create files private (0600), right for the framework's own state; a write to a file the user owns (`write_file`, `edit_file`) passes `preserve_mode=True`, which keeps an existing file's permission bits and gives a new file the process default.
+- **Memory package boundary**: `agentic_cli/memory/` (the knowledge base in `memory/kb/`, the memory store in `memory/store.py`, shared embeddings and atomic writes in `memory/_core/`) imports nothing from the rest of agentic-cli, and `kb` and `store` never import each other. The rest of agentic-cli uses only `agentic_cli.memory` and `agentic_cli.memory.kb`; `workflow/memory_services.py` is the one place settings become package arguments. `tests/memory/test_boundary.py` enforces all of it, and tests under `tests/memory/` import only the package. A knowledge base summarizes only with the `summarizer=` it was given; the workflow passes itself when `knowledge_base_summarize` is on. `agentic_cli.knowledge_base` and `tools.memory_tools.MemoryStore(settings)` are deprecated forwarding paths, removed in 0.7.0. Importing it loads no other agentic_cli module (`tests/memory/test_loads_alone.py`), because the package root `agentic_cli/__init__.py` loads its exports on first use (PEP 562 `__getattr__`): nothing may be imported there eagerly, since Python runs it before every `agentic_cli.*` import.
+- **Atomic writes**: Use `atomic_write_json`/`atomic_write_text`/`atomic_write_bytes` from `file_utils.py` for file persistence. They create files private (0600), right for the framework's own state; a write to a file the user owns (`write_file`, `edit_file`) passes `preserve_mode=True`, which keeps an existing file's permission bits and gives a new file the process default.
 
 ### Console Output
 All console output must go through `ThinkingPromptSession` methods. Never use `rich.Console` or `print()` directly.
@@ -190,8 +194,8 @@ Available session methods:
 
 - **Framework**: pytest with `asyncio_mode = "auto"`
 - **MockContext**: From `tests/conftest.py` — provides isolated settings and temp dirs for all tests
-- **MockVectorStore** and **MockEmbeddingService**: In `knowledge_base/_mocks.py` for testing without ML dependencies
-- **FAISS tests**: Guard with `pytest.importorskip("faiss")` since FAISS is not installed in dev env
+- **MockVectorStore** (`agentic_cli.memory.kb`) and **MockEmbeddingService** (`agentic_cli.memory`): for testing without ML dependencies
+- **`kb` extra tests**: import faiss, bm25s, rank_bm25, sentence_transformers or trafilatura with `require_kb_module(name)` (`tests/memory/kb_extra.py`), not `pytest.importorskip`. Without the extra the test skips; CI's `kb-extra` job installs it and sets `KB_REQUIRE_EXTRA=1`, so a missing library fails there instead of skipping. No offline test loads an embedding model.
 - **Integration tests**: `tests/integration/` covers ADK and LangGraph pipeline tests
 
 ### Live LLM tests (real API calls)
