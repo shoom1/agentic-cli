@@ -21,7 +21,7 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
 ]
 dependencies = [
-    "thinking-prompt>=0.3.0",
+    "thinking-prompt>=0.3.0,<0.4",  # 0.4 renames and removes the UI API we use
     "google-adk>=1.34,<2",  # >=1.34: Anthropic adaptive thinking (negative budget)
     # ADK's Claude path (google.adk.models.anthropic_llm) and our DirectAnthropicLlm
     # import `anthropic` at module load; google-adk only pulls it via optional extras,
