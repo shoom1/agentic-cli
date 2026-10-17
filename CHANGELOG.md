@@ -160,6 +160,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   It told the model "My name is TestBot" and asked for it back, and Gemini
   2.5 Flash often declined to remember personal information (1 pass in 6).
   It now asks for a project name given in the first turn (6 passes in 6).
+- **The live durable-session tests no longer ask the model to remember a
+  codeword.** Asked after a restart which codeword it had been given, Gemini
+  sometimes answered that it cannot remember arbitrary information, although
+  the stored session was found (a failure in 4 of 10 runs). They now give a
+  project name and ask for it back, as the multi-turn test does (6 of 6).
 
 ## [0.6.2] - 2026-10-03
 
