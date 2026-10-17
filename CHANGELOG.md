@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-10-17
+
+The knowledge base and the memory store move into `agentic_cli.memory`, a
+package that depends on nothing else in agentic-cli; the old import paths
+keep working, with a warning, until 0.7.0. `web_fetch` now saves every page
+it reads, and `kb_ingest_file` adds a saved page to the knowledge base as its
+main text; `kb_ingest_url` is deprecated. Search without the `kb` extra
+returns only matching documents, keyword search ignores punctuation, and
+`thinking-prompt` is capped below 0.4, which made apps fail at startup. One
+change costs model calls, see *Changed*: apps whose agents have
+knowledge-base tools but not `web_fetch` now summarize each ingested
+document.
+
 ### Changed
 
 - **Knowledge-base summaries no longer depend on `web_fetch`.** A knowledge
