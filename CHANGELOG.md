@@ -114,6 +114,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Apps failed at startup with thinking-prompt 0.4.** agentic-cli asked for
+  `thinking-prompt>=0.3.0`, so a fresh install got 0.4.0 (released
+  2026-10-17), which removes `SettingsDialog` and moves `AppInfo`'s display
+  settings to the session; `BaseCLIApp` could not start. The requirement is
+  now `>=0.3.0,<0.4`. If you stay on 0.6.2, add `thinking-prompt<0.4` to your
+  own requirements. Support for 0.4 is planned for a later release.
 - **Knowledge-base search without the `kb` extra returns only documents that
   match.** Without the extra's libraries (or with `knowledge_base_use_mock`)
   the knowledge base embeds text as a hash of it, which carries no meaning;
