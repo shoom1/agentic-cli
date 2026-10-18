@@ -412,3 +412,225 @@ def test_a_failing_later_scope_is_left_out_of_the_catalogue(tmp_path):
     kb = KnowledgeBase({"project": project, "user": _Broken()})
 
     assert [s.document.title for s in kb.list_documents()] == ["Mine"]
+
+
+# -- text ----------------------------------------------------------------------
+
+
+def test_read_text_returns_the_stored_text(two):
+    doc = _add(two.manager("user"), "Glacier", content="The glacier retreated.")
+
+    assert two.read_text(ScopedDocument(doc, "user")) == ("The glacier retreated.", False)
+
+
+def test_read_text_cuts_at_max_chars(two):
+    doc = _add(two.manager("project"), "Long", content="x" * 50)
+
+    assert two.read_text(ScopedDocument(doc, "project"), max_chars=10) == ("x" * 10, True)
+
+
+def test_an_older_pdf_without_text_is_read_from_its_file(two):
+    doc = _add(
+        two.manager("user"), "Ledger", content="", file_bytes=pdf_with_text("Magma ledger entries"),
+        file_extension=".pdf",
+    )
+
+    assert two.read_text(ScopedDocument(doc, "user")) == ("Magma ledger entries", False)
+
+
+# -- sidecars ------------------------------------------------------------------
+
+
+class _Counting:
+    def __init__(self, delay: float = 0.0, delete=None) -> None:
+        self.calls: list[str] = []
+        self.delay = delay
+        self.delete = delete
+
+    async def summarize(self, content, prompt):
+        self.calls.append(content)
+        await asyncio.sleep(self.delay)
+        if self.delete is not None:
+            self.delete()
+        return "SUMMARY: A lazy summary.\nCLAIMS:\n- One claim.\n"
+
+
+def _without_sidecar(manager, title="Doc", **kwargs):
+    doc = _add(manager, title, **kwargs)
+    manager.sidecar_path(doc.id).unlink()
+    return doc
+
+
+async def test_sidecar_returns_the_existing_sidecar(two):
+    doc = _add(two.manager("project"), "Doc")
+
+    text = await two.sidecar(ScopedDocument(doc, "project"))
+
+    assert text == two.manager("project").sidecar_path(doc.id).read_text()
+    assert "## Summary" in text
+
+
+async def test_a_missing_sidecar_is_written_from_the_summarizer(tmp_path):
+    summarizer = _Counting()
+    manager = _manager(tmp_path / "kb", summarizer)
+    doc = _without_sidecar(manager, content="raw body")
+    kb = KnowledgeBase({"project": manager})
+
+    text = await kb.sidecar(ScopedDocument(doc, "project"))
+
+    assert "A lazy summary." in text and "- One claim." in text
+    assert manager.sidecar_path(doc.id).exists()
+    assert summarizer.calls == ["raw body"]
+
+
+async def test_two_first_reads_make_one_summarizer_call(tmp_path):
+    summarizer = _Counting(delay=0.05)
+    manager = _manager(tmp_path / "kb", summarizer)
+    doc = _without_sidecar(manager)
+    kb = KnowledgeBase({"project": manager})
+
+    await asyncio.gather(kb.sidecar(ScopedDocument(doc, "project")), kb.sidecar(ScopedDocument(doc, "project")))
+
+    assert len(summarizer.calls) == 1
+
+
+async def test_the_sidecar_lock_comes_from_the_managers_accessor(tmp_path):
+    manager = _manager(tmp_path / "kb", _Counting())
+    doc = _without_sidecar(manager)
+    seen = []
+    original = manager.get_or_create_sidecar_lock
+    manager.get_or_create_sidecar_lock = lambda doc_id: seen.append(doc_id) or original(doc_id)
+
+    await KnowledgeBase({"project": manager}).sidecar(ScopedDocument(doc, "project"))
+
+    assert seen == [doc.id]
+
+
+async def test_an_older_pdfs_sidecar_is_written_from_its_files_text(tmp_path):
+    summarizer = _Counting()
+    manager = _manager(tmp_path / "kb", summarizer)
+    doc = _without_sidecar(
+        manager, "Ledger", content="", file_bytes=pdf_with_text("Magma ledger entries"), file_extension=".pdf"
+    )
+
+    await KnowledgeBase({"project": manager}).sidecar(ScopedDocument(doc, "project"))
+
+    assert summarizer.calls == ["Magma ledger entries"]
+
+
+async def test_a_document_deleted_during_the_summarizer_call_is_not_found(tmp_path):
+    manager = _manager(tmp_path / "kb")
+    doc = _without_sidecar(manager)
+    manager._summarizer = _Counting(delete=lambda: manager.delete_document(doc.id))
+
+    with pytest.raises(DocumentNotFound):
+        await KnowledgeBase({"project": manager}).sidecar(ScopedDocument(doc, "project"))
+
+    assert not manager.sidecar_path(doc.id).exists()
+
+
+async def test_deleting_a_document_drops_its_sidecar_lock(tmp_path):
+    manager = _manager(tmp_path / "kb", _Counting())
+    doc = _without_sidecar(manager)
+    await KnowledgeBase({"project": manager}).sidecar(ScopedDocument(doc, "project"))
+    assert doc.id in manager._sidecar_locks
+
+    manager.delete_document(doc.id)
+
+    assert doc.id not in manager._sidecar_locks
+
+
+# -- concepts ------------------------------------------------------------------
+
+
+def test_a_concept_cites_documents_of_any_scope(two):
+    project_doc = _add(two.manager("project"), "Basalt")
+    user_doc = _add(two.manager("user"), "Glacier")
+
+    result = two.write_concept(
+        "Volcanic rocks", "What the knowledge base knows.", [project_doc.id, user_doc.id, "not-a-real-id"]
+    )
+
+    assert result["success"] is True
+    assert result["slug"] == "volcanic-rocks"
+    assert result["invalid_sources"] == ["not-a-real-id"]
+    assert (two.manager("project").kb_dir / "concepts" / "volcanic-rocks.md").exists()
+    assert not (two.manager("user").kb_dir / "concepts").exists()
+
+
+def test_a_concept_with_no_valid_source_fails(two):
+    result = two.write_concept("X", "b", ["fake-1", "fake-2"])
+
+    assert result["success"] is False
+    assert "at least one valid source" in result["error"]
+
+
+def test_a_concept_with_no_sources_fails(two):
+    assert two.write_concept("X", "b", [])["success"] is False
+
+
+def test_an_explicit_slug_updates_the_concept(two):
+    doc = _add(two.manager("project"), "P")
+    two.write_concept("T", "v1", [doc.id], slug="x")
+
+    assert two.write_concept("T", "v2", [doc.id], slug="x")["action"] == "updated"
+
+
+def test_concepts_are_searched_in_the_first_scope(two):
+    doc = _add(two.manager("project"), "P")
+    for i in range(5):
+        two.write_concept(f"Diffusion {i}", "Synthesis.", [doc.id], slug=f"c{i}")
+
+    assert [hit["slug"] for hit in two.search_concepts("diffusion 3")] == ["c3"]
+    assert len(two.search_concepts("diffusion", limit=2)) == 2
+    assert two.search_concepts("nothing") == []
+
+
+# -- maintenance ---------------------------------------------------------------
+
+
+async def test_backfill_runs_over_every_scope(tmp_path):
+    project = _manager(tmp_path / "project", _Counting())
+    user = _manager(tmp_path / "user", _Counting())
+    _without_sidecar(project, "P")
+    _without_sidecar(user, "U1")
+    _without_sidecar(user, "U2")
+    seen = []
+
+    results = await KnowledgeBase({"project": project, "user": user}).backfill_sidecars(
+        progress=lambda scope, done, total, doc: seen.append((scope, done, total, doc.title))
+    )
+
+    assert results == [BackfillResult("project", 1), BackfillResult("user", 2)]
+    assert seen == [("project", 0, 1, "P"), ("user", 0, 2, "U1"), ("user", 1, 2, "U2")]
+
+
+async def test_one_scopes_failure_does_not_stop_the_next(tmp_path):
+    project = _manager(tmp_path / "project", _Counting())
+    user = _manager(tmp_path / "user", _Counting())
+    _without_sidecar(user, "U")
+    project._backfill_running = True  # another backfill holds the project scope
+
+    results = await KnowledgeBase({"project": project, "user": user}).backfill_sidecars()
+
+    assert results[0].scope == "project" and isinstance(results[0].error, BackfillAlreadyRunning)
+    assert results[1] == BackfillResult("user", 1)
+
+
+async def test_a_shared_directory_is_backfilled_once(tmp_path):
+    shared = _manager(tmp_path / "shared", _Counting())
+    _without_sidecar(shared)
+
+    results = await KnowledgeBase({"project": shared, "user": shared}).backfill_sidecars()
+
+    assert results == [BackfillResult("project", 1)]
+
+
+def test_stats_per_scope(two):
+    _add(two.manager("user"), "U")
+
+    stats = two.stats()
+
+    assert list(stats) == ["project", "user"]
+    assert stats["project"]["document_count"] == 0
+    assert stats["user"]["document_count"] == 1

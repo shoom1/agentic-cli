@@ -16,6 +16,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recording from 0.6.3 (`tests/tools/kb_tool_contract.json`). A second test
   pins what `agentic_cli.memory` and `agentic_cli.memory.kb` export. 0.6.4
   moves the knowledge-base logic into the package behind both.
+- **`agentic_cli.memory.kb.KnowledgeBase`** (provisional: its name and
+  methods may change in 0.7.0) serves the project and user knowledge bases
+  as one. `KnowledgeBase.open({"project": dir, "user": dir}, ...)` builds one
+  `KnowledgeBaseManager` per directory and shares one embedding service
+  across them; the class also takes ready managers. It searches every scope
+  and merges the hits by reciprocal rank fusion (`search`), looks documents
+  up in scope order (`find_document`, `get_document`), lists one catalogue
+  (`list_documents`), reads text and sidecars (`read_text`, `sidecar`),
+  writes and searches concept pages (`write_concept`, `search_concepts`),
+  backfills every scope (`backfill_sidecars`, returning a `BackfillResult`
+  per scope) and reports `stats()`. Results that name one document are a
+  `ScopedDocument(document, scope)`; `DocumentNotFound` means the document
+  went away mid-operation.
 - **Each index records the embedding model that built it.** A knowledge base
   writes `embeddings/model.json` and the memory store
   `memory/embedding_model.json` (model name and dimension): the knowledge

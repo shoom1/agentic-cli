@@ -19,6 +19,7 @@ from typing import Any
 
 from agentic_cli.memory._core.embeddings import EmbeddingConfig, EmbeddingService
 from agentic_cli.memory._core.log import get_logger
+from agentic_cli.memory.kb import convert as _convert
 from agentic_cli.memory.kb.manager import KnowledgeBaseManager
 from agentic_cli.memory.kb.models import Document, SourceType
 
@@ -288,3 +289,96 @@ class KnowledgeBase:
                 listed.append(ScopedDocument(doc, name))
         listed.sort(key=lambda s: s.document.updated_at, reverse=True)
         return listed if limit is None else listed[:limit]
+
+    def read_text(self, doc: ScopedDocument, *, max_chars: int | None = None) -> tuple[str, bool]:
+        """The document's stored text, and whether it was cut at ``max_chars``.
+
+        A PDF stored without text (from before text was kept) is read from
+        its stored file.
+        """
+        document = doc.document
+        text = document.content
+        if not text and document.file_path:
+            file_path = self.manager(doc.scope).get_file_path(document.id)
+            if file_path is not None and str(file_path).endswith(".pdf"):
+                text = _convert.extract_pdf_text(file_path)
+        if max_chars is not None and len(text) > max_chars:
+            return text[:max_chars], True
+        return text, False
+
+    async def sidecar(self, doc: ScopedDocument) -> str:
+        """The document's sidecar, written first when it is missing.
+
+        The summarizer is called under the document's sidecar lock, so two
+        first reads make one call.
+
+        Raises:
+            DocumentNotFound: the document was deleted during the
+                summarizer call (nothing is written).
+        """
+        manager = self.manager(doc.scope)
+        document = doc.document
+        path = manager.sidecar_path(document.id)
+        if not path.exists():
+            async with manager.get_or_create_sidecar_lock(document.id):
+                if not path.exists():
+                    text, _ = self.read_text(doc)
+                    payload = await manager.generate_sidecar_payload(text, title=document.title)
+                    if not manager.write_sidecar_if_present(document, payload):
+                        raise DocumentNotFound(document.id)
+        return path.read_text()
+
+    # -- concepts --------------------------------------------------------------
+
+    def write_concept(
+        self, title: str, body: str, sources: list[str], *, slug: str = ""
+    ) -> dict[str, Any]:
+        """Write a concept page to the first scope; each source must exist in some scope.
+
+        Returns what ``ConceptStore.write`` returns.
+        """
+        _, first = self._first()
+
+        def exists(doc_id: str) -> bool:
+            return any(m.get_document(doc_id) is not None for m in self._managers.values())
+
+        return first.concepts.write(
+            title=title, body=body, sources=sources, slug=slug, valid_ids_check=exists
+        )
+
+    def search_concepts(self, query: str, *, limit: int = 10) -> list[dict[str, Any]]:
+        """Search the first scope's concept pages."""
+        _, first = self._first()
+        return first.concepts.search(query, limit=limit)
+
+    # -- maintenance -------------------------------------------------------------
+
+    async def backfill_sidecars(
+        self, *, progress: ProgressCallback | None = None
+    ) -> list[BackfillResult]:
+        """Write the missing sidecars of every scope, in order.
+
+        ``progress(scope, done, total, document)`` is called before each
+        summarizer call. A scope's error (``BackfillAlreadyRunning``, or
+        whatever stopped it) is its result's ``error``; the next scope still
+        runs.
+        """
+        results: list[BackfillResult] = []
+        for name, manager in self._managers.items():
+            callback = None
+            if progress is not None:
+
+                def callback(done: int, total: int, document: Document, _scope: str = name) -> None:
+                    progress(_scope, done, total, document)
+
+            try:
+                written = await manager.backfill_sidecars(progress_cb=callback)
+            except Exception as e:
+                results.append(BackfillResult(name, 0, e))
+                continue
+            results.append(BackfillResult(name, written))
+        return results
+
+    def stats(self) -> dict[str, dict[str, Any]]:
+        """Each scope's ``get_stats()``, by scope name."""
+        return {name: manager.get_stats() for name, manager in self._managers.items()}
