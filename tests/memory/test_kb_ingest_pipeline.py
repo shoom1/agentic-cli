@@ -262,3 +262,116 @@ async def test_a_converter_crash_is_a_conversion_failure(kb, monkeypatch):
 async def test_no_text_and_no_bytes_is_empty(kb):
     with pytest.raises(EmptyDocument):
         await kb.ingest_bytes(b"", extension=".txt")
+
+
+async def test_nothing_is_stored_for_an_empty_document(kb):
+    with pytest.raises(EmptyDocument):
+        await kb.ingest_text("")
+    with pytest.raises(EmptyDocument):
+        await kb.ingest_bytes(b"", extension=".txt")
+
+    assert kb.list_documents() == []
+
+
+# -- scopes --------------------------------------------------------------------
+
+
+async def test_an_alias_scope_reports_the_real_scopes_name(tmp_path, summarizer):
+    manager = KnowledgeBaseManager(tmp_path / "kb", use_mock=True, summarizer=summarizer)
+    kb = KnowledgeBase({"project": manager, "user": manager})
+
+    found = await kb.ingest_text("Alias text.", title="Alias", scope="user")
+
+    assert found.scope == "project"
+    assert manager.get_document(found.document.id) is not None
+
+
+async def test_an_unknown_scope_raises_and_stores_nothing(kb):
+    with pytest.raises(KeyError):
+        await kb.ingest_text("Text.", scope="typo")
+    with pytest.raises(KeyError):
+        await kb.ingest_bytes(b"Text.", extension=".txt", scope="typo")
+
+    assert kb.list_documents() == []
+
+
+async def test_the_scope_is_checked_before_converting(kb, monkeypatch):
+    calls = []
+    real = convert.convert_document
+
+    def counting(*args, **kwargs):
+        calls.append(1)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(convert, "convert_document", counting)
+
+    with pytest.raises(KeyError):
+        await kb.ingest_bytes(b"\xff\xfe\x00\x01", extension=".bin", scope="typo")
+
+    assert calls == []
+
+
+async def test_conversion_runs_off_the_event_loop(kb, monkeypatch):
+    import threading
+
+    seen = []
+    real = convert.convert_document
+
+    def recording(*args, **kwargs):
+        seen.append(threading.get_ident())
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(convert, "convert_document", recording)
+
+    await kb.ingest_bytes(b"Some text.", extension=".txt")
+
+    assert seen and seen[0] != threading.get_ident()
+
+
+# -- source_type as a string -----------------------------------------------------
+
+
+async def test_a_string_source_type_is_accepted(kb):
+    text = await kb.ingest_text("hello", source_type="web")
+    data = await kb.ingest_bytes(b"hello again", extension=".txt", source_type="arxiv")
+
+    assert text.document.source_type is SourceType.WEB
+    assert data.document.source_type is SourceType.ARXIV
+
+
+async def test_an_unknown_source_type_fails_before_anything_happens(kb, summarizer):
+    with pytest.raises(ValueError):
+        await kb.ingest_text("hello", source_type="nonsense")
+    with pytest.raises(ValueError):
+        await kb.ingest_bytes(b"hello", extension=".txt", source_type="nonsense")
+
+    assert summarizer.prompts == []
+    assert kb.list_documents() == []
+
+
+# -- a summarizer answer that is not text ------------------------------------------
+
+
+async def test_a_summarizer_answer_that_is_not_text_stores_the_preview(tmp_path):
+    summarizer = _Summarizer(42)  # type: ignore[arg-type]
+    kb = KnowledgeBase({"project": KnowledgeBaseManager(tmp_path / "kb", use_mock=True, summarizer=summarizer)})
+
+    found = await kb.ingest_text("The body text.", title="T")
+
+    assert found.document.summary == "The body text."
+    assert len(summarizer.prompts) == 1
+
+
+# -- titles from URLs --------------------------------------------------------------
+
+
+async def test_a_url_title_has_no_control_characters(kb):
+    page = b"<html><body><p>No title here.</p></body></html>"
+
+    found = await kb.ingest_bytes(
+        page, extension=".html", charset="utf-8", fetched_url="https://example.com/a/x%0Aid:%20forged"
+    )
+
+    assert found.document.title == "x id: forged"
+    sidecar = kb.manager("project").sidecar_path(found.document.id).read_text()
+    assert "\nid: forged" not in sidecar

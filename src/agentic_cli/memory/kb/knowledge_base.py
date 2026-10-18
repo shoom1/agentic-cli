@@ -3,7 +3,8 @@
 ``KnowledgeBaseManager`` is the store for one directory. ``KnowledgeBase``
 holds one manager per scope (in agentic-cli: the project's and the user's)
 and does what spans them: search merged by reciprocal rank fusion, lookups
-in scope order, one catalogue, sidecars, concept pages, backfill. Method
+in scope order, one catalogue, sidecars, concept pages, backfill, and
+ingestion (``ingest_text`` / ``ingest_bytes``: convert, enrich, store). Method
 names follow the manager's.
 
 **Provisional:** its name and methods may change in 0.7.0, when the
@@ -23,6 +24,7 @@ from urllib.parse import unquote, urlparse
 from agentic_cli.memory._core.embeddings import EmbeddingConfig, EmbeddingService
 from agentic_cli.memory._core.log import get_logger
 from agentic_cli.memory.kb import convert as _convert
+from agentic_cli.memory.kb import enrich
 from agentic_cli.memory.kb.manager import KnowledgeBaseManager
 from agentic_cli.memory.kb.models import Document, SourceType
 
@@ -58,7 +60,12 @@ def _url_title(url: str) -> str:
     """A title from a URL: its last path segment (percent-decoded), else its host."""
     parsed = urlparse(url)
     segment = parsed.path.rstrip("/").rsplit("/", 1)[-1]
-    return unquote(segment) if segment else (parsed.netloc or url)
+    return _printable(unquote(segment)) or _printable(parsed.netloc or url)
+
+
+def _printable(text: str) -> str:
+    """``text`` with control characters as spaces and whitespace runs collapsed."""
+    return " ".join("".join(ch if ch.isprintable() else " " for ch in text).split())
 
 
 @dataclass(frozen=True)
@@ -362,7 +369,7 @@ class KnowledgeBase:
         content: str,
         *,
         title: str = "",
-        source_type: SourceType = SourceType.USER,
+        source_type: SourceType | str = SourceType.USER,
         source_url: str | None = None,
         metadata: dict[str, Any] | None = None,
         scope: str | None = None,
@@ -370,13 +377,18 @@ class KnowledgeBase:
         """Store ``content`` as a document of ``scope`` (default: the first scope).
 
         The title defaults to the text's first 80 characters. One summarizer
-        call writes the summary and the sidecar.
+        call writes the summary and the sidecar. ``source_type`` may be a
+        ``SourceType`` or its string value (``"web"``).
 
         Raises:
+            KeyError: no scope has that name.
+            ValueError: ``source_type`` is not a source type.
             EmptyDocument: ``content`` is empty.
         """
+        name = self._scope_name(scope) if scope is not None else self.scopes[0]
+        source_type = SourceType(source_type)
         return await self._store(
-            scope, text=content, data=None, extension=".txt", title=title,
+            name, text=content, data=None, extension=".txt", title=title,
             source_type=source_type, source_url=source_url, metadata=dict(metadata or {}),
         )
 
@@ -391,7 +403,7 @@ class KnowledgeBase:
         fetched_at: str | None = None,
         title: str = "",
         default_title: str = "",
-        source_type: SourceType | None = None,
+        source_type: SourceType | str | None = None,
         source_url: str | None = None,
         metadata: dict[str, Any] | None = None,
         fallback_text: str | None = None,
@@ -423,12 +435,18 @@ class KnowledgeBase:
             fetched_at: When (ISO 8601).
             source_url: What the document cites (arXiv: the abstract page,
                 while the bytes come from the PDF URL).
+            source_type: A ``SourceType`` or its string value (``"web"``).
 
         Raises:
+            KeyError: no scope has that name.
+            ValueError: ``source_type`` is not a source type.
             UnsupportedDocument: the converter cannot read the bytes.
             ConversionFailed: the converter failed unexpectedly.
             EmptyDocument: no text and no bytes.
         """
+        name = self._scope_name(scope) if scope is not None else self.scopes[0]
+        if source_type is not None:
+            source_type = SourceType(source_type)
         try:
             converted = await asyncio.to_thread(
                 _convert.convert_document,
@@ -458,7 +476,7 @@ class KnowledgeBase:
             page_title = converted.title or default_title
             default_type = SourceType.LOCAL
         return await self._store(
-            scope,
+            name,
             text=converted.text or (fallback_text or ""),
             data=data,
             extension=extension,
@@ -470,7 +488,7 @@ class KnowledgeBase:
 
     async def _store(
         self,
-        scope: str | None,
+        name: str,
         *,
         text: str,
         data: bytes | None,
@@ -483,11 +501,15 @@ class KnowledgeBase:
         """Enrich (one summarizer call) and store through the scope's manager."""
         if not text and not data:
             raise EmptyDocument("no text and no bytes to ingest")
-        name = self._scope_name(scope) if scope is not None else self.scopes[0]
         manager = self._managers[name]
         if not title:
             title = _cut(text, _TITLE_CHARS)
-        payload = await manager.generate_sidecar_payload(text, title=title)
+        try:
+            payload = await manager.generate_sidecar_payload(text, title=title)
+        except Exception:
+            # e.g. a summarizer that answered with something other than text
+            logger.debug("kb_sidecar_payload_failed", exc_info=True)
+            payload = {"summary": enrich.preview(text), "claims": [], "entities": {}}
         document = manager.ingest_document(
             content=text,
             title=title,

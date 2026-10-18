@@ -951,6 +951,48 @@ class TestIngestArxivPaper:
         assert "- Attention suffices." in kb.sidecar_path(result["document_id"]).read_text()
 
     @pytest.mark.asyncio
+    async def test_a_summarizer_answer_that_is_not_text_stores_the_preview(self, ingest_ctx):
+        source, kb = ingest_ctx
+        from agentic_cli.tools.arxiv_tools import ingest_arxiv_paper
+
+        class _Summarizer:
+            async def summarize(self, content, prompt):
+                return 42
+
+        kb._summarizer = _Summarizer()
+        source._store_entry("2301.07041", {
+            "arxiv_id": "2301.07041", "title": "A paper", "authors": [],
+            "abstract": "The abstract.", "abs_url": "https://arxiv.org/abs/2301.07041",
+            "pdf_url": "", "src_url": "", "published_date": "", "updated_date": "",
+            "categories": [], "primary_category": "",
+        })
+
+        result = await ingest_arxiv_paper("2301.07041")
+
+        assert result["success"] is True
+        assert result["summary"] == "The abstract."
+
+    @pytest.mark.asyncio
+    async def test_an_unexpected_storage_error_is_reported_not_raised(self, ingest_ctx):
+        source, kb = ingest_ctx
+        from agentic_cli.tools.arxiv_tools import ingest_arxiv_paper
+
+        def full(*args, **kwargs):
+            raise OSError("disk full")
+
+        kb.ingest_document = full
+        source._store_entry("2301.07041", {
+            "arxiv_id": "2301.07041", "title": "A paper", "authors": [],
+            "abstract": "The abstract.", "abs_url": "https://arxiv.org/abs/2301.07041",
+            "pdf_url": "", "src_url": "", "published_date": "", "updated_date": "",
+            "categories": [], "primary_category": "",
+        })
+
+        result = await ingest_arxiv_paper("2301.07041")
+
+        assert result == {"success": False, "error": "Ingestion failed: disk full"}
+
+    @pytest.mark.asyncio
     async def test_returns_error_when_arxiv_source_missing(self):
         """Without a registry, the tool surfaces the require_service error."""
         from agentic_cli.tools.arxiv_tools import ingest_arxiv_paper
