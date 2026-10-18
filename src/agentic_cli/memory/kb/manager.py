@@ -287,6 +287,12 @@ class KnowledgeBaseManager:
                     return service, vs
                 except ImportError:
                     pass
+            if service is not None and not _faiss_available():
+                logger.info(
+                    "kb_keyword_search_only",
+                    reason="faiss not installed",
+                    model=getattr(service, "model_name", "unknown"),
+                )
         self._use_mock = True
 
         emb = MockEmbeddingService(
