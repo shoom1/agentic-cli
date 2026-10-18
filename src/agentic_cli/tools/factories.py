@@ -145,15 +145,14 @@ def make_kb_tools(knowledge_base=None, user_kb_manager=None, *, kb_manager=None)
     from agentic_cli.tools._knowledge_base import knowledge_base_argument
     from agentic_cli.tools.knowledge_tools import (
         READ_DOCUMENT_MAX_CHARS,
-        _ingest_file_with_kb,
-        _ingest_text_with_kb,
-        _ingest_url_with_kb,
+        _ingest_file,
+        _ingest_text,
+        _ingest_url,
         _list,
         _read,
         _search,
         _search_concepts,
         _write_concept,
-        _writes_to,
         kb_ingest_file as _orig_ingest_file,
         kb_ingest_text as _orig_ingest_text,
         kb_ingest_url as _orig_ingest_url,
@@ -182,8 +181,8 @@ def make_kb_tools(knowledge_base=None, user_kb_manager=None, *, kb_manager=None)
         abstract: str = "",
         tags: list[str] | None = None,
     ) -> dict[str, Any]:
-        return await _ingest_text_with_kb(
-            _writes_to(kb),
+        return await _ingest_text(
+            kb,
             content=content,
             title=title,
             source_type=source_type,
@@ -202,8 +201,8 @@ def make_kb_tools(knowledge_base=None, user_kb_manager=None, *, kb_manager=None)
         abstract: str = "",
         tags: list[str] | None = None,
     ) -> dict[str, Any]:
-        return await _ingest_file_with_kb(
-            _writes_to(kb),
+        return await _ingest_file(
+            kb,
             path=path,
             title=title,
             source_type=source_type,
@@ -222,8 +221,8 @@ def make_kb_tools(knowledge_base=None, user_kb_manager=None, *, kb_manager=None)
         abstract: str = "",
         tags: list[str] | None = None,
     ) -> dict[str, Any]:
-        return await _ingest_url_with_kb(
-            _writes_to(kb),
+        return await _ingest_url(
+            kb,
             url=url,
             title=title,
             source_type=source_type,

@@ -125,7 +125,7 @@ async def test_any_other_conversion_failure_is_also_refused(kb, tmp_path, monkey
     def _boom(*a, **kw):
         raise RuntimeError("converter exploded")
 
-    monkeypatch.setattr("agentic_cli.memory.kb.convert_document", _boom)
+    monkeypatch.setattr("agentic_cli.memory.kb.convert.convert_document", _boom)
     notes = tmp_path / "notes.md"
     notes.write_text("# Notes\n")
 
