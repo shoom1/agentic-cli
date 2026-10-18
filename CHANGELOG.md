@@ -17,6 +17,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pins what `agentic_cli.memory` and `agentic_cli.memory.kb` export. 0.6.4
   moves the knowledge-base logic into the package behind both.
 
+### Deprecated
+
+- **`memory_services.build_memory_store(settings)`** works, with a
+  `DeprecationWarning`, until 0.7.0. Use
+  `memory_services.open_memory_store(settings, embedding_service=None)`.
+
+### Fixed
+
+- **The embedding model loads once per process.** Each knowledge base loaded
+  the sentence-transformers model when it opened, and the memory store
+  loaded its own: up to three copies of one model. The workflow now builds
+  one `EmbeddingService` and shares it, and `EmbeddingService` takes a lock
+  around loading the model and around `embed_text` and `embed_batch`, so the
+  knowledge base's worker threads and the memory tools can share it.
+- **`KnowledgeBaseManager(embedding_service=...)` uses the service it is
+  given.** Without `vector_store`, the argument was silently ignored and the
+  knowledge base built its own service; it now builds its vector store at
+  the given service's dimension. A real service without FAISS falls back to
+  keyword search instead of failing at the first ingest.
+
 ## [0.6.3] - 2026-10-17
 
 The knowledge base and the memory store move into `agentic_cli.memory`, a
