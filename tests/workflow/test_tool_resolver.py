@@ -8,6 +8,9 @@ service detection.
 from __future__ import annotations
 
 import math
+import sys
+import types
+import warnings
 from typing import AsyncGenerator
 
 import pytest
@@ -93,6 +96,54 @@ class TestResolveTools:
 # ---------------------------------------------------------------------------
 # Base-manager integration
 # ---------------------------------------------------------------------------
+
+
+class TestDeprecationsInDottedReferences:
+    """A dotted tool path comes from configuration, so no frame of the
+    application's code is on the stack while it resolves, and Python's default
+    filters would hide a DeprecationWarning raised there. The resolver re-issues
+    it as a FutureWarning that names the reference."""
+
+    @pytest.fixture
+    def module(self, monkeypatch):
+        module = types.ModuleType("deprecating_tools_fixture")
+
+        def kept_tool() -> str:
+            return "kept"
+
+        def __getattr__(name: str):
+            if name == "old_tool":
+                warnings.warn(
+                    "old_tool is deprecated; use kept_tool", DeprecationWarning, stacklevel=2
+                )
+                return kept_tool
+            raise AttributeError(name)
+
+        module.kept_tool = kept_tool
+        module.__getattr__ = __getattr__
+        monkeypatch.setitem(sys.modules, module.__name__, module)
+        return module
+
+    def test_a_deprecation_is_reissued_as_a_future_warning_naming_the_reference(self, module):
+        with pytest.warns(FutureWarning) as caught:
+            obj = resolve_tool("deprecating_tools_fixture.old_tool")
+        assert obj is module.kept_tool
+        assert [str(w.message) for w in caught if issubclass(w.category, FutureWarning)] == [
+            "tool reference 'deprecating_tools_fixture.old_tool': "
+            "old_tool is deprecated; use kept_tool"
+        ]
+        assert not [w for w in caught if issubclass(w.category, DeprecationWarning)]
+
+    def test_an_error_filter_on_deprecations_does_not_break_resolution(self, module):
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            warnings.simplefilter("ignore", FutureWarning)
+            assert resolve_tool("deprecating_tools_fixture.old_tool") is module.kept_tool
+
+    def test_a_reference_that_warns_nothing_stays_silent(self, module):
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            assert resolve_tool("deprecating_tools_fixture.kept_tool") is module.kept_tool
 
 
 class _MiniManager(BaseWorkflowManager):

@@ -45,3 +45,8 @@ def test_kb_manager_among_other_keys_is_refused_and_names_knowledge_base():
             return {"success": True}
 
     assert "requires='knowledge_base'" in str(exc.value)
+
+
+def test_a_config_naming_the_removed_google_search_tool_fails_clearly():
+    with pytest.raises(ValueError, match="has no attribute 'google_search_tool'"):
+        resolve_tool("agentic_cli.tools.google_search_tool")
