@@ -33,7 +33,10 @@ SRC = ROOT / "src"
 PACKAGE = SRC / "agentic_cli" / "memory"
 TESTS = ROOT / "tests" / "memory"
 
-LIBRARIES = {"numpy", "structlog", "torch", "sentence_transformers", "faiss", "bm25s", "rank_bm25", "nltk"}
+LIBRARIES = {
+    "numpy", "structlog", "torch", "sentence_transformers", "faiss", "bm25s", "rank_bm25", "nltk",
+    "pypdf", "html2text", "trafilatura",
+}
 TEST_LIBRARIES = LIBRARIES | {"pytest"}
 PUBLIC_MODULES = {"agentic_cli.memory", "agentic_cli.memory.kb"}
 
@@ -52,6 +55,8 @@ COMPAT_DIRS: set[Path] = {SRC / "agentic_cli" / "knowledge_base"}
 def _deprecated(module: str, names: list[str]) -> bool:
     """An import of a path the compatibility layer keeps until 0.7.0."""
     if module == "agentic_cli.tools.memory_tools" and "MemoryStore" in names:
+        return True
+    if module == "agentic_cli.tools.kb_convert":
         return True
     return module == "agentic_cli.knowledge_base" or module.startswith("agentic_cli.knowledge_base.")
 

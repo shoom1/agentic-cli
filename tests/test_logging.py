@@ -9,8 +9,10 @@ def test_trafilatura_dependency_loggers_are_silenced():
     """trafilatura's own stdlib loggers emit raw ERROR lines to stderr
     (e.g. "parsed tree length: 0, wrong data type or not valid HTML",
     "readability_lxml failed:") under the default logging setup.
-    kb_convert's own ``kb_convert_html``/``kb_convert_failed`` events already
-    record what happened, so these must not print over the CLI.
+    The converter (agentic_cli.memory.kb.convert) logs kb_convert_html (and
+    kb_convert_trafilatura_failed / kb_convert_html_failed), and the ingest
+    tools log kb_convert_failed, which already record what happened, so these
+    must not print over the CLI.
     """
     configure_logging()
 

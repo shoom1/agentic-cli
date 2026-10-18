@@ -626,7 +626,7 @@ from agentic_cli.tools import (
 
 The single `kb_ingest` tool was split in 0.5.2 so each entry point declares the right capability — text-only stays under `kb.write`, while file and URL ingestion correctly trip `filesystem.read` / `http.read` checks. For arXiv papers, prefer `ingest_arxiv_paper(arxiv_id)`.
 
-Ingestion converts files with its own converter (`tools/kb_convert.py`): PDFs through pypdf, HTML through trafilatura, which keeps a page's main text and drops menus, sidebars and footers. trafilatura comes with the `kb` extra (`pip install agentic-cli[kb]`), or on its own (`pip install trafilatura`); without it, html2text converts the whole page.
+Ingestion converts files with its own converter (`agentic_cli.memory.kb.convert_document`): PDFs through pypdf, HTML through trafilatura, which keeps a page's main text and drops menus, sidebars and footers. trafilatura comes with the `kb` extra (`pip install agentic-cli[kb]`), or on its own (`pip install trafilatura`); without it, html2text converts the whole page.
 
 Bundle convenience:
 
@@ -925,7 +925,6 @@ agentic-cli/
 │   │   ├── knowledge_tools.py    # kb_search / kb_ingest_text / kb_ingest_file /
 │   │   │                         #   kb_ingest_url / kb_read / kb_list /
 │   │   │                         #   kb_write_concept / kb_search_concepts
-│   │   ├── kb_convert.py         # Ingestion converter: trafilatura / html2text, pypdf, text
 │   │   ├── file_read.py          # read_file, diff_compare
 │   │   ├── file_write.py         # write_file, edit_file (atomic)
 │   │   ├── grep_tool.py          # grep
@@ -957,6 +956,7 @@ agentic-cli/
 │   │   └── kb/                   # Knowledge base (agentic_cli.memory.kb)
 │   │       ├── manager.py                # KnowledgeBaseManager(base_dir, embedding=, summarizer=), Summarizer
 │   │       ├── models.py                 # Document, SearchResult, SourceType
+│   │       ├── convert.py                # convert_document: trafilatura / html2text, pypdf, text
 │   │       ├── vector_store.py, bm25_index.py (+ _bm25_backends.py), concepts.py, sidecar.py
 │   │       └── _mock_vector_store.py, _mock_bm25.py
 │   └── persistence/              # (sessions are persisted natively by each

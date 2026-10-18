@@ -69,7 +69,6 @@ agentic-cli/
 │   │   ├── executor.py       # SafePythonExecutor (CORE_MODULES; SANDBOXED_MODULES gated on OS sandbox)
 │   │   ├── execution_tools.py # execute_python
 │   │   ├── knowledge_tools.py # kb_search, kb_ingest_{text,file}, kb_ingest_url (deprecated), kb_list, kb_read, kb_write_concept, kb_search_concepts
-│   │   ├── kb_convert.py     # Ingestion converter (HTML main text via trafilatura, html2text fallback; pypdf)
 │   │   ├── arxiv_tools.py    # search_arxiv, fetch_arxiv_paper, ingest_arxiv_paper
 │   │   ├── arxiv_source.py   # ArxivSearchSource (feed fetch, download_pdf)
 │   │   ├── search_sources.py # SearchSource, SearchSourceResult
@@ -98,6 +97,7 @@ agentic-cli/
 │   │   └── kb/               # Knowledge base (agentic_cli.memory.kb)
 │   │       ├── manager.py    # KnowledgeBaseManager(base_dir, embedding=, summarizer=), Summarizer
 │   │       ├── models.py     # Document, SearchResult, SourceType
+│   │       ├── convert.py    # convert_document (HTML main text via trafilatura, html2text fallback; pypdf), own _charset.py
 │   │       ├── vector_store.py, bm25_index.py (+ _bm25_backends.py), concepts.py, sidecar.py
 │   │       └── _mock_vector_store.py, _mock_bm25.py
 │   └── persistence/

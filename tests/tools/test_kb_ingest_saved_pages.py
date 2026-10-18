@@ -136,9 +136,9 @@ async def test_a_saved_page_is_decoded_with_its_charset(kb):
 
 
 async def test_a_saved_pdf_is_ingested_as_a_web_document(kb, monkeypatch):
-    from agentic_cli.tools import pdf_utils
+    from agentic_cli.memory.kb import convert
 
-    monkeypatch.setattr(pdf_utils, "extract_pdf_text", lambda data, **kw: "pdf text about volcanoes")
+    monkeypatch.setattr(convert, "extract_pdf_text", lambda data: "pdf text about volcanoes")
     saved = _saved(data=b"%PDF-1.4", content_type="application/pdf", charset=None)
 
     result = await kb_ingest_file(path=str(saved))

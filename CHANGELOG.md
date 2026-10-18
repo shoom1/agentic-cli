@@ -31,8 +31,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   starts, so a large knowledge base makes that one start slower; the log
   gives the chunk count and the time taken.
 
+### Changed
+
+- **The ingestion converter moved into the package:** `convert_document`,
+  `ConvertedDocument` and `UnsupportedDocument` are exported from
+  `agentic_cli.memory.kb`, which reads PDFs and charset labels with its own
+  helpers (a test keeps its charset helper in agreement with `web_fetch`'s).
+  Ingestion no longer reads PDFs through `agentic_cli.tools.pdf_utils`; a
+  test that patched `extract_pdf_text` there should patch
+  `agentic_cli.memory.kb.convert.extract_pdf_text`.
+
 ### Deprecated
 
+- **`agentic_cli.tools.kb_convert`** forwards to `agentic_cli.memory.kb`,
+  with a `DeprecationWarning`, until 0.7.0.
 - **`memory_services.build_memory_store(settings)`** works, with a
   `DeprecationWarning`, until 0.7.0. Use
   `memory_services.open_memory_store(settings, embedding_service=None)`.
