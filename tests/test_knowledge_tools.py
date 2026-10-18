@@ -759,8 +759,6 @@ class TestTwoTierKnowledgeBase:
         from agentic_cli.workflow.service_registry import set_service_registry
 
         project_kb = MagicMock()
-        # Two scopes are one when they share a directory; mocks need their own.
-        project_kb.kb_dir = tmp_path / "project"
         project_kb.search.return_value = {
             "results": [
                 {"document_id": "p1", "score": 0.5, "document_title": "Project Top"},
@@ -769,7 +767,6 @@ class TestTwoTierKnowledgeBase:
             "total_matches": 2,
         }
         user_kb = MagicMock()
-        user_kb.kb_dir = tmp_path / "user"
         user_kb.search.return_value = {
             "results": [
                 {"document_id": "u1", "score": 0.9, "document_title": "User Top"},

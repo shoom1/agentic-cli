@@ -65,12 +65,18 @@ def _same_dir(a: Path | str, b: Path | str) -> bool:
     yet falls back to comparing resolved paths.
     """
     try:
+        a, b = os.fspath(a), os.fspath(b)
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(a, (str, bytes)) or not isinstance(b, (str, bytes)):
+        return False
+    try:
         return os.path.samefile(a, b)
     except OSError:
         pass
     try:
-        return Path(a).resolve() == Path(b).resolve()
-    except (OSError, RuntimeError):
+        return Path(os.fsdecode(a)).resolve() == Path(os.fsdecode(b)).resolve()
+    except (OSError, RuntimeError, TypeError, ValueError):
         return False
 
 
@@ -363,7 +369,10 @@ class KnowledgeBase:
                     payload = await manager.generate_sidecar_payload(text, title=live.title)
                     if not manager.write_sidecar_if_present(live, payload):
                         raise DocumentNotFound(doc_id)
-        return path.read_text(encoding="utf-8")
+        try:
+            return path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            raise DocumentNotFound(doc_id) from None
 
     # -- concepts --------------------------------------------------------------
 

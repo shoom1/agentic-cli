@@ -76,6 +76,23 @@ def test_two_managers_on_one_directory_are_one_scope(tmp_path):
     assert kb.manager("user") is first
 
 
+def test_two_bare_mock_managers_are_two_scopes():
+    from unittest.mock import MagicMock
+
+    kb = KnowledgeBase({"project": MagicMock(), "user": MagicMock()})
+
+    assert kb.scopes == ("project", "user")
+
+
+def test_a_manager_without_a_path_is_its_own_scope(tmp_path):
+    class _Odd:
+        kb_dir = object()
+
+    kb = KnowledgeBase({"project": _manager(tmp_path / "project"), "odd": _Odd(), "other": _Odd()})
+
+    assert kb.scopes == ("project", "odd", "other")
+
+
 def test_one_scope_is_fine(tmp_path):
     kb = KnowledgeBase({"user": _manager(tmp_path / "user")})
 
@@ -468,6 +485,23 @@ def _without_sidecar(manager, title="Doc", **kwargs):
     doc = _add(manager, title, **kwargs)
     manager.sidecar_path(doc.id).unlink()
     return doc
+
+
+async def test_a_sidecar_that_vanishes_before_the_read_is_not_found(two, monkeypatch):
+    manager = two.manager("project")
+    doc = _add(manager, "Doc")
+
+    class _Vanishing:
+        def exists(self):
+            return True
+
+        def read_text(self, *args, **kwargs):
+            raise FileNotFoundError("gone")
+
+    monkeypatch.setattr(manager, "sidecar_path", lambda doc_id: _Vanishing())
+
+    with pytest.raises(DocumentNotFound):
+        await two.sidecar(ScopedDocument(doc, "project"))
 
 
 async def test_sidecar_returns_the_existing_sidecar(two):
