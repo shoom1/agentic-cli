@@ -68,6 +68,15 @@ def _truncate(text: str, max_length: int = 200) -> str:
     return text
 
 
+def _faiss_available() -> bool:
+    """Whether FAISS can be imported (the real vector store needs it)."""
+    try:
+        import faiss  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
 def matches_document_filters(doc: Document, filters: dict[str, Any]) -> bool:
     """Check if a document matches the given filters.
 
@@ -157,7 +166,10 @@ class KnowledgeBaseManager:
                 the summary is the document's first ~500 characters.
             use_mock: Use the mock embedding service and vector store (no ML
                 libraries needed).
-            embedding_service: A ready embedding service (with ``vector_store``).
+            embedding_service: A ready embedding service, for example one
+                shared with another knowledge base. Without ``vector_store``,
+                the knowledge base builds its vector store at the service's
+                dimension.
             vector_store: A ready vector store (with ``embedding_service``).
         """
         base_dir = Path(base_dir)
@@ -183,12 +195,12 @@ class KnowledgeBaseManager:
         self.files_dir.mkdir(parents=True, exist_ok=True)
 
         # Use injected services or create them
-        if embedding_service and vector_store:
+        if embedding_service is not None and vector_store is not None:
             self._embedding_service = embedding_service
             self._vector_store = vector_store
         else:
             self._embedding_service, self._vector_store = self._create_services(
-                embedding or EmbeddingConfig()
+                embedding or EmbeddingConfig(), embedding_service
             )
 
         # Load document metadata
@@ -231,29 +243,43 @@ class KnowledgeBaseManager:
             self._concepts_store = ConceptStore(self.kb_dir / "concepts")
         return self._concepts_store
 
-    def _create_services(self, embedding: EmbeddingConfig) -> tuple[Any, Any]:
-        """Create embedding service and vector store.
+    def _create_services(
+        self, embedding: EmbeddingConfig, embedding_service: Any = None
+    ) -> tuple[Any, Any]:
+        """The embedding service and vector store this knowledge base uses.
 
-        Tries real implementations first; falls back to mocks if
-        dependencies (sentence_transformers, faiss) are unavailable.
+        A given ``embedding_service`` is used (a mock one with the mock
+        store); otherwise one is built from ``embedding`` when
+        sentence-transformers is installed. A real service needs FAISS:
+        without it, with ``use_mock``, or with no service at all, the
+        knowledge base uses the mock service and store and searches by
+        keyword.
         """
-        if not self._use_mock and EmbeddingService.is_available():
-            try:
-                emb = EmbeddingService(
+        from agentic_cli.memory.kb._mock_vector_store import MockVectorStore
+
+        if not self._use_mock:
+            if isinstance(embedding_service, MockEmbeddingService):
+                return embedding_service, MockVectorStore(
+                    index_path=self.embeddings_dir / "index.mock",
+                    embedding_dim=embedding_service.embedding_dim,
+                )
+            service = embedding_service
+            if service is None and EmbeddingService.is_available():
+                service = EmbeddingService(
                     model_name=embedding.model_name,
                     batch_size=embedding.batch_size,
                     device=embedding.device,
                 )
-                vs = VectorStore(
-                    index_path=self.embeddings_dir / "index.faiss",
-                    embedding_dim=emb.embedding_dim,
-                )
-                return emb, vs
-            except ImportError:
-                pass
+            if service is not None and _faiss_available():
+                try:
+                    vs = VectorStore(
+                        index_path=self.embeddings_dir / "index.faiss",
+                        embedding_dim=service.embedding_dim,
+                    )
+                    return service, vs
+                except ImportError:
+                    pass
         self._use_mock = True
-
-        from agentic_cli.memory.kb._mock_vector_store import MockVectorStore
 
         emb = MockEmbeddingService(
             model_name=embedding.model_name,
