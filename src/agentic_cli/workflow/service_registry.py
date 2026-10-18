@@ -23,6 +23,11 @@ SANDBOX_MANAGER = "sandbox_manager"
 USER_KB_MANAGER = "user_kb_manager"
 WORKFLOW = "workflow"
 
+# The embedding service both knowledge bases and the memory store share.
+# Built with them, never on its own: it is not in KNOWN_SERVICE_KEYS, so no
+# tool can declare it.
+EMBEDDING_SERVICE = "_embedding_service"
+
 # Service keys a tool may declare via ``register_tool(requires=...)``.
 #
 # Every entry must be something a manager can actually construct on demand
@@ -48,6 +53,10 @@ SERVICE_KEY_HINTS = {
     ),
     PERMISSION_ENGINE: f"{PERMISSION_ENGINE!r} is always available.",
     WORKFLOW: f"{WORKFLOW!r} is always available.",
+    EMBEDDING_SERVICE: (
+        f"{EMBEDDING_SERVICE!r} is private: the workflow builds it with the "
+        "knowledge bases and the memory store."
+    ),
 }
 
 

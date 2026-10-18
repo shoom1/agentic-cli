@@ -36,6 +36,7 @@ from agentic_cli.workflow.sessions import (
 from agentic_cli.workflow.service_registry import (
     set_service_registry,
     ARXIV_SOURCE,
+    EMBEDDING_SERVICE,
     JOB_MANAGER,
     KB_MANAGER,
     LLM_SUMMARIZER,
@@ -464,7 +465,7 @@ class BaseWorkflowManager(ABC):
     ) -> dict[str, Any]:
         """Construct the required services into a **fresh** dict.
 
-        Pure construction: it never touches ``self._services``. Constructors
+        Pure construction: it never writes to ``self._services``. Constructors
         here can load heavy dependencies (the sentence-transformers model inside
         ``EmbeddingService``), so this runs on a worker thread — and cancelling
         the coroutine that awaits it does not stop that thread. Writing results
@@ -500,16 +501,33 @@ class BaseWorkflowManager(ABC):
         self, s: dict[str, Any], existing: frozenset[str]
     ) -> None:
         """Construct the required services into ``s``. See :meth:`_build_services`."""
-        if "memory_store" in self._required_managers and MEMORY_STORE not in existing:
-            from agentic_cli.workflow.memory_services import build_memory_store
+        needs_memory = "memory_store" in self._required_managers and MEMORY_STORE not in existing
+        needs_kb = "kb_manager" in self._required_managers and KB_MANAGER not in existing
+        embedding_service = None
+        if needs_memory or needs_kb:
+            # One service for both knowledge bases and the memory store, so the
+            # model loads once. Reading the live registry here is safe: nothing
+            # publishes into it while services are being built, and a service
+            # carried over a model switch, or built for an earlier component,
+            # is reused rather than built again.
+            embedding_service = self._services.get(EMBEDDING_SERVICE)
+            if embedding_service is None:
+                from agentic_cli.workflow.memory_services import build_embedding_service
 
-            s[MEMORY_STORE] = build_memory_store(self._settings)
+                embedding_service = build_embedding_service(self._settings)
+                if embedding_service is not None:
+                    s[EMBEDDING_SERVICE] = embedding_service
 
-        if "kb_manager" in self._required_managers and KB_MANAGER not in existing:
+        if needs_memory:
+            from agentic_cli.workflow.memory_services import open_memory_store
+
+            s[MEMORY_STORE] = open_memory_store(self._settings, embedding_service=embedding_service)
+
+        if needs_kb:
             from agentic_cli.workflow.memory_services import build_knowledge_bases
 
             s[KB_MANAGER], s[USER_KB_MANAGER] = build_knowledge_bases(
-                self._settings, summarizer=self
+                self._settings, summarizer=self, embedding_service=embedding_service
             )
 
         if "llm_summarizer" in self._required_managers and LLM_SUMMARIZER not in existing:
