@@ -163,29 +163,38 @@ class KbBackfillCommand(Command):
             )
             return
 
-        for scope in kb.scopes:
-            app.session.add_message(
-                "system", f"Backfilling {scope} KB at {kb.manager(scope).kb_dir}…"
-            )
+        announced: set[str] = set()
+
+        def _announce(scope: str) -> None:
+            if scope not in announced:
+                announced.add(scope)
+                app.session.add_message(
+                    "system", f"Backfilling {scope} KB at {kb.manager(scope).kb_dir}…"
+                )
 
         def _progress(scope: str, done: int, total: int, doc) -> None:
+            _announce(scope)
             title = doc.title if len(doc.title) < 80 else doc.title[:77] + "…"
             app.session.add_message("system", f"[{scope} KB] {done + 1}/{total}: {title}")
 
         total_written = 0
+        failed = False
         for result in await kb.backfill_sidecars(progress=_progress):
+            _announce(result.scope)
             if isinstance(result.error, BackfillAlreadyRunning):
                 app.session.add_warning(
                     f"{result.scope} KB: backfill already in progress; "
                     "wait for it to finish before running /kb-backfill again."
                 )
+                failed = True
             elif result.error is not None:
+                failed = True
                 app.session.add_error(f"{result.scope} KB backfill failed: {result.error}")
             else:
                 total_written += result.written
                 app.session.add_success(f"{result.scope} KB: {result.written} sidecar(s) generated")
 
-        if total_written == 0:
+        if total_written == 0 and not failed:
             app.session.add_message("system", "All documents already have sidecars.")
 
 
