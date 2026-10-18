@@ -7,9 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **A resource capability that names no resource is an error.** Registering
+  a tool whose `filesystem.*`, `http.*` or `shell.*` capability has neither
+  `target_arg=` nor `target=` raises `ValueError` (it warned since 0.6.1).
+  Name the resource: `Capability("http.read", target_arg="url")`, or a fixed
+  `target=` for a tool that always acts on one.
+
 ### Removed
 
-The APIs that 0.6.3 and 0.6.4 deprecated for 0.7.0 are gone, with no
+The APIs that 0.6.1, 0.6.3 and 0.6.4 deprecated for 0.7.0 are gone, with no
 further deprecation step.
 
 - **`agentic_cli.knowledge_base`** (all ten modules, with the
@@ -58,6 +66,10 @@ further deprecation step.
 - **`memory_services.build_memory_store`** and
   **`memory_services.build_knowledge_bases`**. Use
   `memory_services.open_memory_store` and `memory_services.open_knowledge_base`.
+- **`agentic_cli.tools.google_search_tool`**. Use `agentic_cli.tools.web_search`.
+  For native Google Search, ADK's `GoogleSearchTool` works as an agent's only
+  tool (`include_state_tools=False`), but it runs inside the model, so the
+  permission engine never checks it.
 
 ## [0.6.4] - 2026-10-18
 

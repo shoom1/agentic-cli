@@ -9,6 +9,7 @@ tool approved that capability for every tool and every resource.
 from __future__ import annotations
 
 import json
+import re
 import warnings
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -106,14 +107,17 @@ class TestResourceCapabilities:
     def test_is_resource_capability(self, name, expected):
         assert is_resource_capability(name) is expected
 
-    def test_registering_a_targetless_resource_capability_warns(self):
+    @pytest.mark.parametrize("name", ["filesystem.read", "http.read", "shell.exec"])
+    def test_registering_a_targetless_resource_capability_is_an_error(self, name):
         from agentic_cli.tools.registry import ToolRegistry
 
-        def my_fetch(q: str) -> dict:
+        def my_tool(q: str) -> dict:
             return {"success": True}
 
-        with pytest.warns(UserWarning, match="my_fetch.*http.read.*target"):
-            ToolRegistry().register(my_fetch, capabilities=[Capability("http.read")])
+        registry = ToolRegistry()
+        with pytest.raises(ValueError, match=rf"my_tool.*{re.escape(name)}.*target_arg=.*target="):
+            registry.register(my_tool, capabilities=[Capability(name)])
+        assert registry.get("my_tool") is None
 
     def test_targeted_or_non_resource_capabilities_do_not_warn(self):
         from agentic_cli.tools.registry import ToolRegistry

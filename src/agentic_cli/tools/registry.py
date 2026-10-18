@@ -10,7 +10,6 @@ from enum import Enum
 from typing import Any, Callable
 import functools
 import inspect
-import warnings
 import weakref
 
 from agentic_cli.workflow.permissions.capabilities import (
@@ -146,6 +145,8 @@ def _validate_capabilities(caps: Any, tool_name: str) -> CapabilitiesSpec:
     - ``EXEMPT`` (or any ``_CapabilityExempt`` instance) passes through unchanged.
     - A non-empty ``list`` of ``Capability`` instances is returned as-is.
     - An empty list raises ``ValueError`` (use ``EXEMPT`` to opt out explicitly).
+    - A resource capability (``filesystem.*``, ``http.*``, ``shell.*``) that
+      names no target raises ``ValueError``: it would resolve to the wildcard.
     - Any other type raises ``TypeError``.
     """
     if isinstance(caps, _CapabilityExempt):
@@ -167,14 +168,10 @@ def _validate_capabilities(caps: Any, tool_name: str) -> CapabilitiesSpec:
                 and item.target_arg is None
                 and item.target is None
             ):
-                warnings.warn(
+                raise ValueError(
                     f"Tool {tool_name!r} declares {item.name!r} without a "
                     "target. Name the resource with target_arg= (the argument "
-                    "holding it) or target= (a fixed value). Until then every "
-                    "approval of this tool applies to one call only; this will "
-                    "be an error in 0.7.0.",
-                    UserWarning,
-                    stacklevel=4,
+                    "holding it) or target= (a fixed value)."
                 )
         return caps
     raise TypeError(
