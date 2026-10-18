@@ -432,6 +432,27 @@ class TestSettingsJsonLoading:
         assert settings.thinking_effort == "high"
         assert settings.log_level == "debug"
 
+    def test_a_settings_file_naming_removed_settings_still_loads(self, tmp_path):
+        """webfetch_model and sandbox_packages were removed; a file or env var
+        that still sets them is ignored, not an error."""
+        import json
+
+        home = tmp_path / "home"
+        (home / ".my_app").mkdir(parents=True)
+        (home / ".my_app" / "settings.json").write_text(json.dumps({
+            "webfetch_model": "gemini-2.5-flash",
+            "sandbox_packages": ["numpy"],
+            "log_level": "debug",
+        }))
+
+        env = {"HOME": str(home), "AGENTIC_WEBFETCH_MODEL": "gemini-2.5-flash"}
+        with patch.dict(os.environ, env, clear=True):
+            settings = BaseSettings(app_name="my_app", workspace_dir=tmp_path / "workspace")
+
+        assert settings.log_level == "debug"
+        assert not hasattr(settings, "webfetch_model")
+        assert not hasattr(settings, "sandbox_packages")
+
 
 def test_package_exports_new_modules():
     """Test that new modules are exported from package."""

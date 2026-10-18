@@ -262,7 +262,6 @@ absolute/user-level file. A key placed in a cwd `.env` is deliberately ignored.
 | `tavily_api_key` | `TAVILY_API_KEY` | None | Tavily API key for web search |
 | `brave_api_key` | `BRAVE_API_KEY` | None | Brave Search API key |
 | `search_backend` | `AGENTIC_SEARCH_BACKEND` | Auto | Web search provider (tavily/brave) |
-| `webfetch_model` | `AGENTIC_WEBFETCH_MODEL` | Auto | Model for web content summarization |
 | `webfetch_max_download_bytes` | `AGENTIC_WEBFETCH_MAX_DOWNLOAD_BYTES` | 5242880 | Largest page body read and saved |
 | `webfetch_saved_max_age_days` | `AGENTIC_WEBFETCH_SAVED_MAX_AGE_DAYS` | 7 | Saved pages older than this are deleted |
 | `webfetch_saved_max_mb` | `AGENTIC_WEBFETCH_SAVED_MAX_MB` | 200 | Oldest saved pages are deleted past this size |

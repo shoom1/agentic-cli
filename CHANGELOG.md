@@ -70,6 +70,25 @@ further deprecation step.
   For native Google Search, ADK's `GoogleSearchTool` works as an agent's only
   tool (`include_state_tools=False`), but it runs inside the model, so the
   permission engine never checks it.
+- **Public members nothing in the framework used**, with no deprecation step:
+  `JobManager.mark_resumed` (use `begin_resume()`, then `complete_resume()`),
+  `memory_services.build_knowledge_base` (`open_knowledge_base`),
+  `BaseWorkflowManager.update_settings` (`reinitialize()`),
+  `ToolRegistry.get_functions` (`list_tools()`), `ModelRegistry.set_default`,
+  `ModelRegistry.discovery_complete` (`is_authoritative_for(model)`),
+  `ModelSettings.common_params`, `workflow.retry.parse_retry_delay`
+  (`is_rate_limit_error` stays), `file_utils.file_lock` and `FileLockTimeout`,
+  `sandbox.backends.detect.docker_available` (`detect_docker().available`),
+  `MessageProcessor.clear_task_state`, and `LLMLoggingPlugin.get_events`
+  (`drain_events()`) and `get_log_file_path`.
+- **Settings helpers** `is_google_model`, `is_anthropic_model`,
+  `default_model_google`, `default_model_anthropic` and
+  `ensure_workspace_exists`. Use `ModelRegistry.get_family(model)` and
+  `ModelRegistry.get_default(family)`.
+- **Settings `webfetch_model` (`AGENTIC_WEBFETCH_MODEL`) and
+  `sandbox_packages`**, which nothing read (the summarizer picks its model
+  from `FAST_MODEL_MAP`). A settings file or environment that still sets them
+  keeps loading; the values are ignored.
 
 ## [0.6.4] - 2026-10-18
 

@@ -145,12 +145,6 @@ class WorkflowSettingsMixin:
     )
 
     # Web fetch configuration
-    webfetch_model: str | None = Field(
-        default=None,
-        title="WebFetch Model",
-        description="Model for summarizing fetched content (None = auto-detect)",
-        json_schema_extra={"ui_order": 56},
-    )
     webfetch_blocked_domains: list[str] = Field(
         default_factory=list,
         title="WebFetch Blocked Domains",
@@ -332,12 +326,6 @@ class WorkflowSettingsMixin:
         title="Sandbox Max Sessions",
         description="Maximum concurrent sandbox sessions",
         json_schema_extra={"ui_order": 124},
-    )
-    sandbox_packages: list[str] = Field(
-        default_factory=list,
-        title="Sandbox Packages",
-        description="Additional pip packages to pre-install in sandbox sessions (informational for local backend, drives image build for Docker backend)",
-        json_schema_extra={"ui_order": 125},
     )
     sandbox_image: str = Field(
         default="quay.io/jupyter/scipy-notebook:python-3.12",
