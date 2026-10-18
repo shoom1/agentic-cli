@@ -32,7 +32,6 @@ import os
 import re
 import sys
 import tempfile
-import warnings
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -241,9 +240,10 @@ def factory_entry(env: _Env, arxiv: Any) -> tuple[dict[str, Any], dict[str, Call
     """The factory-bound tools, with an empty service registry."""
     from agentic_cli.tools.factories import make_ingest_arxiv_tool, make_kb_tools
 
-    tools = {t.__name__: t for t in make_kb_tools(env.project, env.user)}
+    kb = kb_services(env.project, env.user)["knowledge_base"]
+    tools = {t.__name__: t for t in make_kb_tools(kb)}
     if arxiv is not None:
-        tools["ingest_arxiv_paper"] = make_ingest_arxiv_tool(arxiv, env.project)
+        tools["ingest_arxiv_paper"] = make_ingest_arxiv_tool(arxiv, kb)
     return {}, tools
 
 
@@ -258,8 +258,7 @@ def _world(layout: str, entry: str, entry_points: dict[str, Any], *, arxiv: Any 
     from agentic_cli.memory.kb import KnowledgeBaseManager
     from agentic_cli.workflow.service_registry import set_service_registry
 
-    with tempfile.TemporaryDirectory() as tmp, warnings.catch_warnings():
-        warnings.simplefilter("ignore", DeprecationWarning)
+    with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         (root / "cwd").mkdir()
         old_cwd = os.getcwd()
@@ -633,11 +632,9 @@ async def run_without_knowledge_base(tool: str) -> Any:
     fn = arxiv_tools.ingest_arxiv_paper if tool == "ingest_arxiv_paper" else getattr(knowledge_tools, tool)
     token = set_service_registry(registry)
     try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            result = fn(**NO_KB_CALLS[tool])
-            if inspect.isawaitable(result):
-                result = await result
+        result = fn(**NO_KB_CALLS[tool])
+        if inspect.isawaitable(result):
+            result = await result
         return result
     finally:
         token.var.reset(token)
@@ -681,8 +678,7 @@ async def run_papers(name: str, layout: str, with_workflow: bool) -> Any:
     from agentic_cli.config import BaseSettings
     from agentic_cli.memory.kb import KnowledgeBaseManager, SourceType
 
-    with tempfile.TemporaryDirectory() as tmp, warnings.catch_warnings():
-        warnings.simplefilter("ignore", DeprecationWarning)
+    with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         (root / "cwd").mkdir()
         old_cwd = os.getcwd()

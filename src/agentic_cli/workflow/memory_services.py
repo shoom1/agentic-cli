@@ -7,8 +7,6 @@ the package never sees a settings object.
 
 from __future__ import annotations
 
-import warnings
-
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -112,23 +110,6 @@ def open_knowledge_base(
     )
 
 
-def build_knowledge_bases(
-    settings: "BaseSettings", *, summarizer: Any, embedding_service: Any = None
-) -> tuple["KnowledgeBaseManager", "KnowledgeBaseManager"]:
-    """Deprecated: use :func:`open_knowledge_base`. Removed in 0.7.0.
-
-    The project and user knowledge bases (one object if they share a directory).
-    """
-    warnings.warn(
-        "memory_services.build_knowledge_bases is deprecated and will be removed in 0.7.0; "
-        "use memory_services.open_knowledge_base",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    kb = open_knowledge_base(settings, summarizer=summarizer, embedding_service=embedding_service)
-    return kb.manager("project"), kb.manager("user")
-
-
 def open_memory_store(settings: "BaseSettings", *, embedding_service: Any = None) -> "MemoryStore":
     """The memory store in ``workspace_dir/memory``.
 
@@ -144,14 +125,3 @@ def open_memory_store(settings: "BaseSettings", *, embedding_service: Any = None
     if embedding_service is None:
         embedding_service = build_embedding_service(settings)
     return MemoryStore(settings.workspace_dir / "memory", embedding_service=embedding_service)
-
-
-def build_memory_store(settings: "BaseSettings") -> "MemoryStore":
-    """Deprecated: use :func:`open_memory_store`. Removed in 0.7.0."""
-    warnings.warn(
-        "memory_services.build_memory_store is deprecated and will be removed in 0.7.0; "
-        "use memory_services.open_memory_store",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    return open_memory_store(settings)
