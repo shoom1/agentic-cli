@@ -59,6 +59,8 @@ def knowledge_base_argument(
         if user_kb_manager is not None or kb_manager is not None:
             raise TypeError(f"{factory}() takes a KnowledgeBase or 0.6.3's managers, not both")
         return knowledge_base
+    if knowledge_base is not None and kb_manager is not None:
+        raise TypeError(f"{factory}() got multiple values for the knowledge base")
     project = kb_manager if kb_manager is not None else knowledge_base
     if project is None:
         raise TypeError(f"{factory}() needs a KnowledgeBase")

@@ -89,6 +89,19 @@ def test_the_0_6_3_factory_arguments_still_work_and_warn(tmp_path):
         assert callable(make_ingest_arxiv_tool(contract._ArxivSource(), manager))
 
 
+def test_a_manager_given_twice_raises_as_in_0_6_3(tmp_path):
+    from agentic_cli.memory.kb import KnowledgeBaseManager
+    from agentic_cli.tools.factories import make_ingest_arxiv_tool, make_kb_tools
+
+    one = KnowledgeBaseManager(tmp_path / "one", use_mock=True)
+    two = KnowledgeBaseManager(tmp_path / "two", use_mock=True)
+
+    with pytest.raises(TypeError, match="multiple values"):
+        make_kb_tools(one, kb_manager=two)
+    with pytest.raises(TypeError, match="multiple values"):
+        make_ingest_arxiv_tool(contract._ArxivSource(), one, kb_manager=two)
+
+
 def test_a_factory_needs_a_knowledge_base():
     from agentic_cli.tools.factories import make_kb_tools
 
