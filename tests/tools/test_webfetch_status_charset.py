@@ -1,8 +1,7 @@
 """``web_fetch`` reports HTTP errors as failures and survives any charset label.
 
 An error page (404, 500, ...) was returned as fetched content: ``web_fetch``
-summarized it as if it were the page, ``kb_ingest_url`` stored it in the
-knowledge base, and it stayed cached for the TTL. A ``charset`` label Python
+summarized it as if it were the page, and it stayed cached for the TTL. A ``charset`` label Python
 does not know raised ``LookupError`` out of the fetcher. Offline: DNS is stubbed
 and the transport is an ``httpx.MockTransport`` behind the real PinnedTransport.
 """

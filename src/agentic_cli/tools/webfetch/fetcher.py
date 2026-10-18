@@ -17,7 +17,6 @@ from agentic_cli.tools.webfetch.transport import PinnedTransport
 
 @dataclass
 class RedirectInfo:
-    from_url: str
     to_url: str
     to_host: str
 
@@ -149,7 +148,7 @@ class ContentFetcher:
                             if next_host.lower() != original_host.lower():
                                 return FetchResult(
                                     success=False,
-                                    redirect=RedirectInfo(original_url, next_url, next_host),
+                                    redirect=RedirectInfo(next_url, next_host),
                                     error=f"Cross-host redirect to {next_host}",
                                 )
                             if not await self._robots.can_fetch(next_url):

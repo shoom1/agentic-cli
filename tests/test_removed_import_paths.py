@@ -25,3 +25,13 @@ def test_a_removed_module_cannot_be_imported(module, monkeypatch):
 def test_memory_tools_no_longer_exports_a_memory_store():
     with pytest.raises(ImportError):
         from agentic_cli.tools.memory_tools import MemoryStore  # noqa: F401
+
+
+def test_kb_ingest_url_is_gone():
+    import agentic_cli.tools as tools
+    from agentic_cli.tools.registry import get_registry
+
+    with pytest.raises(ImportError):
+        from agentic_cli.tools import kb_ingest_url  # noqa: F401
+    assert "kb_ingest_url" not in tools.__all__
+    assert get_registry().get("kb_ingest_url") is None

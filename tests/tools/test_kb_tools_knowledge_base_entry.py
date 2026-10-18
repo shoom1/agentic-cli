@@ -82,9 +82,9 @@ def test_the_0_6_3_factory_arguments_still_work_and_warn(tmp_path):
     manager = KnowledgeBaseManager(tmp_path / "kb", use_mock=True)
 
     with pytest.warns(DeprecationWarning, match="0.7.0"):
-        assert len(make_kb_tools(manager, manager)) == 8
+        assert len(make_kb_tools(manager, manager)) == 7
     with pytest.warns(DeprecationWarning, match="0.7.0"):
-        assert len(make_kb_tools(kb_manager=manager)) == 8
+        assert len(make_kb_tools(kb_manager=manager)) == 7
     with pytest.warns(DeprecationWarning, match="0.7.0"):
         assert callable(make_ingest_arxiv_tool(contract._ArxivSource(), manager))
 

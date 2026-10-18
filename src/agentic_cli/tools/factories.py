@@ -139,7 +139,7 @@ def make_kb_tools(knowledge_base=None, user_kb_manager=None, *, kb_manager=None)
             works, with a ``DeprecationWarning``, until 0.7.0.
 
     Returns:
-        [kb_search, kb_ingest_text, kb_ingest_file, kb_ingest_url,
+        [kb_search, kb_ingest_text, kb_ingest_file,
          kb_read, kb_list, kb_write_concept, kb_search_concepts]
     """
     from agentic_cli.tools._knowledge_base import knowledge_base_argument
@@ -147,7 +147,6 @@ def make_kb_tools(knowledge_base=None, user_kb_manager=None, *, kb_manager=None)
         READ_DOCUMENT_MAX_CHARS,
         _ingest_file,
         _ingest_text,
-        _ingest_url,
         _list,
         _read,
         _search,
@@ -155,7 +154,6 @@ def make_kb_tools(knowledge_base=None, user_kb_manager=None, *, kb_manager=None)
         _write_concept,
         kb_ingest_file as _orig_ingest_file,
         kb_ingest_text as _orig_ingest_text,
-        kb_ingest_url as _orig_ingest_url,
         kb_list as _orig_list,
         kb_read as _orig_read,
         kb_search as _orig_search,
@@ -212,26 +210,6 @@ def make_kb_tools(knowledge_base=None, user_kb_manager=None, *, kb_manager=None)
             tags=tags,
         )
 
-    async def kb_ingest_url(
-        url: str,
-        title: str = "",
-        source_type: str = "",
-        source_url: str | None = None,
-        authors: list[str] | None = None,
-        abstract: str = "",
-        tags: list[str] | None = None,
-    ) -> dict[str, Any]:
-        return await _ingest_url(
-            kb,
-            url=url,
-            title=title,
-            source_type=source_type,
-            source_url=source_url,
-            authors=authors,
-            abstract=abstract,
-            tags=tags,
-        )
-
     async def kb_read(
         doc_id_or_title: str,
         full: bool = False,
@@ -266,8 +244,6 @@ def make_kb_tools(knowledge_base=None, user_kb_manager=None, *, kb_manager=None)
     kb_ingest_text.__doc__ = _orig_ingest_text.__doc__
     kb_ingest_file.__name__ = "kb_ingest_file"
     kb_ingest_file.__doc__ = _orig_ingest_file.__doc__
-    kb_ingest_url.__name__ = "kb_ingest_url"
-    kb_ingest_url.__doc__ = _orig_ingest_url.__doc__
     kb_read.__name__ = "kb_read"
     kb_read.__doc__ = _orig_read.__doc__
     kb_list.__name__ = "kb_list"
@@ -281,7 +257,6 @@ def make_kb_tools(knowledge_base=None, user_kb_manager=None, *, kb_manager=None)
         (kb_search, _orig_search),
         (kb_ingest_text, _orig_ingest_text),
         (kb_ingest_file, _orig_ingest_file),
-        (kb_ingest_url, _orig_ingest_url),
         (kb_read, _orig_read),
         (kb_list, _orig_list),
         (kb_write_concept, _orig_write_concept),

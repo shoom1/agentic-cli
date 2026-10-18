@@ -51,7 +51,6 @@ KB_TOOLS = {
     "kb_search": "sync",
     "kb_ingest_text": "async",
     "kb_ingest_file": "async",
-    "kb_ingest_url": "async",
     "kb_read": "async",
     "kb_list": "sync",
     "kb_write_concept": "async",
@@ -147,23 +146,6 @@ class _ArxivSource:
         return self._pdf
 
 
-class _Fetcher:
-    """The web fetcher ``kb_ingest_url`` uses, answering with ARTICLE."""
-
-    async def fetch(self, url: str, timeout: int = 30):
-        from agentic_cli.tools.webfetch.fetcher import FetchResult
-
-        body = ARTICLE.encode()
-        return FetchResult(
-            success=True,
-            content=ARTICLE,
-            content_type="text/html; charset=utf-8",
-            raw=body,
-            charset="utf-8",
-            final_url=url,
-        )
-
-
 def _crash_codec(name: str):
     """A codec whose decoder fails the way a converter bug would."""
     if name != CRASH_CODEC.replace("-", "_"):
@@ -241,16 +223,6 @@ def _seed(env: _Env) -> None:
         file_bytes=_pdf_with_text("Magma ledger entries"),
         file_extension=".pdf",
     )
-
-
-@contextlib.contextmanager
-def _patched(target: Any, name: str, value: Any) -> Iterator[None]:
-    old = getattr(target, name)
-    setattr(target, name, value)
-    try:
-        yield
-    finally:
-        setattr(target, name, old)
 
 
 def registry_entry(env: _Env, arxiv: Any) -> tuple[dict[str, Any], dict[str, Callable[..., Any]]]:
@@ -498,19 +470,6 @@ async def _(env):
     return await env.call("kb_ingest_file", path=str(env.root / "absent.txt"))
 
 
-@scenario("ingest_url")
-async def _(env):
-    import agentic_cli.tools.webfetch_tool as webfetch_tool
-
-    with _patched(webfetch_tool, "get_or_create_fetcher", lambda: _Fetcher()):
-        return await env.call("kb_ingest_url", url=PAGE_URL, tags=["web"])
-
-
-@scenario("ingest_url_bad_scheme")
-async def _(env):
-    return await env.call("kb_ingest_url", url="file:///etc/passwd")
-
-
 @scenario("read_sidecar")
 async def _(env):
     return await env.call("kb_read", doc_id_or_title="Glacier survey")
@@ -657,7 +616,6 @@ NO_KB_CALLS = {
     "kb_search": {"query": "basalt"},
     "kb_ingest_text": {"content": "Some text."},
     "kb_ingest_file": {"path": "notes.md"},
-    "kb_ingest_url": {"url": PAGE_URL},
     "kb_read": {"doc_id_or_title": "Basalt columns"},
     "kb_list": {},
     "kb_write_concept": {"title": "T", "body": "B", "sources": ["x"]},

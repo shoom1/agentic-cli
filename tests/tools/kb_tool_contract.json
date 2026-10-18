@@ -70,36 +70,6 @@
     null
    ]
   ],
-  "kb_ingest_url": [
-   [
-    "url",
-    null
-   ],
-   [
-    "title",
-    ""
-   ],
-   [
-    "source_type",
-    ""
-   ],
-   [
-    "source_url",
-    null
-   ],
-   [
-    "authors",
-    null
-   ],
-   [
-    "abstract",
-    ""
-   ],
-   [
-    "tags",
-    null
-   ]
-  ],
   "kb_list": [
    [
     "query",
@@ -1119,42 +1089,6 @@
   "error": "No content or file provided. Pass non-empty content (kb_ingest_text) or a readable file (kb_ingest_file); for a web page, read it with web_fetch and pass its saved_path to kb_ingest_file. For ArXiv papers, use ingest_arxiv_paper instead.",
   "success": false
  },
- "ingest_url/one": {
-  "chunks_created": 2,
-  "document_id": "<id1>",
-  "saved_path": ".agentic_cli/fetched/a45947edc02d2a49.html",
-  "success": true,
-  "summary": "Synthesis of Volcano notes.",
-  "title": "Volcano notes"
- },
- "ingest_url/same": {
-  "chunks_created": 2,
-  "document_id": "<id1>",
-  "saved_path": ".agentic_cli/fetched/a45947edc02d2a49.html",
-  "success": true,
-  "summary": "Synthesis of Volcano notes.",
-  "title": "Volcano notes"
- },
- "ingest_url/two": {
-  "chunks_created": 2,
-  "document_id": "<id1>",
-  "saved_path": ".agentic_cli/fetched/a45947edc02d2a49.html",
-  "success": true,
-  "summary": "Synthesis of Volcano notes.",
-  "title": "Volcano notes"
- },
- "ingest_url_bad_scheme/one": {
-  "error": "url must be an http:// or https:// URL",
-  "success": false
- },
- "ingest_url_bad_scheme/same": {
-  "error": "url must be an http:// or https:// URL",
-  "success": false
- },
- "ingest_url_bad_scheme/two": {
-  "error": "url must be an http:// or https:// URL",
-  "success": false
- },
  "list_all/one": {
   "count": 4,
   "documents": [
@@ -1524,10 +1458,6 @@
   "success": false
  },
  "no_knowledge_base/kb_ingest_text": {
-  "error": "kb manager not available",
-  "success": false
- },
- "no_knowledge_base/kb_ingest_url": {
   "error": "kb manager not available",
   "success": false
  },

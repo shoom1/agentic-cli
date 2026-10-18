@@ -13,15 +13,13 @@ def test_kb_ingest_split_exports():
     from agentic_cli.tools import (
         kb_ingest_text,
         kb_ingest_file,
-        kb_ingest_url,
     )  # noqa: F401
 
 
 def test_legacy_unified_kb_ingest_gone():
     import agentic_cli.tools as t
-    # The single kb_ingest tool was split into three typed entry points
-    # so the permissions engine can gate filesystem.read / http.read at
-    # the right moment.
+    # The single kb_ingest tool was split into typed entry points so the
+    # permissions engine can gate filesystem.read at the right moment.
     assert not hasattr(t, "kb_ingest")
 
 
@@ -84,13 +82,11 @@ def test_writer_bundle_includes_split_ingest_and_write_concept():
         KB_READER_TOOLS,
         kb_ingest_text,
         kb_ingest_file,
-        kb_ingest_url,
         kb_write_concept,
     )
     assert KB_WRITER_TOOLS == [
         *KB_READER_TOOLS,
         kb_ingest_text,
         kb_ingest_file,
-        kb_ingest_url,
         kb_write_concept,
     ]

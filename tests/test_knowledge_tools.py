@@ -203,57 +203,6 @@ class TestIngestDocumentTool:
             finally:
                 token.var.reset(token)
 
-    @pytest.mark.asyncio
-    async def test_ingest_url_routes_through_hardened_fetcher(self, monkeypatch):
-        """kb_ingest_url uses ContentFetcher (SSRF protection) instead of raw httpx."""
-        from agentic_cli.workflow.service_registry import set_service_registry
-        from agentic_cli.tools.knowledge_tools import kb_ingest_url
-        from agentic_cli.tools.webfetch.fetcher import FetchResult
-
-        called_urls: list[str] = []
-
-        class _StubFetcher:
-            async def fetch(self, url, timeout=30):
-                called_urls.append(url)
-                return FetchResult(
-                    success=True,
-                    content="<html>Hi</html>",
-                    content_type="text/html",
-                )
-
-        # The import inside the helper happens lazily; patch the source.
-        import agentic_cli.tools.webfetch_tool as wft
-        monkeypatch.setattr(wft, "get_or_create_fetcher", lambda: _StubFetcher())
-
-        with tempfile.TemporaryDirectory() as tmp:
-            monkeypatch.chdir(tmp)
-            kb = _make_kb(Path(tmp))
-            token = set_service_registry(kb_services(kb))
-            try:
-                with pytest.warns(DeprecationWarning, match="kb_ingest_url"):
-                    result = await kb_ingest_url(url="https://example.com/article")
-                assert result["success"] is True
-                assert called_urls == ["https://example.com/article"]
-            finally:
-                token.var.reset(token)
-
-    @pytest.mark.asyncio
-    async def test_ingest_url_rejects_non_http_scheme(self):
-        """kb_ingest_url refuses file:// and other non-http(s) schemes."""
-        from agentic_cli.workflow.service_registry import set_service_registry
-        from agentic_cli.tools.knowledge_tools import kb_ingest_url
-
-        with tempfile.TemporaryDirectory() as tmp:
-            kb = _make_kb(Path(tmp))
-            token = set_service_registry(kb_services(kb))
-            try:
-                with pytest.warns(DeprecationWarning, match="kb_ingest_url"):
-                    result = await kb_ingest_url(url="file:///etc/passwd")
-                assert result["success"] is False
-                assert "http" in result["error"].lower()
-            finally:
-                token.var.reset(token)
-
 
 # ============================================================================
 # kb_read tests
