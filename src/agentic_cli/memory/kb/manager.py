@@ -26,6 +26,7 @@ from typing import Any, Protocol
 
 from agentic_cli.memory._core.embeddings import EmbeddingConfig, EmbeddingService
 from agentic_cli.memory._core.mock_embeddings import MockEmbeddingService
+from agentic_cli.memory.kb import enrich
 from agentic_cli.memory.kb.models import (
     Document,
     DocumentChunk,
@@ -758,21 +759,7 @@ class KnowledgeBaseManager:
     @staticmethod
     def _truncate_summary(content: str) -> str:
         """Return the deterministic fallback summary (first ~500 chars)."""
-        return _truncate(content, 500) if content else ""
-
-    # Cap the amount of content we hand to the LLM summarizer. Long PDFs
-    # can easily exceed sensible prompt budgets, and the summary only
-    # needs the lead-in to be useful.
-    _SUMMARY_INPUT_CHAR_LIMIT = 12_000
-
-    _SUMMARY_PROMPT_TEMPLATE = (
-        "Summarize the following document in 2-3 sentences (max ~500 "
-        "characters). Focus on the main topic, key contributions, and "
-        "why the document is relevant. Return only the summary text "
-        "with no preamble or markdown.\n\n"
-        "Title: {title}\n\n"
-        "Content:\n---\n{content}\n---"
-    )
+        return enrich.preview(content)
 
     async def generate_summary(self, content: str, title: str = "") -> str:
         """Generate a document summary via the summarizer given at construction.
@@ -787,57 +774,7 @@ class KnowledgeBaseManager:
         Returns:
             Summary string (~500 chars).
         """
-        if not content:
-            return ""
-
-        try:
-            summarizer = self._summarizer
-            if summarizer is not None:
-                capped = content[: self._SUMMARY_INPUT_CHAR_LIMIT]
-                prompt = self._SUMMARY_PROMPT_TEMPLATE.format(
-                    title=title or "(untitled)",
-                    content=capped,
-                )
-                summary = await summarizer.summarize(capped, prompt)
-                if summary:
-                    return summary.strip()
-        except Exception:
-            logger.debug("kb_summary_generation_failed", exc_info=True)
-
-        return self._truncate_summary(content)
-
-    _SIDECAR_PROMPT_TEMPLATE = (
-        "Extract a structured payload from the document below. "
-        "Return PLAIN TEXT in exactly this layout, with section headers "
-        "in ALL CAPS followed by a colon:\n\n"
-        "SUMMARY:\n"
-        "<3-5 paragraph synthesis of the document, roughly 1500-3000 "
-        "chars total. Use blank lines between paragraphs. Cover, in "
-        "order: (1) the problem the work addresses and why it matters, "
-        "(2) the technical approach / methodology with enough detail "
-        "to convey how it works, (3) the main results with concrete "
-        "numbers or outcomes, (4) limitations or open questions, and "
-        "(5) how this fits into the broader landscape. Write for a "
-        "reader who will use this instead of re-reading the paper.>\n\n"
-        "CLAIMS:\n"
-        "- <one specific claim with numbers or concrete evidence>\n"
-        "- <one specific claim with numbers or concrete evidence>\n"
-        "- <aim for 5-10 claims, each standalone and specific>\n\n"
-        "ENTITIES:\n"
-        "<KindLabel>: <comma-separated names>\n"
-        "<KindLabel>: <comma-separated names>\n"
-        "Use kind labels like Models, Datasets, Methods, Authors, Tools, "
-        "Organizations as relevant; be exhaustive within each kind. "
-        "Omit any section that has no real content.\n\n"
-        "STRICT OUTPUT RULES:\n"
-        "- No preamble, no meta-commentary, no thinking trace.\n"
-        "- No markdown bold/italic on the SUMMARY/CLAIMS/ENTITIES headers.\n"
-        "- Start your response directly with 'SUMMARY:'.\n"
-        "- Always emit all three sections when content supports them.\n"
-        "- The summary is prose (paragraphs), not a bullet list.\n\n"
-        "Title: {title}\n\n"
-        "Content:\n---\n{content}\n---"
-    )
+        return await enrich.summarize(self._summarizer, content, title)
 
     async def generate_sidecar_payload(
         self, content: str, title: str = ""
@@ -849,81 +786,7 @@ class KnowledgeBaseManager:
         ``{summary: truncate(content), claims: [], entities: {}}`` if there
         is no summarizer or the LLM call fails.
         """
-        fallback = {
-            "summary": self._truncate_summary(content),
-            "claims": [],
-            "entities": {},
-        }
-        if not content:
-            return fallback
-
-        try:
-            summarizer = self._summarizer
-            if summarizer is None:
-                return fallback
-
-            capped = content[: self._SUMMARY_INPUT_CHAR_LIMIT]
-            prompt = self._SIDECAR_PROMPT_TEMPLATE.format(
-                title=title or "(untitled)",
-                content=capped,
-            )
-            raw = await summarizer.summarize(capped, prompt)
-        except Exception:
-            logger.debug("kb_sidecar_payload_failed", exc_info=True)
-            return fallback
-
-        return self._parse_sidecar_response(raw) or fallback
-
-    # Matches section headers like "SUMMARY:", "**SUMMARY:**", "  Claims :",
-    # tolerating leading whitespace and optional markdown bold wrappers
-    # (including a trailing ``**`` immediately after the colon).
-    _SECTION_HEADER_RE = re.compile(
-        r"^\s*\**\s*(SUMMARY|CLAIMS|ENTITIES)\s*\**\s*:\**",
-        re.MULTILINE | re.IGNORECASE,
-    )
-
-    @classmethod
-    def _parse_sidecar_response(cls, raw: str) -> dict[str, Any] | None:
-        """Parse the SUMMARY/CLAIMS/ENTITIES blocks. Returns None on garbage.
-
-        Sections are split by regex so multi-paragraph summaries preserve
-        their blank-line breaks verbatim. CLAIMS is parsed as a bullet
-        list; ENTITIES as ``Kind: comma, separated, names`` lines.
-        """
-        if not raw:
-            return None
-
-        matches = list(cls._SECTION_HEADER_RE.finditer(raw))
-        if not matches:
-            return None
-
-        sections: dict[str, str] = {}
-        for i, m in enumerate(matches):
-            key = m.group(1).lower()
-            start = m.end()
-            end = matches[i + 1].start() if i + 1 < len(matches) else len(raw)
-            sections[key] = raw[start:end].strip()
-
-        summary = sections.get("summary", "")
-
-        claims: list[str] = []
-        for line in sections.get("claims", "").splitlines():
-            stripped = line.strip().lstrip("-*").strip()
-            if stripped:
-                claims.append(stripped)
-
-        entities: dict[str, list[str]] = {}
-        for line in sections.get("entities", "").splitlines():
-            stripped = line.strip().lstrip("-*").strip()
-            if ":" in stripped:
-                kind, _, names = stripped.partition(":")
-                items = [n.strip() for n in names.split(",") if n.strip()]
-                if items:
-                    entities[kind.strip()] = items
-
-        if not summary and not claims and not entities:
-            return None
-        return {"summary": summary, "claims": claims, "entities": entities}
+        return await enrich.sidecar_payload(self._summarizer, content, title)
 
     # ------------------------------------------------------------------
     # Document ingestion
