@@ -180,6 +180,87 @@ async def test_the_bound_tools_use_the_workflows_knowledge_base(tmp_path):
     assert identify_tool(tools["kb_search"]) is identify_tool(kb_search)
 
 
+def _injected(tmp_path, required, **services):
+    """A manager with services published before the build, as tests inject them."""
+    settings = BaseSettings(workspace_dir=tmp_path / "workspace", knowledge_base_use_mock=True)
+    mgr = _Manager(agent_configs=[], settings=settings)
+    mgr._required_managers = set(required)
+    mgr._services.update(services)
+    mgr._ensure_managers_initialized()
+    return mgr
+
+
+def _mock_manager(path, title):
+    from agentic_cli.memory.kb import KnowledgeBaseManager
+
+    manager = KnowledgeBaseManager(path, use_mock=True)
+    manager.ingest_document(content=f"{title} body.", title=title, source_type=SourceType.USER)
+    return manager
+
+
+def test_an_injected_kb_manager_still_gives_the_knowledge_base(tmp_path):
+    injected = _mock_manager(tmp_path / "injected", "Injected doc")
+    mgr = _injected(tmp_path, {"knowledge_base"}, **{KB_MANAGER: injected})
+
+    kb = mgr.knowledge_base
+    assert isinstance(kb, KnowledgeBase)
+    assert kb.manager("project") is injected
+    assert kb.scopes == ("project",)
+    listed = mgr._get_service_tool_map()["kb_list"]()
+    assert [d["title"] for d in listed["documents"]] == ["Injected doc"]
+
+
+def test_an_injected_kb_manager_gives_ingest_arxiv_paper_its_knowledge_base(tmp_path):
+    injected = _mock_manager(tmp_path / "injected", "Injected doc")
+    mgr = _injected(
+        tmp_path, {"knowledge_base", "arxiv_source"}, **{KB_MANAGER: injected, "arxiv_source": object()}
+    )
+
+    assert "ingest_arxiv_paper" in mgr._get_service_tool_map()
+
+
+def _app_with(mgr):
+    from tests.cli.test_papers_command import _App
+
+    class _WithWorkflow(_App):
+        workflow = mgr
+
+    return _WithWorkflow(mgr._settings)
+
+
+async def test_papers_lists_the_injected_manager(tmp_path):
+    from agentic_cli.cli.builtin_commands import PapersCommand
+    injected = _mock_manager(tmp_path / "injected", "Injected doc")
+    mgr = _injected(tmp_path, {"knowledge_base"}, **{KB_MANAGER: injected})
+    app = _app_with(mgr)
+    await PapersCommand().execute("", app)
+
+    [table] = app.session.tables
+    assert [str(cell) for cell in table.columns[1]._cells] == ["Injected doc"]
+
+
+async def test_papers_global_falls_back_when_only_the_project_manager_is_injected(tmp_path):
+    from agentic_cli.cli.builtin_commands import PapersCommand
+    injected = _mock_manager(tmp_path / "injected", "Injected doc")
+    mgr = _injected(tmp_path, {"knowledge_base"}, **{KB_MANAGER: injected})
+    assert mgr.knowledge_base.scopes == ("project",)
+    app = _app_with(mgr)
+    await PapersCommand().execute("--global", app)
+
+    assert app.session.messages == ["No documents found in user knowledge base."]
+
+
+def test_an_injected_knowledge_base_fills_the_legacy_keys(tmp_path):
+    project = _mock_manager(tmp_path / "project", "P")
+    user = _mock_manager(tmp_path / "user", "U")
+    kb = KnowledgeBase({"project": project, "user": user})
+    mgr = _injected(tmp_path, {"knowledge_base"}, **{KNOWLEDGE_BASE: kb})
+
+    assert mgr.services[KNOWLEDGE_BASE] is kb
+    assert mgr.services[KB_MANAGER] is project
+    assert mgr.services[USER_KB_MANAGER] is user
+
+
 def _deprecations(caught):
     return [w for w in caught if issubclass(w.category, DeprecationWarning) and "kb_manager" in str(w.message)]
 
