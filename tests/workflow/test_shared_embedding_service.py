@@ -29,6 +29,8 @@ from agentic_cli.workflow.service_registry import (
     USER_KB_MANAGER,
 )
 
+from tests.memory.kb_extra import require_kb_module
+
 
 class _Manager(BaseWorkflowManager):
     @property
@@ -134,8 +136,8 @@ def test_mock_mode_builds_no_service(tmp_path, monkeypatch):
     assert services[MEMORY_STORE]._embedding_service is None
 
 
-def test_the_model_loads_once_for_both_scopes_and_the_memory_store(tmp_path, monkeypatch):
-    loads: list[str] = []
+def _install_fake_model(monkeypatch, loads: list[str]) -> None:
+    """A sentence-transformers stand-in of dimension 8 that records each load."""
 
     class SentenceTransformer:
         def __init__(self, name, device=None):
@@ -151,6 +153,11 @@ def test_the_model_loads_once_for_both_scopes_and_the_memory_store(tmp_path, mon
     monkeypatch.setitem(
         sys.modules, "sentence_transformers", types.SimpleNamespace(SentenceTransformer=SentenceTransformer)
     )
+
+
+def test_the_model_loads_once_for_both_scopes_and_the_memory_store(tmp_path, monkeypatch):
+    loads: list[str] = []
+    _install_fake_model(monkeypatch, loads)
     mgr = _manager(
         tmp_path, {"kb_manager", "memory_store"}, knowledge_base_use_mock=False, embedding_device="cpu"
     )
@@ -161,3 +168,15 @@ def test_the_model_loads_once_for_both_scopes_and_the_memory_store(tmp_path, mon
     services[USER_KB_MANAGER].ingest_document(content="Glacier notes.", title="Glacier", source_type=SourceType.USER)
 
     assert loads == [mgr.settings.embedding_model]
+
+
+def test_both_knowledge_bases_hold_the_shared_service_with_faiss(tmp_path, monkeypatch):
+    """With FAISS a real service reaches both knowledge bases (without it they fall back to keyword search)."""
+    require_kb_module("faiss")
+    _install_fake_model(monkeypatch, [])
+    mgr = _manager(tmp_path, {"kb_manager"}, knowledge_base_use_mock=False, embedding_device="cpu")
+
+    services = mgr._build_services()
+
+    assert services[KB_MANAGER]._embedding_service is services[EMBEDDING_SERVICE]
+    assert services[USER_KB_MANAGER]._embedding_service is services[EMBEDDING_SERVICE]

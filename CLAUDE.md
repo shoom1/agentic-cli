@@ -93,7 +93,7 @@ agentic-cli/
 │   ├── knowledge_base/       # Deprecated forwarding modules → memory.kb (removed in 0.7.0)
 │   ├── memory/               # Knowledge base + memory store; imports nothing else from agentic_cli
 │   │   ├── __init__.py       # MemoryStore, MemoryItem, ForgettingPolicy, EmbeddingService, EmbeddingConfig, MockEmbeddingService
-│   │   ├── _core/            # Shared, private: embeddings.py, mock_embeddings.py, io.py, log.py
+│   │   ├── _core/            # Shared, private: embeddings.py, mock_embeddings.py, io.py, log.py, model_record.py
 │   │   ├── store.py          # MemoryStore
 │   │   └── kb/               # Knowledge base (agentic_cli.memory.kb)
 │   │       ├── manager.py    # KnowledgeBaseManager(base_dir, embedding=, summarizer=), Summarizer
