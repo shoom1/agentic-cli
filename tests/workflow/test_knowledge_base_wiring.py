@@ -3,8 +3,7 @@
 It built two ``KnowledgeBaseManager``s under ``kb_manager`` and
 ``user_kb_manager``, and every tool merged them by hand. It now builds one
 ``KnowledgeBase`` under ``knowledge_base``, which the framework's tools
-declare. Until 0.7.0 the old names keep working: the two keys still hold
-the scopes' managers, and the old properties warn.
+declare, and publishes no other knowledge-base key.
 """
 
 from __future__ import annotations
@@ -20,12 +19,7 @@ from agentic_cli.tools.registry import ToolRegistry, identify_tool
 from agentic_cli.workflow.base_manager import BaseWorkflowManager
 from agentic_cli.workflow.events import WorkflowEvent
 from agentic_cli.workflow.permissions import EXEMPT
-from agentic_cli.workflow.service_registry import (
-    KB_MANAGER,
-    KNOWLEDGE_BASE,
-    MEMORY_STORE,
-    USER_KB_MANAGER,
-)
+from agentic_cli.workflow.service_registry import KNOWLEDGE_BASE, MEMORY_STORE
 
 
 class _Manager(BaseWorkflowManager):
@@ -74,30 +68,27 @@ def test_one_knowledge_base_over_both_scopes(tmp_path):
 
     assert isinstance(kb, KnowledgeBase)
     assert kb.scopes == ("project", "user")
-    assert mgr.services[KB_MANAGER] is kb.manager("project")
-    assert mgr.services[USER_KB_MANAGER] is kb.manager("user")
+
+
+async def test_service_init_publishes_the_knowledge_base_and_no_0_6_3_keys(tmp_path):
+    from agentic_cli.tools.knowledge_tools import kb_search
+    from agentic_cli.workflow.config import AgentConfig
+
+    settings = BaseSettings(workspace_dir=tmp_path / "workspace", knowledge_base_use_mock=True)
+    config = AgentConfig(name="a", prompt="p", tools=[kb_search])
+    mgr = _Manager(agent_configs=[config], settings=settings)
+
+    await mgr.initialize_services(validate=False)
+
+    assert isinstance(mgr.services[KNOWLEDGE_BASE], KnowledgeBase)
+    assert "kb_manager" not in mgr.services
+    assert "user_kb_manager" not in mgr.services
 
 
 def test_one_scope_when_both_are_one_directory(tmp_path):
     mgr = _manager(tmp_path, {"knowledge_base"}, workspace=tmp_path / "project" / ".agentic_cli")
 
     assert mgr.services[KNOWLEDGE_BASE].scopes == ("project",)
-    assert mgr.services[KB_MANAGER] is mgr.services[USER_KB_MANAGER]
-
-
-def test_a_legacy_declaration_builds_the_same_services(tmp_path):
-    mgr = _manager(tmp_path, {"kb_manager"})
-
-    assert isinstance(mgr.services[KNOWLEDGE_BASE], KnowledgeBase)
-    assert mgr.services[KB_MANAGER] is mgr.services[KNOWLEDGE_BASE].manager("project")
-
-
-def test_a_legacy_declaration_and_a_new_one_build_one_knowledge_base(tmp_path):
-    mgr = _manager(tmp_path, {"kb_manager", "knowledge_base"})
-    kb = mgr.services[KNOWLEDGE_BASE]
-
-    assert mgr.services[KB_MANAGER] is kb.manager("project")
-    assert mgr.services[USER_KB_MANAGER] is kb.manager("user")
 
 
 def test_declaring_knowledge_base_does_not_warn():
@@ -129,16 +120,11 @@ def test_the_new_properties(tmp_path):
         assert mgr.memory_store is mgr.services[MEMORY_STORE]
 
 
-@pytest.mark.parametrize(("name", "key"), [
-    ("kb_manager", KB_MANAGER), ("user_kb_manager", USER_KB_MANAGER), ("memory_manager", MEMORY_STORE),
-])
-def test_the_old_properties_warn_and_still_work(tmp_path, name, key):
+@pytest.mark.parametrize("name", ["kb_manager", "user_kb_manager", "memory_manager"])
+def test_the_0_6_3_properties_are_gone(tmp_path, name):
     mgr = _manager(tmp_path, {"knowledge_base", "memory_store"})
 
-    with pytest.warns(DeprecationWarning, match="0.7.0"):
-        value = getattr(mgr, name)
-
-    assert value is mgr.services[key]
+    assert not hasattr(mgr, name)
 
 
 def test_a_model_switch_carries_the_knowledge_base(tmp_path):
@@ -149,7 +135,6 @@ def test_a_model_switch_carries_the_knowledge_base(tmp_path):
         mgr._cleanup_managers()
 
     assert mgr.services[KNOWLEDGE_BASE] is kb
-    assert mgr.services[KB_MANAGER] is kb.manager("project")
 
 
 async def test_the_bound_tools_use_the_workflows_knowledge_base(tmp_path):
@@ -184,22 +169,19 @@ def _mock_manager(path, title):
     return manager
 
 
-def test_an_injected_kb_manager_still_gives_the_knowledge_base(tmp_path):
-    injected = _mock_manager(tmp_path / "injected", "Injected doc")
-    mgr = _injected(tmp_path, {"knowledge_base"}, **{KB_MANAGER: injected})
+def test_an_injected_knowledge_base_is_the_one_the_tools_use(tmp_path):
+    injected = KnowledgeBase({"project": _mock_manager(tmp_path / "injected", "Injected doc")})
+    mgr = _injected(tmp_path, {"knowledge_base"}, **{KNOWLEDGE_BASE: injected})
 
-    kb = mgr.knowledge_base
-    assert isinstance(kb, KnowledgeBase)
-    assert kb.manager("project") is injected
-    assert kb.scopes == ("project",)
+    assert mgr.knowledge_base is injected
     listed = mgr._get_service_tool_map()["kb_list"]()
     assert [d["title"] for d in listed["documents"]] == ["Injected doc"]
 
 
-def test_an_injected_kb_manager_gives_ingest_arxiv_paper_its_knowledge_base(tmp_path):
-    injected = _mock_manager(tmp_path / "injected", "Injected doc")
+def test_an_injected_knowledge_base_gives_ingest_arxiv_paper_its_knowledge_base(tmp_path):
+    injected = KnowledgeBase({"project": _mock_manager(tmp_path / "injected", "Injected doc")})
     mgr = _injected(
-        tmp_path, {"knowledge_base", "arxiv_source"}, **{KB_MANAGER: injected, "arxiv_source": object()}
+        tmp_path, {"knowledge_base", "arxiv_source"}, **{KNOWLEDGE_BASE: injected, "arxiv_source": object()}
     )
 
     assert "ingest_arxiv_paper" in mgr._get_service_tool_map()
@@ -214,10 +196,10 @@ def _app_with(mgr):
     return _WithWorkflow(mgr._settings)
 
 
-async def test_papers_lists_the_injected_manager(tmp_path):
+async def test_papers_lists_the_injected_knowledge_base(tmp_path):
     from agentic_cli.cli.builtin_commands import PapersCommand
-    injected = _mock_manager(tmp_path / "injected", "Injected doc")
-    mgr = _injected(tmp_path, {"knowledge_base"}, **{KB_MANAGER: injected})
+    injected = KnowledgeBase({"project": _mock_manager(tmp_path / "injected", "Injected doc")})
+    mgr = _injected(tmp_path, {"knowledge_base"}, **{KNOWLEDGE_BASE: injected})
     app = _app_with(mgr)
     await PapersCommand().execute("", app)
 
@@ -225,10 +207,10 @@ async def test_papers_lists_the_injected_manager(tmp_path):
     assert [str(cell) for cell in table.columns[1]._cells] == ["Injected doc"]
 
 
-async def test_papers_global_falls_back_when_only_the_project_manager_is_injected(tmp_path):
+async def test_papers_global_falls_back_when_only_the_project_scope_is_injected(tmp_path):
     from agentic_cli.cli.builtin_commands import PapersCommand
-    injected = _mock_manager(tmp_path / "injected", "Injected doc")
-    mgr = _injected(tmp_path, {"knowledge_base"}, **{KB_MANAGER: injected})
+    injected = KnowledgeBase({"project": _mock_manager(tmp_path / "injected", "Injected doc")})
+    mgr = _injected(tmp_path, {"knowledge_base"}, **{KNOWLEDGE_BASE: injected})
     assert mgr.knowledge_base.scopes == ("project",)
     app = _app_with(mgr)
     await PapersCommand().execute("--global", app)
@@ -236,12 +218,12 @@ async def test_papers_global_falls_back_when_only_the_project_manager_is_injecte
     assert app.session.messages == ["No documents found in user knowledge base."]
 
 
-def test_an_injected_knowledge_base_fills_the_legacy_keys(tmp_path):
+def test_an_injected_knowledge_base_gets_no_0_6_3_keys(tmp_path):
     project = _mock_manager(tmp_path / "project", "P")
     user = _mock_manager(tmp_path / "user", "U")
     kb = KnowledgeBase({"project": project, "user": user})
     mgr = _injected(tmp_path, {"knowledge_base"}, **{KNOWLEDGE_BASE: kb})
 
     assert mgr.services[KNOWLEDGE_BASE] is kb
-    assert mgr.services[KB_MANAGER] is project
-    assert mgr.services[USER_KB_MANAGER] is user
+    assert "kb_manager" not in mgr.services
+    assert "user_kb_manager" not in mgr.services

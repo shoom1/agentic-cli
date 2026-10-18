@@ -1322,14 +1322,9 @@ class TestRequiresAreConstructible:
 
         assert "requires='knowledge_base'" in str(exc.value)
 
-    def test_kb_manager_creates_both_scopes(self):
+    def test_knowledge_base_creates_both_scopes(self):
         """The documented replacement really provides the user-scoped KB too."""
-        from unittest.mock import MagicMock
-
-        from agentic_cli.workflow.service_registry import (
-            KB_MANAGER,
-            USER_KB_MANAGER,
-        )
+        from agentic_cli.workflow.service_registry import KNOWLEDGE_BASE
 
         from tests.conftest import MockContext
 
@@ -1357,11 +1352,12 @@ class TestRequiresAreConstructible:
                     return None
 
             mgr = _Manager(agent_configs=[], settings=ctx.settings)
-            mgr._required_managers = {"kb_manager"}
+            mgr._required_managers = {"knowledge_base"}
             mgr._ensure_managers_initialized()
 
-            assert mgr.services.get(KB_MANAGER) is not None
-            assert mgr.services.get(USER_KB_MANAGER) is not None
+            kb = mgr.services[KNOWLEDGE_BASE]
+            assert kb.manager("project") is not None
+            assert kb.manager("user") is not None
 
     def test_always_present_services_are_not_declarable(self):
         registry = ToolRegistry()

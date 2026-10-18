@@ -24,9 +24,8 @@ from agentic_cli.workflow.base_manager import BaseWorkflowManager
 from agentic_cli.workflow.events import WorkflowEvent
 from agentic_cli.workflow.service_registry import (
     EMBEDDING_SERVICE,
-    KB_MANAGER,
+    KNOWLEDGE_BASE,
     MEMORY_STORE,
-    USER_KB_MANAGER,
 )
 
 from tests.memory.kb_extra import require_kb_module
@@ -85,12 +84,12 @@ def made(monkeypatch) -> list:
 
 
 def test_one_service_reaches_both_scopes_and_the_memory_store(tmp_path, made):
-    services = _manager(tmp_path, {"kb_manager", "memory_store"}, knowledge_base_use_mock=False)._build_services()
+    services = _manager(tmp_path, {"knowledge_base", "memory_store"}, knowledge_base_use_mock=False)._build_services()
 
     [service] = made
     assert services[EMBEDDING_SERVICE] is service
-    assert services[KB_MANAGER]._embedding_service is service
-    assert services[USER_KB_MANAGER]._embedding_service is service
+    assert services[KNOWLEDGE_BASE].manager("project")._embedding_service is service
+    assert services[KNOWLEDGE_BASE].manager("user")._embedding_service is service
     assert services[MEMORY_STORE]._embedding_service is service
 
 
@@ -102,7 +101,7 @@ def test_no_service_without_a_knowledge_base_or_memory_store(tmp_path, made):
 
 
 def test_a_component_built_later_reuses_the_service(tmp_path, made):
-    mgr = _manager(tmp_path, {"kb_manager"}, knowledge_base_use_mock=False)
+    mgr = _manager(tmp_path, {"knowledge_base"}, knowledge_base_use_mock=False)
     mgr._publish_services(mgr._build_services())
     mgr._required_managers.add("memory_store")
 
@@ -130,7 +129,7 @@ def test_mock_mode_builds_no_service(tmp_path, monkeypatch):
     monkeypatch.setattr(EmbeddingService, "is_available", staticmethod(lambda: True))
     monkeypatch.setattr(EmbeddingService, "__init__", refuse)
 
-    services = _manager(tmp_path, {"kb_manager", "memory_store"}, knowledge_base_use_mock=True)._build_services()
+    services = _manager(tmp_path, {"knowledge_base", "memory_store"}, knowledge_base_use_mock=True)._build_services()
 
     assert EMBEDDING_SERVICE not in services
     assert services[MEMORY_STORE]._embedding_service is None
@@ -159,13 +158,14 @@ def test_the_model_loads_once_for_both_scopes_and_the_memory_store(tmp_path, mon
     loads: list[str] = []
     _install_fake_model(monkeypatch, loads)
     mgr = _manager(
-        tmp_path, {"kb_manager", "memory_store"}, knowledge_base_use_mock=False, embedding_device="cpu"
+        tmp_path, {"knowledge_base", "memory_store"}, knowledge_base_use_mock=False, embedding_device="cpu"
     )
     services = mgr._build_services()
+    kb = services[KNOWLEDGE_BASE]
 
     services[MEMORY_STORE].store("The team mascot is an otter")
-    services[KB_MANAGER].ingest_document(content="Basalt columns.", title="Basalt", source_type=SourceType.USER)
-    services[USER_KB_MANAGER].ingest_document(content="Glacier notes.", title="Glacier", source_type=SourceType.USER)
+    kb.manager("project").ingest_document(content="Basalt columns.", title="Basalt", source_type=SourceType.USER)
+    kb.manager("user").ingest_document(content="Glacier notes.", title="Glacier", source_type=SourceType.USER)
 
     assert loads == [mgr.settings.embedding_model]
 
@@ -174,9 +174,10 @@ def test_both_knowledge_bases_hold_the_shared_service_with_faiss(tmp_path, monke
     """With FAISS a real service reaches both knowledge bases (without it they fall back to keyword search)."""
     require_kb_module("faiss")
     _install_fake_model(monkeypatch, [])
-    mgr = _manager(tmp_path, {"kb_manager"}, knowledge_base_use_mock=False, embedding_device="cpu")
+    mgr = _manager(tmp_path, {"knowledge_base"}, knowledge_base_use_mock=False, embedding_device="cpu")
 
     services = mgr._build_services()
 
-    assert services[KB_MANAGER]._embedding_service is services[EMBEDDING_SERVICE]
-    assert services[USER_KB_MANAGER]._embedding_service is services[EMBEDDING_SERVICE]
+    kb = services[KNOWLEDGE_BASE]
+    assert kb.manager("project")._embedding_service is services[EMBEDDING_SERVICE]
+    assert kb.manager("user")._embedding_service is services[EMBEDDING_SERVICE]

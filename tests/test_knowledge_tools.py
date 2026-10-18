@@ -404,7 +404,7 @@ class TestKBManagerContextVar:
         )
         token = set_service_registry({})
         try:
-            assert get_service("kb_manager") is None
+            assert get_service("knowledge_base") is None
         finally:
             token.var.reset(token)
 
@@ -414,9 +414,9 @@ class TestKBManagerContextVar:
             set_service_registry,
         )
         sentinel = object()
-        token = set_service_registry({"kb_manager": sentinel})
+        token = set_service_registry({"knowledge_base": sentinel})
         try:
-            assert get_service("kb_manager") is sentinel
+            assert get_service("knowledge_base") is sentinel
         finally:
             token.var.reset(token)
 
@@ -439,26 +439,11 @@ class TestKBManagerContextVar:
 
         assert get_registry().get("kb_search").requires == ("knowledge_base",)
 
-    def test_base_manager_has_kb_manager_slot(self):
+    def test_base_manager_has_a_knowledge_base_slot(self):
         from agentic_cli.workflow.base_manager import BaseWorkflowManager
-        assert hasattr(BaseWorkflowManager, "kb_manager")
-
-    def test_base_manager_has_user_kb_manager_slot(self):
-        from agentic_cli.workflow.base_manager import BaseWorkflowManager
-        assert hasattr(BaseWorkflowManager, "user_kb_manager")
-
-    def test_user_kb_manager_registry_key_exists(self):
-        from agentic_cli.workflow.service_registry import (
-            get_service,
-            set_service_registry,
-            USER_KB_MANAGER,
-        )
-        sentinel = object()
-        token = set_service_registry({USER_KB_MANAGER: sentinel})
-        try:
-            assert get_service(USER_KB_MANAGER) is sentinel
-        finally:
-            token.var.reset(token)
+        assert hasattr(BaseWorkflowManager, "knowledge_base")
+        assert not hasattr(BaseWorkflowManager, "kb_manager")
+        assert not hasattr(BaseWorkflowManager, "user_kb_manager")
 
 
 # ============================================================================
