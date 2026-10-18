@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+The APIs that 0.6.3 and 0.6.4 deprecated for 0.7.0 are gone, with no
+further deprecation step.
+
+- **`agentic_cli.knowledge_base`** (all ten modules, with the
+  `KnowledgeBaseManager(settings=...)` signature, `extract_text_from_pdf` and
+  `embeddings.resolve_embedding_device`). Use `agentic_cli.memory.kb`,
+  `KnowledgeBaseManager(base_dir, ...)` and
+  `agentic_cli.memory.resolve_embedding_device`.
+- **`agentic_cli.tools.search_sources.PaperResult`** and **`WebResult`**, which
+  only the old package used. Search sources return `SearchSourceResult`.
+- **`agentic_cli.tools.kb_convert`**. Import `convert_document`,
+  `ConvertedDocument` and `UnsupportedDocument` from `agentic_cli.memory.kb`.
+- **`agentic_cli.tools.memory_tools.MemoryStore(settings)`**. Use
+  `agentic_cli.memory.MemoryStore(settings.workspace_dir / "memory")`.
+- **`settings.knowledge_base_documents_dir`** and
+  **`settings.knowledge_base_embeddings_dir`**. The knowledge base lays out
+  its own folder, `settings.knowledge_base_dir`.
+- **The `kb_ingest_url` tool**, also from `KB_WRITER_TOOLS`, `make_kb_tools`
+  and the `agentic_cli.tools` exports. Read the page with `web_fetch`, then
+  pass its `saved_path` to `kb_ingest_file`.
+- **`requires="kb_manager"`**. Declare `requires="knowledge_base"`; a tool
+  declaring `kb_manager` or `user_kb_manager` now fails to register, and the
+  error names `knowledge_base`.
+- **The `kb_manager` and `user_kb_manager` service keys.** The workflow
+  publishes `knowledge_base` alone, and the knowledge-base tools read only
+  that key: a registry holding only the 0.6.3 keys gives them no knowledge
+  base. Publish a `KnowledgeBase` under `knowledge_base`, and use
+  `knowledge_base.manager(name)` for one scope.
+- **`workflow.kb_manager`, `workflow.user_kb_manager`** and
+  **`workflow.memory_manager`**. Use `workflow.knowledge_base` and
+  `workflow.memory_store`.
+- **`make_kb_tools(kb_manager, user_kb_manager)`**, **`make_kb_tools(kb_manager=...)`**
+  and **`make_ingest_arxiv_tool(source, kb_manager=...)`**. The factories are
+  `make_kb_tools(knowledge_base)` and
+  `make_ingest_arxiv_tool(arxiv_source, knowledge_base)`, and raise
+  `TypeError` when given anything but a `KnowledgeBase`.
+- **`memory_services.build_memory_store`** and
+  **`memory_services.build_knowledge_bases`**. Use
+  `memory_services.open_memory_store` and `memory_services.open_knowledge_base`.
+
 ## [0.6.4] - 2026-10-18
 
 The knowledge base gets a public API in `agentic_cli.memory.kb`. A

@@ -256,7 +256,7 @@ def _read_scope(kb, found) -> str:
 
     0.6.3 said "user" whenever the document came from the user scope's
     manager, also when both names point at one directory (where kb_search
-    and kb_list say "project"). Kept until 0.7.0.
+    and kb_list say "project"). Kept until the knowledge-base redesign.
     """
     try:
         user = kb.manager("user")
