@@ -18,8 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   moves the knowledge-base logic into the package behind both.
 - **Each index records the embedding model that built it.** A knowledge base
   writes `embeddings/model.json` and the memory store
-  `memory/embedding_model.json` (model name and dimension) whenever they
-  save. After `embedding_model` changes, the next open embeds the stored
+  `memory/embedding_model.json` (model name and dimension): the knowledge
+  base whenever it saves its index, the memory store when it opens and the
+  model changed. A record that cannot be written (a read-only directory,
+  say) is logged and does not stop the open. After `embedding_model` changes, the next open embeds the stored
   text again: the knowledge base builds the new index beside the old one and
   swaps it in when complete, and if that fails it keeps the old index and
   searches by keyword for the session. An index from 0.6.3 is kept when its
