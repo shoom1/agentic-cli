@@ -36,7 +36,6 @@ logger = structlog.get_logger(__name__)
 from agentic_cli.config import get_settings
 from agentic_cli.constants import truncate
 from agentic_cli.paths import resolve_path
-from agentic_cli.tools.kb_convert import UnsupportedDocument, convert_document
 from agentic_cli.tools.registry import (
     register_tool,
     ToolCategory,
@@ -343,6 +342,8 @@ async def _ingest_bytes_with_kb(
     last segment. ``charset`` None means a local file, which must be UTF-8
     unless it is a PDF. Arguments the model passed always win.
     """
+    from agentic_cli.memory.kb import UnsupportedDocument, convert_document
+
     try:
         converted = await asyncio.to_thread(
             convert_document,

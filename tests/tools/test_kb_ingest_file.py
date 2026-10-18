@@ -120,12 +120,10 @@ async def test_any_other_conversion_failure_is_also_refused(kb, tmp_path, monkey
     """Defensive: whatever a future converter raises besides
     ``UnsupportedDocument`` must still come back as a refusal, not an
     exception out of the tool."""
-    from agentic_cli.tools import knowledge_tools
-
     def _boom(*a, **kw):
         raise RuntimeError("converter exploded")
 
-    monkeypatch.setattr(knowledge_tools, "convert_document", _boom)
+    monkeypatch.setattr("agentic_cli.memory.kb.convert_document", _boom)
     notes = tmp_path / "notes.md"
     notes.write_text("# Notes\n")
 

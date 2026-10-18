@@ -1,4 +1,4 @@
-"""The ingestion converter (``tools/kb_convert.py``).
+"""The ingestion converter (``agentic_cli.memory.kb.convert``).
 
 Ingestion has its own converter, separate from ``web_fetch``'s. A web page
 goes in as its main text, not its HTML: trafilatura (the ``kb`` extra) keeps
@@ -12,7 +12,7 @@ import sys
 
 import pytest
 
-from agentic_cli.tools.kb_convert import UnsupportedDocument, convert_document
+from agentic_cli.memory.kb import UnsupportedDocument, convert_document
 
 from tests.memory.kb_extra import require_kb_module
 
@@ -51,10 +51,10 @@ class _Log:
 
 @pytest.fixture
 def log(monkeypatch):
-    from agentic_cli.tools import kb_convert
+    from agentic_cli.memory.kb import convert
 
     recorder = _Log()
-    monkeypatch.setattr(kb_convert, "logger", recorder)
+    monkeypatch.setattr(convert, "logger", recorder)
     return recorder
 
 
@@ -104,10 +104,10 @@ def test_a_page_is_decoded_with_its_charset(no_trafilatura):
 
 
 def test_a_pdf_goes_through_pypdf(monkeypatch):
-    from agentic_cli.tools import pdf_utils
+    from agentic_cli.memory.kb import convert
 
     seen = []
-    monkeypatch.setattr(pdf_utils, "extract_pdf_text", lambda data, **kw: seen.append(data) or "pdf text")
+    monkeypatch.setattr(convert, "extract_pdf_text", lambda data: seen.append(data) or "pdf text")
     doc = convert_document(b"%PDF-1.4", content_type=None, extension=".pdf")
 
     assert doc.text == "pdf text"
@@ -258,3 +258,16 @@ def test_empty_html_falls_back_to_html2text_without_calling_extract(log):
 
     assert doc.extractor == "html2text"
     assert {"event": "kb_convert_html", "extractor": "html2text", "reason": "no_main_text"} in log.events
+
+
+def test_the_pdf_reader_returns_the_text_of_every_page():
+    from agentic_cli.memory.kb.convert import extract_pdf_text
+    from tests.memory.pdf_bytes import pdf_with_text
+
+    assert extract_pdf_text(pdf_with_text("Tephra layers record eruptions")) == "Tephra layers record eruptions"
+
+
+def test_the_pdf_reader_returns_nothing_for_bytes_that_are_not_a_pdf():
+    from agentic_cli.memory.kb.convert import extract_pdf_text
+
+    assert extract_pdf_text(b"%PDF-1.4 not really") == ""
