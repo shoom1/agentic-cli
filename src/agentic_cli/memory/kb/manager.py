@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import threading
 import time
@@ -33,6 +34,7 @@ from agentic_cli.memory.kb.models import (
 )
 from agentic_cli.memory.kb.vector_store import VectorStore
 from agentic_cli.memory._core.io import atomic_write_json, atomic_write_text
+from agentic_cli.memory._core.model_record import ModelRecord, read_model_record, write_model_record
 from agentic_cli.memory._core.log import get_logger
 
 logger = get_logger("agentic_cli.memory.kb")
@@ -187,6 +189,7 @@ class KnowledgeBaseManager:
 
         self.metadata_path = self.kb_dir / "metadata.json"
         self.files_dir = self.kb_dir / "files"
+        self._model_record_path = self.embeddings_dir / "model.json"
 
         # Ensure directories exist
         self.kb_dir.mkdir(parents=True, exist_ok=True)
@@ -207,6 +210,11 @@ class KnowledgeBaseManager:
         self._documents: dict[str, Document] = {}
         self._chunks: dict[str, DocumentChunk] = {}
         self._load_metadata()
+
+        # A real index must have been built by the model this knowledge base
+        # has now (see _reconcile_index).
+        if self._has_real_index():
+            self._reconcile_index()
 
         # BM25 index for hybrid search
         self._bm25_index = None
@@ -290,6 +298,119 @@ class KnowledgeBaseManager:
             embedding_dim=emb.embedding_dim,
         )
         return emb, vs
+
+    _REEMBED_BATCH = 256
+
+    def _has_real_index(self) -> bool:
+        """A FAISS index with a real (not mock) embedding service."""
+        return isinstance(self._vector_store, VectorStore) and not isinstance(
+            self._embedding_service, MockEmbeddingService
+        )
+
+    def _current_record(self) -> ModelRecord:
+        return ModelRecord(
+            getattr(self._embedding_service, "model_name", "unknown"),
+            self._embedding_service.embedding_dim,
+        )
+
+    def _reconcile_index(self) -> None:
+        """Make the index on disk one the current model built.
+
+        With chunks and no index, every chunk is embedded. A record that names
+        the current model, with an index of its dimension, loads as it is;
+        any other record means re-embedding. With no record (a knowledge base
+        from 0.6.3), an index of the model's dimension whose mappings name
+        exactly the stored chunks is adopted; anything else is re-embedded.
+        A new knowledge base (no chunks, no index) gets its record with its
+        first save.
+        """
+        current = self._current_record()
+        store = self._vector_store
+        if not store.index_path.exists():
+            if self._chunks:
+                self._reembed(current, "no_index")
+            return
+        recorded = read_model_record(self._model_record_path)
+        dimension = store.index.d
+        if recorded is not None:
+            if recorded == current and dimension == current.embedding_dim:
+                return
+            self._reembed(current, "model_changed")
+            return
+        if dimension == current.embedding_dim and store.chunk_ids() == set(self._chunks):
+            write_model_record(self._model_record_path, current)
+            logger.info("kb_index_adopted", model=current.model_name, chunks=len(self._chunks))
+            return
+        self._reembed(current, "no_record")
+
+    def _reembed(self, current: ModelRecord, reason: str) -> None:
+        """Embed every chunk again and swap the new index in when it is complete.
+
+        The new index is built beside the old one and replaces it by rename;
+        the record is written last, so an interrupted run is redone on the
+        next open. If embedding fails, the old index stays on disk and this
+        session searches by keyword.
+        """
+        started = time.monotonic()
+        old = self._vector_store
+        new_index = old.index_path.with_name("index.rebuild.faiss")
+        new_mappings = new_index.with_suffix(".mappings.json")
+        chunk_ids = list(self._chunks)
+        logger.info("kb_reembedding", reason=reason, model=current.model_name, chunks=len(chunk_ids))
+        try:
+            new_index.unlink(missing_ok=True)
+            new_mappings.unlink(missing_ok=True)
+            fresh = VectorStore(index_path=new_index, embedding_dim=current.embedding_dim)
+            _ = fresh.index  # an empty knowledge base still saves an (empty) index
+            for start in range(0, len(chunk_ids), self._REEMBED_BATCH):
+                batch = chunk_ids[start : start + self._REEMBED_BATCH]
+                vectors = self._embedding_service.embed_batch([self._chunks[c].content for c in batch])
+                fresh.add_embeddings(batch, vectors)
+            fresh.save()
+            os.replace(new_mappings, old.index_path.with_suffix(".mappings.json"))
+            os.replace(new_index, old.index_path)
+        except Exception as e:
+            for leftover in (new_index, new_mappings):
+                try:
+                    leftover.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            logger.warning("kb_reembed_failed", reason=reason, error=str(e), exc_info=True)
+            self._search_by_keyword()
+            return
+        fresh.index_path = old.index_path
+        self._vector_store = fresh
+        write_model_record(self._model_record_path, current)
+        logger.info(
+            "kb_reembedded",
+            model=current.model_name,
+            chunks=len(chunk_ids),
+            seconds=round(time.monotonic() - started, 2),
+        )
+
+    def _search_by_keyword(self) -> None:
+        """Use the mock service and store for this session; the real index stays on disk."""
+        from agentic_cli.memory.kb._mock_vector_store import MockVectorStore
+
+        self._embedding_service = MockEmbeddingService(
+            model_name=getattr(self._embedding_service, "model_name", "mock-model"),
+            batch_size=getattr(self._embedding_service, "batch_size", 32),
+        )
+        self._vector_store = MockVectorStore(
+            index_path=self.embeddings_dir / "index.mock",
+            embedding_dim=self._embedding_service.embedding_dim,
+        )
+        self._use_mock = True
+
+    def _save_vectors(self) -> None:
+        """Save the vector store and, for a real index, the record of its model.
+
+        Rewritten on every save: when two sessions with different models save
+        one knowledge base, the record names the model of the index last saved.
+        """
+        self._vector_store.save()
+        if self._has_real_index():
+            write_model_record(self._model_record_path, self._current_record())
 
     # ------------------------------------------------------------------
     # Persistence — v2/v3 format (content in per-document files)
@@ -878,7 +999,7 @@ class KnowledgeBaseManager:
             self._rebuild_index_md()
             self._append_ingest_log("ingest", doc)
             self._save_metadata()
-            self._vector_store.save()
+            self._save_vectors()
 
             # Add to BM25 index
             bm25_index = getattr(self, "_bm25_index", None)
@@ -1092,7 +1213,7 @@ class KnowledgeBaseManager:
             self._rebuild_index_md()
             self._append_ingest_log("delete", doc)
             self._save_metadata()
-            self._vector_store.save()
+            self._save_vectors()
 
         return True
 
@@ -1136,7 +1257,7 @@ class KnowledgeBaseManager:
                 bm25_index.rebuild([], [])
             self._remove_bm25_files()
             self._save_metadata()
-            self._vector_store.save()
+            self._save_vectors()
             self._rebuild_index_md()
 
     async def backfill_sidecars(

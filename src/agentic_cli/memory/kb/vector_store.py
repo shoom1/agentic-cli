@@ -65,6 +65,11 @@ class VectorStore:
         """Get the number of vectors in the index."""
         return self.index.ntotal
 
+    def chunk_ids(self) -> set[str]:
+        """The chunk IDs the index holds vectors for."""
+        with self._lock:
+            return set(self._chunk_to_faiss)
+
     def add_embeddings(
         self,
         chunk_ids: list[str],
