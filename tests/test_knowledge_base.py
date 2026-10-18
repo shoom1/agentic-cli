@@ -14,7 +14,6 @@ from agentic_cli.memory.kb.models import (
 )
 from agentic_cli.memory._core.mock_embeddings import MockEmbeddingService
 from agentic_cli.memory.kb._mock_vector_store import MockVectorStore
-from agentic_cli.tools.search_sources import PaperResult, WebResult
 
 from tests.memory.kb_extra import require_kb_module
 
@@ -312,107 +311,6 @@ class TestSearchResult:
         # Merged metadata
         assert data["metadata"]["doc_key"] == "doc_value"
         assert data["metadata"]["chunk_key"] == "chunk_value"
-
-
-class TestPaperResult:
-    """Tests for PaperResult dataclass."""
-
-    def test_paper_result_basic(self):
-        """Test basic paper result."""
-        paper = PaperResult(
-            title="Deep Learning Survey",
-            authors=["Alice", "Bob"],
-            abstract="A survey of deep learning...",
-            url="https://arxiv.org/abs/1234.5678",
-            published_date="2024-01-15",
-            source="arxiv",
-        )
-
-        assert paper.title == "Deep Learning Survey"
-        assert paper.authors == ["Alice", "Bob"]
-        assert paper.categories == []
-        assert paper.pdf_url is None
-        assert paper.arxiv_id is None
-
-    def test_paper_result_full(self):
-        """Test paper result with all fields."""
-        paper = PaperResult(
-            title="Paper Title",
-            authors=["Author"],
-            abstract="Abstract",
-            url="https://arxiv.org/abs/1234",
-            published_date="2024-01-01",
-            source="arxiv",
-            categories=["cs.AI", "cs.LG"],
-            pdf_url="https://arxiv.org/pdf/1234.pdf",
-            arxiv_id="1234.5678",
-        )
-
-        assert paper.categories == ["cs.AI", "cs.LG"]
-        assert paper.pdf_url == "https://arxiv.org/pdf/1234.pdf"
-        assert paper.arxiv_id == "1234.5678"
-
-    def test_paper_result_to_dict(self):
-        """Test paper result serialization."""
-        paper = PaperResult(
-            title="Test Paper",
-            authors=["Alice"],
-            abstract="Abstract text",
-            url="https://example.com",
-            published_date="2024-01-01",
-            source="ssrn",
-            categories=["finance"],
-            pdf_url="https://example.com/paper.pdf",
-            arxiv_id=None,
-        )
-
-        data = paper.to_dict()
-
-        assert data["title"] == "Test Paper"
-        assert data["authors"] == ["Alice"]
-        assert data["abstract"] == "Abstract text"
-        assert data["url"] == "https://example.com"
-        assert data["published_date"] == "2024-01-01"
-        assert data["source"] == "ssrn"
-        assert data["categories"] == ["finance"]
-        assert data["pdf_url"] == "https://example.com/paper.pdf"
-        assert data["arxiv_id"] is None
-
-
-class TestWebResult:
-    """Tests for WebResult dataclass."""
-
-    def test_web_result(self):
-        """Test web result creation."""
-        result = WebResult(
-            title="Example Page",
-            url="https://example.com/page",
-            snippet="This is a snippet of the page content...",
-            domain="example.com",
-        )
-
-        assert result.title == "Example Page"
-        assert result.url == "https://example.com/page"
-        assert result.snippet == "This is a snippet of the page content..."
-        assert result.domain == "example.com"
-
-    def test_web_result_to_dict(self):
-        """Test web result serialization."""
-        result = WebResult(
-            title="Test Page",
-            url="https://test.com",
-            snippet="Snippet",
-            domain="test.com",
-        )
-
-        data = result.to_dict()
-
-        assert data == {
-            "title": "Test Page",
-            "url": "https://test.com",
-            "snippet": "Snippet",
-            "domain": "test.com",
-        }
 
 
 # ============================================================================

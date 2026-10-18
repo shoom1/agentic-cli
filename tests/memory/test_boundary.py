@@ -48,17 +48,12 @@ ALLOWED_INSIDE = {
     "kb": {"_core", "kb"},
 }
 
-# Old-path modules that forward to the package until 0.7.0 (rule 3 exempt).
-COMPAT_DIRS: set[Path] = {SRC / "agentic_cli" / "knowledge_base"}
-
 
 def _deprecated(module: str, names: list[str]) -> bool:
     """An import of a path the compatibility layer keeps until 0.7.0."""
     if module == "agentic_cli.tools.memory_tools" and "MemoryStore" in names:
         return True
-    if module == "agentic_cli.tools.kb_convert":
-        return True
-    return module == "agentic_cli.knowledge_base" or module.startswith("agentic_cli.knowledge_base.")
+    return module == "agentic_cli.tools.kb_convert"
 
 
 def _is_real_module(dotted: str) -> bool:
@@ -182,7 +177,7 @@ def _outside_files() -> list[Path]:
     files = [
         p
         for p in sorted((SRC / "agentic_cli").rglob("*.py"))
-        if PACKAGE not in p.parents and not any(d in p.parents for d in COMPAT_DIRS)
+        if PACKAGE not in p.parents
     ]
     files += sorted((ROOT / "examples").rglob("*.py"))
     return files
