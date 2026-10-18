@@ -11,6 +11,9 @@ dimension. Without an embedding service it leaves its files alone.
 from __future__ import annotations
 
 import json
+import os
+
+import pytest
 
 from agentic_cli.memory import MemoryStore
 from tests.memory.fake_embeddings import FakeEmbeddingService
@@ -115,3 +118,74 @@ def test_a_service_that_does_not_name_its_model_keeps_no_record(tmp_path):
 
     assert not (tmp_path / "embedding_model.json").exists()
     assert [item.content for item in store.search("a fact")] == ["a fact"]
+
+
+def test_a_read_only_directory_with_a_matching_record_opens(tmp_path):
+    if os.geteuid() == 0:
+        pytest.skip("directory permissions do not bind root")
+    _seed(tmp_path, FakeEmbeddingService("model-a", 8))
+    tmp_path.chmod(0o500)
+    try:
+        service = FakeEmbeddingService("model-a", 8)
+        store = MemoryStore(tmp_path, embedding_service=service)
+
+        assert service.calls == 0
+        assert len(store._items) == 2  # search records access, which needs a writable directory
+    finally:
+        tmp_path.chmod(0o700)
+
+
+def test_a_directory_planted_at_the_record_does_not_stop_the_open(tmp_path):
+    _seed(tmp_path, FakeEmbeddingService("model-a", 8))
+    record = tmp_path / "embedding_model.json"
+    record.unlink()
+    record.mkdir()
+    (record / "planted").write_text("x")
+
+    store = MemoryStore(tmp_path, embedding_service=FakeEmbeddingService("model-a", 8))
+
+    assert "The team mascot is an otter" in [i.content for i in store.search("otter")]
+
+
+class _NoDimension(FakeEmbeddingService):
+    @property
+    def embedding_dim(self):
+        raise RuntimeError("the model cannot load")
+
+
+def test_a_model_that_cannot_load_does_not_stop_the_open(tmp_path):
+    _seed(tmp_path, FakeEmbeddingService("model-a", 8))
+    record = (tmp_path / "embedding_model.json").read_bytes()
+    vectors = _vectors(tmp_path)
+
+    store = MemoryStore(tmp_path, embedding_service=_NoDimension("model-a", 8))
+
+    assert (tmp_path / "embedding_model.json").read_bytes() == record
+    assert _vectors(tmp_path) == vectors
+    assert all(item.embedding is not None for item in store._items.values())
+    assert store.search("otter")
+
+
+def test_a_failed_re_embedding_leaves_memories_without_vectors_and_no_record(tmp_path):
+    _seed(tmp_path, FakeEmbeddingService("model-a", 8))
+    (tmp_path / "embedding_model.json").unlink()
+
+    store = MemoryStore(tmp_path, embedding_service=FakeEmbeddingService("model-b", 16, fail_after=0))
+
+    assert all(item.embedding is None for item in store._items.values())
+    assert not (tmp_path / "embedding_model.json").exists()
+    assert [i.content for i in store.search("otter")] == ["The team mascot is an otter"]
+
+
+def test_a_matching_record_with_a_wrong_length_vector_re_embeds(tmp_path):
+    _seed(tmp_path, FakeEmbeddingService("model-a", 8))
+    vectors = _vectors(tmp_path)
+    first = next(iter(vectors))
+    vectors[first] = vectors[first][:3]
+    (tmp_path / "memories_embeddings.json").write_text(json.dumps(vectors))
+    service = FakeEmbeddingService("model-a", 8)
+
+    MemoryStore(tmp_path, embedding_service=service)
+
+    assert service.calls == 2
+    assert {len(v) for v in _vectors(tmp_path).values()} == {8}

@@ -68,7 +68,7 @@ def read_model_record(path: Path) -> ModelRecord | None:
         return None
     try:
         parsed = json.loads(data.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError):
+    except (UnicodeDecodeError, ValueError, RecursionError):
         return None
     if not isinstance(parsed, dict):
         return None
@@ -87,9 +87,9 @@ def record_for(service: Any) -> ModelRecord | None:
     The memory store takes any object with ``embed_text`` and ``embed_batch``;
     one without ``model_name`` and ``embedding_dim`` keeps no record.
     """
-    name = getattr(service, "model_name", None)
     try:
+        name = getattr(service, "model_name", None)
         dim = service.embedding_dim
-    except AttributeError:
+    except Exception:
         return None
     return ModelRecord(name, dim) if _valid(name, dim) else None

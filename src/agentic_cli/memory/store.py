@@ -123,12 +123,38 @@ class MemoryStore:
         self._lock = threading.Lock()
         self._load()
         if self._embedding_service:
-            current = self._stale_vectors_dropped()
+            self._open_with_embeddings()
+
+    def _open_with_embeddings(self) -> None:
+        """Reconcile the vectors with the model, then embed what is missing.
+
+        Record bookkeeping never fails the open: a model that cannot say what
+        it is leaves the files as 0.6.3 would, and a record that cannot be
+        written is logged. The record is written after the vectors are, so a
+        store whose re-embedding failed is re-embedded on the next open.
+        """
+        try:
+            current = record_for(self._embedding_service)
+        except Exception as e:
+            logger.warning("memory_model_record_unavailable", error=str(e))
+            current = None
+        if current is None:
             self._ensure_embeddings()
-            if current is not None:
-                # Written after the vectors are: a store whose re-embedding
-                # failed is re-embedded again on the next open.
+            return
+        recorded = read_model_record(self._model_path)
+        dropped = self._drop_stale_vectors(current, recorded)
+        try:
+            self._ensure_embeddings()
+        except Exception as e:
+            if not dropped:
+                raise
+            logger.warning("memory_reembed_failed", error=str(e))
+            return
+        if recorded != current:
+            try:
                 write_model_record(self._model_path, current)
+            except OSError as e:
+                logger.warning("memory_model_record_write_failed", error=str(e))
 
     def _load(self) -> None:
         if self._path.exists():
@@ -178,30 +204,23 @@ class MemoryStore:
             item.embedding = emb
         self._save_embeddings()
 
-    def _stale_vectors_dropped(self):
-        """Drop the vectors another model made; return the current model's record.
+    def _drop_stale_vectors(self, current, recorded) -> bool:
+        """Drop the vectors another model made; return whether any were dropped.
 
-        With a record, the vectors are kept when it names the current model
-        and dimension. Without one (a store from 0.6.3), they are kept when
-        every stored vector has the current dimension. Dropped vectors are
-        embedded again by ``_ensure_embeddings``. A service that does not name
-        its model (``model_name`` and ``embedding_dim``) keeps no record:
-        returns None and drops nothing.
+        With a matching record, and without one (a store from 0.6.3), the
+        vectors are kept only when every stored vector has the current
+        dimension. A record of another model drops them all. Dropped vectors
+        are embedded again by ``_ensure_embeddings``.
         """
-        current = record_for(self._embedding_service)
-        if current is None:
-            return None
-        recorded = read_model_record(self._model_path)
         stored = [item.embedding for item in self._items.values() if item.embedding is not None]
-        if recorded is not None:
-            keep = recorded == current
-        else:
-            keep = all(isinstance(v, list) and len(v) == current.embedding_dim for v in stored)
-        if not keep:
-            logger.info("memory_reembedding", model=current.model_name, memories=len(self._items))
-            for item in self._items.values():
-                item.embedding = None
-        return current
+        right_length = all(isinstance(v, list) and len(v) == current.embedding_dim for v in stored)
+        keep = right_length and (recorded is None or recorded == current)
+        if keep:
+            return False
+        logger.info("memory_reembedding", model=current.model_name, memories=len(self._items))
+        for item in self._items.values():
+            item.embedding = None
+        return True
 
     def store(self, content: str, tags: list[str] | None = None, importance: int = 5) -> str:
         """Append a memory to the persistent store.
