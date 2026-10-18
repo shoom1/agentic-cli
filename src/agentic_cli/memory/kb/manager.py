@@ -68,15 +68,6 @@ def _truncate(text: str, max_length: int = 200) -> str:
     return text
 
 
-def _faiss_available() -> bool:
-    """Whether FAISS can be imported (the real vector store needs it)."""
-    try:
-        import faiss  # noqa: F401
-    except ImportError:
-        return False
-    return True
-
-
 def matches_document_filters(doc: Document, filters: dict[str, Any]) -> bool:
     """Check if a document matches the given filters.
 
@@ -116,6 +107,15 @@ def matches_document_filters(doc: Document, filters: dict[str, Any]) -> bool:
             if keyword.lower() not in content_lower:
                 return False
 
+    return True
+
+
+def _faiss_available() -> bool:
+    """Whether FAISS can be imported (the real vector store needs it)."""
+    try:
+        import faiss  # noqa: F401
+    except ImportError:
+        return False
     return True
 
 
