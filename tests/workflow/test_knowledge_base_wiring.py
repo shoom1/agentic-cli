@@ -178,3 +178,62 @@ async def test_the_bound_tools_use_the_workflows_knowledge_base(tmp_path):
     from agentic_cli.tools.knowledge_tools import kb_search
 
     assert identify_tool(tools["kb_search"]) is identify_tool(kb_search)
+
+
+def _deprecations(caught):
+    return [w for w in caught if issubclass(w.category, DeprecationWarning) and "kb_manager" in str(w.message)]
+
+
+def test_the_warning_points_at_the_decorator_site():
+    registry = ToolRegistry()
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+
+        @registry.register(capabilities=EXEMPT, requires="kb_manager")
+        def kb_thing() -> dict:
+            """A downstream tool."""
+            return {"success": True}
+
+    assert [w.filename for w in _deprecations(caught)] == [__file__]
+
+
+def test_the_warning_points_at_a_direct_register_call():
+    registry = ToolRegistry()
+
+    def kb_thing() -> dict:
+        """A downstream tool."""
+        return {"success": True}
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        registry.register(kb_thing, capabilities=EXEMPT, requires="kb_manager")
+
+    assert [w.filename for w in _deprecations(caught)] == [__file__]
+
+
+def test_the_warning_points_at_register_tool():
+    from agentic_cli.tools.registry import get_registry, register_tool
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+
+        @register_tool(capabilities=EXEMPT, requires="kb_manager")
+        def kb_wiring_probe_tool() -> dict:
+            """A downstream tool."""
+            return {"success": True}
+
+    get_registry()._tools.pop("kb_wiring_probe_tool", None)
+    assert [w.filename for w in _deprecations(caught)] == [__file__]
+
+
+def test_the_warning_points_at_declare_tool():
+    from agentic_cli.tools.registry import declare_tool
+
+    registry = ToolRegistry()
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        declare_tool("kb_declared", description="d", capabilities=EXEMPT, requires="kb_manager", registry=registry)
+
+    assert [w.filename for w in _deprecations(caught)] == [__file__]
