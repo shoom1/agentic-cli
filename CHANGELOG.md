@@ -16,6 +16,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recording from 0.6.3 (`tests/tools/kb_tool_contract.json`). A second test
   pins what `agentic_cli.memory` and `agentic_cli.memory.kb` export. 0.6.4
   moves the knowledge-base logic into the package behind both.
+- **Each index records the embedding model that built it.** A knowledge base
+  writes `embeddings/model.json` and the memory store
+  `memory/embedding_model.json` (model name and dimension) whenever they
+  save. After `embedding_model` changes, the next open embeds the stored
+  text again: the knowledge base builds the new index beside the old one and
+  swaps it in when complete, and if that fails it keeps the old index and
+  searches by keyword for the session. An index from 0.6.3 is kept when its
+  dimension matches the model (one built by another model of the same
+  dimension is kept too; delete `embeddings/index.faiss` to force a
+  rebuild). 0.6.3 ignores both files. Re-embedding runs when the workflow
+  starts, so a large knowledge base makes that one start slower; the log
+  gives the chunk count and the time taken.
 
 ### Deprecated
 

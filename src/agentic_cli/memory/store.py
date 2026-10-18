@@ -16,6 +16,7 @@ from typing import Any
 
 from agentic_cli.memory._core.io import atomic_write_json
 from agentic_cli.memory._core.log import get_logger
+from agentic_cli.memory._core.model_record import read_model_record, record_for, write_model_record
 
 logger = get_logger("agentic_cli.memory.store")
 
@@ -89,7 +90,9 @@ class MemoryStore:
 
     Keeps memories in ``memories.json`` in its directory (embeddings in
     ``memories_embeddings.json``), searched by substring or, with an
-    embedding service, by semantic similarity.
+    embedding service, by semantic similarity. The model that made the
+    embeddings is recorded in ``embedding_model.json``; after a model change
+    they are made again.
 
     Example:
         >>> store = MemoryStore(Path("memory"))
@@ -112,6 +115,7 @@ class MemoryStore:
         base_dir.mkdir(parents=True, exist_ok=True)
         self._path = base_dir / "memories.json"
         self._embeddings_path = base_dir / "memories_embeddings.json"
+        self._model_path = base_dir / "embedding_model.json"
         self._items: dict[str, MemoryItem] = {}
         # Guards self._items and _save() — LangGraph's ToolNode runs sync tools
         # concurrently in executor threads, so store/update/delete/search (and
@@ -119,7 +123,12 @@ class MemoryStore:
         self._lock = threading.Lock()
         self._load()
         if self._embedding_service:
+            current = self._stale_vectors_dropped()
             self._ensure_embeddings()
+            if current is not None:
+                # Written after the vectors are: a store whose re-embedding
+                # failed is re-embedded again on the next open.
+                write_model_record(self._model_path, current)
 
     def _load(self) -> None:
         if self._path.exists():
@@ -168,6 +177,31 @@ class MemoryStore:
         for item, emb in zip(to_embed, embeddings):
             item.embedding = emb
         self._save_embeddings()
+
+    def _stale_vectors_dropped(self):
+        """Drop the vectors another model made; return the current model's record.
+
+        With a record, the vectors are kept when it names the current model
+        and dimension. Without one (a store from 0.6.3), they are kept when
+        every stored vector has the current dimension. Dropped vectors are
+        embedded again by ``_ensure_embeddings``. A service that does not name
+        its model (``model_name`` and ``embedding_dim``) keeps no record:
+        returns None and drops nothing.
+        """
+        current = record_for(self._embedding_service)
+        if current is None:
+            return None
+        recorded = read_model_record(self._model_path)
+        stored = [item.embedding for item in self._items.values() if item.embedding is not None]
+        if recorded is not None:
+            keep = recorded == current
+        else:
+            keep = all(isinstance(v, list) and len(v) == current.embedding_dim for v in stored)
+        if not keep:
+            logger.info("memory_reembedding", model=current.model_name, memories=len(self._items))
+            for item in self._items.values():
+                item.embedding = None
+        return current
 
     def store(self, content: str, tags: list[str] | None = None, importance: int = 5) -> str:
         """Append a memory to the persistent store.
