@@ -620,14 +620,6 @@ class ToolRegistry:
         """List tools by category."""
         return [t for t in self._tools.values() if t.category == category]
 
-    def get_functions(self) -> list[Callable[..., Any]]:
-        """Get all tool functions (for passing to agents).
-
-        Declared-only tools are skipped: they have no backend-neutral
-        implementation to hand out (see :meth:`declare`).
-        """
-        return [t.func for t in self._tools.values() if t.func is not None]
-
     def __len__(self) -> int:
         return len(self._tools)
 

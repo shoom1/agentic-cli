@@ -15,7 +15,7 @@ import subprocess
 
 import pytest
 
-from agentic_cli.tools.sandbox.backends.detect import detect_docker, docker_available
+from agentic_cli.tools.sandbox.backends.detect import detect_docker
 from agentic_cli.tools.sandbox.backends.jupyter_docker import JupyterDockerBackend
 from agentic_cli.tools.sandbox.manager import SandboxManager
 from tests.conftest import MockContext
@@ -23,7 +23,7 @@ from tests.conftest import MockContext
 # Every test in this module is a docker test (selectable via -m docker).
 pytestmark = pytest.mark.docker
 
-_DOCKER = docker_available()
+_DOCKER = detect_docker().available
 _requires_docker = pytest.mark.skipif(not _DOCKER, reason="no container runtime available")
 
 

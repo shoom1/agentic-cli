@@ -96,7 +96,7 @@ class TestLLMLoggingPlugin:
         """Log directory and file path should be set up (under HOME)."""
         expected_dir = tmp_path / ".test_app" / "logs"
         assert expected_dir.exists()
-        assert plugin.get_log_file_path() == expected_dir / "llm_events.jsonl"
+        assert plugin._log_file == expected_dir / "llm_events.jsonl"
 
     def test_log_dir_under_home_not_cwd(self, tmp_path, monkeypatch):
         """Conversation logs must live under the user's home, not the (often
@@ -107,7 +107,7 @@ class TestLLMLoggingPlugin:
         monkeypatch.chdir(proj)
         monkeypatch.setenv("HOME", str(home))
         plugin = LLMLoggingPlugin(app_name="test_app")
-        log_path = str(plugin.get_log_file_path())
+        log_path = str(plugin._log_file)
         assert str(home) in log_path
         assert str(proj) not in log_path
 
@@ -115,7 +115,7 @@ class TestLLMLoggingPlugin:
         """Full conversations may contain secrets — the file must be 0600."""
         import stat
 
-        mode = stat.S_IMODE(plugin.get_log_file_path().stat().st_mode)
+        mode = stat.S_IMODE(plugin._log_file.stat().st_mode)
         assert mode == 0o600
 
     def test_secrets_redacted_in_written_log(self, plugin):
@@ -138,7 +138,7 @@ class TestLLMLoggingPlugin:
 
         assert result is None  # Should not short-circuit
 
-        events = plugin.get_events()
+        events = plugin.drain_events()
         assert len(events) == 1
         assert events[0].type == EventType.LLM_REQUEST
         assert events[0].metadata["model"] == "gemini-2.0-flash"
@@ -156,7 +156,7 @@ class TestLLMLoggingPlugin:
 
         assert result is None  # Should not short-circuit
 
-        events = plugin.get_events()
+        events = plugin.drain_events()
         assert len(events) == 1  # response event only (no usage)
         assert events[0].type == EventType.LLM_RESPONSE
         assert events[0].metadata["model"] == "test-model"
@@ -181,7 +181,7 @@ class TestLLMLoggingPlugin:
             llm_response=resp,
         )
 
-        events = plugin.get_events()
+        events = plugin.drain_events()
         assert len(events) == 2  # response + usage
         usage_event = events[1]
         assert usage_event.type == EventType.LLM_USAGE
@@ -213,7 +213,7 @@ class TestLLMLoggingPlugin:
             llm_response=resp,
         )
 
-        events = plugin.get_events()
+        events = plugin.drain_events()
         # request + response + usage = 3 events
         assert len(events) == 3
         usage_event = events[2]
@@ -235,7 +235,6 @@ class TestLLMLoggingPlugin:
         assert len(drained) == 1
 
         # Buffer should be empty now
-        assert plugin.get_events() == []
         assert plugin.drain_events() == []
 
     def test_clear_resets_state(self, plugin):
@@ -265,7 +264,7 @@ class TestLLMLoggingPlugin:
                 llm_request=req,
             )
 
-        events = plugin.get_events()
+        events = plugin.drain_events()
         assert len(events) == 3
         # Should have the last 3 events (inv-2, inv-3, inv-4)
         assert events[0].metadata["invocation_id"] == "inv-2"
@@ -281,7 +280,7 @@ class TestLLMLoggingPlugin:
             llm_request=req,
         )
 
-        log_path = plugin.get_log_file_path()
+        log_path = plugin._log_file
         assert log_path.exists()
 
         with open(log_path) as f:
@@ -304,7 +303,7 @@ class TestLLMLoggingPlugin:
             llm_request=req,
         )
 
-        events = plugin.get_events()
+        events = plugin.drain_events()
         assert events[0].metadata["tools"] == ["search_web", "read_file"]
 
     async def test_before_model_extracts_system_instruction_string(self, plugin):
@@ -324,7 +323,7 @@ class TestLLMLoggingPlugin:
             llm_request=req,
         )
 
-        events = plugin.get_events()
+        events = plugin.drain_events()
         assert events[0].metadata["system_instruction"] == "You are a helpful assistant."
 
     async def test_before_model_extracts_config(self, plugin):
@@ -344,7 +343,7 @@ class TestLLMLoggingPlugin:
             llm_request=req,
         )
 
-        events = plugin.get_events()
+        events = plugin.drain_events()
         gen_config = events[0].metadata["config"]
         assert gen_config["temperature"] == 0.7
         assert gen_config["top_p"] == 0.9
@@ -363,7 +362,7 @@ class TestLLMLoggingPlugin:
             llm_response=resp,
         )
 
-        events = plugin.get_events()
+        events = plugin.drain_events()
         assert events[0].metadata["error_code"] == "RATE_LIMIT"
         assert events[0].metadata["error_message"] == "Too many requests"
 
@@ -411,7 +410,7 @@ class TestLLMLoggingPlugin:
             llm_request=req,
         )
 
-        events = plugin.get_events()
+        events = plugin.drain_events()
         assert len(events) == 1
         # invocation_id should not be in metadata (None filtered out)
         assert "invocation_id" not in events[0].metadata

@@ -176,7 +176,7 @@ async def test_long_running_tool_then_resume(live_settings, return_none: bool):
 async def test_full_resume_loop_via_coordinator(live_settings):
     """End-to-end: the harness coordinator drains a finished job into a resume turn.
 
-    Exercises the whole milestone-3 path live: awaiting_resume → mark_resumed →
+    Exercises the whole milestone-3 path live: awaiting_resume → begin_resume →
     MessageProcessor.process_resume → _run_turn → resume_with_job_result →
     model reply, rendered into a RecordingSession.
     """

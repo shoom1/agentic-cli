@@ -310,7 +310,7 @@ class TestResumeMetadata:
         assert rec.resume_on_complete is True
         assert rec.session_id is None and rec.user_id is None
 
-    def test_awaiting_resume_and_mark_resumed(self, tmp_path: Path):
+    def test_awaiting_resume_and_delivery(self, tmp_path: Path):
         base = tmp_path / "jobs"
         jm = JobManager(base_dir=base, max_concurrent=2)
         rec = jm.submit(
@@ -325,8 +325,9 @@ class TestResumeMetadata:
         awaiting = jm.awaiting_resume()
         assert [r.job_id for r in awaiting] == [rec.job_id]
 
-        # Marking it resumed (durably) drops it from the list.
-        jm.mark_resumed(rec.job_id)
+        # Delivering it (durably) drops it from the list.
+        assert jm.begin_resume(rec.job_id)
+        jm.complete_resume(rec.job_id, delivered=True)
         assert jm.awaiting_resume() == []
         jm_reloaded = JobManager(base_dir=base)
         assert jm_reloaded.get(rec.job_id).resumed is True  # type: ignore[union-attr]
@@ -1675,16 +1676,6 @@ class TestResumeTransitionGuards:
 
         with pytest.raises(ResumeStateError, match="Unknown job"):
             self._jm(tmp_path).complete_resume("nope", delivered=True)
-
-    def test_mark_resumed_shim_claims_then_completes(self, tmp_path):
-        from agentic_cli.tools.jobs.manager import ResumeState
-
-        jm = self._jm(tmp_path)
-        rec = self._record(jm)
-        jm.mark_resumed("j1")
-        assert rec.resume_state == ResumeState.DELIVERED.value
-        jm.mark_resumed("j1")  # already terminal: no-op, no raise
-        assert rec.resume_state == ResumeState.DELIVERED.value
 
 
 class TestStartupRecoveryHonorsDurableReads:

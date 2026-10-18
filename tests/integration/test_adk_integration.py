@@ -18,10 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager
-from agentic_cli.workflow.retry import (
-    is_rate_limit_error,
-    parse_retry_delay,
-)
+from agentic_cli.workflow.retry import is_rate_limit_error
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.events import EventType, WorkflowEvent
 
@@ -429,44 +426,6 @@ class TestIsRateLimitError:
         """Generic exception is not a rate limit error."""
         error = ValueError("something went wrong")
         assert is_rate_limit_error(error) is False
-
-
-class TestParseRetryDelay:
-    """Tests for parse_retry_delay helper."""
-
-    def test_parse_delay_from_details(self):
-        """Extracts delay from structured error.details."""
-        error = Exception("rate limited")
-        error.details = {
-            "error": {
-                "details": [
-                    {"retryDelay": "41s"},
-                ]
-            }
-        }
-        assert parse_retry_delay(error) == 41.0
-
-    def test_parse_delay_from_message(self):
-        """Extracts delay from error message string."""
-        error = Exception("Please retry in 2.5s")
-        assert parse_retry_delay(error) == 2.5
-
-    def test_parse_delay_none_for_generic(self):
-        """Returns None for generic exception without delay info."""
-        error = Exception("something failed")
-        assert parse_retry_delay(error) is None
-
-    def test_parse_delay_from_details_float(self):
-        """Handles float seconds in retryDelay field."""
-        error = Exception("rate limited")
-        error.details = {
-            "error": {
-                "details": [
-                    {"retryDelay": "10.5s"},
-                ]
-            }
-        }
-        assert parse_retry_delay(error) == 10.5
 
 
 class TestTaskProgressAutoClean:

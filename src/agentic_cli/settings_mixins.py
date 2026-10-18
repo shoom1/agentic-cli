@@ -19,7 +19,6 @@ class AppSettingsMixin:
     Mixin class that provides:
     - Application name and workspace directory
     - Path expansion for workspace_dir
-    - Workspace directory creation
     - Derived path properties (sessions, artifacts, knowledge base)
 
     Should be composed with BaseSettings via multiple inheritance.
@@ -48,10 +47,6 @@ class AppSettingsMixin:
         if isinstance(v, str):
             return Path(v).expanduser()
         return v
-
-    def ensure_workspace_exists(self) -> None:
-        """Create workspace directory if it doesn't exist."""
-        self.workspace_dir.mkdir(parents=True, exist_ok=True)
 
     @property
     def sessions_dir(self) -> Path:

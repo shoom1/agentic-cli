@@ -179,19 +179,6 @@ class TestLangGraphWorkflowManagerCreation:
 
         assert manager.settings is settings
 
-    def test_manager_update_settings(self, agent_configs):
-        """Test updating settings."""
-        settings1 = BaseSettings(google_api_key="key1")
-        settings2 = BaseSettings(google_api_key="key2")
-
-        manager = LangGraphWorkflowManager(
-            agent_configs=agent_configs,
-            settings=settings1,
-        )
-
-        manager.update_settings(settings2)
-        assert manager.settings is settings2
-
 
 class TestLangGraphWorkflowManagerLifecycle:
     """Tests for LangGraphWorkflowManager lifecycle operations."""

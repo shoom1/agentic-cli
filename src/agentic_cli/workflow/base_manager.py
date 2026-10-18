@@ -1133,17 +1133,6 @@ class BaseWorkflowManager(ABC):
 
     # Optional methods with default implementations
 
-    def update_settings(self, settings: "BaseSettings") -> None:
-        """Update the settings instance.
-
-        Note: This only updates the settings reference. To apply changes
-        that affect agent behavior, call reinitialize().
-
-        Args:
-            settings: New settings instance.
-        """
-        self._settings = settings
-
     async def generate_simple(self, prompt: str, max_tokens: int = 500) -> str:
         """Generate a simple text response using the current model.
 

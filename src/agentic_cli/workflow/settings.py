@@ -602,18 +602,6 @@ class WorkflowSettingsMixin:
 
     # === Model helpers ===
 
-    @property
-    def default_model_google(self) -> str:
-        """Default Google model."""
-        registry = self._get_registry()
-        return registry.get_default(ModelFamily.GEMINI)
-
-    @property
-    def default_model_anthropic(self) -> str:
-        """Default Anthropic model."""
-        registry = self._get_registry()
-        return registry.get_default(ModelFamily.CLAUDE)
-
     def _get_registry(self) -> ModelRegistry:
         """Get the model registry (creates a default if none attached)."""
         reg = getattr(self, "_model_registry", None)
@@ -657,24 +645,6 @@ class WorkflowSettingsMixin:
             google_key=self.has_google_key,
             anthropic_key=self.has_anthropic_key,
         )
-
-    def is_google_model(self, model: str | None = None) -> bool:
-        """Check if the given model (or current model) is a Google model."""
-        model = model or self.get_model()
-        registry = self._get_registry()
-        try:
-            return registry.get_family(model) == ModelFamily.GEMINI
-        except ValueError:
-            return False
-
-    def is_anthropic_model(self, model: str | None = None) -> bool:
-        """Check if the given model (or current model) is an Anthropic model."""
-        model = model or self.get_model()
-        registry = self._get_registry()
-        try:
-            return registry.get_family(model) == ModelFamily.CLAUDE
-        except ValueError:
-            return False
 
     def supports_thinking_effort(self, model: str | None = None) -> bool:
         """Check if the model supports thinking effort configuration."""

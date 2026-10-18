@@ -156,7 +156,7 @@ class TestDiscoveryUnavailable:
             assert mgr.is_initialized
             # Fallbacks were substituted, so the list is not authoritative.
             assert registry.is_refreshed is True
-            assert registry.discovery_complete is False
+            assert registry.is_authoritative_for(DISCOVERED) is False
 
 
 class TestBlockingFetchOffEventLoop:

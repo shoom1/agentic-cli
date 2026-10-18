@@ -48,9 +48,5 @@ def detect_docker() -> DockerAvailability:
     return DockerAvailability(False, "", "docker/podman not found in PATH")
 
 
-def docker_available() -> bool:
-    return detect_docker().available
-
-
 def clear_detection_cache() -> None:
     detect_docker.cache_clear()

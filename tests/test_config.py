@@ -17,7 +17,7 @@ from agentic_cli.config import (
     set_settings,
     validate_settings,
 )
-from agentic_cli.workflow.models import ModelRegistry
+from agentic_cli.workflow.models import ModelFamily, ModelRegistry
 from agentic_cli.workflow.settings import THINKING_EFFORT_LEVELS
 
 
@@ -82,7 +82,7 @@ class TestAPIKeyManagement:
         assert settings_google_only.has_any_api_key
 
         model = settings_google_only.get_model()
-        assert model == settings_google_only.default_model_google
+        assert model == ModelRegistry().get_default(ModelFamily.GEMINI)
 
     def test_anthropic_key_only(self, settings_anthropic_only: BaseSettings):
         """Test behavior with only Anthropic API key."""
@@ -91,7 +91,7 @@ class TestAPIKeyManagement:
         assert settings_anthropic_only.has_any_api_key
 
         model = settings_anthropic_only.get_model()
-        assert model == settings_anthropic_only.default_model_anthropic
+        assert model == ModelRegistry().get_default(ModelFamily.CLAUDE)
 
     def test_both_keys(self, settings_both_keys: BaseSettings):
         """Test behavior with both API keys - Google should be preferred."""
@@ -101,7 +101,7 @@ class TestAPIKeyManagement:
 
         # Google is preferred when both are available
         model = settings_both_keys.get_model()
-        assert model == settings_both_keys.default_model_google
+        assert model == ModelRegistry().get_default(ModelFamily.GEMINI)
 
     def test_get_available_models(self, settings_both_keys: BaseSettings):
         """Test getting available models based on API keys."""
@@ -130,18 +130,6 @@ class TestModelConfiguration:
         """Test setting a model from unavailable provider."""
         with pytest.raises(ValueError, match="not available"):
             settings_google_only.set_model("claude-sonnet-4")
-
-    def test_is_google_model(self, settings_google_only: BaseSettings):
-        """Test Google model detection."""
-        assert settings_google_only.is_google_model("gemini-2.5-pro")
-        assert settings_google_only.is_google_model("gemini-3-flash-preview")
-        assert not settings_google_only.is_google_model("claude-sonnet-4")
-
-    def test_is_anthropic_model(self, settings_anthropic_only: BaseSettings):
-        """Test Anthropic model detection."""
-        assert settings_anthropic_only.is_anthropic_model("claude-sonnet-4")
-        assert settings_anthropic_only.is_anthropic_model("claude-opus-4")
-        assert not settings_anthropic_only.is_anthropic_model("gemini-2.5-pro")
 
 
 class TestThinkingEffort:
@@ -215,17 +203,6 @@ class TestGlobalSettings:
 
 class TestWorkspaceOperations:
     """Tests for workspace operations."""
-
-    def test_ensure_workspace_exists(self, temp_workspace: Path):
-        """Test workspace directory creation."""
-        workspace = temp_workspace / "new_workspace"
-
-        with patch.dict(os.environ, {}, clear=True):
-            settings = BaseSettings(workspace_dir=workspace)
-
-        assert not workspace.exists()
-        settings.ensure_workspace_exists()
-        assert workspace.exists()
 
     def test_export_api_keys_to_env(self, temp_workspace: Path):
         """Test API key export to environment."""

@@ -145,24 +145,6 @@ class ModelRegistry:
             return False
         return self.authority_for(family) is DiscoveryState.SUCCEEDED
 
-    @property
-    def discovery_complete(self) -> bool:
-        """Whether every attempted provider answered its listing.
-
-        Coarse, kept for callers that want one flag; prefer
-        :meth:`is_authoritative_for` when judging a specific model.
-        """
-        if not self._refreshed:
-            return False
-        attempted = [
-            state
-            for state in self._discovery.values()
-            if state is not DiscoveryState.UNATTEMPTED
-        ]
-        if not attempted:
-            return True  # internals seeded directly; nothing contradicts it
-        return all(state is DiscoveryState.SUCCEEDED for state in attempted)
-
     # ------------------------------------------------------------------
     # Public sync API
     # ------------------------------------------------------------------
@@ -226,10 +208,6 @@ class ModelRegistry:
     def get_default(self, family: ModelFamily) -> str:
         """Get the default model for a family."""
         return self._defaults.get(family, self.FALLBACK_DEFAULTS.get(family, ""))
-
-    def set_default(self, family: ModelFamily, model_id: str) -> None:
-        """Set the default model for a family."""
-        self._defaults[family] = model_id
 
     def get_family(self, model_id: str) -> ModelFamily:
         """Detect model family from model ID.
