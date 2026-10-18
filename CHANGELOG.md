@@ -15,7 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   both names on one directory, and their full results are compared with a
   recording from 0.6.3 (`tests/tools/kb_tool_contract.json`). A second test
   pins what `agentic_cli.memory` and `agentic_cli.memory.kb` export. 0.6.4
-  moves the knowledge-base logic into the package behind both.
+  moves the knowledge-base logic into the package behind both; the recording
+  has one planned edit in 0.6.4, the arXiv `summary`.
 - **`agentic_cli.memory.kb.KnowledgeBase`** (provisional: its name and
   methods may change in 0.7.0) serves the project and user knowledge bases
   as one. `KnowledgeBase.open({"project": dir, "user": dir}, ...)` builds one
@@ -65,8 +66,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   helpers (a test keeps its charset helper in agreement with `web_fetch`'s).
   Ingestion and `kb_read` no longer read PDFs through `agentic_cli.tools.pdf_utils`; a
   test that patched `extract_pdf_text` there should patch
-  `agentic_cli.memory.kb.convert.extract_pdf_text`.
-
+  `agentic_cli.memory.kb.convert.extract_pdf_text`; one that patched
+  `agentic_cli.tools.arxiv_tools.extract_pdf_text` now gets an
+  `AttributeError`, because that name is gone.
 - **The workflow exposes one `KnowledgeBase`.** `workflow.knowledge_base`
   (service key `knowledge_base`) serves the project and user knowledge bases
   as one, and the framework's knowledge-base tools declare
@@ -74,6 +76,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `kb_search`, `kb_list`, `kb_read`, the concept tools, `/papers` and the
   demo's `/kb-backfill` call it instead of merging the two knowledge bases by
   hand. Their names, arguments and results do not change.
+- **Small visible changes in ingestion.** An arXiv paper's PDF text is
+  extracted off the event loop. `kb_ingest_url` checks `source_type` before
+  fetching. A bad `source_type` is reported before an unconvertible or
+  empty file (a missing file is still reported first). A summarizer answer
+  that is not text no longer makes `kb_ingest_*` or `ingest_arxiv_paper`
+  fail; the preview is stored. An arXiv answer that cannot be parsed stores
+  the preview.
 
 ### Deprecated
 

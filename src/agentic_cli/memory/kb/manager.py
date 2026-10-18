@@ -783,7 +783,7 @@ class KnowledgeBaseManager:
 
         Returns a dict with keys ``summary`` (str), ``claims`` (list[str]),
         and ``entities`` (dict[str, list[str]]). Falls back to
-        ``{summary: truncate(content), claims: [], entities: {}}`` if there
+        ``{summary: enrich.preview(content), claims: [], entities: {}}`` if there
         is no summarizer or the LLM call fails.
         """
         return await enrich.sidecar_payload(self._summarizer, content, title)
@@ -820,9 +820,10 @@ class KnowledgeBaseManager:
             chunk_overlap: Overlap between chunks.
             summary: Optional pre-computed summary. When ``None``, falls
                 back to the deterministic truncation of ``content``.
-                Async callers that want an LLM-generated summary should
-                ``await self.generate_summary(...)`` first and pass the
-                result in here.
+                Async callers that want an LLM-generated summary and sidecar
+                should ingest through ``KnowledgeBase.ingest_text`` /
+                ``ingest_bytes``, which make the summarizer call and pass
+                the result in here.
 
         Returns:
             The created Document object.

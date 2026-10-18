@@ -674,7 +674,7 @@ kb = KnowledgeBase.open(
     {"project": Path(".myapp/knowledge_base"), "user": Path("~/.myapp/knowledge_base").expanduser()},
     summarizer=my_summarizer,
 )
-doc = await kb.ingest_bytes(Path("paper.pdf").read_bytes(), extension=".pdf", default_title="paper")
+stored = await kb.ingest_bytes(Path("paper.pdf").read_bytes(), extension=".pdf", default_title="paper")  # ScopedDocument: stored.document, stored.scope
 results = kb.search("neural networks", top_k=5)          # both scopes, merged by rank
 found = kb.find_document("Attention")                     # ScopedDocument(document, scope) or None
 recent = kb.list_documents(title_or_author="vaswani")     # the catalogue, newest first
@@ -690,7 +690,7 @@ The workflow exposes it as `workflow.knowledge_base` (and the memory store as `w
 
 The KB also maintains `index.md` and an append-only `ingest_log.md` audit trail. Source-type constants (`arxiv`, `ssrn`, `web`, `internal`, `user`, `local`) live on `SourceType`.
 
-Ingesting a document writes a summary and a sidecar with the workflow's LLM when `knowledge_base_summarize` is on (the default; one call per document). Turn it off in `~/.{app_name}/settings.json` to store the first ~500 characters instead. A knowledge base you build yourself calls the `summarizer=` you pass it in `generate_summary`, `generate_sidecar_payload` and `backfill_sidecars`; `ingest_document` stores the summary and sidecar payload you give it, or a preview. `KnowledgeBase.ingest_text(content, ...)` and `ingest_bytes(data, extension=..., ...)` do the conversion and the summarizer call for you; they raise `EmptyDocument`, `UnsupportedDocument` or `ConversionFailed`.
+Ingesting a document writes a summary and a sidecar with the workflow's LLM when `knowledge_base_summarize` is on (the default; one call per document). Turn it off in `~/.{app_name}/settings.json` to store the first ~500 characters instead. A knowledge base you build yourself calls the `summarizer=` you pass it in `generate_summary`, `generate_sidecar_payload` and `backfill_sidecars`; `ingest_document` stores the summary and sidecar payload you give it, or a preview. `KnowledgeBase.ingest_text(content, ...)` and `ingest_bytes(data, extension=..., ...)` do the conversion and the summarizer call for you; they raise `EmptyDocument`, `UnsupportedDocument` or `ConversionFailed`, `KeyError` for an unknown `scope=`, and `ValueError` for an unknown `source_type`; errors from storing the document propagate.
 
 The workflow loads the embedding model once per process: both knowledge bases and the memory store share one `EmbeddingService`. A knowledge base you build yourself uses the `embedding_service=` you pass it (FAISS sizes its index from the service), so several knowledge bases can share one model too.
 
@@ -979,7 +979,8 @@ agentic-cli/
 │   │   ├── store.py              # MemoryStore
 │   │   └── kb/                   # Knowledge base (agentic_cli.memory.kb)
 │   │       ├── manager.py                # KnowledgeBaseManager(base_dir, embedding=, summarizer=), Summarizer
-│   │       ├── knowledge_base.py         # KnowledgeBase (provisional), ScopedDocument, BackfillResult
+│   │       ├── knowledge_base.py         # KnowledgeBase (provisional): the scopes as one, and the ingestion pipeline; ScopedDocument, BackfillResult
+│   │       ├── enrich.py                 # The summary/sidecar prompts and parser: one summarizer call per document
 │   │       ├── models.py                 # Document, SearchResult, SourceType
 │   │       ├── convert.py                # convert_document: trafilatura / html2text, pypdf, text
 │   │       ├── vector_store.py, bm25_index.py (+ _bm25_backends.py), concepts.py, sidecar.py
