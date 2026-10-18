@@ -14,9 +14,16 @@ further deprecation step.
 
 - **`agentic_cli.knowledge_base`** (all ten modules, with the
   `KnowledgeBaseManager(settings=...)` signature, `extract_text_from_pdf` and
-  `embeddings.resolve_embedding_device`). Use `agentic_cli.memory.kb`,
-  `KnowledgeBaseManager(base_dir, ...)` and
-  `agentic_cli.memory.resolve_embedding_device`.
+  `embeddings.resolve_embedding_device`). Use `agentic_cli.memory.kb` and
+  `agentic_cli.memory.resolve_embedding_device`. The old class read the
+  embedding model from the settings and summarized with the turn in
+  progress; `KnowledgeBaseManager(base_dir)` does neither, and a knowledge
+  base opened with another model re-embeds all its text. Pass both:
+  `KnowledgeBaseManager(base_dir, embedding=memory_services.embedding_config(settings), summarizer=...)`,
+  or open the workflow's scopes with
+  `memory_services.open_knowledge_base(settings, summarizer=...)`. For
+  `extract_text_from_pdf`, use `agentic_cli.tools.pdf_utils.extract_pdf_text`
+  or `convert_document` from `agentic_cli.memory.kb`.
 - **`agentic_cli.tools.search_sources.PaperResult`** and **`WebResult`**, which
   only the old package used. Search sources return `SearchSourceResult`.
 - **`agentic_cli.tools.kb_convert`**. Import `convert_document`,
@@ -29,6 +36,7 @@ further deprecation step.
 - **The `kb_ingest_url` tool**, also from `KB_WRITER_TOOLS`, `make_kb_tools`
   and the `agentic_cli.tools` exports. Read the page with `web_fetch`, then
   pass its `saved_path` to `kb_ingest_file`.
+  `tools.webfetch.RedirectInfo` loses `from_url`, which only that tool read.
 - **`requires="kb_manager"`**. Declare `requires="knowledge_base"`; a tool
   declaring `kb_manager` or `user_kb_manager` now fails to register, and the
   error names `knowledge_base`.
@@ -37,6 +45,8 @@ further deprecation step.
   that key: a registry holding only the 0.6.3 keys gives them no knowledge
   base. Publish a `KnowledgeBase` under `knowledge_base`, and use
   `knowledge_base.manager(name)` for one scope.
+  The constants `service_registry.KB_MANAGER`, `USER_KB_MANAGER` and
+  `DEPRECATED_SERVICE_KEYS` go with them.
 - **`workflow.kb_manager`, `workflow.user_kb_manager`** and
   **`workflow.memory_manager`**. Use `workflow.knowledge_base` and
   `workflow.memory_store`.

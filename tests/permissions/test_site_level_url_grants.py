@@ -72,6 +72,15 @@ async def test_a_session_approval_covers_the_site():
     assert not await _asks(engine, approver, "https://docs.example.org/api?q=fetch")
     assert not await _asks(engine, approver, "https://docs.example.org/")
 
+    # The grant belongs to the capability and the site, not to web_fetch: another
+    # tool that reads the same site through http.read is covered too.
+    before = len(approver.prompts)
+    caps = get_registry().get("web_fetch").capabilities
+    args = {"url": "https://docs.example.org/guide", "prompt": "summarize"}
+    result = await engine.check("another_reader", caps, args)
+    assert result.allowed
+    assert len(approver.prompts) == before
+
 
 @pytest.mark.parametrize(
     "other",
