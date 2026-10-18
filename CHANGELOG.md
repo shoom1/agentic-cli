@@ -43,9 +43,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rebuild). 0.6.3 ignores both files. Re-embedding runs when the workflow
   starts, so a large knowledge base makes that one start slower; the log
   gives the chunk count and the time taken.
+- **One ingestion pipeline.** `KnowledgeBase.ingest_text(content, ...)` and
+  `KnowledgeBase.ingest_bytes(data, extension=..., ...)` convert (bytes
+  only), fill in the title, source type, source URL and metadata (a value
+  the caller passed always wins), make one summarizer call for the summary,
+  claims and entities, and store the document. `kb_ingest_text`,
+  `kb_ingest_file`, `kb_ingest_url` and `ingest_arxiv_paper` call them.
+  `EmptyDocument` and `ConversionFailed` join `UnsupportedDocument` as the
+  ingest errors, exported from `agentic_cli.memory.kb`.
 
 ### Changed
 
+- **An arXiv paper's `summary` is the synthesis other documents get.**
+  `ingest_arxiv_paper` asked the summarizer for 2–3 sentences and wrote a
+  sidecar from them; it now goes through the ingestion pipeline like every
+  other document, so its summary is the 1,500–3,000-character synthesis and
+  its sidecar has claims and entities. Still one summarizer call per paper.
 - **The ingestion converter moved into the package:** `convert_document`,
   `ConvertedDocument` and `UnsupportedDocument` are exported from
   `agentic_cli.memory.kb`, which reads PDFs and charset labels with its own

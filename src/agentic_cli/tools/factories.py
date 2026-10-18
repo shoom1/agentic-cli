@@ -524,7 +524,7 @@ def make_ingest_arxiv_tool(arxiv_source, knowledge_base=None, *, kb_manager=None
             abstract was used as fallback content).
         """
         return await _ingest_arxiv_paper_with_services(
-            arxiv_source, kb.manager(kb.scopes[0]), arxiv_id, tags=tags
+            arxiv_source, kb, arxiv_id, tags=tags
         )
 
     ingest_arxiv_paper.__name__ = "ingest_arxiv_paper"
