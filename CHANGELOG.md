@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Tests pin what the knowledge-base tools return.** Every `kb_*` tool,
+  `ingest_arxiv_paper` and `/papers` run through their public entry points
+  with one knowledge base, with a project and a user knowledge base, and with
+  both names on one directory, and their full results are compared with a
+  recording from 0.6.3 (`tests/tools/kb_tool_contract.json`). A second test
+  pins what `agentic_cli.memory` and `agentic_cli.memory.kb` export. 0.6.4
+  moves the knowledge-base logic into the package behind both.
+
 ## [0.6.3] - 2026-10-17
 
 The knowledge base and the memory store move into `agentic_cli.memory`, a
