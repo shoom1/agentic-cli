@@ -536,11 +536,11 @@ class TestKBManagerContextVar:
         finally:
             token.var.reset(token)
 
-    def test_kb_tools_declare_the_kb_manager_service(self):
+    def test_kb_tools_declare_the_knowledge_base_service(self):
         """KB tools carry their own service requirement in the registry."""
         from agentic_cli.tools.registry import get_registry
 
-        assert get_registry().get("kb_search").requires == ("kb_manager",)
+        assert get_registry().get("kb_search").requires == ("knowledge_base",)
 
     def test_base_manager_has_kb_manager_slot(self):
         from agentic_cli.workflow.base_manager import BaseWorkflowManager

@@ -305,7 +305,7 @@ async def _ingest_arxiv_paper_with_services(
         Capability("kb.write"),
     ],
     description="Download an arXiv paper's PDF, extract text, and ingest it into the knowledge base. Use this to add a specific arXiv paper to long-term storage so it can be searched later.",
-    requires=("arxiv_source", "kb_manager"),
+    requires=("arxiv_source", "knowledge_base"),
 )
 async def ingest_arxiv_paper(
     arxiv_id: str,

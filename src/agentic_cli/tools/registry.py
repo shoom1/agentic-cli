@@ -21,6 +21,7 @@ from agentic_cli.workflow.permissions.capabilities import (
 )
 from agentic_cli.workflow.permissions.capabilities import _CapabilityExempt
 from agentic_cli.workflow.service_registry import (
+    DEPRECATED_SERVICE_KEYS,
     KNOWN_SERVICE_KEYS,
     SERVICE_KEY_HINTS,
 )
@@ -218,6 +219,15 @@ def _validate_requires(requires: Any, tool_name: str) -> tuple[str, ...]:
             f"{', '.join(sorted(KNOWN_SERVICE_KEYS))}."
             + (f" {hints}" if hints else "")
         )
+    for key in keys:
+        replacement = DEPRECATED_SERVICE_KEYS.get(key)
+        if replacement is not None:
+            warnings.warn(
+                f"Tool {tool_name!r}: requires={key!r} is deprecated and will be removed in "
+                f"0.7.0; declare requires={replacement!r}",
+                DeprecationWarning,
+                stacklevel=2,
+            )
     return keys
 
 
@@ -349,7 +359,7 @@ class ToolRegistry:
             registry.register(my_tool, category=ToolCategory.READ, capabilities=EXEMPT)
 
         ``requires=`` declares the service keys the tool needs (e.g.
-        ``requires="kb_manager"``); workflow managers read that metadata to
+        ``requires="knowledge_base"``); workflow managers read that metadata to
         create exactly those services, lazily. Unknown keys raise.
 
         ``long_running=True`` marks a tool that starts a background job (it should
@@ -693,7 +703,7 @@ def register_tool(
     the resources this tool accesses.
 
     ``requires`` declares which **framework-provided** services the tool needs
-    (``"kb_manager"``, ``"memory_store"``, … — the full set is
+    (``"knowledge_base"``, ``"memory_store"``, … — the full set is
     ``service_registry.KNOWN_SERVICE_KEYS``), so managers create exactly those,
     lazily. A downstream tool may request any of them without editing the
     framework; anything else raises, because nothing would construct it. There
