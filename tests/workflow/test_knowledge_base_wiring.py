@@ -4,8 +4,7 @@ It built two ``KnowledgeBaseManager``s under ``kb_manager`` and
 ``user_kb_manager``, and every tool merged them by hand. It now builds one
 ``KnowledgeBase`` under ``knowledge_base``, which the framework's tools
 declare. Until 0.7.0 the old names keep working: the two keys still hold
-the scopes' managers, ``requires="kb_manager"`` builds the same services
-(with a warning when the tool registers), and the old properties warn.
+the scopes' managers, and the old properties warn.
 """
 
 from __future__ import annotations
@@ -99,19 +98,6 @@ def test_a_legacy_declaration_and_a_new_one_build_one_knowledge_base(tmp_path):
 
     assert mgr.services[KB_MANAGER] is kb.manager("project")
     assert mgr.services[USER_KB_MANAGER] is kb.manager("user")
-
-
-def test_declaring_kb_manager_warns_at_registration():
-    registry = ToolRegistry()
-
-    with pytest.warns(DeprecationWarning, match="knowledge_base.*0.7.0|0.7.0.*knowledge_base"):
-
-        @registry.register(capabilities=EXEMPT, requires="kb_manager")
-        def kb_thing() -> dict:
-            """A downstream tool written for 0.6.3."""
-            return {"success": True}
-
-    assert registry.get("kb_thing").requires == ("kb_manager",)
 
 
 def test_declaring_knowledge_base_does_not_warn():
@@ -259,62 +245,3 @@ def test_an_injected_knowledge_base_fills_the_legacy_keys(tmp_path):
     assert mgr.services[KNOWLEDGE_BASE] is kb
     assert mgr.services[KB_MANAGER] is project
     assert mgr.services[USER_KB_MANAGER] is user
-
-
-def _deprecations(caught):
-    return [w for w in caught if issubclass(w.category, DeprecationWarning) and "kb_manager" in str(w.message)]
-
-
-def test_the_warning_points_at_the_decorator_site():
-    registry = ToolRegistry()
-
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-
-        @registry.register(capabilities=EXEMPT, requires="kb_manager")
-        def kb_thing() -> dict:
-            """A downstream tool."""
-            return {"success": True}
-
-    assert [w.filename for w in _deprecations(caught)] == [__file__]
-
-
-def test_the_warning_points_at_a_direct_register_call():
-    registry = ToolRegistry()
-
-    def kb_thing() -> dict:
-        """A downstream tool."""
-        return {"success": True}
-
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        registry.register(kb_thing, capabilities=EXEMPT, requires="kb_manager")
-
-    assert [w.filename for w in _deprecations(caught)] == [__file__]
-
-
-def test_the_warning_points_at_register_tool():
-    from agentic_cli.tools.registry import get_registry, register_tool
-
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-
-        @register_tool(capabilities=EXEMPT, requires="kb_manager")
-        def kb_wiring_probe_tool() -> dict:
-            """A downstream tool."""
-            return {"success": True}
-
-    get_registry()._tools.pop("kb_wiring_probe_tool", None)
-    assert [w.filename for w in _deprecations(caught)] == [__file__]
-
-
-def test_the_warning_points_at_declare_tool():
-    from agentic_cli.tools.registry import declare_tool
-
-    registry = ToolRegistry()
-
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        declare_tool("kb_declared", description="d", capabilities=EXEMPT, requires="kb_manager", registry=registry)
-
-    assert [w.filename for w in _deprecations(caught)] == [__file__]

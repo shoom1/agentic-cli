@@ -1,23 +1,15 @@
 """Finding the knowledge base the knowledge-base tools work on.
 
 The workflow publishes a ``KnowledgeBase`` under ``knowledge_base``. Until
-0.7.0 the tools also accept a registry that holds only the 0.6.3 keys,
-``kb_manager`` and ``user_kb_manager`` (as registries filled by hand do),
-and the factories accept 0.6.3's managers, with a warning.
+0.7.0 the factories also accept 0.6.3's managers, with a warning.
 """
 
 from __future__ import annotations
 
-import sys
 import warnings
 from typing import TYPE_CHECKING, Any
 
-from agentic_cli.workflow.service_registry import (
-    KB_MANAGER,
-    KNOWLEDGE_BASE,
-    USER_KB_MANAGER,
-    get_service,
-)
+from agentic_cli.workflow.service_registry import KNOWLEDGE_BASE, get_service
 
 if TYPE_CHECKING:
     from agentic_cli.memory.kb import KnowledgeBase
@@ -35,37 +27,9 @@ def _over(project: Any, user: Any) -> "KnowledgeBase":
     return KnowledgeBase(managers)
 
 
-def _caller_stacklevel() -> int:
-    """The ``stacklevel`` that points a warning at the code calling a tool.
-
-    Tool bodies reach this through a few frames of ``agentic_cli.tools``
-    (the tool, ``current_knowledge_base``, helpers), so skip those frames
-    instead of hard-coding a depth. Level 1 is the caller of this function's
-    caller.
-    """
-    level = 1
-    frame = sys._getframe(1)
-    while frame is not None and frame.f_globals.get("__name__", "").startswith("agentic_cli.tools"):
-        level += 1
-        frame = frame.f_back
-    return level
-
-
 def current_knowledge_base() -> "KnowledgeBase | None":
-    """The workflow's knowledge base, else one over the 0.6.3 registry keys."""
-    kb = get_service(KNOWLEDGE_BASE)
-    if kb is not None:
-        return kb
-    project = get_service(KB_MANAGER)
-    if project is None:
-        return None
-    warnings.warn(
-        "a service registry holding only kb_manager/user_kb_manager is deprecated and will be "
-        "removed in 0.7.0; publish a KnowledgeBase under knowledge_base",
-        DeprecationWarning,
-        stacklevel=_caller_stacklevel(),
-    )
-    return _over(project, get_service(USER_KB_MANAGER))
+    """The workflow's knowledge base, ``None`` when the registry holds none."""
+    return get_service(KNOWLEDGE_BASE)
 
 
 def knowledge_base_argument(

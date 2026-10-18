@@ -1308,19 +1308,19 @@ class TestDirectRegisterOriginalCallable:
 class TestRequiresAreConstructible:
     """Only services a manager can actually build may be declared."""
 
-    def test_user_kb_manager_is_not_declarable(self):
-        """It is created with kb_manager, never on its own — declaring it
-        validated and then provided nothing."""
+    @pytest.mark.parametrize("key", ["kb_manager", "user_kb_manager"])
+    def test_the_0_6_3_knowledge_base_keys_are_not_declarable(self, key):
+        """The knowledge base is one service; the error names it."""
         registry = ToolRegistry()
 
-        with pytest.raises(ValueError, match="user_kb_manager") as exc:
+        with pytest.raises(ValueError, match=key) as exc:
 
-            @registry.register(capabilities=EXEMPT, requires="user_kb_manager")
+            @registry.register(capabilities=EXEMPT, requires=key)
             def _tool() -> dict:
                 """Tool."""
                 return {"success": True}
 
-        assert "kb_manager" in str(exc.value)
+        assert "requires='knowledge_base'" in str(exc.value)
 
     def test_kb_manager_creates_both_scopes(self):
         """The documented replacement really provides the user-scoped KB too."""
@@ -1386,7 +1386,7 @@ class TestRequiresAreConstructible:
         registry = ToolRegistry()
         with pytest.raises(ValueError, match="non-empty"):
 
-            @registry.register(capabilities=EXEMPT, requires=("kb_manager", None))
+            @registry.register(capabilities=EXEMPT, requires=("knowledge_base", None))
             def _tool() -> dict:
                 """Tool."""
                 return {"success": True}

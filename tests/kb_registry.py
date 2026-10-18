@@ -1,8 +1,7 @@
-"""A service registry for the knowledge-base tools that does not use the 0.6.3 keys.
+"""A service registry for the knowledge-base tools.
 
-The tools read the ``KnowledgeBase`` under ``knowledge_base``. A registry
-holding only ``kb_manager`` / ``user_kb_manager`` still works until 0.7.0
-but warns, so tests that are not about that path build theirs here.
+The tools read the ``KnowledgeBase`` under ``knowledge_base``; tests build
+theirs here from one or two ``KnowledgeBaseManager``s.
 """
 
 from __future__ import annotations

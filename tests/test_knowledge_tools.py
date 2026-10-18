@@ -420,6 +420,19 @@ class TestKBManagerContextVar:
         finally:
             token.var.reset(token)
 
+    def test_a_registry_holding_only_kb_manager_gives_no_knowledge_base(self, tmp_path):
+        """The tools read ``knowledge_base`` alone; 0.6.3's key is not looked at."""
+        from agentic_cli.tools.knowledge_tools import kb_search
+        from agentic_cli.workflow.service_registry import set_service_registry
+
+        token = set_service_registry({"kb_manager": _make_kb(tmp_path)})
+        try:
+            result = kb_search("basalt")
+        finally:
+            token.var.reset(token)
+
+        assert result == {"success": False, "error": "kb manager not available"}
+
     def test_kb_tools_declare_the_knowledge_base_service(self):
         """KB tools carry their own service requirement in the registry."""
         from agentic_cli.tools.registry import get_registry

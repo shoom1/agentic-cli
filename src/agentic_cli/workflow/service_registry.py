@@ -34,29 +34,25 @@ EMBEDDING_SERVICE = "_embedding_service"
 #
 # Every entry must be something a manager can actually construct on demand
 # (see ``BaseWorkflowManager._ensure_managers_initialized``). Keys that are
-# always present (PERMISSION_ENGINE, WORKFLOW) say nothing when declared, and
-# USER_KB_MANAGER is not independently constructible — it is created with
-# the knowledge base — so declaring it would validate and then provide
-# nothing. KB_MANAGER is still declarable, with a warning, until 0.7.0.
+# always present (PERMISSION_ENGINE, WORKFLOW) say nothing when declared.
 KNOWN_SERVICE_KEYS = frozenset({
     ARXIV_SOURCE,
     JOB_MANAGER,
-    KB_MANAGER,
     KNOWLEDGE_BASE,
     LLM_SUMMARIZER,
     MEMORY_STORE,
     SANDBOX_MANAGER,
 })
 
-# Declarable keys that warn at registration, and what to declare instead.
-DEPRECATED_SERVICE_KEYS = {KB_MANAGER: KNOWLEDGE_BASE}
-
 # Extra guidance for keys that look declarable but are not.
 SERVICE_KEY_HINTS = {
-    USER_KB_MANAGER: (
-        f"{USER_KB_MANAGER!r} is created together with the knowledge base; "
-        f"declare requires={KNOWLEDGE_BASE!r} to get both the project- and "
-        "user-scoped knowledge bases."
+    "kb_manager": (
+        f"The knowledge base is one service: declare requires={KNOWLEDGE_BASE!r} "
+        "(its project scope is knowledge_base.manager('project'))."
+    ),
+    "user_kb_manager": (
+        f"The knowledge base is one service: declare requires={KNOWLEDGE_BASE!r} "
+        "(its user scope is knowledge_base.manager('user'))."
     ),
     PERMISSION_ENGINE: f"{PERMISSION_ENGINE!r} is always available.",
     WORKFLOW: f"{WORKFLOW!r} is always available.",

@@ -30,3 +30,18 @@ def test_no_tool_description_or_demo_prompt_names_a_removed_tool(mock_context):
     texts.update({f"agent {c.name}": c.get_prompt(mock_context.settings) for c in AGENT_CONFIGS})
     for removed in ("kb_ingest_url", "google_search_tool"):
         assert [name for name, text in texts.items() if removed in text] == [], removed
+
+
+def test_kb_manager_among_other_keys_is_refused_and_names_knowledge_base():
+    from agentic_cli.tools.registry import ToolRegistry
+    from agentic_cli.workflow.permissions import EXEMPT
+
+    registry = ToolRegistry()
+    with pytest.raises(ValueError, match="kb_manager") as exc:
+
+        @registry.register(capabilities=EXEMPT, requires=("knowledge_base", "kb_manager"))
+        def _tool() -> dict:
+            """Tool."""
+            return {"success": True}
+
+    assert "requires='knowledge_base'" in str(exc.value)
