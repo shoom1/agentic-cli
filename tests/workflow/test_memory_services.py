@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from agentic_cli.config import BaseSettings
-from agentic_cli.memory import MemoryStore
+from agentic_cli.memory import EmbeddingService, MemoryStore, MockEmbeddingService
 from agentic_cli.workflow import memory_services
 
 
@@ -70,7 +70,7 @@ def test_build_knowledge_base_uses_the_settings_embedding_model(tmp_path):
 
 
 def test_the_memory_store_lives_in_the_workspace(settings):
-    store = memory_services.build_memory_store(settings)
+    store = memory_services.open_memory_store(settings)
     store.store("a fact")
 
     assert isinstance(store, MemoryStore)
@@ -79,14 +79,70 @@ def test_the_memory_store_lives_in_the_workspace(settings):
 
 def test_the_mock_setting_gives_the_memory_store_no_embedder(settings):
     """Hash embeddings carry no meaning, so the store searches by substring."""
-    store = memory_services.build_memory_store(settings)
+    store = memory_services.open_memory_store(settings)
 
     assert store._embedding_service is None
 
 
 def test_memory_search_in_mock_mode_finds_the_matching_memory(settings):
-    store = memory_services.build_memory_store(settings)
+    store = memory_services.open_memory_store(settings)
     for text in ("Project uses Python 3.12", "User prefers dark mode", "The team mascot is an otter"):
         store.store(text)
 
     assert [item.content for item in store.search("otter", limit=2)] == ["The team mascot is an otter"]
+
+
+def test_the_memory_store_uses_the_service_it_is_given(settings):
+    service = MockEmbeddingService(embedding_dim=16)
+
+    store = memory_services.open_memory_store(settings, embedding_service=service)
+
+    assert store._embedding_service is service
+
+
+def test_build_memory_store_still_works_and_warns(settings):
+    with pytest.warns(DeprecationWarning, match="open_memory_store.*0.7.0|0.7.0.*open_memory_store"):
+        store = memory_services.build_memory_store(settings)
+
+    assert isinstance(store, MemoryStore)
+
+
+def test_no_embedding_service_in_mock_mode(settings, monkeypatch):
+    def refuse(*args, **kwargs):
+        raise AssertionError("mock mode must not build an embedding service")
+
+    monkeypatch.setattr(EmbeddingService, "is_available", staticmethod(lambda: True))
+    monkeypatch.setattr(EmbeddingService, "__init__", refuse)
+
+    assert memory_services.build_embedding_service(settings) is None
+
+
+def test_no_embedding_service_without_sentence_transformers(tmp_path, monkeypatch):
+    monkeypatch.setattr(EmbeddingService, "is_available", staticmethod(lambda: False))
+    settings = BaseSettings(workspace_dir=tmp_path / "w", knowledge_base_use_mock=False)
+
+    assert memory_services.build_embedding_service(settings) is None
+
+
+def test_the_embedding_service_is_the_one_the_settings_name(tmp_path, monkeypatch):
+    monkeypatch.setattr(EmbeddingService, "is_available", staticmethod(lambda: True))
+    settings = BaseSettings(
+        workspace_dir=tmp_path / "w", knowledge_base_use_mock=False,
+        embedding_model="m-x", embedding_batch_size=7, embedding_device="cpu",
+    )
+
+    service = memory_services.build_embedding_service(settings)
+
+    assert isinstance(service, EmbeddingService)
+    assert (service.model_name, service.batch_size, service.device) == ("m-x", 7, "cpu")
+    assert service._model is None  # built, not loaded
+
+
+def test_both_knowledge_bases_get_the_service(settings):
+    service = MockEmbeddingService(embedding_dim=16)
+    real = BaseSettings(workspace_dir=settings.workspace_dir, knowledge_base_use_mock=False)
+
+    project, user = memory_services.build_knowledge_bases(real, summarizer=None, embedding_service=service)
+
+    assert project._embedding_service is service
+    assert user._embedding_service is service
