@@ -343,11 +343,22 @@ class KnowledgeBaseManager:
                 return
             self._reembed(current, "model_changed")
             return
-        if dimension == current.embedding_dim and store.chunk_ids() == set(self._chunks):
-            write_model_record(self._model_record_path, current)
+        try:
+            covers = store.chunk_ids() == set(self._chunks)
+        except (TypeError, ValueError):
+            covers = False  # malformed mappings: rebuild rather than fail the open
+        if dimension == current.embedding_dim and covers and store.size == len(self._chunks):
+            self._write_record_on_open(current)
             logger.info("kb_index_adopted", model=current.model_name, chunks=len(self._chunks))
             return
         self._reembed(current, "no_record")
+
+    def _write_record_on_open(self, current: ModelRecord) -> None:
+        """Write the record while opening; failing to must not fail the open."""
+        try:
+            write_model_record(self._model_record_path, current)
+        except OSError as e:
+            logger.warning("kb_model_record_write_failed", error=str(e))
 
     def _reembed(self, current: ModelRecord, reason: str) -> None:
         """Embed every chunk again and swap the new index in when it is complete.
@@ -373,6 +384,12 @@ class KnowledgeBaseManager:
                 vectors = self._embedding_service.embed_batch([self._chunks[c].content for c in batch])
                 fresh.add_embeddings(batch, vectors)
             fresh.save()
+            # Matches no model: an interruption after the swap, before the real
+            # record, forces a re-embedding on the next open.
+            write_model_record(
+                self._model_record_path,
+                ModelRecord(f"rebuilding:{current.model_name}", current.embedding_dim),
+            )
             os.replace(new_mappings, old.index_path.with_suffix(".mappings.json"))
             os.replace(new_index, old.index_path)
         except Exception as e:
@@ -386,7 +403,7 @@ class KnowledgeBaseManager:
             return
         fresh.index_path = old.index_path
         self._vector_store = fresh
-        write_model_record(self._model_record_path, current)
+        self._write_record_on_open(current)
         logger.info(
             "kb_reembedded",
             model=current.model_name,

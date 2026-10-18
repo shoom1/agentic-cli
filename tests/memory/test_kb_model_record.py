@@ -13,6 +13,7 @@ them against real FAISS.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 
 import pytest
@@ -264,3 +265,110 @@ def test_a_copy_of_a_knowledge_base_reopens_with_its_record(kb_dir, faiss, tmp_p
     _open(copy, service)
 
     assert service.calls == 0
+
+
+# ---- bookkeeping during open must not fail the open -----------------------
+
+
+def _skip_as_root() -> None:
+    if os.geteuid() == 0:
+        pytest.skip("directory permissions do not bind root")
+
+
+def test_a_read_only_0_6_3_knowledge_base_opens_and_searches(kb_dir, faiss):
+    _skip_as_root()
+    _seed(_open(kb_dir, FakeEmbeddingService("model-a", 8)))
+    embeddings = kb_dir / "embeddings"
+    (embeddings / "model.json").unlink()  # as 0.6.3 left it
+    embeddings.chmod(0o500)
+    try:
+        service = FakeEmbeddingService("model-a", 8)
+        kb = _open(kb_dir, service)
+
+        assert service.calls == 0
+        assert kb.search("basalt lava")["results"]
+    finally:
+        embeddings.chmod(0o700)
+
+
+@pytest.mark.parametrize("change", [False, True], ids=["adopt", "re-embed"])
+def test_a_directory_planted_at_the_record_does_not_stop_the_open(kb_dir, faiss, change):
+    _seed(_open(kb_dir, FakeEmbeddingService("model-a", 8)))
+    record = kb_dir / "embeddings" / "model.json"
+    record.unlink()
+    record.mkdir()
+    (record / "planted").write_text("x")
+    model = "model-b" if change else "model-a"
+
+    kb = _open(kb_dir, FakeEmbeddingService(model, 8))
+    assert kb._vector_store.size == 3
+    assert kb.search("basalt lava")["results"]
+    again = _open(kb_dir, FakeEmbeddingService(model, 8))  # a second open works too
+    assert again._vector_store.size == 3
+
+
+def test_an_interrupted_swap_forces_a_re_embedding_whichever_model_opens(kb_dir, faiss, monkeypatch):
+    _seed(_open(kb_dir, FakeEmbeddingService("model-a", 8)))
+    real = manager_module.write_model_record
+
+    def fail_final_record(path, record):
+        if record.model_name == "model-b":
+            raise OSError("interrupted")
+        real(path, record)
+
+    monkeypatch.setattr(manager_module, "write_model_record", fail_final_record)
+    _open(kb_dir, FakeEmbeddingService("model-b", 8))  # swapped, real record never written
+    monkeypatch.undo()
+
+    service = FakeEmbeddingService("model-a", 8)
+    _open(kb_dir, service)  # the old model, same dimension, must not trust the new vectors
+
+    assert service.calls == 3
+
+
+def test_a_sentinel_write_failure_aborts_the_rebuild_and_keeps_the_old_index(kb_dir, faiss, monkeypatch, log):
+    _seed(_open(kb_dir, FakeEmbeddingService("model-a", 8)))
+    before = _files(kb_dir)
+    real = manager_module.write_model_record
+
+    def fail_sentinel(path, record):
+        if record.model_name.startswith("rebuilding:"):
+            raise OSError("read-only")
+        real(path, record)
+
+    monkeypatch.setattr(manager_module, "write_model_record", fail_sentinel)
+    kb = _open(kb_dir, FakeEmbeddingService("model-b", 8))
+
+    assert _files(kb_dir) == before
+    assert isinstance(kb._embedding_service, MockEmbeddingService)
+    assert "kb_reembed_failed" in log.events
+
+
+def test_mappings_that_are_not_a_mapping_re_embed_instead_of_failing(kb_dir, faiss):
+    _seed(_open(kb_dir, FakeEmbeddingService("model-a", 8)))
+    mappings = kb_dir / "embeddings" / "index.mappings.json"
+    data = json.loads(mappings.read_text())
+    data["chunk_to_faiss"] = 5
+    mappings.write_text(json.dumps(data))
+    (kb_dir / "embeddings" / "model.json").unlink()
+    service = FakeEmbeddingService("model-a", 8)
+
+    kb = _open(kb_dir, service)
+
+    assert service.calls == 3
+    assert kb._vector_store.size == 3
+
+
+def test_an_index_holding_fewer_vectors_than_its_mappings_name_is_not_adopted(kb_dir, faiss):
+    _seed(_open(kb_dir, FakeEmbeddingService("model-a", 8)))
+    index = kb_dir / "embeddings" / "index.faiss"
+    small = faiss.IndexFlatIP(8)
+    small.add(__import__("numpy").ones((1, 8), dtype="float32"))
+    faiss.write_index(small, str(index))
+    (kb_dir / "embeddings" / "model.json").unlink()
+    service = FakeEmbeddingService("model-a", 8)
+
+    kb = _open(kb_dir, service)
+
+    assert service.calls == 3
+    assert kb._vector_store.size == 3
