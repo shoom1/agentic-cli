@@ -473,7 +473,7 @@ Tool access is gated by the **permission engine** (see the HITL section below). 
 
 - **`Capability("namespace.action", target_arg="...")`** — e.g. `Capability("filesystem.write", target_arg="path")`, `Capability("http.read", target_arg="url")`, `Capability("shell.exec", target_arg="command")`. The engine resolves `target_arg` against the actual tool-call arguments and matches against rules.
 - **`Capability("namespace.action", target="...")`** — a fixed target, for a tool that always reaches the same resource, e.g. `Capability("http.read", target="https://export.arxiv.org/api/query")`.
-- Filesystem, network (`http.*`) and shell capabilities must name their resource with `target_arg` or `target`. Without one the target is the wildcard: the tool warns at registration, and every approval of it applies to that one call only, because remembering it would approve the capability for every resource.
+- Filesystem, network (`http.*`) and shell capabilities must name their resource with `target_arg` or `target`. Without one the target would be the wildcard, so registering the tool raises `ValueError`: remembering an approval of it would approve the capability for every resource.
 - **`EXEMPT`** — opts the tool out of the engine entirely. Use for tools that need no permission check: pure functions with no side effects, and backend-internal tools (e.g. ADK `transfer_to_agent`, backend state tools).
 
 ### Built-in Tools
