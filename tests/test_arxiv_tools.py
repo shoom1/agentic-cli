@@ -1,3 +1,4 @@
+from tests.kb_registry import kb_services
 """Tests for ArXiv tools — error reporting and metadata fetching.
 
 Covers:
@@ -828,7 +829,7 @@ def ingest_ctx():
 
     source = ArxivSearchSource()
     kb = _FakeKB()
-    token = set_service_registry({ARXIV_SOURCE: source, KB_MANAGER: kb})
+    token = set_service_registry(kb_services(kb, **{ARXIV_SOURCE: source}))
     try:
         yield source, kb
     finally:

@@ -23,11 +23,8 @@ from agentic_cli.tools.registry import (
     ToolCategory,
 )
 from agentic_cli.workflow.permissions import Capability
-from agentic_cli.workflow.service_registry import (
-    ARXIV_SOURCE,
-    KB_MANAGER,
-    require_service,
-)
+from agentic_cli.tools._knowledge_base import NO_KNOWLEDGE_BASE, current_knowledge_base
+from agentic_cli.workflow.service_registry import ARXIV_SOURCE, require_service
 
 
 _VALID_SORT_BY = ("relevance", "lastUpdatedDate", "submittedDate")
@@ -308,7 +305,7 @@ async def _ingest_arxiv_paper_with_services(
         Capability("kb.write"),
     ],
     description="Download an arXiv paper's PDF, extract text, and ingest it into the knowledge base. Use this to add a specific arXiv paper to long-term storage so it can be searched later.",
-    requires=("arxiv_source", "kb_manager"),
+    requires=("arxiv_source", "knowledge_base"),
 )
 async def ingest_arxiv_paper(
     arxiv_id: str,
@@ -329,8 +326,10 @@ async def ingest_arxiv_paper(
     if isinstance(source, dict):
         return source
 
-    kb_manager = require_service(KB_MANAGER)
-    if isinstance(kb_manager, dict):
-        return kb_manager
+    kb = current_knowledge_base()
+    if kb is None:
+        return {"success": False, "error": NO_KNOWLEDGE_BASE}
 
-    return await _ingest_arxiv_paper_with_services(source, kb_manager, arxiv_id, tags=tags)
+    return await _ingest_arxiv_paper_with_services(
+        source, kb.manager(kb.scopes[0]), arxiv_id, tags=tags
+    )

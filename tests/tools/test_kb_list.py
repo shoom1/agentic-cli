@@ -11,6 +11,8 @@ and cut at ``limit``, and an unknown ``source_type`` is an error.
 
 from __future__ import annotations
 
+from tests.kb_registry import kb_services
+
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -27,7 +29,7 @@ _EPOCH = datetime(2026, 1, 1, tzinfo=timezone.utc)
 def kbs(tmp_path):
     project = KnowledgeBaseManager(base_dir=tmp_path / "project", use_mock=True)
     user = KnowledgeBaseManager(base_dir=tmp_path / "user", use_mock=True)
-    token = set_service_registry({"kb_manager": project, "user_kb_manager": user})
+    token = set_service_registry(kb_services(project, user))
     try:
         yield {"project": project, "user": user}
     finally:

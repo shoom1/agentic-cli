@@ -348,45 +348,34 @@ class PapersCommand(Command):
 
     async def execute(self, args: str, app: Any) -> None:
         """Display knowledge base documents in a table."""
-        from pathlib import Path
         from agentic_cli.memory.kb import SourceType
-        from agentic_cli.constants import format_size
 
         parsed = self.parse_args(args)
         query = parsed.positional or ""
         source_filter = parsed.get_option("source", "", str) or ""
         use_global = parsed.has_flag("global")
+        scope = "user" if use_global else "project"
+        scope_label = "User" if use_global else "Project"
 
-        # Determine which KB dir to use
-        if use_global:
-            kb_dir = app.settings.knowledge_base_dir
-            scope_label = "User"
-        else:
-            kb_dir = Path.cwd() / f".{app.settings.app_name}" / "knowledge_base"
-            scope_label = "Project"
-
-        # Get KB manager from workflow or create temporary one
+        # The workflow's knowledge base, or one opened for this command
         kb = None
         try:
             workflow = app.workflow
             if workflow:
-                if use_global and hasattr(workflow, "user_kb_manager") and workflow.user_kb_manager:
-                    kb = workflow.user_kb_manager
-                elif not use_global and hasattr(workflow, "kb_manager") and workflow.kb_manager:
-                    kb = workflow.kb_manager
+                kb = getattr(workflow, "knowledge_base", None)
         except (RuntimeError, AttributeError):
             pass
-
+        if kb is not None:
+            try:
+                kb.manager(scope)
+            except KeyError:
+                kb = None
         if kb is None:
-            from agentic_cli.workflow.memory_services import build_knowledge_base
+            from agentic_cli.workflow.memory_services import open_knowledge_base
 
-            kb = build_knowledge_base(
-                app.settings,
-                kb_dir,
-                use_mock=getattr(app.settings, "knowledge_base_use_mock", True),
-            )
+            kb = open_knowledge_base(app.settings, summarizer=None, scopes=(scope,))
 
-        # Parse source type filter
+        # Parse source type filter (an unknown one lists everything, as before)
         st_filter = None
         if source_filter:
             try:
@@ -394,16 +383,13 @@ class PapersCommand(Command):
             except ValueError:
                 pass
 
-        docs = kb.list_documents(source_type=st_filter, limit=50)
-
-        # Apply query filter
-        if query:
-            query_lower = query.lower()
-            docs = [
-                d for d in docs
-                if query_lower in d.title.lower()
-                or any(query_lower in a.lower() for a in d.metadata.get("authors", []))
-            ]
+        # Filtered before the cut at 50, as kb_list does
+        docs = [
+            listed.document
+            for listed in kb.list_documents(
+                title_or_author=query, source_type=st_filter, scope=scope, limit=50
+            )
+        ]
 
         if not docs:
             app.session.add_message("system", f"No documents found in {scope_label.lower()} knowledge base.")

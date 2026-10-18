@@ -325,6 +325,7 @@ class TestKbBackfillCommand:
         """Both project and user KBs write sidecars → two success messages."""
         from examples.research_demo.commands import KbBackfillCommand
         from types import SimpleNamespace
+        from agentic_cli.memory.kb import KnowledgeBase
 
         class FakeKB:
             def __init__(self, name: str):
@@ -340,8 +341,7 @@ class TestKbBackfillCommand:
         user_kb = FakeKB("user")
         app = SimpleNamespace(
             workflow=SimpleNamespace(
-                kb_manager=project_kb,
-                user_kb_manager=user_kb,
+                knowledge_base=KnowledgeBase({"project": project_kb, "user": user_kb}),
             ),
             session=RecordingSession(),
         )
@@ -362,6 +362,64 @@ class TestKbBackfillCommand:
             f"Expected the project KB's progress message exactly once, got {messages_text}"
         )
 
+    async def test_each_scope_prints_header_progress_result_in_turn(self):
+        """Two scopes with progress: header, progress, result for each, in order."""
+        from examples.research_demo.commands import KbBackfillCommand
+        from types import SimpleNamespace
+        from agentic_cli.memory.kb import KnowledgeBase
+
+        class FakeKB:
+            def __init__(self, name: str):
+                self.kb_dir = f"/tmp/{name}"
+                self.name = name
+
+            async def backfill_sidecars(self, progress_cb=None):
+                progress_cb(0, 1, SimpleNamespace(title=f"Paper from {self.name}"))
+                return 1
+
+        app = SimpleNamespace(
+            workflow=SimpleNamespace(
+                knowledge_base=KnowledgeBase({"project": FakeKB("project"), "user": FakeKB("user")}),
+            ),
+            session=RecordingSession(),
+        )
+
+        await KbBackfillCommand().execute("", app)
+
+        texts = [c[-1] for c in app.session.calls]
+        assert texts == [
+            "Backfilling project KB at /tmp/project…",
+            "[project KB] 1/1: Paper from project",
+            "Backfilling user KB at /tmp/user…",
+            "[user KB] 1/1: Paper from user",
+            "project KB: 1 sidecar(s) generated",
+            "user KB: 1 sidecar(s) generated",
+        ]
+
+    async def test_no_all_done_message_after_a_failure(self):
+        from examples.research_demo.commands import KbBackfillCommand
+        from types import SimpleNamespace
+        from agentic_cli.memory.kb import KnowledgeBase
+
+        class FakeKB:
+            def __init__(self, fail: bool):
+                self.kb_dir = f"/tmp/{fail}"
+                self.fail = fail
+
+            async def backfill_sidecars(self, progress_cb=None):
+                if self.fail:
+                    raise RuntimeError("boom")
+                return 0
+
+        app = SimpleNamespace(
+            workflow=SimpleNamespace(knowledge_base=KnowledgeBase({"project": FakeKB(True), "user": FakeKB(False)})),
+            session=RecordingSession(),
+        )
+
+        await KbBackfillCommand().execute("", app)
+
+        assert not any("All documents already have sidecars" in c[-1] for c in app.session.calls)
+
     async def test_project_kb_raises_backfill_already_running(self):
         """Project KB raises BackfillAlreadyRunning → warning, user KB still processes.
 
@@ -372,6 +430,7 @@ class TestKbBackfillCommand:
         from examples.research_demo.commands import KbBackfillCommand
         from agentic_cli.memory.kb.manager import BackfillAlreadyRunning
         from types import SimpleNamespace
+        from agentic_cli.memory.kb import KnowledgeBase
 
         class FakeKB:
             def __init__(self, name: str):
@@ -387,8 +446,7 @@ class TestKbBackfillCommand:
         user_kb = FakeKB("user")
         app = SimpleNamespace(
             workflow=SimpleNamespace(
-                kb_manager=project_kb,
-                user_kb_manager=user_kb,
+                knowledge_base=KnowledgeBase({"project": project_kb, "user": user_kb}),
             ),
             session=RecordingSession(),
         )
@@ -414,6 +472,7 @@ class TestKbBackfillCommand:
         """
         from examples.research_demo.commands import KbBackfillCommand
         from types import SimpleNamespace
+        from agentic_cli.memory.kb import KnowledgeBase
 
         class FakeKB:
             def __init__(self, name: str):
@@ -429,8 +488,7 @@ class TestKbBackfillCommand:
         user_kb = FakeKB("user")
         app = SimpleNamespace(
             workflow=SimpleNamespace(
-                kb_manager=project_kb,
-                user_kb_manager=user_kb,
+                knowledge_base=KnowledgeBase({"project": project_kb, "user": user_kb}),
             ),
             session=RecordingSession(),
         )
@@ -450,6 +508,7 @@ class TestKbBackfillCommand:
         """Both KBs return 0 → "All documents already have sidecars." message, exactly once."""
         from examples.research_demo.commands import KbBackfillCommand
         from types import SimpleNamespace
+        from agentic_cli.memory.kb import KnowledgeBase
 
         class FakeKB:
             def __init__(self, name: str):
@@ -463,8 +522,7 @@ class TestKbBackfillCommand:
         user_kb = FakeKB("user")
         app = SimpleNamespace(
             workflow=SimpleNamespace(
-                kb_manager=project_kb,
-                user_kb_manager=user_kb,
+                knowledge_base=KnowledgeBase({"project": project_kb, "user": user_kb}),
             ),
             session=RecordingSession(),
         )
@@ -485,6 +543,7 @@ class TestKbBackfillCommand:
         """When user_kb_manager is same object as kb_manager → backfill called once."""
         from examples.research_demo.commands import KbBackfillCommand
         from types import SimpleNamespace
+        from agentic_cli.memory.kb import KnowledgeBase
 
         call_count = [0]
 
@@ -499,8 +558,7 @@ class TestKbBackfillCommand:
         kb = FakeKB()
         app = SimpleNamespace(
             workflow=SimpleNamespace(
-                kb_manager=kb,
-                user_kb_manager=kb,  # Same object
+                knowledge_base=KnowledgeBase({"project": kb, "user": kb}),
             ),
             session=RecordingSession(),
         )

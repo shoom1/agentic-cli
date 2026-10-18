@@ -11,6 +11,8 @@ searched, a NUL byte) raised instead of returning an error.
 
 from __future__ import annotations
 
+from tests.kb_registry import kb_services
+
 import os
 
 import pytest
@@ -28,7 +30,7 @@ needs_non_root = pytest.mark.skipif(
 @pytest.fixture
 def kb(tmp_path):
     manager = KnowledgeBaseManager(base_dir=tmp_path / "kb", use_mock=True)
-    token = set_service_registry({"kb_manager": manager})
+    token = set_service_registry(kb_services(manager))
     try:
         yield manager
     finally:

@@ -13,6 +13,8 @@ the framework has ever assigned is a UUID) is now skipped when loading.
 
 from __future__ import annotations
 
+from tests.kb_registry import kb_services
+
 import json
 from pathlib import Path
 
@@ -69,7 +71,7 @@ def _ship_document_with_id(kb_dir: Path, doc_id: str, *, version: int | None = N
 
 
 async def _read(kb: KnowledgeBaseManager, title: str, **kwargs) -> str:
-    token = set_service_registry({"kb_manager": kb})
+    token = set_service_registry(kb_services(kb))
     try:
         return json.dumps(await kb_read(title, **kwargs))
     finally:

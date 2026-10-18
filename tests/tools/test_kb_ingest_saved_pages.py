@@ -9,6 +9,8 @@ and the page supplies its title, authors and description.
 
 from __future__ import annotations
 
+from tests.kb_registry import kb_services
+
 import os
 import sys
 from pathlib import Path
@@ -47,7 +49,7 @@ def project(tmp_path, monkeypatch):
 @pytest.fixture
 def kb(tmp_path):
     manager = KnowledgeBaseManager(base_dir=tmp_path / "kb", use_mock=True)
-    token = set_service_registry({"kb_manager": manager})
+    token = set_service_registry(kb_services(manager))
     try:
         yield manager
     finally:
@@ -192,9 +194,10 @@ async def test_a_metadata_file_is_refused(kb):
 
 
 async def test_the_factory_variant_reads_saved_pages(kb):
+    from agentic_cli.memory.kb import KnowledgeBase
     from agentic_cli.tools.factories import make_kb_tools
 
-    tools = {t.__name__: t for t in make_kb_tools(kb)}
+    tools = {t.__name__: t for t in make_kb_tools(KnowledgeBase({"project": kb}))}
     result = await tools["kb_ingest_file"](path=str(_saved()))
 
     assert kb.get_document(result["document_id"]).source_url == URL
@@ -242,7 +245,7 @@ async def test_fetch_then_ingest_then_search(kb):
                 raw=ARTICLE.encode(), charset="utf-8", final_url=url,
             )
 
-    token = set_service_registry({LLM_SUMMARIZER: _Summarizer(), "kb_manager": kb})
+    token = set_service_registry(kb_services(kb, **{LLM_SUMMARIZER: _Summarizer()}))
     try:
         with patch("agentic_cli.tools.webfetch_tool.get_or_create_fetcher", return_value=_Fetcher()):
             fetched = await web_fetch(URL, "What is this page about?")

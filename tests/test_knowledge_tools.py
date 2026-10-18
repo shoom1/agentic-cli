@@ -1,3 +1,4 @@
+from tests.kb_registry import kb_services
 """Tests for knowledge_tools.
 
 Covers:
@@ -125,7 +126,7 @@ class TestSearchKnowledgeBaseTool:
 
         with tempfile.TemporaryDirectory() as tmp:
             kb = _make_kb(Path(tmp))
-            token = set_service_registry({"kb_manager": kb})
+            token = set_service_registry(kb_services(kb))
             try:
                 result = kb_search("test query")
                 assert result["success"] is True
@@ -159,7 +160,7 @@ class TestIngestDocumentTool:
 
         with tempfile.TemporaryDirectory() as tmp:
             kb = _make_kb(Path(tmp))
-            token = set_service_registry({"kb_manager": kb})
+            token = set_service_registry(kb_services(kb))
             try:
                 result = await kb_ingest_text(
                     content="Test",
@@ -179,7 +180,7 @@ class TestIngestDocumentTool:
 
         with tempfile.TemporaryDirectory() as tmp:
             kb = _make_kb(Path(tmp))
-            token = set_service_registry({"kb_manager": kb})
+            token = set_service_registry(kb_services(kb))
             try:
                 result = await kb_ingest_text(
                     content="Test content for ingestion.",
@@ -219,7 +220,7 @@ class TestIngestDocumentTool:
 
         with tempfile.TemporaryDirectory() as tmp:
             kb = _make_kb(Path(tmp))
-            token = set_service_registry({"kb_manager": kb})
+            token = set_service_registry(kb_services(kb))
             try:
                 result = await kb_ingest_text(content="", title="Empty")
                 assert result["success"] is False
@@ -235,7 +236,7 @@ class TestIngestDocumentTool:
 
         with tempfile.TemporaryDirectory() as tmp:
             kb = _make_kb(Path(tmp))
-            token = set_service_registry({"kb_manager": kb})
+            token = set_service_registry(kb_services(kb))
             try:
                 # Create a fake PDF file
                 pdf_path = Path(tmp) / "test.pdf"
@@ -258,7 +259,7 @@ class TestIngestDocumentTool:
 
         with tempfile.TemporaryDirectory() as tmp:
             kb = _make_kb(Path(tmp))
-            token = set_service_registry({"kb_manager": kb})
+            token = set_service_registry(kb_services(kb))
             try:
                 result = await kb_ingest_file(
                     path="/nonexistent/file.pdf",
@@ -293,7 +294,7 @@ class TestIngestDocumentTool:
         with tempfile.TemporaryDirectory() as tmp:
             monkeypatch.chdir(tmp)
             kb = _make_kb(Path(tmp))
-            token = set_service_registry({"kb_manager": kb})
+            token = set_service_registry(kb_services(kb))
             try:
                 with pytest.warns(DeprecationWarning, match="kb_ingest_url"):
                     result = await kb_ingest_url(url="https://example.com/article")
@@ -310,7 +311,7 @@ class TestIngestDocumentTool:
 
         with tempfile.TemporaryDirectory() as tmp:
             kb = _make_kb(Path(tmp))
-            token = set_service_registry({"kb_manager": kb})
+            token = set_service_registry(kb_services(kb))
             try:
                 with pytest.warns(DeprecationWarning, match="kb_ingest_url"):
                     result = await kb_ingest_url(url="file:///etc/passwd")
@@ -340,7 +341,7 @@ class TestKbRead:
                 title="Readable Doc",
                 source_type=SourceType.USER,
             )
-            token = set_service_registry({"kb_manager": kb})
+            token = set_service_registry(kb_services(kb))
             try:
                 result = await kb_read(doc.id, full=True)
                 assert result["success"] is True
@@ -362,7 +363,7 @@ class TestKbRead:
                 title="Unique Title ABC",
                 source_type=SourceType.USER,
             )
-            token = set_service_registry({"kb_manager": kb})
+            token = set_service_registry(kb_services(kb))
             try:
                 result = await kb_read("Unique Title")
                 assert result["success"] is True
@@ -377,7 +378,7 @@ class TestKbRead:
 
         with tempfile.TemporaryDirectory() as tmp:
             kb = _make_kb(Path(tmp))
-            token = set_service_registry({"kb_manager": kb})
+            token = set_service_registry(kb_services(kb))
             try:
                 result = await kb_read("nonexistent")
                 assert result["success"] is False
@@ -398,7 +399,7 @@ class TestKbRead:
                 title="Long Doc",
                 source_type=SourceType.USER,
             )
-            token = set_service_registry({"kb_manager": kb})
+            token = set_service_registry(kb_services(kb))
             try:
                 result = await kb_read(doc.id, full=True, max_chars=1000)
                 assert result["success"] is True
@@ -423,7 +424,7 @@ class TestListDocuments:
 
         with tempfile.TemporaryDirectory() as tmp:
             kb = _make_kb(Path(tmp))
-            token = set_service_registry({"kb_manager": kb})
+            token = set_service_registry(kb_services(kb))
             try:
                 result = kb_list()
                 assert result["success"] is True
@@ -450,7 +451,7 @@ class TestListDocuments:
                 title="Document B",
                 source_type=SourceType.USER,
             )
-            token = set_service_registry({"kb_manager": kb})
+            token = set_service_registry(kb_services(kb))
             try:
                 result = kb_list()
                 assert result["success"] is True
@@ -471,7 +472,7 @@ class TestListDocuments:
             kb = _make_kb(Path(tmp))
             kb.ingest_document(content="A.", title="A", source_type=SourceType.ARXIV)
             kb.ingest_document(content="B.", title="B", source_type=SourceType.USER)
-            token = set_service_registry({"kb_manager": kb})
+            token = set_service_registry(kb_services(kb))
             try:
                 result = kb_list(source_type="arxiv")
                 assert result["count"] == 1
@@ -488,7 +489,7 @@ class TestListDocuments:
             kb = _make_kb(Path(tmp))
             kb.ingest_document(content="A.", title="Attention Paper", source_type=SourceType.USER)
             kb.ingest_document(content="B.", title="BERT Paper", source_type=SourceType.USER)
-            token = set_service_registry({"kb_manager": kb})
+            token = set_service_registry(kb_services(kb))
             try:
                 result = kb_list(query="attention")
                 assert result["count"] == 1
@@ -536,11 +537,11 @@ class TestKBManagerContextVar:
         finally:
             token.var.reset(token)
 
-    def test_kb_tools_declare_the_kb_manager_service(self):
+    def test_kb_tools_declare_the_knowledge_base_service(self):
         """KB tools carry their own service requirement in the registry."""
         from agentic_cli.tools.registry import get_registry
 
-        assert get_registry().get("kb_search").requires == ("kb_manager",)
+        assert get_registry().get("kb_search").requires == ("knowledge_base",)
 
     def test_base_manager_has_kb_manager_slot(self):
         from agentic_cli.workflow.base_manager import BaseWorkflowManager
@@ -597,10 +598,7 @@ class TestTwoTierKnowledgeBase:
     def _set_both_contexts(self, project_kb, user_kb):
         """Set both KB contexts via service registry, return token for cleanup."""
         from agentic_cli.workflow.service_registry import set_service_registry
-        token = set_service_registry({
-            "kb_manager": project_kb,
-            "user_kb_manager": user_kb,
-        })
+        token = set_service_registry(kb_services(project_kb, user_kb))
         return token
 
     def _reset_token(self, token):
@@ -711,10 +709,7 @@ class TestTwoTierKnowledgeBase:
 
         # Set same KB for both
         from agentic_cli.workflow.service_registry import set_service_registry
-        token = set_service_registry({
-            "kb_manager": kb,
-            "user_kb_manager": kb,
-        })
+        token = set_service_registry(kb_services(kb, kb))
         try:
             result = kb_search("shared")
             assert result["success"] is True
@@ -733,10 +728,7 @@ class TestTwoTierKnowledgeBase:
         failing_kb = MagicMock()
         failing_kb.search.side_effect = RuntimeError("User KB broken")
 
-        token = set_service_registry({
-            "kb_manager": project_kb,
-            "user_kb_manager": failing_kb,
-        })
+        token = set_service_registry(kb_services(project_kb, failing_kb))
         try:
             result = kb_search("transformers")
             assert result["success"] is True
@@ -745,7 +737,7 @@ class TestTwoTierKnowledgeBase:
         finally:
             token.var.reset(token)
 
-    def test_search_cross_kb_merge_uses_rrf(self):
+    def test_search_cross_kb_merge_uses_rrf(self, tmp_path):
         """Cross-KB merge uses Reciprocal Rank Fusion, not absolute scores.
 
         Scores from separate FAISS / BM25 indexes are not comparable, so
@@ -775,10 +767,7 @@ class TestTwoTierKnowledgeBase:
             "total_matches": 2,
         }
 
-        token = set_service_registry({
-            "kb_manager": project_kb,
-            "user_kb_manager": user_kb,
-        })
+        token = set_service_registry(kb_services(project_kb, user_kb))
         try:
             result = kb_search("query")
             assert result["success"] is True

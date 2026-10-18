@@ -50,20 +50,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ConvertedDocument` and `UnsupportedDocument` are exported from
   `agentic_cli.memory.kb`, which reads PDFs and charset labels with its own
   helpers (a test keeps its charset helper in agreement with `web_fetch`'s).
-  Ingestion no longer reads PDFs through `agentic_cli.tools.pdf_utils`; a
+  Ingestion and `kb_read` no longer read PDFs through `agentic_cli.tools.pdf_utils`; a
   test that patched `extract_pdf_text` there should patch
   `agentic_cli.memory.kb.convert.extract_pdf_text`.
 
+- **The workflow exposes one `KnowledgeBase`.** `workflow.knowledge_base`
+  (service key `knowledge_base`) serves the project and user knowledge bases
+  as one, and the framework's knowledge-base tools declare
+  `requires="knowledge_base"`; `workflow.memory_store` is the memory store.
+  `kb_search`, `kb_list`, `kb_read`, the concept tools, `/papers` and the
+  demo's `/kb-backfill` call it instead of merging the two knowledge bases by
+  hand. Their names, arguments and results do not change.
+
 ### Deprecated
 
+All of these work until 0.7.0.
+
 - **`agentic_cli.tools.kb_convert`** forwards to `agentic_cli.memory.kb`,
-  with a `DeprecationWarning`, until 0.7.0.
-- **`memory_services.build_memory_store(settings)`** works, with a
-  `DeprecationWarning`, until 0.7.0. Use
+  with a `DeprecationWarning`.
+- **`memory_services.build_memory_store(settings)`** warns. Use
   `memory_services.open_memory_store(settings, embedding_service=None)`.
+- **`requires="kb_manager"`** builds the same services, and warns when the
+  tool registers. Declare `requires="knowledge_base"`.
+- **The `kb_manager` and `user_kb_manager` service keys** still hold
+  `knowledge_base.manager("project")` and the user scope's manager (the same
+  object when both are one directory). A dictionary lookup cannot warn; use
+  `knowledge_base`, and `knowledge_base.manager(name)` for one scope.
+- **A service registry holding only `kb_manager` / `user_kb_manager`** (filled
+  by hand, as many tests and some apps do) still works, and the knowledge-base
+  tools warn when they find it. Publish a `KnowledgeBase` under
+  `knowledge_base`.
+- **`workflow.kb_manager`, `workflow.user_kb_manager`** warn; use
+  `workflow.knowledge_base`. **`workflow.memory_manager`** warns; use
+  `workflow.memory_store`.
+- **`make_kb_tools(kb_manager, user_kb_manager)`** and
+  **`make_ingest_arxiv_tool(source, kb_manager)`** warn and wrap the managers
+  in a `KnowledgeBase`; pass the `KnowledgeBase`.
+- **`memory_services.build_knowledge_bases`** warns; use
+  `memory_services.open_knowledge_base`.
 
 ### Fixed
 
+- **`/papers` finds a match older than the 50 newest documents.** It cut the
+  list at 50 and only then filtered by the query; it now filters first, as
+  `kb_list` does.
 - **The embedding model loads once per process.** Each knowledge base loaded
   the sentence-transformers model when it opened, and the memory store
   loaded its own: up to three copies of one model. The workflow now builds
