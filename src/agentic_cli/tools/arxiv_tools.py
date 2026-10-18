@@ -17,7 +17,6 @@ from typing import Any
 
 from agentic_cli.tools.arxiv_source import ARXIV_API_URL, ARXIV_PDF_URL
 from agentic_cli.tools.arxiv_source import _clean_arxiv_id  # re-exported for tests/back-compat
-from agentic_cli.tools.pdf_utils import extract_pdf_text
 from agentic_cli.tools.registry import (
     register_tool,
     ToolCategory,
@@ -196,27 +195,28 @@ async def fetch_arxiv_paper(
 
 async def _ingest_arxiv_paper_with_services(
     source,
-    kb_manager,
+    knowledge_base,
     arxiv_id: str,
     tags: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Download an arXiv paper's PDF, extract text, and ingest into the KB.
+    """Download an arXiv paper's PDF and ingest it into the knowledge base.
 
     Shared implementation used by both the module-level ``ingest_arxiv_paper``
     tool and the closure-bound factory version. Composes the arxiv layer
-    (metadata + PDF download, with shared rate limiter) and the KB layer
-    (chunking + indexing + storage of the raw bytes).
+    (metadata + PDF download, with shared rate limiter) and the knowledge
+    base's ingestion pipeline.
 
     Behavior:
     1. Normalize arxiv_id (handles URLs and version suffixes).
     2. Fetch metadata via ``source.fetch_by_id`` — a cache hit if the
        paper was returned by a prior search, else a single API call.
-    3. Wait on the shared rate limiter before the PDF download (arxiv's
-       crawl policy doesn't distinguish the API host from arxiv.org).
-    4. Download the PDF from the feed-provided ``pdf_url``.
-    5. Extract text and ingest into KB with full metadata.
-    6. On PDF download failure, fall back to ingesting the abstract so
-       the agent at least has searchable content.
+    3. Download the PDF from the feed-provided ``pdf_url`` (the source
+       waits on the shared rate limiter first).
+    4. Ingest the PDF through ``KnowledgeBase.ingest_bytes``, citing the
+       abstract page, with the abstract as fallback text; one summarizer
+       call writes the summary and the sidecar.
+    5. On PDF download failure, ingest the abstract as text so the agent
+       at least has searchable content.
     """
     from agentic_cli.memory.kb import SourceType
 
@@ -248,44 +248,44 @@ async def _ingest_arxiv_paper_with_services(
     if tags:
         meta["tags"] = tags
 
-    # 2. PDF download via the source's encapsulated downloader (shared
-    # rate limiter, shared httpx import). On any failure we fall back to
-    # the abstract so the caller still ends up with searchable content.
-    file_bytes: bytes | None = None
-    content = ""
+    abs_url = paper.get("abs_url", "") or f"https://arxiv.org/abs/{arxiv_id}"
     pdf_url = paper.get("pdf_url", "")
 
+    # 2. PDF download via the source's encapsulated downloader (shared rate
+    # limiter, shared httpx import). On any failure the abstract goes in.
+    file_bytes: bytes | None = None
     if pdf_url:
         try:
             file_bytes = await source.download_pdf(pdf_url)
-            content = extract_pdf_text(file_bytes)
-            meta["file_size_bytes"] = len(file_bytes)
         except Exception as exc:
-            file_bytes = None
-            content = abstract or title
             meta["pdf_download_error"] = str(exc)
 
-    if not content:
-        content = abstract or title
-
-    # 3. Generate LLM summary (async, safe before taking the KB lock)
-    summary = await kb_manager.generate_summary(content, title=title)
-
-    # 4. Ingest into KB
+    # 3. Ingest through the knowledge base's pipeline
     try:
-        doc = kb_manager.ingest_document(
-            content=content,
-            title=title,
-            source_type=SourceType.ARXIV,
-            source_url=paper.get("abs_url", "") or f"https://arxiv.org/abs/{arxiv_id}",
-            metadata=meta,
-            file_bytes=file_bytes,
-            file_extension=".pdf",
-            summary=summary,
-        )
+        if file_bytes is not None:
+            found = await knowledge_base.ingest_bytes(
+                file_bytes,
+                extension=".pdf",
+                content_type="application/pdf",
+                fetched_url=pdf_url,
+                title=title,
+                source_type=SourceType.ARXIV,
+                source_url=abs_url,
+                metadata=meta,
+                fallback_text=abstract or title,
+            )
+        else:
+            found = await knowledge_base.ingest_text(
+                abstract or title,
+                title=title,
+                source_type=SourceType.ARXIV,
+                source_url=abs_url,
+                metadata=meta,
+            )
     except Exception as exc:
         return {"success": False, "error": f"Ingestion failed: {exc}"}
 
+    doc = found.document
     return {
         "success": True,
         "document_id": doc.id,
@@ -331,5 +331,5 @@ async def ingest_arxiv_paper(
         return {"success": False, "error": NO_KNOWLEDGE_BASE}
 
     return await _ingest_arxiv_paper_with_services(
-        source, kb.manager(kb.scopes[0]), arxiv_id, tags=tags
+        source, kb, arxiv_id, tags=tags
     )

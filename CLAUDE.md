@@ -69,7 +69,7 @@ agentic-cli/
 │   │   ├── executor.py       # SafePythonExecutor (CORE_MODULES; SANDBOXED_MODULES gated on OS sandbox)
 │   │   ├── execution_tools.py # execute_python
 │   │   ├── _knowledge_base.py # current_knowledge_base(): the knowledge_base key, or one over 0.6.3's kb_manager keys
-│   │   ├── knowledge_tools.py # kb_search, kb_ingest_{text,file}, kb_ingest_url (deprecated), kb_list, kb_read, kb_write_concept, kb_search_concepts
+│   │   ├── knowledge_tools.py # kb_* tools: adapters over KnowledgeBase
 │   │   ├── arxiv_tools.py    # search_arxiv, fetch_arxiv_paper, ingest_arxiv_paper
 │   │   ├── arxiv_source.py   # ArxivSearchSource (feed fetch, download_pdf)
 │   │   ├── search_sources.py # SearchSource, SearchSourceResult
@@ -97,7 +97,8 @@ agentic-cli/
 │   │   ├── store.py          # MemoryStore
 │   │   └── kb/               # Knowledge base (agentic_cli.memory.kb)
 │   │       ├── manager.py    # KnowledgeBaseManager(base_dir, embedding=, summarizer=), Summarizer
-│   │       ├── knowledge_base.py  # KnowledgeBase (provisional): the scopes as one; ScopedDocument, BackfillResult, errors
+│   │       ├── knowledge_base.py  # KnowledgeBase (provisional): the scopes as one, and the ingestion pipeline (ingest_text, ingest_bytes)
+│   │       ├── enrich.py      # The summary/sidecar prompts and parser: one summarizer call per document
 │   │       ├── models.py     # Document, SearchResult, SourceType
 │   │       ├── convert.py    # convert_document (HTML main text via trafilatura, html2text fallback; pypdf), own _charset.py
 │   │       ├── vector_store.py, bm25_index.py (+ _bm25_backends.py), concepts.py, sidecar.py

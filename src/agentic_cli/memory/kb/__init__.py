@@ -10,7 +10,9 @@ from agentic_cli.memory.kb.concepts import ConceptStore
 from agentic_cli.memory.kb.convert import ConvertedDocument, UnsupportedDocument, convert_document
 from agentic_cli.memory.kb.knowledge_base import (
     BackfillResult,
+    ConversionFailed,
     DocumentNotFound,
+    EmptyDocument,
     KnowledgeBase,
     ScopedDocument,
 )
@@ -28,9 +30,11 @@ __all__ = [
     "BackfillResult",
     "ConceptStore",
     "ConvertedDocument",
+    "ConversionFailed",
     "Document",
     "DocumentChunk",
     "DocumentNotFound",
+    "EmptyDocument",
     "KnowledgeBase",
     "KnowledgeBaseManager",
     "MockVectorStore",

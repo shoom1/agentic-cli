@@ -164,13 +164,11 @@ def test_it_stays_in_the_writer_bundle_until_0_7_0():
     assert kb_ingest_url in KB_WRITER_TOOLS
 
 
-async def test_the_no_content_error_points_to_web_fetch():
-    from agentic_cli.tools.knowledge_tools import _finalize_ingest
+async def test_the_no_content_error_points_to_web_fetch(kb):
+    from agentic_cli.tools.knowledge_tools import kb_ingest_text
 
-    result = await _finalize_ingest(
-        None, content="", title="", source_type="user", source_url=None,
-        meta={}, file_bytes=None, file_extension=".txt",
-    )
+    result = await kb_ingest_text(content="")
 
+    assert result["success"] is False
     assert "kb_ingest_url" not in result["error"]
     assert "web_fetch" in result["error"]

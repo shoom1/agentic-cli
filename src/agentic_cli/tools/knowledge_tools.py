@@ -22,14 +22,13 @@ import asyncio
 import warnings
 from datetime import datetime, timezone
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import urlparse
 
 import structlog
 
 logger = structlog.get_logger(__name__)
 
 from agentic_cli.config import get_settings
-from agentic_cli.constants import truncate
 from agentic_cli.paths import resolve_path
 from agentic_cli.tools.registry import (
     register_tool,
@@ -88,12 +87,6 @@ def _build_document_item(d, scope: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _writes_to(kb):
-    """The manager of the scope that takes writes (ingestion moves to the
-    knowledge base itself in a later change)."""
-    return kb.manager(kb.scopes[0])
-
-
 def _search(kb, query: str, filters: str = "", top_k: int = 10) -> dict[str, Any]:
     """Shared implementation for kb_search."""
     import json as _json
@@ -112,11 +105,28 @@ def _search(kb, query: str, filters: str = "", top_k: int = 10) -> dict[str, Any
     return {"success": True, **result}
 
 
-def _build_meta(
-    authors: list[str] | None,
-    abstract: str,
-    tags: list[str] | None,
-) -> dict[str, Any]:
+_NO_CONTENT = (
+    "No content or file provided. "
+    "Pass non-empty content (kb_ingest_text) or a readable file "
+    "(kb_ingest_file); for a web page, read it with web_fetch and "
+    "pass its saved_path to kb_ingest_file. "
+    "For ArXiv papers, use ingest_arxiv_paper instead."
+)
+
+
+def _source_type(value: str):
+    """``value`` as a SourceType, and an error dict when it is not one."""
+    from agentic_cli.memory.kb import SourceType
+
+    try:
+        return SourceType(value), None
+    except ValueError:
+        valid = ", ".join(t.value for t in SourceType)
+        return None, {"success": False, "error": f"Invalid source_type: {value!r}. Valid: {valid}"}
+
+
+def _caller_metadata(authors: list[str] | None, abstract: str, tags: list[str] | None) -> dict[str, Any]:
+    """The tool's ``authors``, ``abstract`` and ``tags``, the ones given."""
     meta: dict[str, Any] = {}
     if authors:
         meta["authors"] = authors
@@ -127,61 +137,23 @@ def _build_meta(
     return meta
 
 
-async def _finalize_ingest(
-    kb_manager,
-    *,
-    content: str,
-    title: str,
-    source_type: str,
-    source_url: str | None,
-    meta: dict[str, Any],
-    file_bytes: bytes | None,
-    file_extension: str,
-) -> dict[str, Any]:
-    """Validate, generate sidecar, and persist into the supplied ``kb_manager``.
-
-    Shared tail used by all three ingest entry points (text/file/url).
-    """
-    from agentic_cli.memory.kb import SourceType
-
-    if not content and not file_bytes:
-        return {
-            "success": False,
-            "error": (
-                "No content or file provided. "
-                "Pass non-empty content (kb_ingest_text) or a readable file "
-                "(kb_ingest_file); for a web page, read it with web_fetch and "
-                "pass its saved_path to kb_ingest_file. "
-                "For ArXiv papers, use ingest_arxiv_paper instead."
-            ),
-        }
-
-    if not title:
-        title = truncate(content, 80)
+async def _ingested(ingest, display_name: str) -> dict[str, Any]:
+    """Await one pipeline call and turn its result, or its error, into the tool's dict."""
+    from agentic_cli.memory.kb import ConversionFailed, EmptyDocument, UnsupportedDocument
 
     try:
-        source = SourceType(source_type)
-    except ValueError:
-        valid = ", ".join(t.value for t in SourceType)
-        return {"success": False, "error": f"Invalid source_type: {source_type!r}. Valid: {valid}"}
-
-    payload = await kb_manager.generate_sidecar_payload(content, title=title)
-
-    try:
-        doc = kb_manager.ingest_document(
-            content=content,
-            title=title,
-            source_type=source,
-            source_url=source_url,
-            metadata=meta or None,
-            file_bytes=file_bytes,
-            file_extension=file_extension,
-            summary=payload["summary"] or None,
-            sidecar_payload=payload,
-        )
+        found = await ingest
+    except EmptyDocument:
+        return {"success": False, "error": _NO_CONTENT}
+    except UnsupportedDocument as e:
+        return {"success": False, "error": f"Cannot ingest {display_name}: {e}"}
+    except ConversionFailed as e:
+        cause = type(e.__cause__).__name__
+        logger.warning("kb_convert_failed", file=display_name, error=cause, exc_info=True)
+        return {"success": False, "error": f"Cannot ingest {display_name}: could not convert it ({cause})"}
     except Exception as e:
         return {"success": False, "error": f"Ingestion failed: {e}"}
-
+    doc = found.document
     return {
         "success": True,
         "document_id": doc.id,
@@ -191,90 +163,8 @@ async def _finalize_ingest(
     }
 
 
-def _url_title(url: str) -> str:
-    """A title from a URL: its last path segment (percent-decoded), else its host."""
-    parsed = urlparse(url)
-    segment = parsed.path.rstrip("/").rsplit("/", 1)[-1]
-    return unquote(segment) if segment else (parsed.netloc or url)
-
-
-async def _ingest_bytes_with_kb(
-    kb_manager,
-    data: bytes,
-    *,
-    extension: str,
-    content_type: str | None,
-    charset: str | None,
-    page_url: str | None,
-    fetched_at: str | None,
-    truncated: bool,
-    fallback_title: str,
-    fallback_source_url: str,
-    display_name: str,
-    title: str,
-    source_type: str,
-    source_url: str | None,
-    authors: list[str] | None,
-    abstract: str,
-    tags: list[str] | None,
-) -> dict[str, Any]:
-    """Convert ``data`` and ingest it.
-
-    Shared by ``kb_ingest_file`` and ``kb_ingest_url``. ``page_url`` marks a
-    web page (a saved page or a fetched URL): it defaults to source type
-    ``web``, the page URL as source, and the page's title, else the URL's
-    last segment. ``charset`` None means a local file, which must be UTF-8
-    unless it is a PDF. Arguments the model passed always win.
-    """
-    from agentic_cli.memory.kb import UnsupportedDocument, convert_document
-
-    try:
-        converted = await asyncio.to_thread(
-            convert_document,
-            data, content_type=content_type, extension=extension, charset=charset, url=page_url,
-        )
-    except UnsupportedDocument as e:
-        return {"success": False, "error": f"Cannot ingest {display_name}: {e}"}
-    except Exception as e:  # a future converter may raise something else; never escape the tool
-        logger.warning(
-            "kb_convert_failed", file=display_name, error=type(e).__name__, exc_info=True
-        )
-        return {
-            "success": False,
-            "error": f"Cannot ingest {display_name}: could not convert it ({type(e).__name__})",
-        }
-
-    meta = _build_meta(authors or list(converted.authors), abstract or converted.description or "", tags)
-    meta["file_size_bytes"] = len(data)
-    if converted.published:
-        meta["published"] = converted.published
-    if fetched_at:
-        meta["fetched_at"] = fetched_at
-
-    if page_url:
-        default_title = converted.title or _url_title(page_url)
-        default_type, default_source = "web", page_url
-    else:
-        default_title = converted.title or fallback_title
-        default_type, default_source = "local", fallback_source_url
-
-    result = await _finalize_ingest(
-        kb_manager,
-        content=converted.text,
-        title=title or default_title,
-        source_type=source_type or default_type,
-        source_url=source_url or default_source,
-        meta=meta,
-        file_bytes=data,
-        file_extension=extension,
-    )
-    if truncated and result.get("success"):
-        result["truncated"] = True
-    return result
-
-
-async def _ingest_text_with_kb(
-    kb_manager,
+async def _ingest_text(
+    kb,
     content: str,
     title: str = "",
     source_type: str = "user",
@@ -284,20 +174,22 @@ async def _ingest_text_with_kb(
     tags: list[str] | None = None,
 ) -> dict[str, Any]:
     """Ingest a plain text document — no filesystem or network access."""
-    return await _finalize_ingest(
-        kb_manager,
-        content=content,
-        title=title,
-        source_type=source_type,
-        source_url=source_url,
-        meta=_build_meta(authors, abstract, tags),
-        file_bytes=None,
-        file_extension=".txt",
+    if not content:
+        return {"success": False, "error": _NO_CONTENT}
+    st, error = _source_type(source_type)
+    if error:
+        return error
+    return await _ingested(
+        kb.ingest_text(
+            content, title=title, source_type=st, source_url=source_url,
+            metadata=_caller_metadata(authors, abstract, tags),
+        ),
+        display_name="",
     )
 
 
-async def _ingest_file_with_kb(
-    kb_manager,
+async def _ingest_file(
+    kb,
     path: str,
     title: str = "",
     source_type: str = "",
@@ -337,29 +229,35 @@ async def _ingest_file_with_kb(
             }
         saved = read_saved_page_meta(source_path, folder)
 
-    return await _ingest_bytes_with_kb(
-        kb_manager,
-        file_bytes,
-        extension=source_path.suffix.lower() or ".bin",
-        content_type=saved.content_type if saved else None,
-        charset=(saved.charset or "utf-8") if saved else None,
-        page_url=saved.url if saved else None,
-        fetched_at=saved.fetched_at.isoformat() if saved else None,
-        truncated=saved.truncated if saved else False,
-        fallback_title=source_path.stem,
-        fallback_source_url=str(source_path),
+    st = None
+    if source_type:
+        st, error = _source_type(source_type)
+        if error:
+            return error
+
+    result = await _ingested(
+        kb.ingest_bytes(
+            file_bytes,
+            extension=source_path.suffix.lower() or ".bin",
+            content_type=saved.content_type if saved else None,
+            charset=(saved.charset or "utf-8") if saved else None,
+            fetched_url=saved.url if saved else None,
+            fetched_at=saved.fetched_at.isoformat() if saved else None,
+            title=title,
+            default_title=source_path.stem,
+            source_type=st,
+            source_url=source_url or (None if saved else str(source_path)),
+            metadata=_caller_metadata(authors, abstract, tags),
+        ),
         display_name=path,
-        title=title,
-        source_type=source_type,
-        source_url=source_url,
-        authors=authors,
-        abstract=abstract,
-        tags=tags,
     )
+    if saved is not None and saved.truncated and result.get("success"):
+        result["truncated"] = True
+    return result
 
 
-async def _ingest_url_with_kb(
-    kb_manager,
+async def _ingest_url(
+    kb,
     url: str,
     title: str = "",
     source_type: str = "",
@@ -373,7 +271,7 @@ async def _ingest_url_with_kb(
     Routes the download through ``ContentFetcher`` (URL validation, redirect
     revalidation, DNS pinning); the caller's permissions engine has already
     gated ``http.read`` for ``url``. The page is saved as ``web_fetch`` saves
-    it and converted like ``kb_ingest_file`` converts a saved page.
+    it and ingested like ``kb_ingest_file`` ingests a saved page.
     """
     warnings.warn(
         "kb_ingest_url is deprecated and will be removed in 0.7.0; "
@@ -387,6 +285,11 @@ async def _ingest_url_with_kb(
             "success": False,
             "error": "url must be an http:// or https:// URL",
         }
+    st = None
+    if source_type:
+        st, error = _source_type(source_type)
+        if error:
+            return error
 
     from agentic_cli.tools.webfetch.saved import saved_page_extension
     from agentic_cli.tools.webfetch_tool import get_or_create_fetcher, save_fetched_page
@@ -425,25 +328,23 @@ async def _ingest_url_with_kb(
 
     # Off the event loop, same as web_fetch's own save.
     saved = await asyncio.to_thread(save_fetched_page, url, fetch_result)
-    result = await _ingest_bytes_with_kb(
-        kb_manager,
-        data,
-        extension=extension,
-        content_type=content_type,
-        charset=fetch_result.charset or "utf-8",
-        page_url=url,
-        fetched_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        truncated=fetch_result.raw_truncated,
-        fallback_title=url,
-        fallback_source_url=url,
+    result = await _ingested(
+        kb.ingest_bytes(
+            data,
+            extension=extension,
+            content_type=content_type,
+            charset=fetch_result.charset or "utf-8",
+            fetched_url=url,
+            fetched_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            title=title,
+            source_type=st,
+            source_url=source_url,
+            metadata=_caller_metadata(authors, abstract, tags),
+        ),
         display_name=url,
-        title=title,
-        source_type=source_type,
-        source_url=source_url,
-        authors=authors,
-        abstract=abstract,
-        tags=tags,
     )
+    if fetch_result.raw_truncated and result.get("success"):
+        result["truncated"] = True
     return {**result, **saved}
 
 
@@ -601,15 +502,9 @@ async def kb_ingest_text(
     kb = current_knowledge_base()
     if kb is None:
         return {"success": False, "error": NO_KNOWLEDGE_BASE}
-    return await _ingest_text_with_kb(
-        _writes_to(kb),
-        content=content,
-        title=title,
-        source_type=source_type,
-        source_url=source_url,
-        authors=authors,
-        abstract=abstract,
-        tags=tags,
+    return await _ingest_text(
+        kb, content=content, title=title, source_type=source_type, source_url=source_url,
+        authors=authors, abstract=abstract, tags=tags,
     )
 
 
@@ -658,15 +553,9 @@ async def kb_ingest_file(
     kb = current_knowledge_base()
     if kb is None:
         return {"success": False, "error": NO_KNOWLEDGE_BASE}
-    return await _ingest_file_with_kb(
-        _writes_to(kb),
-        path=path,
-        title=title,
-        source_type=source_type,
-        source_url=source_url,
-        authors=authors,
-        abstract=abstract,
-        tags=tags,
+    return await _ingest_file(
+        kb, path=path, title=title, source_type=source_type, source_url=source_url,
+        authors=authors, abstract=abstract, tags=tags,
     )
 
 
@@ -709,15 +598,9 @@ async def kb_ingest_url(
     kb = current_knowledge_base()
     if kb is None:
         return {"success": False, "error": NO_KNOWLEDGE_BASE}
-    return await _ingest_url_with_kb(
-        _writes_to(kb),
-        url=url,
-        title=title,
-        source_type=source_type,
-        source_url=source_url,
-        authors=authors,
-        abstract=abstract,
-        tags=tags,
+    return await _ingest_url(
+        kb, url=url, title=title, source_type=source_type, source_url=source_url,
+        authors=authors, abstract=abstract, tags=tags,
     )
 
 
