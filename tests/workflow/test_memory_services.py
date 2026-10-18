@@ -29,40 +29,6 @@ def settings(tmp_path):
     return BaseSettings(workspace_dir=tmp_path / "workspace", knowledge_base_use_mock=True)
 
 
-def test_the_project_and_user_knowledge_bases_live_where_they_did(settings, tmp_path):
-    with pytest.warns(DeprecationWarning):
-        project, user = memory_services.build_knowledge_bases(settings, summarizer=None)
-
-    assert project.kb_dir == tmp_path / "project" / f".{settings.app_name}" / "knowledge_base"
-    assert user.kb_dir == settings.knowledge_base_dir
-
-
-def test_one_object_when_both_resolve_to_the_same_directory(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    settings = BaseSettings(workspace_dir=tmp_path / ".agentic_cli", knowledge_base_use_mock=True)
-    assert memory_services.project_kb_dir(settings).resolve() == settings.knowledge_base_dir.resolve()
-
-    with pytest.warns(DeprecationWarning):
-        project, user = memory_services.build_knowledge_bases(settings, summarizer=None)
-
-    assert project is user
-
-
-async def test_the_setting_decides_whether_the_summarizer_is_passed(tmp_path):
-    on = BaseSettings(workspace_dir=tmp_path / "on", knowledge_base_use_mock=True)
-    off = BaseSettings(
-        workspace_dir=tmp_path / "off", knowledge_base_use_mock=True, knowledge_base_summarize=False
-    )
-
-    with pytest.warns(DeprecationWarning):
-        _, user_on = memory_services.build_knowledge_bases(on, summarizer=_Summarizer())
-    with pytest.warns(DeprecationWarning):
-        _, user_off = memory_services.build_knowledge_bases(off, summarizer=_Summarizer())
-
-    assert (await user_on.generate_sidecar_payload("Body.", title="T"))["summary"] == "From the summarizer."
-    assert (await user_off.generate_sidecar_payload("Body.", title="T"))["summary"] == "Body."
-
-
 def test_build_knowledge_base_uses_the_settings_embedding_model(tmp_path):
     settings = BaseSettings(
         workspace_dir=tmp_path / "w", embedding_model="m-x", knowledge_base_use_mock=True
@@ -104,13 +70,6 @@ def test_the_memory_store_uses_the_service_it_is_given(settings):
     assert store._embedding_service is service
 
 
-def test_build_memory_store_still_works_and_warns(settings):
-    with pytest.warns(DeprecationWarning, match="open_memory_store.*0.7.0|0.7.0.*open_memory_store"):
-        store = memory_services.build_memory_store(settings)
-
-    assert isinstance(store, MemoryStore)
-
-
 def test_no_embedding_service_in_mock_mode(settings, monkeypatch):
     def refuse(*args, **kwargs):
         raise AssertionError("mock mode must not build an embedding service")
@@ -140,17 +99,6 @@ def test_the_embedding_service_is_the_one_the_settings_name(tmp_path, monkeypatc
     assert isinstance(service, EmbeddingService)
     assert (service.model_name, service.batch_size, service.device) == ("m-x", 7, "cpu")
     assert service._model is None  # built, not loaded
-
-
-def test_both_knowledge_bases_get_the_service(settings):
-    service = MockEmbeddingService(embedding_dim=16)
-    real = BaseSettings(workspace_dir=settings.workspace_dir, knowledge_base_use_mock=False)
-
-    with pytest.warns(DeprecationWarning):
-        project, user = memory_services.build_knowledge_bases(real, summarizer=None, embedding_service=service)
-
-    assert project._embedding_service is service
-    assert user._embedding_service is service
 
 
 def test_the_knowledge_base_has_both_scopes_where_they_were(settings, tmp_path):
@@ -204,11 +152,3 @@ def test_one_scope_can_be_opened_alone(settings):
 def test_an_unknown_scope_is_refused(settings):
     with pytest.raises(ValueError, match="team"):
         memory_services.open_knowledge_base(settings, summarizer=None, scopes=("team",))
-
-
-def test_build_knowledge_bases_still_works_and_warns(settings):
-    with pytest.warns(DeprecationWarning, match="0.7.0"):
-        project, user = memory_services.build_knowledge_bases(settings, summarizer=None)
-
-    assert project.kb_dir == memory_services.project_kb_dir(settings)
-    assert user.kb_dir == settings.knowledge_base_dir

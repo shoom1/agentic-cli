@@ -1351,7 +1351,6 @@ class TestToolRegistryConsistency:
             "kb_search",
             "kb_ingest_text",
             "kb_ingest_file",
-            "kb_ingest_url",
             "kb_read",
             "kb_list",
             # ArXiv (metadata only)

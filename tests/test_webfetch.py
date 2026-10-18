@@ -595,7 +595,6 @@ class TestWebFetchTool:
                 mock_fetcher.fetch.return_value = FetchResult(
                     success=False,
                     redirect=RedirectInfo(
-                        from_url="https://example.com/page",
                         to_url="https://other.com/page",
                         to_host="other.com",
                     ),

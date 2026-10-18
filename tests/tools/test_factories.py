@@ -193,12 +193,12 @@ class TestMakeMemoryTools:
 class TestMakeKBTools:
     """Tests for make_kb_tools factory."""
 
-    def test_returns_eight_functions(self):
-        """make_kb_tools returns 8 tools (kb_ingest split into text/file/url)."""
+    def test_returns_seven_functions(self):
+        """make_kb_tools returns 7 tools (kb_ingest split into text/file)."""
         from agentic_cli.tools.factories import make_kb_tools
         from agentic_cli.memory.kb import KnowledgeBase
         tools = make_kb_tools(KnowledgeBase({"project": object()}))
-        assert len(tools) == 8
+        assert len(tools) == 7
         names = [t.__name__ for t in tools]
         assert "kb_write_concept" in names
         assert "kb_search_concepts" in names
@@ -211,7 +211,6 @@ class TestMakeKBTools:
             "kb_search",
             "kb_ingest_text",
             "kb_ingest_file",
-            "kb_ingest_url",
             "kb_read",
             "kb_list",
             "kb_write_concept",

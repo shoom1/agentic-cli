@@ -435,7 +435,6 @@ tool assembly.
 **A tool may declare the services it needs** with `requires=` — e.g.
 `@register_tool(..., requires="knowledge_base")`, or a tuple for several. The
 manager builds only the services its agents' tools actually declare.
-(`requires="kb_manager"`, the 0.6.3 name, still works with a warning until 0.7.0.)
 
 **One name means one tool.** `register_tool()` raises on a name that is already
 registered. If a tool genuinely needs a per-backend implementation, declare the
@@ -607,7 +606,7 @@ Renamed tools and a new concept-pages subsystem:
 
 ```python
 from agentic_cli.tools import (
-    kb_search, kb_ingest_text, kb_ingest_file, kb_ingest_url,
+    kb_search, kb_ingest_text, kb_ingest_file,
     kb_read, kb_list,
     kb_write_concept, kb_search_concepts,
     KB_READER_TOOLS, KB_WRITER_TOOLS,
@@ -619,13 +618,12 @@ from agentic_cli.tools import (
 | `kb_search` | Hybrid BM25 + vector search with RRF fusion, filters by source/date; keyword-only without the `kb` extra or with `knowledge_base_use_mock` |
 | `kb_ingest_text` | Ingest in-memory text content (no FS or network access) |
 | `kb_ingest_file` | Ingest a local PDF, HTML or UTF-8 text file, or a page `web_fetch` saved (`saved_path`, recorded with its URL); HTML goes in as its main text. Declares `filesystem.read(path)` |
-| `kb_ingest_url` | Deprecated (removed in 0.7.0): use `web_fetch`, then `kb_ingest_file(saved_path)`. Fetches a URL through the hardened `ContentFetcher` and ingests it; declares `http.read(url)` |
 | `kb_read` | Return the per-document markdown sidecar (lazy-generated on first read) |
 | `kb_list` | List documents, optionally filtered |
 | `kb_write_concept` | Agent-authored concept/summary page (slugged, merged on overwrite) |
 | `kb_search_concepts` | Search concept pages (title-weighted, case-insensitive) |
 
-The single `kb_ingest` tool was split in 0.5.2 so each entry point declares the right capability — text-only stays under `kb.write`, while file and URL ingestion correctly trip `filesystem.read` / `http.read` checks. For arXiv papers, prefer `ingest_arxiv_paper(arxiv_id)`.
+The single `kb_ingest` tool was split in 0.5.2 so each entry point declares the right capability — text-only stays under `kb.write`, while file ingestion trips the `filesystem.read` check. For a web page, read it with `web_fetch`, then pass its `saved_path` to `kb_ingest_file`. For arXiv papers, prefer `ingest_arxiv_paper(arxiv_id)`.
 
 Every way into the knowledge base (text, a local file, a saved page, a fetched URL, an arXiv paper) runs through one pipeline, `KnowledgeBase.ingest_text` or `ingest_bytes`: convert, fill in defaults (a value you pass always wins), enrich with one summarizer call, store. The converter (`agentic_cli.memory.kb.convert_document`) handles files: PDFs through pypdf, HTML through trafilatura, which keeps a page's main text and drops menus, sidebars and footers. trafilatura comes with the `kb` extra (`pip install agentic-cli[kb]`), or on its own (`pip install trafilatura`); without it, html2text converts the whole page.
 
@@ -724,7 +722,7 @@ Each index records the embedding model that built it: a knowledge base in `embed
 
 #### HITL (Human-in-the-Loop)
 
-Tool calls are gated by the **permission engine** (`workflow/permissions/`). Each tool declares a list of capabilities (e.g. `filesystem.write(path=...)`); the engine evaluates them against rules from four sources (builtin defaults, user `~/.{app_name}/settings.json`, project `./.{app_name}/settings.json`, in-memory session). The builtin defaults allow reads inside the project, the knowledge base and memory, and the arXiv tools' two fixed endpoints (the API and `https://arxiv.org/pdf`), and deny writes to system and credential directories and to the app's own config. When no rule matches, the user is prompted with `Allow once` / `Allow for this session` / `Allow always for this project` / `Deny`. A filesystem grant covers the directory it names (or the directory a file is in), never the filesystem root or a directory above your home. A URL grant (`web_fetch`, `kb_ingest_url`) answered "for this session" or "always" covers that site, `https://host/**`: the exact host, not its other subdomains, and HTTPS only (a plain-HTTP URL, an IP address or a local name keeps an exact-URL grant). "Allow once" approves one URL, and the prompt shows both the URL and the site. To pre-approve a site, add a rule to `~/.{app_name}/settings.json`: `{"permissions": {"allow": [{"capability": "http.read", "target": "https://docs.python.org/**"}]}}`.
+Tool calls are gated by the **permission engine** (`workflow/permissions/`). Each tool declares a list of capabilities (e.g. `filesystem.write(path=...)`); the engine evaluates them against rules from four sources (builtin defaults, user `~/.{app_name}/settings.json`, project `./.{app_name}/settings.json`, in-memory session). The builtin defaults allow reads inside the project, the knowledge base and memory, and the arXiv tools' two fixed endpoints (the API and `https://arxiv.org/pdf`), and deny writes to system and credential directories and to the app's own config. When no rule matches, the user is prompted with `Allow once` / `Allow for this session` / `Allow always for this project` / `Deny`. A filesystem grant covers the directory it names (or the directory a file is in), never the filesystem root or a directory above your home. A URL grant (`web_fetch`) answered "for this session" or "always" covers that site, `https://host/**`: the exact host, not its other subdomains, and HTTPS only (a plain-HTTP URL, an IP address or a local name keeps an exact-URL grant). "Allow once" approves one URL, and the prompt shows both the URL and the site. To pre-approve a site, add a rule to `~/.{app_name}/settings.json`: `{"permissions": {"allow": [{"capability": "http.read", "target": "https://docs.python.org/**"}]}}`.
 
 **"Allow always" grants are user-owned, not project-owned.** They persist to
 `~/.{app_name}/project_grants.json`, keyed by the *resolved project path*, so
@@ -947,7 +945,7 @@ agentic-cli/
 │   │   ├── execution_tools.py    # execute_python
 │   │   ├── interaction_tools.py  # ask_clarification
 │   │   ├── knowledge_tools.py    # kb_search / kb_ingest_text / kb_ingest_file /
-│   │   │                         #   kb_ingest_url / kb_read / kb_list /
+│   │   │                         #   kb_read / kb_list /
 │   │   │                         #   kb_write_concept / kb_search_concepts
 │   │   ├── file_read.py          # read_file, diff_compare
 │   │   ├── file_write.py         # write_file, edit_file (atomic)
@@ -972,7 +970,6 @@ agentic-cli/
 │   │   │   ├── os_sandbox/       # macOS seatbelt / Linux namespace sandboxes
 │   │   │   └── ...               # tokenizer, classifier, sandbox, audit
 │   │   └── webfetch/             # Fetcher, converter, validator, robots, summarizer, saved pages
-│   ├── knowledge_base/           # Deprecated forwarding modules → memory.kb (removed in 0.7.0)
 │   ├── memory/                   # Knowledge base + memory store; imports nothing else from agentic_cli
 │   │   ├── __init__.py           # MemoryStore, MemoryItem, ForgettingPolicy, EmbeddingService, EmbeddingConfig, MockEmbeddingService
 │   │   ├── _core/                # Shared, private: embeddings.py, mock_embeddings.py, io.py, log.py

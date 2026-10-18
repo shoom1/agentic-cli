@@ -318,7 +318,7 @@ class TestFetchArxivPaper:
 
 class TestIngestDocument:
     @pytest.mark.parametrize(
-        "tool_name", ["kb_ingest_text", "kb_ingest_file", "kb_ingest_url"]
+        "tool_name", ["kb_ingest_text", "kb_ingest_file"]
     )
     def test_basic(self, tool_name):
         result = {"success": True, "document_id": "abc", "title": "Paper", "chunks_created": 5}

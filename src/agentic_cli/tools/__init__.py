@@ -31,7 +31,6 @@ from agentic_cli.tools.knowledge_tools import (
     kb_search,
     kb_ingest_text,
     kb_ingest_file,
-    kb_ingest_url,
     kb_read,
     kb_list,
     kb_write_concept,
@@ -43,7 +42,6 @@ KB_WRITER_TOOLS = [
     *KB_READER_TOOLS,
     kb_ingest_text,
     kb_ingest_file,
-    kb_ingest_url,
     kb_write_concept,
 ]
 from agentic_cli.tools.arxiv_tools import (
@@ -115,7 +113,6 @@ __all__ = [
     "kb_search",
     "kb_ingest_text",
     "kb_ingest_file",
-    "kb_ingest_url",
     "kb_read",
     "kb_list",
     "kb_write_concept",

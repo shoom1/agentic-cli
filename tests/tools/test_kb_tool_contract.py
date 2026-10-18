@@ -32,13 +32,14 @@ import os
 import re
 import sys
 import tempfile
-import warnings
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterator
 
 import pytest
+
+from tests.kb_registry import kb_services
 
 GOLDEN = Path(__file__).with_name("kb_tool_contract.json")
 LAYOUTS = ("one", "two", "same")
@@ -49,7 +50,6 @@ KB_TOOLS = {
     "kb_search": "sync",
     "kb_ingest_text": "async",
     "kb_ingest_file": "async",
-    "kb_ingest_url": "async",
     "kb_read": "async",
     "kb_list": "sync",
     "kb_write_concept": "async",
@@ -145,23 +145,6 @@ class _ArxivSource:
         return self._pdf
 
 
-class _Fetcher:
-    """The web fetcher ``kb_ingest_url`` uses, answering with ARTICLE."""
-
-    async def fetch(self, url: str, timeout: int = 30):
-        from agentic_cli.tools.webfetch.fetcher import FetchResult
-
-        body = ARTICLE.encode()
-        return FetchResult(
-            success=True,
-            content=ARTICLE,
-            content_type="text/html; charset=utf-8",
-            raw=body,
-            charset="utf-8",
-            final_url=url,
-        )
-
-
 def _crash_codec(name: str):
     """A codec whose decoder fails the way a converter bug would."""
     if name != CRASH_CODEC.replace("-", "_"):
@@ -241,23 +224,11 @@ def _seed(env: _Env) -> None:
     )
 
 
-@contextlib.contextmanager
-def _patched(target: Any, name: str, value: Any) -> Iterator[None]:
-    old = getattr(target, name)
-    setattr(target, name, value)
-    try:
-        yield
-    finally:
-        setattr(target, name, old)
-
-
 def registry_entry(env: _Env, arxiv: Any) -> tuple[dict[str, Any], dict[str, Callable[..., Any]]]:
     """The module-level tools, finding the knowledge bases in the service registry."""
     from agentic_cli.tools import arxiv_tools, knowledge_tools
 
-    registry: dict[str, Any] = {"kb_manager": env.project}
-    if env.user is not None:
-        registry["user_kb_manager"] = env.user
+    registry = kb_services(env.project, env.user)
     if arxiv is not None:
         registry["arxiv_source"] = arxiv
     tools = {name: getattr(knowledge_tools, name) for name in KB_TOOLS}
@@ -269,9 +240,10 @@ def factory_entry(env: _Env, arxiv: Any) -> tuple[dict[str, Any], dict[str, Call
     """The factory-bound tools, with an empty service registry."""
     from agentic_cli.tools.factories import make_ingest_arxiv_tool, make_kb_tools
 
-    tools = {t.__name__: t for t in make_kb_tools(env.project, env.user)}
+    kb = kb_services(env.project, env.user)["knowledge_base"]
+    tools = {t.__name__: t for t in make_kb_tools(kb)}
     if arxiv is not None:
-        tools["ingest_arxiv_paper"] = make_ingest_arxiv_tool(arxiv, env.project)
+        tools["ingest_arxiv_paper"] = make_ingest_arxiv_tool(arxiv, kb)
     return {}, tools
 
 
@@ -286,8 +258,7 @@ def _world(layout: str, entry: str, entry_points: dict[str, Any], *, arxiv: Any 
     from agentic_cli.memory.kb import KnowledgeBaseManager
     from agentic_cli.workflow.service_registry import set_service_registry
 
-    with tempfile.TemporaryDirectory() as tmp, warnings.catch_warnings():
-        warnings.simplefilter("ignore", DeprecationWarning)
+    with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         (root / "cwd").mkdir()
         old_cwd = os.getcwd()
@@ -498,19 +469,6 @@ async def _(env):
     return await env.call("kb_ingest_file", path=str(env.root / "absent.txt"))
 
 
-@scenario("ingest_url")
-async def _(env):
-    import agentic_cli.tools.webfetch_tool as webfetch_tool
-
-    with _patched(webfetch_tool, "get_or_create_fetcher", lambda: _Fetcher()):
-        return await env.call("kb_ingest_url", url=PAGE_URL, tags=["web"])
-
-
-@scenario("ingest_url_bad_scheme")
-async def _(env):
-    return await env.call("kb_ingest_url", url="file:///etc/passwd")
-
-
 @scenario("read_sidecar")
 async def _(env):
     return await env.call("kb_read", doc_id_or_title="Glacier survey")
@@ -657,7 +615,6 @@ NO_KB_CALLS = {
     "kb_search": {"query": "basalt"},
     "kb_ingest_text": {"content": "Some text."},
     "kb_ingest_file": {"path": "notes.md"},
-    "kb_ingest_url": {"url": PAGE_URL},
     "kb_read": {"doc_id_or_title": "Basalt columns"},
     "kb_list": {},
     "kb_write_concept": {"title": "T", "body": "B", "sources": ["x"]},
@@ -675,11 +632,9 @@ async def run_without_knowledge_base(tool: str) -> Any:
     fn = arxiv_tools.ingest_arxiv_paper if tool == "ingest_arxiv_paper" else getattr(knowledge_tools, tool)
     token = set_service_registry(registry)
     try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            result = fn(**NO_KB_CALLS[tool])
-            if inspect.isawaitable(result):
-                result = await result
+        result = fn(**NO_KB_CALLS[tool])
+        if inspect.isawaitable(result):
+            result = await result
         return result
     finally:
         token.var.reset(token)
@@ -723,8 +678,7 @@ async def run_papers(name: str, layout: str, with_workflow: bool) -> Any:
     from agentic_cli.config import BaseSettings
     from agentic_cli.memory.kb import KnowledgeBaseManager, SourceType
 
-    with tempfile.TemporaryDirectory() as tmp, warnings.catch_warnings():
-        warnings.simplefilter("ignore", DeprecationWarning)
+    with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         (root / "cwd").mkdir()
         old_cwd = os.getcwd()
@@ -799,7 +753,7 @@ def _workflow(settings):
             return []
 
     manager = _Manager(agent_configs=[], settings=settings)
-    manager._required_managers = {"kb_manager"}
+    manager._required_managers = {"knowledge_base"}
     manager._ensure_managers_initialized()
     return manager
 

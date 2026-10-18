@@ -16,9 +16,8 @@ from agentic_cli.config import BaseSettings
 from agentic_cli.workflow.base_manager import BaseWorkflowManager
 from agentic_cli.workflow.events import WorkflowEvent
 from agentic_cli.workflow.service_registry import (
-    KB_MANAGER,
+    KNOWLEDGE_BASE,
     LLM_SUMMARIZER,
-    USER_KB_MANAGER,
     set_service_registry,
 )
 
@@ -74,10 +73,11 @@ def _knowledge_bases(tmp_path, **settings):
         ),
     )
     mgr.prompts = []
-    mgr._required_managers = {"kb_manager"}
+    mgr._required_managers = {"knowledge_base"}
     services = mgr._build_services()
     assert LLM_SUMMARIZER not in services
-    return mgr, services[KB_MANAGER], services[USER_KB_MANAGER]
+    kb = services[KNOWLEDGE_BASE]
+    return mgr, kb.manager("project"), kb.manager("user")
 
 
 async def test_knowledge_bases_summarize_without_web_fetch(tmp_path):

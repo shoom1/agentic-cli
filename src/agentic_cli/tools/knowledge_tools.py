@@ -1,10 +1,9 @@
 """Knowledge base tools for agentic workflows.
 
-- kb_ingest_text / kb_ingest_file / kb_ingest_url: Ingest content into KB.
-  Three separate tools so each declares the right capability for the
-  permissions engine — text-only (kb.write), local file or a page web_fetch
-  saved (kb.write + filesystem.read), and URL (kb.write + http.read; deprecated
-  until 0.7.0, use web_fetch then kb_ingest_file).
+- kb_ingest_text / kb_ingest_file: Ingest content into KB.
+  Two separate tools so each declares the right capability for the
+  permissions engine — text-only (kb.write), and a local file or a page
+  web_fetch saved (kb.write + filesystem.read).
 - kb_search: Semantic search across all documents
 - kb_read: Read a stored document (sidecar by default, full text with full=True)
 - kb_list: List documents with summaries
@@ -18,11 +17,7 @@ functions find the knowledge base in the service registry
 ``tools.factories.make_kb_tools`` capture it.
 """
 
-import asyncio
-import warnings
-from datetime import datetime, timezone
 from typing import Any
-from urllib.parse import urlparse
 
 import structlog
 
@@ -256,104 +251,12 @@ async def _ingest_file(
     return result
 
 
-async def _ingest_url(
-    kb,
-    url: str,
-    title: str = "",
-    source_type: str = "",
-    source_url: str | None = None,
-    authors: list[str] | None = None,
-    abstract: str = "",
-    tags: list[str] | None = None,
-) -> dict[str, Any]:
-    """Fetch a URL, save the page, and ingest it (deprecated until 0.7.0).
-
-    Routes the download through ``ContentFetcher`` (URL validation, redirect
-    revalidation, DNS pinning); the caller's permissions engine has already
-    gated ``http.read`` for ``url``. The page is saved as ``web_fetch`` saves
-    it and ingested like ``kb_ingest_file`` ingests a saved page.
-    """
-    warnings.warn(
-        "kb_ingest_url is deprecated and will be removed in 0.7.0; "
-        "use web_fetch, then kb_ingest_file(saved_path)",
-        DeprecationWarning,
-        stacklevel=3,
-    )
-    logger.warning("kb_ingest_url_deprecated", host=urlparse(url).hostname)
-    if not url or not url.startswith(("http://", "https://")):
-        return {
-            "success": False,
-            "error": "url must be an http:// or https:// URL",
-        }
-    st = None
-    if source_type:
-        st, error = _source_type(source_type)
-        if error:
-            return error
-
-    from agentic_cli.tools.webfetch.saved import saved_page_extension
-    from agentic_cli.tools.webfetch_tool import get_or_create_fetcher, save_fetched_page
-
-    fetcher = get_or_create_fetcher()
-    fetch_result = await fetcher.fetch(url, timeout=60)
-    if not fetch_result.success:
-        if fetch_result.redirect is not None:
-            return {
-                "success": False,
-                "error": (
-                    f"Cross-host redirect blocked: "
-                    f"{fetch_result.redirect.from_url} -> "
-                    f"{fetch_result.redirect.to_url}"
-                ),
-                "redirect": True,
-                "redirect_url": fetch_result.redirect.to_url,
-                "redirect_host": fetch_result.redirect.to_host,
-            }
-        return {"success": False, "error": fetch_result.error or "fetch failed"}
-
-    content_type = fetch_result.content_type or "text/html"
-    extension = saved_page_extension(content_type)
-    if extension is None:
-        return {
-            "success": False,
-            "error": f"Cannot ingest {url}: {content_type} is not a type the knowledge base can ingest",
-        }
-
-    if isinstance(fetch_result.raw, bytes):
-        data = fetch_result.raw
-    elif isinstance(fetch_result.content, bytes):
-        data = fetch_result.content
-    else:
-        data = (fetch_result.content or "").encode("utf-8")
-
-    # Off the event loop, same as web_fetch's own save.
-    saved = await asyncio.to_thread(save_fetched_page, url, fetch_result)
-    result = await _ingested(
-        kb.ingest_bytes(
-            data,
-            extension=extension,
-            content_type=content_type,
-            charset=fetch_result.charset or "utf-8",
-            fetched_url=url,
-            fetched_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            title=title,
-            source_type=st,
-            source_url=source_url,
-            metadata=_caller_metadata(authors, abstract, tags),
-        ),
-        display_name=url,
-    )
-    if fetch_result.raw_truncated and result.get("success"):
-        result["truncated"] = True
-    return {**result, **saved}
-
-
 def _read_scope(kb, found) -> str:
     """The scope ``kb_read`` reports.
 
     0.6.3 said "user" whenever the document came from the user scope's
     manager, also when both names point at one directory (where kb_search
-    and kb_list say "project"). Kept until 0.7.0.
+    and kb_list say "project"). Kept until the knowledge-base redesign.
     """
     try:
         user = kb.manager("user")
@@ -555,51 +458,6 @@ async def kb_ingest_file(
         return {"success": False, "error": NO_KNOWLEDGE_BASE}
     return await _ingest_file(
         kb, path=path, title=title, source_type=source_type, source_url=source_url,
-        authors=authors, abstract=abstract, tags=tags,
-    )
-
-
-@register_tool(
-    category=ToolCategory.KNOWLEDGE,
-    capabilities=[
-        Capability("kb.write"),
-        Capability("http.read", target_arg="url"),
-    ],
-    description=(
-        "Deprecated, removed in 0.7.0: use web_fetch, then "
-        "kb_ingest_file(saved_path). Fetches an http(s) URL through the "
-        "hardened web fetcher and ingests it. Triggers an http.read "
-        "permission check for the supplied URL."
-    ),
-    requires="knowledge_base",
-)
-async def kb_ingest_url(
-    url: str,
-    title: str = "",
-    source_type: str = "",
-    source_url: str | None = None,
-    authors: list[str] | None = None,
-    abstract: str = "",
-    tags: list[str] | None = None,
-) -> dict[str, Any]:
-    """Deprecated, removed in 0.7.0: use web_fetch, then kb_ingest_file(saved_path).
-
-    Fetches a URL and ingests it into the knowledge base.
-
-    Args:
-        url: An ``http://`` or ``https://`` URL.
-        title: Document title (defaults to the page title, else the URL's last segment).
-        source_type: Source type (defaults to ``web``).
-        source_url: Optional URL of the source (defaults to ``url``).
-        authors: Optional list of author names.
-        abstract: Optional paper abstract.
-        tags: Optional tags for categorization.
-    """
-    kb = current_knowledge_base()
-    if kb is None:
-        return {"success": False, "error": NO_KNOWLEDGE_BASE}
-    return await _ingest_url(
-        kb, url=url, title=title, source_type=source_type, source_url=source_url,
         authors=authors, abstract=abstract, tags=tags,
     )
 

@@ -10,7 +10,6 @@ from enum import Enum
 from typing import Any, Callable
 import functools
 import inspect
-import sys
 import warnings
 import weakref
 
@@ -22,7 +21,6 @@ from agentic_cli.workflow.permissions.capabilities import (
 )
 from agentic_cli.workflow.permissions.capabilities import _CapabilityExempt
 from agentic_cli.workflow.service_registry import (
-    DEPRECATED_SERVICE_KEYS,
     KNOWN_SERVICE_KEYS,
     SERVICE_KEY_HINTS,
 )
@@ -185,23 +183,6 @@ def _validate_capabilities(caps: Any, tool_name: str) -> CapabilitiesSpec:
     )
 
 
-def _declaring_stacklevel() -> int:
-    """The ``stacklevel`` that attributes a warning to the module declaring a tool.
-
-    Declarations reach ``_validate_requires`` through different depths
-    (``register`` as a decorator or a direct call, ``register_tool``,
-    ``declare``, ``declare_tool``), so count the frames of this module
-    instead of hard-coding one. Called from ``_validate_requires``: level 1
-    is the caller of this function's caller.
-    """
-    level = 1
-    frame = sys._getframe(1)
-    while frame is not None and frame.f_globals.get("__name__") == __name__:
-        level += 1
-        frame = frame.f_back
-    return level
-
-
 def _validate_requires(requires: Any, tool_name: str) -> tuple[str, ...]:
     """Validate declared service keys against the constructible service keys.
 
@@ -237,15 +218,6 @@ def _validate_requires(requires: Any, tool_name: str) -> tuple[str, ...]:
             f"{', '.join(sorted(KNOWN_SERVICE_KEYS))}."
             + (f" {hints}" if hints else "")
         )
-    for key in keys:
-        replacement = DEPRECATED_SERVICE_KEYS.get(key)
-        if replacement is not None:
-            warnings.warn(
-                f"Tool {tool_name!r}: requires={key!r} is deprecated and will be removed in "
-                f"0.7.0; declare requires={replacement!r}",
-                DeprecationWarning,
-                stacklevel=_declaring_stacklevel(),
-            )
     return keys
 
 

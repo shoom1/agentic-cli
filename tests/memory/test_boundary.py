@@ -5,18 +5,15 @@
 2. Its components stay apart: ``kb`` never imports ``store``, ``store`` never
    imports ``kb``, and ``_core`` imports neither.
 3. The rest of ``src/`` and ``examples/`` use only the public modules
-   (``agentic_cli.memory`` and ``agentic_cli.memory.kb``) and never the
-   deprecated paths the compatibility layer keeps until 0.7.0.
+   (``agentic_cli.memory`` and ``agentic_cli.memory.kb``).
 4. ``tests/memory/`` follows rule 1, so the tests can move with the package.
 
 Imports inside functions and ``if TYPE_CHECKING:`` blocks count.
 
 What this scan cannot see: imports built from strings
 (``importlib.import_module``, ``__import__``), and attribute access on a
-parent module after importing it (e.g. ``memory_tools.MemoryStore(...)``
-after ``from agentic_cli.tools import memory_tools`` — no name from the
-memory package is ever imported there). The ``DeprecationWarning`` the old
-paths raise is the backstop for that case. Fixtures pulled in from conftest
+parent module after importing it (e.g. ``memory._core`` after
+``import agentic_cli.memory as memory``). Fixtures pulled in from conftest
 are not imports either, and are invisible here too. What importing the
 package loads at runtime, through ``agentic_cli/__init__.py``, is checked by
 ``test_loads_alone.py``.
@@ -47,18 +44,6 @@ ALLOWED_INSIDE = {
     "store": {"_core", "store"},
     "kb": {"_core", "kb"},
 }
-
-# Old-path modules that forward to the package until 0.7.0 (rule 3 exempt).
-COMPAT_DIRS: set[Path] = {SRC / "agentic_cli" / "knowledge_base"}
-
-
-def _deprecated(module: str, names: list[str]) -> bool:
-    """An import of a path the compatibility layer keeps until 0.7.0."""
-    if module == "agentic_cli.tools.memory_tools" and "MemoryStore" in names:
-        return True
-    if module == "agentic_cli.tools.kb_convert":
-        return True
-    return module == "agentic_cli.knowledge_base" or module.startswith("agentic_cli.knowledge_base.")
 
 
 def _is_real_module(dotted: str) -> bool:
@@ -182,7 +167,7 @@ def _outside_files() -> list[Path]:
     files = [
         p
         for p in sorted((SRC / "agentic_cli").rglob("*.py"))
-        if PACKAGE not in p.parents and not any(d in p.parents for d in COMPAT_DIRS)
+        if PACKAGE not in p.parents
     ]
     files += sorted((ROOT / "examples").rglob("*.py"))
     return files
@@ -204,9 +189,9 @@ def outside_violations() -> set[tuple[str, str]]:
     bad = set()
     for path in _outside_files():
         module = _module_name(path, SRC) if SRC in path.parents else _module_name(path, ROOT)
-        for target, names in imports_of(path, module):
+        for target, _names in imports_of(path, module):
             inside = target == "agentic_cli.memory" or target.startswith("agentic_cli.memory.")
-            if (inside and target not in PUBLIC_MODULES) or _deprecated(target, names):
+            if inside and target not in PUBLIC_MODULES:
                 bad.add((path.relative_to(ROOT).as_posix(), target))
     return bad
 

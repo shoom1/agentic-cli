@@ -192,3 +192,9 @@ class TestMemoryToolParity:
         assert registry_out == factory_out == {"success": True, "deleted": True}
 
 
+def test_memory_tools_re_exports_the_item_types_unchanged():
+    import agentic_cli.memory as memory
+    from agentic_cli.tools import memory_tools
+
+    assert memory_tools.MemoryItem is memory.MemoryItem
+    assert memory_tools.ForgettingPolicy is memory.ForgettingPolicy

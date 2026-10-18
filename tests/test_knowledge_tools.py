@@ -203,57 +203,6 @@ class TestIngestDocumentTool:
             finally:
                 token.var.reset(token)
 
-    @pytest.mark.asyncio
-    async def test_ingest_url_routes_through_hardened_fetcher(self, monkeypatch):
-        """kb_ingest_url uses ContentFetcher (SSRF protection) instead of raw httpx."""
-        from agentic_cli.workflow.service_registry import set_service_registry
-        from agentic_cli.tools.knowledge_tools import kb_ingest_url
-        from agentic_cli.tools.webfetch.fetcher import FetchResult
-
-        called_urls: list[str] = []
-
-        class _StubFetcher:
-            async def fetch(self, url, timeout=30):
-                called_urls.append(url)
-                return FetchResult(
-                    success=True,
-                    content="<html>Hi</html>",
-                    content_type="text/html",
-                )
-
-        # The import inside the helper happens lazily; patch the source.
-        import agentic_cli.tools.webfetch_tool as wft
-        monkeypatch.setattr(wft, "get_or_create_fetcher", lambda: _StubFetcher())
-
-        with tempfile.TemporaryDirectory() as tmp:
-            monkeypatch.chdir(tmp)
-            kb = _make_kb(Path(tmp))
-            token = set_service_registry(kb_services(kb))
-            try:
-                with pytest.warns(DeprecationWarning, match="kb_ingest_url"):
-                    result = await kb_ingest_url(url="https://example.com/article")
-                assert result["success"] is True
-                assert called_urls == ["https://example.com/article"]
-            finally:
-                token.var.reset(token)
-
-    @pytest.mark.asyncio
-    async def test_ingest_url_rejects_non_http_scheme(self):
-        """kb_ingest_url refuses file:// and other non-http(s) schemes."""
-        from agentic_cli.workflow.service_registry import set_service_registry
-        from agentic_cli.tools.knowledge_tools import kb_ingest_url
-
-        with tempfile.TemporaryDirectory() as tmp:
-            kb = _make_kb(Path(tmp))
-            token = set_service_registry(kb_services(kb))
-            try:
-                with pytest.warns(DeprecationWarning, match="kb_ingest_url"):
-                    result = await kb_ingest_url(url="file:///etc/passwd")
-                assert result["success"] is False
-                assert "http" in result["error"].lower()
-            finally:
-                token.var.reset(token)
-
 
 # ============================================================================
 # kb_read tests
@@ -455,7 +404,7 @@ class TestKBManagerContextVar:
         )
         token = set_service_registry({})
         try:
-            assert get_service("kb_manager") is None
+            assert get_service("knowledge_base") is None
         finally:
             token.var.reset(token)
 
@@ -465,11 +414,24 @@ class TestKBManagerContextVar:
             set_service_registry,
         )
         sentinel = object()
-        token = set_service_registry({"kb_manager": sentinel})
+        token = set_service_registry({"knowledge_base": sentinel})
         try:
-            assert get_service("kb_manager") is sentinel
+            assert get_service("knowledge_base") is sentinel
         finally:
             token.var.reset(token)
+
+    def test_a_registry_holding_only_kb_manager_gives_no_knowledge_base(self, tmp_path):
+        """The tools read ``knowledge_base`` alone; 0.6.3's key is not looked at."""
+        from agentic_cli.tools.knowledge_tools import kb_search
+        from agentic_cli.workflow.service_registry import set_service_registry
+
+        token = set_service_registry({"kb_manager": _make_kb(tmp_path)})
+        try:
+            result = kb_search("basalt")
+        finally:
+            token.var.reset(token)
+
+        assert result == {"success": False, "error": "kb manager not available"}
 
     def test_kb_tools_declare_the_knowledge_base_service(self):
         """KB tools carry their own service requirement in the registry."""
@@ -477,26 +439,11 @@ class TestKBManagerContextVar:
 
         assert get_registry().get("kb_search").requires == ("knowledge_base",)
 
-    def test_base_manager_has_kb_manager_slot(self):
+    def test_base_manager_has_a_knowledge_base_slot(self):
         from agentic_cli.workflow.base_manager import BaseWorkflowManager
-        assert hasattr(BaseWorkflowManager, "kb_manager")
-
-    def test_base_manager_has_user_kb_manager_slot(self):
-        from agentic_cli.workflow.base_manager import BaseWorkflowManager
-        assert hasattr(BaseWorkflowManager, "user_kb_manager")
-
-    def test_user_kb_manager_registry_key_exists(self):
-        from agentic_cli.workflow.service_registry import (
-            get_service,
-            set_service_registry,
-            USER_KB_MANAGER,
-        )
-        sentinel = object()
-        token = set_service_registry({USER_KB_MANAGER: sentinel})
-        try:
-            assert get_service(USER_KB_MANAGER) is sentinel
-        finally:
-            token.var.reset(token)
+        assert hasattr(BaseWorkflowManager, "knowledge_base")
+        assert not hasattr(BaseWorkflowManager, "kb_manager")
+        assert not hasattr(BaseWorkflowManager, "user_kb_manager")
 
 
 # ============================================================================

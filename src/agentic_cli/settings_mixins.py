@@ -7,7 +7,6 @@ These modules live outside cli/ so that config.py can compose BaseSettings
 without importing the cli package.
 """
 
-import warnings
 from pathlib import Path
 from typing import Literal
 
@@ -63,27 +62,6 @@ class AppSettingsMixin:
     def knowledge_base_dir(self) -> Path:
         """Directory for knowledge base storage."""
         return self.workspace_dir / "knowledge_base"
-
-    @property
-    def knowledge_base_documents_dir(self) -> Path:
-        """Deprecated: the knowledge base lays out its own folder. Removed in 0.7.0."""
-        _warn_kb_layout_path("knowledge_base_documents_dir")
-        return self.knowledge_base_dir / "documents"
-
-    @property
-    def knowledge_base_embeddings_dir(self) -> Path:
-        """Deprecated: the knowledge base lays out its own folder. Removed in 0.7.0."""
-        _warn_kb_layout_path("knowledge_base_embeddings_dir")
-        return self.knowledge_base_dir / "embeddings"
-
-
-def _warn_kb_layout_path(name: str) -> None:
-    warnings.warn(
-        f"settings.{name} is deprecated and will be removed in 0.7.0; the "
-        "knowledge base lays out its own folder, settings.knowledge_base_dir",
-        DeprecationWarning,
-        stacklevel=3,
-    )
 
 
 class CLISettingsMixin:

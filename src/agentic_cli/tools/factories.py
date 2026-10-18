@@ -126,7 +126,7 @@ def make_memory_tools(memory_store, embedding_service=None) -> list[Callable]:
 # Knowledge base tools
 # ---------------------------------------------------------------------------
 
-def make_kb_tools(knowledge_base=None, user_kb_manager=None, *, kb_manager=None) -> list[Callable]:
+def make_kb_tools(knowledge_base) -> list[Callable]:
     """Create KB tools bound to a ``KnowledgeBase``.
 
     Thin closure-bound wrappers around the shared helpers in
@@ -135,11 +135,9 @@ def make_kb_tools(knowledge_base=None, user_kb_manager=None, *, kb_manager=None)
 
     Args:
         knowledge_base: The ``KnowledgeBase`` (``agentic_cli.memory.kb``).
-            0.6.3's ``make_kb_tools(kb_manager, user_kb_manager)`` still
-            works, with a ``DeprecationWarning``, until 0.7.0.
 
     Returns:
-        [kb_search, kb_ingest_text, kb_ingest_file, kb_ingest_url,
+        [kb_search, kb_ingest_text, kb_ingest_file,
          kb_read, kb_list, kb_write_concept, kb_search_concepts]
     """
     from agentic_cli.tools._knowledge_base import knowledge_base_argument
@@ -147,7 +145,6 @@ def make_kb_tools(knowledge_base=None, user_kb_manager=None, *, kb_manager=None)
         READ_DOCUMENT_MAX_CHARS,
         _ingest_file,
         _ingest_text,
-        _ingest_url,
         _list,
         _read,
         _search,
@@ -155,7 +152,6 @@ def make_kb_tools(knowledge_base=None, user_kb_manager=None, *, kb_manager=None)
         _write_concept,
         kb_ingest_file as _orig_ingest_file,
         kb_ingest_text as _orig_ingest_text,
-        kb_ingest_url as _orig_ingest_url,
         kb_list as _orig_list,
         kb_read as _orig_read,
         kb_search as _orig_search,
@@ -163,7 +159,7 @@ def make_kb_tools(knowledge_base=None, user_kb_manager=None, *, kb_manager=None)
         kb_write_concept as _orig_write_concept,
     )
 
-    kb = knowledge_base_argument(knowledge_base, user_kb_manager, kb_manager, "make_kb_tools")
+    kb = knowledge_base_argument(knowledge_base, "make_kb_tools")
 
     def kb_search(
         query: str,
@@ -212,26 +208,6 @@ def make_kb_tools(knowledge_base=None, user_kb_manager=None, *, kb_manager=None)
             tags=tags,
         )
 
-    async def kb_ingest_url(
-        url: str,
-        title: str = "",
-        source_type: str = "",
-        source_url: str | None = None,
-        authors: list[str] | None = None,
-        abstract: str = "",
-        tags: list[str] | None = None,
-    ) -> dict[str, Any]:
-        return await _ingest_url(
-            kb,
-            url=url,
-            title=title,
-            source_type=source_type,
-            source_url=source_url,
-            authors=authors,
-            abstract=abstract,
-            tags=tags,
-        )
-
     async def kb_read(
         doc_id_or_title: str,
         full: bool = False,
@@ -266,8 +242,6 @@ def make_kb_tools(knowledge_base=None, user_kb_manager=None, *, kb_manager=None)
     kb_ingest_text.__doc__ = _orig_ingest_text.__doc__
     kb_ingest_file.__name__ = "kb_ingest_file"
     kb_ingest_file.__doc__ = _orig_ingest_file.__doc__
-    kb_ingest_url.__name__ = "kb_ingest_url"
-    kb_ingest_url.__doc__ = _orig_ingest_url.__doc__
     kb_read.__name__ = "kb_read"
     kb_read.__doc__ = _orig_read.__doc__
     kb_list.__name__ = "kb_list"
@@ -281,7 +255,6 @@ def make_kb_tools(knowledge_base=None, user_kb_manager=None, *, kb_manager=None)
         (kb_search, _orig_search),
         (kb_ingest_text, _orig_ingest_text),
         (kb_ingest_file, _orig_ingest_file),
-        (kb_ingest_url, _orig_ingest_url),
         (kb_read, _orig_read),
         (kb_list, _orig_list),
         (kb_write_concept, _orig_write_concept),
@@ -486,7 +459,7 @@ def make_arxiv_tools(arxiv_source) -> list[Callable]:
     )
 
 
-def make_ingest_arxiv_tool(arxiv_source, knowledge_base=None, *, kb_manager=None) -> Callable:
+def make_ingest_arxiv_tool(arxiv_source, knowledge_base) -> Callable:
     """Create ingest_arxiv_paper bound to an arxiv source and a ``KnowledgeBase``.
 
     The composed tool downloads a paper's PDF via the arxiv layer (with
@@ -495,9 +468,7 @@ def make_ingest_arxiv_tool(arxiv_source, knowledge_base=None, *, kb_manager=None
 
     Args:
         arxiv_source: An ArxivSearchSource instance.
-        knowledge_base: The ``KnowledgeBase``. 0.6.3's
-            ``make_ingest_arxiv_tool(source, kb_manager)`` still works, with a
-            ``DeprecationWarning``, until 0.7.0.
+        knowledge_base: The ``KnowledgeBase``.
 
     Returns:
         ingest_arxiv_paper async function with both services captured
@@ -506,7 +477,7 @@ def make_ingest_arxiv_tool(arxiv_source, knowledge_base=None, *, kb_manager=None
     from agentic_cli.tools._knowledge_base import knowledge_base_argument
     from agentic_cli.tools.arxiv_tools import _ingest_arxiv_paper_with_services
 
-    kb = knowledge_base_argument(knowledge_base, None, kb_manager, "make_ingest_arxiv_tool")
+    kb = knowledge_base_argument(knowledge_base, "make_ingest_arxiv_tool")
 
     async def ingest_arxiv_paper(
         arxiv_id: str,

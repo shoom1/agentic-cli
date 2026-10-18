@@ -11,8 +11,7 @@ Ingestion owns this converter; ``web_fetch`` keeps its own for summaries.
 - Anything else is decoded as text: leniently with the given ``charset`` for a
   fetched page, strictly as UTF-8 for a local file.
 
-Part of ``agentic_cli.memory.kb``. ``agentic_cli.tools.kb_convert`` forwards
-here, with a warning, until 0.7.0.
+Part of ``agentic_cli.memory.kb``.
 """
 
 from __future__ import annotations

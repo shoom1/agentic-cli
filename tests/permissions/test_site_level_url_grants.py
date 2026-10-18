@@ -1,7 +1,7 @@
 """Approving a URL "for this session" or "always" covers its site.
 
-``http.read`` grants (``web_fetch``, ``kb_ingest_url``) were stored for the exact
-URL, so reading ten pages of one site asked ten times whatever the answer. A
+``http.read`` grants (``web_fetch``) were stored for the exact URL, so
+reading ten pages of one site asked ten times whatever the answer. A
 session or "always" approval now covers the URL's site, ``https://host/**``:
 the exact host (no other subdomain) and port, HTTPS only. A plain-HTTP URL, an
 IP address, ``localhost`` or a single-label name keeps the exact-URL grant,
@@ -19,7 +19,6 @@ from pathlib import Path
 
 import pytest
 
-import agentic_cli.tools.knowledge_tools  # noqa: F401  (registers kb_ingest_url)
 import agentic_cli.tools.webfetch_tool  # noqa: F401  (registers web_fetch)
 from agentic_cli.config import BaseSettings
 from agentic_cli.tools.registry import get_registry
@@ -57,10 +56,10 @@ def _engine(approver: _Approver) -> PermissionEngine:
     return PermissionEngine(settings=settings, workflow=approver, ctx=ctx)
 
 
-async def _asks(engine: PermissionEngine, approver: _Approver, url: str, tool="web_fetch") -> bool:
+async def _asks(engine: PermissionEngine, approver: _Approver, url: str) -> bool:
     before = len(approver.prompts)
-    args = {"url": url, "prompt": "summarize"} if tool == "web_fetch" else {"url": url}
-    result = await engine.check(tool, get_registry().get(tool).capabilities, args)
+    args = {"url": url, "prompt": "summarize"}
+    result = await engine.check("web_fetch", get_registry().get("web_fetch").capabilities, args)
     assert result.allowed
     return len(approver.prompts) > before
 
@@ -72,7 +71,15 @@ async def test_a_session_approval_covers_the_site():
     assert await _asks(engine, approver, "https://docs.example.org/guide/intro")
     assert not await _asks(engine, approver, "https://docs.example.org/api?q=fetch")
     assert not await _asks(engine, approver, "https://docs.example.org/")
-    assert not await _asks(engine, approver, "https://docs.example.org/guide", tool="kb_ingest_url")
+
+    # The grant belongs to the capability and the site, not to web_fetch: another
+    # tool that reads the same site through http.read is covered too.
+    before = len(approver.prompts)
+    caps = get_registry().get("web_fetch").capabilities
+    args = {"url": "https://docs.example.org/guide", "prompt": "summarize"}
+    result = await engine.check("another_reader", caps, args)
+    assert result.allowed
+    assert len(approver.prompts) == before
 
 
 @pytest.mark.parametrize(

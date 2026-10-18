@@ -16,7 +16,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import inspect
-import warnings
 from abc import ABC, abstractmethod
 from contextvars import ContextVar, Token
 from typing import Any, AsyncGenerator, Awaitable, Callable, Iterator, TYPE_CHECKING
@@ -39,13 +38,11 @@ from agentic_cli.workflow.service_registry import (
     ARXIV_SOURCE,
     EMBEDDING_SERVICE,
     JOB_MANAGER,
-    KB_MANAGER,
     KNOWLEDGE_BASE,
     LLM_SUMMARIZER,
     MEMORY_STORE,
     PERMISSION_ENGINE,
     SANDBOX_MANAGER,
-    USER_KB_MANAGER,
     WORKFLOW,
 )
 from agentic_cli.logging import Loggers
@@ -53,7 +50,7 @@ from agentic_cli.logging import Loggers
 if TYPE_CHECKING:
     from agentic_cli.config import BaseSettings
     from agentic_cli.memory import MemoryStore
-    from agentic_cli.memory.kb import KnowledgeBase, KnowledgeBaseManager
+    from agentic_cli.memory.kb import KnowledgeBase
     from agentic_cli.tools.sandbox.manager import SandboxManager
 
 logger = Loggers.workflow()
@@ -246,39 +243,6 @@ class BaseWorkflowManager(ABC):
     def memory_store(self) -> "MemoryStore | None":
         """The memory store (if required by tools)."""
         return self._services.get(MEMORY_STORE)
-
-    @property
-    def memory_manager(self) -> "MemoryStore | None":
-        """Deprecated: use :attr:`memory_store`. Removed in 0.7.0."""
-        warnings.warn(
-            "BaseWorkflowManager.memory_manager is deprecated and will be removed in 0.7.0; "
-            "use memory_store",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return self._services.get(MEMORY_STORE)
-
-    @property
-    def kb_manager(self) -> "KnowledgeBaseManager | None":
-        """Deprecated: use ``knowledge_base.manager("project")``. Removed in 0.7.0."""
-        warnings.warn(
-            "BaseWorkflowManager.kb_manager is deprecated and will be removed in 0.7.0; "
-            "use knowledge_base (knowledge_base.manager('project') for the project scope)",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return self._services.get(KB_MANAGER)
-
-    @property
-    def user_kb_manager(self) -> "KnowledgeBaseManager | None":
-        """Deprecated: use ``knowledge_base.manager("user")``. Removed in 0.7.0."""
-        warnings.warn(
-            "BaseWorkflowManager.user_kb_manager is deprecated and will be removed in 0.7.0; "
-            "use knowledge_base (knowledge_base.manager('user') for the user scope)",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return self._services.get(USER_KB_MANAGER)
 
     @property
     def llm_summarizer(self) -> Any | None:
@@ -526,40 +490,14 @@ class BaseWorkflowManager(ABC):
             raise
         return s
 
-    def _complete_knowledge_base_keys(self, s: dict[str, Any], existing: frozenset[str]) -> None:
-        """Make ``knowledge_base`` and the 0.6.3 keys agree when only one side is present.
-
-        A registry holding ``kb_manager`` (injected before the build, as 0.6.3
-        tests did) gets a ``KnowledgeBase`` over those managers; one holding
-        ``knowledge_base`` gets the legacy keys from its scopes. Nothing is
-        opened, and an injected manager is never replaced.
-        """
-        live = self._services
-        if KNOWLEDGE_BASE not in existing and KB_MANAGER in existing:
-            from agentic_cli.tools._knowledge_base import _over
-
-            s[KNOWLEDGE_BASE] = _over(live[KB_MANAGER], live.get(USER_KB_MANAGER))
-        elif KNOWLEDGE_BASE in existing:
-            knowledge_base = live[KNOWLEDGE_BASE]
-            for key, scope in ((KB_MANAGER, "project"), (USER_KB_MANAGER, "user")):
-                if key not in existing:
-                    try:
-                        s[key] = knowledge_base.manager(scope)
-                    except KeyError:
-                        pass
-
     def _build_services_into(
         self, s: dict[str, Any], existing: frozenset[str]
     ) -> None:
         """Construct the required services into ``s``. See :meth:`_build_services`."""
+        # Spelled `"<key>" in self._required_managers` for every declarable
+        # key: test_every_declarable_key_is_constructible reads this source.
         needs_memory = "memory_store" in self._required_managers and MEMORY_STORE not in existing
-        # "kb_manager" is 0.6.3's declaration of the same services. (Spelled
-        # `"<key>" in self._required_managers` for every declarable key:
-        # test_every_declarable_key_is_constructible reads this source.)
-        wants_kb = (
-            "knowledge_base" in self._required_managers or "kb_manager" in self._required_managers
-        )
-        needs_kb = wants_kb and KNOWLEDGE_BASE not in existing and KB_MANAGER not in existing
+        needs_kb = "knowledge_base" in self._required_managers and KNOWLEDGE_BASE not in existing
         embedding_service = None
         if needs_memory or needs_kb:
             # One service for both knowledge bases and the memory store, so the
@@ -583,17 +521,9 @@ class BaseWorkflowManager(ABC):
         if needs_kb:
             from agentic_cli.workflow.memory_services import open_knowledge_base
 
-            knowledge_base = open_knowledge_base(
+            s[KNOWLEDGE_BASE] = open_knowledge_base(
                 self._settings, summarizer=self, embedding_service=embedding_service
             )
-            s[KNOWLEDGE_BASE] = knowledge_base
-            # The 0.6.3 keys hold the scopes' managers until 0.7.0 (a dict
-            # lookup cannot warn; the CHANGELOG and docstrings say so).
-            s[KB_MANAGER] = knowledge_base.manager("project")
-            s[USER_KB_MANAGER] = knowledge_base.manager("user")
-
-        if wants_kb and not needs_kb:
-            self._complete_knowledge_base_keys(s, existing)
 
         if "llm_summarizer" in self._required_managers and LLM_SUMMARIZER not in existing:
             s[LLM_SUMMARIZER] = self

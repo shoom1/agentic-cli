@@ -14,8 +14,7 @@ Example:
 
 from __future__ import annotations
 
-import warnings
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from agentic_cli.memory import ForgettingPolicy, MemoryItem
 from agentic_cli.memory import MemoryStore as _MemoryStore
@@ -23,32 +22,14 @@ from agentic_cli.tools.registry import ToolCategory, register_tool
 from agentic_cli.workflow.permissions import Capability
 from agentic_cli.workflow.service_registry import MEMORY_STORE, require_service
 
-if TYPE_CHECKING:
-    from agentic_cli.config import BaseSettings
-
 __all__ = [
     "ForgettingPolicy",
     "MemoryItem",
-    "MemoryStore",
     "delete_memory",
     "save_memory",
     "search_memory",
     "update_memory",
 ]
-
-
-class MemoryStore(_MemoryStore):
-    """Deprecated: use ``agentic_cli.memory.MemoryStore(base_dir)``. Removed in 0.7.0."""
-
-    def __init__(self, settings: "BaseSettings", embedding_service=None) -> None:
-        warnings.warn(
-            "agentic_cli.tools.memory_tools.MemoryStore(settings) is deprecated and "
-            "will be removed in 0.7.0; use "
-            "agentic_cli.memory.MemoryStore(settings.workspace_dir / 'memory')",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        super().__init__(settings.workspace_dir / "memory", embedding_service=embedding_service)
 
 
 # ---------------------------------------------------------------------------
