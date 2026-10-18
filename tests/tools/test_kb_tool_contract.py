@@ -40,6 +40,8 @@ from typing import Any, Awaitable, Callable, Iterator
 
 import pytest
 
+from tests.kb_registry import kb_services
+
 GOLDEN = Path(__file__).with_name("kb_tool_contract.json")
 LAYOUTS = ("one", "two", "same")
 ENTRIES = ("registry", "factory")
@@ -255,9 +257,7 @@ def registry_entry(env: _Env, arxiv: Any) -> tuple[dict[str, Any], dict[str, Cal
     """The module-level tools, finding the knowledge bases in the service registry."""
     from agentic_cli.tools import arxiv_tools, knowledge_tools
 
-    registry: dict[str, Any] = {"kb_manager": env.project}
-    if env.user is not None:
-        registry["user_kb_manager"] = env.user
+    registry = kb_services(env.project, env.user)
     if arxiv is not None:
         registry["arxiv_source"] = arxiv
     tools = {name: getattr(knowledge_tools, name) for name in KB_TOOLS}
@@ -799,7 +799,7 @@ def _workflow(settings):
             return []
 
     manager = _Manager(agent_configs=[], settings=settings)
-    manager._required_managers = {"kb_manager"}
+    manager._required_managers = {"knowledge_base"}
     manager._ensure_managers_initialized()
     return manager
 
