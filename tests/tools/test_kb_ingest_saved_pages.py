@@ -192,9 +192,10 @@ async def test_a_metadata_file_is_refused(kb):
 
 
 async def test_the_factory_variant_reads_saved_pages(kb):
+    from agentic_cli.memory.kb import KnowledgeBase
     from agentic_cli.tools.factories import make_kb_tools
 
-    tools = {t.__name__: t for t in make_kb_tools(kb)}
+    tools = {t.__name__: t for t in make_kb_tools(KnowledgeBase({"project": kb}))}
     result = await tools["kb_ingest_file"](path=str(_saved()))
 
     assert kb.get_document(result["document_id"]).source_url == URL

@@ -513,9 +513,10 @@ class TestServiceSubstitutionIsExact:
     def _framework_kb_variant() -> dict:
         from unittest.mock import MagicMock
 
+        from agentic_cli.memory.kb import KnowledgeBase
         from agentic_cli.tools.factories import make_kb_tools
 
-        return {t.__name__: t for t in make_kb_tools(MagicMock())}
+        return {t.__name__: t for t in make_kb_tools(KnowledgeBase({"project": MagicMock()}))}
 
     def test_genuine_builtin_is_still_substituted(self):
         from agentic_cli.tools.knowledge_tools import kb_search
@@ -1211,13 +1212,14 @@ class TestAssemblyRequiresBoundIdentity:
         """A config may name a tool; that is a registry lookup, not a guess."""
         from unittest.mock import MagicMock
 
+        from agentic_cli.memory.kb import KnowledgeBase
         from agentic_cli.tools.factories import make_kb_tools
         from agentic_cli.tools.knowledge_tools import kb_search  # noqa: F401
 
         mgr, config = self._manager(["kb_search"])
         assert mgr.required_managers == {"kb_manager"}
 
-        service_map = {t.__name__: t for t in make_kb_tools(MagicMock())}
+        service_map = {t.__name__: t for t in make_kb_tools(KnowledgeBase({"project": MagicMock()}))}
         built = mgr._build_tools(config, service_map=service_map)
         assert built == [service_map["kb_search"]]
 
