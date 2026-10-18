@@ -261,7 +261,7 @@ class TestDuplicateNamePolicy:
         with pytest.raises(ValueError, match="already registered"):
 
             @registry.register(
-                name="a_tool", capabilities=EXEMPT, requires="kb_manager"
+                name="a_tool", capabilities=EXEMPT, requires="knowledge_base"
             )
             def _second() -> dict:
                 """Second."""
@@ -360,7 +360,7 @@ class TestDeclaredVariants:
                 variant_of="a_tool",
                 capabilities=EXEMPT,
                 category=ToolCategory.PLANNING,
-                requires="kb_manager",
+                requires="knowledge_base",
             )
             def _needy() -> dict:
                 """Backend that wants a service."""
@@ -513,9 +513,10 @@ class TestServiceSubstitutionIsExact:
     def _framework_kb_variant() -> dict:
         from unittest.mock import MagicMock
 
+        from agentic_cli.memory.kb import KnowledgeBase
         from agentic_cli.tools.factories import make_kb_tools
 
-        return {t.__name__: t for t in make_kb_tools(MagicMock())}
+        return {t.__name__: t for t in make_kb_tools(KnowledgeBase({"project": MagicMock()}))}
 
     def test_genuine_builtin_is_still_substituted(self):
         from agentic_cli.tools.knowledge_tools import kb_search
@@ -867,24 +868,24 @@ class TestRequiresMetadata:
     def test_requires_is_recorded(self):
         registry = ToolRegistry()
 
-        @registry.register(capabilities=EXEMPT, requires="kb_manager")
+        @registry.register(capabilities=EXEMPT, requires="knowledge_base")
         def kb_thing() -> dict:
             """KB thing."""
             return {"success": True}
 
-        assert registry.get("kb_thing").requires == ("kb_manager",)
+        assert registry.get("kb_thing").requires == ("knowledge_base",)
 
     def test_multiple_services_are_recorded_in_order(self):
         registry = ToolRegistry()
 
         @registry.register(
-            capabilities=EXEMPT, requires=("arxiv_source", "kb_manager")
+            capabilities=EXEMPT, requires=("arxiv_source", "knowledge_base")
         )
         def composite() -> dict:
             """Composite."""
             return {"success": True}
 
-        assert registry.get("composite").requires == ("arxiv_source", "kb_manager")
+        assert registry.get("composite").requires == ("arxiv_source", "knowledge_base")
 
     def test_no_requires_defaults_to_empty(self):
         registry = ToolRegistry()
@@ -924,11 +925,11 @@ class TestRequiresMetadata:
         from agentic_cli.tools.registry import get_registry
 
         reg = get_registry()
-        assert reg.get("kb_search").requires == ("kb_manager",)
+        assert reg.get("kb_search").requires == ("knowledge_base",)
         assert reg.get("save_memory").requires == ("memory_store",)
         assert reg.get("ingest_arxiv_paper").requires == (
             "arxiv_source",
-            "kb_manager",
+            "knowledge_base",
         )
         assert reg.get("read_file").requires == ()
 
@@ -971,7 +972,7 @@ class TestManagerDetectionUsesRegistry:
             agent_configs=[AgentConfig(name="a", prompt="p", tools=[kb_search, save_memory])],
             settings=settings,
         )
-        assert mgr.required_managers == {"kb_manager", "memory_store"}
+        assert mgr.required_managers == {"knowledge_base", "memory_store"}
 
     def test_extension_tool_needs_no_framework_edit(self):
         """A tool defined outside the framework still gets its service created."""
@@ -1211,13 +1212,14 @@ class TestAssemblyRequiresBoundIdentity:
         """A config may name a tool; that is a registry lookup, not a guess."""
         from unittest.mock import MagicMock
 
+        from agentic_cli.memory.kb import KnowledgeBase
         from agentic_cli.tools.factories import make_kb_tools
         from agentic_cli.tools.knowledge_tools import kb_search  # noqa: F401
 
         mgr, config = self._manager(["kb_search"])
-        assert mgr.required_managers == {"kb_manager"}
+        assert mgr.required_managers == {"knowledge_base"}
 
-        service_map = {t.__name__: t for t in make_kb_tools(MagicMock())}
+        service_map = {t.__name__: t for t in make_kb_tools(KnowledgeBase({"project": MagicMock()}))}
         built = mgr._build_tools(config, service_map=service_map)
         assert built == [service_map["kb_search"]]
 

@@ -79,9 +79,11 @@ def configure_logging(settings: "BaseSettings | None" = None) -> None:
 
     # trafilatura (and its own dependencies) log raw ERROR lines to stderr
     # under the default logging setup (e.g. "parsed tree length: 0, wrong
-    # data type or not valid HTML", "readability_lxml failed:"). kb_convert's
-    # own kb_convert_html / kb_convert_failed events already record what
-    # happened, so silence the library's own logs entirely.
+    # data type or not valid HTML", "readability_lxml failed:"). The
+    # knowledge base's converter (agentic_cli.memory.kb.convert) logs kb_convert_html
+    # (and kb_convert_trafilatura_failed / kb_convert_html_failed), and the ingest
+    # tools log kb_convert_failed, which already record what happened, so silence the
+    # library's own logs entirely.
     logging.getLogger("trafilatura").setLevel(logging.CRITICAL)
     logging.getLogger("htmldate").setLevel(logging.CRITICAL)
     logging.getLogger("courlan").setLevel(logging.CRITICAL)

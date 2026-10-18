@@ -11,6 +11,8 @@ searched, a NUL byte) raised instead of returning an error.
 
 from __future__ import annotations
 
+from tests.kb_registry import kb_services
+
 import os
 
 import pytest
@@ -28,7 +30,7 @@ needs_non_root = pytest.mark.skipif(
 @pytest.fixture
 def kb(tmp_path):
     manager = KnowledgeBaseManager(base_dir=tmp_path / "kb", use_mock=True)
-    token = set_service_registry({"kb_manager": manager})
+    token = set_service_registry(kb_services(manager))
     try:
         yield manager
     finally:
@@ -120,12 +122,10 @@ async def test_any_other_conversion_failure_is_also_refused(kb, tmp_path, monkey
     """Defensive: whatever a future converter raises besides
     ``UnsupportedDocument`` must still come back as a refusal, not an
     exception out of the tool."""
-    from agentic_cli.tools import knowledge_tools
-
     def _boom(*a, **kw):
         raise RuntimeError("converter exploded")
 
-    monkeypatch.setattr(knowledge_tools, "convert_document", _boom)
+    monkeypatch.setattr("agentic_cli.memory.kb.convert.convert_document", _boom)
     notes = tmp_path / "notes.md"
     notes.write_text("# Notes\n")
 

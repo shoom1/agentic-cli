@@ -7,6 +7,142 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.4] - 2026-10-18
+
+The knowledge base gets a public API in `agentic_cli.memory.kb`. A
+provisional `KnowledgeBase` serves the project and user knowledge bases as
+one, and one ingestion pipeline (`ingest_text`, `ingest_bytes`) stores every
+document, arXiv papers included; the knowledge-base tools are now adapters
+over it. The workflow shares one embedding model between both knowledge bases
+and the memory store, so the model loads once per process, and each index
+records the model that built it, so a change of `embedding_model` re-embeds
+the stored text instead of mixing two models. The 0.6.3 API keeps working:
+the tools' results are pinned against a recording from 0.6.3, and the old
+service keys, properties and factory arguments warn until 0.7.0. One result
+changes, see *Changed*: an arXiv paper's `summary` is the full synthesis.
+`/papers` now finds matches older than the 50 newest documents.
+
+### Added
+
+- **Tests pin what the knowledge-base tools return.** Every `kb_*` tool,
+  `ingest_arxiv_paper` and `/papers` run through their public entry points
+  with one knowledge base, with a project and a user knowledge base, and with
+  both names on one directory, and their full results are compared with a
+  recording from 0.6.3 (`tests/tools/kb_tool_contract.json`). A second test
+  pins what `agentic_cli.memory` and `agentic_cli.memory.kb` export. 0.6.4
+  moves the knowledge-base logic into the package behind both; the recording
+  has one planned edit in 0.6.4, the arXiv `summary`.
+- **`agentic_cli.memory.kb.KnowledgeBase`** (provisional: its name and
+  methods may change in 0.7.0) serves the project and user knowledge bases
+  as one. `KnowledgeBase.open({"project": dir, "user": dir}, ...)` builds one
+  `KnowledgeBaseManager` per directory and shares one embedding service
+  across them; the class also takes ready managers. It searches every scope
+  and merges the hits by reciprocal rank fusion (`search`), looks documents
+  up in scope order (`find_document`, `get_document`), lists one catalogue
+  (`list_documents`), reads text and sidecars (`read_text`, `sidecar`),
+  writes and searches concept pages (`write_concept`, `search_concepts`),
+  backfills every scope (`backfill_sidecars`, returning a `BackfillResult`
+  per scope) and reports `stats()`. Results that name one document are a
+  `ScopedDocument(document, scope)`; `DocumentNotFound` means the document
+  went away mid-operation.
+- **Each index records the embedding model that built it.** A knowledge base
+  writes `embeddings/model.json` and the memory store
+  `memory/embedding_model.json` (model name and dimension): the knowledge
+  base whenever it saves its index, the memory store when it opens and the
+  model changed. A record that cannot be written (a read-only directory,
+  say) is logged and does not stop the open. After `embedding_model` changes, the next open embeds the stored
+  text again: the knowledge base builds the new index beside the old one and
+  swaps it in when complete, and if that fails it keeps the old index and
+  searches by keyword for the session. An index from 0.6.3 is kept when its
+  dimension matches the model (one built by another model of the same
+  dimension is kept too; delete `embeddings/index.faiss` to force a
+  rebuild). 0.6.3 ignores both files. Re-embedding runs when the workflow
+  starts, so a large knowledge base makes that one start slower; the log
+  gives the chunk count and the time taken.
+- **One ingestion pipeline.** `KnowledgeBase.ingest_text(content, ...)` and
+  `KnowledgeBase.ingest_bytes(data, extension=..., ...)` convert (bytes
+  only), fill in the title, source type, source URL and metadata (a value
+  the caller passed always wins), make one summarizer call for the summary,
+  claims and entities, and store the document. `kb_ingest_text`,
+  `kb_ingest_file`, `kb_ingest_url` and `ingest_arxiv_paper` call them.
+  `EmptyDocument` and `ConversionFailed` join `UnsupportedDocument` as the
+  ingest errors, exported from `agentic_cli.memory.kb`.
+
+### Changed
+
+- **An arXiv paper's `summary` is the synthesis other documents get.**
+  `ingest_arxiv_paper` asked the summarizer for 2–3 sentences and wrote a
+  sidecar from them; it now goes through the ingestion pipeline like every
+  other document, so its summary is the 1,500–3,000-character synthesis and
+  its sidecar has claims and entities. Still one summarizer call per paper.
+- **The ingestion converter moved into the package:** `convert_document`,
+  `ConvertedDocument` and `UnsupportedDocument` are exported from
+  `agentic_cli.memory.kb`, which reads PDFs and charset labels with its own
+  helpers (a test keeps its charset helper in agreement with `web_fetch`'s).
+  Ingestion and `kb_read` no longer read PDFs through `agentic_cli.tools.pdf_utils`; a
+  test that patched `extract_pdf_text` there should patch
+  `agentic_cli.memory.kb.convert.extract_pdf_text`; one that patched
+  `agentic_cli.tools.arxiv_tools.extract_pdf_text` now gets an
+  `AttributeError`, because that name is gone.
+- **The workflow exposes one `KnowledgeBase`.** `workflow.knowledge_base`
+  (service key `knowledge_base`) serves the project and user knowledge bases
+  as one, and the framework's knowledge-base tools declare
+  `requires="knowledge_base"`; `workflow.memory_store` is the memory store.
+  `kb_search`, `kb_list`, `kb_read`, the concept tools, `/papers` and the
+  demo's `/kb-backfill` call it instead of merging the two knowledge bases by
+  hand. Their names, arguments and results do not change.
+- **Small visible changes in ingestion.** An arXiv paper's PDF text is
+  extracted off the event loop. `kb_ingest_url` checks `source_type` before
+  fetching. A bad `source_type` is reported before an unconvertible or
+  empty file (a missing file is still reported first). A summarizer answer
+  that is not text no longer makes `kb_ingest_*` or `ingest_arxiv_paper`
+  fail; the preview is stored. An arXiv answer that cannot be parsed stores
+  the preview.
+
+### Deprecated
+
+All of these work until 0.7.0.
+
+- **`agentic_cli.tools.kb_convert`** forwards to `agentic_cli.memory.kb`,
+  with a `DeprecationWarning`.
+- **`memory_services.build_memory_store(settings)`** warns. Use
+  `memory_services.open_memory_store(settings, embedding_service=None)`.
+- **`requires="kb_manager"`** builds the same services, and warns when the
+  tool registers. Declare `requires="knowledge_base"`.
+- **The `kb_manager` and `user_kb_manager` service keys** still hold
+  `knowledge_base.manager("project")` and the user scope's manager (the same
+  object when both are one directory). A dictionary lookup cannot warn; use
+  `knowledge_base`, and `knowledge_base.manager(name)` for one scope.
+- **A service registry holding only `kb_manager` / `user_kb_manager`** (filled
+  by hand, as many tests and some apps do) still works, and the knowledge-base
+  tools warn when they find it. Publish a `KnowledgeBase` under
+  `knowledge_base`.
+- **`workflow.kb_manager`, `workflow.user_kb_manager`** warn; use
+  `workflow.knowledge_base`. **`workflow.memory_manager`** warns; use
+  `workflow.memory_store`.
+- **`make_kb_tools(kb_manager, user_kb_manager)`** and
+  **`make_ingest_arxiv_tool(source, kb_manager)`** warn and wrap the managers
+  in a `KnowledgeBase`; pass the `KnowledgeBase`.
+- **`memory_services.build_knowledge_bases`** warns; use
+  `memory_services.open_knowledge_base`.
+
+### Fixed
+
+- **`/papers` finds a match older than the 50 newest documents.** It cut the
+  list at 50 and only then filtered by the query; it now filters first, as
+  `kb_list` does.
+- **The embedding model loads once per process.** Each knowledge base loaded
+  the sentence-transformers model when it opened, and the memory store
+  loaded its own: up to three copies of one model. The workflow now builds
+  one `EmbeddingService` and shares it, and `EmbeddingService` takes a lock
+  around loading the model and around `embed_text` and `embed_batch`, so the
+  knowledge base's worker threads and the memory tools can share it.
+- **`KnowledgeBaseManager(embedding_service=...)` uses the service it is
+  given.** Without `vector_store`, the argument was silently ignored and the
+  knowledge base built its own service; it now builds its vector store at
+  the given service's dimension. A real service without FAISS falls back to
+  keyword search instead of failing at the first ingest.
+
 ## [0.6.3] - 2026-10-17
 
 The knowledge base and the memory store move into `agentic_cli.memory`, a

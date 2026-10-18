@@ -1,0 +1,2746 @@
+{
+ "arguments": {
+  "ingest_arxiv_paper": [
+   [
+    "arxiv_id",
+    null
+   ],
+   [
+    "tags",
+    null
+   ]
+  ],
+  "kb_ingest_file": [
+   [
+    "path",
+    null
+   ],
+   [
+    "title",
+    ""
+   ],
+   [
+    "source_type",
+    ""
+   ],
+   [
+    "source_url",
+    null
+   ],
+   [
+    "authors",
+    null
+   ],
+   [
+    "abstract",
+    ""
+   ],
+   [
+    "tags",
+    null
+   ]
+  ],
+  "kb_ingest_text": [
+   [
+    "content",
+    null
+   ],
+   [
+    "title",
+    ""
+   ],
+   [
+    "source_type",
+    "user"
+   ],
+   [
+    "source_url",
+    null
+   ],
+   [
+    "authors",
+    null
+   ],
+   [
+    "abstract",
+    ""
+   ],
+   [
+    "tags",
+    null
+   ]
+  ],
+  "kb_ingest_url": [
+   [
+    "url",
+    null
+   ],
+   [
+    "title",
+    ""
+   ],
+   [
+    "source_type",
+    ""
+   ],
+   [
+    "source_url",
+    null
+   ],
+   [
+    "authors",
+    null
+   ],
+   [
+    "abstract",
+    ""
+   ],
+   [
+    "tags",
+    null
+   ]
+  ],
+  "kb_list": [
+   [
+    "query",
+    ""
+   ],
+   [
+    "source_type",
+    ""
+   ],
+   [
+    "limit",
+    20
+   ]
+  ],
+  "kb_read": [
+   [
+    "doc_id_or_title",
+    null
+   ],
+   [
+    "full",
+    false
+   ],
+   [
+    "max_chars",
+    30000
+   ]
+  ],
+  "kb_search": [
+   [
+    "query",
+    null
+   ],
+   [
+    "filters",
+    ""
+   ],
+   [
+    "top_k",
+    10
+   ]
+  ],
+  "kb_search_concepts": [
+   [
+    "query",
+    null
+   ],
+   [
+    "limit",
+    10
+   ]
+  ],
+  "kb_write_concept": [
+   [
+    "title",
+    null
+   ],
+   [
+    "body",
+    null
+   ],
+   [
+    "sources",
+    null
+   ],
+   [
+    "slug",
+    ""
+   ]
+  ]
+ },
+ "arxiv_download_fails/one": {
+  "found": {
+   "query_embedding_time_ms": "<ms>",
+   "results": [
+    {
+     "chunk_content": "We propose the Transformer, built on attention alone.",
+     "chunk_id": "<id1>",
+     "document_id": "<id2>",
+     "document_title": "Attention Is All You Need",
+     "highlight": "We propose the Transformer, built on attention alone.",
+     "metadata": {
+      "abs_url": "https://arxiv.org/abs/1706.03762",
+      "abstract": "We propose the Transformer, built on attention alone.",
+      "arxiv_id": "1706.03762",
+      "authors": [
+       "Ashish Vaswani",
+       "Noam Shazeer"
+      ],
+      "categories": [
+       "cs.CL"
+      ],
+      "pdf_download_error": "network down",
+      "pdf_url": "https://arxiv.org/pdf/1706.03762",
+      "primary_category": "cs.CL",
+      "published_date": "2017-06-12",
+      "src_url": "https://arxiv.org/e-print/1706.03762",
+      "title": "Attention Is All You Need",
+      "updated_date": "2017-12-06"
+     },
+     "scope": "project",
+     "score": 0.01639344262295082,
+     "source_type": "arxiv",
+     "source_url": "https://arxiv.org/abs/1706.03762"
+    }
+   ],
+   "search_time_ms": "<ms>",
+   "success": true,
+   "total_matches": 1,
+   "total_time_ms": "<ms>"
+  },
+  "ingest": {
+   "chunks_created": 1,
+   "document_id": "<id2>",
+   "pdf_downloaded": false,
+   "success": true,
+   "summary": "Synthesis of Attention Is All You Need.",
+   "title": "Attention Is All You Need"
+  }
+ },
+ "arxiv_download_fails/same": {
+  "found": {
+   "query_embedding_time_ms": "<ms>",
+   "results": [
+    {
+     "chunk_content": "We propose the Transformer, built on attention alone.",
+     "chunk_id": "<id1>",
+     "document_id": "<id2>",
+     "document_title": "Attention Is All You Need",
+     "highlight": "We propose the Transformer, built on attention alone.",
+     "metadata": {
+      "abs_url": "https://arxiv.org/abs/1706.03762",
+      "abstract": "We propose the Transformer, built on attention alone.",
+      "arxiv_id": "1706.03762",
+      "authors": [
+       "Ashish Vaswani",
+       "Noam Shazeer"
+      ],
+      "categories": [
+       "cs.CL"
+      ],
+      "pdf_download_error": "network down",
+      "pdf_url": "https://arxiv.org/pdf/1706.03762",
+      "primary_category": "cs.CL",
+      "published_date": "2017-06-12",
+      "src_url": "https://arxiv.org/e-print/1706.03762",
+      "title": "Attention Is All You Need",
+      "updated_date": "2017-12-06"
+     },
+     "scope": "project",
+     "score": 0.01639344262295082,
+     "source_type": "arxiv",
+     "source_url": "https://arxiv.org/abs/1706.03762"
+    }
+   ],
+   "search_time_ms": "<ms>",
+   "success": true,
+   "total_matches": 1,
+   "total_time_ms": "<ms>"
+  },
+  "ingest": {
+   "chunks_created": 1,
+   "document_id": "<id2>",
+   "pdf_downloaded": false,
+   "success": true,
+   "summary": "Synthesis of Attention Is All You Need.",
+   "title": "Attention Is All You Need"
+  }
+ },
+ "arxiv_download_fails/two": {
+  "found": {
+   "query_embedding_time_ms": "<ms>",
+   "results": [
+    {
+     "chunk_content": "We propose the Transformer, built on attention alone.",
+     "chunk_id": "<id1>",
+     "document_id": "<id2>",
+     "document_title": "Attention Is All You Need",
+     "highlight": "We propose the Transformer, built on attention alone.",
+     "metadata": {
+      "abs_url": "https://arxiv.org/abs/1706.03762",
+      "abstract": "We propose the Transformer, built on attention alone.",
+      "arxiv_id": "1706.03762",
+      "authors": [
+       "Ashish Vaswani",
+       "Noam Shazeer"
+      ],
+      "categories": [
+       "cs.CL"
+      ],
+      "pdf_download_error": "network down",
+      "pdf_url": "https://arxiv.org/pdf/1706.03762",
+      "primary_category": "cs.CL",
+      "published_date": "2017-06-12",
+      "src_url": "https://arxiv.org/e-print/1706.03762",
+      "title": "Attention Is All You Need",
+      "updated_date": "2017-12-06"
+     },
+     "scope": "project",
+     "score": 0.0164,
+     "source_type": "arxiv",
+     "source_url": "https://arxiv.org/abs/1706.03762"
+    }
+   ],
+   "search_time_ms": "<ms>",
+   "success": true,
+   "total_matches": 1,
+   "total_time_ms": "<ms>"
+  },
+  "ingest": {
+   "chunks_created": 1,
+   "document_id": "<id2>",
+   "pdf_downloaded": false,
+   "success": true,
+   "summary": "Synthesis of Attention Is All You Need.",
+   "title": "Attention Is All You Need"
+  }
+ },
+ "arxiv_ingest/one": {
+  "found": {
+   "query_embedding_time_ms": "<ms>",
+   "results": [
+    {
+     "chunk_content": "Attention replaces recurrence",
+     "chunk_id": "<id1>",
+     "document_id": "<id2>",
+     "document_title": "Attention Is All You Need",
+     "highlight": "Attention replaces recurrence",
+     "metadata": {
+      "abs_url": "https://arxiv.org/abs/1706.03762",
+      "abstract": "We propose the Transformer, built on attention alone.",
+      "arxiv_id": "1706.03762",
+      "authors": [
+       "Ashish Vaswani",
+       "Noam Shazeer"
+      ],
+      "categories": [
+       "cs.CL"
+      ],
+      "file_size_bytes": 604,
+      "pdf_url": "https://arxiv.org/pdf/1706.03762",
+      "primary_category": "cs.CL",
+      "published_date": "2017-06-12",
+      "src_url": "https://arxiv.org/e-print/1706.03762",
+      "tags": [
+       "nlp"
+      ],
+      "title": "Attention Is All You Need",
+      "updated_date": "2017-12-06"
+     },
+     "scope": "project",
+     "score": 0.01639344262295082,
+     "source_type": "arxiv",
+     "source_url": "https://arxiv.org/abs/1706.03762"
+    }
+   ],
+   "search_time_ms": "<ms>",
+   "success": true,
+   "total_matches": 1,
+   "total_time_ms": "<ms>"
+  },
+  "ingest": {
+   "chunks_created": 1,
+   "document_id": "<id2>",
+   "pdf_downloaded": true,
+   "success": true,
+   "summary": "Synthesis of Attention Is All You Need.",
+   "title": "Attention Is All You Need"
+  }
+ },
+ "arxiv_ingest/same": {
+  "found": {
+   "query_embedding_time_ms": "<ms>",
+   "results": [
+    {
+     "chunk_content": "Attention replaces recurrence",
+     "chunk_id": "<id1>",
+     "document_id": "<id2>",
+     "document_title": "Attention Is All You Need",
+     "highlight": "Attention replaces recurrence",
+     "metadata": {
+      "abs_url": "https://arxiv.org/abs/1706.03762",
+      "abstract": "We propose the Transformer, built on attention alone.",
+      "arxiv_id": "1706.03762",
+      "authors": [
+       "Ashish Vaswani",
+       "Noam Shazeer"
+      ],
+      "categories": [
+       "cs.CL"
+      ],
+      "file_size_bytes": 604,
+      "pdf_url": "https://arxiv.org/pdf/1706.03762",
+      "primary_category": "cs.CL",
+      "published_date": "2017-06-12",
+      "src_url": "https://arxiv.org/e-print/1706.03762",
+      "tags": [
+       "nlp"
+      ],
+      "title": "Attention Is All You Need",
+      "updated_date": "2017-12-06"
+     },
+     "scope": "project",
+     "score": 0.01639344262295082,
+     "source_type": "arxiv",
+     "source_url": "https://arxiv.org/abs/1706.03762"
+    }
+   ],
+   "search_time_ms": "<ms>",
+   "success": true,
+   "total_matches": 1,
+   "total_time_ms": "<ms>"
+  },
+  "ingest": {
+   "chunks_created": 1,
+   "document_id": "<id2>",
+   "pdf_downloaded": true,
+   "success": true,
+   "summary": "Synthesis of Attention Is All You Need.",
+   "title": "Attention Is All You Need"
+  }
+ },
+ "arxiv_ingest/two": {
+  "found": {
+   "query_embedding_time_ms": "<ms>",
+   "results": [
+    {
+     "chunk_content": "Attention replaces recurrence",
+     "chunk_id": "<id1>",
+     "document_id": "<id2>",
+     "document_title": "Attention Is All You Need",
+     "highlight": "Attention replaces recurrence",
+     "metadata": {
+      "abs_url": "https://arxiv.org/abs/1706.03762",
+      "abstract": "We propose the Transformer, built on attention alone.",
+      "arxiv_id": "1706.03762",
+      "authors": [
+       "Ashish Vaswani",
+       "Noam Shazeer"
+      ],
+      "categories": [
+       "cs.CL"
+      ],
+      "file_size_bytes": 604,
+      "pdf_url": "https://arxiv.org/pdf/1706.03762",
+      "primary_category": "cs.CL",
+      "published_date": "2017-06-12",
+      "src_url": "https://arxiv.org/e-print/1706.03762",
+      "tags": [
+       "nlp"
+      ],
+      "title": "Attention Is All You Need",
+      "updated_date": "2017-12-06"
+     },
+     "scope": "project",
+     "score": 0.0164,
+     "source_type": "arxiv",
+     "source_url": "https://arxiv.org/abs/1706.03762"
+    }
+   ],
+   "search_time_ms": "<ms>",
+   "success": true,
+   "total_matches": 1,
+   "total_time_ms": "<ms>"
+  },
+  "ingest": {
+   "chunks_created": 1,
+   "document_id": "<id2>",
+   "pdf_downloaded": true,
+   "success": true,
+   "summary": "Synthesis of Attention Is All You Need.",
+   "title": "Attention Is All You Need"
+  }
+ },
+ "arxiv_not_found/one": {
+  "error": "Paper not found: 9999.99999",
+  "success": false
+ },
+ "arxiv_not_found/same": {
+  "error": "Paper not found: 9999.99999",
+  "success": false
+ },
+ "arxiv_not_found/two": {
+  "error": "Paper not found: 9999.99999",
+  "success": false
+ },
+ "concept_search/one": {
+  "concepts": [
+   {
+    "slug": "volcanic-rocks",
+    "snippet": "Basalt and pumice both come from lava.\n",
+    "sources": [
+     "<id1>"
+    ],
+    "title": "Volcanic rocks"
+   }
+  ],
+  "count": 1,
+  "success": true
+ },
+ "concept_search/same": {
+  "concepts": [
+   {
+    "slug": "volcanic-rocks",
+    "snippet": "Basalt and pumice both come from lava.\n",
+    "sources": [
+     "<id1>"
+    ],
+    "title": "Volcanic rocks"
+   }
+  ],
+  "count": 1,
+  "success": true
+ },
+ "concept_search/two": {
+  "concepts": [
+   {
+    "slug": "volcanic-rocks",
+    "snippet": "Basalt and pumice both come from lava.\n",
+    "sources": [
+     "<id1>"
+    ],
+    "title": "Volcanic rocks"
+   }
+  ],
+  "count": 1,
+  "success": true
+ },
+ "concept_write_cites_both_scopes/one": {
+  "action": "created",
+  "invalid_sources": [
+   "missing-id"
+  ],
+  "path": "<tmp>/project_kb/concepts/volcanic-rocks.md",
+  "slug": "volcanic-rocks",
+  "success": true
+ },
+ "concept_write_cites_both_scopes/same": {
+  "action": "created",
+  "invalid_sources": [
+   "missing-id"
+  ],
+  "path": "<tmp>/project_kb/concepts/volcanic-rocks.md",
+  "slug": "volcanic-rocks",
+  "success": true
+ },
+ "concept_write_cites_both_scopes/two": {
+  "action": "created",
+  "invalid_sources": [
+   "missing-id"
+  ],
+  "path": "<tmp>/project_kb/concepts/volcanic-rocks.md",
+  "slug": "volcanic-rocks",
+  "success": true
+ },
+ "concept_write_no_valid_source/one": {
+  "action": "failed",
+  "error": "concept page requires at least one valid source document id; got none",
+  "invalid_sources": [
+   "missing-id"
+  ],
+  "path": "",
+  "slug": "",
+  "success": false
+ },
+ "concept_write_no_valid_source/same": {
+  "action": "failed",
+  "error": "concept page requires at least one valid source document id; got none",
+  "invalid_sources": [
+   "missing-id"
+  ],
+  "path": "",
+  "slug": "",
+  "success": false
+ },
+ "concept_write_no_valid_source/two": {
+  "action": "failed",
+  "error": "concept page requires at least one valid source document id; got none",
+  "invalid_sources": [
+   "missing-id"
+  ],
+  "path": "",
+  "slug": "",
+  "success": false
+ },
+ "ingest_file_converter_crash/one": {
+  "error": "Cannot ingest <tmp>/cwd/.agentic_cli/fetched/a45947edc02d2a49.txt: could not convert it (RuntimeError)",
+  "success": false
+ },
+ "ingest_file_converter_crash/same": {
+  "error": "Cannot ingest <tmp>/cwd/.agentic_cli/fetched/a45947edc02d2a49.txt: could not convert it (RuntimeError)",
+  "success": false
+ },
+ "ingest_file_converter_crash/two": {
+  "error": "Cannot ingest <tmp>/cwd/.agentic_cli/fetched/a45947edc02d2a49.txt: could not convert it (RuntimeError)",
+  "success": false
+ },
+ "ingest_file_html/one": {
+  "chunks_created": 2,
+  "document_id": "<id1>",
+  "success": true,
+  "summary": "Synthesis of Volcano notes.",
+  "title": "Volcano notes"
+ },
+ "ingest_file_html/same": {
+  "chunks_created": 2,
+  "document_id": "<id1>",
+  "success": true,
+  "summary": "Synthesis of Volcano notes.",
+  "title": "Volcano notes"
+ },
+ "ingest_file_html/two": {
+  "chunks_created": 2,
+  "document_id": "<id1>",
+  "success": true,
+  "summary": "Synthesis of Volcano notes.",
+  "title": "Volcano notes"
+ },
+ "ingest_file_markdown/one": {
+  "ingest": {
+   "chunks_created": 1,
+   "document_id": "<id1>",
+   "success": true,
+   "summary": "Synthesis of notes.",
+   "title": "notes"
+  },
+  "read": {
+   "content": "# Lava tubes\n\nLava tubes form when the surface of a flow hardens.\n",
+   "document_id": "<id1>",
+   "full": true,
+   "scope": "project",
+   "source_type": "local",
+   "success": true,
+   "title": "notes",
+   "truncated": false
+  }
+ },
+ "ingest_file_markdown/same": {
+  "ingest": {
+   "chunks_created": 1,
+   "document_id": "<id1>",
+   "success": true,
+   "summary": "Synthesis of notes.",
+   "title": "notes"
+  },
+  "read": {
+   "content": "# Lava tubes\n\nLava tubes form when the surface of a flow hardens.\n",
+   "document_id": "<id1>",
+   "full": true,
+   "scope": "user",
+   "source_type": "local",
+   "success": true,
+   "title": "notes",
+   "truncated": false
+  }
+ },
+ "ingest_file_markdown/two": {
+  "ingest": {
+   "chunks_created": 1,
+   "document_id": "<id1>",
+   "success": true,
+   "summary": "Synthesis of notes.",
+   "title": "notes"
+  },
+  "read": {
+   "content": "# Lava tubes\n\nLava tubes form when the surface of a flow hardens.\n",
+   "document_id": "<id1>",
+   "full": true,
+   "scope": "project",
+   "source_type": "local",
+   "success": true,
+   "title": "notes",
+   "truncated": false
+  }
+ },
+ "ingest_file_missing/one": {
+  "error": "File not found: <tmp>/absent.txt",
+  "success": false
+ },
+ "ingest_file_missing/same": {
+  "error": "File not found: <tmp>/absent.txt",
+  "success": false
+ },
+ "ingest_file_missing/two": {
+  "error": "File not found: <tmp>/absent.txt",
+  "success": false
+ },
+ "ingest_file_pdf/one": {
+  "ingest": {
+   "chunks_created": 1,
+   "document_id": "<id1>",
+   "success": true,
+   "summary": "Synthesis of scan.",
+   "title": "scan"
+  },
+  "read": {
+   "document_id": "<id1>",
+   "full": false,
+   "scope": "project",
+   "sidecar": "---\nid: <id1>\ntitle: scan\nsource_type: local\nsource_url: <tmp>/scan.pdf\ningested_at: <time>\nchunks: 1\nfile: files/<id1>.pdf\n---\n\n## Summary\nSynthesis of scan.\n\n## Key Claims\n- scan makes one claim.\n\n## Key Entities\nTopics: geology\n",
+   "source_type": "local",
+   "success": true,
+   "summary": "Synthesis of scan.",
+   "title": "scan"
+  }
+ },
+ "ingest_file_pdf/same": {
+  "ingest": {
+   "chunks_created": 1,
+   "document_id": "<id1>",
+   "success": true,
+   "summary": "Synthesis of scan.",
+   "title": "scan"
+  },
+  "read": {
+   "document_id": "<id1>",
+   "full": false,
+   "scope": "user",
+   "sidecar": "---\nid: <id1>\ntitle: scan\nsource_type: local\nsource_url: <tmp>/scan.pdf\ningested_at: <time>\nchunks: 1\nfile: files/<id1>.pdf\n---\n\n## Summary\nSynthesis of scan.\n\n## Key Claims\n- scan makes one claim.\n\n## Key Entities\nTopics: geology\n",
+   "source_type": "local",
+   "success": true,
+   "summary": "Synthesis of scan.",
+   "title": "scan"
+  }
+ },
+ "ingest_file_pdf/two": {
+  "ingest": {
+   "chunks_created": 1,
+   "document_id": "<id1>",
+   "success": true,
+   "summary": "Synthesis of scan.",
+   "title": "scan"
+  },
+  "read": {
+   "document_id": "<id1>",
+   "full": false,
+   "scope": "project",
+   "sidecar": "---\nid: <id1>\ntitle: scan\nsource_type: local\nsource_url: <tmp>/scan.pdf\ningested_at: <time>\nchunks: 1\nfile: files/<id1>.pdf\n---\n\n## Summary\nSynthesis of scan.\n\n## Key Claims\n- scan makes one claim.\n\n## Key Entities\nTopics: geology\n",
+   "source_type": "local",
+   "success": true,
+   "summary": "Synthesis of scan.",
+   "title": "scan"
+  }
+ },
+ "ingest_file_saved_page/one": {
+  "found": {
+   "query_embedding_time_ms": "<ms>",
+   "results": [
+    {
+     "chunk_content": "# Volcanoes\nMagma rises through the crust and erupts as lava.",
+     "chunk_id": "<id1>",
+     "document_id": "<id2>",
+     "document_title": "Volcano notes",
+     "highlight": "# Volcanoes\nMagma rises through the crust and erupts as lava.",
+     "metadata": {
+      "fetched_at": "<time>",
+      "file_size_bytes": 218,
+      "title": "Volcano notes"
+     },
+     "scope": "project",
+     "score": 0.01639344262295082,
+     "source_type": "web",
+     "source_url": "https://example.com/articles/volcanoes"
+    }
+   ],
+   "search_time_ms": "<ms>",
+   "success": true,
+   "total_matches": 1,
+   "total_time_ms": "<ms>"
+  },
+  "ingest": {
+   "chunks_created": 2,
+   "document_id": "<id2>",
+   "success": true,
+   "summary": "Synthesis of Volcano notes.",
+   "title": "Volcano notes"
+  }
+ },
+ "ingest_file_saved_page/same": {
+  "found": {
+   "query_embedding_time_ms": "<ms>",
+   "results": [
+    {
+     "chunk_content": "# Volcanoes\nMagma rises through the crust and erupts as lava.",
+     "chunk_id": "<id1>",
+     "document_id": "<id2>",
+     "document_title": "Volcano notes",
+     "highlight": "# Volcanoes\nMagma rises through the crust and erupts as lava.",
+     "metadata": {
+      "fetched_at": "<time>",
+      "file_size_bytes": 218,
+      "title": "Volcano notes"
+     },
+     "scope": "project",
+     "score": 0.01639344262295082,
+     "source_type": "web",
+     "source_url": "https://example.com/articles/volcanoes"
+    }
+   ],
+   "search_time_ms": "<ms>",
+   "success": true,
+   "total_matches": 1,
+   "total_time_ms": "<ms>"
+  },
+  "ingest": {
+   "chunks_created": 2,
+   "document_id": "<id2>",
+   "success": true,
+   "summary": "Synthesis of Volcano notes.",
+   "title": "Volcano notes"
+  }
+ },
+ "ingest_file_saved_page/two": {
+  "found": {
+   "query_embedding_time_ms": "<ms>",
+   "results": [
+    {
+     "chunk_content": "# Volcanoes\nMagma rises through the crust and erupts as lava.",
+     "chunk_id": "<id1>",
+     "document_id": "<id2>",
+     "document_title": "Volcano notes",
+     "highlight": "# Volcanoes\nMagma rises through the crust and erupts as lava.",
+     "metadata": {
+      "fetched_at": "<time>",
+      "file_size_bytes": 218,
+      "title": "Volcano notes"
+     },
+     "scope": "project",
+     "score": 0.0164,
+     "source_type": "web",
+     "source_url": "https://example.com/articles/volcanoes"
+    }
+   ],
+   "search_time_ms": "<ms>",
+   "success": true,
+   "total_matches": 1,
+   "total_time_ms": "<ms>"
+  },
+  "ingest": {
+   "chunks_created": 2,
+   "document_id": "<id2>",
+   "success": true,
+   "summary": "Synthesis of Volcano notes.",
+   "title": "Volcano notes"
+  }
+ },
+ "ingest_file_saved_page_metadata/one": {
+  "error": "<tmp>/cwd/.agentic_cli/fetched/a45947edc02d2a49.meta.json is a saved page's metadata; pass the page itself",
+  "success": false
+ },
+ "ingest_file_saved_page_metadata/same": {
+  "error": "<tmp>/cwd/.agentic_cli/fetched/a45947edc02d2a49.meta.json is a saved page's metadata; pass the page itself",
+  "success": false
+ },
+ "ingest_file_saved_page_metadata/two": {
+  "error": "<tmp>/cwd/.agentic_cli/fetched/a45947edc02d2a49.meta.json is a saved page's metadata; pass the page itself",
+  "success": false
+ },
+ "ingest_file_saved_page_truncated/one": {
+  "chunks_created": 2,
+  "document_id": "<id1>",
+  "success": true,
+  "summary": "Synthesis of Cut page.",
+  "title": "Cut page",
+  "truncated": true
+ },
+ "ingest_file_saved_page_truncated/same": {
+  "chunks_created": 2,
+  "document_id": "<id1>",
+  "success": true,
+  "summary": "Synthesis of Cut page.",
+  "title": "Cut page",
+  "truncated": true
+ },
+ "ingest_file_saved_page_truncated/two": {
+  "chunks_created": 2,
+  "document_id": "<id1>",
+  "success": true,
+  "summary": "Synthesis of Cut page.",
+  "title": "Cut page",
+  "truncated": true
+ },
+ "ingest_file_undecodable/one": {
+  "error": "Cannot ingest <tmp>/blob.bin: not a PDF or a UTF-8 text file",
+  "success": false
+ },
+ "ingest_file_undecodable/same": {
+  "error": "Cannot ingest <tmp>/blob.bin: not a PDF or a UTF-8 text file",
+  "success": false
+ },
+ "ingest_file_undecodable/two": {
+  "error": "Cannot ingest <tmp>/blob.bin: not a PDF or a UTF-8 text file",
+  "success": false
+ },
+ "ingest_text/one": {
+  "found": {
+   "query_embedding_time_ms": "<ms>",
+   "results": [
+    {
+     "chunk_content": "Pumice floats on water because of trapped gas.",
+     "chunk_id": "<id1>",
+     "document_id": "<id2>",
+     "document_title": "Pumice",
+     "highlight": "Pumice floats on water because of trapped gas.",
+     "metadata": {
+      "abstract": "Why pumice floats.",
+      "authors": [
+       "Mary Anning"
+      ],
+      "tags": [
+       "rocks"
+      ],
+      "title": "Pumice"
+     },
+     "scope": "project",
+     "score": 0.01639344262295082,
+     "source_type": "internal",
+     "source_url": "https://example.org/pumice"
+    }
+   ],
+   "search_time_ms": "<ms>",
+   "success": true,
+   "total_matches": 1,
+   "total_time_ms": "<ms>"
+  },
+  "ingest": {
+   "chunks_created": 1,
+   "document_id": "<id2>",
+   "success": true,
+   "summary": "Synthesis of Pumice.",
+   "title": "Pumice"
+  },
+  "listed": {
+   "count": 1,
+   "documents": [
+    {
+     "authors": [
+      "Mary Anning"
+     ],
+     "chunks": 1,
+     "created_at": "<time>",
+     "id": "<id2>",
+     "scope": "project",
+     "source_type": "internal",
+     "summary": "Synthesis of Pumice.",
+     "tags": [
+      "rocks"
+     ],
+     "title": "Pumice"
+    }
+   ],
+   "success": true
+  }
+ },
+ "ingest_text/same": {
+  "found": {
+   "query_embedding_time_ms": "<ms>",
+   "results": [
+    {
+     "chunk_content": "Pumice floats on water because of trapped gas.",
+     "chunk_id": "<id1>",
+     "document_id": "<id2>",
+     "document_title": "Pumice",
+     "highlight": "Pumice floats on water because of trapped gas.",
+     "metadata": {
+      "abstract": "Why pumice floats.",
+      "authors": [
+       "Mary Anning"
+      ],
+      "tags": [
+       "rocks"
+      ],
+      "title": "Pumice"
+     },
+     "scope": "project",
+     "score": 0.01639344262295082,
+     "source_type": "internal",
+     "source_url": "https://example.org/pumice"
+    }
+   ],
+   "search_time_ms": "<ms>",
+   "success": true,
+   "total_matches": 1,
+   "total_time_ms": "<ms>"
+  },
+  "ingest": {
+   "chunks_created": 1,
+   "document_id": "<id2>",
+   "success": true,
+   "summary": "Synthesis of Pumice.",
+   "title": "Pumice"
+  },
+  "listed": {
+   "count": 1,
+   "documents": [
+    {
+     "authors": [
+      "Mary Anning"
+     ],
+     "chunks": 1,
+     "created_at": "<time>",
+     "id": "<id2>",
+     "scope": "project",
+     "source_type": "internal",
+     "summary": "Synthesis of Pumice.",
+     "tags": [
+      "rocks"
+     ],
+     "title": "Pumice"
+    }
+   ],
+   "success": true
+  }
+ },
+ "ingest_text/two": {
+  "found": {
+   "query_embedding_time_ms": "<ms>",
+   "results": [
+    {
+     "chunk_content": "Pumice floats on water because of trapped gas.",
+     "chunk_id": "<id1>",
+     "document_id": "<id2>",
+     "document_title": "Pumice",
+     "highlight": "Pumice floats on water because of trapped gas.",
+     "metadata": {
+      "abstract": "Why pumice floats.",
+      "authors": [
+       "Mary Anning"
+      ],
+      "tags": [
+       "rocks"
+      ],
+      "title": "Pumice"
+     },
+     "scope": "project",
+     "score": 0.0164,
+     "source_type": "internal",
+     "source_url": "https://example.org/pumice"
+    }
+   ],
+   "search_time_ms": "<ms>",
+   "success": true,
+   "total_matches": 1,
+   "total_time_ms": "<ms>"
+  },
+  "ingest": {
+   "chunks_created": 1,
+   "document_id": "<id2>",
+   "success": true,
+   "summary": "Synthesis of Pumice.",
+   "title": "Pumice"
+  },
+  "listed": {
+   "count": 1,
+   "documents": [
+    {
+     "authors": [
+      "Mary Anning"
+     ],
+     "chunks": 1,
+     "created_at": "<time>",
+     "id": "<id2>",
+     "scope": "project",
+     "source_type": "internal",
+     "summary": "Synthesis of Pumice.",
+     "tags": [
+      "rocks"
+     ],
+     "title": "Pumice"
+    }
+   ],
+   "success": true
+  }
+ },
+ "ingest_text_bad_source_type/one": {
+  "error": "Invalid source_type: 'blog'. Valid: arxiv, ssrn, web, internal, user, local",
+  "success": false
+ },
+ "ingest_text_bad_source_type/same": {
+  "error": "Invalid source_type: 'blog'. Valid: arxiv, ssrn, web, internal, user, local",
+  "success": false
+ },
+ "ingest_text_bad_source_type/two": {
+  "error": "Invalid source_type: 'blog'. Valid: arxiv, ssrn, web, internal, user, local",
+  "success": false
+ },
+ "ingest_text_defaults/one": {
+  "chunks_created": 1,
+  "document_id": "<id1>",
+  "success": true,
+  "summary": "Synthesis of Obsidian is volcanic glass that forms when lava cools too fast to crystallise..",
+  "title": "Obsidian is volcanic glass that forms when lava cools too fast to crystallise."
+ },
+ "ingest_text_defaults/same": {
+  "chunks_created": 1,
+  "document_id": "<id1>",
+  "success": true,
+  "summary": "Synthesis of Obsidian is volcanic glass that forms when lava cools too fast to crystallise..",
+  "title": "Obsidian is volcanic glass that forms when lava cools too fast to crystallise."
+ },
+ "ingest_text_defaults/two": {
+  "chunks_created": 1,
+  "document_id": "<id1>",
+  "success": true,
+  "summary": "Synthesis of Obsidian is volcanic glass that forms when lava cools too fast to crystallise..",
+  "title": "Obsidian is volcanic glass that forms when lava cools too fast to crystallise."
+ },
+ "ingest_text_empty/one": {
+  "error": "No content or file provided. Pass non-empty content (kb_ingest_text) or a readable file (kb_ingest_file); for a web page, read it with web_fetch and pass its saved_path to kb_ingest_file. For ArXiv papers, use ingest_arxiv_paper instead.",
+  "success": false
+ },
+ "ingest_text_empty/same": {
+  "error": "No content or file provided. Pass non-empty content (kb_ingest_text) or a readable file (kb_ingest_file); for a web page, read it with web_fetch and pass its saved_path to kb_ingest_file. For ArXiv papers, use ingest_arxiv_paper instead.",
+  "success": false
+ },
+ "ingest_text_empty/two": {
+  "error": "No content or file provided. Pass non-empty content (kb_ingest_text) or a readable file (kb_ingest_file); for a web page, read it with web_fetch and pass its saved_path to kb_ingest_file. For ArXiv papers, use ingest_arxiv_paper instead.",
+  "success": false
+ },
+ "ingest_url/one": {
+  "chunks_created": 2,
+  "document_id": "<id1>",
+  "saved_path": ".agentic_cli/fetched/a45947edc02d2a49.html",
+  "success": true,
+  "summary": "Synthesis of Volcano notes.",
+  "title": "Volcano notes"
+ },
+ "ingest_url/same": {
+  "chunks_created": 2,
+  "document_id": "<id1>",
+  "saved_path": ".agentic_cli/fetched/a45947edc02d2a49.html",
+  "success": true,
+  "summary": "Synthesis of Volcano notes.",
+  "title": "Volcano notes"
+ },
+ "ingest_url/two": {
+  "chunks_created": 2,
+  "document_id": "<id1>",
+  "saved_path": ".agentic_cli/fetched/a45947edc02d2a49.html",
+  "success": true,
+  "summary": "Synthesis of Volcano notes.",
+  "title": "Volcano notes"
+ },
+ "ingest_url_bad_scheme/one": {
+  "error": "url must be an http:// or https:// URL",
+  "success": false
+ },
+ "ingest_url_bad_scheme/same": {
+  "error": "url must be an http:// or https:// URL",
+  "success": false
+ },
+ "ingest_url_bad_scheme/two": {
+  "error": "url must be an http:// or https:// URL",
+  "success": false
+ },
+ "list_all/one": {
+  "count": 4,
+  "documents": [
+   {
+    "chunks": 0,
+    "created_at": "<time>",
+    "has_file": true,
+    "id": "<id1>",
+    "scope": "project",
+    "source_type": "local",
+    "summary": "",
+    "title": "Scanned ledger"
+   },
+   {
+    "arxiv_id": "2401.00001",
+    "authors": [
+     "Mary Somerville"
+    ],
+    "chunks": 1,
+    "created_at": "<time>",
+    "id": "<id2>",
+    "scope": "project",
+    "source_type": "arxiv",
+    "summary": "The glacier retreated two kilometres and meltwater carved new channels.",
+    "title": "Glacier survey"
+   },
+   {
+    "chunks": 1,
+    "created_at": "<time>",
+    "id": "<id3>",
+    "scope": "project",
+    "source_type": "web",
+    "summary": "Columns of basalt form as thick lava flows cool slowly.",
+    "title": "Basalt columns"
+   },
+   {
+    "authors": [
+     "Ada Lovelace"
+    ],
+    "chunks": 1,
+    "created_at": "<time>",
+    "id": "<id4>",
+    "scope": "project",
+    "source_type": "user",
+    "summary": "Basalt lava cools into columns near the volcano.",
+    "tags": [
+     "field"
+    ],
+    "title": "Volcano field notes"
+   }
+  ],
+  "success": true
+ },
+ "list_all/same": {
+  "count": 4,
+  "documents": [
+   {
+    "chunks": 0,
+    "created_at": "<time>",
+    "has_file": true,
+    "id": "<id1>",
+    "scope": "project",
+    "source_type": "local",
+    "summary": "",
+    "title": "Scanned ledger"
+   },
+   {
+    "arxiv_id": "2401.00001",
+    "authors": [
+     "Mary Somerville"
+    ],
+    "chunks": 1,
+    "created_at": "<time>",
+    "id": "<id2>",
+    "scope": "project",
+    "source_type": "arxiv",
+    "summary": "The glacier retreated two kilometres and meltwater carved new channels.",
+    "title": "Glacier survey"
+   },
+   {
+    "chunks": 1,
+    "created_at": "<time>",
+    "id": "<id3>",
+    "scope": "project",
+    "source_type": "web",
+    "summary": "Columns of basalt form as thick lava flows cool slowly.",
+    "title": "Basalt columns"
+   },
+   {
+    "authors": [
+     "Ada Lovelace"
+    ],
+    "chunks": 1,
+    "created_at": "<time>",
+    "id": "<id4>",
+    "scope": "project",
+    "source_type": "user",
+    "summary": "Basalt lava cools into columns near the volcano.",
+    "tags": [
+     "field"
+    ],
+    "title": "Volcano field notes"
+   }
+  ],
+  "success": true
+ },
+ "list_all/two": {
+  "count": 4,
+  "documents": [
+   {
+    "chunks": 0,
+    "created_at": "<time>",
+    "has_file": true,
+    "id": "<id1>",
+    "scope": "user",
+    "source_type": "local",
+    "summary": "",
+    "title": "Scanned ledger"
+   },
+   {
+    "arxiv_id": "2401.00001",
+    "authors": [
+     "Mary Somerville"
+    ],
+    "chunks": 1,
+    "created_at": "<time>",
+    "id": "<id2>",
+    "scope": "user",
+    "source_type": "arxiv",
+    "summary": "The glacier retreated two kilometres and meltwater carved new channels.",
+    "title": "Glacier survey"
+   },
+   {
+    "chunks": 1,
+    "created_at": "<time>",
+    "id": "<id3>",
+    "scope": "project",
+    "source_type": "web",
+    "summary": "Columns of basalt form as thick lava flows cool slowly.",
+    "title": "Basalt columns"
+   },
+   {
+    "authors": [
+     "Ada Lovelace"
+    ],
+    "chunks": 1,
+    "created_at": "<time>",
+    "id": "<id4>",
+    "scope": "project",
+    "source_type": "user",
+    "summary": "Basalt lava cools into columns near the volcano.",
+    "tags": [
+     "field"
+    ],
+    "title": "Volcano field notes"
+   }
+  ],
+  "success": true
+ },
+ "list_bad_source_type/one": {
+  "error": "Invalid source_type: 'blog'. Valid: arxiv, ssrn, web, internal, user, local",
+  "success": false
+ },
+ "list_bad_source_type/same": {
+  "error": "Invalid source_type: 'blog'. Valid: arxiv, ssrn, web, internal, user, local",
+  "success": false
+ },
+ "list_bad_source_type/two": {
+  "error": "Invalid source_type: 'blog'. Valid: arxiv, ssrn, web, internal, user, local",
+  "success": false
+ },
+ "list_by_author/one": {
+  "count": 1,
+  "documents": [
+   {
+    "arxiv_id": "2401.00001",
+    "authors": [
+     "Mary Somerville"
+    ],
+    "chunks": 1,
+    "created_at": "<time>",
+    "id": "<id1>",
+    "scope": "project",
+    "source_type": "arxiv",
+    "summary": "The glacier retreated two kilometres and meltwater carved new channels.",
+    "title": "Glacier survey"
+   }
+  ],
+  "success": true
+ },
+ "list_by_author/same": {
+  "count": 1,
+  "documents": [
+   {
+    "arxiv_id": "2401.00001",
+    "authors": [
+     "Mary Somerville"
+    ],
+    "chunks": 1,
+    "created_at": "<time>",
+    "id": "<id1>",
+    "scope": "project",
+    "source_type": "arxiv",
+    "summary": "The glacier retreated two kilometres and meltwater carved new channels.",
+    "title": "Glacier survey"
+   }
+  ],
+  "success": true
+ },
+ "list_by_author/two": {
+  "count": 1,
+  "documents": [
+   {
+    "arxiv_id": "2401.00001",
+    "authors": [
+     "Mary Somerville"
+    ],
+    "chunks": 1,
+    "created_at": "<time>",
+    "id": "<id1>",
+    "scope": "user",
+    "source_type": "arxiv",
+    "summary": "The glacier retreated two kilometres and meltwater carved new channels.",
+    "title": "Glacier survey"
+   }
+  ],
+  "success": true
+ },
+ "list_by_source_type/one": {
+  "count": 1,
+  "documents": [
+   {
+    "chunks": 1,
+    "created_at": "<time>",
+    "id": "<id1>",
+    "scope": "project",
+    "source_type": "web",
+    "summary": "Columns of basalt form as thick lava flows cool slowly.",
+    "title": "Basalt columns"
+   }
+  ],
+  "success": true
+ },
+ "list_by_source_type/same": {
+  "count": 1,
+  "documents": [
+   {
+    "chunks": 1,
+    "created_at": "<time>",
+    "id": "<id1>",
+    "scope": "project",
+    "source_type": "web",
+    "summary": "Columns of basalt form as thick lava flows cool slowly.",
+    "title": "Basalt columns"
+   }
+  ],
+  "success": true
+ },
+ "list_by_source_type/two": {
+  "count": 1,
+  "documents": [
+   {
+    "chunks": 1,
+    "created_at": "<time>",
+    "id": "<id1>",
+    "scope": "project",
+    "source_type": "web",
+    "summary": "Columns of basalt form as thick lava flows cool slowly.",
+    "title": "Basalt columns"
+   }
+  ],
+  "success": true
+ },
+ "list_limit/one": {
+  "count": 2,
+  "documents": [
+   {
+    "chunks": 0,
+    "created_at": "<time>",
+    "has_file": true,
+    "id": "<id1>",
+    "scope": "project",
+    "source_type": "local",
+    "summary": "",
+    "title": "Scanned ledger"
+   },
+   {
+    "arxiv_id": "2401.00001",
+    "authors": [
+     "Mary Somerville"
+    ],
+    "chunks": 1,
+    "created_at": "<time>",
+    "id": "<id2>",
+    "scope": "project",
+    "source_type": "arxiv",
+    "summary": "The glacier retreated two kilometres and meltwater carved new channels.",
+    "title": "Glacier survey"
+   }
+  ],
+  "success": true
+ },
+ "list_limit/same": {
+  "count": 2,
+  "documents": [
+   {
+    "chunks": 0,
+    "created_at": "<time>",
+    "has_file": true,
+    "id": "<id1>",
+    "scope": "project",
+    "source_type": "local",
+    "summary": "",
+    "title": "Scanned ledger"
+   },
+   {
+    "arxiv_id": "2401.00001",
+    "authors": [
+     "Mary Somerville"
+    ],
+    "chunks": 1,
+    "created_at": "<time>",
+    "id": "<id2>",
+    "scope": "project",
+    "source_type": "arxiv",
+    "summary": "The glacier retreated two kilometres and meltwater carved new channels.",
+    "title": "Glacier survey"
+   }
+  ],
+  "success": true
+ },
+ "list_limit/two": {
+  "count": 2,
+  "documents": [
+   {
+    "chunks": 0,
+    "created_at": "<time>",
+    "has_file": true,
+    "id": "<id1>",
+    "scope": "user",
+    "source_type": "local",
+    "summary": "",
+    "title": "Scanned ledger"
+   },
+   {
+    "arxiv_id": "2401.00001",
+    "authors": [
+     "Mary Somerville"
+    ],
+    "chunks": 1,
+    "created_at": "<time>",
+    "id": "<id2>",
+    "scope": "user",
+    "source_type": "arxiv",
+    "summary": "The glacier retreated two kilometres and meltwater carved new channels.",
+    "title": "Glacier survey"
+   }
+  ],
+  "success": true
+ },
+ "no_knowledge_base/ingest_arxiv_paper": {
+  "error": "kb manager not available",
+  "success": false
+ },
+ "no_knowledge_base/kb_ingest_file": {
+  "error": "kb manager not available",
+  "success": false
+ },
+ "no_knowledge_base/kb_ingest_text": {
+  "error": "kb manager not available",
+  "success": false
+ },
+ "no_knowledge_base/kb_ingest_url": {
+  "error": "kb manager not available",
+  "success": false
+ },
+ "no_knowledge_base/kb_list": {
+  "error": "kb manager not available",
+  "success": false
+ },
+ "no_knowledge_base/kb_read": {
+  "error": "Document not found: Basalt columns",
+  "success": false
+ },
+ "no_knowledge_base/kb_search": {
+  "error": "kb manager not available",
+  "success": false
+ },
+ "no_knowledge_base/kb_search_concepts": {
+  "error": "kb manager not available",
+  "success": false
+ },
+ "no_knowledge_base/kb_write_concept": {
+  "error": "kb manager not available",
+  "success": false
+ },
+ "papers_bad_source/same/no_workflow": [
+  {
+   "columns": [
+    "ID",
+    "Title",
+    "Source",
+    "Chunks",
+    "Created"
+   ],
+   "rows": [
+    [
+     "<id>",
+     "Glacier survey",
+     "arxiv",
+     "1",
+     "<date>"
+    ],
+    [
+     "<id>",
+     "Basalt columns",
+     "web",
+     "1",
+     "<date>"
+    ],
+    [
+     "<id>",
+     "Volcano field notes",
+     "user",
+     "1",
+     "<date>"
+    ]
+   ],
+   "table": "Project Knowledge Base Documents"
+  }
+ ],
+ "papers_bad_source/same/workflow": [
+  {
+   "columns": [
+    "ID",
+    "Title",
+    "Source",
+    "Chunks",
+    "Created"
+   ],
+   "rows": [
+    [
+     "<id>",
+     "Glacier survey",
+     "arxiv",
+     "1",
+     "<date>"
+    ],
+    [
+     "<id>",
+     "Basalt columns",
+     "web",
+     "1",
+     "<date>"
+    ],
+    [
+     "<id>",
+     "Volcano field notes",
+     "user",
+     "1",
+     "<date>"
+    ]
+   ],
+   "table": "Project Knowledge Base Documents"
+  }
+ ],
+ "papers_bad_source/two/no_workflow": [
+  {
+   "columns": [
+    "ID",
+    "Title",
+    "Source",
+    "Chunks",
+    "Created"
+   ],
+   "rows": [
+    [
+     "<id>",
+     "Basalt columns",
+     "web",
+     "1",
+     "<date>"
+    ],
+    [
+     "<id>",
+     "Volcano field notes",
+     "user",
+     "1",
+     "<date>"
+    ]
+   ],
+   "table": "Project Knowledge Base Documents"
+  }
+ ],
+ "papers_bad_source/two/workflow": [
+  {
+   "columns": [
+    "ID",
+    "Title",
+    "Source",
+    "Chunks",
+    "Created"
+   ],
+   "rows": [
+    [
+     "<id>",
+     "Basalt columns",
+     "web",
+     "1",
+     "<date>"
+    ],
+    [
+     "<id>",
+     "Volcano field notes",
+     "user",
+     "1",
+     "<date>"
+    ]
+   ],
+   "table": "Project Knowledge Base Documents"
+  }
+ ],
+ "papers_global/same/no_workflow": [
+  {
+   "columns": [
+    "ID",
+    "Title",
+    "Source",
+    "Chunks",
+    "Created"
+   ],
+   "rows": [
+    [
+     "<id>",
+     "Glacier survey",
+     "arxiv",
+     "1",
+     "<date>"
+    ],
+    [
+     "<id>",
+     "Basalt columns",
+     "web",
+     "1",
+     "<date>"
+    ],
+    [
+     "<id>",
+     "Volcano field notes",
+     "user",
+     "1",
+     "<date>"
+    ]
+   ],
+   "table": "User Knowledge Base Documents"
+  }
+ ],
+ "papers_global/same/workflow": [
+  {
+   "columns": [
+    "ID",
+    "Title",
+    "Source",
+    "Chunks",
+    "Created"
+   ],
+   "rows": [
+    [
+     "<id>",
+     "Glacier survey",
+     "arxiv",
+     "1",
+     "<date>"
+    ],
+    [
+     "<id>",
+     "Basalt columns",
+     "web",
+     "1",
+     "<date>"
+    ],
+    [
+     "<id>",
+     "Volcano field notes",
+     "user",
+     "1",
+     "<date>"
+    ]
+   ],
+   "table": "User Knowledge Base Documents"
+  }
+ ],
+ "papers_global/two/no_workflow": [
+  {
+   "columns": [
+    "ID",
+    "Title",
+    "Source",
+    "Chunks",
+    "Created"
+   ],
+   "rows": [
+    [
+     "<id>",
+     "Glacier survey",
+     "arxiv",
+     "1",
+     "<date>"
+    ]
+   ],
+   "table": "User Knowledge Base Documents"
+  }
+ ],
+ "papers_global/two/workflow": [
+  {
+   "columns": [
+    "ID",
+    "Title",
+    "Source",
+    "Chunks",
+    "Created"
+   ],
+   "rows": [
+    [
+     "<id>",
+     "Glacier survey",
+     "arxiv",
+     "1",
+     "<date>"
+    ]
+   ],
+   "table": "User Knowledge Base Documents"
+  }
+ ],
+ "papers_project/same/no_workflow": [
+  {
+   "columns": [
+    "ID",
+    "Title",
+    "Source",
+    "Chunks",
+    "Created"
+   ],
+   "rows": [
+    [
+     "<id>",
+     "Glacier survey",
+     "arxiv",
+     "1",
+     "<date>"
+    ],
+    [
+     "<id>",
+     "Basalt columns",
+     "web",
+     "1",
+     "<date>"
+    ],
+    [
+     "<id>",
+     "Volcano field notes",
+     "user",
+     "1",
+     "<date>"
+    ]
+   ],
+   "table": "Project Knowledge Base Documents"
+  }
+ ],
+ "papers_project/same/workflow": [
+  {
+   "columns": [
+    "ID",
+    "Title",
+    "Source",
+    "Chunks",
+    "Created"
+   ],
+   "rows": [
+    [
+     "<id>",
+     "Glacier survey",
+     "arxiv",
+     "1",
+     "<date>"
+    ],
+    [
+     "<id>",
+     "Basalt columns",
+     "web",
+     "1",
+     "<date>"
+    ],
+    [
+     "<id>",
+     "Volcano field notes",
+     "user",
+     "1",
+     "<date>"
+    ]
+   ],
+   "table": "Project Knowledge Base Documents"
+  }
+ ],
+ "papers_project/two/no_workflow": [
+  {
+   "columns": [
+    "ID",
+    "Title",
+    "Source",
+    "Chunks",
+    "Created"
+   ],
+   "rows": [
+    [
+     "<id>",
+     "Basalt columns",
+     "web",
+     "1",
+     "<date>"
+    ],
+    [
+     "<id>",
+     "Volcano field notes",
+     "user",
+     "1",
+     "<date>"
+    ]
+   ],
+   "table": "Project Knowledge Base Documents"
+  }
+ ],
+ "papers_project/two/workflow": [
+  {
+   "columns": [
+    "ID",
+    "Title",
+    "Source",
+    "Chunks",
+    "Created"
+   ],
+   "rows": [
+    [
+     "<id>",
+     "Basalt columns",
+     "web",
+     "1",
+     "<date>"
+    ],
+    [
+     "<id>",
+     "Volcano field notes",
+     "user",
+     "1",
+     "<date>"
+    ]
+   ],
+   "table": "Project Knowledge Base Documents"
+  }
+ ],
+ "papers_query/same/no_workflow": [
+  {
+   "columns": [
+    "ID",
+    "Title",
+    "Source",
+    "Chunks",
+    "Created"
+   ],
+   "rows": [
+    [
+     "<id>",
+     "Volcano field notes",
+     "user",
+     "1",
+     "<date>"
+    ]
+   ],
+   "table": "Project Knowledge Base Documents"
+  }
+ ],
+ "papers_query/same/workflow": [
+  {
+   "columns": [
+    "ID",
+    "Title",
+    "Source",
+    "Chunks",
+    "Created"
+   ],
+   "rows": [
+    [
+     "<id>",
+     "Volcano field notes",
+     "user",
+     "1",
+     "<date>"
+    ]
+   ],
+   "table": "Project Knowledge Base Documents"
+  }
+ ],
+ "papers_query/two/no_workflow": [
+  {
+   "columns": [
+    "ID",
+    "Title",
+    "Source",
+    "Chunks",
+    "Created"
+   ],
+   "rows": [
+    [
+     "<id>",
+     "Volcano field notes",
+     "user",
+     "1",
+     "<date>"
+    ]
+   ],
+   "table": "Project Knowledge Base Documents"
+  }
+ ],
+ "papers_query/two/workflow": [
+  {
+   "columns": [
+    "ID",
+    "Title",
+    "Source",
+    "Chunks",
+    "Created"
+   ],
+   "rows": [
+    [
+     "<id>",
+     "Volcano field notes",
+     "user",
+     "1",
+     "<date>"
+    ]
+   ],
+   "table": "Project Knowledge Base Documents"
+  }
+ ],
+ "papers_query_author/same/no_workflow": [
+  {
+   "columns": [
+    "ID",
+    "Title",
+    "Source",
+    "Chunks",
+    "Created"
+   ],
+   "rows": [
+    [
+     "<id>",
+     "Glacier survey",
+     "arxiv",
+     "1",
+     "<date>"
+    ]
+   ],
+   "table": "User Knowledge Base Documents"
+  }
+ ],
+ "papers_query_author/same/workflow": [
+  {
+   "columns": [
+    "ID",
+    "Title",
+    "Source",
+    "Chunks",
+    "Created"
+   ],
+   "rows": [
+    [
+     "<id>",
+     "Glacier survey",
+     "arxiv",
+     "1",
+     "<date>"
+    ]
+   ],
+   "table": "User Knowledge Base Documents"
+  }
+ ],
+ "papers_query_author/two/no_workflow": [
+  {
+   "columns": [
+    "ID",
+    "Title",
+    "Source",
+    "Chunks",
+    "Created"
+   ],
+   "rows": [
+    [
+     "<id>",
+     "Glacier survey",
+     "arxiv",
+     "1",
+     "<date>"
+    ]
+   ],
+   "table": "User Knowledge Base Documents"
+  }
+ ],
+ "papers_query_author/two/workflow": [
+  {
+   "columns": [
+    "ID",
+    "Title",
+    "Source",
+    "Chunks",
+    "Created"
+   ],
+   "rows": [
+    [
+     "<id>",
+     "Glacier survey",
+     "arxiv",
+     "1",
+     "<date>"
+    ]
+   ],
+   "table": "User Knowledge Base Documents"
+  }
+ ],
+ "papers_source/same/no_workflow": [
+  {
+   "columns": [
+    "ID",
+    "Title",
+    "Source",
+    "Chunks",
+    "Created"
+   ],
+   "rows": [
+    [
+     "<id>",
+     "Basalt columns",
+     "web",
+     "1",
+     "<date>"
+    ]
+   ],
+   "table": "Project Knowledge Base Documents"
+  }
+ ],
+ "papers_source/same/workflow": [
+  {
+   "columns": [
+    "ID",
+    "Title",
+    "Source",
+    "Chunks",
+    "Created"
+   ],
+   "rows": [
+    [
+     "<id>",
+     "Basalt columns",
+     "web",
+     "1",
+     "<date>"
+    ]
+   ],
+   "table": "Project Knowledge Base Documents"
+  }
+ ],
+ "papers_source/two/no_workflow": [
+  {
+   "columns": [
+    "ID",
+    "Title",
+    "Source",
+    "Chunks",
+    "Created"
+   ],
+   "rows": [
+    [
+     "<id>",
+     "Basalt columns",
+     "web",
+     "1",
+     "<date>"
+    ]
+   ],
+   "table": "Project Knowledge Base Documents"
+  }
+ ],
+ "papers_source/two/workflow": [
+  {
+   "columns": [
+    "ID",
+    "Title",
+    "Source",
+    "Chunks",
+    "Created"
+   ],
+   "rows": [
+    [
+     "<id>",
+     "Basalt columns",
+     "web",
+     "1",
+     "<date>"
+    ]
+   ],
+   "table": "Project Knowledge Base Documents"
+  }
+ ],
+ "read_by_id_prefix/one": {
+  "content": "The glacier retreated two kilometres and meltwater carved new channels.",
+  "document_id": "<id1>",
+  "full": true,
+  "scope": "project",
+  "source_type": "arxiv",
+  "success": true,
+  "title": "Glacier survey",
+  "truncated": false
+ },
+ "read_by_id_prefix/same": {
+  "content": "The glacier retreated two kilometres and meltwater carved new channels.",
+  "document_id": "<id1>",
+  "full": true,
+  "scope": "user",
+  "source_type": "arxiv",
+  "success": true,
+  "title": "Glacier survey",
+  "truncated": false
+ },
+ "read_by_id_prefix/two": {
+  "content": "The glacier retreated two kilometres and meltwater carved new channels.",
+  "document_id": "<id1>",
+  "full": true,
+  "scope": "user",
+  "source_type": "arxiv",
+  "success": true,
+  "title": "Glacier survey",
+  "truncated": false
+ },
+ "read_full/one": {
+  "content": "Basalt lava cools into columns near the volcano.",
+  "document_id": "<id1>",
+  "full": true,
+  "scope": "project",
+  "source_type": "user",
+  "success": true,
+  "title": "Volcano field notes",
+  "truncated": false
+ },
+ "read_full/same": {
+  "content": "Basalt lava cools into columns near the volcano.",
+  "document_id": "<id1>",
+  "full": true,
+  "scope": "user",
+  "source_type": "user",
+  "success": true,
+  "title": "Volcano field notes",
+  "truncated": false
+ },
+ "read_full/two": {
+  "content": "Basalt lava cools into columns near the volcano.",
+  "document_id": "<id1>",
+  "full": true,
+  "scope": "project",
+  "source_type": "user",
+  "success": true,
+  "title": "Volcano field notes",
+  "truncated": false
+ },
+ "read_full_truncated/one": {
+  "content": "Columns of b",
+  "document_id": "<id1>",
+  "full": true,
+  "scope": "project",
+  "source_type": "web",
+  "success": true,
+  "title": "Basalt columns",
+  "truncated": true
+ },
+ "read_full_truncated/same": {
+  "content": "Columns of b",
+  "document_id": "<id1>",
+  "full": true,
+  "scope": "user",
+  "source_type": "web",
+  "success": true,
+  "title": "Basalt columns",
+  "truncated": true
+ },
+ "read_full_truncated/two": {
+  "content": "Columns of b",
+  "document_id": "<id1>",
+  "full": true,
+  "scope": "project",
+  "source_type": "web",
+  "success": true,
+  "title": "Basalt columns",
+  "truncated": true
+ },
+ "read_missing_sidecar_is_written/one": {
+  "read": {
+   "document_id": "<id1>",
+   "full": false,
+   "scope": "project",
+   "sidecar": "---\nid: <id1>\ntitle: Scanned ledger\nsource_type: local\ningested_at: <time>\nchunks: 0\nfile: files/<id1>.pdf\n---\n\n## Summary\nSynthesis of Scanned ledger.\n\n## Key Claims\n- Scanned ledger makes one claim.\n\n## Key Entities\nTopics: geology\n",
+   "source_type": "local",
+   "success": true,
+   "summary": "",
+   "title": "Scanned ledger"
+  },
+  "written": true
+ },
+ "read_missing_sidecar_is_written/same": {
+  "read": {
+   "document_id": "<id1>",
+   "full": false,
+   "scope": "user",
+   "sidecar": "---\nid: <id1>\ntitle: Scanned ledger\nsource_type: local\ningested_at: <time>\nchunks: 0\nfile: files/<id1>.pdf\n---\n\n## Summary\nSynthesis of Scanned ledger.\n\n## Key Claims\n- Scanned ledger makes one claim.\n\n## Key Entities\nTopics: geology\n",
+   "source_type": "local",
+   "success": true,
+   "summary": "",
+   "title": "Scanned ledger"
+  },
+  "written": true
+ },
+ "read_missing_sidecar_is_written/two": {
+  "read": {
+   "document_id": "<id1>",
+   "full": false,
+   "scope": "user",
+   "sidecar": "---\nid: <id1>\ntitle: Scanned ledger\nsource_type: local\ningested_at: <time>\nchunks: 0\nfile: files/<id1>.pdf\n---\n\n## Summary\nSynthesis of Scanned ledger.\n\n## Key Claims\n- Scanned ledger makes one claim.\n\n## Key Entities\nTopics: geology\n",
+   "source_type": "local",
+   "success": true,
+   "summary": "",
+   "title": "Scanned ledger"
+  },
+  "written": true
+ },
+ "read_pdf_without_text/one": {
+  "content": "Magma ledger entries",
+  "document_id": "<id1>",
+  "full": true,
+  "scope": "project",
+  "source_type": "local",
+  "success": true,
+  "title": "Scanned ledger",
+  "truncated": false
+ },
+ "read_pdf_without_text/same": {
+  "content": "Magma ledger entries",
+  "document_id": "<id1>",
+  "full": true,
+  "scope": "user",
+  "source_type": "local",
+  "success": true,
+  "title": "Scanned ledger",
+  "truncated": false
+ },
+ "read_pdf_without_text/two": {
+  "content": "Magma ledger entries",
+  "document_id": "<id1>",
+  "full": true,
+  "scope": "user",
+  "source_type": "local",
+  "success": true,
+  "title": "Scanned ledger",
+  "truncated": false
+ },
+ "read_sidecar/one": {
+  "document_id": "<id1>",
+  "full": false,
+  "scope": "project",
+  "sidecar": "---\nid: <id1>\ntitle: Glacier survey\nsource_type: arxiv\nauthors: [Mary Somerville]\narxiv_id: 2401.00001\ningested_at: <time>\nchunks: 1\n---\n\n## Summary\nThe glacier retreated two kilometres and meltwater carved new channels.\n",
+  "source_type": "arxiv",
+  "success": true,
+  "summary": "The glacier retreated two kilometres and meltwater carved new channels.",
+  "title": "Glacier survey"
+ },
+ "read_sidecar/same": {
+  "document_id": "<id1>",
+  "full": false,
+  "scope": "user",
+  "sidecar": "---\nid: <id1>\ntitle: Glacier survey\nsource_type: arxiv\nauthors: [Mary Somerville]\narxiv_id: 2401.00001\ningested_at: <time>\nchunks: 1\n---\n\n## Summary\nThe glacier retreated two kilometres and meltwater carved new channels.\n",
+  "source_type": "arxiv",
+  "success": true,
+  "summary": "The glacier retreated two kilometres and meltwater carved new channels.",
+  "title": "Glacier survey"
+ },
+ "read_sidecar/two": {
+  "document_id": "<id1>",
+  "full": false,
+  "scope": "user",
+  "sidecar": "---\nid: <id1>\ntitle: Glacier survey\nsource_type: arxiv\nauthors: [Mary Somerville]\narxiv_id: 2401.00001\ningested_at: <time>\nchunks: 1\n---\n\n## Summary\nThe glacier retreated two kilometres and meltwater carved new channels.\n",
+  "source_type": "arxiv",
+  "success": true,
+  "summary": "The glacier retreated two kilometres and meltwater carved new channels.",
+  "title": "Glacier survey"
+ },
+ "read_unknown/one": {
+  "error": "Document not found: no such document",
+  "success": false
+ },
+ "read_unknown/same": {
+  "error": "Document not found: no such document",
+  "success": false
+ },
+ "read_unknown/two": {
+  "error": "Document not found: no such document",
+  "success": false
+ },
+ "search_all/one": {
+  "query_embedding_time_ms": "<ms>",
+  "results": [
+   {
+    "chunk_content": "Basalt lava cools into columns near the volcano.",
+    "chunk_id": "<id1>",
+    "document_id": "<id2>",
+    "document_title": "Volcano field notes",
+    "highlight": "Basalt lava cools into columns near the volcano.",
+    "metadata": {
+     "authors": [
+      "Ada Lovelace"
+     ],
+     "tags": [
+      "field"
+     ],
+     "title": "Volcano field notes"
+    },
+    "scope": "project",
+    "score": 0.01639344262295082,
+    "source_type": "user",
+    "source_url": null
+   },
+   {
+    "chunk_content": "The glacier retreated two kilometres and meltwater carved new channels.",
+    "chunk_id": "<id3>",
+    "document_id": "<id4>",
+    "document_title": "Glacier survey",
+    "highlight": "The glacier retreated two kilometres and meltwater carved new channels.",
+    "metadata": {
+     "arxiv_id": "2401.00001",
+     "authors": [
+      "Mary Somerville"
+     ],
+     "title": "Glacier survey"
+    },
+    "scope": "project",
+    "score": 0.016129032258064516,
+    "source_type": "arxiv",
+    "source_url": null
+   },
+   {
+    "chunk_content": "Columns of basalt form as thick lava flows cool slowly.",
+    "chunk_id": "<id5>",
+    "document_id": "<id6>",
+    "document_title": "Basalt columns",
+    "highlight": "Columns of basalt form as thick lava flows cool slowly.",
+    "metadata": {
+     "title": "Basalt columns"
+    },
+    "scope": "project",
+    "score": 0.015873015873015872,
+    "source_type": "web",
+    "source_url": "https://example.org/basalt"
+   }
+  ],
+  "search_time_ms": "<ms>",
+  "success": true,
+  "total_matches": 3,
+  "total_time_ms": "<ms>"
+ },
+ "search_all/same": {
+  "query_embedding_time_ms": "<ms>",
+  "results": [
+   {
+    "chunk_content": "Basalt lava cools into columns near the volcano.",
+    "chunk_id": "<id1>",
+    "document_id": "<id2>",
+    "document_title": "Volcano field notes",
+    "highlight": "Basalt lava cools into columns near the volcano.",
+    "metadata": {
+     "authors": [
+      "Ada Lovelace"
+     ],
+     "tags": [
+      "field"
+     ],
+     "title": "Volcano field notes"
+    },
+    "scope": "project",
+    "score": 0.01639344262295082,
+    "source_type": "user",
+    "source_url": null
+   },
+   {
+    "chunk_content": "The glacier retreated two kilometres and meltwater carved new channels.",
+    "chunk_id": "<id3>",
+    "document_id": "<id4>",
+    "document_title": "Glacier survey",
+    "highlight": "The glacier retreated two kilometres and meltwater carved new channels.",
+    "metadata": {
+     "arxiv_id": "2401.00001",
+     "authors": [
+      "Mary Somerville"
+     ],
+     "title": "Glacier survey"
+    },
+    "scope": "project",
+    "score": 0.016129032258064516,
+    "source_type": "arxiv",
+    "source_url": null
+   },
+   {
+    "chunk_content": "Columns of basalt form as thick lava flows cool slowly.",
+    "chunk_id": "<id5>",
+    "document_id": "<id6>",
+    "document_title": "Basalt columns",
+    "highlight": "Columns of basalt form as thick lava flows cool slowly.",
+    "metadata": {
+     "title": "Basalt columns"
+    },
+    "scope": "project",
+    "score": 0.015873015873015872,
+    "source_type": "web",
+    "source_url": "https://example.org/basalt"
+   }
+  ],
+  "search_time_ms": "<ms>",
+  "success": true,
+  "total_matches": 3,
+  "total_time_ms": "<ms>"
+ },
+ "search_all/two": {
+  "query_embedding_time_ms": "<ms>",
+  "results": [
+   {
+    "chunk_content": "Basalt lava cools into columns near the volcano.",
+    "chunk_id": "<id1>",
+    "document_id": "<id2>",
+    "document_title": "Volcano field notes",
+    "highlight": "Basalt lava cools into columns near the volcano.",
+    "metadata": {
+     "authors": [
+      "Ada Lovelace"
+     ],
+     "tags": [
+      "field"
+     ],
+     "title": "Volcano field notes"
+    },
+    "scope": "project",
+    "score": 0.0164,
+    "source_type": "user",
+    "source_url": null
+   },
+   {
+    "chunk_content": "The glacier retreated two kilometres and meltwater carved new channels.",
+    "chunk_id": "<id3>",
+    "document_id": "<id4>",
+    "document_title": "Glacier survey",
+    "highlight": "The glacier retreated two kilometres and meltwater carved new channels.",
+    "metadata": {
+     "arxiv_id": "2401.00001",
+     "authors": [
+      "Mary Somerville"
+     ],
+     "title": "Glacier survey"
+    },
+    "scope": "user",
+    "score": 0.0164,
+    "source_type": "arxiv",
+    "source_url": null
+   },
+   {
+    "chunk_content": "Columns of basalt form as thick lava flows cool slowly.",
+    "chunk_id": "<id5>",
+    "document_id": "<id6>",
+    "document_title": "Basalt columns",
+    "highlight": "Columns of basalt form as thick lava flows cool slowly.",
+    "metadata": {
+     "title": "Basalt columns"
+    },
+    "scope": "project",
+    "score": 0.0161,
+    "source_type": "web",
+    "source_url": "https://example.org/basalt"
+   }
+  ],
+  "search_time_ms": "<ms>",
+  "success": true,
+  "total_matches": 3,
+  "total_time_ms": "<ms>"
+ },
+ "search_bad_filter_value/one": {
+  "error": "Search failed: 'blog' is not a valid SourceType",
+  "success": false
+ },
+ "search_bad_filter_value/same": {
+  "error": "Search failed: 'blog' is not a valid SourceType",
+  "success": false
+ },
+ "search_bad_filter_value/two": {
+  "error": "Search failed: 'blog' is not a valid SourceType",
+  "success": false
+ },
+ "search_bad_filters/one": {
+  "error": "Invalid JSON in filters: not json",
+  "success": false
+ },
+ "search_bad_filters/same": {
+  "error": "Invalid JSON in filters: not json",
+  "success": false
+ },
+ "search_bad_filters/two": {
+  "error": "Invalid JSON in filters: not json",
+  "success": false
+ },
+ "search_filtered/one": {
+  "query_embedding_time_ms": "<ms>",
+  "results": [
+   {
+    "chunk_content": "The glacier retreated two kilometres and meltwater carved new channels.",
+    "chunk_id": "<id1>",
+    "document_id": "<id2>",
+    "document_title": "Glacier survey",
+    "highlight": "The glacier retreated two kilometres and meltwater carved new channels.",
+    "metadata": {
+     "arxiv_id": "2401.00001",
+     "authors": [
+      "Mary Somerville"
+     ],
+     "title": "Glacier survey"
+    },
+    "scope": "project",
+    "score": 0.016129032258064516,
+    "source_type": "arxiv",
+    "source_url": null
+   }
+  ],
+  "search_time_ms": "<ms>",
+  "success": true,
+  "total_matches": 1,
+  "total_time_ms": "<ms>"
+ },
+ "search_filtered/same": {
+  "query_embedding_time_ms": "<ms>",
+  "results": [
+   {
+    "chunk_content": "The glacier retreated two kilometres and meltwater carved new channels.",
+    "chunk_id": "<id1>",
+    "document_id": "<id2>",
+    "document_title": "Glacier survey",
+    "highlight": "The glacier retreated two kilometres and meltwater carved new channels.",
+    "metadata": {
+     "arxiv_id": "2401.00001",
+     "authors": [
+      "Mary Somerville"
+     ],
+     "title": "Glacier survey"
+    },
+    "scope": "project",
+    "score": 0.016129032258064516,
+    "source_type": "arxiv",
+    "source_url": null
+   }
+  ],
+  "search_time_ms": "<ms>",
+  "success": true,
+  "total_matches": 1,
+  "total_time_ms": "<ms>"
+ },
+ "search_filtered/two": {
+  "query_embedding_time_ms": "<ms>",
+  "results": [
+   {
+    "chunk_content": "The glacier retreated two kilometres and meltwater carved new channels.",
+    "chunk_id": "<id1>",
+    "document_id": "<id2>",
+    "document_title": "Glacier survey",
+    "highlight": "The glacier retreated two kilometres and meltwater carved new channels.",
+    "metadata": {
+     "arxiv_id": "2401.00001",
+     "authors": [
+      "Mary Somerville"
+     ],
+     "title": "Glacier survey"
+    },
+    "scope": "user",
+    "score": 0.0164,
+    "source_type": "arxiv",
+    "source_url": null
+   }
+  ],
+  "search_time_ms": "<ms>",
+  "success": true,
+  "total_matches": 1,
+  "total_time_ms": "<ms>"
+ },
+ "search_top_k/one": {
+  "query_embedding_time_ms": "<ms>",
+  "results": [
+   {
+    "chunk_content": "Basalt lava cools into columns near the volcano.",
+    "chunk_id": "<id1>",
+    "document_id": "<id2>",
+    "document_title": "Volcano field notes",
+    "highlight": "Basalt lava cools into columns near the volcano.",
+    "metadata": {
+     "authors": [
+      "Ada Lovelace"
+     ],
+     "tags": [
+      "field"
+     ],
+     "title": "Volcano field notes"
+    },
+    "scope": "project",
+    "score": 0.01639344262295082,
+    "source_type": "user",
+    "source_url": null
+   }
+  ],
+  "search_time_ms": "<ms>",
+  "success": true,
+  "total_matches": 1,
+  "total_time_ms": "<ms>"
+ },
+ "search_top_k/same": {
+  "query_embedding_time_ms": "<ms>",
+  "results": [
+   {
+    "chunk_content": "Basalt lava cools into columns near the volcano.",
+    "chunk_id": "<id1>",
+    "document_id": "<id2>",
+    "document_title": "Volcano field notes",
+    "highlight": "Basalt lava cools into columns near the volcano.",
+    "metadata": {
+     "authors": [
+      "Ada Lovelace"
+     ],
+     "tags": [
+      "field"
+     ],
+     "title": "Volcano field notes"
+    },
+    "scope": "project",
+    "score": 0.01639344262295082,
+    "source_type": "user",
+    "source_url": null
+   }
+  ],
+  "search_time_ms": "<ms>",
+  "success": true,
+  "total_matches": 1,
+  "total_time_ms": "<ms>"
+ },
+ "search_top_k/two": {
+  "query_embedding_time_ms": "<ms>",
+  "results": [
+   {
+    "chunk_content": "Basalt lava cools into columns near the volcano.",
+    "chunk_id": "<id1>",
+    "document_id": "<id2>",
+    "document_title": "Volcano field notes",
+    "highlight": "Basalt lava cools into columns near the volcano.",
+    "metadata": {
+     "authors": [
+      "Ada Lovelace"
+     ],
+     "tags": [
+      "field"
+     ],
+     "title": "Volcano field notes"
+    },
+    "scope": "project",
+    "score": 0.0164,
+    "source_type": "user",
+    "source_url": null
+   }
+  ],
+  "search_time_ms": "<ms>",
+  "success": true,
+  "total_matches": 1,
+  "total_time_ms": "<ms>"
+ }
+}

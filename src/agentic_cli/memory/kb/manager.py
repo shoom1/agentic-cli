@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import threading
 import time
@@ -25,6 +26,7 @@ from typing import Any, Protocol
 
 from agentic_cli.memory._core.embeddings import EmbeddingConfig, EmbeddingService
 from agentic_cli.memory._core.mock_embeddings import MockEmbeddingService
+from agentic_cli.memory.kb import enrich
 from agentic_cli.memory.kb.models import (
     Document,
     DocumentChunk,
@@ -33,6 +35,7 @@ from agentic_cli.memory.kb.models import (
 )
 from agentic_cli.memory.kb.vector_store import VectorStore
 from agentic_cli.memory._core.io import atomic_write_json, atomic_write_text
+from agentic_cli.memory._core.model_record import ModelRecord, read_model_record, write_model_record
 from agentic_cli.memory._core.log import get_logger
 
 logger = get_logger("agentic_cli.memory.kb")
@@ -110,6 +113,15 @@ def matches_document_filters(doc: Document, filters: dict[str, Any]) -> bool:
     return True
 
 
+def _faiss_available() -> bool:
+    """Whether FAISS can be imported (the real vector store needs it)."""
+    try:
+        import faiss  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
 class KnowledgeBaseManager:
     """Main interface for knowledge base operations.
 
@@ -157,7 +169,10 @@ class KnowledgeBaseManager:
                 the summary is the document's first ~500 characters.
             use_mock: Use the mock embedding service and vector store (no ML
                 libraries needed).
-            embedding_service: A ready embedding service (with ``vector_store``).
+            embedding_service: A ready embedding service, for example one
+                shared with another knowledge base. Without ``vector_store``,
+                the knowledge base builds its vector store at the service's
+                dimension.
             vector_store: A ready vector store (with ``embedding_service``).
         """
         base_dir = Path(base_dir)
@@ -175,6 +190,7 @@ class KnowledgeBaseManager:
 
         self.metadata_path = self.kb_dir / "metadata.json"
         self.files_dir = self.kb_dir / "files"
+        self._model_record_path = self.embeddings_dir / "model.json"
 
         # Ensure directories exist
         self.kb_dir.mkdir(parents=True, exist_ok=True)
@@ -183,18 +199,23 @@ class KnowledgeBaseManager:
         self.files_dir.mkdir(parents=True, exist_ok=True)
 
         # Use injected services or create them
-        if embedding_service and vector_store:
+        if embedding_service is not None and vector_store is not None:
             self._embedding_service = embedding_service
             self._vector_store = vector_store
         else:
             self._embedding_service, self._vector_store = self._create_services(
-                embedding or EmbeddingConfig()
+                embedding or EmbeddingConfig(), embedding_service
             )
 
         # Load document metadata
         self._documents: dict[str, Document] = {}
         self._chunks: dict[str, DocumentChunk] = {}
         self._load_metadata()
+
+        # A real index must have been built by the model this knowledge base
+        # has now (see _reconcile_index).
+        if self._has_real_index():
+            self._reconcile_index()
 
         # BM25 index for hybrid search
         self._bm25_index = None
@@ -231,29 +252,49 @@ class KnowledgeBaseManager:
             self._concepts_store = ConceptStore(self.kb_dir / "concepts")
         return self._concepts_store
 
-    def _create_services(self, embedding: EmbeddingConfig) -> tuple[Any, Any]:
-        """Create embedding service and vector store.
+    def _create_services(
+        self, embedding: EmbeddingConfig, embedding_service: Any = None
+    ) -> tuple[Any, Any]:
+        """The embedding service and vector store this knowledge base uses.
 
-        Tries real implementations first; falls back to mocks if
-        dependencies (sentence_transformers, faiss) are unavailable.
+        A given ``embedding_service`` is used (a mock one with the mock
+        store); otherwise one is built from ``embedding`` when
+        sentence-transformers is installed. A real service needs FAISS:
+        without it, with ``use_mock``, or with no service at all, the
+        knowledge base uses the mock service and store and searches by
+        keyword.
         """
-        if not self._use_mock and EmbeddingService.is_available():
-            try:
-                emb = EmbeddingService(
+        from agentic_cli.memory.kb._mock_vector_store import MockVectorStore
+
+        if not self._use_mock:
+            if isinstance(embedding_service, MockEmbeddingService):
+                return embedding_service, MockVectorStore(
+                    index_path=self.embeddings_dir / "index.mock",
+                    embedding_dim=embedding_service.embedding_dim,
+                )
+            service = embedding_service
+            if service is None and EmbeddingService.is_available():
+                service = EmbeddingService(
                     model_name=embedding.model_name,
                     batch_size=embedding.batch_size,
                     device=embedding.device,
                 )
-                vs = VectorStore(
-                    index_path=self.embeddings_dir / "index.faiss",
-                    embedding_dim=emb.embedding_dim,
+            if service is not None and _faiss_available():
+                try:
+                    vs = VectorStore(
+                        index_path=self.embeddings_dir / "index.faiss",
+                        embedding_dim=service.embedding_dim,
+                    )
+                    return service, vs
+                except ImportError:
+                    pass
+            if service is not None and not _faiss_available():
+                logger.info(
+                    "kb_keyword_search_only",
+                    reason="faiss not installed",
+                    model=getattr(service, "model_name", "unknown"),
                 )
-                return emb, vs
-            except ImportError:
-                pass
         self._use_mock = True
-
-        from agentic_cli.memory.kb._mock_vector_store import MockVectorStore
 
         emb = MockEmbeddingService(
             model_name=embedding.model_name,
@@ -264,6 +305,136 @@ class KnowledgeBaseManager:
             embedding_dim=emb.embedding_dim,
         )
         return emb, vs
+
+    _REEMBED_BATCH = 256
+
+    def _has_real_index(self) -> bool:
+        """A FAISS index with a real (not mock) embedding service."""
+        return isinstance(self._vector_store, VectorStore) and not isinstance(
+            self._embedding_service, MockEmbeddingService
+        )
+
+    def _current_record(self) -> ModelRecord:
+        return ModelRecord(
+            getattr(self._embedding_service, "model_name", "unknown"),
+            self._embedding_service.embedding_dim,
+        )
+
+    def _reconcile_index(self) -> None:
+        """Make the index on disk one the current model built.
+
+        With chunks and no index, every chunk is embedded. A record that names
+        the current model, with an index of its dimension, loads as it is;
+        any other record means re-embedding. With no record (a knowledge base
+        from 0.6.3), an index of the model's dimension whose mappings name
+        exactly the stored chunks is adopted; anything else is re-embedded.
+        A new knowledge base (no chunks, no index) gets its record with its
+        first save.
+        """
+        current = self._current_record()
+        store = self._vector_store
+        if not store.index_path.exists():
+            if self._chunks:
+                self._reembed(current, "no_index")
+            return
+        recorded = read_model_record(self._model_record_path)
+        dimension = store.index.d
+        if recorded is not None:
+            if recorded == current and dimension == current.embedding_dim:
+                return
+            self._reembed(current, "model_changed")
+            return
+        try:
+            covers = store.chunk_ids() == set(self._chunks)
+        except (TypeError, ValueError):
+            covers = False  # malformed mappings: rebuild rather than fail the open
+        if dimension == current.embedding_dim and covers and store.size == len(self._chunks):
+            self._write_record_on_open(current)
+            logger.info("kb_index_adopted", model=current.model_name, chunks=len(self._chunks))
+            return
+        self._reembed(current, "no_record")
+
+    def _write_record_on_open(self, current: ModelRecord) -> None:
+        """Write the record while opening; failing to must not fail the open."""
+        try:
+            write_model_record(self._model_record_path, current)
+        except OSError as e:
+            logger.warning("kb_model_record_write_failed", error=str(e))
+
+    def _reembed(self, current: ModelRecord, reason: str) -> None:
+        """Embed every chunk again and swap the new index in when it is complete.
+
+        The new index is built beside the old one and replaces it by rename;
+        the record is written last, so an interrupted run is redone on the
+        next open. If embedding fails, the old index stays on disk and this
+        session searches by keyword.
+        """
+        started = time.monotonic()
+        old = self._vector_store
+        new_index = old.index_path.with_name("index.rebuild.faiss")
+        new_mappings = new_index.with_suffix(".mappings.json")
+        chunk_ids = list(self._chunks)
+        logger.info("kb_reembedding", reason=reason, model=current.model_name, chunks=len(chunk_ids))
+        try:
+            new_index.unlink(missing_ok=True)
+            new_mappings.unlink(missing_ok=True)
+            fresh = VectorStore(index_path=new_index, embedding_dim=current.embedding_dim)
+            _ = fresh.index  # an empty knowledge base still saves an (empty) index
+            for start in range(0, len(chunk_ids), self._REEMBED_BATCH):
+                batch = chunk_ids[start : start + self._REEMBED_BATCH]
+                vectors = self._embedding_service.embed_batch([self._chunks[c].content for c in batch])
+                fresh.add_embeddings(batch, vectors)
+            fresh.save()
+            # Matches no model: an interruption after the swap, before the real
+            # record, forces a re-embedding on the next open.
+            write_model_record(
+                self._model_record_path,
+                ModelRecord(f"rebuilding:{current.model_name}", current.embedding_dim),
+            )
+            os.replace(new_mappings, old.index_path.with_suffix(".mappings.json"))
+            os.replace(new_index, old.index_path)
+        except Exception as e:
+            for leftover in (new_index, new_mappings):
+                try:
+                    leftover.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            logger.warning("kb_reembed_failed", reason=reason, error=str(e), exc_info=True)
+            self._search_by_keyword()
+            return
+        fresh.index_path = old.index_path
+        self._vector_store = fresh
+        self._write_record_on_open(current)
+        logger.info(
+            "kb_reembedded",
+            model=current.model_name,
+            chunks=len(chunk_ids),
+            seconds=round(time.monotonic() - started, 2),
+        )
+
+    def _search_by_keyword(self) -> None:
+        """Use the mock service and store for this session; the real index stays on disk."""
+        from agentic_cli.memory.kb._mock_vector_store import MockVectorStore
+
+        self._embedding_service = MockEmbeddingService(
+            model_name=getattr(self._embedding_service, "model_name", "mock-model"),
+            batch_size=getattr(self._embedding_service, "batch_size", 32),
+        )
+        self._vector_store = MockVectorStore(
+            index_path=self.embeddings_dir / "index.mock",
+            embedding_dim=self._embedding_service.embedding_dim,
+        )
+        self._use_mock = True
+
+    def _save_vectors(self) -> None:
+        """Save the vector store and, for a real index, the record of its model.
+
+        Rewritten on every save: when two sessions with different models save
+        one knowledge base, the record names the model of the index last saved.
+        """
+        self._vector_store.save()
+        if self._has_real_index():
+            write_model_record(self._model_record_path, self._current_record())
 
     # ------------------------------------------------------------------
     # Persistence — v2/v3 format (content in per-document files)
@@ -588,21 +759,7 @@ class KnowledgeBaseManager:
     @staticmethod
     def _truncate_summary(content: str) -> str:
         """Return the deterministic fallback summary (first ~500 chars)."""
-        return _truncate(content, 500) if content else ""
-
-    # Cap the amount of content we hand to the LLM summarizer. Long PDFs
-    # can easily exceed sensible prompt budgets, and the summary only
-    # needs the lead-in to be useful.
-    _SUMMARY_INPUT_CHAR_LIMIT = 12_000
-
-    _SUMMARY_PROMPT_TEMPLATE = (
-        "Summarize the following document in 2-3 sentences (max ~500 "
-        "characters). Focus on the main topic, key contributions, and "
-        "why the document is relevant. Return only the summary text "
-        "with no preamble or markdown.\n\n"
-        "Title: {title}\n\n"
-        "Content:\n---\n{content}\n---"
-    )
+        return enrich.preview(content)
 
     async def generate_summary(self, content: str, title: str = "") -> str:
         """Generate a document summary via the summarizer given at construction.
@@ -617,57 +774,7 @@ class KnowledgeBaseManager:
         Returns:
             Summary string (~500 chars).
         """
-        if not content:
-            return ""
-
-        try:
-            summarizer = self._summarizer
-            if summarizer is not None:
-                capped = content[: self._SUMMARY_INPUT_CHAR_LIMIT]
-                prompt = self._SUMMARY_PROMPT_TEMPLATE.format(
-                    title=title or "(untitled)",
-                    content=capped,
-                )
-                summary = await summarizer.summarize(capped, prompt)
-                if summary:
-                    return summary.strip()
-        except Exception:
-            logger.debug("kb_summary_generation_failed", exc_info=True)
-
-        return self._truncate_summary(content)
-
-    _SIDECAR_PROMPT_TEMPLATE = (
-        "Extract a structured payload from the document below. "
-        "Return PLAIN TEXT in exactly this layout, with section headers "
-        "in ALL CAPS followed by a colon:\n\n"
-        "SUMMARY:\n"
-        "<3-5 paragraph synthesis of the document, roughly 1500-3000 "
-        "chars total. Use blank lines between paragraphs. Cover, in "
-        "order: (1) the problem the work addresses and why it matters, "
-        "(2) the technical approach / methodology with enough detail "
-        "to convey how it works, (3) the main results with concrete "
-        "numbers or outcomes, (4) limitations or open questions, and "
-        "(5) how this fits into the broader landscape. Write for a "
-        "reader who will use this instead of re-reading the paper.>\n\n"
-        "CLAIMS:\n"
-        "- <one specific claim with numbers or concrete evidence>\n"
-        "- <one specific claim with numbers or concrete evidence>\n"
-        "- <aim for 5-10 claims, each standalone and specific>\n\n"
-        "ENTITIES:\n"
-        "<KindLabel>: <comma-separated names>\n"
-        "<KindLabel>: <comma-separated names>\n"
-        "Use kind labels like Models, Datasets, Methods, Authors, Tools, "
-        "Organizations as relevant; be exhaustive within each kind. "
-        "Omit any section that has no real content.\n\n"
-        "STRICT OUTPUT RULES:\n"
-        "- No preamble, no meta-commentary, no thinking trace.\n"
-        "- No markdown bold/italic on the SUMMARY/CLAIMS/ENTITIES headers.\n"
-        "- Start your response directly with 'SUMMARY:'.\n"
-        "- Always emit all three sections when content supports them.\n"
-        "- The summary is prose (paragraphs), not a bullet list.\n\n"
-        "Title: {title}\n\n"
-        "Content:\n---\n{content}\n---"
-    )
+        return await enrich.summarize(self._summarizer, content, title)
 
     async def generate_sidecar_payload(
         self, content: str, title: str = ""
@@ -676,84 +783,10 @@ class KnowledgeBaseManager:
 
         Returns a dict with keys ``summary`` (str), ``claims`` (list[str]),
         and ``entities`` (dict[str, list[str]]). Falls back to
-        ``{summary: truncate(content), claims: [], entities: {}}`` if there
+        ``{summary: enrich.preview(content), claims: [], entities: {}}`` if there
         is no summarizer or the LLM call fails.
         """
-        fallback = {
-            "summary": self._truncate_summary(content),
-            "claims": [],
-            "entities": {},
-        }
-        if not content:
-            return fallback
-
-        try:
-            summarizer = self._summarizer
-            if summarizer is None:
-                return fallback
-
-            capped = content[: self._SUMMARY_INPUT_CHAR_LIMIT]
-            prompt = self._SIDECAR_PROMPT_TEMPLATE.format(
-                title=title or "(untitled)",
-                content=capped,
-            )
-            raw = await summarizer.summarize(capped, prompt)
-        except Exception:
-            logger.debug("kb_sidecar_payload_failed", exc_info=True)
-            return fallback
-
-        return self._parse_sidecar_response(raw) or fallback
-
-    # Matches section headers like "SUMMARY:", "**SUMMARY:**", "  Claims :",
-    # tolerating leading whitespace and optional markdown bold wrappers
-    # (including a trailing ``**`` immediately after the colon).
-    _SECTION_HEADER_RE = re.compile(
-        r"^\s*\**\s*(SUMMARY|CLAIMS|ENTITIES)\s*\**\s*:\**",
-        re.MULTILINE | re.IGNORECASE,
-    )
-
-    @classmethod
-    def _parse_sidecar_response(cls, raw: str) -> dict[str, Any] | None:
-        """Parse the SUMMARY/CLAIMS/ENTITIES blocks. Returns None on garbage.
-
-        Sections are split by regex so multi-paragraph summaries preserve
-        their blank-line breaks verbatim. CLAIMS is parsed as a bullet
-        list; ENTITIES as ``Kind: comma, separated, names`` lines.
-        """
-        if not raw:
-            return None
-
-        matches = list(cls._SECTION_HEADER_RE.finditer(raw))
-        if not matches:
-            return None
-
-        sections: dict[str, str] = {}
-        for i, m in enumerate(matches):
-            key = m.group(1).lower()
-            start = m.end()
-            end = matches[i + 1].start() if i + 1 < len(matches) else len(raw)
-            sections[key] = raw[start:end].strip()
-
-        summary = sections.get("summary", "")
-
-        claims: list[str] = []
-        for line in sections.get("claims", "").splitlines():
-            stripped = line.strip().lstrip("-*").strip()
-            if stripped:
-                claims.append(stripped)
-
-        entities: dict[str, list[str]] = {}
-        for line in sections.get("entities", "").splitlines():
-            stripped = line.strip().lstrip("-*").strip()
-            if ":" in stripped:
-                kind, _, names = stripped.partition(":")
-                items = [n.strip() for n in names.split(",") if n.strip()]
-                if items:
-                    entities[kind.strip()] = items
-
-        if not summary and not claims and not entities:
-            return None
-        return {"summary": summary, "claims": claims, "entities": entities}
+        return await enrich.sidecar_payload(self._summarizer, content, title)
 
     # ------------------------------------------------------------------
     # Document ingestion
@@ -787,9 +820,10 @@ class KnowledgeBaseManager:
             chunk_overlap: Overlap between chunks.
             summary: Optional pre-computed summary. When ``None``, falls
                 back to the deterministic truncation of ``content``.
-                Async callers that want an LLM-generated summary should
-                ``await self.generate_summary(...)`` first and pass the
-                result in here.
+                Async callers that want an LLM-generated summary and sidecar
+                should ingest through ``KnowledgeBase.ingest_text`` /
+                ``ingest_bytes``, which make the summarizer call and pass
+                the result in here.
 
         Returns:
             The created Document object.
@@ -852,7 +886,7 @@ class KnowledgeBaseManager:
             self._rebuild_index_md()
             self._append_ingest_log("ingest", doc)
             self._save_metadata()
-            self._vector_store.save()
+            self._save_vectors()
 
             # Add to BM25 index
             bm25_index = getattr(self, "_bm25_index", None)
@@ -1066,7 +1100,7 @@ class KnowledgeBaseManager:
             self._rebuild_index_md()
             self._append_ingest_log("delete", doc)
             self._save_metadata()
-            self._vector_store.save()
+            self._save_vectors()
 
         return True
 
@@ -1110,7 +1144,7 @@ class KnowledgeBaseManager:
                 bm25_index.rebuild([], [])
             self._remove_bm25_files()
             self._save_metadata()
-            self._vector_store.save()
+            self._save_vectors()
             self._rebuild_index_md()
 
     async def backfill_sidecars(

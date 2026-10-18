@@ -150,21 +150,22 @@ class TestTildeAndRelativePaths:
         assert result["success"] is True
         assert "-one" in result["diff"] and "+two" in result["diff"]
 
-    def test_kb_ingest_file(self, env, monkeypatch):
+    def test_kb_ingest_file(self, env):
+        from agentic_cli.memory.kb import KnowledgeBase, KnowledgeBaseManager
         from agentic_cli.tools import knowledge_tools
+        from agentic_cli.workflow.service_registry import set_service_registry
+
         (env["home"] / "doc.txt").write_bytes(b"kb bytes 4711")
         [target] = checked("kb_ingest_file", {"path": "~/doc.txt"}, env)
         assert target == str(env["home"] / "doc.txt")
-        seen: dict = {}
-
-        async def capture(kb_manager, **kw):
-            seen.update(kw)
-            return {"success": True}
-
-        monkeypatch.setattr(knowledge_tools, "_finalize_ingest", capture)
-        result = asyncio.run(knowledge_tools._ingest_file_with_kb(None, path="~/doc.txt"))
-        assert result["success"] is True
-        assert seen["file_bytes"] == b"kb bytes 4711"
+        manager = KnowledgeBaseManager(env["work"] / "kb", use_mock=True)
+        token = set_service_registry({"knowledge_base": KnowledgeBase({"project": manager})})
+        try:
+            result = asyncio.run(knowledge_tools.kb_ingest_file(path="~/doc.txt"))
+        finally:
+            token.var.reset(token)
+        assert result["success"] is True, result
+        assert manager.get_file_path(result["document_id"]).read_bytes() == b"kb bytes 4711"
 
     def test_compile_document_finds_the_source_it_was_checked_for(self, env):
         from agentic_cli.tools.document import compile_document

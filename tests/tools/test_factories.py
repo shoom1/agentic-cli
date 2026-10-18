@@ -196,14 +196,16 @@ class TestMakeKBTools:
     def test_returns_eight_functions(self):
         """make_kb_tools returns 8 tools (kb_ingest split into text/file/url)."""
         from agentic_cli.tools.factories import make_kb_tools
-        tools = make_kb_tools(kb_manager=object())
+        from agentic_cli.memory.kb import KnowledgeBase
+        tools = make_kb_tools(KnowledgeBase({"project": object()}))
         assert len(tools) == 8
         names = [t.__name__ for t in tools]
         assert "kb_write_concept" in names
         assert "kb_search_concepts" in names
 
     def test_function_names(self):
-        tools = make_kb_tools(kb_manager=object())
+        from agentic_cli.memory.kb import KnowledgeBase
+        tools = make_kb_tools(KnowledgeBase({"project": object()}))
         names = [t.__name__ for t in tools]
         assert names == [
             "kb_search",
@@ -217,7 +219,8 @@ class TestMakeKBTools:
         ]
 
     def test_functions_have_docstrings(self):
-        tools = make_kb_tools(kb_manager=object())
+        from agentic_cli.memory.kb import KnowledgeBase
+        tools = make_kb_tools(KnowledgeBase({"project": object()}))
         for tool in tools:
             assert tool.__doc__ is not None
             assert len(tool.__doc__) > 0

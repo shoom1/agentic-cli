@@ -1,6 +1,5 @@
 """Knowledge base tools for agentic workflows.
 
-Provides tools for managing documents in the unified knowledge base:
 - kb_ingest_text / kb_ingest_file / kb_ingest_url: Ingest content into KB.
   Three separate tools so each declares the right capability for the
   permissions engine — text-only (kb.write), local file or a page web_fetch
@@ -9,34 +8,28 @@ Provides tools for managing documents in the unified knowledge base:
 - kb_search: Semantic search across all documents
 - kb_read: Read a stored document (sidecar by default, full text with full=True)
 - kb_list: List documents with summaries
+- kb_write_concept / kb_search_concepts: Concept pages
 
-Each tool comes in two flavors that share a single implementation:
-
-- ``@register_tool``-decorated module functions look up the KB managers
-  from the service registry and call the shared helpers below.
-- The closure-bound versions in ``tools.factories.make_kb_tools`` capture
-  the KB managers in a closure and call the same helpers.
-
-The helpers (``_search_kbs``, ``_ingest_text_with_kb`` /
-``_ingest_file_with_kb`` / ``_ingest_url_with_kb``,
-``_read_document_from_kbs``, ``_list_documents_in_kbs``) take the KB
-managers as explicit args so both call paths stay in sync.
+Each tool is an adapter over ``agentic_cli.memory.kb.KnowledgeBase``:
+arguments in, one call, a ``{"success": ...}`` dict out. It comes in two
+flavors that share one implementation: the ``@register_tool`` module
+functions find the knowledge base in the service registry
+(``tools._knowledge_base.current_knowledge_base``), and the closures in
+``tools.factories.make_kb_tools`` capture it.
 """
 
 import asyncio
 import warnings
 from datetime import datetime, timezone
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import urlparse
 
 import structlog
 
 logger = structlog.get_logger(__name__)
 
 from agentic_cli.config import get_settings
-from agentic_cli.constants import truncate
 from agentic_cli.paths import resolve_path
-from agentic_cli.tools.kb_convert import UnsupportedDocument, convert_document
 from agentic_cli.tools.registry import (
     register_tool,
     ToolCategory,
@@ -47,12 +40,7 @@ from agentic_cli.tools.webfetch.saved import (
     saved_pages_dir,
 )
 from agentic_cli.workflow.permissions import Capability
-from agentic_cli.workflow.service_registry import (
-    get_service,
-    require_service,
-    KB_MANAGER,
-    USER_KB_MANAGER,
-)
+from agentic_cli.tools._knowledge_base import NO_KNOWLEDGE_BASE, current_knowledge_base
 
 
 # Max chars of extracted text to return via kb_read (full=True).
@@ -99,100 +87,8 @@ def _build_document_item(d, scope: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _find_doc_in_kbs(kb_manager, user_kb_manager, doc_id_or_title: str) -> tuple:
-    """Find a document across project + user KBs.
-
-    Lookup order: project KB first, then user KB on miss.
-
-    Returns:
-        (document, source_kb) tuple. ``document`` is None if not found
-        in either KB. ``source_kb`` is the project KB on miss (so callers
-        that want to print / open against the project KB still have a
-        handle), or ``(None, None)`` if no project KB was supplied.
-    """
-    if kb_manager is None:
-        return None, None
-    doc = kb_manager.find_document(doc_id_or_title)
-    if doc is not None:
-        return doc, kb_manager
-    if user_kb_manager is not None and user_kb_manager is not kb_manager:
-        doc = user_kb_manager.find_document(doc_id_or_title)
-        if doc is not None:
-            return doc, user_kb_manager
-    return None, kb_manager
-
-
-def _merge_kb_results_rrf(
-    project_results: list[dict],
-    user_results: list[dict],
-    top_k: int,
-    k: int = 60,
-) -> list[dict]:
-    """Merge two KB result lists via Reciprocal Rank Fusion.
-
-    Scores from separate FAISS / BM25 indexes live on different
-    scales and are not comparable in absolute terms, so a "concat +
-    sort by score" merge produces a degenerate ordering whenever the
-    two KBs happen to score on different magnitudes. RRF works on
-    rank position instead, so the merge is well-defined regardless
-    of how the underlying KBs assign scores.
-
-    On document_id collisions, the project entry wins (its dict is
-    kept), but both KBs' ranks contribute to the fused score — so a
-    document that ranks high in both KBs ends up higher in the merged
-    list than one that's only ranked high in one.
-
-    Args:
-        project_results: Ordered list of search-result dicts from project KB.
-        user_results: Ordered list of search-result dicts from user KB.
-        top_k: Maximum results to return after merge.
-        k: RRF constant (default 60, the standard value).
-
-    Returns:
-        Merged list (length <= top_k) with the fused RRF score in
-        each entry's ``score`` field. The original raw KB score is
-        discarded; absolute KB scores from independent indexes do
-        not compose meaningfully across a merge.
-    """
-    fused: dict[str, dict] = {}
-    fused_scores: dict[str, float] = {}
-
-    for rank, r in enumerate(project_results):
-        doc_id = r.get("document_id", "")
-        if not doc_id:
-            continue
-        fused[doc_id] = r
-        fused_scores[doc_id] = fused_scores.get(doc_id, 0.0) + 1.0 / (k + rank + 1)
-
-    for rank, r in enumerate(user_results):
-        doc_id = r.get("document_id", "")
-        if not doc_id:
-            continue
-        if doc_id not in fused:
-            fused[doc_id] = r
-        fused_scores[doc_id] = fused_scores.get(doc_id, 0.0) + 1.0 / (k + rank + 1)
-
-    sorted_ids = sorted(fused_scores.keys(), key=lambda x: fused_scores[x], reverse=True)
-    merged = []
-    for doc_id in sorted_ids[:top_k]:
-        entry = fused[doc_id]
-        entry["score"] = round(fused_scores[doc_id], 4)
-        merged.append(entry)
-    return merged
-
-
-def _search_kbs(
-    kb_manager,
-    user_kb_manager,
-    query: str,
-    filters: str = "",
-    top_k: int = 10,
-) -> dict[str, Any]:
-    """Shared implementation for kb_search.
-
-    Caller must pass a non-None ``kb_manager`` — registry-based wrappers
-    handle the missing-kb error case before reaching this helper.
-    """
+def _search(kb, query: str, filters: str = "", top_k: int = 10) -> dict[str, Any]:
+    """Shared implementation for kb_search."""
     import json as _json
 
     parsed_filters = None
@@ -203,37 +99,34 @@ def _search_kbs(
             return {"success": False, "error": f"Invalid JSON in filters: {filters}"}
 
     try:
-        result = kb_manager.search(query, filters=parsed_filters, top_k=top_k)
-
-        # Tag project results with scope
-        for r in result.get("results", []):
-            r["scope"] = "project"
-
-        # Merge user KB results (non-fatal if unavailable)
-        if user_kb_manager is not None and user_kb_manager is not kb_manager:
-            try:
-                user_result = user_kb_manager.search(query, filters=parsed_filters, top_k=top_k)
-                for r in user_result.get("results", []):
-                    r["scope"] = "user"
-                result["results"] = _merge_kb_results_rrf(
-                    result.get("results", []),
-                    user_result.get("results", []),
-                    top_k,
-                )
-                result["total_matches"] = len(result["results"])
-            except Exception:
-                logger.debug("user_kb_search_failed", query=query, exc_info=True)
-
-        return {"success": True, **result}
+        result = kb.search(query, filters=parsed_filters, top_k=top_k)
     except Exception as e:
         return {"success": False, "error": f"Search failed: {e}"}
+    return {"success": True, **result}
 
 
-def _build_meta(
-    authors: list[str] | None,
-    abstract: str,
-    tags: list[str] | None,
-) -> dict[str, Any]:
+_NO_CONTENT = (
+    "No content or file provided. "
+    "Pass non-empty content (kb_ingest_text) or a readable file "
+    "(kb_ingest_file); for a web page, read it with web_fetch and "
+    "pass its saved_path to kb_ingest_file. "
+    "For ArXiv papers, use ingest_arxiv_paper instead."
+)
+
+
+def _source_type(value: str):
+    """``value`` as a SourceType, and an error dict when it is not one."""
+    from agentic_cli.memory.kb import SourceType
+
+    try:
+        return SourceType(value), None
+    except ValueError:
+        valid = ", ".join(t.value for t in SourceType)
+        return None, {"success": False, "error": f"Invalid source_type: {value!r}. Valid: {valid}"}
+
+
+def _caller_metadata(authors: list[str] | None, abstract: str, tags: list[str] | None) -> dict[str, Any]:
+    """The tool's ``authors``, ``abstract`` and ``tags``, the ones given."""
     meta: dict[str, Any] = {}
     if authors:
         meta["authors"] = authors
@@ -244,61 +137,23 @@ def _build_meta(
     return meta
 
 
-async def _finalize_ingest(
-    kb_manager,
-    *,
-    content: str,
-    title: str,
-    source_type: str,
-    source_url: str | None,
-    meta: dict[str, Any],
-    file_bytes: bytes | None,
-    file_extension: str,
-) -> dict[str, Any]:
-    """Validate, generate sidecar, and persist into the supplied ``kb_manager``.
-
-    Shared tail used by all three ingest entry points (text/file/url).
-    """
-    from agentic_cli.memory.kb import SourceType
-
-    if not content and not file_bytes:
-        return {
-            "success": False,
-            "error": (
-                "No content or file provided. "
-                "Pass non-empty content (kb_ingest_text) or a readable file "
-                "(kb_ingest_file); for a web page, read it with web_fetch and "
-                "pass its saved_path to kb_ingest_file. "
-                "For ArXiv papers, use ingest_arxiv_paper instead."
-            ),
-        }
-
-    if not title:
-        title = truncate(content, 80)
+async def _ingested(ingest, display_name: str) -> dict[str, Any]:
+    """Await one pipeline call and turn its result, or its error, into the tool's dict."""
+    from agentic_cli.memory.kb import ConversionFailed, EmptyDocument, UnsupportedDocument
 
     try:
-        source = SourceType(source_type)
-    except ValueError:
-        valid = ", ".join(t.value for t in SourceType)
-        return {"success": False, "error": f"Invalid source_type: {source_type!r}. Valid: {valid}"}
-
-    payload = await kb_manager.generate_sidecar_payload(content, title=title)
-
-    try:
-        doc = kb_manager.ingest_document(
-            content=content,
-            title=title,
-            source_type=source,
-            source_url=source_url,
-            metadata=meta or None,
-            file_bytes=file_bytes,
-            file_extension=file_extension,
-            summary=payload["summary"] or None,
-            sidecar_payload=payload,
-        )
+        found = await ingest
+    except EmptyDocument:
+        return {"success": False, "error": _NO_CONTENT}
+    except UnsupportedDocument as e:
+        return {"success": False, "error": f"Cannot ingest {display_name}: {e}"}
+    except ConversionFailed as e:
+        cause = type(e.__cause__).__name__
+        logger.warning("kb_convert_failed", file=display_name, error=cause, exc_info=True)
+        return {"success": False, "error": f"Cannot ingest {display_name}: could not convert it ({cause})"}
     except Exception as e:
         return {"success": False, "error": f"Ingestion failed: {e}"}
-
+    doc = found.document
     return {
         "success": True,
         "document_id": doc.id,
@@ -308,88 +163,8 @@ async def _finalize_ingest(
     }
 
 
-def _url_title(url: str) -> str:
-    """A title from a URL: its last path segment (percent-decoded), else its host."""
-    parsed = urlparse(url)
-    segment = parsed.path.rstrip("/").rsplit("/", 1)[-1]
-    return unquote(segment) if segment else (parsed.netloc or url)
-
-
-async def _ingest_bytes_with_kb(
-    kb_manager,
-    data: bytes,
-    *,
-    extension: str,
-    content_type: str | None,
-    charset: str | None,
-    page_url: str | None,
-    fetched_at: str | None,
-    truncated: bool,
-    fallback_title: str,
-    fallback_source_url: str,
-    display_name: str,
-    title: str,
-    source_type: str,
-    source_url: str | None,
-    authors: list[str] | None,
-    abstract: str,
-    tags: list[str] | None,
-) -> dict[str, Any]:
-    """Convert ``data`` and ingest it.
-
-    Shared by ``kb_ingest_file`` and ``kb_ingest_url``. ``page_url`` marks a
-    web page (a saved page or a fetched URL): it defaults to source type
-    ``web``, the page URL as source, and the page's title, else the URL's
-    last segment. ``charset`` None means a local file, which must be UTF-8
-    unless it is a PDF. Arguments the model passed always win.
-    """
-    try:
-        converted = await asyncio.to_thread(
-            convert_document,
-            data, content_type=content_type, extension=extension, charset=charset, url=page_url,
-        )
-    except UnsupportedDocument as e:
-        return {"success": False, "error": f"Cannot ingest {display_name}: {e}"}
-    except Exception as e:  # a future converter may raise something else; never escape the tool
-        logger.warning(
-            "kb_convert_failed", file=display_name, error=type(e).__name__, exc_info=True
-        )
-        return {
-            "success": False,
-            "error": f"Cannot ingest {display_name}: could not convert it ({type(e).__name__})",
-        }
-
-    meta = _build_meta(authors or list(converted.authors), abstract or converted.description or "", tags)
-    meta["file_size_bytes"] = len(data)
-    if converted.published:
-        meta["published"] = converted.published
-    if fetched_at:
-        meta["fetched_at"] = fetched_at
-
-    if page_url:
-        default_title = converted.title or _url_title(page_url)
-        default_type, default_source = "web", page_url
-    else:
-        default_title = converted.title or fallback_title
-        default_type, default_source = "local", fallback_source_url
-
-    result = await _finalize_ingest(
-        kb_manager,
-        content=converted.text,
-        title=title or default_title,
-        source_type=source_type or default_type,
-        source_url=source_url or default_source,
-        meta=meta,
-        file_bytes=data,
-        file_extension=extension,
-    )
-    if truncated and result.get("success"):
-        result["truncated"] = True
-    return result
-
-
-async def _ingest_text_with_kb(
-    kb_manager,
+async def _ingest_text(
+    kb,
     content: str,
     title: str = "",
     source_type: str = "user",
@@ -399,20 +174,22 @@ async def _ingest_text_with_kb(
     tags: list[str] | None = None,
 ) -> dict[str, Any]:
     """Ingest a plain text document — no filesystem or network access."""
-    return await _finalize_ingest(
-        kb_manager,
-        content=content,
-        title=title,
-        source_type=source_type,
-        source_url=source_url,
-        meta=_build_meta(authors, abstract, tags),
-        file_bytes=None,
-        file_extension=".txt",
+    if not content:
+        return {"success": False, "error": _NO_CONTENT}
+    st, error = _source_type(source_type)
+    if error:
+        return error
+    return await _ingested(
+        kb.ingest_text(
+            content, title=title, source_type=st, source_url=source_url,
+            metadata=_caller_metadata(authors, abstract, tags),
+        ),
+        display_name="",
     )
 
 
-async def _ingest_file_with_kb(
-    kb_manager,
+async def _ingest_file(
+    kb,
     path: str,
     title: str = "",
     source_type: str = "",
@@ -452,29 +229,35 @@ async def _ingest_file_with_kb(
             }
         saved = read_saved_page_meta(source_path, folder)
 
-    return await _ingest_bytes_with_kb(
-        kb_manager,
-        file_bytes,
-        extension=source_path.suffix.lower() or ".bin",
-        content_type=saved.content_type if saved else None,
-        charset=(saved.charset or "utf-8") if saved else None,
-        page_url=saved.url if saved else None,
-        fetched_at=saved.fetched_at.isoformat() if saved else None,
-        truncated=saved.truncated if saved else False,
-        fallback_title=source_path.stem,
-        fallback_source_url=str(source_path),
+    st = None
+    if source_type:
+        st, error = _source_type(source_type)
+        if error:
+            return error
+
+    result = await _ingested(
+        kb.ingest_bytes(
+            file_bytes,
+            extension=source_path.suffix.lower() or ".bin",
+            content_type=saved.content_type if saved else None,
+            charset=(saved.charset or "utf-8") if saved else None,
+            fetched_url=saved.url if saved else None,
+            fetched_at=saved.fetched_at.isoformat() if saved else None,
+            title=title,
+            default_title=source_path.stem,
+            source_type=st,
+            source_url=source_url or (None if saved else str(source_path)),
+            metadata=_caller_metadata(authors, abstract, tags),
+        ),
         display_name=path,
-        title=title,
-        source_type=source_type,
-        source_url=source_url,
-        authors=authors,
-        abstract=abstract,
-        tags=tags,
     )
+    if saved is not None and saved.truncated and result.get("success"):
+        result["truncated"] = True
+    return result
 
 
-async def _ingest_url_with_kb(
-    kb_manager,
+async def _ingest_url(
+    kb,
     url: str,
     title: str = "",
     source_type: str = "",
@@ -488,7 +271,7 @@ async def _ingest_url_with_kb(
     Routes the download through ``ContentFetcher`` (URL validation, redirect
     revalidation, DNS pinning); the caller's permissions engine has already
     gated ``http.read`` for ``url``. The page is saved as ``web_fetch`` saves
-    it and converted like ``kb_ingest_file`` converts a saved page.
+    it and ingested like ``kb_ingest_file`` ingests a saved page.
     """
     warnings.warn(
         "kb_ingest_url is deprecated and will be removed in 0.7.0; "
@@ -502,6 +285,11 @@ async def _ingest_url_with_kb(
             "success": False,
             "error": "url must be an http:// or https:// URL",
         }
+    st = None
+    if source_type:
+        st, error = _source_type(source_type)
+        if error:
+            return error
 
     from agentic_cli.tools.webfetch.saved import saved_page_extension
     from agentic_cli.tools.webfetch_tool import get_or_create_fetcher, save_fetched_page
@@ -540,115 +328,80 @@ async def _ingest_url_with_kb(
 
     # Off the event loop, same as web_fetch's own save.
     saved = await asyncio.to_thread(save_fetched_page, url, fetch_result)
-    result = await _ingest_bytes_with_kb(
-        kb_manager,
-        data,
-        extension=extension,
-        content_type=content_type,
-        charset=fetch_result.charset or "utf-8",
-        page_url=url,
-        fetched_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        truncated=fetch_result.raw_truncated,
-        fallback_title=url,
-        fallback_source_url=url,
+    result = await _ingested(
+        kb.ingest_bytes(
+            data,
+            extension=extension,
+            content_type=content_type,
+            charset=fetch_result.charset or "utf-8",
+            fetched_url=url,
+            fetched_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            title=title,
+            source_type=st,
+            source_url=source_url,
+            metadata=_caller_metadata(authors, abstract, tags),
+        ),
         display_name=url,
-        title=title,
-        source_type=source_type,
-        source_url=source_url,
-        authors=authors,
-        abstract=abstract,
-        tags=tags,
     )
+    if fetch_result.raw_truncated and result.get("success"):
+        result["truncated"] = True
     return {**result, **saved}
 
 
-async def _read_document_from_kbs(
-    kb_manager,
-    user_kb_manager,
-    doc_id_or_title: str,
-    full: bool = False,
-    max_chars: int = READ_DOCUMENT_MAX_CHARS,
-) -> dict[str, Any]:
-    """Shared implementation for kb_read.
+def _read_scope(kb, found) -> str:
+    """The scope ``kb_read`` reports.
 
-    Default returns the sidecar payload (summary + claims + entities).
-    With ``full=True``, returns the raw extracted text up to ``max_chars``.
-    Lazily generates a missing sidecar via the manager's per-doc lock.
+    0.6.3 said "user" whenever the document came from the user scope's
+    manager, also when both names point at one directory (where kb_search
+    and kb_list say "project"). Kept until 0.7.0.
     """
-    doc, source_kb = _find_doc_in_kbs(kb_manager, user_kb_manager, doc_id_or_title)
-    if doc is None:
+    try:
+        user = kb.manager("user")
+    except KeyError:
+        return found.scope
+    return "user" if kb.manager(found.scope) is user else found.scope
+
+
+async def _read(
+    kb, doc_id_or_title: str, full: bool = False, max_chars: int = READ_DOCUMENT_MAX_CHARS
+) -> dict[str, Any]:
+    """Shared implementation for kb_read: the sidecar by default, the text with ``full``."""
+    from agentic_cli.memory.kb import DocumentNotFound
+
+    found = kb.find_document(doc_id_or_title)
+    if found is None:
         return {"success": False, "error": f"Document not found: {doc_id_or_title}"}
-
+    doc = found.document
     if full:
-        content = doc.content
-        if not content and doc.file_path:
-            file_path = source_kb.get_file_path(doc.id)
-            if file_path and str(file_path).endswith(".pdf"):
-                from agentic_cli.tools.pdf_utils import extract_pdf_text
-
-                content = extract_pdf_text(file_path)
-        truncated = len(content) > max_chars
-        if truncated:
-            content = content[:max_chars]
+        content, truncated = kb.read_text(found, max_chars=max_chars)
         return {
             "success": True,
             "full": True,
             "document_id": doc.id,
             "title": doc.title,
-            "scope": "user" if user_kb_manager is not None and source_kb is user_kb_manager else "project",
+            "scope": _read_scope(kb, found),
             "content": content,
             "truncated": truncated,
             "source_type": doc.source_type.value,
         }
-
-    # Sidecar mode (default). Lazily generate if missing.
-    sidecar_path = source_kb.sidecar_path(doc.id)
-    if not sidecar_path.exists():
-        lock = source_kb.get_or_create_sidecar_lock(doc.id)
-        async with lock:
-            if not sidecar_path.exists():
-                # Resolve content the same way full=True does — extract from
-                # PDF when in-memory content is empty. Avoids caching a
-                # useless empty sidecar for legacy PDFs.
-                content_for_payload = doc.content
-                if not content_for_payload and doc.file_path:
-                    file_path = source_kb.get_file_path(doc.id)
-                    if file_path and str(file_path).endswith(".pdf"):
-                        from agentic_cli.tools.pdf_utils import extract_pdf_text
-
-                        content_for_payload = extract_pdf_text(file_path)
-                payload = await source_kb.generate_sidecar_payload(
-                    content_for_payload, title=doc.title
-                )
-                # Deleted during the LLM call: do not write it back.
-                if not source_kb.write_sidecar_if_present(doc, payload):
-                    return {"success": False, "error": f"Document not found: {doc_id_or_title}"}
-
-    sidecar_text = sidecar_path.read_text()
+    try:
+        sidecar = await kb.sidecar(found)
+    except DocumentNotFound:
+        return {"success": False, "error": f"Document not found: {doc_id_or_title}"}
     return {
         "success": True,
         "full": False,
         "document_id": doc.id,
         "title": doc.title,
         "source_type": doc.source_type.value,
-        "scope": "user" if user_kb_manager is not None and source_kb is user_kb_manager else "project",
+        "scope": _read_scope(kb, found),
         "summary": doc.summary,
-        "sidecar": sidecar_text,
+        "sidecar": sidecar,
     }
 
 
-def _list_documents_in_kbs(
-    kb_manager,
-    user_kb_manager,
-    query: str = "",
-    source_type: str = "",
-    limit: int = 20,
-) -> dict[str, Any]:
-    """Shared implementation for kb_list.
-
-    Filters first, then merges the project and user knowledge bases newest
-    first and cuts the result at ``limit``.
-    """
+def _list(kb, query: str = "", source_type: str = "", limit: int = 20) -> dict[str, Any]:
+    """Shared implementation for kb_list."""
     from agentic_cli.memory.kb import SourceType as ST
 
     st_filter = None
@@ -662,120 +415,26 @@ def _list_documents_in_kbs(
                 "error": f"Invalid source_type: {source_type!r}. Valid: {valid}",
             }
 
-    query_lower = query.lower()
-
-    def _matching(manager) -> list:
-        docs = manager.list_documents(source_type=st_filter, limit=None)
-        if not query_lower:
-            return docs
-        return [
-            d for d in docs
-            if query_lower in d.title.lower()
-            or any(query_lower in a.lower() for a in d.metadata.get("authors", []))
-        ]
-
-    scoped = [(d, "project") for d in _matching(kb_manager)]
-    if user_kb_manager is not None and user_kb_manager is not kb_manager:
-        try:
-            seen_ids = {d.id for d, _ in scoped}
-            scoped += [
-                (d, "user") for d in _matching(user_kb_manager) if d.id not in seen_ids
-            ]
-        except Exception:
-            logger.debug("user_kb_list_documents_failed", exc_info=True)
-
-    scoped.sort(key=lambda pair: pair[0].updated_at, reverse=True)
-    items = [_build_document_item(d, scope) for d, scope in scoped[:limit]]
-
-    return {
-        "success": True,
-        "documents": items,
-        "count": len(items),
-    }
+    listed = kb.list_documents(title_or_author=query, source_type=st_filter, limit=limit)
+    items = [_build_document_item(s.document, s.scope) for s in listed]
+    return {"success": True, "documents": items, "count": len(items)}
 
 
-async def _write_concept_with_kb(
-    kb_manager,
-    user_kb_manager,
-    title: str,
-    body: str,
-    sources: list[str],
-    slug: str = "",
-) -> dict[str, Any]:
-    """Shared implementation for kb_write_concept.
-
-    Writes to the project KB's concepts directory. Source IDs are
-    validated against BOTH KBs (project first, then user if distinct) so
-    cross-KB citations work.
-    """
-    if kb_manager is None:
-        return {"success": False, "error": "kb manager not available"}
-
-    def _is_valid_id(doc_id: str) -> bool:
-        if kb_manager.get_document(doc_id) is not None:
-            return True
-        if user_kb_manager is not None and user_kb_manager is not kb_manager:
-            if user_kb_manager.get_document(doc_id) is not None:
-                return True
-        return False
-
+async def _write_concept(kb, title: str, body: str, sources: list[str], slug: str = "") -> dict[str, Any]:
+    """Shared implementation for kb_write_concept (the first scope's concept pages)."""
     try:
-        return kb_manager.concepts.write(
-            title=title,
-            body=body,
-            sources=sources,
-            slug=slug,
-            valid_ids_check=_is_valid_id,
-        )
+        return kb.write_concept(title, body, sources, slug=slug)
     except Exception as e:
         return {"success": False, "error": f"write_concept failed: {e}"}
 
 
-async def _search_concepts_with_kb(
-    kb_manager,
-    user_kb_manager,
-    query: str,
-    limit: int = 10,
-) -> dict[str, Any]:
-    """Shared implementation for kb_search_concepts.
-
-    Searches the project KB's concepts directory. Async signature
-    matches the other tool helpers even though the underlying
-    implementation is synchronous grep.
-    """
-    if kb_manager is None:
-        return {"success": False, "error": "kb manager not available"}
-
+async def _search_concepts(kb, query: str, limit: int = 10) -> dict[str, Any]:
+    """Shared implementation for kb_search_concepts."""
     try:
-        hits = kb_manager.concepts.search(query, limit=limit)
+        hits = kb.search_concepts(query, limit=limit)
     except Exception as e:
         return {"success": False, "error": f"search_concepts failed: {e}"}
-
-    return {
-        "success": True,
-        "concepts": hits,
-        "count": len(hits),
-    }
-
-
-# ---------------------------------------------------------------------------
-# Registry-bound helper (back-compat for tests/callers that don't have
-# explicit KB handles)
-# ---------------------------------------------------------------------------
-
-
-def _find_document_in_kbs(doc_id_or_title: str) -> tuple:
-    """Find a document across main and user KBs via the service registry.
-
-    Thin registry-based wrapper around ``_find_doc_in_kbs``. Used by the
-    module-level ``@register_tool`` functions and exercised directly by
-    ``tests/test_kb_helpers.py``.
-    """
-    kb = get_service(KB_MANAGER)
-    if kb is None:
-        return None, None
-    user_kb = get_service(USER_KB_MANAGER)
-    return _find_doc_in_kbs(kb, user_kb, doc_id_or_title)
+    return {"success": True, "concepts": hits, "count": len(hits)}
 
 
 # ---------------------------------------------------------------------------
@@ -787,7 +446,7 @@ def _find_document_in_kbs(doc_id_or_title: str) -> tuple:
     category=ToolCategory.KNOWLEDGE,
     capabilities=[Capability("kb.read")],
     description="Search the local knowledge base for relevant documents using semantic similarity. Use this when you need to find previously ingested papers, notes, or documents.",
-    requires="kb_manager",
+    requires="knowledge_base",
 )
 def kb_search(
     query: str,
@@ -804,11 +463,10 @@ def kb_search(
     Returns:
         Dictionary with search results and timing information
     """
-    kb = require_service(KB_MANAGER)
-    if isinstance(kb, dict):
-        return kb
-    user_kb = get_service(USER_KB_MANAGER)
-    return _search_kbs(kb, user_kb, query, filters, top_k)
+    kb = current_knowledge_base()
+    if kb is None:
+        return {"success": False, "error": NO_KNOWLEDGE_BASE}
+    return _search(kb, query, filters, top_k)
 
 
 @register_tool(
@@ -819,7 +477,7 @@ def kb_search(
         "you already have in memory; use kb_ingest_file for local files and "
         "for pages web_fetch saved."
     ),
-    requires="kb_manager",
+    requires="knowledge_base",
 )
 async def kb_ingest_text(
     content: str,
@@ -841,18 +499,12 @@ async def kb_ingest_text(
         abstract: Optional paper abstract.
         tags: Optional tags for categorization.
     """
-    kb = get_service(KB_MANAGER)
+    kb = current_knowledge_base()
     if kb is None:
-        return {"success": False, "error": "kb manager not available"}
-    return await _ingest_text_with_kb(
-        kb,
-        content=content,
-        title=title,
-        source_type=source_type,
-        source_url=source_url,
-        authors=authors,
-        abstract=abstract,
-        tags=tags,
+        return {"success": False, "error": NO_KNOWLEDGE_BASE}
+    return await _ingest_text(
+        kb, content=content, title=title, source_type=source_type, source_url=source_url,
+        authors=authors, abstract=abstract, tags=tags,
     )
 
 
@@ -868,7 +520,7 @@ async def kb_ingest_text(
         "text file as it is. Other binary files are refused. Triggers a "
         "filesystem.read permission check for the supplied path."
     ),
-    requires="kb_manager",
+    requires="knowledge_base",
 )
 async def kb_ingest_file(
     path: str,
@@ -898,18 +550,12 @@ async def kb_ingest_file(
         abstract: Abstract (default: the page's description, if any).
         tags: Optional tags for categorization.
     """
-    kb = get_service(KB_MANAGER)
+    kb = current_knowledge_base()
     if kb is None:
-        return {"success": False, "error": "kb manager not available"}
-    return await _ingest_file_with_kb(
-        kb,
-        path=path,
-        title=title,
-        source_type=source_type,
-        source_url=source_url,
-        authors=authors,
-        abstract=abstract,
-        tags=tags,
+        return {"success": False, "error": NO_KNOWLEDGE_BASE}
+    return await _ingest_file(
+        kb, path=path, title=title, source_type=source_type, source_url=source_url,
+        authors=authors, abstract=abstract, tags=tags,
     )
 
 
@@ -925,7 +571,7 @@ async def kb_ingest_file(
         "hardened web fetcher and ingests it. Triggers an http.read "
         "permission check for the supplied URL."
     ),
-    requires="kb_manager",
+    requires="knowledge_base",
 )
 async def kb_ingest_url(
     url: str,
@@ -949,18 +595,12 @@ async def kb_ingest_url(
         abstract: Optional paper abstract.
         tags: Optional tags for categorization.
     """
-    kb = get_service(KB_MANAGER)
+    kb = current_knowledge_base()
     if kb is None:
-        return {"success": False, "error": "kb manager not available"}
-    return await _ingest_url_with_kb(
-        kb,
-        url=url,
-        title=title,
-        source_type=source_type,
-        source_url=source_url,
-        authors=authors,
-        abstract=abstract,
-        tags=tags,
+        return {"success": False, "error": NO_KNOWLEDGE_BASE}
+    return await _ingest_url(
+        kb, url=url, title=title, source_type=source_type, source_url=source_url,
+        authors=authors, abstract=abstract, tags=tags,
     )
 
 
@@ -972,7 +612,7 @@ async def kb_ingest_url(
         "sidecar (summary, key claims, entities) by default. Pass full=True "
         "to get the raw extracted text up to max_chars."
     ),
-    requires="kb_manager",
+    requires="knowledge_base",
 )
 async def kb_read(
     doc_id_or_title: str,
@@ -986,18 +626,17 @@ async def kb_read(
         full: If True, return raw text. Default returns the sidecar payload.
         max_chars: Maximum characters of raw text to return when full=True.
     """
-    kb = get_service(KB_MANAGER)
+    kb = current_knowledge_base()
     if kb is None:
         return {"success": False, "error": f"Document not found: {doc_id_or_title}"}
-    user_kb = get_service(USER_KB_MANAGER)
-    return await _read_document_from_kbs(kb, user_kb, doc_id_or_title, full, max_chars)
+    return await _read(kb, doc_id_or_title, full, max_chars)
 
 
 @register_tool(
     category=ToolCategory.KNOWLEDGE,
     capabilities=[Capability("kb.read")],
     description="List documents in the knowledge base with summaries. Filter by query or source type. Returns summaries, not full content.",
-    requires="kb_manager",
+    requires="knowledge_base",
 )
 def kb_list(
     query: str = "",
@@ -1014,11 +653,10 @@ def kb_list(
     Returns:
         Dictionary with document list.
     """
-    kb = get_service(KB_MANAGER)
+    kb = current_knowledge_base()
     if kb is None:
-        return {"success": False, "error": "kb manager not available"}
-    user_kb = get_service(USER_KB_MANAGER)
-    return _list_documents_in_kbs(kb, user_kb, query, source_type, limit)
+        return {"success": False, "error": NO_KNOWLEDGE_BASE}
+    return _list(kb, query, source_type, limit)
 
 
 @register_tool(
@@ -1030,7 +668,7 @@ def kb_list(
         "agent-writable, grep-searchable, and human-readable. `sources` "
         "must cite at least one valid document ID from the KB."
     ),
-    requires="kb_manager",
+    requires="knowledge_base",
 )
 async def kb_write_concept(
     title: str,
@@ -1051,13 +689,10 @@ async def kb_write_concept(
             merged as union). If empty, auto-generated from title and
             collision-suffixed on conflict.
     """
-    kb = get_service(KB_MANAGER)
+    kb = current_knowledge_base()
     if kb is None:
-        return {"success": False, "error": "kb manager not available"}
-    user_kb = get_service(USER_KB_MANAGER)
-    return await _write_concept_with_kb(
-        kb, user_kb, title=title, body=body, sources=sources, slug=slug,
-    )
+        return {"success": False, "error": NO_KNOWLEDGE_BASE}
+    return await _write_concept(kb, title=title, body=body, sources=sources, slug=slug)
 
 
 @register_tool(
@@ -1068,7 +703,7 @@ async def kb_write_concept(
         "Case-insensitive substring match; title hits rank above body "
         "hits. Use when asking 'what does the KB know about X?'."
     ),
-    requires="kb_manager",
+    requires="knowledge_base",
 )
 async def kb_search_concepts(
     query: str,
@@ -1080,10 +715,9 @@ async def kb_search_concepts(
         query: Case-insensitive substring.
         limit: Max hits to return.
     """
-    kb = get_service(KB_MANAGER)
+    kb = current_knowledge_base()
     if kb is None:
-        return {"success": False, "error": "kb manager not available"}
-    user_kb = get_service(USER_KB_MANAGER)
-    return await _search_concepts_with_kb(kb, user_kb, query=query, limit=limit)
+        return {"success": False, "error": NO_KNOWLEDGE_BASE}
+    return await _search_concepts(kb, query=query, limit=limit)
 
 

@@ -433,8 +433,9 @@ registry never issued is denied however it is named, and is left untouched by
 tool assembly.
 
 **A tool may declare the services it needs** with `requires=` — e.g.
-`@register_tool(..., requires="kb_manager")`, or a tuple for several. The
+`@register_tool(..., requires="knowledge_base")`, or a tuple for several. The
 manager builds only the services its agents' tools actually declare.
+(`requires="kb_manager"`, the 0.6.3 name, still works with a warning until 0.7.0.)
 
 **One name means one tool.** `register_tool()` raises on a name that is already
 registered. If a tool genuinely needs a per-backend implementation, declare the
@@ -553,7 +554,7 @@ results = search_arxiv("transformer attention", max_results=10, categories=["cs.
 paper = fetch_arxiv_paper("1706.03762")  # "Attention Is All You Need"
 ```
 
-The `ArxivSearchSource` (in `tools/arxiv_source.py`) is cached via the service registry and reused across tools. To pull a paper into the KB, use `ingest_arxiv_paper(arxiv_id)` — it composes the arxiv source with `kb_manager`.
+The `ArxivSearchSource` (in `tools/arxiv_source.py`) is cached via the service registry and reused across tools. To pull a paper into the KB, use `ingest_arxiv_paper(arxiv_id)` — it composes the arxiv source with the knowledge base.
 
 #### File Operations
 
@@ -626,7 +627,7 @@ from agentic_cli.tools import (
 
 The single `kb_ingest` tool was split in 0.5.2 so each entry point declares the right capability — text-only stays under `kb.write`, while file and URL ingestion correctly trip `filesystem.read` / `http.read` checks. For arXiv papers, prefer `ingest_arxiv_paper(arxiv_id)`.
 
-Ingestion converts files with its own converter (`tools/kb_convert.py`): PDFs through pypdf, HTML through trafilatura, which keeps a page's main text and drops menus, sidebars and footers. trafilatura comes with the `kb` extra (`pip install agentic-cli[kb]`), or on its own (`pip install trafilatura`); without it, html2text converts the whole page.
+Every way into the knowledge base (text, a local file, a saved page, a fetched URL, an arXiv paper) runs through one pipeline, `KnowledgeBase.ingest_text` or `ingest_bytes`: convert, fill in defaults (a value you pass always wins), enrich with one summarizer call, store. The converter (`agentic_cli.memory.kb.convert_document`) handles files: PDFs through pypdf, HTML through trafilatura, which keeps a page's main text and drops menus, sidebars and footers. trafilatura comes with the `kb` extra (`pip install agentic-cli[kb]`), or on its own (`pip install trafilatura`); without it, html2text converts the whole page.
 
 Bundle convenience:
 
@@ -662,11 +663,36 @@ concepts = kb.concepts.search("attention")             # concept pages
 await kb.backfill_sidecars()                           # regenerate markdown summaries
 ```
 
+`KnowledgeBase` (provisional: its name and methods may change in 0.7.0) serves several directories as one, as the workflow does with the project and user knowledge bases:
+
+```python
+from pathlib import Path
+
+from agentic_cli.memory.kb import KnowledgeBase
+
+kb = KnowledgeBase.open(
+    {"project": Path(".myapp/knowledge_base"), "user": Path("~/.myapp/knowledge_base").expanduser()},
+    summarizer=my_summarizer,
+)
+stored = await kb.ingest_bytes(Path("paper.pdf").read_bytes(), extension=".pdf", default_title="paper")  # ScopedDocument: stored.document, stored.scope
+results = kb.search("neural networks", top_k=5)          # both scopes, merged by rank
+found = kb.find_document("Attention")                     # ScopedDocument(document, scope) or None
+recent = kb.list_documents(title_or_author="vaswani")     # the catalogue, newest first
+if found is not None:
+    text, truncated = kb.read_text(found, max_chars=10_000)
+    sidecar = await kb.sidecar(found)                     # written first when missing
+backfilled = await kb.backfill_sidecars()                 # one BackfillResult per scope
+```
+
+The workflow exposes it as `workflow.knowledge_base` (and the memory store as `workflow.memory_store`); tools find it under the `knowledge_base` service key.
+
 `ingest_document` is synchronous and never calls the summarizer itself.
 
 The KB also maintains `index.md` and an append-only `ingest_log.md` audit trail. Source-type constants (`arxiv`, `ssrn`, `web`, `internal`, `user`, `local`) live on `SourceType`.
 
-Ingesting a document writes a summary and a sidecar with the workflow's LLM when `knowledge_base_summarize` is on (the default; one call per document). Turn it off in `~/.{app_name}/settings.json` to store the first ~500 characters instead. A knowledge base you build yourself calls the `summarizer=` you pass it in `generate_summary`, `generate_sidecar_payload` and `backfill_sidecars`; `ingest_document` stores the summary and sidecar payload you give it, or a preview.
+Ingesting a document writes a summary and a sidecar with the workflow's LLM when `knowledge_base_summarize` is on (the default; one call per document). Turn it off in `~/.{app_name}/settings.json` to store the first ~500 characters instead. A knowledge base you build yourself calls the `summarizer=` you pass it in `generate_summary`, `generate_sidecar_payload` and `backfill_sidecars`; `ingest_document` stores the summary and sidecar payload you give it, or a preview. `KnowledgeBase.ingest_text(content, ...)` and `ingest_bytes(data, extension=..., ...)` do the conversion and the summarizer call for you; they raise `EmptyDocument`, `UnsupportedDocument` or `ConversionFailed`, `KeyError` for an unknown `scope=`, and `ValueError` for an unknown `source_type`; errors from storing the document propagate.
+
+The workflow loads the embedding model once per process: both knowledge bases and the memory store share one `EmbeddingService`. A knowledge base you build yourself uses the `embedding_service=` you pass it (FAISS sizes its index from the service), so several knowledge bases can share one model too.
 
 #### Memory Tools
 
@@ -693,6 +719,8 @@ store.store("User prefers metric units", tags=["preference"])
 - Contradiction detection via `store_with_similarity_check`
 - `ForgettingPolicy` with `apply_forgetting()` for bounded retention
 - Archive filtering and `load_all` with tag/source filters
+
+Each index records the embedding model that built it: a knowledge base in `embeddings/model.json`, the memory store in `embedding_model.json`. After a change of `embedding_model`, the next open embeds the stored text again (a large knowledge base makes that one start slower; the log gives the chunk count and the time taken). An index from 0.6.3 with no record is kept when its dimension matches the model. Delete `embeddings/index.faiss` to force a rebuild.
 
 #### HITL (Human-in-the-Loop)
 
@@ -921,7 +949,6 @@ agentic-cli/
 │   │   ├── knowledge_tools.py    # kb_search / kb_ingest_text / kb_ingest_file /
 │   │   │                         #   kb_ingest_url / kb_read / kb_list /
 │   │   │                         #   kb_write_concept / kb_search_concepts
-│   │   ├── kb_convert.py         # Ingestion converter: trafilatura / html2text, pypdf, text
 │   │   ├── file_read.py          # read_file, diff_compare
 │   │   ├── file_write.py         # write_file, edit_file (atomic)
 │   │   ├── grep_tool.py          # grep
@@ -952,7 +979,10 @@ agentic-cli/
 │   │   ├── store.py              # MemoryStore
 │   │   └── kb/                   # Knowledge base (agentic_cli.memory.kb)
 │   │       ├── manager.py                # KnowledgeBaseManager(base_dir, embedding=, summarizer=), Summarizer
+│   │       ├── knowledge_base.py         # KnowledgeBase (provisional): the scopes as one, and the ingestion pipeline; ScopedDocument, BackfillResult
+│   │       ├── enrich.py                 # The summary/sidecar prompts and parser: one summarizer call per document
 │   │       ├── models.py                 # Document, SearchResult, SourceType
+│   │       ├── convert.py                # convert_document: trafilatura / html2text, pypdf, text
 │   │       ├── vector_store.py, bm25_index.py (+ _bm25_backends.py), concepts.py, sidecar.py
 │   │       └── _mock_vector_store.py, _mock_bm25.py
 │   └── persistence/              # (sessions are persisted natively by each

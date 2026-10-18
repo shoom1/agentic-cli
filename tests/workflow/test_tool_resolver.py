@@ -132,7 +132,7 @@ class _MiniManager(BaseWorkflowManager):
 class TestBaseManagerIntegration:
     def test_string_tool_resolved_and_service_detected(self, mock_context):
         # "kb_search" is a registered service tool -> resolution must make it a
-        # callable AND detection must flag the kb_manager service.
+        # callable AND detection must flag the knowledge_base service.
         cfg = AgentConfig(
             name="a", prompt="p", tools=["kb_search"], include_state_tools=False
         )
@@ -140,7 +140,7 @@ class TestBaseManagerIntegration:
 
         assert callable(cfg.tools[0])
         assert getattr(cfg.tools[0], "__name__", None) == "kb_search"
-        assert "kb_manager" in mgr.required_managers
+        assert "knowledge_base" in mgr.required_managers
 
     def test_callable_tools_unaffected(self, mock_context):
         def my_tool():

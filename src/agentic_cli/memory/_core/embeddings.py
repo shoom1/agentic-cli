@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import platform
 import re
+import threading
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -95,16 +96,22 @@ class EmbeddingService:
         self.device = resolve_embedding_device(device)
         self._model: SentenceTransformer | None = None
         self._embedding_dim: int | None = None
+        # One service is shared by both knowledge-base scopes and the memory
+        # store, and called from worker threads; a SentenceTransformer is not
+        # safe to call from two threads at once. Reentrant: encoding loads
+        # the model on first use.
+        self._lock = threading.RLock()
 
     @property
     def model(self) -> SentenceTransformer:
-        """Get the sentence transformer model (lazy loading)."""
-        if self._model is None:
-            from sentence_transformers import SentenceTransformer
+        """Get the sentence transformer model (loaded once, on first use)."""
+        with self._lock:
+            if self._model is None:
+                from sentence_transformers import SentenceTransformer
 
-            self._model = SentenceTransformer(self.model_name, device=self.device)
-            self._embedding_dim = self._model.get_sentence_embedding_dimension()
-        return self._model
+                self._model = SentenceTransformer(self.model_name, device=self.device)
+                self._embedding_dim = self._model.get_sentence_embedding_dimension()
+            return self._model
 
     @property
     def embedding_dim(self) -> int:
@@ -123,7 +130,8 @@ class EmbeddingService:
         Returns:
             List of floats representing the embedding vector.
         """
-        embedding = self.model.encode(text, convert_to_numpy=True)
+        with self._lock:
+            embedding = self.model.encode(text, convert_to_numpy=True)
         return embedding.tolist()
 
     def embed_batch(self, texts: list[str]) -> list[list[float]]:
@@ -138,12 +146,13 @@ class EmbeddingService:
         if not texts:
             return []
 
-        embeddings = self.model.encode(
-            texts,
-            batch_size=self.batch_size,
-            convert_to_numpy=True,
-            show_progress_bar=False,
-        )
+        with self._lock:
+            embeddings = self.model.encode(
+                texts,
+                batch_size=self.batch_size,
+                convert_to_numpy=True,
+                show_progress_bar=False,
+            )
         return embeddings.tolist()
 
     def chunk_document(

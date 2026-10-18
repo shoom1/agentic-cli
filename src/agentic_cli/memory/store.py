@@ -16,6 +16,7 @@ from typing import Any
 
 from agentic_cli.memory._core.io import atomic_write_json
 from agentic_cli.memory._core.log import get_logger
+from agentic_cli.memory._core.model_record import read_model_record, record_for, write_model_record
 
 logger = get_logger("agentic_cli.memory.store")
 
@@ -89,7 +90,9 @@ class MemoryStore:
 
     Keeps memories in ``memories.json`` in its directory (embeddings in
     ``memories_embeddings.json``), searched by substring or, with an
-    embedding service, by semantic similarity.
+    embedding service, by semantic similarity. The model that made the
+    embeddings is recorded in ``embedding_model.json``; after a model change
+    they are made again.
 
     Example:
         >>> store = MemoryStore(Path("memory"))
@@ -112,6 +115,7 @@ class MemoryStore:
         base_dir.mkdir(parents=True, exist_ok=True)
         self._path = base_dir / "memories.json"
         self._embeddings_path = base_dir / "memories_embeddings.json"
+        self._model_path = base_dir / "embedding_model.json"
         self._items: dict[str, MemoryItem] = {}
         # Guards self._items and _save() — LangGraph's ToolNode runs sync tools
         # concurrently in executor threads, so store/update/delete/search (and
@@ -119,7 +123,38 @@ class MemoryStore:
         self._lock = threading.Lock()
         self._load()
         if self._embedding_service:
+            self._open_with_embeddings()
+
+    def _open_with_embeddings(self) -> None:
+        """Reconcile the vectors with the model, then embed what is missing.
+
+        Record bookkeeping never fails the open: a model that cannot say what
+        it is leaves the files as 0.6.3 would, and a record that cannot be
+        written is logged. The record is written after the vectors are, so a
+        store whose re-embedding failed is re-embedded on the next open.
+        """
+        try:
+            current = record_for(self._embedding_service)
+        except Exception as e:
+            logger.warning("memory_model_record_unavailable", error=str(e))
+            current = None
+        if current is None:
             self._ensure_embeddings()
+            return
+        recorded = read_model_record(self._model_path)
+        dropped = self._drop_stale_vectors(current, recorded)
+        try:
+            self._ensure_embeddings()
+        except Exception as e:
+            if not dropped:
+                raise
+            logger.warning("memory_reembed_failed", error=str(e))
+            return
+        if recorded != current:
+            try:
+                write_model_record(self._model_path, current)
+            except OSError as e:
+                logger.warning("memory_model_record_write_failed", error=str(e))
 
     def _load(self) -> None:
         if self._path.exists():
@@ -168,6 +203,24 @@ class MemoryStore:
         for item, emb in zip(to_embed, embeddings):
             item.embedding = emb
         self._save_embeddings()
+
+    def _drop_stale_vectors(self, current, recorded) -> bool:
+        """Drop the vectors another model made; return whether any were dropped.
+
+        With a matching record, and without one (a store from 0.6.3), the
+        vectors are kept only when every stored vector has the current
+        dimension. A record of another model drops them all. Dropped vectors
+        are embedded again by ``_ensure_embeddings``.
+        """
+        stored = [item.embedding for item in self._items.values() if item.embedding is not None]
+        right_length = all(isinstance(v, list) and len(v) == current.embedding_dim for v in stored)
+        keep = right_length and (recorded is None or recorded == current)
+        if keep:
+            return False
+        logger.info("memory_reembedding", model=current.model_name, memories=len(self._items))
+        for item in self._items.values():
+            item.embedding = None
+        return True
 
     def store(self, content: str, tags: list[str] | None = None, importance: int = 5) -> str:
         """Append a memory to the persistent store.

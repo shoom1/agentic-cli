@@ -783,52 +783,20 @@ class TestArxivDownloadPdf:
 # ---------------------------------------------------------------------------
 
 
-class _FakeKB:
-    """Minimal KnowledgeBaseManager stub for ingestion tests.
-
-    Records the kwargs passed to ingest_document and returns a fake
-    Document. Avoids the full KB pipeline and any disk I/O.
-    """
-
-    def __init__(self) -> None:
-        self.calls: list[dict] = []
-        self.summary_calls: list[dict] = []
-
-    async def generate_summary(self, content: str, title: str = "") -> str:
-        self.summary_calls.append({"content": content, "title": title})
-        return "fake summary"
-
-    def ingest_document(self, **kwargs):
-        self.calls.append(kwargs)
-        return _FakeDoc(
-            id="doc-123",
-            title=kwargs.get("title", ""),
-            chunks=[object(), object(), object()],
-            summary=kwargs.get("summary", "fake summary"),
-        )
-
-
-class _FakeDoc:
-    def __init__(self, id, title, chunks, summary):
-        self.id = id
-        self.title = title
-        self.chunks = chunks
-        self.summary = summary
-
-
 @pytest.fixture
-def ingest_ctx():
-    """Publish ArxivSearchSource and a fake KB into the registry."""
+def ingest_ctx(tmp_path):
+    """Publish ArxivSearchSource and a mock-backed knowledge base into the registry."""
+    from agentic_cli.memory.kb import KnowledgeBase, KnowledgeBaseManager
     from agentic_cli.tools.arxiv_source import ArxivSearchSource
     from agentic_cli.workflow.service_registry import (
         ARXIV_SOURCE,
-        KB_MANAGER,
+        KNOWLEDGE_BASE,
         set_service_registry,
     )
 
     source = ArxivSearchSource()
-    kb = _FakeKB()
-    token = set_service_registry({ARXIV_SOURCE: source, KB_MANAGER: kb})
+    kb = KnowledgeBaseManager(tmp_path / "kb", use_mock=True)
+    token = set_service_registry({ARXIV_SOURCE: source, KNOWLEDGE_BASE: KnowledgeBase({"project": kb})})
     try:
         yield source, kb
     finally:
@@ -862,7 +830,9 @@ class TestIngestArxivPaper:
             },
         )
 
-        fake_pdf_bytes = b"%PDF-fake-bytes"
+        from tests.memory.pdf_bytes import pdf_with_text
+
+        fake_pdf_bytes = pdf_with_text("Extracted PDF text content")
 
         from agentic_cli.tools.webfetch.fetcher import FetchResult
 
@@ -874,30 +844,25 @@ class TestIngestArxivPaper:
         with patch(
             "agentic_cli.tools.webfetch_tool.get_or_create_fetcher",
             return_value=fake_fetcher,
-        ), patch("agentic_cli.tools.arxiv_tools.extract_pdf_text") as mock_extract, \
-             patch("agentic_cli.tools.arxiv_source.asyncio.sleep", new=AsyncMock()):
-            mock_extract.return_value = "Extracted PDF text content"
-
+        ), patch("agentic_cli.tools.arxiv_source.asyncio.sleep", new=AsyncMock()):
             result = await ingest_arxiv_paper("1706.03762", tags=["transformer"])
 
         assert result["success"] is True
-        assert result["document_id"] == "doc-123"
         assert result["title"] == "Attention Is All You Need"
-        assert result["chunks_created"] == 3
+        assert result["chunks_created"] == 1
         assert result["pdf_downloaded"] is True
 
-        # Verify KB was called with the right shape
-        assert len(kb.calls) == 1
-        call = kb.calls[0]
-        assert call["title"] == "Attention Is All You Need"
-        assert call["content"] == "Extracted PDF text content"
-        assert call["file_bytes"] == fake_pdf_bytes
-        assert call["source_url"] == "https://arxiv.org/abs/1706.03762"
-        assert call["metadata"]["arxiv_id"] == "1706.03762"
-        assert call["metadata"]["pdf_url"] == "https://arxiv.org/pdf/1706.03762"
-        assert call["metadata"]["src_url"] == "https://arxiv.org/e-print/1706.03762"
-        assert call["metadata"]["tags"] == ["transformer"]
-        assert call["metadata"]["authors"] == ["Vaswani"]
+        # Verify what the knowledge base stored
+        doc = kb.get_document(result["document_id"])
+        assert doc.title == "Attention Is All You Need"
+        assert doc.content == "Extracted PDF text content"
+        assert kb.get_file_path(doc.id).read_bytes() == fake_pdf_bytes
+        assert doc.source_url == "https://arxiv.org/abs/1706.03762"
+        assert doc.metadata["arxiv_id"] == "1706.03762"
+        assert doc.metadata["pdf_url"] == "https://arxiv.org/pdf/1706.03762"
+        assert doc.metadata["src_url"] == "https://arxiv.org/e-print/1706.03762"
+        assert doc.metadata["tags"] == ["transformer"]
+        assert doc.metadata["authors"] == ["Vaswani"]
 
         # Verify the PDF was fetched from the cached pdf_url, not synthesized,
         # and that it went through the hardened fetcher.
@@ -938,9 +903,10 @@ class TestIngestArxivPaper:
 
         assert result["success"] is True
         assert result["pdf_downloaded"] is False
-        assert kb.calls[0]["content"] == "This is the abstract used as fallback"
-        assert kb.calls[0]["file_bytes"] is None
-        assert "pdf_download_error" in kb.calls[0]["metadata"]
+        doc = kb.get_document(result["document_id"])
+        assert doc.content == "This is the abstract used as fallback"
+        assert doc.file_path is None
+        assert "pdf_download_error" in doc.metadata
 
     @pytest.mark.asyncio
     async def test_returns_error_when_paper_not_found(self, ingest_ctx):
@@ -955,7 +921,76 @@ class TestIngestArxivPaper:
 
         assert result["success"] is False
         assert "not found" in result["error"].lower()
-        assert kb.calls == []
+        assert kb.list_documents() == []
+
+    @pytest.mark.asyncio
+    async def test_the_summary_is_the_synthesis_other_documents_get(self, ingest_ctx):
+        """One summarizer call, with the sidecar prompt (it was 2-3 sentences)."""
+        source, kb = ingest_ctx
+        from agentic_cli.tools.arxiv_tools import ingest_arxiv_paper
+
+        prompts = []
+
+        class _Summarizer:
+            async def summarize(self, content, prompt):
+                prompts.append(prompt)
+                return "SUMMARY:\nA synthesis of the paper.\n\nCLAIMS:\n- Attention suffices.\n"
+
+        kb._summarizer = _Summarizer()
+        source._store_entry("2301.07041", {
+            "arxiv_id": "2301.07041", "title": "A paper", "authors": [],
+            "abstract": "The abstract.", "abs_url": "https://arxiv.org/abs/2301.07041",
+            "pdf_url": "", "src_url": "", "published_date": "", "updated_date": "",
+            "categories": [], "primary_category": "",
+        })
+
+        result = await ingest_arxiv_paper("2301.07041")
+
+        assert result["summary"] == "A synthesis of the paper."
+        assert len(prompts) == 1 and prompts[0].startswith("Extract a structured payload")
+        assert "- Attention suffices." in kb.sidecar_path(result["document_id"]).read_text()
+
+    @pytest.mark.asyncio
+    async def test_a_summarizer_answer_that_is_not_text_stores_the_preview(self, ingest_ctx):
+        source, kb = ingest_ctx
+        from agentic_cli.tools.arxiv_tools import ingest_arxiv_paper
+
+        class _Summarizer:
+            async def summarize(self, content, prompt):
+                return 42
+
+        kb._summarizer = _Summarizer()
+        source._store_entry("2301.07041", {
+            "arxiv_id": "2301.07041", "title": "A paper", "authors": [],
+            "abstract": "The abstract.", "abs_url": "https://arxiv.org/abs/2301.07041",
+            "pdf_url": "", "src_url": "", "published_date": "", "updated_date": "",
+            "categories": [], "primary_category": "",
+        })
+
+        result = await ingest_arxiv_paper("2301.07041")
+
+        assert result["success"] is True
+        assert result["summary"] == "The abstract."
+
+    @pytest.mark.asyncio
+    async def test_an_unexpected_storage_error_is_reported_not_raised(self, ingest_ctx):
+        source, kb = ingest_ctx
+        from agentic_cli.tools.arxiv_tools import ingest_arxiv_paper
+
+        def full(*args, **kwargs):
+            raise OSError("disk full")
+
+        kb.ingest_document = full
+        source._store_entry("2301.07041", {
+            "arxiv_id": "2301.07041", "title": "A paper", "authors": [],
+            "abstract": "The abstract.", "abs_url": "https://arxiv.org/abs/2301.07041",
+            "pdf_url": "", "src_url": "", "published_date": "", "updated_date": "",
+            "categories": [], "primary_category": "",
+        })
+
+        result = await ingest_arxiv_paper("2301.07041")
+
+        assert result == {"success": False, "error": "Ingestion failed: disk full"}
 
     @pytest.mark.asyncio
     async def test_returns_error_when_arxiv_source_missing(self):
