@@ -12,6 +12,7 @@ knowledge base becomes its own library.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -45,11 +46,32 @@ class ScopedDocument:
 
 @dataclass(frozen=True)
 class BackfillResult:
-    """What ``backfill_sidecars`` did in one scope."""
+    """What ``backfill_sidecars`` did in one scope.
+
+    ``written`` counts the sidecars of a scope that finished; it is 0 when
+    ``error`` is set.
+    """
 
     scope: str
     written: int
     error: BaseException | None = None
+
+
+def _same_dir(a: Path | str, b: Path | str) -> bool:
+    """Whether two paths are one directory, however they are spelled.
+
+    ``samefile`` sees through symlinks and, on a case-insensitive filesystem,
+    letter case, which ``resolve()`` does not. A path that does not exist
+    yet falls back to comparing resolved paths.
+    """
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        pass
+    try:
+        return Path(a).resolve() == Path(b).resolve()
+    except (OSError, RuntimeError):
+        return False
 
 
 def _same_store(a: Any, b: Any) -> bool:
@@ -59,10 +81,24 @@ def _same_store(a: Any, b: Any) -> bool:
     dir_a, dir_b = getattr(a, "kb_dir", None), getattr(b, "kb_dir", None)
     if dir_a is None or dir_b is None:
         return False
-    try:
-        return Path(dir_a).resolve() == Path(dir_b).resolve()
-    except (OSError, RuntimeError):
+    return _same_dir(dir_a, dir_b)
+
+
+def _check_scope(name: Any, manager: Any) -> None:
+    if not isinstance(name, str) or not name:
+        raise ValueError(f"a scope name must be a non-empty string, got {name!r}")
+    if manager is None:
+        raise ValueError(f"scope {name!r} has no knowledge base")
+
+
+def _matches(doc: Document, query: str) -> bool:
+    """Whether ``query`` (lower-case) is in the title or in an author."""
+    if query in doc.title.lower():
+        return True
+    authors = doc.metadata.get("authors")
+    if not isinstance(authors, (list, tuple)):
         return False
+    return any(query in a.lower() for a in authors if isinstance(a, str))
 
 
 def _fuse(ranked: list[list[dict[str, Any]]], top_k: int) -> list[dict[str, Any]]:
@@ -107,10 +143,7 @@ class KnowledgeBase:
         self._managers: dict[str, KnowledgeBaseManager] = {}
         self._aliases: dict[str, str] = {}
         for name, manager in managers.items():
-            if not isinstance(name, str) or not name:
-                raise ValueError(f"a scope name must be a non-empty string, got {name!r}")
-            if manager is None:
-                raise ValueError(f"scope {name!r} has no knowledge base")
+            _check_scope(name, manager)
             same = next((n for n, m in self._managers.items() if _same_store(m, manager)), None)
             if same is None:
                 self._managers[name] = manager
@@ -144,21 +177,26 @@ class KnowledgeBase:
                 ``EmbeddingConfig()``.
             summarizer: Passed to every scope (see ``KnowledgeBaseManager``).
             use_mock: Mock embeddings and vector store in every scope.
+
+        With the ``kb`` extra and no ``use_mock``, this builds one embedding
+        service; the model loads once, when the first real index is opened,
+        to size or reconcile it.
         """
         if not dirs:
             raise ValueError("a knowledge base needs at least one scope")
+        for name, directory in dirs.items():
+            _check_scope(name, directory)
         service = embedding_service
         if service is None and not use_mock and EmbeddingService.is_available():
             config = embedding or EmbeddingConfig()
             service = EmbeddingService(
                 model_name=config.model_name, batch_size=config.batch_size, device=config.device
             )
-        opened: list[tuple[Path, KnowledgeBaseManager]] = []
+        opened: list[KnowledgeBaseManager] = []
         managers: dict[str, KnowledgeBaseManager] = {}
         for name, directory in dirs.items():
             path = Path(directory)
-            resolved = path.resolve()
-            manager = next((m for r, m in opened if r == resolved), None)
+            manager = next((m for m in opened if _same_dir(m.kb_dir, path)), None)
             if manager is None:
                 manager = KnowledgeBaseManager(
                     path,
@@ -167,7 +205,7 @@ class KnowledgeBase:
                     use_mock=use_mock,
                     embedding_service=service,
                 )
-                opened.append((resolved, manager))
+                opened.append(manager)
             managers[name] = manager
         return cls(managers)
 
@@ -261,9 +299,9 @@ class KnowledgeBase:
 
         Each scope's documents are filtered first (``title_or_author``: a
         case-insensitive substring of the title or of an author;
-        ``source_type``), then merged newest first by ``updated_at``, without
+        ``source_type``, a ``SourceType``), then merged newest first by ``updated_at``, without
         listing an ID twice, and cut at ``limit`` (None: all). ``scope``
-        limits it to one scope.
+        limits it to one scope; an unknown one raises ``KeyError``.
         """
         names = [self._scope_name(scope)] if scope is not None else list(self._managers)
         query = title_or_author.lower()
@@ -272,18 +310,14 @@ class KnowledgeBase:
         for position, name in enumerate(names):
             try:
                 docs = self._managers[name].list_documents(source_type=source_type, limit=None)
+                matches = [d for d in docs if not query or _matches(d, query)]
             except Exception:
                 if position == 0:
                     raise
                 logger.debug("kb_scope_list_failed", scope=name, exc_info=True)
                 continue
-            for doc in docs:
+            for doc in matches:
                 if doc.id in seen:
-                    continue
-                if query and not (
-                    query in doc.title.lower()
-                    or any(query in a.lower() for a in doc.metadata.get("authors", []))
-                ):
                     continue
                 seen.add(doc.id)
                 listed.append(ScopedDocument(doc, name))
@@ -317,16 +351,19 @@ class KnowledgeBase:
                 summarizer call (nothing is written).
         """
         manager = self.manager(doc.scope)
-        document = doc.document
-        path = manager.sidecar_path(document.id)
+        doc_id = doc.document.id
+        path = manager.sidecar_path(doc_id)
         if not path.exists():
-            async with manager.get_or_create_sidecar_lock(document.id):
+            async with manager.get_or_create_sidecar_lock(doc_id):
                 if not path.exists():
-                    text, _ = self.read_text(doc)
-                    payload = await manager.generate_sidecar_payload(text, title=document.title)
-                    if not manager.write_sidecar_if_present(document, payload):
-                        raise DocumentNotFound(document.id)
-        return path.read_text()
+                    live = manager.get_document(doc_id)
+                    if live is None:
+                        raise DocumentNotFound(doc_id)
+                    text, _ = self.read_text(ScopedDocument(live, doc.scope))
+                    payload = await manager.generate_sidecar_payload(text, title=live.title)
+                    if not manager.write_sidecar_if_present(live, payload):
+                        raise DocumentNotFound(doc_id)
+        return path.read_text(encoding="utf-8")
 
     # -- concepts --------------------------------------------------------------
 
@@ -365,19 +402,24 @@ class KnowledgeBase:
         """
         results: list[BackfillResult] = []
         for name, manager in self._managers.items():
-            callback = None
-            if progress is not None:
-
-                def callback(done: int, total: int, document: Document, _scope: str = name) -> None:
-                    progress(_scope, done, total, document)
-
             try:
-                written = await manager.backfill_sidecars(progress_cb=callback)
+                written = await manager.backfill_sidecars(progress_cb=self._scoped(progress, name))
             except Exception as e:
                 results.append(BackfillResult(name, 0, e))
                 continue
             results.append(BackfillResult(name, written))
         return results
+
+    @staticmethod
+    def _scoped(progress: ProgressCallback | None, scope: str) -> Callable[[int, int, Document], None] | None:
+        """``progress`` as the manager's callback, with ``scope`` bound."""
+        if progress is None:
+            return None
+
+        def callback(done: int, total: int, document: Document) -> None:
+            progress(scope, done, total, document)
+
+        return callback
 
     def stats(self) -> dict[str, dict[str, Any]]:
         """Each scope's ``get_stats()``, by scope name."""

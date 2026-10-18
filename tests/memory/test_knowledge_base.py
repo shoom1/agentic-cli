@@ -643,3 +643,128 @@ def test_stats_per_scope(two):
     assert list(stats) == ["project", "user"]
     assert stats["project"]["document_count"] == 0
     assert stats["user"]["document_count"] == 1
+
+
+# -- review fixes (PR 5 fix wave) -----------------------------------------------
+
+
+def _case_insensitive(tmp_path) -> bool:
+    (tmp_path / "KB").mkdir()
+    return (tmp_path / "kb").exists()
+
+
+def test_open_makes_one_scope_of_two_spellings_of_a_directory(tmp_path):
+    if not _case_insensitive(tmp_path):
+        pytest.skip("case-sensitive filesystem")
+
+    kb = KnowledgeBase.open({"project": tmp_path / "KB", "user": tmp_path / "kb"}, use_mock=True)
+
+    assert kb.scopes == ("project",)
+    assert kb.manager("user") is kb.manager("project")
+
+
+def test_two_managers_on_two_spellings_of_a_directory_are_one_scope(tmp_path):
+    if not _case_insensitive(tmp_path):
+        pytest.skip("case-sensitive filesystem")
+
+    kb = KnowledgeBase({"project": _manager(tmp_path / "KB"), "user": _manager(tmp_path / "kb")})
+
+    assert kb.scopes == ("project",)
+    assert kb.manager("user") is kb.manager("project")
+
+
+def test_a_later_scopes_document_without_authors_does_not_break_the_catalogue(two):
+    _add(two.manager("project"), "Mine", metadata={"authors": ["Ada"]})
+    _add(two.manager("user"), "Theirs", metadata={"authors": None})
+
+    assert {s.document.title for s in two.list_documents()} == {"Mine", "Theirs"}
+    assert [s.document.title for s in two.list_documents(title_or_author="ada")] == ["Mine"]
+
+
+def test_an_author_list_with_a_non_string_still_matches(two):
+    doc = _add(two.manager("project"), "Mixed")
+    doc.metadata["authors"] = [7, "Ada"]  # set after ingestion: the sidecar writer wants strings
+
+    assert [s.document.title for s in two.list_documents(title_or_author="ada")] == ["Mixed"]
+
+
+async def test_a_document_deleted_before_the_sidecar_call_makes_no_summarizer_call(tmp_path):
+    summarizer = _Counting()
+    manager = _manager(tmp_path / "kb", summarizer)
+    doc = _without_sidecar(manager)
+    manager.delete_document(doc.id)
+
+    with pytest.raises(DocumentNotFound):
+        await KnowledgeBase({"project": manager}).sidecar(ScopedDocument(doc, "project"))
+
+    assert summarizer.calls == []
+
+
+async def test_a_copy_of_a_live_document_gets_its_sidecar(tmp_path):
+    import dataclasses
+
+    manager = _manager(tmp_path / "kb", _Counting())
+    doc = _without_sidecar(manager)
+
+    text = await KnowledgeBase({"project": manager}).sidecar(ScopedDocument(dataclasses.replace(doc), "project"))
+
+    assert "A lazy summary." in text
+    assert manager.sidecar_path(doc.id).exists()
+
+
+def test_open_validates_the_scopes_before_creating_a_directory(tmp_path):
+    with pytest.raises(ValueError):
+        KnowledgeBase.open({"project": tmp_path / "a", "": tmp_path / "b"}, use_mock=True)
+
+    assert not (tmp_path / "a").exists()
+    assert not (tmp_path / "b").exists()
+
+
+def _recording_service(monkeypatch):
+    built = []
+
+    class _Service(MockEmbeddingService):
+        is_available = staticmethod(lambda: True)
+
+        def __init__(self, model_name, batch_size, device):
+            super().__init__(model_name=model_name, batch_size=batch_size)
+            built.append(self)
+
+    monkeypatch.setattr("agentic_cli.memory.kb.knowledge_base.EmbeddingService", _Service)
+    return built
+
+
+def test_open_builds_no_service_in_mock_mode(tmp_path, monkeypatch):
+    built = _recording_service(monkeypatch)
+
+    KnowledgeBase.open({"project": tmp_path / "project"}, use_mock=True)
+
+    assert built == []
+
+
+def test_open_builds_no_service_without_the_extra(tmp_path, monkeypatch):
+    built = _recording_service(monkeypatch)
+    monkeypatch.setattr(
+        "agentic_cli.memory.kb.knowledge_base.EmbeddingService.is_available", staticmethod(lambda: False)
+    )
+
+    KnowledgeBase.open({"project": tmp_path / "project"})
+
+    assert built == []
+
+
+def test_open_constructs_one_manager_for_two_spellings_of_a_directory(tmp_path, monkeypatch):
+    constructed = []
+
+    class _Recording(KnowledgeBaseManager):
+        def __init__(self, *args, **kwargs):
+            constructed.append(args)
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr("agentic_cli.memory.kb.knowledge_base.KnowledgeBaseManager", _Recording)
+    (tmp_path / "kb").mkdir()
+    (tmp_path / "link").symlink_to(tmp_path / "kb")
+
+    KnowledgeBase.open({"project": tmp_path / "kb", "user": tmp_path / "link"}, use_mock=True)
+
+    assert len(constructed) == 1
