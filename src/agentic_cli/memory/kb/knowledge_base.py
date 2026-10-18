@@ -12,11 +12,13 @@ knowledge base becomes its own library.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlparse
 
 from agentic_cli.memory._core.embeddings import EmbeddingConfig, EmbeddingService
 from agentic_cli.memory._core.log import get_logger
@@ -34,6 +36,29 @@ ProgressCallback = Callable[[str, int, int, Document], None]
 
 class DocumentNotFound(LookupError):
     """The document went away while an operation on it was under way."""
+
+
+class EmptyDocument(ValueError):
+    """An ingest with no text and no bytes."""
+
+
+class ConversionFailed(Exception):
+    """The converter failed unexpectedly; the original exception is ``__cause__``."""
+
+
+# A title made from a document's text: its first characters.
+_TITLE_CHARS = 80
+
+
+def _cut(text: str, length: int) -> str:
+    return text[:length] + "..." if len(text) > length else text
+
+
+def _url_title(url: str) -> str:
+    """A title from a URL: its last path segment (percent-decoded), else its host."""
+    parsed = urlparse(url)
+    segment = parsed.path.rstrip("/").rsplit("/", 1)[-1]
+    return unquote(segment) if segment else (parsed.netloc or url)
 
 
 @dataclass(frozen=True)
@@ -329,6 +354,152 @@ class KnowledgeBase:
                 listed.append(ScopedDocument(doc, name))
         listed.sort(key=lambda s: s.document.updated_at, reverse=True)
         return listed if limit is None else listed[:limit]
+
+    # -- ingestion -----------------------------------------------------------
+
+    async def ingest_text(
+        self,
+        content: str,
+        *,
+        title: str = "",
+        source_type: SourceType = SourceType.USER,
+        source_url: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        scope: str | None = None,
+    ) -> ScopedDocument:
+        """Store ``content`` as a document of ``scope`` (default: the first scope).
+
+        The title defaults to the text's first 80 characters. One summarizer
+        call writes the summary and the sidecar.
+
+        Raises:
+            EmptyDocument: ``content`` is empty.
+        """
+        return await self._store(
+            scope, text=content, data=None, extension=".txt", title=title,
+            source_type=source_type, source_url=source_url, metadata=dict(metadata or {}),
+        )
+
+    async def ingest_bytes(
+        self,
+        data: bytes,
+        *,
+        extension: str,
+        content_type: str | None = None,
+        charset: str | None = None,
+        fetched_url: str | None = None,
+        fetched_at: str | None = None,
+        title: str = "",
+        default_title: str = "",
+        source_type: SourceType | None = None,
+        source_url: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        fallback_text: str | None = None,
+        scope: str | None = None,
+    ) -> ScopedDocument:
+        """Convert ``data`` and store it, with the bytes, in ``scope`` (default: the first).
+
+        Convert (on a worker thread), fill in defaults, enrich (one
+        summarizer call), store. A value the caller passed always wins:
+
+        - Title: the page's title, then the last segment of ``fetched_url``
+          (or its host), then ``default_title``, then the text's first 80
+          characters.
+        - Source type: ``web`` with a ``fetched_url``, otherwise ``local``.
+        - Source URL: ``fetched_url``.
+        - Metadata: the page's authors, its description (as ``abstract``),
+          ``published``, then ``fetched_at`` and ``file_size_bytes``; the
+          caller's keys win.
+        - Text: the converted text, or ``fallback_text`` when that is empty.
+
+        Args:
+            data: The bytes.
+            extension: Their extension, for example ``.pdf``.
+            content_type: The fetched page's Content-Type.
+            charset: The fetched page's charset. None means a local file,
+                which must be UTF-8 unless it is a PDF.
+            fetched_url: Where the bytes were downloaded; it helps
+                trafilatura and marks the document as a web page.
+            fetched_at: When (ISO 8601).
+            source_url: What the document cites (arXiv: the abstract page,
+                while the bytes come from the PDF URL).
+
+        Raises:
+            UnsupportedDocument: the converter cannot read the bytes.
+            ConversionFailed: the converter failed unexpectedly.
+            EmptyDocument: no text and no bytes.
+        """
+        try:
+            converted = await asyncio.to_thread(
+                _convert.convert_document,
+                data, content_type=content_type, extension=extension, charset=charset, url=fetched_url,
+            )
+        except _convert.UnsupportedDocument:
+            raise
+        except Exception as e:
+            raise ConversionFailed(f"could not convert it ({type(e).__name__})") from e
+
+        found: dict[str, Any] = {}
+        if converted.authors:
+            found["authors"] = list(converted.authors)
+        if converted.description:
+            found["abstract"] = converted.description
+        if converted.published:
+            found["published"] = converted.published
+        if fetched_at:
+            found["fetched_at"] = fetched_at
+        found["file_size_bytes"] = len(data)
+        found.update(metadata or {})
+
+        if fetched_url:
+            page_title = converted.title or _url_title(fetched_url)
+            default_type = SourceType.WEB
+        else:
+            page_title = converted.title or default_title
+            default_type = SourceType.LOCAL
+        return await self._store(
+            scope,
+            text=converted.text or (fallback_text or ""),
+            data=data,
+            extension=extension,
+            title=title or page_title,
+            source_type=source_type or default_type,
+            source_url=source_url or fetched_url,
+            metadata=found,
+        )
+
+    async def _store(
+        self,
+        scope: str | None,
+        *,
+        text: str,
+        data: bytes | None,
+        extension: str,
+        title: str,
+        source_type: SourceType,
+        source_url: str | None,
+        metadata: dict[str, Any],
+    ) -> ScopedDocument:
+        """Enrich (one summarizer call) and store through the scope's manager."""
+        if not text and not data:
+            raise EmptyDocument("no text and no bytes to ingest")
+        name = self._scope_name(scope) if scope is not None else self.scopes[0]
+        manager = self._managers[name]
+        if not title:
+            title = _cut(text, _TITLE_CHARS)
+        payload = await manager.generate_sidecar_payload(text, title=title)
+        document = manager.ingest_document(
+            content=text,
+            title=title,
+            source_type=source_type,
+            source_url=source_url,
+            metadata=metadata or None,
+            file_bytes=data,
+            file_extension=extension,
+            summary=payload["summary"] or None,
+            sidecar_payload=payload,
+        )
+        return ScopedDocument(document, name)
 
     def read_text(self, doc: ScopedDocument, *, max_chars: int | None = None) -> tuple[str, bool]:
         """The document's stored text, and whether it was cut at ``max_chars``.
