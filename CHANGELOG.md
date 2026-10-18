@@ -50,7 +50,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ConvertedDocument` and `UnsupportedDocument` are exported from
   `agentic_cli.memory.kb`, which reads PDFs and charset labels with its own
   helpers (a test keeps its charset helper in agreement with `web_fetch`'s).
-  Ingestion no longer reads PDFs through `agentic_cli.tools.pdf_utils`; a
+  Ingestion and `kb_read` no longer read PDFs through `agentic_cli.tools.pdf_utils`; a
   test that patched `extract_pdf_text` there should patch
   `agentic_cli.memory.kb.convert.extract_pdf_text`.
 
@@ -64,20 +64,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Deprecated
 
+All of these work until 0.7.0.
+
 - **`agentic_cli.tools.kb_convert`** forwards to `agentic_cli.memory.kb`,
-  with a `DeprecationWarning`, until 0.7.0.
-- **`memory_services.build_memory_store(settings)`** works, with a
-  `DeprecationWarning`, until 0.7.0. Use
+  with a `DeprecationWarning`.
+- **`memory_services.build_memory_store(settings)`** warns. Use
   `memory_services.open_memory_store(settings, embedding_service=None)`.
-
-All work until 0.7.0:
-
 - **`requires="kb_manager"`** builds the same services, and warns when the
   tool registers. Declare `requires="knowledge_base"`.
 - **The `kb_manager` and `user_kb_manager` service keys** still hold
   `knowledge_base.manager("project")` and the user scope's manager (the same
   object when both are one directory). A dictionary lookup cannot warn; use
   `knowledge_base`, and `knowledge_base.manager(name)` for one scope.
+- **A service registry holding only `kb_manager` / `user_kb_manager`** (filled
+  by hand, as many tests and some apps do) still works, and the knowledge-base
+  tools warn when they find it. Publish a `KnowledgeBase` under
+  `knowledge_base`.
 - **`workflow.kb_manager`, `workflow.user_kb_manager`** warn; use
   `workflow.knowledge_base`. **`workflow.memory_manager`** warns; use
   `workflow.memory_store`.

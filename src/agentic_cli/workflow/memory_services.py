@@ -100,7 +100,7 @@ def open_knowledge_base(
     dirs = {"project": project_kb_dir(settings), "user": settings.knowledge_base_dir}
     unknown = [name for name in scopes if name not in dirs]
     if unknown:
-        raise ValueError(f"unknown knowledge-base scope(s): {', '.join(unknown)}; scopes: project, user")
+        raise ValueError(f"unknown knowledge-base scope(s): {', '.join(unknown)}; scopes: {', '.join(dirs)}")
     if not settings.knowledge_base_summarize:
         summarizer = None
     return KnowledgeBase.open(

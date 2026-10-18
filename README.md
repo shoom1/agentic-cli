@@ -666,6 +666,8 @@ await kb.backfill_sidecars()                           # regenerate markdown sum
 `KnowledgeBase` (provisional: its name and methods may change in 0.7.0) serves several directories as one, as the workflow does with the project and user knowledge bases:
 
 ```python
+from pathlib import Path
+
 from agentic_cli.memory.kb import KnowledgeBase
 
 kb = KnowledgeBase.open(
@@ -675,9 +677,10 @@ kb = KnowledgeBase.open(
 results = kb.search("neural networks", top_k=5)          # both scopes, merged by rank
 found = kb.find_document("Attention")                     # ScopedDocument(document, scope) or None
 recent = kb.list_documents(title_or_author="vaswani")     # the catalogue, newest first
-text, truncated = kb.read_text(found, max_chars=10_000)
-sidecar = await kb.sidecar(found)                         # written first when missing
-results = await kb.backfill_sidecars()                    # one BackfillResult per scope
+if found is not None:
+    text, truncated = kb.read_text(found, max_chars=10_000)
+    sidecar = await kb.sidecar(found)                     # written first when missing
+backfilled = await kb.backfill_sidecars()                 # one BackfillResult per scope
 ```
 
 The workflow exposes it as `workflow.knowledge_base` (and the memory store as `workflow.memory_store`); tools find it under the `knowledge_base` service key.
