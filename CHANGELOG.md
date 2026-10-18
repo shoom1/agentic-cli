@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.4] - 2026-10-18
+
+The knowledge base gets a public API in `agentic_cli.memory.kb`. A
+provisional `KnowledgeBase` serves the project and user knowledge bases as
+one, and one ingestion pipeline (`ingest_text`, `ingest_bytes`) stores every
+document, arXiv papers included; the knowledge-base tools are now adapters
+over it. The workflow shares one embedding model between both knowledge bases
+and the memory store, so the model loads once per process, and each index
+records the model that built it, so a change of `embedding_model` re-embeds
+the stored text instead of mixing two models. The 0.6.3 API keeps working:
+the tools' results are pinned against a recording from 0.6.3, and the old
+service keys, properties and factory arguments warn until 0.7.0. One result
+changes, see *Changed*: an arXiv paper's `summary` is the full synthesis.
+`/papers` now finds matches older than the 50 newest documents.
+
 ### Added
 
 - **Tests pin what the knowledge-base tools return.** Every `kb_*` tool,
