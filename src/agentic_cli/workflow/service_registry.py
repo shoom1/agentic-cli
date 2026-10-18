@@ -16,6 +16,7 @@ from typing import Any
 ARXIV_SOURCE = "arxiv_source"
 JOB_MANAGER = "job_manager"
 KB_MANAGER = "kb_manager"
+KNOWLEDGE_BASE = "knowledge_base"
 LLM_SUMMARIZER = "llm_summarizer"
 MEMORY_STORE = "memory_store"
 PERMISSION_ENGINE = "permission_engine"
