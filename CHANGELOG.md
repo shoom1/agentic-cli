@@ -66,9 +66,10 @@ further deprecation step.
 - **`memory_services.build_memory_store`** and
   **`memory_services.build_knowledge_bases`**. Use
   `memory_services.open_memory_store` and `memory_services.open_knowledge_base`.
-- **`agentic_cli.tools.google_search_tool`**. Use `agentic_cli.tools.web_search`;
-  for native Google Search, ADK's `GoogleSearchTool` as an agent's only tool
-  (`include_state_tools=False`).
+- **`agentic_cli.tools.google_search_tool`**. Use `agentic_cli.tools.web_search`.
+  For native Google Search, ADK's `GoogleSearchTool` works as an agent's only
+  tool (`include_state_tools=False`), but it runs inside the model, so the
+  permission engine never checks it.
 
 ## [0.6.4] - 2026-10-18
 
