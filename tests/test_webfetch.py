@@ -34,11 +34,6 @@ def _pinned_fetcher(monkeypatch, handler, *, resolves_to="93.184.216.34", **kw):
 class TestWebFetchSettings:
     """Tests for webfetch settings fields."""
 
-    def test_webfetch_model_default_none(self):
-        """Test webfetch_model defaults to None."""
-        settings = BaseSettings()
-        assert settings.webfetch_model is None
-
     def test_webfetch_blocked_domains_default_empty(self):
         """Test webfetch_blocked_domains defaults to empty list."""
         settings = BaseSettings()

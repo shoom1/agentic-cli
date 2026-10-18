@@ -133,11 +133,6 @@ class TestFallbackBehavior:
         assert reg.get_default(ModelFamily.GEMINI) == "gemini-2.5-flash"
         assert reg.get_default(ModelFamily.CLAUDE) == "claude-sonnet-4-6"
 
-    def test_set_default(self):
-        reg = ModelRegistry()
-        reg.set_default(ModelFamily.GEMINI, "gemini-2.5-pro")
-        assert reg.get_default(ModelFamily.GEMINI) == "gemini-2.5-pro"
-
 
 class TestResolveModel:
     """Tests for model resolution."""

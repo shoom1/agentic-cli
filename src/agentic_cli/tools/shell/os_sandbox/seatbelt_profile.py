@@ -47,22 +47,6 @@ def _subpath_rule(operation: str, path: Path, allow: bool = True) -> str:
     return f'({action} {operation} (subpath "{escaped}"))'
 
 
-def _literal_rule(operation: str, path: Path, allow: bool = True) -> str:
-    """Generate a literal path rule for a file operation.
-
-    Args:
-        operation: SBPL operation.
-        path: The exact file path.
-        allow: Whether to allow or deny.
-
-    Returns:
-        SBPL rule string.
-    """
-    action = "allow" if allow else "deny"
-    escaped = _escape_sbpl_path(str(path))
-    return f'({action} {operation} (literal "{escaped}"))'
-
-
 def generate_seatbelt_profile(
     writable_paths: list[Path],
     deny_write_paths: list[Path],

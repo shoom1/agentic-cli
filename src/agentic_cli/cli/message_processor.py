@@ -171,14 +171,6 @@ class MessageProcessor:
         self._task_box: "ThinkingContext | None" = None
         self._last_task_content: str | None = None
 
-    def clear_task_state(self) -> None:
-        """Clear task box state."""
-        self._last_task_progress = None
-        if self._task_box is not None:
-            self._task_box.finish(add_to_history=False, echo_to_console=False)
-            self._task_box = None
-        self._last_task_content = None
-
     async def process(
         self,
         message: str,

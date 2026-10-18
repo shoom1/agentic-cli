@@ -120,7 +120,7 @@ def _real_manager(monkeypatch=None):
     mgr = GoogleADKWorkflowManager(
         agent_configs=[AgentConfig(name="a", prompt="p")], settings=ctx.settings
     )
-    mgr._model_registry = MagicMock(refresh=AsyncMock(), discovery_complete=False)
+    mgr._model_registry = MagicMock(refresh=AsyncMock())
     mgr._ensure_managers_initialized = lambda: None
 
     created: list[_AsyncClosable] = []

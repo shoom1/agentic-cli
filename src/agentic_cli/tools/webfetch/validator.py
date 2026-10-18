@@ -22,7 +22,6 @@ class ValidationResult:
 
     valid: bool
     error: str | None = None
-    resolved_ip: str | None = None
 
 
 # Ranges ipaddress.is_global marks global but that are SSRF-risky.
@@ -97,7 +96,6 @@ class URLValidator:
             return ValidationResult(
                 valid=False,
                 error=f"Private/internal IP address blocked: {literal}",
-                resolved_ip=str(literal),
             )
 
         return ValidationResult(valid=True)

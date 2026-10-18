@@ -396,22 +396,6 @@ class TestWorkflowManagerLifecycle:
 
         assert manager.settings is mock_settings
 
-    def test_update_settings(self, mock_settings, agent_configs):
-        """Test updating settings."""
-        from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager
-
-        manager = GoogleADKWorkflowManager(
-            agent_configs=agent_configs,
-            settings=mock_settings,
-        )
-
-        new_settings = MagicMock()
-        new_settings.app_name = "new_app"
-
-        manager.update_settings(new_settings)
-
-        assert manager.settings is new_settings
-
     @pytest.mark.asyncio
     async def test_cleanup(self, mock_settings, agent_configs):
         """Test cleanup resets state."""

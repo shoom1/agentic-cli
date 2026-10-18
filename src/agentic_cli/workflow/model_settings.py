@@ -67,21 +67,3 @@ class ModelSettings(BaseModel):
     stop_sequences: list[str] | None = None
     thinking: ThinkingSettings | None = None
     extra: dict[str, Any] = Field(default_factory=dict)
-
-    def common_params(self) -> dict[str, Any]:
-        """Return non-None neutral generation params (excludes thinking/extra).
-
-        Keys use the neutral field names; backends rename as needed.
-        """
-        params: dict[str, Any] = {}
-        if self.temperature is not None:
-            params["temperature"] = self.temperature
-        if self.top_p is not None:
-            params["top_p"] = self.top_p
-        if self.top_k is not None:
-            params["top_k"] = self.top_k
-        if self.max_tokens is not None:
-            params["max_tokens"] = self.max_tokens
-        if self.stop_sequences is not None:
-            params["stop_sequences"] = self.stop_sequences
-        return params

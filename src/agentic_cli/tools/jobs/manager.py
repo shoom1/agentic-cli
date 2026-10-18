@@ -758,17 +758,6 @@ class JobManager:
         rec.resume_owner = None
         self._persist(rec, owns_shared_state=True)
 
-    def mark_resumed(self, job_id: str) -> None:
-        """Mark a job's result delivered (durably) so it is never resumed twice.
-
-        Deprecated compatibility shim for the pre-lifecycle API: it claims and
-        completes in one step. Prefer ``begin_resume()``/``complete_resume()``,
-        which survives a crash between claiming and delivering. A job that
-        cannot be claimed is left alone.
-        """
-        if self.begin_resume(job_id):
-            self.complete_resume(job_id, delivered=True)
-
     def _recover_interrupted_resumes(self) -> None:
         """Fail records left mid-delivery by a *dead* owner (called on load).
 

@@ -145,12 +145,6 @@ class WorkflowSettingsMixin:
     )
 
     # Web fetch configuration
-    webfetch_model: str | None = Field(
-        default=None,
-        title="WebFetch Model",
-        description="Model for summarizing fetched content (None = auto-detect)",
-        json_schema_extra={"ui_order": 56},
-    )
     webfetch_blocked_domains: list[str] = Field(
         default_factory=list,
         title="WebFetch Blocked Domains",
@@ -332,12 +326,6 @@ class WorkflowSettingsMixin:
         title="Sandbox Max Sessions",
         description="Maximum concurrent sandbox sessions",
         json_schema_extra={"ui_order": 124},
-    )
-    sandbox_packages: list[str] = Field(
-        default_factory=list,
-        title="Sandbox Packages",
-        description="Additional pip packages to pre-install in sandbox sessions (informational for local backend, drives image build for Docker backend)",
-        json_schema_extra={"ui_order": 125},
     )
     sandbox_image: str = Field(
         default="quay.io/jupyter/scipy-notebook:python-3.12",
@@ -602,18 +590,6 @@ class WorkflowSettingsMixin:
 
     # === Model helpers ===
 
-    @property
-    def default_model_google(self) -> str:
-        """Default Google model."""
-        registry = self._get_registry()
-        return registry.get_default(ModelFamily.GEMINI)
-
-    @property
-    def default_model_anthropic(self) -> str:
-        """Default Anthropic model."""
-        registry = self._get_registry()
-        return registry.get_default(ModelFamily.CLAUDE)
-
     def _get_registry(self) -> ModelRegistry:
         """Get the model registry (creates a default if none attached)."""
         reg = getattr(self, "_model_registry", None)
@@ -657,24 +633,6 @@ class WorkflowSettingsMixin:
             google_key=self.has_google_key,
             anthropic_key=self.has_anthropic_key,
         )
-
-    def is_google_model(self, model: str | None = None) -> bool:
-        """Check if the given model (or current model) is a Google model."""
-        model = model or self.get_model()
-        registry = self._get_registry()
-        try:
-            return registry.get_family(model) == ModelFamily.GEMINI
-        except ValueError:
-            return False
-
-    def is_anthropic_model(self, model: str | None = None) -> bool:
-        """Check if the given model (or current model) is an Anthropic model."""
-        model = model or self.get_model()
-        registry = self._get_registry()
-        try:
-            return registry.get_family(model) == ModelFamily.CLAUDE
-        except ValueError:
-            return False
 
     def supports_thinking_effort(self, model: str | None = None) -> bool:
         """Check if the model supports thinking effort configuration."""

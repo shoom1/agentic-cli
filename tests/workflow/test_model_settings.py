@@ -43,13 +43,9 @@ def _cfg(model_settings=None, model=None) -> AgentConfig:
 class TestModelSettingsModel:
     def test_defaults_all_none(self):
         ms = ModelSettings()
-        assert ms.common_params() == {}
+        assert (ms.temperature, ms.top_p, ms.top_k, ms.max_tokens, ms.stop_sequences) == (None,) * 5
         assert ms.thinking is None
         assert ms.extra == {}
-
-    def test_common_params_only_non_none(self):
-        ms = ModelSettings(temperature=0.5, max_tokens=100)
-        assert ms.common_params() == {"temperature": 0.5, "max_tokens": 100}
 
     def test_thinking_defaults(self):
         ts = ThinkingSettings()

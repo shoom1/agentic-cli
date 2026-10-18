@@ -229,10 +229,6 @@ class LLMLoggingPlugin(BasePlugin):
     # Event buffer management
     # ------------------------------------------------------------------
 
-    def get_events(self) -> list[WorkflowEvent]:
-        """Get all captured events without clearing the buffer."""
-        return list(self._events)
-
     def drain_events(self) -> list[WorkflowEvent]:
         """Get and clear all captured events."""
         events = list(self._events)
@@ -243,10 +239,6 @@ class LLMLoggingPlugin(BasePlugin):
         """Clear all captured events and pending timestamps."""
         self._events.clear()
         self._request_timestamps.clear()
-
-    def get_log_file_path(self) -> Path:
-        """Get the path to the log file."""
-        return self._log_file
 
     # ------------------------------------------------------------------
     # Internal helpers

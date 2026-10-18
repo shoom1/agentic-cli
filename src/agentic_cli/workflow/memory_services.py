@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from agentic_cli.config import BaseSettings
     from agentic_cli.memory import EmbeddingConfig, EmbeddingService, MemoryStore
-    from agentic_cli.memory.kb import KnowledgeBase, KnowledgeBaseManager
+    from agentic_cli.memory.kb import KnowledgeBase
 
 
 def project_kb_dir(settings: "BaseSettings") -> Path:
@@ -49,28 +49,6 @@ def build_embedding_service(settings: "BaseSettings") -> "EmbeddingService | Non
     config = embedding_config(settings)
     return EmbeddingService(
         model_name=config.model_name, batch_size=config.batch_size, device=config.device
-    )
-
-
-def build_knowledge_base(
-    settings: "BaseSettings",
-    base_dir: Path,
-    *,
-    summarizer: Any = None,
-    use_mock: bool | None = None,
-    embedding_service: Any = None,
-) -> "KnowledgeBaseManager":
-    """One knowledge base in ``base_dir``; ``use_mock`` defaults to the setting."""
-    from agentic_cli.memory.kb import KnowledgeBaseManager
-
-    if use_mock is None:
-        use_mock = settings.knowledge_base_use_mock
-    return KnowledgeBaseManager(
-        base_dir,
-        embedding=embedding_config(settings),
-        summarizer=summarizer,
-        use_mock=use_mock,
-        embedding_service=embedding_service,
     )
 
 

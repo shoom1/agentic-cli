@@ -536,26 +536,6 @@ class TestToolRegistry:
         assert "internal_search" not in registry
         assert registry.get("custom_search").description == "Custom search"
 
-    def test_registry_get_functions(self):
-        """Test getting all functions."""
-        from agentic_cli.workflow.permissions import EXEMPT
-
-        registry = ToolRegistry()
-
-        def tool_a():
-            pass
-
-        def tool_b():
-            pass
-
-        registry.register(tool_a, capabilities=EXEMPT)
-        registry.register(tool_b, capabilities=EXEMPT)
-
-        functions = registry.get_functions()
-        assert len(functions) == 2
-        assert tool_a in functions
-        assert tool_b in functions
-
     def test_registry_list_by_category(self):
         """Test listing tools by category."""
         from agentic_cli.workflow.permissions import EXEMPT
