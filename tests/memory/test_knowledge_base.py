@@ -1,0 +1,414 @@
+"""``KnowledgeBase``: the project and user knowledge bases as one.
+
+Each scope is a ``KnowledgeBaseManager`` (one directory). ``KnowledgeBase``
+does what spans them, which the tools did by hand: search merged by
+reciprocal rank fusion, lookups in scope order, one catalogue, sidecars,
+concept pages that may cite any scope, and a backfill of every scope.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from datetime import datetime, timedelta
+
+import pytest
+
+from agentic_cli.memory import EmbeddingService, MockEmbeddingService
+from agentic_cli.memory.kb import (
+    BackfillAlreadyRunning,
+    BackfillResult,
+    DocumentNotFound,
+    KnowledgeBase,
+    KnowledgeBaseManager,
+    ScopedDocument,
+    SourceType,
+)
+from tests.memory.pdf_bytes import pdf_with_text
+
+EPOCH = datetime(2026, 1, 1)
+
+
+@pytest.fixture(autouse=True)
+def no_model(monkeypatch):
+    monkeypatch.setattr(EmbeddingService, "is_available", staticmethod(lambda: False))
+
+
+def _manager(path, summarizer=None) -> KnowledgeBaseManager:
+    return KnowledgeBaseManager(path, use_mock=True, summarizer=summarizer)
+
+
+def _add(manager, title, minute=0, content=None, source=SourceType.USER, **kwargs):
+    doc = manager.ingest_document(
+        content=f"Text of {title}." if content is None else content, title=title, source_type=source, **kwargs
+    )
+    doc.updated_at = EPOCH + timedelta(minutes=minute)
+    return doc
+
+
+@pytest.fixture
+def two(tmp_path) -> KnowledgeBase:
+    return KnowledgeBase({"project": _manager(tmp_path / "project"), "user": _manager(tmp_path / "user")})
+
+
+# -- scopes ------------------------------------------------------------------
+
+
+def test_the_scopes_keep_their_order(two):
+    assert two.scopes == ("project", "user")
+
+
+def test_one_manager_under_two_names_is_one_scope(tmp_path):
+    shared = _manager(tmp_path / "shared")
+
+    kb = KnowledgeBase({"project": shared, "user": shared})
+
+    assert kb.scopes == ("project",)
+    assert kb.manager("user") is shared
+
+
+def test_two_managers_on_one_directory_are_one_scope(tmp_path):
+    first = _manager(tmp_path / "kb")
+    second = _manager(tmp_path / "other" / ".." / "kb")
+
+    kb = KnowledgeBase({"project": first, "user": second})
+
+    assert kb.scopes == ("project",)
+    assert kb.manager("user") is first
+
+
+def test_one_scope_is_fine(tmp_path):
+    kb = KnowledgeBase({"user": _manager(tmp_path / "user")})
+
+    assert kb.scopes == ("user",)
+
+
+def test_an_unknown_scope_is_a_key_error(two):
+    with pytest.raises(KeyError, match="team"):
+        two.manager("team")
+
+
+@pytest.mark.parametrize("managers", [{}, {"": None}, {"project": None}])
+def test_a_knowledge_base_needs_real_scopes(managers):
+    with pytest.raises(ValueError):
+        KnowledgeBase(managers)
+
+
+def test_open_builds_a_manager_per_directory(tmp_path):
+    kb = KnowledgeBase.open({"project": tmp_path / "project", "user": tmp_path / "user"}, use_mock=True)
+
+    assert kb.scopes == ("project", "user")
+    assert kb.manager("project").kb_dir == tmp_path / "project"
+    assert kb.manager("user").kb_dir == tmp_path / "user"
+
+
+def test_open_makes_one_scope_of_one_directory(tmp_path):
+    (tmp_path / "kb").mkdir()
+    (tmp_path / "link").symlink_to(tmp_path / "kb")
+
+    kb = KnowledgeBase.open({"project": tmp_path / "kb", "user": tmp_path / "link"}, use_mock=True)
+
+    assert kb.scopes == ("project",)
+    assert kb.manager("user") is kb.manager("project")
+
+
+def test_open_shares_the_given_service_across_scopes(tmp_path):
+    service = MockEmbeddingService(embedding_dim=16)
+
+    kb = KnowledgeBase.open(
+        {"project": tmp_path / "project", "user": tmp_path / "user"}, embedding_service=service
+    )
+
+    assert kb.manager("project")._embedding_service is service
+    assert kb.manager("user")._embedding_service is service
+
+
+def test_open_builds_one_service_for_all_scopes(tmp_path, monkeypatch):
+    built = []
+
+    class _Service(MockEmbeddingService):
+        """Stands in for EmbeddingService: built like it, mock to the manager."""
+
+        is_available = staticmethod(lambda: True)
+
+        def __init__(self, model_name, batch_size, device):
+            super().__init__(model_name=model_name, batch_size=batch_size)
+            built.append(self)
+
+    monkeypatch.setattr("agentic_cli.memory.kb.knowledge_base.EmbeddingService", _Service)
+
+    kb = KnowledgeBase.open({"project": tmp_path / "project", "user": tmp_path / "user"})
+
+    assert len(built) == 1
+    assert kb.manager("project")._embedding_service is built[0]
+    assert kb.manager("user")._embedding_service is built[0]
+
+
+def test_open_passes_the_summarizer_to_every_scope(tmp_path):
+    class _Summarizer:
+        async def summarize(self, content, prompt):
+            return "SUMMARY: s"
+
+    summarizer = _Summarizer()
+
+    kb = KnowledgeBase.open(
+        {"project": tmp_path / "project", "user": tmp_path / "user"}, summarizer=summarizer, use_mock=True
+    )
+
+    assert kb.manager("project")._summarizer is summarizer
+    assert kb.manager("user")._summarizer is summarizer
+
+
+# -- search ------------------------------------------------------------------
+
+
+def test_search_tags_every_hit_with_its_scope(two):
+    _add(two.manager("project"), "Basalt", content="Basalt columns from lava.")
+    _add(two.manager("user"), "Glacier", content="A glacier carved the lava field.")
+
+    result = two.search("lava")
+
+    assert {(r["document_title"], r["scope"]) for r in result["results"]} == {
+        ("Basalt", "project"),
+        ("Glacier", "user"),
+    }
+    assert result["total_matches"] == 2
+
+
+def test_search_merges_by_rank_not_by_score(tmp_path):
+    """Scores from separate indexes are not comparable; ranks are."""
+
+    class _Fixed:
+        def __init__(self, hits):
+            self.hits = hits
+
+        def search(self, query, filters=None, top_k=10):
+            return {"results": [dict(h) for h in self.hits], "total_matches": len(self.hits)}
+
+    kb = KnowledgeBase({
+        "project": _Fixed([{"document_id": "p1", "score": 0.5}, {"document_id": "p2", "score": 0.4}]),
+        "user": _Fixed([{"document_id": "u1", "score": 0.9}, {"document_id": "u2", "score": 0.8}]),
+    })
+
+    merged = [r["document_id"] for r in kb.search("q")["results"]]
+
+    assert max(merged.index("p1"), merged.index("u1")) < min(merged.index("p2"), merged.index("u2"))
+    assert all(r["score"] == round(r["score"], 4) and r["score"] < 0.1 for r in kb.search("q")["results"])
+
+
+def test_a_document_in_two_scopes_keeps_the_first_scopes_hit(tmp_path):
+    class _Fixed:
+        def __init__(self, hits):
+            self.hits = hits
+
+        def search(self, query, filters=None, top_k=10):
+            return {"results": [dict(h) for h in self.hits], "total_matches": len(self.hits)}
+
+    kb = KnowledgeBase({
+        "project": _Fixed([{"document_id": "d", "chunk_content": "project copy"}, {"document_id": "p"}]),
+        "user": _Fixed([{"document_id": "d", "chunk_content": "user copy"}]),
+    })
+
+    results = kb.search("q")["results"]
+
+    assert results[0]["document_id"] == "d"
+    assert results[0]["chunk_content"] == "project copy"
+    assert results[0]["scope"] == "project"
+    assert results[0]["score"] == round(1 / 61 + 1 / 61, 4)  # both ranks add up
+
+
+def test_search_cuts_the_merged_list_at_top_k(two):
+    for i in range(4):
+        _add(two.manager("project"), f"Lava {i}", content=f"Lava note {i}.")
+        _add(two.manager("user"), f"Lava user {i}", content=f"Lava user note {i}.")
+
+    assert len(two.search("lava", top_k=3)["results"]) == 3
+
+
+def test_a_failing_later_scope_is_skipped(tmp_path):
+    class _Broken:
+        def search(self, *args, **kwargs):
+            raise RuntimeError("user knowledge base broken")
+
+    project = _manager(tmp_path / "project")
+    _add(project, "Basalt", content="Basalt from lava.")
+    kb = KnowledgeBase({"project": project, "user": _Broken()})
+
+    result = kb.search("lava")
+
+    assert [r["document_title"] for r in result["results"]] == ["Basalt"]
+
+
+def test_a_failing_first_scope_raises(tmp_path):
+    class _Broken:
+        def search(self, *args, **kwargs):
+            raise RuntimeError("project knowledge base broken")
+
+    kb = KnowledgeBase({"project": _Broken(), "user": _manager(tmp_path / "user")})
+
+    with pytest.raises(RuntimeError, match="project knowledge base broken"):
+        kb.search("lava")
+
+
+def test_with_one_scope_the_scores_are_the_managers(tmp_path):
+    project = _manager(tmp_path / "project")
+    _add(project, "Basalt", content="Basalt from lava.")
+    kb = KnowledgeBase({"project": project})
+
+    assert kb.search("lava")["results"][0]["score"] == project.search("lava")["results"][0]["score"]
+
+
+def test_search_passes_the_filters_to_every_scope(two):
+    _add(two.manager("project"), "Paper", content="Lava paper.", source=SourceType.ARXIV)
+    _add(two.manager("user"), "Page", content="Lava page.", source=SourceType.WEB)
+
+    result = two.search("lava", filters={"source_type": "arxiv"})
+
+    assert [r["document_title"] for r in result["results"]] == ["Paper"]
+
+
+# -- lookups -----------------------------------------------------------------
+
+
+def test_find_document_looks_in_the_project_first(two):
+    _add(two.manager("project"), "Shared title", content="project version")
+    _add(two.manager("user"), "Shared title", content="user version")
+
+    found = two.find_document("Shared title")
+
+    assert found.scope == "project"
+    assert found.document.content == "project version"
+
+
+def test_find_document_falls_back_to_later_scopes(two):
+    doc = _add(two.manager("user"), "Glacier survey")
+
+    found = two.find_document("glacier")
+
+    assert found == ScopedDocument(doc, "user")
+
+
+def test_find_document_tries_the_whole_chain_in_each_scope_first(two):
+    """A title match in the project wins over an exact ID in the user scope (as 0.6.3)."""
+    user_doc = _add(two.manager("user"), "Elsewhere")
+    project_doc = _add(two.manager("project"), f"Notes on {user_doc.id}")
+
+    assert two.find_document(user_doc.id).document is project_doc
+
+
+def test_find_document_by_id_prefix(two):
+    doc = _add(two.manager("user"), "Glacier survey")
+
+    assert two.find_document(doc.id[:8]).document is doc
+
+
+def test_an_unknown_document_is_none(two):
+    assert two.find_document("nothing like it") is None
+    assert two.get_document("no-such-id") is None
+
+
+def test_get_document_takes_exact_ids_only(two):
+    doc = _add(two.manager("user"), "Glacier survey")
+
+    assert two.get_document(doc.id) == ScopedDocument(doc, "user")
+    assert two.get_document(doc.id[:8]) is None
+
+
+def test_a_shared_directory_is_looked_up_once(tmp_path):
+    calls = []
+    shared = _manager(tmp_path / "shared")
+    real = shared.find_document
+    shared.find_document = lambda ref: calls.append(ref) or real(ref)
+
+    assert KnowledgeBase({"project": shared, "user": shared}).find_document("x") is None
+    assert calls == ["x"]
+
+
+# -- the catalogue -------------------------------------------------------------
+
+
+def test_the_catalogue_is_newest_first_across_scopes(two):
+    _add(two.manager("project"), "Old", minute=1)
+    _add(two.manager("user"), "Middle", minute=2)
+    _add(two.manager("project"), "New", minute=3)
+
+    listed = two.list_documents()
+
+    assert [(s.document.title, s.scope) for s in listed] == [
+        ("New", "project"),
+        ("Middle", "user"),
+        ("Old", "project"),
+    ]
+
+
+def test_the_catalogue_filters_before_it_cuts(two):
+    _add(two.manager("user"), "Zeppelin mooring", minute=0)
+    for n in range(1, 26):
+        _add(two.manager("project"), f"Note {n}", minute=n)
+
+    assert [s.document.title for s in two.list_documents(title_or_author="zeppelin")] == ["Zeppelin mooring"]
+
+
+def test_the_catalogue_matches_titles_and_authors_case_insensitively(two):
+    _add(two.manager("project"), "Volcano notes", metadata={"authors": ["Ada Lovelace"]})
+    _add(two.manager("user"), "Glacier survey", metadata={"authors": ["Mary Somerville"]})
+
+    assert [s.document.title for s in two.list_documents(title_or_author="SOMERVILLE")] == ["Glacier survey"]
+    assert [s.document.title for s in two.list_documents(title_or_author="volcano")] == ["Volcano notes"]
+
+
+def test_the_catalogue_filters_by_source_type(two):
+    _add(two.manager("project"), "Paper", source=SourceType.ARXIV)
+    _add(two.manager("user"), "Page", source=SourceType.WEB)
+
+    assert [s.document.title for s in two.list_documents(source_type=SourceType.WEB)] == ["Page"]
+
+
+def test_the_catalogue_stays_within_limit(two):
+    for n in range(15):
+        _add(two.manager("project"), f"Project {n}", minute=2 * n)
+        _add(two.manager("user"), f"User {n}", minute=2 * n + 1)
+
+    assert len(two.list_documents(limit=20)) == 20
+    assert len(two.list_documents(limit=None)) == 30
+
+
+def test_the_catalogue_of_one_scope(two):
+    _add(two.manager("project"), "Mine")
+    _add(two.manager("user"), "Theirs")
+
+    assert [s.document.title for s in two.list_documents(scope="user")] == ["Theirs"]
+
+
+def test_the_catalogue_of_an_alias_lists_its_scope(tmp_path):
+    shared = _manager(tmp_path / "shared")
+    _add(shared, "Only")
+    kb = KnowledgeBase({"project": shared, "user": shared})
+
+    assert [(s.document.title, s.scope) for s in kb.list_documents(scope="user")] == [("Only", "project")]
+
+
+def test_the_catalogue_never_lists_a_document_twice(tmp_path):
+    class _Same:
+        def __init__(self, docs):
+            self.docs = docs
+
+        def list_documents(self, source_type=None, limit=100):
+            return list(self.docs)
+
+    doc = _add(_manager(tmp_path / "kb"), "Twice")
+    kb = KnowledgeBase({"project": _Same([doc]), "user": _Same([doc])})
+
+    assert [s.document.title for s in kb.list_documents()] == ["Twice"]
+
+
+def test_a_failing_later_scope_is_left_out_of_the_catalogue(tmp_path):
+    class _Broken:
+        def list_documents(self, *args, **kwargs):
+            raise RuntimeError("broken")
+
+    project = _manager(tmp_path / "project")
+    _add(project, "Mine")
+
+    kb = KnowledgeBase({"project": project, "user": _Broken()})
+
+    assert [s.document.title for s in kb.list_documents()] == ["Mine"]
