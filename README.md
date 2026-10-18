@@ -433,8 +433,9 @@ registry never issued is denied however it is named, and is left untouched by
 tool assembly.
 
 **A tool may declare the services it needs** with `requires=` — e.g.
-`@register_tool(..., requires="kb_manager")`, or a tuple for several. The
+`@register_tool(..., requires="knowledge_base")`, or a tuple for several. The
 manager builds only the services its agents' tools actually declare.
+(`requires="kb_manager"`, the 0.6.3 name, still works with a warning until 0.7.0.)
 
 **One name means one tool.** `register_tool()` raises on a name that is already
 registered. If a tool genuinely needs a per-backend implementation, declare the
@@ -553,7 +554,7 @@ results = search_arxiv("transformer attention", max_results=10, categories=["cs.
 paper = fetch_arxiv_paper("1706.03762")  # "Attention Is All You Need"
 ```
 
-The `ArxivSearchSource` (in `tools/arxiv_source.py`) is cached via the service registry and reused across tools. To pull a paper into the KB, use `ingest_arxiv_paper(arxiv_id)` — it composes the arxiv source with `kb_manager`.
+The `ArxivSearchSource` (in `tools/arxiv_source.py`) is cached via the service registry and reused across tools. To pull a paper into the KB, use `ingest_arxiv_paper(arxiv_id)` — it composes the arxiv source with the knowledge base.
 
 #### File Operations
 
@@ -661,6 +662,25 @@ results = kb.search("neural networks", top_k=5)        # hybrid by default
 concepts = kb.concepts.search("attention")             # concept pages
 await kb.backfill_sidecars()                           # regenerate markdown summaries
 ```
+
+`KnowledgeBase` (provisional: its name and methods may change in 0.7.0) serves several directories as one, as the workflow does with the project and user knowledge bases:
+
+```python
+from agentic_cli.memory.kb import KnowledgeBase
+
+kb = KnowledgeBase.open(
+    {"project": Path(".myapp/knowledge_base"), "user": Path("~/.myapp/knowledge_base").expanduser()},
+    summarizer=my_summarizer,
+)
+results = kb.search("neural networks", top_k=5)          # both scopes, merged by rank
+found = kb.find_document("Attention")                     # ScopedDocument(document, scope) or None
+recent = kb.list_documents(title_or_author="vaswani")     # the catalogue, newest first
+text, truncated = kb.read_text(found, max_chars=10_000)
+sidecar = await kb.sidecar(found)                         # written first when missing
+results = await kb.backfill_sidecars()                    # one BackfillResult per scope
+```
+
+The workflow exposes it as `workflow.knowledge_base` (and the memory store as `workflow.memory_store`); tools find it under the `knowledge_base` service key.
 
 `ingest_document` is synchronous and never calls the summarizer itself.
 
@@ -955,6 +975,7 @@ agentic-cli/
 │   │   ├── store.py              # MemoryStore
 │   │   └── kb/                   # Knowledge base (agentic_cli.memory.kb)
 │   │       ├── manager.py                # KnowledgeBaseManager(base_dir, embedding=, summarizer=), Summarizer
+│   │       ├── knowledge_base.py         # KnowledgeBase (provisional), ScopedDocument, BackfillResult
 │   │       ├── models.py                 # Document, SearchResult, SourceType
 │   │       ├── convert.py                # convert_document: trafilatura / html2text, pypdf, text
 │   │       ├── vector_store.py, bm25_index.py (+ _bm25_backends.py), concepts.py, sidecar.py

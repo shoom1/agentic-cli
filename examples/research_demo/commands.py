@@ -52,7 +52,7 @@ class MemoryCommand(Command):
             )
             return
 
-        memory_store = workflow.memory_manager
+        memory_store = workflow.memory_store
 
         table = Table(title="Persistent Memory", show_header=True)
         table.add_column("ID", style="dim", width=8)
@@ -155,47 +155,35 @@ class KbBackfillCommand(Command):
             )
             return
 
-        project_kb = workflow.kb_manager
-        user_kb = workflow.user_kb_manager
-
-        if project_kb is None:
+        kb = getattr(workflow, "knowledge_base", None)
+        if kb is None:
             app.session.add_warning(
                 "No knowledge base configured. Ingest a document first, "
                 "or enable KB tools in the agent config."
             )
             return
 
-        kbs: list[tuple[str, object]] = [("project", project_kb)]
-        if user_kb is not None and user_kb is not project_kb:
-            kbs.append(("user", user_kb))
+        for scope in kb.scopes:
+            app.session.add_message(
+                "system", f"Backfilling {scope} KB at {kb.manager(scope).kb_dir}…"
+            )
+
+        def _progress(scope: str, done: int, total: int, doc) -> None:
+            title = doc.title if len(doc.title) < 80 else doc.title[:77] + "…"
+            app.session.add_message("system", f"[{scope} KB] {done + 1}/{total}: {title}")
 
         total_written = 0
-        for label, kb in kbs:
-            def _progress(done: int, total: int, doc) -> None:
-                title = doc.title if len(doc.title) < 80 else doc.title[:77] + "…"
-                app.session.add_message(
-                    "system",
-                    f"[{label} KB] {done + 1}/{total}: {title}",
-                )
-
-            app.session.add_message(
-                "system", f"Backfilling {label} KB at {kb.kb_dir}…"
-            )
-            try:
-                written = await kb.backfill_sidecars(progress_cb=_progress)
-            except BackfillAlreadyRunning:
+        for result in await kb.backfill_sidecars(progress=_progress):
+            if isinstance(result.error, BackfillAlreadyRunning):
                 app.session.add_warning(
-                    f"{label} KB: backfill already in progress; "
+                    f"{result.scope} KB: backfill already in progress; "
                     "wait for it to finish before running /kb-backfill again."
                 )
-                continue
-            except Exception as e:
-                app.session.add_error(f"{label} KB backfill failed: {e}")
-                continue
-            total_written += written
-            app.session.add_success(
-                f"{label} KB: {written} sidecar(s) generated"
-            )
+            elif result.error is not None:
+                app.session.add_error(f"{result.scope} KB backfill failed: {result.error}")
+            else:
+                total_written += result.written
+                app.session.add_success(f"{result.scope} KB: {result.written} sidecar(s) generated")
 
         if total_written == 0:
             app.session.add_message("system", "All documents already have sidecars.")

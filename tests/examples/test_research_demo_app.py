@@ -325,6 +325,7 @@ class TestKbBackfillCommand:
         """Both project and user KBs write sidecars → two success messages."""
         from examples.research_demo.commands import KbBackfillCommand
         from types import SimpleNamespace
+        from agentic_cli.memory.kb import KnowledgeBase
 
         class FakeKB:
             def __init__(self, name: str):
@@ -340,8 +341,7 @@ class TestKbBackfillCommand:
         user_kb = FakeKB("user")
         app = SimpleNamespace(
             workflow=SimpleNamespace(
-                kb_manager=project_kb,
-                user_kb_manager=user_kb,
+                knowledge_base=KnowledgeBase({"project": project_kb, "user": user_kb}),
             ),
             session=RecordingSession(),
         )
@@ -372,6 +372,7 @@ class TestKbBackfillCommand:
         from examples.research_demo.commands import KbBackfillCommand
         from agentic_cli.memory.kb.manager import BackfillAlreadyRunning
         from types import SimpleNamespace
+        from agentic_cli.memory.kb import KnowledgeBase
 
         class FakeKB:
             def __init__(self, name: str):
@@ -387,8 +388,7 @@ class TestKbBackfillCommand:
         user_kb = FakeKB("user")
         app = SimpleNamespace(
             workflow=SimpleNamespace(
-                kb_manager=project_kb,
-                user_kb_manager=user_kb,
+                knowledge_base=KnowledgeBase({"project": project_kb, "user": user_kb}),
             ),
             session=RecordingSession(),
         )
@@ -414,6 +414,7 @@ class TestKbBackfillCommand:
         """
         from examples.research_demo.commands import KbBackfillCommand
         from types import SimpleNamespace
+        from agentic_cli.memory.kb import KnowledgeBase
 
         class FakeKB:
             def __init__(self, name: str):
@@ -429,8 +430,7 @@ class TestKbBackfillCommand:
         user_kb = FakeKB("user")
         app = SimpleNamespace(
             workflow=SimpleNamespace(
-                kb_manager=project_kb,
-                user_kb_manager=user_kb,
+                knowledge_base=KnowledgeBase({"project": project_kb, "user": user_kb}),
             ),
             session=RecordingSession(),
         )
@@ -450,6 +450,7 @@ class TestKbBackfillCommand:
         """Both KBs return 0 → "All documents already have sidecars." message, exactly once."""
         from examples.research_demo.commands import KbBackfillCommand
         from types import SimpleNamespace
+        from agentic_cli.memory.kb import KnowledgeBase
 
         class FakeKB:
             def __init__(self, name: str):
@@ -463,8 +464,7 @@ class TestKbBackfillCommand:
         user_kb = FakeKB("user")
         app = SimpleNamespace(
             workflow=SimpleNamespace(
-                kb_manager=project_kb,
-                user_kb_manager=user_kb,
+                knowledge_base=KnowledgeBase({"project": project_kb, "user": user_kb}),
             ),
             session=RecordingSession(),
         )
@@ -485,6 +485,7 @@ class TestKbBackfillCommand:
         """When user_kb_manager is same object as kb_manager → backfill called once."""
         from examples.research_demo.commands import KbBackfillCommand
         from types import SimpleNamespace
+        from agentic_cli.memory.kb import KnowledgeBase
 
         call_count = [0]
 
@@ -499,8 +500,7 @@ class TestKbBackfillCommand:
         kb = FakeKB()
         app = SimpleNamespace(
             workflow=SimpleNamespace(
-                kb_manager=kb,
-                user_kb_manager=kb,  # Same object
+                knowledge_base=KnowledgeBase({"project": kb, "user": kb}),
             ),
             session=RecordingSession(),
         )

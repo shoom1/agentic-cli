@@ -54,6 +54,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   test that patched `extract_pdf_text` there should patch
   `agentic_cli.memory.kb.convert.extract_pdf_text`.
 
+- **The workflow exposes one `KnowledgeBase`.** `workflow.knowledge_base`
+  (service key `knowledge_base`) serves the project and user knowledge bases
+  as one, and the framework's knowledge-base tools declare
+  `requires="knowledge_base"`; `workflow.memory_store` is the memory store.
+  `kb_search`, `kb_list`, `kb_read`, the concept tools, `/papers` and the
+  demo's `/kb-backfill` call it instead of merging the two knowledge bases by
+  hand. Their names, arguments and results do not change.
+
 ### Deprecated
 
 - **`agentic_cli.tools.kb_convert`** forwards to `agentic_cli.memory.kb`,
@@ -62,8 +70,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `DeprecationWarning`, until 0.7.0. Use
   `memory_services.open_memory_store(settings, embedding_service=None)`.
 
+All work until 0.7.0:
+
+- **`requires="kb_manager"`** builds the same services, and warns when the
+  tool registers. Declare `requires="knowledge_base"`.
+- **The `kb_manager` and `user_kb_manager` service keys** still hold
+  `knowledge_base.manager("project")` and the user scope's manager (the same
+  object when both are one directory). A dictionary lookup cannot warn; use
+  `knowledge_base`, and `knowledge_base.manager(name)` for one scope.
+- **`workflow.kb_manager`, `workflow.user_kb_manager`** warn; use
+  `workflow.knowledge_base`. **`workflow.memory_manager`** warns; use
+  `workflow.memory_store`.
+- **`make_kb_tools(kb_manager, user_kb_manager)`** and
+  **`make_ingest_arxiv_tool(source, kb_manager)`** warn and wrap the managers
+  in a `KnowledgeBase`; pass the `KnowledgeBase`.
+- **`memory_services.build_knowledge_bases`** warns; use
+  `memory_services.open_knowledge_base`.
+
 ### Fixed
 
+- **`/papers` finds a match older than the 50 newest documents.** It cut the
+  list at 50 and only then filtered by the query; it now filters first, as
+  `kb_list` does.
 - **The embedding model loads once per process.** Each knowledge base loaded
   the sentence-transformers model when it opened, and the memory store
   loaded its own: up to three copies of one model. The workflow now builds
