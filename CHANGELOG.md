@@ -37,6 +37,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ConvertedDocument` and `UnsupportedDocument` are exported from
   `agentic_cli.memory.kb`, which reads PDFs and charset labels with its own
   helpers (a test keeps its charset helper in agreement with `web_fetch`'s).
+  Ingestion no longer reads PDFs through `agentic_cli.tools.pdf_utils`; a
+  test that patched `extract_pdf_text` there should patch
+  `agentic_cli.memory.kb.convert.extract_pdf_text`.
 
 ### Deprecated
 
