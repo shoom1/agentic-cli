@@ -348,6 +348,15 @@ def test_the_catalogue_filters_before_it_cuts(two):
     assert [s.document.title for s in two.list_documents(title_or_author="zeppelin")] == ["Zeppelin mooring"]
 
 
+def test_a_scope_is_filtered_before_it_is_cut(two):
+    """A match behind the scope's newest documents is still listed."""
+    _add(two.manager("project"), "Zeppelin mooring", minute=0)
+    for n in range(1, 26):
+        _add(two.manager("project"), f"Note {n}", minute=n)
+
+    assert [s.document.title for s in two.list_documents(title_or_author="zeppelin")] == ["Zeppelin mooring"]
+
+
 def test_the_catalogue_matches_titles_and_authors_case_insensitively(two):
     _add(two.manager("project"), "Volcano notes", metadata={"authors": ["Ada Lovelace"]})
     _add(two.manager("user"), "Glacier survey", metadata={"authors": ["Mary Somerville"]})
