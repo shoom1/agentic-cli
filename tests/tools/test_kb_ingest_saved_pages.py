@@ -9,6 +9,8 @@ and the page supplies its title, authors and description.
 
 from __future__ import annotations
 
+from tests.kb_registry import kb_services
+
 import os
 import sys
 from pathlib import Path
@@ -47,7 +49,7 @@ def project(tmp_path, monkeypatch):
 @pytest.fixture
 def kb(tmp_path):
     manager = KnowledgeBaseManager(base_dir=tmp_path / "kb", use_mock=True)
-    token = set_service_registry({"kb_manager": manager})
+    token = set_service_registry(kb_services(manager))
     try:
         yield manager
     finally:
@@ -243,7 +245,7 @@ async def test_fetch_then_ingest_then_search(kb):
                 raw=ARTICLE.encode(), charset="utf-8", final_url=url,
             )
 
-    token = set_service_registry({LLM_SUMMARIZER: _Summarizer(), "kb_manager": kb})
+    token = set_service_registry(kb_services(kb, **{LLM_SUMMARIZER: _Summarizer()}))
     try:
         with patch("agentic_cli.tools.webfetch_tool.get_or_create_fetcher", return_value=_Fetcher()):
             fetched = await web_fetch(URL, "What is this page about?")

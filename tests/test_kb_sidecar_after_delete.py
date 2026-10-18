@@ -11,6 +11,8 @@ deletion holds.
 
 from __future__ import annotations
 
+from tests.kb_registry import kb_services
+
 from agentic_cli.memory.kb.manager import KnowledgeBaseManager
 from agentic_cli.memory.kb.models import SourceType
 from agentic_cli.tools.knowledge_tools import kb_read
@@ -41,7 +43,7 @@ def _document_without_summary(tmp_path) -> tuple[KnowledgeBaseManager, str]:
 async def test_kb_read_does_not_bring_a_deleted_document_back(tmp_path):
     kb, doc_id = _document_without_summary(tmp_path)
     kb._summarizer = _DeletingSummarizer(kb, doc_id)
-    token = set_service_registry({"kb_manager": kb})
+    token = set_service_registry(kb_services(kb))
     try:
         result = await kb_read(doc_id)
     finally:

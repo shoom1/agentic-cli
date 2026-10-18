@@ -7,6 +7,8 @@ does, refuses types the knowledge base cannot ingest, and warns on every call.
 
 from __future__ import annotations
 
+from tests.kb_registry import kb_services
+
 from pathlib import Path
 from unittest.mock import patch
 
@@ -42,7 +44,7 @@ def project(tmp_path, monkeypatch):
 @pytest.fixture
 def kb(tmp_path):
     manager = KnowledgeBaseManager(base_dir=tmp_path / "kb", use_mock=True)
-    token = set_service_registry({"kb_manager": manager})
+    token = set_service_registry(kb_services(manager))
     try:
         yield manager
     finally:

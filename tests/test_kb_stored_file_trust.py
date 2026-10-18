@@ -13,6 +13,8 @@ directory and resolve to a file inside the knowledge base.
 
 from __future__ import annotations
 
+from tests.kb_registry import kb_services
+
 import json
 import shutil
 from pathlib import Path
@@ -104,7 +106,7 @@ def _set_file_path(kb_dir: Path, doc_id: str, file_path: str) -> None:
 
 async def _read(kb_dir: Path, doc_id: str, **kwargs) -> str:
     """What kb_read hands the model, as one string."""
-    token = set_service_registry({"kb_manager": _open_kb(kb_dir)})
+    token = set_service_registry(kb_services(_open_kb(kb_dir)))
     try:
         return json.dumps(await kb_read(doc_id, **kwargs))
     finally:
