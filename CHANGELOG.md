@@ -527,8 +527,9 @@ step; each entry says what to use instead.
   provider and leaves another provider's thoughts out of the request
   (`workflow/adk/foreign_reasoning_plugin.py`). The session keeps them, and a
   model's own thoughts still go back to it. Thoughts saved before this
-  release carry no tag and are left out too; a model loses nothing it needs,
-  as Claude needs its thinking only within a turn's tool calls.
+  release carry no tag and are left out too, so a session from before the
+  upgrade no longer sends its earlier turns' reasoning; no request needs it
+  (Claude needs its thinking only within a turn's tool calls).
 - **Budget-thinking Claude with a per-agent `max_tokens` failed on ADK with
   HTTP 400.** ADK 2.12's `AnthropicLlm` sends the agent config's
   `max_output_tokens` in preference to the model's `max_tokens`, and 0.6 put
