@@ -199,6 +199,17 @@ class TestCommandsBeforeReadiness:
         assert not any("Unknown command" in e for e in demo_app.session.errors())
 
 
+class TestSettingsDialog:
+    def test_the_demo_keeps_every_framework_picker(self, demo_app):
+        """The demo adds verbose_thinking; it must not drop the role pickers."""
+        from agentic_cli import BaseCLIApp
+
+        framework = BaseCLIApp.get_ui_setting_keys(demo_app)
+
+        assert {"model", "model_role:fast", "model_role:strong"} <= set(framework)
+        assert demo_app.get_ui_setting_keys() == [*framework, "verbose_thinking"]
+
+
 class TestMessageRouting:
     """A plain message goes through MessageProcessor and renders its events."""
 

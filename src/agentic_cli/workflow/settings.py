@@ -661,6 +661,22 @@ class WorkflowSettingsMixin:
         parse_ref(model)
         object.__setattr__(self, "default_model", model)
 
+    def set_model_role(self, role: str, model: str) -> None:
+        """Map ``role`` (``fast``, ``strong`` or an app's own) to a model in ``model_roles``.
+
+        Only the names are checked here, as for ``set_model``. The mapping is
+        replaced with a new dict, never changed in place, so a caller that
+        kept the old one (``/settings``, to roll back) still holds it.
+
+        Raises:
+            ValueError: If ``role`` is malformed or ``default`` (that role is
+                ``default_model``), or ``model`` is malformed or names a
+                role; the message names ``model_roles[role]``.
+        """
+        roles = {**self.model_roles, role: model}
+        RoleMap(default_model=None, model_roles=roles)
+        object.__setattr__(self, "model_roles", roles)
+
     def set_thinking_effort(self, effort: str) -> None:
         """Set the global thinking effort.
 

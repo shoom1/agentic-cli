@@ -57,6 +57,9 @@ from agentic_cli.logging import Loggers
 
 logger = Loggers.config()
 
+#: ``update_setting("model_role:fast", ref)`` maps one role in ``model_roles``.
+MODEL_ROLE_KEY_PREFIX = "model_role:"
+
 __all__ = [
     "BaseSettings",
     "SettingsContext",
@@ -240,7 +243,9 @@ class BaseSettings(WorkflowSettingsMixin, AppSettingsMixin, CLISettingsMixin, Py
         """Update a single setting, using dedicated setters where required.
 
         Args:
-            key: Setting name.
+            key: Setting name. ``model`` sets ``default_model``, and
+                ``model_role:<role>`` maps one role in ``model_roles`` (the
+                ``/settings`` model pickers' keys).
             value: New value.
 
         Raises:
@@ -248,6 +253,8 @@ class BaseSettings(WorkflowSettingsMixin, AppSettingsMixin, CLISettingsMixin, Py
         """
         if key == "model":
             self.set_model(value)
+        elif key.startswith(MODEL_ROLE_KEY_PREFIX):
+            self.set_model_role(key.removeprefix(MODEL_ROLE_KEY_PREFIX), value)
         elif key == "thinking_effort":
             self.set_thinking_effort(value)
         else:
