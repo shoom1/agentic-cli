@@ -414,7 +414,7 @@ class TestStatus:
         assert status["google"] == ProviderStatus("google", True, ProviderState.FRESH, 5000.0, 6)
         assert status["anthropic"].state is ProviderState.DEGRADED
         assert status["anthropic"].error == "HTTP 500 Internal Server Error"
-        assert status["anthropic"].model_count == 4  # the fallbacks
+        assert status["anthropic"].model_count == 5  # the fallbacks
         assert status["openai"] == ProviderStatus(
             "openai", False, ProviderState.UNATTEMPTED, None, len(load_table().curated_openai())
         )
