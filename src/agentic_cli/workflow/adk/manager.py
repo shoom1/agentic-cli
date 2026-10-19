@@ -15,6 +15,8 @@ from typing import AsyncGenerator, Any, Callable
 
 from google.genai import types
 from google.adk import Runner
+from google.adk.apps import App
+from google.adk.apps.app import validate_app_name
 from google.adk.agents import LlmAgent, Agent
 from google.adk.planners import BuiltInPlanner
 from google.adk.sessions import InMemorySessionService, BaseSessionService, Session
@@ -83,6 +85,21 @@ def _claude_version(model: str) -> tuple[int, ...]:
 def _anthropic_uses_adaptive(model: str | None) -> bool:
     """True for Claude models that require adaptive thinking (>= 4.6)."""
     return _is_anthropic_model(model) and _claude_version(model) >= _ANTHROPIC_ADAPTIVE_MIN
+
+
+def _check_app_name(app_name: str) -> None:
+    """Refuse an ``app_name`` ADK cannot run, naming the setting.
+
+    ADK's ``App`` validates its name, so an unsuitable one would otherwise
+    fail on the first turn, inside initialization. ADK's own rule is applied,
+    so it cannot drift from what ADK accepts.
+    """
+    try:
+        validate_app_name(app_name)
+    except ValueError as exc:
+        raise ValueError(
+            f"app_name {app_name!r} cannot be used with the ADK backend: {exc}"
+        ) from exc
 
 
 def _summarize_result(result: Any) -> str | None:
@@ -160,6 +177,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             model=model,
             on_event=on_event,
         )
+        _check_app_name(self.app_name)
         self.session_id = "default_session"
         self._adk_config_path = adk_config_path
 
@@ -751,24 +769,14 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         """Create ADK plugins and store references for later access.
 
         Returns:
-            List of BasePlugin instances to pass to Runner(plugins=...).
+            List of BasePlugin instances for the runner's App(plugins=...).
         """
         from agentic_cli.workflow.adk.task_progress_plugin import TaskProgressPlugin
         from agentic_cli.workflow.adk.tool_error_plugin import ToolErrorPlugin
-        from agentic_cli.workflow.adk.transfer_tool_description import (
-            TransferToolDescriptionPlugin,
-        )
 
         # ToolErrorPlugin: ADK ends the turn when a tool raises; this turns the
         # exception into an error result the model can read.
         plugins: list = [PermissionPlugin(), ToolErrorPlugin()]
-
-        # ADK's generated description for its own transfer tool tells the model
-        # to call `TransferToAgentTool` — a name that does not exist as a tool.
-        # Corrected on the prepared request; a no-op once ADK ships a fixed
-        # docstring. See transfer_tool_description for why this is safe.
-        self._transfer_description_plugin = TransferToolDescriptionPlugin()
-        plugins.append(self._transfer_description_plugin)
 
         # Task progress tracking via ToolContext.state
         self._task_progress_plugin = TaskProgressPlugin()
@@ -834,13 +842,13 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         else:
             self._root_agent = self._create_agents()
 
-        # Create runner with plugins
-        self._runner = Runner(
-            app_name=self.app_name,
-            agent=self._root_agent,
-            session_service=self._session_service,
+        # The plugins belong to the App; ADK deprecates Runner(plugins=...).
+        app = App(
+            name=self.app_name,
+            root_agent=self._root_agent,
             plugins=self._init_plugins(),
         )
+        self._runner = Runner(app=app, session_service=self._session_service)
 
         logger.info(
             "services_initialized",

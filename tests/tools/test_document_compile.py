@@ -577,7 +577,7 @@ def test_output_pdf_is_required_in_the_model_declaration():
     from google.adk.tools import FunctionTool
 
     declaration = FunctionTool(compile_document)._get_declaration()
-    assert "output_pdf" in declaration.parameters.required
+    assert "output_pdf" in declaration.parameters_json_schema["required"]
 
 
 def test_an_empty_output_pdf_is_refused(monkeypatch, tmp_path):

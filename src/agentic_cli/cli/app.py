@@ -9,6 +9,9 @@ This module provides the base CLI application that:
 from __future__ import annotations
 
 import asyncio
+import logging
+import re
+import warnings
 from typing import TYPE_CHECKING, Any
 
 from prompt_toolkit.completion import Completer, Completion
@@ -41,6 +44,60 @@ logger = Loggers.cli()
 # default_model. A synthetic key without an entry here is treated as writing
 # a field of the same name.
 _UI_KEY_TARGET_FIELDS = {"model": "default_model"}
+
+
+# === ADK notices ===
+
+# ADK 2 announces each experimental feature it enables with a UserWarning:
+# "[EXPERIMENTAL] feature FeatureName.JSON_SCHEMA_FOR_FUNC_DECL is enabled."
+_ADK_EXPERIMENTAL_NOTICE = re.compile(r"\[EXPERIMENTAL\] feature (?P<feature>\S+) is enabled")
+
+# ADK 2's runner warns, through stdlib logging, that an app with sub-agents has
+# no context_cache_config. agentic-cli does not expose that setting, so the
+# advice is not something a user of the CLI can act on.
+_ADK_RUNNER_LOGGER = "google_adk.google.adk.runners"
+_ADK_UNCACHED_TRANSFER = "can transfer between agents but has no context_cache_config"
+
+
+class _AdkUncachedTransferFilter(logging.Filter):
+    """Turns ADK's context-cache advice into a debug log entry."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        if _ADK_UNCACHED_TRANSFER not in message:
+            return True
+        logger.debug("adk_uncached_agent_transfer", message=message)
+        return False
+
+
+def _install_adk_notice_hook() -> None:
+    """Log ADK's notices instead of printing them.
+
+    Python prints warnings, and the stdlib logging ``configure_logging`` sets
+    up, to stderr, which in the CLI lands over the terminal UI. The hook logs
+    ADK's experimental-feature notices at debug and passes every other warning
+    to the hook it replaced; a filter on ADK's runner logger does the same for
+    its context-cache advice. Only the CLI installs them, so library users and
+    the test suite keep Python's own handling. Installing twice changes nothing.
+    """
+    runner_logger = logging.getLogger(_ADK_RUNNER_LOGGER)
+    if not any(isinstance(f, _AdkUncachedTransferFilter) for f in runner_logger.filters):
+        runner_logger.addFilter(_AdkUncachedTransferFilter())
+
+    previous = warnings.showwarning
+    if getattr(previous, "_logs_adk_notices", False):
+        return
+
+    def showwarning(message, category, filename, lineno, file=None, line=None):
+        notice = _ADK_EXPERIMENTAL_NOTICE.match(str(message))
+        if notice and issubclass(category, UserWarning):
+            feature = notice["feature"].removeprefix("FeatureName.")
+            logger.debug("adk_experimental_feature", feature=feature)
+            return
+        previous(message, category, filename, lineno, file, line)
+
+    showwarning._logs_adk_notices = True
+    warnings.showwarning = showwarning
 
 
 # === Slash Command Completer ===
@@ -143,6 +200,7 @@ class BaseCLIApp:
         self._app_info = app_info
         self._settings = settings
         configure_logging(self._settings)
+        _install_adk_notice_hook()
 
         logger.info("app_starting", app_name=self._settings.app_name)
 
