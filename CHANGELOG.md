@@ -17,11 +17,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unchanged. The runner is built from an ADK `App`, which validates its name,
   so an `app_name` ADK rejects (it must start with a letter and hold only
   letters, digits, `_` and `-`, and cannot be `user`) now fails with a
-  `ValueError` when the ADK manager is built, not on the first turn. The CLI
-  logs ADK's `[EXPERIMENTAL] feature … is enabled` warnings at debug instead
-  of printing them over the UI. An app that calls ADK's own APIs follows
-  ADK's 2.0 migration notes; one that uses only agentic-cli's API changes
-  nothing.
+  `ValueError` when the ADK manager is built, not on the first turn. Renaming
+  such an app moves nothing with it: its 0.6.x sessions stay in the session
+  database under the old name and no longer list, and `~/.<name>/` (user
+  settings, saved grants, jobs) and each project's `./.<name>/` (project
+  settings, knowledge base, fetched pages) are found by name, so move those
+  folders to the new name to keep them. The CLI logs ADK's
+  `[EXPERIMENTAL] feature … is enabled` warnings, and ADK's advice that an app
+  with sub-agents set a `context_cache_config` (which agentic-cli does not
+  expose), at debug instead of printing them over the UI. An app that calls
+  ADK's own APIs follows ADK's 2.0 migration notes; one that uses only
+  agentic-cli's API changes nothing, unless its `app_name` is one ADK
+  rejects.
 - **A resource capability that names no resource is an error.** Registering
   a tool whose `filesystem.*`, `http.*` or `shell.*` capability has neither
   `target_arg=` nor `target=` raises `ValueError` (it warned since 0.6.1).
