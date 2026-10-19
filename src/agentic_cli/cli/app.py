@@ -623,6 +623,7 @@ class BaseCLIApp:
             ResumeCommand,
             PapersCommand,
             SessionsCommand,
+            ModelsCommand,
         )
         from agentic_cli.cli.settings_command import SettingsCommand
 
@@ -636,6 +637,7 @@ class BaseCLIApp:
         self.command_registry.register(SettingsCommand())
         self.command_registry.register(PapersCommand())
         self.command_registry.register(SessionsCommand())
+        self.command_registry.register(ModelsCommand())
 
     async def process_input(self, user_input: str) -> None:
         """Process user input.
