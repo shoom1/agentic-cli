@@ -257,6 +257,7 @@ def test_the_fallback_lists():
     )
     assert table.fallback_models(A) == (
         "claude-sonnet-4-6", "claude-opus-4-6", "claude-sonnet-4-5", "claude-sonnet-4",
+        "claude-haiku-4-5",
     )
     assert table.fallback_models(O) == table.curated_openai()
     assert table.fallback_models(ProviderKind.OPENROUTER) == ()
@@ -274,7 +275,9 @@ def test_the_fallback_lists_fill_every_builtin_tier():
     table = load_table()
     for kind in (G, A, O):
         tiers = {table.record_for(kind.value, kind, m).tier for m in table.fallback_models(kind)}
-        assert {"default"} <= tiers, kind
+        # Every built-in role finds a model while the provider's listing is
+        # missing, so a failed listing never moves a role to another provider.
+        assert {"fast", "default", "strong"} <= tiers, kind
 
 
 def test_load_table_is_cached():

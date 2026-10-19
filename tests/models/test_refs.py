@@ -57,9 +57,17 @@ def test_a_bare_id_maps_to_its_provider(spec, provider):
     assert parse_spec(spec) == ModelRef(provider, spec)
 
 
-@pytest.mark.parametrize("spec", ["default", "fast", "strong", "vision", "code_review", "x-1"])
+@pytest.mark.parametrize("spec", ["default", "fast", "strong", "vision", "code_review", "my-role"])
 def test_any_other_bare_name_is_a_role(spec):
     assert parse_spec(spec) == RoleRef(spec)
+
+
+@pytest.mark.parametrize("spec", ["qwen3-32b", "gemma-3-27b-it", "deepseek-r1", "phi-4", "x-1"])
+def test_a_bare_name_with_a_digit_is_a_model_id_missing_its_provider(spec):
+    # As a role it would run on the default model, perhaps another provider's,
+    # so a local model's prompts could go to the cloud.
+    with pytest.raises(ModelSpecError, match=f"<endpoint>:{spec}"):
+        parse_spec(spec)
 
 
 @pytest.mark.parametrize(
@@ -107,7 +115,7 @@ def test_a_reference_prints_as_provider_colon_model():
     assert str(parse_spec("gpt-5.5")) == "openai:gpt-5.5"
 
 
-@pytest.mark.parametrize("name", ["vision", "fast", "my_role-2", "a" * 64])
+@pytest.mark.parametrize("name", ["vision", "fast", "my_role-two", "a" * 64])
 def test_a_valid_role_name(name):
     assert validate_role_name(name) == name
 
@@ -117,6 +125,12 @@ def test_a_valid_role_name(name):
 )
 def test_a_role_name_cannot_look_like_a_model_id(name):
     with pytest.raises(ModelSpecError):
+        validate_role_name(name)
+
+
+@pytest.mark.parametrize("name", ["tier2", "my_role-2", "qwen3"])
+def test_a_role_name_has_no_digits(name):
+    with pytest.raises(ModelSpecError, match="digit"):
         validate_role_name(name)
 
 

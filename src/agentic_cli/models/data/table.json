@@ -257,8 +257,14 @@
       }
     },
     "anthropic": {
-      "fallback_models": ["claude-sonnet-4-6", "claude-opus-4-6", "claude-sonnet-4-5", "claude-sonnet-4"],
-      "fallback_source": "agentic-cli 0.6.x ModelRegistry.FALLBACK_ANTHROPIC",
+      "fallback_models": [
+        "claude-sonnet-4-6",
+        "claude-opus-4-6",
+        "claude-sonnet-4-5",
+        "claude-sonnet-4",
+        "claude-haiku-4-5"
+      ],
+      "fallback_source": "agentic-cli 0.6.x ModelRegistry.FALLBACK_ANTHROPIC, plus claude-haiku-4-5 for the fast tier",
       "rules": [
         {
           "match": "^claude-fable-",

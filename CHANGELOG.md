@@ -14,7 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no provider SDK. It parses model references (`provider:model`, split on the
   first colon so `openrouter:qwen/qwen3-235b-a22b:free` works; a bare
   `gemini-…`, `claude-…`, `gpt-…` or `o<digit>…` id still names its provider;
-  any other bare name is a role such as `fast`), builds the four built-in
+  any other bare name is a role such as `fast`, and a role name has no digits,
+  so a bare `qwen3-32b` is an error that asks for its provider), builds the four built-in
   providers and the user's OpenAI-compatible endpoints (`build_endpoints`),
   describes a model as a `ModelRecord`, and ships a table of model families
   and numbers (`load_table()`; per-model numbers from the LangChain partner

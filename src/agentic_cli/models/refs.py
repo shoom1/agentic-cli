@@ -34,6 +34,9 @@ _BARE_ID_PREFIXES: tuple[tuple[re.Pattern[str], str], ...] = (
 # A role name may not start like a model id, even without the hyphen
 # ("gemini", "gpt5"), so a typo in an id never silently becomes a role.
 _ID_LIKE = re.compile(r"gemini|claude|gpt|o\d")
+# Nor contain a digit: a bare "qwen3-32b" is a model id missing its provider,
+# and as a role it would run on the default model, perhaps another provider's.
+_DIGIT = re.compile(r"\d")
 
 
 class ModelSpecError(ValueError):
@@ -87,13 +90,18 @@ def parse_spec(spec: str) -> ModelRef | RoleRef:
         if prefix.match(spec):
             return ModelRef(bare_provider, spec)
 
+    if _DIGIT.search(spec):
+        raise ModelSpecError(
+            f"Model {spec!r} has no provider: write it as provider:model, such as "
+            f"openrouter:{spec}, or <endpoint>:{spec} for one of your model_endpoints. "
+            "(A role name has no digits.)"
+        )
     try:
         return RoleRef(validate_role_name(spec))
     except ModelSpecError:
         raise ModelSpecError(
             f"Model {spec!r} is neither a provider:model reference, a gemini-, claude-, "
-            "gpt- or o<digit> model id, nor a role name (lowercase letters, digits, '_' "
-            "and '-')."
+            "gpt- or o<digit> model id, nor a role name (lowercase letters, '_' and '-')."
         ) from None
 
 
@@ -115,13 +123,18 @@ def validate_role_name(name: str) -> str:
     """Return ``name`` if it is a valid role name.
 
     Raises:
-        ModelSpecError: If it is malformed or starts like a model id
-            (``gemini``, ``claude``, ``gpt``, ``o<digit>``).
+        ModelSpecError: If it is malformed, contains a digit, or starts like a
+            model id (``gemini``, ``claude``, ``gpt``, ``o<digit>``).
     """
     if not isinstance(name, str) or not _NAME.fullmatch(name):
         raise ModelSpecError(
-            f"Role {name!r} is not a role name (lowercase letters, digits, '_' and '-', "
+            f"Role {name!r} is not a role name (lowercase letters, '_' and '-', "
             "starting with a letter, at most 64 characters)."
+        )
+    if _DIGIT.search(name):
+        raise ModelSpecError(
+            f"Role {name!r} contains a digit, so it looks like a model id; "
+            "choose a name without digits."
         )
     if _ID_LIKE.match(name):
         raise ModelSpecError(f"Role {name!r} starts like a model id; choose another name.")
