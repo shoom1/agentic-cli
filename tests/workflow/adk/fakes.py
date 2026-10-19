@@ -95,6 +95,20 @@ def openai_response(text: str = "ok", *, model: str = "gpt-5.5") -> dict[str, An
     }
 
 
+def chat_completion(text: str = "ok", *, model: str = "qwen/qwen3-235b-a22b") -> dict[str, Any]:
+    """An OpenAI Chat Completions response (OpenRouter, vLLM and the like)."""
+    return {
+        "id": "chatcmpl-1",
+        "object": "chat.completion",
+        "created": 0,
+        "model": model,
+        "choices": [
+            {"index": 0, "message": {"role": "assistant", "content": text}, "finish_reason": "stop"}
+        ],
+        "usage": {"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4},
+    }
+
+
 def user(text: str) -> types.Content:
     return types.Content(role="user", parts=[types.Part.from_text(text=text)])
 

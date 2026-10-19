@@ -34,17 +34,30 @@ from google.adk.models.registry import LLMRegistry  # noqa: E402
 from google.genai import types  # noqa: E402
 from openai import AsyncOpenAI  # noqa: E402
 
-from agentic_cli.models import ResolvedModel, RoleMap, resolve_model  # noqa: E402
+from agentic_cli.models import (  # noqa: E402
+    DeclaredModel,
+    EndpointSpec,
+    ModelCatalog,
+    ModelRecord,
+    ProviderKind,
+    ResolvedModel,
+    RoleMap,
+    ThinkingMechanism,
+    ThinkingRule,
+    resolve_model,
+)
 from agentic_cli.workflow.adk.anthropic_llm import (  # noqa: E402
     DirectAnthropicLlm,
     register_direct_anthropic,
 )
 from agentic_cli.workflow.adk.model_factory import AdkModel, build_adk_model  # noqa: E402
+from agentic_cli.workflow.adk.openai_compatible import OpenAICompatibleLlm  # noqa: E402
 from agentic_cli.workflow.model_settings import ModelSettings, ThinkingSettings  # noqa: E402
 from tests.models.fakes import FakeCatalog, endpoints  # noqa: E402
 from tests.workflow.adk.fakes import (  # noqa: E402
     FakeAPI,
     anthropic_message,
+    chat_completion,
     generate,
     openai_response,
     run_agent,
@@ -72,6 +85,31 @@ def settings(mock_context):
     )
 
 
+#: An OpenRouter model whose listing says it reasons (see ModelCatalog).
+OPENROUTER_REASONER = ModelRecord(
+    provider="openrouter",
+    kind=ProviderKind.OPENROUTER,
+    model="qwen/qwen3-235b-a22b",
+    thinking=ThinkingRule(
+        ThinkingMechanism.EFFORT, levels=("none", "minimal", "low", "medium", "high", "xhigh")
+    ),
+    reasoning_text=True,
+)
+#: A user's vLLM server, its key in LOCAL_KEY.
+LOCAL = {
+    "local": EndpointSpec(
+        base_url="http://localhost:8000/v1",
+        api_key_env="LOCAL_KEY",
+        models={
+            "Qwen/Qwen3-32B": DeclaredModel(thinking="chat_template"),
+            "reasoner": DeclaredModel(thinking="effort", effort_levels=["low", "medium", "high"]),
+            "plain": DeclaredModel(),
+        },
+    ),
+    "keyless": EndpointSpec(base_url="http://localhost:9000/v1", models={"plain": DeclaredModel()}),
+}
+
+
 def resolved(
     spec: str,
     *,
@@ -84,17 +122,26 @@ def resolved(
 
     ``effort`` is the global ``thinking_effort``; ``thinking`` (with
     ``budget``) the agent's own mode; ``generation`` its other model settings.
+    The catalog is the shipped table, plus ``OPENROUTER_REASONER`` and the
+    models ``LOCAL`` declares.
     """
     if thinking is not None:
         generation["thinking"] = ThinkingSettings(mode=thinking, budget_tokens=budget)
+    every = endpoints(**KEYS, specs=LOCAL, env={"LOCAL_KEY": "l-test-key"})
+    declared = ModelCatalog(endpoints=every)  # never loaded: declarations and the table
+    catalog = FakeCatalog([
+        OPENROUTER_REASONER,
+        *declared.records("local"),
+        *declared.records("keyless"),
+    ])
     return resolve_model(
         agent="writer",
         spec=spec,
         generation=ModelSettings(**generation) if generation else None,
         thinking_effort=effort,
         roles=RoleMap(default_model=None, model_roles={}),
-        catalog=FakeCatalog(),
-        endpoints=endpoints(**KEYS),
+        catalog=catalog,
+        endpoints=every,
     )
 
 
@@ -500,3 +547,94 @@ class TestGpt:
         assert built.generate_content_config.effort is None
         assert built.model.reasoning is None
         assert built.generate_content_config.temperature == 0.2
+
+
+# --- OpenRouter and the user's endpoints ----------------------------------------------
+
+
+class TestOpenRouter:
+    def test_an_openrouter_model_on_the_openai_compatible_class(self, settings):
+        built = build("openrouter:qwen/qwen3-235b-a22b", settings)
+
+        assert type(built.model) is OpenAICompatibleLlm
+        assert built.model.model == "qwen/qwen3-235b-a22b"
+        client = built.model.client
+        assert str(client.base_url) == "https://openrouter.ai/api/v1/"
+        assert client.api_key == "r-test-key"
+        assert client.max_retries == 4
+        assert client.timeout == httpx.Timeout(600.0, connect=5.0)
+        # OpenRouter's attribution headers name the app.
+        assert client.default_headers["HTTP-Referer"] == "factory-test"
+        assert client.default_headers["X-Title"] == "factory-test"
+        assert type(built.generate_content_config) is types.GenerateContentConfig
+        assert built.planner is None  # the reasoning parameter rides in extra_body
+
+    @pytest.mark.parametrize("effort", ["none", "low", "high"])
+    def test_the_effort_is_openrouter_s_reasoning_parameter(self, settings, effort):
+        built = build("openrouter:qwen/qwen3-235b-a22b", settings, effort=effort)
+
+        assert built.model.extra_body == {"reasoning": {"effort": effort}}
+
+    def test_a_model_that_does_not_reason_gets_no_reasoning_parameter(self, settings):
+        built = build("openrouter:mistralai/mistral-small", settings, effort="high")
+
+        assert built.model.extra_body == {}
+
+    def test_max_tokens_is_left_to_the_server_unless_set(self, settings):
+        unset = build("openrouter:qwen/qwen3-235b-a22b", settings)
+        given = build("openrouter:qwen/qwen3-235b-a22b", settings, max_tokens=1000)
+
+        assert (unset.model.max_tokens, unset.generate_content_config.max_output_tokens) == (
+            None, None,
+        )
+        assert (given.model.max_tokens, given.generate_content_config.max_output_tokens) == (
+            1000, 1000,
+        )
+
+    async def test_the_request_names_the_app_and_carries_the_effort(self, settings):
+        built = build("openrouter:qwen/qwen3-235b-a22b", settings, effort="high")
+        api = FakeAPI(chat_completion())
+        serve(built.model, api)
+
+        await generate(built)
+
+        sent = api.requests[0]
+        assert sent.url == "https://openrouter.ai/api/v1/chat/completions"
+        assert sent.headers["authorization"] == "Bearer r-test-key"
+        assert sent.headers["http-referer"] == "factory-test"
+        assert sent.headers["x-title"] == "factory-test"
+        assert api.bodies[0]["reasoning"] == {"effort": "high"}
+
+
+class TestEndpoints:
+    def test_an_endpoint_model_on_the_openai_compatible_class(self, settings):
+        built = build("local:plain", settings)
+
+        assert type(built.model) is OpenAICompatibleLlm
+        assert built.model.model == "plain"
+        client = built.model.client
+        assert str(client.base_url) == "http://localhost:8000/v1/"
+        assert client.api_key == "l-test-key"  # from the variable api_key_env names
+        assert "X-Title" not in client.default_headers
+        assert built.model.extra_body == {}
+
+    @pytest.mark.parametrize("effort, enabled", [("none", False), ("low", True), ("high", True)])
+    def test_chat_template_thinking_is_switched_in_the_template(self, settings, effort, enabled):
+        built = build("local:Qwen/Qwen3-32B", settings, effort=effort)
+
+        assert built.model.extra_body == {"chat_template_kwargs": {"enable_thinking": enabled}}
+
+    @pytest.mark.parametrize("effort, sent", [("none", "low"), ("medium", "medium")])
+    def test_a_declared_effort_is_sent_as_reasoning_effort(self, settings, effort, sent):
+        built = build("local:reasoner", settings, effort=effort)
+
+        assert built.model.extra_body == {"reasoning_effort": sent}
+
+    def test_a_keyless_endpoint_sends_a_placeholder_never_the_openai_key(
+        self, settings, monkeypatch
+    ):
+        monkeypatch.setenv("OPENAI_API_KEY", "o-env-key")
+
+        built = build("keyless:plain", settings)
+
+        assert built.model.client.api_key == "EMPTY"

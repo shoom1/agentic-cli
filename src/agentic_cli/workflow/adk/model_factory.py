@@ -24,6 +24,11 @@ where its ADK class reads it:
 - OpenAI: ``OpenAIResponsesLlm`` (``store=False``) with an ``AsyncOpenAI``
   client; the effort in ``OpenAIGenerateContentConfig``, for which ADK
   requests a concise reasoning summary.
+- OpenRouter and the user's endpoints: ``OpenAICompatibleLlm`` (Chat
+  Completions) with an ``AsyncOpenAI`` client on their base URL (OpenRouter's
+  carries attribution headers naming the app). The reasoning parameter goes
+  in ``extra_body``: OpenRouter's ``reasoning.effort``, or what the endpoint
+  declares, ``chat_template_kwargs.enable_thinking`` or ``reasoning_effort``.
 """
 
 from __future__ import annotations
@@ -60,6 +65,10 @@ _GEMINI_LEVELS = {
 }
 # ADK's AnthropicLlm reads a negative thinking budget as adaptive thinking.
 _ADAPTIVE = -1
+# The key an endpoint without one is sent: a local server without
+# authentication expects some key, and the client must never fall back to
+# OPENAI_API_KEY and send the user's OpenAI key to it.
+_PLACEHOLDER_KEY = "EMPTY"
 
 
 @dataclass(frozen=True)
@@ -99,6 +108,8 @@ def build_adk_model(
         return _claude(resolved, settings)
     if kind is ProviderKind.OPENAI:
         return _gpt(resolved, settings)
+    if kind in (ProviderKind.OPENROUTER, ProviderKind.OPENAI_COMPATIBLE):
+        return _openai_compatible(resolved, settings, app_name)
     raise ValueError(f"The ADK backend cannot build {resolved.ref} ({kind.value} models).")
 
 
@@ -209,11 +220,47 @@ def _gpt(resolved: ResolvedModel, settings: "BaseSettings") -> AdkModel:
     )
 
 
+def _openai_compatible(
+    resolved: ResolvedModel, settings: "BaseSettings", app_name: str
+) -> AdkModel:
+    from agentic_cli.workflow.adk.openai_compatible import OpenAICompatibleLlm
+
+    endpoint = resolved.endpoint
+    headers = None
+    if endpoint.kind is ProviderKind.OPENROUTER:
+        headers = {"HTTP-Referer": app_name, "X-Title": app_name}
+    client = _openai_client(
+        resolved, settings, base_url=endpoint.base_url, default_headers=headers
+    )
+    return AdkModel(
+        model=OpenAICompatibleLlm(
+            model=resolved.record.model,
+            max_tokens=resolved.max_tokens,
+            client=client,
+            extra_body=_reasoning_body(resolved),
+        ),
+        generate_content_config=_config(resolved, types.GenerateContentConfig),
+        planner=None,
+    )
+
+
+def _reasoning_body(resolved: ResolvedModel) -> dict[str, Any]:
+    """The request fields that set an OpenAI-compatible model's thinking."""
+    thinking = resolved.thinking
+    if thinking is None:
+        return {}
+    if thinking.mechanism is ThinkingMechanism.CHAT_TEMPLATE:
+        return {"chat_template_kwargs": {"enable_thinking": thinking.enabled}}
+    if resolved.endpoint.kind is ProviderKind.OPENROUTER:
+        return {"reasoning": {"effort": thinking.level}}
+    return {"reasoning_effort": thinking.level}  # an endpoint that declares effort
+
+
 def _openai_client(resolved: ResolvedModel, settings: "BaseSettings", **kwargs: Any):
     from openai import AsyncOpenAI
 
     return AsyncOpenAI(
-        api_key=resolved.endpoint.api_key,
+        api_key=resolved.endpoint.api_key or _PLACEHOLDER_KEY,
         timeout=httpx.Timeout(_REQUEST_TIMEOUT, connect=_CONNECT_TIMEOUT),
         max_retries=settings.retry_max_attempts,
         **kwargs,
