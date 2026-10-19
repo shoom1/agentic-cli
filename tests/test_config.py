@@ -360,6 +360,40 @@ class TestSettingsValidation:
 
         validate_settings(settings)
 
+    LAB = {"lab": {"base_url": "http://gpu-box:8000/v1", "api_key_env": "LAB_KEY"}}
+
+    def test_an_endpoint_s_unset_key_variable_is_an_error_naming_it(
+        self, temp_workspace: Path, monkeypatch
+    ):
+        """Its requests would carry a placeholder key and fail with a bare 401."""
+        monkeypatch.delenv("LAB_KEY", raising=False)
+        settings = self._settings(temp_workspace, model_endpoints=self.LAB)
+        agents = [AgentConfig(name="writer", prompt="p", model="lab:Qwen/Qwen3-32B")]
+
+        with pytest.raises(SettingsValidationError) as caught:
+            validate_settings(settings, agents)
+
+        message = str(caught.value)
+        assert "Agent 'writer'" in message and "'lab'" in message
+        assert "LAB_KEY is not set" in message
+
+    def test_an_endpoint_whose_key_variable_is_set_runs(self, temp_workspace: Path, monkeypatch):
+        monkeypatch.setenv("LAB_KEY", "lab-test-key")
+        settings = self._settings(temp_workspace, model_endpoints=self.LAB)
+        agents = [AgentConfig(name="writer", prompt="p", model="lab:Qwen/Qwen3-32B")]
+
+        validate_settings(settings, agents)
+
+    def test_an_unused_endpoint_s_unset_key_variable_is_no_error(
+        self, temp_workspace: Path, monkeypatch
+    ):
+        monkeypatch.delenv("LAB_KEY", raising=False)
+        settings = self._settings(
+            temp_workspace, {"GOOGLE_API_KEY": "test-key"}, model_endpoints=self.LAB
+        )
+
+        validate_settings(settings)
+
     def test_a_valid_model(self, temp_workspace: Path):
         settings = self._settings(
             temp_workspace, {"GOOGLE_API_KEY": "test-key"}, default_model="gemini-2.5-pro"

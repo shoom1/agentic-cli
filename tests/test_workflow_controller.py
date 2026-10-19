@@ -13,10 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from agentic_cli.cli.workflow_controller import WorkflowController
-from agentic_cli.workflow.factory import (
-    _is_claude_model,
-    create_workflow_manager_from_settings,
-)
+from agentic_cli.workflow.factory import create_workflow_manager_from_settings
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.settings import OrchestratorType
 
@@ -64,23 +61,6 @@ def _FakeLangGraphWorkflow(model="claude-sonnet-4-5"):
     wf.reinitialize = AsyncMock()
     wf.initialize_services = AsyncMock()
     return wf
-
-
-# --- Unit tests for helpers (predicates retained for callers/back-compat) ---
-
-
-class TestIsClaudeModel:
-    def test_claude_models(self):
-        assert _is_claude_model("claude-sonnet-4-5") is True
-        assert _is_claude_model("claude-opus-4") is True
-        assert _is_claude_model("claude-3-haiku") is True
-
-    def test_non_claude_models(self):
-        assert _is_claude_model("gemini-2.5-pro") is False
-        assert _is_claude_model("gpt-4") is False
-
-    def test_none(self):
-        assert _is_claude_model(None) is False
 
 
 # --- Factory routing tests (backend = orchestrator setting only) ---

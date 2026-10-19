@@ -24,6 +24,16 @@ from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager  # noqa: E
 from tests.conftest import MockContext  # noqa: E402
 
 
+async def _built(mgr: GoogleADKWorkflowManager):
+    """The root agent ``mgr`` builds when it initializes (agents are built
+    from the models initialization resolves)."""
+    await mgr.initialize_services()
+    try:
+        return mgr._root_agent
+    finally:
+        await mgr.cleanup()
+
+
 class TestGraphValidation:
     def test_empty_graph_is_rejected(self):
         with pytest.raises(AgentGraphError, match="No agents configured"):
@@ -89,12 +99,12 @@ class TestConstructionOrderIndependence:
         return {"top-first": [top, mid, leaf], "leaf-first": [leaf, mid, top]}[order]
 
     @pytest.mark.parametrize("order", ["top-first", "leaf-first"])
-    def test_two_level_hierarchy_is_built_completely(self, order: str):
-        with MockContext(google_api_key="test-key") as ctx:
+    async def test_two_level_hierarchy_is_built_completely(self, order: str):
+        with MockContext(google_api_key="test-key", session_store="memory") as ctx:
             mgr = GoogleADKWorkflowManager(
                 agent_configs=self._nested_configs(order), settings=ctx.settings
             )
-            root = mgr._create_agents()
+            root = await _built(mgr)
 
         assert root.name == "top"
         assert [a.name for a in root.sub_agents] == ["mid"]
@@ -105,7 +115,7 @@ class TestConstructionOrderIndependence:
 class TestPromptSettingsScope:
     """Prompt factories resolve against the manager's settings, not the global."""
 
-    def test_zero_arg_factory_sees_manager_settings(self):
+    async def test_zero_arg_factory_sees_manager_settings(self):
         seen: list[str] = []
 
         def _prompt() -> str:
@@ -114,7 +124,9 @@ class TestPromptSettingsScope:
             seen.append(get_settings().app_name)
             return "instruction"
 
-        with MockContext(google_api_key="test-key", app_name="manager-app") as ctx:
+        with MockContext(
+            google_api_key="test-key", app_name="manager-app", session_store="memory"
+        ) as ctx:
             from agentic_cli.config import BaseSettings, set_settings
 
             # Global singleton points somewhere else entirely.
@@ -123,23 +135,25 @@ class TestPromptSettingsScope:
                 agent_configs=[AgentConfig(name="a", prompt=_prompt)],
                 settings=ctx.settings,
             )
-            mgr._create_agents()
+            await _built(mgr)
 
         assert seen == ["manager-app"]
 
-    def test_factory_taking_settings_is_passed_them(self):
+    async def test_factory_taking_settings_is_passed_them(self):
         received: list[object] = []
 
         def _prompt(settings) -> str:
             received.append(settings)
             return f"app={settings.app_name}"
 
-        with MockContext(google_api_key="test-key", app_name="manager-app") as ctx:
+        with MockContext(
+            google_api_key="test-key", app_name="manager-app", session_store="memory"
+        ) as ctx:
             mgr = GoogleADKWorkflowManager(
                 agent_configs=[AgentConfig(name="a", prompt=_prompt)],
                 settings=ctx.settings,
             )
-            root = mgr._create_agents()
+            root = await _built(mgr)
 
         assert received == [ctx.settings]
         assert root.instruction == "app=manager-app"

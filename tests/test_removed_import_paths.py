@@ -103,3 +103,66 @@ def test_the_manager_exposes_its_catalog_not_a_registry():
 
     assert not hasattr(BaseWorkflowManager, "model_registry")
     assert isinstance(BaseWorkflowManager.catalog, property)
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("effort", "high"),
+        ("extra_params", {"service_tier": "auto"}),
+        ("request_timeout", 900.0),
+        ("max_retries", 5),
+    ],
+)
+def test_direct_anthropic_llm_refuses_the_fields_it_lost(field, value):
+    """An ignored field would silently drop the effort or timeout it carried."""
+    from pydantic import ValidationError
+
+    from agentic_cli.workflow.adk.anthropic_llm import DirectAnthropicLlm
+
+    with pytest.raises(ValidationError, match=f"{field}\n  Extra inputs are not permitted"):
+        DirectAnthropicLlm(model="claude-sonnet-4-5", **{field: value})
+
+
+def test_the_anthropic_extra_param_client_is_gone():
+    from agentic_cli.workflow.adk import anthropic_llm
+
+    assert not hasattr(anthropic_llm, "_ExtraParamClient")
+    assert not hasattr(anthropic_llm, "_ExtraParamMessages")
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "_get_planner",
+        "_gemini3_thinking_config",
+        "_gemini25_thinking_config",
+        "_anthropic_thinking_budget",
+        "_anthropic_effort",
+        "_anthropic_max_tokens",
+        "_build_model_arg",
+        "_get_generate_content_config",
+        "_generate_config_kwargs_from_settings",
+        "_resolve_thinking",
+        "_resolve_model_for_config",
+    ],
+)
+def test_the_adk_manager_s_model_helpers_are_gone(name):
+    """The ADK model factory builds every agent's model."""
+    from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager
+
+    assert not hasattr(GoogleADKWorkflowManager, name)
+
+
+@pytest.mark.parametrize(
+    "module, name",
+    [
+        ("agentic_cli.workflow.adk.manager", "_is_anthropic_model"),
+        ("agentic_cli.workflow.adk.manager", "_anthropic_uses_adaptive"),
+        ("agentic_cli.workflow.adk.manager", "_claude_version"),
+        ("agentic_cli.workflow.factory", "_is_claude_model"),
+        ("agentic_cli.cli.workflow_controller", "_is_claude_model"),
+    ],
+)
+def test_the_model_name_guesses_are_gone(module, name):
+    assert not hasattr(importlib.import_module(module), name)

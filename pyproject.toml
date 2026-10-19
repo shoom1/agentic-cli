@@ -29,6 +29,9 @@ dependencies = [
     # import `anthropic` at module load; google-adk only pulls it via optional extras,
     # so declare it directly (>=0.78 matches google-adk's own floor).
     "anthropic>=0.78",
+    # ADK's OpenAI model classes (GPT, OpenRouter and endpoint models on ADK)
+    # import `openai`; google-adk pulls it only via an extra. Its floor is ADK's.
+    "openai>=2.20,<3",
     "google-genai>=2.30,<3",  # imported directly (google.genai.types); ADK 2.12 needs 2.30
     "pydantic>=2.0.0",
     "pydantic-settings>=2.0.0",

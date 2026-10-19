@@ -25,8 +25,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   settings. `ModelCatalog` merges the shipped table, live model listings and
   the user's endpoint declarations into one record per model, decides which
   ids a provider rejects, and caches the listings (see Changed). The workflow
-  resolves every agent's model through it; the backends still build their
-  models with their 0.6 code until their model adapters land.
+  resolves every agent's model through it. The ADK backend builds each
+  agent's model from the result (next entry); the LangGraph backend still
+  builds its models with its 0.6 code until its adapter lands.
+- **The ADK backend runs every provider.** It builds each agent's model as an
+  instance of its own, with
+  `workflow.adk.model_factory.build_adk_model(resolved, settings=..., app_name=...)`.
+  The result is an `AdkModel`: the model, the agent's
+  `generate_content_config` and its thinking planner. Gemini runs on ADK's
+  `Gemini`, Claude on ADK's `AnthropicLlm`, and GPT on ADK's
+  `OpenAIResponsesLlm` (the Responses API, with `store=False`). OpenRouter
+  and the user's OpenAI-compatible endpoints run on the new
+  `workflow.adk.openai_compatible.OpenAICompatibleLlm`, which does two
+  things ADK's own class does not. It shows the model's reasoning text in
+  the thinking box, and it sends the provider's reasoning parameter:
+  OpenRouter's `reasoning.effort`, or an endpoint's
+  `chat_template_kwargs.enable_thinking` or `reasoning_effort`, as its
+  `model_endpoints` entry declares. One agent tree can mix providers, and a
+  per-agent native thinking level (`xhigh`, `max`, `minimal`) runs on ADK.
 - **Model settings**: `openai_api_key` (`OPENAI_API_KEY`) and
   `openrouter_api_key` (`OPENROUTER_API_KEY`), secrets like the other keys
   (never saved, kept out of `repr`, and not exported to the process
@@ -42,6 +58,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `pinned_models` are project-settable. `workflow.model_services` turns
   these settings into the package's arguments, and builds the catalog
   (`build_catalog`).
+- **Earlier reasoning stays out of later requests on OpenRouter and endpoint
+  models.** `OpenAICompatibleLlm` leaves a model's thoughts out of what it
+  sends, where ADK's own conversion would replay each one to the model as
+  answer text ("Thought: …") on every later turn and tool step. The session
+  keeps them.
 - **`BaseWorkflowManager.catalog`**, the `ModelCatalog` the manager loaded
   (None before it initializes): `catalog.records("google")`,
   `catalog.record(ModelRef("google", "gemini-2.5-flash"))`,
@@ -85,12 +106,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Gemini 3 and adaptive Claude (4.6 and later) take levels, not budgets; 0.6
   reinterpreted `budget` on them (as a raw budget, or as plain adaptive
   thinking). Use `low`, `medium` or `high`.
-- **Until the model adapters land later in 0.7.0,** the ADK backend runs
-  Google and Anthropic models only, and the LangGraph backend Google,
-  Anthropic and OpenAI models; another provider, or a per-agent native
-  thinking level (`xhigh`, `max`, `minimal`), fails at startup with a message
-  naming the agent. The backends build each agent from its resolved model's
-  id, and the LangGraph backend passes `openai_api_key` to its OpenAI client.
+- **Until its model adapter lands later in 0.7.0,** the LangGraph backend
+  runs Google, Anthropic and OpenAI models only; another provider, or a
+  per-agent native thinking level (`xhigh`, `max`, `minimal`), fails at
+  startup with a message naming the agent. It builds each agent from its
+  resolved model's id, and passes `openai_api_key` to its OpenAI client.
+- **Each ADK model has its own client, with a timeout and retries for its
+  provider.** Each model's key is passed to its client. Gemini's goes in
+  `client_kwargs`, where 0.6 relied on the exported `GOOGLE_API_KEY`.
+  Timeouts and retries:
+  - Gemini keeps google-genai's retries in the agent's config (server
+    errors, not 429). It gains a 600-second timeout: it had none, so a hung
+    connection hung the turn.
+  - Claude's client has the `anthropic_request_timeout` and
+    `retry_max_attempts` retries, as before.
+  - GPT, OpenRouter and endpoint clients have a 600-second timeout (5
+    seconds to connect) and `retry_max_attempts` retries.
+
+  An endpoint without `api_key_env` is sent the placeholder key `EMPTY`,
+  never `OPENAI_API_KEY`.
+- **Thinking `none` turns thinking off on ADK wherever the model allows
+  it.** 0.6 sent Gemini no thinking config for `none`, so Gemini 2.5 Flash
+  and Pro, and Gemini 3, kept thinking at their own default. Now Gemini 2.5
+  Flash gets a budget of 0. A model that cannot stop thinking gets its
+  least: Gemini 2.5 Pro a budget of 128, Gemini 3 its lowest level, and
+  Claude Opus 5.5, Sonnet 5.5, Fable 5 and Fable 5.1, which reject thinking
+  `disabled`, adaptive thinking at effort `low`. Anthropic's model listing
+  says which Claude models cannot turn thinking off; without a listing, the
+  shipped table names these four. Other Claude models are sent thinking
+  `disabled` explicitly.
+- **`generate_simple`, which writes summaries, runs on any default model.**
+  It builds the default model through the model factory, with thinking off
+  where the model allows it and the caller's `max_tokens`. 0.6 called the
+  Anthropic SDK for Claude and the Gemini API for anything else, so a GPT,
+  OpenRouter or endpoint default model could not summarize.
+- **ADK's "Sampling parameters … are ignored" warning no longer prints over
+  the UI.** Temperature, top-p and top-k are dropped, with a debug log,
+  before ADK sees them, whenever the model rejects them in its
+  configuration: Claude while it thinks, Claude 4.6 and later, and GPT
+  reasoning models.
+- **agentic-cli depends on `openai`** (`openai>=2.20,<3`, the floor of
+  google-adk's own extra), because ADK's GPT and OpenAI-compatible model
+  classes import it.
+- **An endpoint whose `api_key_env` names a variable that is not set fails
+  at startup,** naming the endpoint and the variable, for each agent that
+  runs on it. Its requests would carry the placeholder key and fail with a
+  bare 401. An endpoint's key is read from the environment only, not from a
+  `.env` file.
 - **`validate_settings(settings, agent_configs=None)` checks without the
   network.** It checks that every model reference parses, that every
   endpoint a reference names is defined, that every provider a model runs on
@@ -264,6 +326,51 @@ further deprecation step.
   rewrote the description ADK 1.x gave its `transfer_to_agent` tool (it told
   the model to call `TransferToAgentTool`). ADK 2's description is correct,
   so the plugin had nothing left to do. Nothing replaces it.
+- **`DirectAnthropicLlm`'s `effort`, `extra_params`, `request_timeout` and
+  `max_retries`**, and the `_ExtraParamClient` that sent them. ADK 2.12's
+  `AnthropicLlm` sends effort itself and takes a pre-built client.
+  `DirectAnthropicLlm` stays only as what a bare `claude-*` string in a
+  native ADK agent YAML resolves to: Claude on the direct API, not on
+  Vertex AI. Passing it a removed field now raises `ValidationError`, where
+  0.6 would have ignored an unknown field. For an agent agentic-cli builds,
+  set its thinking, such as
+  `AgentConfig(..., model_settings=ModelSettings(thinking=ThinkingSettings(mode="high")))`
+  or a native level such as `"xhigh"`, and the `anthropic_request_timeout`
+  and `retry_max_attempts` settings. For an ADK agent you build yourself,
+  pass a client to ADK's own class:
+  `LlmAgent(..., model=AnthropicLlm(model="claude-opus-4-7", client=AsyncAnthropic(timeout=900.0, max_retries=3)), generate_content_config=AnthropicGenerateContentConfig(effort="high"))`.
+  The imports are `from google.adk.models.anthropic_llm import AnthropicGenerateContentConfig, AnthropicLlm`
+  and `from anthropic import AsyncAnthropic`. `extra_params` has no
+  replacement; `ModelSettings.extra` still passes fields of the agent's
+  `generate_content_config`.
+- **`workflow.factory._is_claude_model`**, and its re-export from
+  `cli.workflow_controller`. For a model id or reference, use
+  `parse_ref(model).provider == "anthropic"`
+  (`from agentic_cli.models import parse_ref`).
+- **The ADK manager's private model helpers**: `_get_planner`,
+  `_gemini3_thinking_config`, `_gemini25_thinking_config`,
+  `_anthropic_thinking_budget`, `_anthropic_effort`, `_anthropic_max_tokens`,
+  `_build_model_arg`, `_get_generate_content_config`,
+  `_generate_config_kwargs_from_settings`, `_resolve_thinking` and
+  `_resolve_model_for_config`, and `workflow.adk.manager`'s
+  `_is_anthropic_model`, `_anthropic_uses_adaptive` and `_claude_version`.
+  The model factory replaces them. To build an agent's model, resolve it
+  and pass the result to the factory:
+  `build_adk_model(resolve_model(...), settings=settings, app_name=app_name)`.
+  Whether a Claude model thinks adaptively is in its record:
+  `manager.catalog.record(parse_ref(model)).thinking.mechanism is ThinkingMechanism.ANTHROPIC_ADAPTIVE`.
+  The imports are `from agentic_cli.models import ThinkingMechanism, parse_ref, resolve_model`
+  and `from agentic_cli.workflow.adk.model_factory import build_adk_model`.
+
+### Fixed
+
+- **Budget-thinking Claude with a per-agent `max_tokens` failed on ADK with
+  HTTP 400.** ADK 2.12's `AnthropicLlm` sends the agent config's
+  `max_output_tokens` in preference to the model's `max_tokens`, and 0.6 put
+  the agent's own `max_tokens` there. So `ModelSettings(max_tokens=2000)`
+  with thinking `high` on `claude-sonnet-4-5` sent 2000 under a 32000-token
+  thinking budget. ADK now gets one value in both places, raised to at
+  least the budget plus 8192 (40192 here).
 
 ## [0.6.4] - 2026-10-18
 

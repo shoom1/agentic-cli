@@ -19,11 +19,6 @@ if TYPE_CHECKING:
 logger = Loggers.workflow()
 
 
-def _is_claude_model(model: str | None) -> bool:
-    """Check if a model string refers to a Claude (Anthropic) model."""
-    return model is not None and model.startswith("claude-")
-
-
 def create_workflow_manager_from_settings(
     agent_configs: list["AgentConfig"],
     settings: "BaseSettings",
@@ -37,8 +32,8 @@ def create_workflow_manager_from_settings(
 
     Creates either a GoogleADKWorkflowManager or LangGraphWorkflowManager
     based purely on the settings.orchestrator configuration. The backend is
-    model-agnostic: ADK runs Claude natively via the direct-API ``AnthropicLlm``
-    (no LiteLLM), so Claude no longer forces a LangGraph swap.
+    model-agnostic: each backend builds every agent's model from its resolved
+    model, so no model forces a backend.
 
     Args:
         agent_configs: List of agent configurations.

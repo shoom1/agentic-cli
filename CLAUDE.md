@@ -53,6 +53,9 @@ agentic-cli/
 │   │   ├── adk/              # ADK orchestrator
 │   │   │   ├── manager.py    # GoogleADKWorkflowManager
 │   │   │   ├── event_processor.py  # ADKEventProcessor
+│   │   │   ├── model_factory.py # build_adk_model: ResolvedModel → ADK model, config, planner
+│   │   │   ├── openai_compatible.py # OpenAICompatibleLlm (OpenRouter, endpoints; reasoning text)
+│   │   │   ├── anthropic_llm.py # DirectAnthropicLlm: bare claude-* strings → direct API
 │   │   │   ├── permission_plugin.py # PermissionPlugin (gates tool calls)
 │   │   │   ├── task_progress_plugin.py # Emits TASK_PROGRESS events
 │   │   │   ├── tool_error_plugin.py # Tool exception → error result (turn survives)
