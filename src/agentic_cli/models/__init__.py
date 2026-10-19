@@ -17,8 +17,13 @@ both); each backend's adapter turns what it resolves into SDK objects.
   providers with a key when unmapped.
 - ``resolve``: ``resolve_model``, one agent's model, thinking, ``max_tokens``
   and sampling settings as a ``ResolvedModel``.
+- ``discovery``: one lister per provider, over its REST API with httpx.
+- ``catalog``: ``ModelCatalog``, the records merged from declarations,
+  listings and the table; which ids each provider rejects; the listing cache
+  and its background refresh.
 """
 
+from agentic_cli.models.catalog import ModelCatalog, ProviderState, ProviderStatus
 from agentic_cli.models.endpoints import (
     OPENROUTER_BASE_URL,
     PROVIDER_KEY_ENV,
@@ -66,6 +71,7 @@ __all__ = [
     "Endpoint",
     "EndpointSpec",
     "GenerationSettings",
+    "ModelCatalog",
     "ModelRecord",
     "ModelRef",
     "ModelResolutionError",
@@ -74,6 +80,8 @@ __all__ = [
     "OPENROUTER_BASE_URL",
     "PROVIDER_KEY_ENV",
     "ProviderKind",
+    "ProviderState",
+    "ProviderStatus",
     "ResolvedModel",
     "RoleMap",
     "RoleRef",
