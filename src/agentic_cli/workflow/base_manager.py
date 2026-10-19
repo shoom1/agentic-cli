@@ -18,6 +18,7 @@ import contextlib
 import inspect
 from abc import ABC, abstractmethod
 from contextvars import ContextVar, Token
+from types import MappingProxyType
 from typing import Any, AsyncGenerator, Awaitable, Callable, Iterator, Mapping, TYPE_CHECKING
 
 from agentic_cli.workflow.events import (
@@ -880,6 +881,11 @@ class BaseWorkflowManager(ABC):
         if self._default_model is not None:
             return str(self._default_model.ref)
         return str(self._default_ref_without_listings())
+
+    @property
+    def agent_models(self) -> Mapping[str, ResolvedModel]:
+        """Each agent's model, by agent name; empty before initialization."""
+        return MappingProxyType(self._resolved_models)
 
     async def initialize_services(self, validate: bool = True) -> None:
         """Initialize backend services asynchronously.

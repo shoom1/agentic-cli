@@ -89,6 +89,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (None before it initializes): `catalog.records("google")`,
   `catalog.record(ModelRef("google", "gemini-2.5-flash"))`,
   `catalog.status()` and `await catalog.refresh()`.
+- **`BaseWorkflowManager.agent_models`**, each agent's `ResolvedModel` by
+  agent name (read-only; empty before the manager initializes).
+- **A `/settings` switch to another provider's model says what it costs.**
+  One system line per switch names the agents and both models: the
+  conversation is kept, but the earlier reasoning from the old provider is
+  not sent to the new model (neither backend sends one provider's reasoning
+  to another), and the prompt cache starts over. A switch within one
+  provider loses neither and stays silent.
 - **`/models`** shows what the model catalog knows. First a row per provider
   and endpoint: whether it has credentials, whether its listing is fresh,
   stale, failed or not tried, when it was fetched, how many models it
