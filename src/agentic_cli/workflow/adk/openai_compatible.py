@@ -81,7 +81,7 @@ class OpenAICompatibleLlm(OpenAILlm):
         call = self.model_copy()
         call._streamed = stream
         async for response in super(OpenAICompatibleLlm, call).generate_content_async(
-            llm_request, stream=True
+            _without_thoughts(llm_request), stream=True
         ):
             yield response
 
@@ -233,6 +233,35 @@ class OpenAICompatibleLlm(OpenAILlm):
             usage_metadata=_usage_metadata(usage),
             finish_reason=mapped_finish_reason,
         )
+
+
+def _without_thoughts(llm_request: LlmRequest) -> LlmRequest:
+    """The request without the model's earlier reasoning.
+
+    ADK keeps a model's thought parts in the session, and its Chat Completions
+    converter sends each one back as answer text ("Thought: ..."), so every
+    later turn and every step of a tool loop would replay the reasoning. It is
+    not part of the conversation: thought parts are left out of the request
+    (the session keeps them), and a turn that was only reasoning is dropped.
+    """
+    contents: list[types.Content] = []
+    changed = False
+    for content in llm_request.contents:
+        parts = content.parts or []
+        kept = [
+            part
+            for part in parts
+            if not part.thought or part.function_call or part.function_response
+        ]
+        if len(kept) == len(parts):
+            contents.append(content)
+            continue
+        changed = True
+        if kept:
+            contents.append(content.model_copy(update={"parts": kept}))
+    if not changed:
+        return llm_request
+    return llm_request.model_copy(update={"contents": contents})
 
 
 def _reasoning_of(message: Any) -> str | None:

@@ -602,4 +602,18 @@ def _model_settings_problems(
             errors.append(
                 f"{who}: model {str(ref)!r} needs the {ref.provider} API key; set {variable}."
             )
+        spec = settings.model_endpoints.get(ref.provider)
+        if (
+            endpoint is not None
+            and endpoint.kind is ProviderKind.OPENAI_COMPATIBLE
+            and spec is not None
+            and spec.api_key_env
+            and not endpoint.api_key
+        ):
+            # Otherwise its requests carry a placeholder key: a bare 401.
+            errors.append(
+                f"{who}: model {str(ref)!r} runs on endpoint {ref.provider!r}, which reads "
+                f"its key from {spec.api_key_env}; {spec.api_key_env} is not set (an "
+                "endpoint's key is read from the environment only, not from a .env file)."
+            )
     return errors

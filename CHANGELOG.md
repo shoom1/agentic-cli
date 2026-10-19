@@ -58,6 +58,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `pinned_models` are project-settable. `workflow.model_services` turns
   these settings into the package's arguments, and builds the catalog
   (`build_catalog`).
+- **Earlier reasoning stays out of later requests on OpenRouter and endpoint
+  models.** `OpenAICompatibleLlm` leaves a model's thoughts out of what it
+  sends, where ADK's own conversion would replay each one to the model as
+  answer text ("Thought: …") on every later turn and tool step. The session
+  keeps them.
 - **`BaseWorkflowManager.catalog`**, the `ModelCatalog` the manager loaded
   (None before it initializes): `catalog.records("google")`,
   `catalog.record(ModelRef("google", "gemini-2.5-flash"))`,
@@ -143,6 +148,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **agentic-cli depends on `openai`** (`openai>=2.20,<3`, the floor of
   google-adk's own extra), because ADK's GPT and OpenAI-compatible model
   classes import it.
+- **An endpoint whose `api_key_env` names a variable that is not set fails
+  at startup,** naming the endpoint and the variable, for each agent that
+  runs on it. Its requests would carry the placeholder key and fail with a
+  bare 401. An endpoint's key is read from the environment only, not from a
+  `.env` file.
 - **`validate_settings(settings, agent_configs=None)` checks without the
   network.** It checks that every model reference parses, that every
   endpoint a reference names is defined, that every provider a model runs on

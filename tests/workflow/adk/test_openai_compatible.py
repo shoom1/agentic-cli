@@ -313,3 +313,70 @@ def test_adk_s_streaming_loop_is_the_one_copied():
         "OpenAICompatibleLlm._stream (agentic_cli/workflow/adk/openai_compatible.py), "
         "keeping its reasoning lines, then update ADK_LOOP_SHA256."
     )
+
+
+# --- earlier reasoning is not sent back -----------------------------------------------
+#
+# ADK keeps a model's thought parts in the session, and its Chat Completions
+# converter would send each one back as answer text ("Thought: ..."): every
+# later turn, and every step of a tool loop, would replay the reasoning.
+
+
+def _model_turn(*parts: types.Part) -> types.Content:
+    return types.Content(role="model", parts=list(parts))
+
+
+def _history() -> LlmRequest:
+    weather = {"id": "call_1", "name": "get_weather"}
+    return LlmRequest(model=MODEL, config=types.GenerateContentConfig(), contents=[
+        user("What is the weather in Paris?"),
+        _model_turn(
+            types.Part(text="I need the weather first.", thought=True),
+            types.Part(function_call=types.FunctionCall(**weather, args={"city": "Paris"})),
+        ),
+        types.Content(role="user", parts=[types.Part(
+            function_response=types.FunctionResponse(**weather, response={"result": "sunny"})
+        )]),
+        _model_turn(types.Part(text="Let me phrase it.", thought=True), types.Part(text="It is sunny.")),
+        _model_turn(types.Part(text="Only thinking here.", thought=True)),
+        user("Thanks. And tomorrow?"),
+    ])
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_earlier_reasoning_is_not_sent_back(stream):
+    server = Server()
+    history = _history()
+
+    [r async for r in compatible(server).generate_content_async(history, stream=stream)]
+
+    body = server.bodies[0]
+    assert "Thought" not in json.dumps(body)
+    assistant = [m for m in body["messages"] if m["role"] == "assistant"]
+    assert len(assistant) == 2  # the thinking-only turn sends nothing
+    assert assistant[0]["tool_calls"][0]["function"]["name"] == "get_weather"
+    assert not assistant[0].get("content")
+    assert assistant[1]["content"] == "It is sunny."
+    # The caller's request, and so the session, keeps every thought.
+    assert [len(c.parts) for c in history.contents] == [1, 2, 1, 2, 1, 1]
+
+
+async def test_a_second_turn_does_not_replay_the_first_turn_s_reasoning():
+    from google.adk import Runner
+    from google.adk.agents import LlmAgent
+    from google.adk.apps import App
+    from google.adk.sessions import InMemorySessionService
+
+    server = Server(message={
+        "role": "assistant", "reasoning": "Let me think hard about this.", "content": "The answer.",
+    })
+    agent = LlmAgent(name="writer", model=compatible(server), instruction="Write.")
+    runner = Runner(
+        app=App(name="compatible_test", root_agent=agent), session_service=InMemorySessionService()
+    )
+    session = await runner.session_service.create_session(app_name="compatible_test", user_id="u")
+    for text in ("First question", "Second question"):
+        [e async for e in runner.run_async(user_id="u", session_id=session.id, new_message=user(text))]
+
+    second = server.bodies[1]["messages"]
+    assert [m["content"] for m in second if m["role"] == "assistant"] == ["The answer."]
