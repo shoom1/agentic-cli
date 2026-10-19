@@ -45,6 +45,8 @@ agentic-cli/
 │   │   ├── tool_summaries.py
 │   │   ├── memory_services.py # Settings → agentic_cli.memory arguments (KBs, memory store)
 │   │   ├── model_services.py # Settings → agentic_cli.models arguments (keys, endpoints, roles); build_catalog
+│   │   ├── model_wire.py     # What both adapters send: timeouts, placeholder key, OpenRouter headers, reasoning_body
+│   │   ├── langchain_models.py # build_chat_model: ResolvedModel → LangChain chat model (profile=); OpenAICompatibleChat
 │   │   ├── permissions/      # Framework-independent capability engine
 │   │   │   ├── engine.py     # PermissionEngine (deny-wins, default-ASK)
 │   │   │   ├── capabilities.py # Capability, EXEMPT
@@ -62,7 +64,7 @@ agentic-cli/
 │   │   │   └── plugins.py    # LLM traffic logging (raw_llm_logging)
 │   │   └── langgraph/        # LangGraph orchestrator
 │   │       ├── manager.py    # LangGraphWorkflowManager
-│   │       ├── graph_builder.py # LangGraphBuilder (graph + LLM factory)
+│   │       ├── graph_builder.py # LangGraphBuilder (graph; one chat model per agent via langchain_models)
 │   │       ├── state.py
 │   │       ├── permission_wrap.py # wrap_tool_for_permission
 │   │       └── persistence/  # Checkpointers, stores

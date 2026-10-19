@@ -179,12 +179,11 @@ class TestLangGraphTurnSurvivesARaisingTool:
     """The LangGraph builder's tool node answers a raising tool with an error
     ToolMessage (``handle_tool_errors=True``), so the graph keeps running."""
 
-    async def test_tool_node_returns_an_error_message(self):
-        from unittest.mock import MagicMock
-
+    async def test_tool_node_returns_an_error_message(self, mock_context):
         from langchain_core.messages import AIMessage
         from langgraph.graph import END, StateGraph
 
+        from agentic_cli.models import ModelCatalog, RoleMap, build_endpoints, resolve_model
         from agentic_cli.tools.registry import ToolCategory, register_tool
         from agentic_cli.workflow.config import AgentConfig
         from agentic_cli.workflow.langgraph.graph_builder import LangGraphBuilder
@@ -196,8 +195,15 @@ class TestLangGraphTurnSurvivesARaisingTool:
             """Always fails."""
             raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
 
-        built = LangGraphBuilder(MagicMock()).build(
-            [AgentConfig(name="a", prompt="p", tools=[_errors_probe_raises])], "gpt-4o-mini",
+        keys = {"google": None, "anthropic": None, "openai": "o-test-key", "openrouter": None}
+        endpoints = build_endpoints(keys=keys, specs={}, env={})
+        model = resolve_model(
+            agent="a", spec="openai:gpt-4o-mini", generation=None, thinking_effort="none",
+            roles=RoleMap(default_model=None, model_roles={}),
+            catalog=ModelCatalog(endpoints=endpoints), endpoints=endpoints,
+        )
+        built = LangGraphBuilder(mock_context.settings).build(
+            [AgentConfig(name="a", prompt="p", tools=[_errors_probe_raises])], {"a": model},
         )
         graph = StateGraph(AgentState)
         graph.add_node("tools", built.nodes["a_tools"].runnable)

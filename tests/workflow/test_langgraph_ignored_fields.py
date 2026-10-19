@@ -1,4 +1,8 @@
-"""LangGraph warns that ADK-only AgentConfig fields are ignored."""
+"""LangGraph warns that ADK-only AgentConfig fields are ignored.
+
+An agent's ``model_settings`` is not one of them: LangGraph builds each agent's
+model from its resolved model, which carries them.
+"""
 
 from __future__ import annotations
 
@@ -17,9 +21,9 @@ from agentic_cli.workflow.model_settings import ModelSettings  # noqa: E402
 
 
 class TestIgnoredFieldsHelper:
-    def test_detects_model_settings(self):
+    def test_model_settings_are_not_ignored(self):
         cfg = AgentConfig(name="a", prompt="p", model_settings=ModelSettings(temperature=0.5))
-        assert _ignored_adk_only_fields([cfg]) == [("a", ["model_settings"])]
+        assert _ignored_adk_only_fields([cfg]) == []
 
     def test_detects_multiple_fields_in_canonical_order(self):
         cfg = AgentConfig(
@@ -27,7 +31,7 @@ class TestIgnoredFieldsHelper:
             skills=["x"],
             mcp_servers=[MCPServerConfig(name="s", command="echo")],
         )
-        # Order follows _ADK_ONLY_FIELDS: model_settings, mcp_servers, skills.
+        # Order follows _ADK_ONLY_FIELDS: mcp_servers, skills.
         assert _ignored_adk_only_fields([cfg]) == [("a", ["mcp_servers", "skills"])]
 
     def test_only_affected_agents_listed(self):
@@ -45,7 +49,7 @@ class TestManagerWarns:
         monkeypatch.setattr(
             mgr_mod.logger, "warning", lambda *a, **k: calls.append((a, k))
         )
-        cfg = AgentConfig(name="a", prompt="p", model_settings=ModelSettings(temperature=0.5))
+        cfg = AgentConfig(name="a", prompt="p", skills=["x"])
         LangGraphWorkflowManager(
             agent_configs=[cfg], settings=mock_context.settings, model="gemini-2.5-flash"
         )
@@ -53,12 +57,15 @@ class TestManagerWarns:
             a and a[0] == "langgraph_ignoring_adk_only_fields" for a, _ in calls
         )
 
-    def test_no_warning_without_adk_only_fields(self, mock_context, monkeypatch):
+    @pytest.mark.parametrize(
+        "fields", [{}, {"model_settings": ModelSettings(temperature=0.5)}], ids=["none", "model"]
+    )
+    def test_no_warning_without_adk_only_fields(self, mock_context, monkeypatch, fields):
         calls = []
         monkeypatch.setattr(
             mgr_mod.logger, "warning", lambda *a, **k: calls.append((a, k))
         )
-        cfg = AgentConfig(name="a", prompt="p")
+        cfg = AgentConfig(name="a", prompt="p", **fields)
         LangGraphWorkflowManager(
             agent_configs=[cfg], settings=mock_context.settings, model="gemini-2.5-flash"
         )

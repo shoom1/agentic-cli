@@ -77,11 +77,17 @@ kb = [
 ]
 langgraph = [
     "langgraph>=0.2.0",
-    "langchain>=0.3.0",
-    "langchain-core>=0.3.0",
-    "langchain-openai>=0.2.0",
-    "langchain-anthropic>=0.2.0",
-    "langchain-google-genai>=2.0.0",
+    # Deep Agents' floors. The LangChain model adapter
+    # (workflow/langchain_models.py) needs ChatAnthropic's reasoning_effort and
+    # summarized adaptive thinking, Gemini's reasoning_effort, the model
+    # profile's effort fields and ChatOpenRouter. Through openrouter, this
+    # extra keeps pydantic below 2.13.
+    "langchain>=1.4.6",
+    "langchain-core>=1.6.11",
+    "langchain-openai>=1.7",
+    "langchain-anthropic>=1.7.6",
+    "langchain-google-genai>=4.4.2",
+    "langchain-openrouter>=0.2",
     # Persistent checkpointer backends (sqlite/postgres store_type). The async
     # savers are required because the manager streams via astream_events.
     "langgraph-checkpoint-sqlite>=2.0",

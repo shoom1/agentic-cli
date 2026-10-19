@@ -25,9 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   settings. `ModelCatalog` merges the shipped table, live model listings and
   the user's endpoint declarations into one record per model, decides which
   ids a provider rejects, and caches the listings (see Changed). The workflow
-  resolves every agent's model through it. The ADK backend builds each
-  agent's model from the result (next entry); the LangGraph backend still
-  builds its models with its 0.6 code until its adapter lands.
+  resolves every agent's model through it, and each backend builds every
+  agent's model from the result (the next two entries).
 - **The ADK backend runs every provider.** It builds each agent's model as an
   instance of its own, with
   `workflow.adk.model_factory.build_adk_model(resolved, settings=..., app_name=...)`.
@@ -43,6 +42,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `chat_template_kwargs.enable_thinking` or `reasoning_effort`, as its
   `model_endpoints` entry declares. One agent tree can mix providers, and a
   per-agent native thinking level (`xhigh`, `max`, `minimal`) runs on ADK.
+- **The LangGraph backend runs every provider too**, through a LangChain
+  adapter that Deep Agents will share:
+  `workflow.langchain_models.build_chat_model(resolved, settings=..., app_name=...)`
+  builds an agent's model as a LangChain chat model.
+  - Gemini runs on `ChatGoogleGenerativeAI` and Claude on `ChatAnthropic`.
+  - GPT runs on `ChatOpenAI` on the Responses API, with `store=False` and its
+    encrypted reasoning sent back, so the reasoning carries across tool
+    calls without being stored.
+  - OpenRouter runs on `ChatOpenRouter`, which sends OpenRouter's
+    `reasoning_details` back with the next request.
+  - The user's endpoints run on the new
+    `workflow.langchain_models.OpenAICompatibleChat`, which keeps the reasoning
+    text such servers send and `ChatOpenAI` drops.
+
+  Each model gets a `profile` from its record
+  (`langchain_models.profile_for(record)`): context window, max output,
+  tools, image input and the thinking levels. Whatever reads a profile (Deep
+  Agents' summarization, for one) sees the catalog's numbers, a small vLLM
+  window included. The OpenAI-compatible wire details both adapters send
+  (timeouts, the placeholder key, OpenRouter's headers, the reasoning
+  parameter) live in `workflow.model_wire`, so an agent sends the same
+  parameters on either backend. One LangGraph agent tree can mix providers,
+  and a per-agent native thinking level runs on LangGraph as on ADK.
 - **Model settings**: `openai_api_key` (`OPENAI_API_KEY`) and
   `openrouter_api_key` (`OPENROUTER_API_KEY`), secrets like the other keys
   (never saved, kept out of `repr`, and not exported to the process
@@ -106,11 +128,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Gemini 3 and adaptive Claude (4.6 and later) take levels, not budgets; 0.6
   reinterpreted `budget` on them (as a raw budget, or as plain adaptive
   thinking). Use `low`, `medium` or `high`.
-- **Until its model adapter lands later in 0.7.0,** the LangGraph backend
-  runs Google, Anthropic and OpenAI models only; another provider, or a
-  per-agent native thinking level (`xhigh`, `max`, `minimal`), fails at
-  startup with a message naming the agent. It builds each agent from its
-  resolved model's id, and passes `openai_api_key` to its OpenAI client.
 - **Each ADK model has its own client, with a timeout and retries for its
   provider.** Each model's key is passed to its client. Gemini's goes in
   `client_kwargs`, where 0.6 relied on the exported `GOOGLE_API_KEY`.
@@ -125,9 +142,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   An endpoint without `api_key_env` is sent the placeholder key `EMPTY`,
   never `OPENAI_API_KEY`.
-- **Thinking `none` turns thinking off on ADK wherever the model allows
-  it.** 0.6 sent Gemini no thinking config for `none`, so Gemini 2.5 Flash
-  and Pro, and Gemini 3, kept thinking at their own default. Now Gemini 2.5
+- **Thinking `none` turns thinking off wherever the model allows it**, on
+  both backends. 0.6 sent Gemini no thinking config for `none`, so Gemini
+  2.5 Flash and Pro, and Gemini 3, kept thinking at their own default. Now Gemini 2.5
   Flash gets a budget of 0. A model that cannot stop thinking gets its
   least: Gemini 2.5 Pro a budget of 128, Gemini 3 its lowest level, and
   Claude Opus 5.5, Sonnet 5.5, Fable 5 and Fable 5.1, which reject thinking
@@ -136,8 +153,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shipped table names these four. Other Claude models are sent thinking
   `disabled` explicitly.
 - **`generate_simple`, which writes summaries, runs on any default model.**
-  It builds the default model through the model factory, with thinking off
-  where the model allows it and the caller's `max_tokens`. 0.6 called the
+  It builds the default model through the backend's adapter (the ADK model
+  factory, or the LangChain adapter on LangGraph), with thinking off where
+  the model allows it and the caller's `max_tokens`, and returns the answer
+  without its thinking. 0.6 called the
   Anthropic SDK for Claude and the Gemini API for anything else, so a GPT,
   OpenRouter or endpoint default model could not summarize.
 - **ADK's "Sampling parameters … are ignored" warning no longer prints over
@@ -180,6 +199,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on a caching Gemini agent's first turn
   (`[EXPERIMENTAL] GeminiContextCacheManager: …`), as it does ADK's other
   experimental notices, so it does not print over the UI.
+- **The LangGraph backend builds each agent's model once, from its resolved
+  model.** 0.6 built a new model on every model call, from the model's name.
+  Each model is now built once, at initialization:
+  - Each agent's `model_settings` apply on LangGraph: thinking, `max_tokens`,
+    sampling and `extra`. 0.6 ignored them and warned. The warning now names
+    only `mcp_servers` and `skills`. An `extra` key the model's class does
+    not take is logged and dropped, and `extra` cannot set the model, the
+    host, the key or the headers.
+  - Every model gets its key, a timeout and `retry_max_attempts` retries
+    explicitly. Claude gets `anthropic_request_timeout`, where 0.6's
+    `ChatAnthropic` had no timeout. The other models get 600 seconds (5
+    seconds to connect for GPT and endpoints). 0.6 left keys and hosts to
+    the environment.
+  - GPT runs on the Responses API with its reasoning effort and a reasoning
+    summary. 0.6 used Chat Completions and sent no reasoning setting.
+  - Gemini keeps its own default temperature unless the agent sets one. 0.6
+    sent `ChatGoogleGenerativeAI`'s 0.7.
+  - Thinking text reaches the thinking box for every provider. 0.6 showed
+    none (see Fixed).
+- **On LangGraph, a model is never sent another provider's reasoning.** A
+  `/settings` switch that keeps the session, or a tree of agents on several
+  providers, puts one provider's AI messages before another's model. Each
+  agent's request now leaves out the reasoning other providers wrote:
+  Claude rejects a thinking block it did not sign, which after a switch from
+  Gemini failed every later turn, and Gemini warned over the UI on every call
+  about each foreign block it dropped. The checkpoint keeps the reasoning, and
+  a model's own reasoning still goes back to it.
+- **On LangGraph, `prompt_caching_enabled` marks Claude's system prompt only
+  for Claude on Anthropic's API.** The model's record decides this, not its
+  name. 0.6 marked any model whose id began with `claude-`, including one
+  served under that name by the user's own server. LangGraph caches nothing
+  for Gemini; only ADK creates Gemini caches.
+- **The `langgraph` extra needs Deep Agents' LangChain releases**:
+  `langchain>=1.4.6`, `langchain-core>=1.6.11`, `langchain-anthropic>=1.7.6`,
+  `langchain-google-genai>=4.4.2` and `langchain-openai>=1.7`. It adds
+  `langchain-openrouter>=0.2`. These releases move other packages with them:
+  - `anthropic` moves to 1.x, which a fresh install of agentic-cli already
+    gets. anthropic 1.x runs on `httpx2`, so code that hands the Anthropic
+    SDK an `httpx` client or timeout passes `httpx2` objects instead.
+  - `openai` moves to at least 2.45.
+  - `langgraph` moves to 1.2.16.
+  - `pydantic` stays below 2.13, because every `openrouter` release caps it
+    there; an install without the extra is not capped.
 - **agentic-cli depends on `openai`** (`openai>=2.20,<3`, the floor of
   google-adk's own extra), because ADK's GPT and OpenAI-compatible model
   classes import it.
@@ -405,6 +467,20 @@ further deprecation step.
   `manager.catalog.record(parse_ref(model)).thinking.mechanism is ThinkingMechanism.ANTHROPIC_ADAPTIVE`.
   The imports are `from agentic_cli.models import ThinkingMechanism, parse_ref, resolve_model`
   and `from agentic_cli.workflow.adk.model_factory import build_adk_model`.
+- **`LangGraphBuilder.get_llm()` and `get_thinking_config()`**, with the
+  builder's `_THINKING_BUDGETS`, `graph_builder._has_thinking_knob`, and the
+  LangGraph manager's private `_resolve_model_for_config` and default `_llm`.
+  The LangChain adapter replaces them. To build a model, resolve it and pass
+  the result to the adapter:
+  `build_chat_model(resolve_model(...), settings=settings, app_name=app_name)`,
+  with `from agentic_cli.models import resolve_model` and
+  `from agentic_cli.workflow.langchain_models import build_chat_model`.
+  `get_thinking_config(model)` has no replacement. A resolved model carries
+  its thinking value (`resolved.thinking`, a `NativeThinking`), and
+  `build_chat_model` puts it on the chat model. `LangGraphBuilder.build()`
+  loses its `default_model` argument. It now takes every agent's resolved
+  model by name, `build(agent_configs, models, tool_overrides=None)`, and
+  keeps the chat models it built in `builder.chat_models`.
 
 ### Fixed
 
@@ -415,6 +491,23 @@ further deprecation step.
   with thinking `high` on `claude-sonnet-4-5` sent 2000 under a 32000-token
   thinking budget. ADK now gets one value in both places, raised to at
   least the budget plus 8192 (40192 here).
+- **Claude thinking on LangGraph failed with HTTP 400 on Claude Opus 4.7 and
+  later.** 0.6 sent every Claude model a thinking budget
+  (`{"type": "enabled", "budget_tokens": …}`). Opus 4.7, 4.8, 5 and 5.5,
+  Sonnet 5 and 5.5, and Fable reject budgets. Claude now thinks the way its
+  record says:
+  - adaptive thinking with a summarized display and an `output_config`
+    effort (`low`, `medium` or `high`, or a native level such as `xhigh`);
+  - a budget only on Claude up to 4.5, with `max_tokens` raised to at least
+    the budget plus 8192, as on ADK;
+  - `disabled` for `none`, except on the models that cannot stop thinking
+    (Opus 5.5, Sonnet 5.5, Fable 5 and Fable 5.1), which run adaptive
+    thinking at effort `low`.
+- **The LangGraph backend showed no thinking text.** It read thinking only
+  from a `text` field, which Claude's and Gemini's thinking blocks do not
+  have. It now reads each answer's standard content blocks, so Claude's
+  thinking, Gemini's thoughts, GPT's reasoning summary and an
+  OpenAI-compatible server's reasoning reach the thinking box.
 
 ## [0.6.4] - 2026-10-18
 

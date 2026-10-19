@@ -49,6 +49,33 @@ def test_openai_is_declared():
     )
 
 
+#: The ``langgraph`` extra's floors: Deep Agents' (0.7.0). The LangChain model
+#: adapter needs what they bring: ChatAnthropic's ``reasoning_effort`` and
+#: summarized adaptive thinking, Gemini's ``reasoning_effort``, the profile's
+#: effort fields, and ``ChatOpenRouter``.
+_LANGGRAPH_FLOORS = {
+    "langchain": "1.4.6",
+    "langchain-core": "1.6.11",
+    "langchain-anthropic": "1.7.6",
+    "langchain-google-genai": "4.4.2",
+    "langchain-openai": "1.7",
+    "langchain-openrouter": "0.2",
+}
+
+
+def test_the_langgraph_extra_has_the_model_adapter_floors():
+    from packaging.requirements import Requirement
+
+    extra = tomllib.loads(_PYPROJECT.read_text())["project"]["optional-dependencies"]
+    floors = {}
+    for spec in extra["langgraph"]:
+        requirement = Requirement(spec)
+        floors[requirement.name.lower()] = next(
+            (s.version for s in requirement.specifier if s.operator == ">="), None
+        )
+    assert {name: floors.get(name) for name in _LANGGRAPH_FLOORS} == _LANGGRAPH_FLOORS
+
+
 def test_the_model_table_ships_in_the_wheel():
     """``agentic_cli.models`` reads ``data/table.json`` at run time.
 
@@ -90,6 +117,11 @@ _OPTIONAL_ROOTS = {
     "langgraph",
     "langchain",
     "langchain_core",
+    "langchain_anthropic",
+    "langchain_google_genai",
+    "langchain_openai",
+    "langchain_openrouter",
+    "openrouter",
 }
 
 
@@ -132,3 +164,10 @@ def test_base_package_imports_without_optional_extras():
 def test_tools_package_imports_without_optional_extras():
     """Tool auto-discovery must not pull the kb/langgraph stacks."""
     assert _import_with_optionals_blocked("agentic_cli.tools") == set()
+
+
+def test_the_adk_model_path_imports_without_the_langgraph_extra():
+    """The wire details both adapters share (``workflow/model_wire.py``) bring
+    no LangChain package to an ADK-only install."""
+    assert _import_with_optionals_blocked("agentic_cli.workflow.model_wire") == set()
+    assert _import_with_optionals_blocked("agentic_cli.workflow.adk.model_factory") == set()

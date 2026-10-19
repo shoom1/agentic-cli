@@ -1,21 +1,24 @@
-"""LangGraph graph building and LLM provider abstraction.
+"""LangGraph graph building.
 
-Extracted from LangGraphWorkflowManager to isolate graph construction
-and LLM factory logic from the runtime process loop.
+Extracted from LangGraphWorkflowManager to isolate graph construction from the
+runtime process loop. Each agent node runs on a LangChain chat model built
+once, when the graph is built, from the agent's resolved model
+(``workflow/langchain_models.py``).
 """
 
 from __future__ import annotations
 
-import re
 from collections import deque
 from typing import Any, Callable, Mapping, TYPE_CHECKING
 
-from agentic_cli.models import ProviderKind, ThinkingMechanism, load_table, parse_ref
+from agentic_cli.models import CacheMechanism, ResolvedModel
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.langgraph.permission_wrap import wrap_tool_for_permission
 from agentic_cli.logging import Loggers
 
 if TYPE_CHECKING:
+    from langchain_core.language_models import BaseChatModel
+
     from agentic_cli.config import BaseSettings
 
 logger = Loggers.workflow()
@@ -24,20 +27,20 @@ logger = Loggers.workflow()
 class LangGraphBuilder:
     """Builds a LangGraph StateGraph from AgentConfig declarations.
 
-    Also handles LLM provider abstraction (needed to create agent nodes)
-    and thinking configuration per-model.
-
     Args:
-        settings: Application settings for provider detection and retry config.
+        settings: Application settings: the retry, timeout, caching and
+            context-window settings.
+        app_name: The application's name, which some providers are told
+            (default: ``settings.app_name``).
     """
 
-    # Thinking budget tokens for Anthropic models
-    _THINKING_BUDGETS = {"low": 4096, "medium": 10000, "high": 32000}
-
-    def __init__(self, settings: "BaseSettings") -> None:
+    def __init__(self, settings: "BaseSettings", app_name: str | None = None) -> None:
         self._settings = settings
+        self._app_name = app_name or settings.app_name
         # Side-channel for trim events: agent_node appends here, manager drains
         self._trim_events: deque[dict[str, Any]] = deque()
+        #: Each agent's chat model, by agent name, from the last ``build``.
+        self.chat_models: dict[str, BaseChatModel] = {}
 
     def drain_trim_events(self) -> list[dict[str, Any]]:
         """Drain and return all pending context-trim events.
@@ -52,29 +55,31 @@ class LangGraphBuilder:
     def build(
         self,
         agent_configs: list[AgentConfig],
-        default_model: str,
+        models: Mapping[str, ResolvedModel],
         tool_overrides: dict[str, list] | None = None,
-        models: Mapping[str, str] | None = None,
     ):
         """Build the LangGraph workflow from agent configs.
 
         Creates a graph where each agent config becomes a node,
-        with edges based on sub_agent relationships.
+        with edges based on sub_agent relationships. Each agent's chat model
+        is built here, once (``chat_models``).
 
         Args:
             agent_configs: List of agent configurations.
-            default_model: Default model name for agents without explicit model.
+            models: Each agent's resolved model, by agent name (the manager
+                    passes the models it resolved at startup).
             tool_overrides: Optional mapping of agent name to pre-built tool lists.
                            When provided, these replace ``config.tools`` for tool
                            node creation and LLM binding.
-            models: Each agent's model id, by agent name (the manager passes
-                    the resolved models); an agent not in it runs on its
-                    ``config.model``, else ``default_model``.
 
         Returns:
             An uncompiled StateGraph.
+
+        Raises:
+            ValueError: If an agent has no resolved model.
         """
         from langgraph.graph import StateGraph, END
+        from agentic_cli.workflow import langchain_models
         from agentic_cli.workflow.langgraph.state import AgentState
 
         # Build config map
@@ -91,15 +96,20 @@ class LangGraphBuilder:
         def _get_tools(config: AgentConfig) -> list:
             return _overrides.get(config.name, config.tools or [])
 
-        def _model_for(config: AgentConfig) -> str:
-            return (models or {}).get(config.name) or config.model or default_model
-
-        # Create nodes for each agent with retry policy
+        # Create nodes for each agent with retry policy, each on its own model
+        chat_models = {}
         for config in agent_configs:
+            if config.name not in models:
+                raise ValueError(f"No resolved model for agent {config.name!r}.")
+            model = models[config.name]
+            chat_models[config.name] = langchain_models.build_chat_model(
+                model, settings=self._settings, app_name=self._app_name
+            )
             node_fn = self._create_agent_node(
-                config, _model_for(config), tools=_get_tools(config) or None,
+                config, model, chat_models[config.name], tools=_get_tools(config) or None,
             )
             graph.add_node(config.name, node_fn, retry_policy=retry_policy)
+        self.chat_models = chat_models
 
         # Determine entry point (root agent)
         root_agent = None
@@ -183,135 +193,6 @@ class LangGraphBuilder:
 
         return graph
 
-    def get_llm(self, model: str):
-        """Get a LangChain LLM instance for the specified model.
-
-        Explicitly instantiates the correct provider based on model name prefix.
-        Uses GenAI (not VertexAI) for Google models.
-
-        Args:
-            model: Model identifier (e.g. "claude-sonnet-4", "gemini-2.5-pro").
-
-        Returns:
-            A LangChain BaseChatModel instance.
-        """
-        thinking = self.get_thinking_config(model)
-
-        # OpenAI models. The key is passed explicitly: openai_api_key is not
-        # exported to the environment.
-        if model.startswith("gpt-") or re.match(r"o\d", model):
-            try:
-                from langchain_openai import ChatOpenAI
-                kwargs = {"model": model}
-                if self._settings.openai_api_key:
-                    kwargs["api_key"] = self._settings.openai_api_key
-                return ChatOpenAI(**kwargs)
-            except ImportError:
-                raise ImportError(
-                    f"Model {model} requires langchain-openai. "
-                    "Install with: pip install langchain-openai"
-                )
-
-        # Anthropic models
-        if model.startswith("claude-"):
-            try:
-                from langchain_anthropic import ChatAnthropic
-                kwargs = {"model": model}
-                if thinking and thinking["provider"] == "anthropic":
-                    kwargs["thinking"] = thinking["thinking"]
-                return ChatAnthropic(**kwargs)
-            except ImportError:
-                raise ImportError(
-                    f"Model {model} requires langchain-anthropic. "
-                    "Install with: pip install langchain-anthropic"
-                )
-
-        # Google models - use GenAI, NOT VertexAI
-        if model.startswith("gemini-"):
-            try:
-                from langchain_google_genai import ChatGoogleGenerativeAI
-                kwargs = {"model": model}
-                if thinking and thinking["provider"] == "google":
-                    kwargs["include_thoughts"] = thinking.get("include_thoughts", True)
-                    # 2.5 → thinking_budget, 3 → thinking_level (see get_thinking_config)
-                    if thinking.get("thinking_budget") is not None:
-                        kwargs["thinking_budget"] = thinking["thinking_budget"]
-                    elif thinking.get("thinking_level") is not None:
-                        kwargs["thinking_level"] = thinking["thinking_level"]
-                return ChatGoogleGenerativeAI(**kwargs)
-            except ImportError:
-                raise ImportError(
-                    f"Model {model} requires langchain-google-genai. "
-                    "Install with: pip install langchain-google-genai"
-                )
-
-        # Unknown model - try to infer from available API keys
-        if self._settings.google_api_key:
-            try:
-                from langchain_google_genai import ChatGoogleGenerativeAI
-                return ChatGoogleGenerativeAI(model=model)
-            except ImportError:
-                pass
-
-        if self._settings.anthropic_api_key:
-            try:
-                from langchain_anthropic import ChatAnthropic
-                return ChatAnthropic(model=model)
-            except ImportError:
-                pass
-
-        raise ValueError(
-            f"Cannot determine provider for model: {model}. "
-            "Ensure model name starts with a known prefix (gpt-, claude-, gemini-) "
-            "or install the appropriate langchain integration."
-        )
-
-    def get_thinking_config(self, model: str) -> dict[str, Any] | None:
-        """Get thinking configuration for the model.
-
-        Returns provider-specific thinking configuration based on
-        settings.thinking_effort and model support.
-
-        Args:
-            model: Model identifier.
-
-        Returns:
-            Provider-specific thinking config dict, or None.
-        """
-        effort = self._settings.thinking_effort
-        if effort == "none" or not _has_thinking_knob(model):
-            return None
-
-        if model.startswith("claude-"):
-            return {
-                "provider": "anthropic",
-                "thinking": {
-                    "type": "enabled",
-                    "budget_tokens": self._THINKING_BUDGETS.get(effort, 10000),
-                },
-            }
-
-        if model.startswith("gemini-"):
-            # Gemini 3 takes a discrete thinking_level; Gemini 2.5 only accepts a
-            # numeric thinking_budget and rejects thinking_level (400). On ADK
-            # the model's record decides (workflow/adk/model_factory.py).
-            if "gemini-3" in model:
-                is_gemini_3_pro = "pro" in model  # 3 Pro lacks "medium"
-                level = "high" if (effort == "medium" and is_gemini_3_pro) else effort
-                return {
-                    "provider": "google",
-                    "include_thoughts": True,
-                    "thinking_level": level,
-                }
-            budget = {"low": 4096, "medium": 12288, "high": 24576}.get(effort, 12288)
-            return {
-                "provider": "google",
-                "include_thoughts": True,
-                "thinking_budget": budget,
-            }
-
-        return None
-
     def get_retry_policy(self):
         """Build RetryPolicy from settings configuration.
 
@@ -327,29 +208,37 @@ class LangGraphBuilder:
         )
 
     def _create_agent_node(
-        self, config: AgentConfig, model: str, tools: list | None = None,
+        self,
+        config: AgentConfig,
+        model: ResolvedModel,
+        chat_model: "BaseChatModel",
+        tools: list | None = None,
     ) -> Callable:
         """Create a LangGraph node function for an agent.
 
         Args:
             config: Agent configuration.
-            model: The model id the agent runs on.
+            model: The agent's resolved model.
+            chat_model: The chat model built from it, which the node calls.
+            tools: The agent's tools (default: ``config.tools``).
 
         Returns:
             Async function that processes state through the agent.
         """
+        from agentic_cli.workflow import langchain_models
+
+        agent_tools = tools or config.tools or []
+        llm = chat_model.bind_tools(agent_tools) if agent_tools else chat_model
+        # Claude on Anthropic's API caches the system prompt it is told to; a
+        # model reached another way (OpenRouter, the user's server) does not.
+        cache_system_prompt = (
+            self._settings.prompt_caching_enabled
+            and model.record.cache is CacheMechanism.ANTHROPIC
+        )
 
         async def agent_node(state: dict) -> dict:
             """Process state through this agent."""
             from langchain_core.messages import SystemMessage
-
-            # Get LLM for this agent
-            llm = self.get_llm(model)
-
-            # Bind tools if available
-            agent_tools = tools or config.tools or []
-            if agent_tools:
-                llm = llm.bind_tools(agent_tools)
 
             # Build messages: system prompt + conversation history
             # State messages are already LangChain objects (add_messages reducer
@@ -358,7 +247,7 @@ class LangGraphBuilder:
 
             system_prompt = config.get_prompt()
             if system_prompt:
-                if self._settings.prompt_caching_enabled and model.startswith("claude-"):
+                if cache_system_prompt:
                     messages.append(
                         SystemMessage(
                             content=[{
@@ -401,7 +290,11 @@ class LangGraphBuilder:
                         "agent": config.name,
                     })
 
-            messages.extend(conversation)
+            # Another provider's reasoning (a model switch, a mixed tree) is
+            # not this model's to read; the checkpoint keeps it.
+            messages.extend(
+                langchain_models.without_foreign_reasoning(conversation, model.record.kind)
+            )
 
             # Invoke LLM
             try:
@@ -478,14 +371,3 @@ class LangGraphBuilder:
             return "__end__"
 
         return router
-
-
-def _has_thinking_knob(model: str) -> bool:
-    """Whether a bare model id has a thinking knob, by the shipped model table."""
-    try:
-        ref = parse_ref(model)
-        kind = ProviderKind(ref.provider)
-    except ValueError:
-        return False
-    record = load_table().record_for(ref.provider, kind, ref.model)
-    return record.thinking.mechanism is not ThinkingMechanism.NONE

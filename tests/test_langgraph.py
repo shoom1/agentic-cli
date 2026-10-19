@@ -235,6 +235,23 @@ class TestLangGraphWorkflowManagerLifecycle:
                 mock_cleanup.assert_called_once()
 
 
+def _resolved(agent: str, spec: str, settings: BaseSettings):
+    """``spec`` resolved for ``agent`` against the shipped table, as the manager does."""
+    from agentic_cli.models import ModelCatalog, RoleMap, resolve_model
+    from agentic_cli.workflow import model_services
+
+    endpoints = model_services.endpoints_from_settings(settings)
+    return resolve_model(
+        agent=agent,
+        spec=spec,
+        generation=None,
+        thinking_effort=settings.thinking_effort,
+        roles=RoleMap(default_model=None, model_roles={}),
+        catalog=ModelCatalog(endpoints=endpoints),
+        endpoints=endpoints,
+    )
+
+
 class TestLangGraphBuilder:
     """Tests for LangGraph graph construction."""
 
@@ -247,11 +264,43 @@ class TestLangGraphBuilder:
 
         graph = builder.build(
             [AgentConfig(name="test_agent", prompt="Test prompt")],
-            "gemini-2.5-flash",
+            {"test_agent": _resolved("test_agent", "gemini-2.5-flash", settings)},
         )
 
         assert graph is not None
         assert graph.compile() is not None
+
+    def test_each_agent_gets_its_own_model(self):
+        """One chat model per agent, built when the graph is built."""
+        from langchain_anthropic import ChatAnthropic
+        from langchain_google_genai import ChatGoogleGenerativeAI
+
+        from agentic_cli.workflow.langgraph.graph_builder import LangGraphBuilder
+
+        settings = BaseSettings(google_api_key="test-key", anthropic_api_key="test-key")
+        builder = LangGraphBuilder(settings)
+
+        builder.build(
+            [
+                AgentConfig(name="lead", prompt="Lead.", sub_agents=["helper"]),
+                AgentConfig(name="helper", prompt="Help."),
+            ],
+            {
+                "lead": _resolved("lead", "claude-sonnet-4-5", settings),
+                "helper": _resolved("helper", "gemini-2.5-flash", settings),
+            },
+        )
+
+        assert type(builder.chat_models["lead"]) is ChatAnthropic
+        assert type(builder.chat_models["helper"]) is ChatGoogleGenerativeAI
+
+    def test_an_agent_without_a_resolved_model_is_an_error(self):
+        from agentic_cli.workflow.langgraph.graph_builder import LangGraphBuilder
+
+        settings = BaseSettings(google_api_key="test-key")
+
+        with pytest.raises(ValueError, match="No resolved model for agent 'test_agent'"):
+            LangGraphBuilder(settings).build([AgentConfig(name="test_agent", prompt="p")], {})
 
 
 class TestOrchestratorSelection:
@@ -277,122 +326,6 @@ class TestOrchestratorSelection:
             session_store="postgres",
         )
         assert settings.session_store == "postgres"
-
-
-class TestLangGraphThinkingConfig:
-    """Tests for thinking configuration in LangGraph manager."""
-
-    @pytest.fixture
-    def agent_configs(self):
-        """Create test agent configs."""
-        return [AgentConfig(name="test", prompt="test")]
-
-    def test_thinking_config_none_effort(self, agent_configs):
-        """Test _get_thinking_config returns None when effort is 'none'."""
-        settings = BaseSettings(
-            google_api_key="test-key",
-            thinking_effort="none",
-        )
-        manager = LangGraphWorkflowManager(
-            agent_configs=agent_configs,
-            settings=settings,
-        )
-
-        config = manager._builder.get_thinking_config("claude-sonnet-4")
-        assert config is None
-
-    def test_thinking_config_unsupported_model(self, agent_configs):
-        """Test _get_thinking_config returns None for unsupported models."""
-        settings = BaseSettings(
-            google_api_key="test-key",
-            thinking_effort="medium",
-        )
-        manager = LangGraphWorkflowManager(
-            agent_configs=agent_configs,
-            settings=settings,
-        )
-
-        # GPT models don't support thinking effort
-        config = manager._builder.get_thinking_config("gpt-4o")
-        assert config is None
-
-    def test_thinking_config_anthropic_model(self, agent_configs):
-        """Test _get_thinking_config returns correct Anthropic config."""
-        settings = BaseSettings(
-            anthropic_api_key="test-key",
-            thinking_effort="high",
-        )
-        manager = LangGraphWorkflowManager(
-            agent_configs=agent_configs,
-            settings=settings,
-        )
-
-        config = manager._builder.get_thinking_config("claude-sonnet-4")
-        assert config is not None
-        assert config["provider"] == "anthropic"
-        assert config["thinking"]["type"] == "enabled"
-        assert config["thinking"]["budget_tokens"] == 32000  # high
-
-    def test_thinking_config_anthropic_medium(self, agent_configs):
-        """Test _get_thinking_config with medium effort for Anthropic."""
-        settings = BaseSettings(
-            anthropic_api_key="test-key",
-            thinking_effort="medium",
-        )
-        manager = LangGraphWorkflowManager(
-            agent_configs=agent_configs,
-            settings=settings,
-        )
-
-        config = manager._builder.get_thinking_config("claude-opus-4")
-        assert config["thinking"]["budget_tokens"] == 10000
-
-    def test_thinking_config_anthropic_low(self, agent_configs):
-        """Test _get_thinking_config with low effort for Anthropic."""
-        settings = BaseSettings(
-            anthropic_api_key="test-key",
-            thinking_effort="low",
-        )
-        manager = LangGraphWorkflowManager(
-            agent_configs=agent_configs,
-            settings=settings,
-        )
-
-        config = manager._builder.get_thinking_config("claude-sonnet-4-5")
-        assert config["thinking"]["budget_tokens"] == 4096
-
-    def test_thinking_config_google_model(self, agent_configs):
-        """Test _get_thinking_config returns correct Google config."""
-        settings = BaseSettings(
-            google_api_key="test-key",
-            thinking_effort="high",
-        )
-        manager = LangGraphWorkflowManager(
-            agent_configs=agent_configs,
-            settings=settings,
-        )
-
-        config = manager._builder.get_thinking_config("gemini-2.5-pro")
-        assert config is not None
-        assert config["provider"] == "google"
-        assert config["include_thoughts"] is True
-        # 2.5 uses a numeric budget, NOT thinking_level (which it rejects, 400).
-        assert config["thinking_budget"] == 24576
-        assert "thinking_level" not in config
-
-    def test_thinking_config_google_medium(self, agent_configs):
-        """Test _get_thinking_config with medium effort for Google."""
-        settings = BaseSettings(
-            google_api_key="test-key",
-            thinking_effort="medium",
-        )
-        manager = LangGraphWorkflowManager(
-            agent_configs=agent_configs,
-            settings=settings,
-        )
-
-        config = manager._builder.get_thinking_config("gemini-3-flash-preview")
-        assert config["thinking_level"] == "medium"
 
 
 class TestCreateWorkflowManagerFromSettings:

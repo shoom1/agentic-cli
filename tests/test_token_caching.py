@@ -6,20 +6,10 @@ prompt_caching_enabled setting.
 """
 
 import pytest
-from unittest.mock import MagicMock
 
 from agentic_cli.config import BaseSettings
+from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.events import WorkflowEvent, EventType
-
-# Check if LangGraph and langchain_core are available
-try:
-    from agentic_cli.workflow.langgraph import LangGraphWorkflowManager
-    from agentic_cli.workflow.config import AgentConfig
-    from langchain_core.messages import SystemMessage
-
-    LANGGRAPH_AVAILABLE = True
-except ImportError:
-    LANGGRAPH_AVAILABLE = False
 
 
 class TestPromptCachingSetting:
@@ -39,153 +29,131 @@ class TestPromptCachingSetting:
         assert settings.prompt_caching_enabled is False
 
 
-@pytest.mark.skipif(
-    not LANGGRAPH_AVAILABLE,
-    reason="LangGraph dependencies not installed",
-)
+def _langgraph_manager(agent_config, **values):
+    pytest.importorskip("langgraph")
+    from agentic_cli.workflow.langgraph import LangGraphWorkflowManager
+
+    return LangGraphWorkflowManager(
+        agent_configs=[agent_config],
+        settings=BaseSettings(session_store="memory", **values),
+        checkpointer="memory",
+    )
+
+
+async def _turn(manager) -> None:
+    try:
+        async for _ in manager.process("hello", user_id="u", session_id="s"):
+            pass
+    finally:
+        await manager.cleanup()
+
+
 class TestClaudeCacheControl:
-    """Tests for cache_control on Claude SystemMessages in LangGraph."""
+    """LangGraph marks Claude's system prompt for Anthropic's cache.
+
+    The marker follows the model's record (its cache mechanism), not its
+    name: Claude on Anthropic's API gets it, a model on another API does not,
+    whatever it is called. Each request is read off a fake provider API.
+    """
 
     @pytest.fixture
     def agent_config(self):
         return AgentConfig(name="test_agent", prompt="You are a test agent")
 
-    def test_claude_system_message_has_cache_control(self, agent_config):
-        """When prompt_caching_enabled=True and model is claude-*, verify
-        SystemMessage content is a list with cache_control."""
-        settings = BaseSettings(
-            anthropic_api_key="test-key",
+    @pytest.fixture(autouse=True)
+    def hermetic(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        for variable in ("GOOGLE_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"):
+            monkeypatch.delenv(variable, raising=False)
+
+    @pytest.fixture
+    def claude(self, monkeypatch):
+        """Claude's API, answering every request."""
+        pytest.importorskip("langgraph")
+        import anthropic
+
+        from tests.workflow.adk.fakes import FakeAPI
+        from tests.workflow.langchain_fakes import anthropic_reply, route
+
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "a-test-key")
+        api = FakeAPI(anthropic_reply({"type": "text", "text": "test response"}))
+        route(monkeypatch, anthropic, "AsyncClient", api)
+        return api
+
+    async def test_claude_system_message_has_cache_control(self, agent_config, claude):
+        manager = _langgraph_manager(
+            agent_config, default_model="claude-sonnet-4-5", prompt_caching_enabled=True
+        )
+
+        await _turn(manager)
+
+        (body,) = claude.bodies
+        assert body["system"] == [{
+            "type": "text",
+            "text": "You are a test agent",
+            "cache_control": {"type": "ephemeral"},
+        }]
+
+    async def test_cache_control_disabled_when_setting_false(self, agent_config, claude):
+        manager = _langgraph_manager(
+            agent_config, default_model="claude-sonnet-4-5", prompt_caching_enabled=False
+        )
+
+        await _turn(manager)
+
+        (body,) = claude.bodies
+        assert body["system"] == "You are a test agent"
+
+    async def test_no_cache_control_for_gemini(self, agent_config, monkeypatch):
+        pytest.importorskip("langgraph")
+        from tests.workflow.adk.fakes import FakeAPI
+        from tests.workflow.langchain_fakes import gemini_reply, route_google
+
+        monkeypatch.setenv("GOOGLE_API_KEY", "g-test-key")
+        api = FakeAPI(gemini_reply({"text": "test response"}))
+        route_google(monkeypatch, api)
+        manager = _langgraph_manager(
+            agent_config, default_model="gemini-2.5-pro", prompt_caching_enabled=True
+        )
+
+        await _turn(manager)
+
+        (request,) = api.requests
+        assert b"cache_control" not in request.content
+        assert api.bodies[0]["systemInstruction"]["parts"] == [{"text": "You are a test agent"}]
+
+    async def test_no_cache_control_for_a_claude_named_model_on_another_api(
+        self, agent_config, monkeypatch
+    ):
+        """0.6 marked any model whose id started ``claude-``; a server of the
+        user's that serves a model under that name does not take the marker."""
+        pytest.importorskip("langgraph")
+        import openai
+
+        from tests.workflow.adk.fakes import FakeAPI, chat_completion
+        from tests.workflow.langchain_fakes import route
+
+        api = FakeAPI(chat_completion("test response"))
+        route(monkeypatch, openai, "AsyncOpenAI", api)
+        endpoints = {"proxy": {
+            "base_url": "http://localhost:8000/v1",
+            "models": {"claude-sonnet-4-5": {}},
+        }}
+        manager = _langgraph_manager(
+            agent_config,
+            model_endpoints=endpoints,
+            default_model="proxy:claude-sonnet-4-5",
             prompt_caching_enabled=True,
         )
-        manager = LangGraphWorkflowManager(
-            agent_configs=[agent_config],
-            settings=settings,
-            model="claude-sonnet-4",
-        )
 
-        # Intercept the SystemMessage creation by patching the builder's get_llm.
-        captured_messages = []
+        await _turn(manager)
 
-        def mock_get_llm(model_name):
-            mock_llm = MagicMock()
-            mock_llm.bind_tools = MagicMock(return_value=mock_llm)
-
-            async def mock_ainvoke(messages, **kwargs):
-                captured_messages.extend(messages)
-                mock_response = MagicMock()
-                mock_response.content = "test response"
-                mock_response.tool_calls = []
-                return mock_response
-
-            mock_llm.ainvoke = mock_ainvoke
-            return mock_llm
-
-        manager._builder.get_llm = mock_get_llm
-        model = manager._resolve_model_for_config(agent_config)  # the bare id
-        node_fn = manager._builder._create_agent_node(agent_config, model)
-
-        # Run the node
-        import asyncio
-
-        state = {"messages": [{"role": "user", "content": "hello"}]}
-        asyncio.run(node_fn(state))
-
-        # Check the SystemMessage
-        sys_msgs = [m for m in captured_messages if isinstance(m, SystemMessage)]
-        assert len(sys_msgs) == 1
-        sys_msg = sys_msgs[0]
-
-        # Content should be a list with cache_control
-        assert isinstance(sys_msg.content, list)
-        assert len(sys_msg.content) == 1
-        block = sys_msg.content[0]
-        assert block["type"] == "text"
-        assert block["text"] == "You are a test agent"
-        assert block["cache_control"] == {"type": "ephemeral"}
-
-    def test_cache_control_disabled_when_setting_false(self, agent_config):
-        """When prompt_caching_enabled=False, verify SystemMessage uses plain string."""
-        settings = BaseSettings(
-            anthropic_api_key="test-key",
-            prompt_caching_enabled=False,
-        )
-        manager = LangGraphWorkflowManager(
-            agent_configs=[agent_config],
-            settings=settings,
-            model="claude-sonnet-4",
-        )
-
-        captured_messages = []
-
-        def mock_get_llm(model_name):
-            mock_llm = MagicMock()
-            mock_llm.bind_tools = MagicMock(return_value=mock_llm)
-
-            async def mock_ainvoke(messages, **kwargs):
-                captured_messages.extend(messages)
-                mock_response = MagicMock()
-                mock_response.content = "test response"
-                mock_response.tool_calls = []
-                return mock_response
-
-            mock_llm.ainvoke = mock_ainvoke
-            return mock_llm
-
-        manager._builder.get_llm = mock_get_llm
-
-        import asyncio
-
-        state = {"messages": [{"role": "user", "content": "hello"}]}
-        model = manager._resolve_model_for_config(agent_config)  # the bare id
-        asyncio.run(manager._builder._create_agent_node(agent_config, model)(state))
-
-        sys_msgs = [m for m in captured_messages if isinstance(m, SystemMessage)]
-        assert len(sys_msgs) == 1
-        # Plain string content, no cache_control
-        assert isinstance(sys_msgs[0].content, str)
-        assert sys_msgs[0].content == "You are a test agent"
-
-    def test_no_cache_control_for_gemini(self, agent_config):
-        """When model is gemini-*, verify SystemMessage uses plain string
-        regardless of prompt_caching_enabled setting."""
-        settings = BaseSettings(
-            google_api_key="test-key",
-            prompt_caching_enabled=True,
-        )
-        manager = LangGraphWorkflowManager(
-            agent_configs=[agent_config],
-            settings=settings,
-            model="gemini-2.5-pro",
-        )
-
-        captured_messages = []
-
-        def mock_get_llm(model_name):
-            mock_llm = MagicMock()
-            mock_llm.bind_tools = MagicMock(return_value=mock_llm)
-
-            async def mock_ainvoke(messages, **kwargs):
-                captured_messages.extend(messages)
-                mock_response = MagicMock()
-                mock_response.content = "test response"
-                mock_response.tool_calls = []
-                return mock_response
-
-            mock_llm.ainvoke = mock_ainvoke
-            return mock_llm
-
-        manager._builder.get_llm = mock_get_llm
-
-        import asyncio
-
-        state = {"messages": [{"role": "user", "content": "hello"}]}
-        model = manager._resolve_model_for_config(agent_config)  # the bare id
-        asyncio.run(manager._builder._create_agent_node(agent_config, model)(state))
-
-        sys_msgs = [m for m in captured_messages if isinstance(m, SystemMessage)]
-        assert len(sys_msgs) == 1
-        # Plain string, no cache_control for Gemini
-        assert isinstance(sys_msgs[0].content, str)
+        (request,) = api.requests
+        assert b"cache_control" not in request.content
+        assert api.bodies[0]["messages"][0] == {
+            "role": "system", "content": "You are a test agent",
+        }
 
 
 class TestLLMUsageEventCacheFields:
