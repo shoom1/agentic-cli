@@ -17,6 +17,8 @@ class TestSecretFields:
         expected = {
             "google_api_key",
             "anthropic_api_key",
+            "openai_api_key",
+            "openrouter_api_key",
             "tavily_api_key",
             "brave_api_key",
             "postgres_uri",  # embeds user:password@host

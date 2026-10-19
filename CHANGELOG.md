@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`agentic_cli.models`** (provisional: its names and signatures may change
+  in 0.7.x) holds what agentic-cli knows about models, as data and logic with
+  no provider SDK. It parses model references (`provider:model`, split on the
+  first colon so `openrouter:qwen/qwen3-235b-a22b:free` works; a bare
+  `gemini-…`, `claude-…`, `gpt-…` or `o<digit>…` id still names its provider;
+  any other bare name is a role such as `fast`), builds the four built-in
+  providers and the user's OpenAI-compatible endpoints (`build_endpoints`),
+  describes a model as a `ModelRecord`, and ships a table of model families
+  and numbers (`load_table()`; per-model numbers from the LangChain partner
+  packages' bundled profiles, models.dev data). `RoleMap` maps the `default`,
+  `fast` and `strong` roles (and an app's own) to models, and `resolve_model`
+  decides one agent's model, thinking value, `max_tokens` and sampling
+  settings. Nothing in the workflow uses the package yet; the next changes
+  move model discovery and both backends onto it.
+- **Model settings**, which nothing reads yet: `openai_api_key`
+  (`OPENAI_API_KEY`) and `openrouter_api_key` (`OPENROUTER_API_KEY`), secrets
+  like the other keys (never saved, kept out of `repr`, and not exported to
+  the process environment); `model_endpoints`, the user's OpenAI-compatible
+  servers by name (`base_url`, the variable holding the key in
+  `api_key_env`, and the models served); `model_roles`, a model per role; and
+  `pinned_models`, models the pickers always offer. `model_endpoints` is
+  user-only: it holds the addresses a key is sent to, so a project
+  `./.<app>/settings.json` or a cwd `.env` that sets it is ignored with a
+  warning, and a save writes it to `~/.<app>/settings.json`. `model_roles`
+  and `pinned_models` are project-settable. `workflow.model_services` turns
+  these settings into the package's arguments.
+
 ### Changed
 
 - **agentic-cli runs on ADK 2.** It requires `google-adk[mcp]>=2.12,<3`
@@ -34,6 +63,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `target_arg=` nor `target=` raises `ValueError` (it warned since 0.6.1).
   Name the resource: `Capability("http.read", target_arg="url")`, or a fixed
   `target=` for a tool that always acts on one.
+- **`ThinkingSettings.mode` accepts any lowercase name** (it accepted only
+  `none`, `low`, `medium`, `high` and `budget`), so a per-agent native level
+  of the agent's model, such as `xhigh`, `max` or `minimal`, validates.
+  `resolve_model` checks it against the model's levels. A name that is not
+  lowercase letters, digits and `_` (`High!`) is still rejected.
+- **Settings validation errors no longer repeat the rejected value.** The
+  value can be a credential (a key written inline in a `model_endpoints`
+  entry, or a password in its `base_url`). The error still names the setting
+  and says what it expects.
 
 ### Removed
 
