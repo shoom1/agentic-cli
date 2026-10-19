@@ -48,13 +48,20 @@ _UI_KEY_TARGET_FIELDS = {"model": "default_model"}
 
 # === ADK notices ===
 
-# ADK 2 announces each experimental feature it enables with a UserWarning:
-# "[EXPERIMENTAL] feature FeatureName.JSON_SCHEMA_FOR_FUNC_DECL is enabled."
-_ADK_EXPERIMENTAL_NOTICE = re.compile(r"\[EXPERIMENTAL\] feature (?P<feature>\S+) is enabled")
+# ADK 2 announces each experimental feature it uses with a UserWarning, in one
+# of two forms: a feature flag ("[EXPERIMENTAL] feature
+# FeatureName.JSON_SCHEMA_FOR_FUNC_DECL is enabled."), or a class or function
+# marked experimental ("[EXPERIMENTAL] GeminiContextCacheManager: This feature
+# is experimental and may change ...", from a Gemini agent's first turn while
+# prompt caching is on).
+_ADK_EXPERIMENTAL_NOTICE = re.compile(
+    r"\[EXPERIMENTAL\] (?:feature (?P<feature>\S+) is enabled|(?P<name>\w+): )"
+)
 
 # ADK 2's runner warns, through stdlib logging, that an app with sub-agents has
-# no context_cache_config. agentic-cli does not expose that setting, so the
-# advice is not something a user of the CLI can act on.
+# no context_cache_config. The ADK manager sets one while prompt caching is on
+# and a model caches, so the advice comes only when the user turned caching
+# off or no model caches: it has nothing left to tell them.
 _ADK_RUNNER_LOGGER = "google_adk.google.adk.runners"
 _ADK_UNCACHED_TRANSFER = "can transfer between agents but has no context_cache_config"
 
@@ -91,7 +98,7 @@ def _install_adk_notice_hook() -> None:
     def showwarning(message, category, filename, lineno, file=None, line=None):
         notice = _ADK_EXPERIMENTAL_NOTICE.match(str(message))
         if notice and issubclass(category, UserWarning):
-            feature = notice["feature"].removeprefix("FeatureName.")
+            feature = (notice["feature"] or notice["name"]).removeprefix("FeatureName.")
             logger.debug("adk_experimental_feature", feature=feature)
             return
         previous(message, category, filename, lineno, file, line)

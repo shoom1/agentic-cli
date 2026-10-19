@@ -17,6 +17,10 @@ LIVE_ADK_CLAUDE_BUDGET_MODEL, LIVE_ADK_GPT_MODEL or LIVE_ADK_OPENROUTER_MODEL
 (a ``provider:model`` reference). The vLLM case runs only when
 LIVE_VLLM_BASE_URL names a server (its model: LIVE_VLLM_MODEL, a Qwen3-style
 model whose chat template switches thinking).
+
+A last case runs two Claude turns in one session with prompt caching on (the
+default): the second reads the prompt the first cached. Its model:
+LIVE_ADK_CLAUDE_CACHE_MODEL.
 """
 
 from __future__ import annotations
@@ -151,3 +155,43 @@ async def test_a_tool_call_with_thinking(model, shows_thinking, listed, tmp_path
     assert "42" in answer
     if shows_thinking:
         assert find_events(events, EventType.THINKING), "no thinking text arrived"
+
+
+#: A system prompt every Claude model caches: about 8000 tokens, where the
+#: largest minimum cacheable prompt is 4096 (Opus 4.5 and 4.6, Haiku 4.5).
+REFERENCE = "\n".join(
+    f"Reference note {n}: item {n} weighs {n * 7 % 97} grams and is filed on shelf {n % 13}."
+    for n in range(1, 401)
+)
+
+
+@pytest.mark.skipif(not os.environ.get("ANTHROPIC_API_KEY"), reason="ANTHROPIC_API_KEY is not set")
+async def test_a_second_claude_turn_reads_the_cache(listed, tmp_path):
+    """The first turn writes the tools, the system instruction and the
+    conversation to Claude's cache; the second, in the same session, reads
+    them back, and its usage reports the tokens it read."""
+    settings = BaseSettings(workspace_dir=tmp_path, session_store="memory", thinking_effort="none")
+    manager = GoogleADKWorkflowManager(
+        agent_configs=[
+            AgentConfig(
+                name="assistant",
+                prompt=f"You are a careful assistant. Keep these notes at hand.\n\n{REFERENCE}",
+            )
+        ],
+        settings=settings,
+        model=os.getenv("LIVE_ADK_CLAUDE_CACHE_MODEL", "anthropic:claude-sonnet-4-5"),
+    )
+    try:
+        first = await collect_events(manager, "Reply with the word ready.", session_id="cached")
+        assert manager._runner.app.context_cache_config is not None, "the app does not cache"
+        second = await collect_events(manager, "Reply with the word done.", session_id="cached")
+    finally:
+        await manager.cleanup()
+
+    assert_no_errors(first + second)
+    cached = [
+        event.metadata.get("cached_tokens") or 0
+        for event in find_events(second, EventType.LLM_USAGE)
+    ]
+    assert cached, "the second turn reported no usage"
+    assert max(cached) > 0, f"the second turn read nothing from the cache: {cached}"
