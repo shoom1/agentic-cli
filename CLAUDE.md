@@ -64,7 +64,7 @@ agentic-cli/
 │   │   │   └── plugins.py    # LLM traffic logging (raw_llm_logging)
 │   │   └── langgraph/        # LangGraph orchestrator
 │   │       ├── manager.py    # LangGraphWorkflowManager
-│   │       ├── graph_builder.py # LangGraphBuilder (graph + LLM factory)
+│   │       ├── graph_builder.py # LangGraphBuilder (graph; one chat model per agent via langchain_models)
 │   │       ├── state.py
 │   │       ├── permission_wrap.py # wrap_tool_for_permission
 │   │       └── persistence/  # Checkpointers, stores

@@ -32,7 +32,6 @@ from agentic_cli.models import (
     ModelRef,
     ModelResolutionError,
     ModelSpecError,
-    ProviderKind,
     ResolvedModel,
     RoleMap,
     resolve_model,
@@ -66,13 +65,6 @@ if TYPE_CHECKING:
     from agentic_cli.tools.sandbox.manager import SandboxManager
 
 logger = Loggers.workflow()
-
-# How a transitional backend gate names the providers it can build.
-_PROVIDER_LABELS = {
-    ProviderKind.GOOGLE: "Google",
-    ProviderKind.ANTHROPIC: "Anthropic",
-    ProviderKind.OPENAI: "OpenAI",
-}
 
 
 class BaseWorkflowManager(ABC):
@@ -949,14 +941,6 @@ class BaseWorkflowManager(ABC):
 
     # --- models ------------------------------------------------------------
 
-    # Transitional, until each backend builds its models through its adapter
-    # (0.7.0 sub-project 3): the provider kinds its model code can build (None:
-    # all), and the thinking modes it understands (None: all). A backend
-    # narrows them; resolution then rejects anything else at startup.
-    _BUILDABLE_PROVIDER_KINDS: "frozenset[ProviderKind] | None" = None
-    _UNDERSTOOD_THINKING_MODES: "frozenset[str] | None" = None
-    _BACKEND_NAME = "workflow"
-
     def _validate_model_settings(self) -> None:
         """The static model checks (``validate_settings``), with this manager's override.
 
@@ -1020,10 +1004,7 @@ class BaseWorkflowManager(ABC):
             except ModelResolutionError as exc:
                 errors.append(str(exc))
                 continue
-            problem = self._backend_model_problem(model, config)
-            if problem is not None:
-                errors.append(problem)
-            elif config is None:
+            if config is None:
                 default = model
             else:
                 resolved[config.name] = model
@@ -1055,28 +1036,6 @@ class BaseWorkflowManager(ABC):
             endpoints=endpoints,
         )
 
-    def _resolved(self, config: AgentConfig | None) -> ResolvedModel:
-        """An agent's resolved model (None: the manager's default model).
-
-        After initialization, what its resolution pass decided. Before it (a
-        backend helper called on its own), the agent is resolved now against
-        the shipped table, without the network.
-
-        Raises:
-            ModelResolutionError: Before initialization, if it cannot be.
-        """
-        if config is None:
-            if self._default_model is not None:
-                return self._default_model
-        elif config.name in self._resolved_models:
-            return self._resolved_models[config.name]
-        from agentic_cli.workflow import model_services
-
-        endpoints = model_services.endpoints_from_settings(self._settings)
-        roles = model_services.role_map_from_settings(self._settings, self._model_override)
-        catalog = ModelCatalog(endpoints=endpoints)  # never loaded: the shipped table
-        return self._resolve_for(config, roles, catalog, endpoints)
-
     def _simple_model(self, max_tokens: int) -> ResolvedModel:
         """The default model as ``generate_simple`` runs it.
 
@@ -1106,34 +1065,6 @@ class BaseWorkflowManager(ABC):
         roles = model_services.role_map_from_settings(self._settings, self._model_override)
         catalog = ModelCatalog(endpoints=endpoints)  # never loaded: the shipped table
         return roles.resolve("default", catalog=catalog, endpoints=endpoints)
-
-    def _backend_model_problem(
-        self, model: ResolvedModel, config: AgentConfig | None
-    ) -> str | None:
-        """Why this backend cannot run ``model`` yet, or None (transitional).
-
-        Until a backend's model adapter lands, its 0.6 model code builds the
-        agents from the resolved model's bare id: it can build only some
-        providers, and understands only the generic thinking modes.
-        """
-        who = f"Agent {config.name!r}" if config is not None else "Default model"
-        kinds = self._BUILDABLE_PROVIDER_KINDS
-        if kinds is not None and model.record.kind not in kinds:
-            names = [_PROVIDER_LABELS.get(k, k.value) for k in ProviderKind if k in kinds]
-            usable = ", ".join(names[:-1]) + f" or {names[-1]}" if len(names) > 1 else names[0]
-            return (
-                f"{who}: model {model.ref} is not supported by the {self._BACKEND_NAME} "
-                f"backend yet; use a {usable} model."
-            )
-        modes = self._UNDERSTOOD_THINKING_MODES
-        settings = config.model_settings if config is not None else None
-        thinking = settings.thinking if settings is not None else None
-        if modes is not None and thinking is not None and thinking.mode not in modes:
-            return (
-                f"{who}: thinking mode {thinking.mode!r} is not supported by the "
-                f"{self._BACKEND_NAME} backend yet."
-            )
-        return None
 
     def _validate_agent_graph(self) -> None:
         """Validate the declared agent graph. Backends may narrow this.

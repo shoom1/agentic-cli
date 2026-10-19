@@ -3,10 +3,12 @@
 The manager builds a ``ModelCatalog`` from settings (``workflow.model_services``)
 when it initializes, loads it (listing only what the cache cannot answer),
 resolves the default model and every agent in one all-or-nothing pass, and
-owns the catalog until cleanup. The ADK backend then builds each agent's model
-from its resolved model. Listings come from ``ProviderAPI``, a fake of every
+owns the catalog until cleanup. Each backend then builds every agent's model
+from its resolved model: ADK through its model factory, LangGraph through the
+LangChain adapter. Listings come from ``ProviderAPI``, a fake of every
 provider's model list, and model requests from the fakes in
-``tests/workflow/adk/fakes.py``; nothing reaches the network.
+``tests/workflow/adk/fakes.py`` and ``tests/workflow/langchain_fakes.py``;
+nothing reaches the network.
 """
 
 from __future__ import annotations
@@ -36,6 +38,7 @@ from agentic_cli.workflow import model_services  # noqa: E402
 from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager  # noqa: E402
 from agentic_cli.workflow.adk.openai_compatible import OpenAICompatibleLlm  # noqa: E402
 from agentic_cli.workflow.config import AgentConfig  # noqa: E402
+from agentic_cli.workflow.events import EventType  # noqa: E402
 from agentic_cli.workflow.model_settings import ModelSettings, ThinkingSettings  # noqa: E402
 from tests.models.fakes import ProviderAPI, hang, recorded, refuse  # noqa: E402
 from tests.workflow.adk.fakes import (  # noqa: E402
@@ -504,7 +507,7 @@ class TestGenerateSimple:
         assert request.contents[0].parts[0].text == "Summarize this."
 
 
-# --- what each backend can build (R8, R14, R20) ------------------------------------------
+# --- every backend builds every provider ----------------------------------------------
 
 
 def _langgraph(configs, s):
@@ -512,6 +515,23 @@ def _langgraph(configs, s):
     from agentic_cli.workflow.langgraph import LangGraphWorkflowManager
 
     return LangGraphWorkflowManager(agent_configs=configs, settings=s, checkpointer="memory")
+
+
+def langchain_fakes():
+    """The LangChain fakes (they import the ``langgraph`` extra's packages)."""
+    pytest.importorskip("langgraph")
+    from tests.workflow import langchain_fakes
+
+    return langchain_fakes
+
+
+async def lg_turn(manager, text: str) -> list:
+    """One user turn, in one session for the whole test."""
+    return [event async for event in manager.process(text, user_id="u", session_id="s")]
+
+
+def texts(events, kind: EventType) -> list[str]:
+    return [event.content for event in events if event.type is kind]
 
 
 class TestBackendGates:
@@ -557,34 +577,56 @@ class TestBackendGates:
         finally:
             await manager.cleanup()
 
-    async def test_langgraph_builds_google_anthropic_and_openai_models_only(
-        self, providers, monkeypatch
-    ):
+    async def test_langgraph_builds_every_provider(self, providers, monkeypatch):
         keys(monkeypatch, "google", "openrouter")
         manager = _langgraph(team("openrouter:qwen/qwen3-235b-a22b"), settings())
 
-        with pytest.raises(SettingsValidationError) as caught:
-            await manager.initialize_services()
-
-        assert str(caught.value) == (
-            "Agent 'writer': model openrouter:qwen/qwen3-235b-a22b is not supported by the "
-            "LangGraph backend yet; use a Google, Anthropic or OpenAI model."
-        )
-
-    async def test_langgraph_takes_an_openai_model(self, providers, monkeypatch):
-        pytest.importorskip("langchain_openai")
-        keys(monkeypatch, "google", "openai")
-        manager = _langgraph(team("openai:o3"), settings())
-
         await manager.initialize_services()
         try:
-            assert str(manager._resolved_models["writer"].ref) == "openai:o3"
+            from langchain_google_genai import ChatGoogleGenerativeAI
+            from langchain_openrouter import ChatOpenRouter
+
+            chat = manager._builder.chat_models
+            assert type(chat["writer"]) is ChatOpenRouter
+            assert chat["writer"].model_name == "qwen/qwen3-235b-a22b"
+            assert type(chat["coordinator"]) is ChatGoogleGenerativeAI
         finally:
             await manager.cleanup()
 
-    async def test_a_native_thinking_level_waits_for_the_langgraph_adapter(
+    async def test_any_provider_can_be_the_default_model_on_langgraph(
         self, providers, monkeypatch
     ):
+        keys(monkeypatch, "openrouter")
+        manager = _langgraph(
+            [AgentConfig(name="solo", prompt="p")],
+            settings(default_model="openrouter:qwen/qwen3-235b-a22b"),
+        )
+
+        await manager.initialize_services()
+        try:
+            from langchain_openrouter import ChatOpenRouter
+
+            assert manager.model == "openrouter:qwen/qwen3-235b-a22b"
+            assert type(manager._builder.chat_models["solo"]) is ChatOpenRouter
+        finally:
+            await manager.cleanup()
+
+    async def test_langgraph_runs_gpt_on_the_responses_api(self, providers, monkeypatch):
+        keys(monkeypatch, "google", "openai")
+        manager = _langgraph(team("openai:o3"), settings(thinking_effort="high"))
+
+        await manager.initialize_services()
+        try:
+            from langchain_openai import ChatOpenAI
+
+            writer = manager._builder.chat_models["writer"]
+            assert type(writer) is ChatOpenAI
+            assert (writer.model_name, writer.use_responses_api) == ("o3", True)
+            assert writer.reasoning == {"effort": "high", "summary": "auto"}
+        finally:
+            await manager.cleanup()
+
+    async def test_a_native_thinking_level_runs_on_langgraph(self, providers, monkeypatch):
         keys(monkeypatch, "anthropic")
         configs = team(
             "anthropic:claude-opus-4-7",
@@ -592,12 +634,13 @@ class TestBackendGates:
         )
         manager = _langgraph(configs, settings())
 
-        with pytest.raises(SettingsValidationError) as caught:
-            await manager.initialize_services()
-
-        assert str(caught.value) == (
-            "Agent 'writer': thinking mode 'xhigh' is not supported by the LangGraph backend yet."
-        )
+        await manager.initialize_services()
+        try:
+            writer = manager._builder.chat_models["writer"]
+            assert writer.reasoning_effort == "xhigh"
+            assert writer.thinking == {"type": "adaptive", "display": "summarized"}
+        finally:
+            await manager.cleanup()
 
     async def test_budget_on_a_model_without_budget_thinking_is_an_error(
         self, providers, monkeypatch
@@ -614,6 +657,247 @@ class TestBackendGates:
 
         with pytest.raises(SettingsValidationError, match="mode 'budget' is not available"):
             await manager.initialize_services()
+
+
+# --- the models LangGraph builds -----------------------------------------------------
+
+
+class TestLangGraphModels:
+    """Each LangGraph agent runs on a LangChain chat model built once, at
+    initialization, from its resolved model."""
+
+    async def test_a_mixed_tree_runs_each_agent_on_its_own_provider(self, providers, monkeypatch):
+        keys(monkeypatch, "google", "anthropic")
+        configs = [
+            AgentConfig(name="coordinator", prompt="Coordinate.", model="claude-sonnet-4-5",
+                        sub_agents=["researcher", "drafter"]),
+            AgentConfig(name="researcher", prompt="Research.", model="gemini-3-flash-preview"),
+            AgentConfig(name="drafter", prompt="Draft.", model="local:Qwen/Qwen3-32B"),
+        ]
+        manager = _langgraph(configs, settings(model_endpoints=LOCAL, thinking_effort="high",
+                                               default_model="gemini-2.5-flash"))
+
+        await manager.initialize_services()
+        try:
+            from langchain_anthropic import ChatAnthropic
+            from langchain_google_genai import ChatGoogleGenerativeAI
+
+            from agentic_cli.workflow.langchain_models import OpenAICompatibleChat
+
+            chat = manager._builder.chat_models
+            assert type(chat["coordinator"]) is ChatAnthropic
+            assert chat["coordinator"].thinking == {"type": "enabled", "budget_tokens": 32000}
+            assert chat["coordinator"].max_tokens == 40192
+            assert type(chat["researcher"]) is ChatGoogleGenerativeAI
+            assert chat["researcher"].reasoning_effort == "high"
+            assert type(chat["drafter"]) is OpenAICompatibleChat
+            assert chat["drafter"].openai_api_base == "http://localhost:8000/v1"
+            assert chat["drafter"].extra_body == {"chat_template_kwargs": {"enable_thinking": True}}
+        finally:
+            await manager.cleanup()
+
+    async def test_each_agent_s_settings_reach_its_own_model(self, providers, monkeypatch):
+        """0.6's LangGraph ignored an agent's model settings, with a warning."""
+        keys(monkeypatch, "google")
+        configs = team(
+            "gemini-2.5-pro",
+            model_settings=ModelSettings(
+                temperature=0.2, max_tokens=1000, thinking=ThinkingSettings(mode="low")
+            ),
+        )
+        manager = _langgraph(
+            configs, settings(thinking_effort="none", default_model="gemini-2.5-flash")
+        )
+
+        await manager.initialize_services()
+        try:
+            chat = manager._builder.chat_models
+            writer, coordinator = chat["writer"], chat["coordinator"]
+            assert (writer.temperature, writer.max_output_tokens) == (0.2, 1000)
+            assert writer.thinking_budget == 4096
+            # The coordinator keeps the global effort, on the default model.
+            assert coordinator.thinking_budget == 0
+            assert coordinator.temperature is None
+        finally:
+            await manager.cleanup()
+
+    async def test_each_agent_s_model_is_built_once(self, providers, monkeypatch):
+        """0.6 built a new model on every model call."""
+        lc = langchain_fakes()
+        from agentic_cli.workflow import langchain_models
+
+        keys(monkeypatch, "anthropic")
+        lc.route(monkeypatch, anthropic, "AsyncClient",
+                 FakeAPI(lc.anthropic_reply({"type": "text", "text": "Hi."})))
+        built = []
+        real = langchain_models.build_chat_model
+
+        def counting(resolved, **kwargs):
+            built.append(resolved.agent)
+            return real(resolved, **kwargs)
+
+        monkeypatch.setattr(langchain_models, "build_chat_model", counting)
+        manager = _langgraph(team(), settings(default_model="claude-sonnet-4-5"))
+        try:
+            await manager.initialize_services()
+            assert sorted(built) == ["coordinator", "writer"]
+
+            await lg_turn(manager, "Hello")
+            await lg_turn(manager, "Hello again")
+
+            assert sorted(built) == ["coordinator", "writer"]
+        finally:
+            await manager.cleanup()
+
+    async def test_opus_4_7_thinks_adaptively(self, providers, monkeypatch):
+        """0.6's LangGraph sent every Claude a thinking budget, which Opus 4.7
+        and later reject with HTTP 400. Its summarized thinking reaches the
+        thinking box."""
+        lc = langchain_fakes()
+        keys(monkeypatch, "anthropic")
+        api = FakeAPI(lc.anthropic_reply(
+            {"type": "thinking", "thinking": "Let me think."},
+            {"type": "text", "text": "Hi."},
+            model="claude-opus-4-7",
+        ))
+        lc.route(monkeypatch, anthropic, "AsyncClient", api)
+        manager = _langgraph(
+            [AgentConfig(name="solo", prompt="Answer.")],
+            settings(default_model="claude-opus-4-7", thinking_effort="high"),
+        )
+        try:
+            events = await lg_turn(manager, "Hello")
+        finally:
+            await manager.cleanup()
+
+        (body,) = api.bodies
+        assert body["thinking"] == {"type": "adaptive", "display": "summarized"}
+        assert body["output_config"] == {"effort": "high"}
+        assert api.requests[0].headers["x-api-key"] == KEYS["ANTHROPIC_API_KEY"]
+        assert texts(events, EventType.THINKING) == ["Let me think."]
+        assert texts(events, EventType.TEXT) == ["Hi."]
+
+    async def test_budget_claude_with_a_small_max_tokens_leaves_room_for_the_budget(
+        self, providers, monkeypatch
+    ):
+        """The rule ADK follows: a per-agent max_tokens below the budget is raised."""
+        lc = langchain_fakes()
+        keys(monkeypatch, "anthropic")
+        api = FakeAPI(lc.anthropic_reply({"type": "text", "text": "Hi."}))
+        lc.route(monkeypatch, anthropic, "AsyncClient", api)
+        manager = _langgraph(
+            [AgentConfig(name="solo", prompt="Answer.", model="claude-sonnet-4-5",
+                         model_settings=ModelSettings(max_tokens=2000))],
+            settings(thinking_effort="high"),
+        )
+        try:
+            await lg_turn(manager, "Hello")
+        finally:
+            await manager.cleanup()
+
+        (body,) = api.bodies
+        assert body["thinking"] == {"type": "enabled", "budget_tokens": 32000}
+        assert body["max_tokens"] == 40192
+
+    async def test_an_endpoint_model_s_reasoning_reaches_the_thinking_box(
+        self, providers, monkeypatch
+    ):
+        lc = langchain_fakes()
+        from tests.workflow.adk.test_openai_compatible import Server
+
+        server = Server(deltas=[
+            {"role": "assistant", "reasoning": "Let me think."},
+            {"content": "Hi."},
+        ])
+        lc.route(monkeypatch, openai, "AsyncOpenAI", FakeAPI(server._handle))
+        manager = _langgraph(
+            [AgentConfig(name="solo", prompt="Answer.")],
+            settings(model_endpoints=LOCAL, default_model="local:Qwen/Qwen3-32B",
+                     thinking_effort="high"),
+        )
+        try:
+            events = await lg_turn(manager, "Hello")
+        finally:
+            await manager.cleanup()
+
+        (body,) = server.bodies
+        assert body["chat_template_kwargs"] == {"enable_thinking": True}
+        assert texts(events, EventType.THINKING) == ["Let me think."]
+        assert texts(events, EventType.TEXT) == ["Hi."]
+
+    async def test_a_model_switch_rebuilds_the_models(self, providers, monkeypatch):
+        keys(monkeypatch, "google", "anthropic")
+        manager = _langgraph(team(), settings())
+        await manager.initialize_services()
+        try:
+            from langchain_anthropic import ChatAnthropic
+
+            await manager.reinitialize(model="anthropic:claude-sonnet-4-5", preserve_sessions=True)
+
+            assert manager.model == "anthropic:claude-sonnet-4-5"
+            chat = manager._builder.chat_models
+            assert {name: type(model) for name, model in chat.items()} == {
+                "coordinator": ChatAnthropic, "writer": ChatAnthropic,
+            }
+        finally:
+            await manager.cleanup()
+
+
+class TestLangGraphGenerateSimple:
+    """Summaries run on the default model, through the LangChain adapter, without thinking."""
+
+    async def test_claude(self, providers, monkeypatch):
+        lc = langchain_fakes()
+        keys(monkeypatch, "anthropic")
+        api = FakeAPI(anthropic_message({"type": "text", "text": "A summary."}))
+        lc.route(monkeypatch, anthropic, "AsyncClient", api)
+        manager = _langgraph(team(), settings(default_model="claude-sonnet-4-5",
+                                              thinking_effort="high"))
+        try:
+            summary = await manager.generate_simple("Summarize this.", max_tokens=123)
+        finally:
+            await manager.cleanup()
+
+        assert summary == "A summary."
+        (body,) = api.bodies
+        assert (body["model"], body["max_tokens"]) == ("claude-sonnet-4-5", 123)
+        assert body["thinking"] == {"type": "disabled"}
+        assert body["messages"] == [{"role": "user", "content": "Summarize this."}]
+
+    async def test_gemini_and_its_thoughts_are_not_the_summary(self, providers, monkeypatch):
+        lc = langchain_fakes()
+        keys(monkeypatch, "google")
+        api = FakeAPI(lc.gemini_reply({"text": "Thinking it over.", "thought": True},
+                                      {"text": "A summary."}))
+        lc.route_google(monkeypatch, api)
+        manager = _langgraph(team(), settings(default_model="gemini-2.5-flash",
+                                              thinking_effort="high"))
+        try:
+            summary = await manager.generate_simple("Summarize this.", max_tokens=123)
+        finally:
+            await manager.cleanup()
+
+        assert summary == "A summary."
+        (body,) = api.bodies
+        assert body["generationConfig"]["maxOutputTokens"] == 123
+        assert body["generationConfig"]["thinkingConfig"]["thinking_budget"] == 0
+
+    async def test_a_model_on_the_user_s_server(self, providers, monkeypatch):
+        lc = langchain_fakes()
+        api = FakeAPI(chat_completion("A summary."))
+        lc.route(monkeypatch, openai, "AsyncOpenAI", api)
+        manager = _langgraph(team(), settings(
+            model_endpoints=LOCAL, default_model="local:Qwen/Qwen3-32B", thinking_effort="high"
+        ))
+        try:
+            summary = await manager.generate_simple("Summarize this.", max_tokens=123)
+        finally:
+            await manager.cleanup()
+
+        assert summary == "A summary."
+        (body,) = api.bodies
+        assert body["max_tokens"] == 123
+        assert body["chat_template_kwargs"] == {"enable_thinking": False}
 
 
 # --- the catalog belongs to the manager -------------------------------------------------

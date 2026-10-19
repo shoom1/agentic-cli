@@ -5,8 +5,8 @@ astream_events() to yield scripted LangGraph-style event dicts, then
 verifying the WorkflowEvents produced by the process() method.
 
 Mock approach:
-    Patch _get_llm_for_model() and the compiled graph to control
-    the events yielded by astream_events(version="v2").
+    Replace the compiled graph, so no model is built or called, and control
+    the events its astream_events(version="v2") yields.
 """
 
 from __future__ import annotations
@@ -69,8 +69,7 @@ def _make_output(content, tool_calls=None, usage_metadata=None):
 def _create_langgraph_manager(settings, agent_configs):
     """Create a LangGraphWorkflowManager with mocked initialization.
 
-    Avoids importing LangGraph dependencies by mocking the compiled graph
-    and LLM creation.
+    Avoids importing LangGraph dependencies by mocking the compiled graph.
     """
     # Import here since langgraph may not be installed
     pytest.importorskip("langgraph")
@@ -85,7 +84,6 @@ def _create_langgraph_manager(settings, agent_configs):
     )
     manager._initialized = True
     manager._compiled_graph = MagicMock()
-    manager._llm = MagicMock()
     return manager
 
 

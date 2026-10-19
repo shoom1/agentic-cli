@@ -166,3 +166,54 @@ def test_the_adk_manager_s_model_helpers_are_gone(name):
 )
 def test_the_model_name_guesses_are_gone(module, name):
     assert not hasattr(importlib.import_module(module), name)
+
+
+@pytest.mark.parametrize("name", ["get_llm", "get_thinking_config", "_THINKING_BUDGETS"])
+def test_the_langgraph_builder_s_model_helpers_are_gone(name):
+    """The LangChain adapter builds every LangGraph agent's model."""
+    pytest.importorskip("langgraph")
+    from agentic_cli.workflow.langgraph.graph_builder import LangGraphBuilder
+
+    assert not hasattr(LangGraphBuilder, name)
+
+
+def test_the_langgraph_model_name_guess_is_gone():
+    pytest.importorskip("langgraph")
+    from agentic_cli.workflow.langgraph import graph_builder
+
+    assert not hasattr(graph_builder, "_has_thinking_knob")
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "_resolve_model_for_config",
+        "_BUILDABLE_PROVIDER_KINDS",
+        "_UNDERSTOOD_THINKING_MODES",
+        "_BACKEND_NAME",
+    ],
+)
+def test_the_langgraph_manager_s_model_helpers_are_gone(name):
+    pytest.importorskip("langgraph")
+    from agentic_cli.workflow.langgraph.manager import LangGraphWorkflowManager
+
+    assert not hasattr(LangGraphWorkflowManager, name)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "_backend_model_problem",
+        "_resolved",
+        "_BUILDABLE_PROVIDER_KINDS",
+        "_UNDERSTOOD_THINKING_MODES",
+        "_BACKEND_NAME",
+    ],
+)
+def test_the_backend_model_gate_is_gone(name):
+    """Every backend builds every provider kind and thinking mode its record
+    allows, from the models resolved at startup."""
+    from agentic_cli.workflow import base_manager
+
+    assert not hasattr(base_manager.BaseWorkflowManager, name)
+    assert not hasattr(base_manager, "_PROVIDER_LABELS")

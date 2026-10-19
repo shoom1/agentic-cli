@@ -9,6 +9,8 @@ class itself sends.
 
 from __future__ import annotations
 
+import json
+from collections.abc import Callable
 from typing import Any
 
 import httpx
@@ -16,7 +18,7 @@ import langchain_google_genai.chat_models as google_chat_models
 import openrouter
 from google.genai import types
 
-from tests.workflow.adk.fakes import FakeAPI, chat_completion, http_library
+from tests.workflow.adk.fakes import FakeAPI, anthropic_message, chat_completion, http_library
 
 
 def route(monkeypatch, module, client_class: str, api: FakeAPI) -> None:
@@ -79,3 +81,71 @@ def openrouter_completion(message: dict[str, Any], finish_reason: str = "stop") 
         "choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
         "system_fingerprint": None,
     }
+
+
+# --- replies to streamed requests ------------------------------------------------------
+#
+# Inside a LangGraph turn every model streams (LangGraph's event stream asks it
+# to), so a fake that answers a whole conversation turn speaks SSE.
+
+
+def _sse(events: list[tuple[str | None, dict[str, Any]]]) -> httpx.Response:
+    lines = []
+    for name, data in events:
+        if name is not None:
+            lines.append(f"event: {name}")
+        lines.append(f"data: {json.dumps(data)}\n")
+    return httpx.Response(
+        200, headers={"content-type": "text/event-stream"}, content="\n".join(lines).encode()
+    )
+
+
+def anthropic_reply(*blocks: dict[str, Any], model: str = "claude-sonnet-4-5") -> Callable:
+    """Claude's answer of ``blocks`` (``thinking``, ``text`` or ``tool_use``),
+    streamed or whole, as the request asks."""
+
+    def answer(request: Any) -> Any:
+        if not json.loads(request.content).get("stream"):
+            return anthropic_message(*blocks, model=model)
+        events = [("message_start", {"type": "message_start", "message": {
+            **anthropic_message(model=model), "content": [], "stop_reason": None,
+        }})]
+        for index, block in enumerate(blocks):
+            kind = block["type"]
+            if kind == "thinking":
+                start = {"type": "thinking", "thinking": "", "signature": ""}
+                deltas = [{"type": "thinking_delta", "thinking": block["thinking"]},
+                          {"type": "signature_delta", "signature": block.get("signature", "s")}]
+            elif kind == "tool_use":
+                start = {**block, "input": {}}
+                deltas = [{"type": "input_json_delta", "partial_json": json.dumps(block["input"])}]
+            else:
+                start = {"type": "text", "text": ""}
+                deltas = [{"type": "text_delta", "text": block["text"]}]
+            events.append(("content_block_start", {
+                "type": "content_block_start", "index": index, "content_block": start,
+            }))
+            events += [("content_block_delta", {
+                "type": "content_block_delta", "index": index, "delta": delta,
+            }) for delta in deltas]
+            events.append(("content_block_stop", {"type": "content_block_stop", "index": index}))
+        stop = "tool_use" if any(b["type"] == "tool_use" for b in blocks) else "end_turn"
+        events.append(("message_delta", {
+            "type": "message_delta", "delta": {"stop_reason": stop, "stop_sequence": None},
+            "usage": {"output_tokens": 1},
+        }))
+        events.append(("message_stop", {"type": "message_stop"}))
+        return _sse(events)
+
+    return answer
+
+
+def gemini_reply(*parts: dict[str, Any]) -> Callable:
+    """Gemini's answer of ``parts``, streamed or whole, as the request asks."""
+
+    def answer(request: Any) -> Any:
+        if request.url.path.endswith(":streamGenerateContent"):
+            return _sse([(None, gemini_response(*parts))])
+        return gemini_response(*parts)
+
+    return answer

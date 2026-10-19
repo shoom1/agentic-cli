@@ -4,7 +4,9 @@ This module provides a BaseWorkflowManager implementation using LangGraph for
 agent orchestration. It offers:
 - Cyclical workflows (self-validation, iterative refinement)
 - Native HITL support with interrupt mechanism
-- Model-agnostic operation (OpenAI, Anthropic, Google)
+- Every model agentic_cli.models resolves (Gemini, Claude, GPT, OpenRouter and
+  the user's OpenAI-compatible endpoints), each agent on its own LangChain chat
+  model (workflow/langchain_models.py)
 - State checkpointing for long-running tasks
 
 Requires the 'langgraph' optional dependency:
@@ -15,7 +17,6 @@ from __future__ import annotations
 
 from typing import AsyncGenerator, Any, Callable, Literal, TYPE_CHECKING
 
-from agentic_cli.models import ProviderKind
 from agentic_cli.workflow.base_manager import BaseWorkflowManager
 from agentic_cli.workflow.events import WorkflowEvent, EventType
 from agentic_cli.workflow.config import AgentConfig
@@ -29,7 +30,7 @@ if TYPE_CHECKING:
 logger = Loggers.workflow()
 
 # AgentConfig fields the LangGraph backend does not (yet) consume.
-_ADK_ONLY_FIELDS = ("model_settings", "mcp_servers", "skills")
+_ADK_ONLY_FIELDS = ("mcp_servers", "skills")
 
 
 def _ignored_adk_only_fields(
@@ -37,8 +38,8 @@ def _ignored_adk_only_fields(
 ) -> list[tuple[str, list[str]]]:
     """Return [(agent_name, [field, ...])] for ADK-only fields set on configs.
 
-    Used to warn that ``model_settings``/``mcp_servers``/``skills`` are ignored
-    on the LangGraph backend.
+    Used to warn that ``mcp_servers``/``skills`` are ignored on the LangGraph
+    backend.
     """
     affected: list[tuple[str, list[str]]] = []
     for cfg in agent_configs:
@@ -82,16 +83,6 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
             print(event.content)
     """
 
-    # Transitional, until the LangChain model factory lands: the graph's LLMs
-    # are built by the 0.6 code in graph_builder.py, which knows Gemini,
-    # Claude and GPT and the generic thinking modes only (see
-    # BaseWorkflowManager._backend_model_problem).
-    _BUILDABLE_PROVIDER_KINDS = frozenset(
-        {ProviderKind.GOOGLE, ProviderKind.ANTHROPIC, ProviderKind.OPENAI}
-    )
-    _UNDERSTOOD_THINKING_MODES = frozenset({"none", "low", "medium", "high", "budget"})
-    _BACKEND_NAME = "LangGraph"
-
     def __init__(
         self,
         agent_configs: list[AgentConfig],
@@ -129,13 +120,13 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
             logger.warning(
                 "langgraph_ignoring_adk_only_fields",
                 agents=ignored,
-                note="model_settings/mcp_servers/skills are consumed by the ADK backend only",
+                note="mcp_servers/skills are consumed by the ADK backend only",
             )
 
         self._checkpointer_type = checkpointer
 
-        # Graph builder (delegates graph construction + LLM factory)
-        self._builder = LangGraphBuilder(self._settings)
+        # Graph builder (builds the graph, and each agent's chat model)
+        self._builder = LangGraphBuilder(self._settings, app_name=self.app_name)
 
         # LangGraph components (lazy-initialized)
         self._graph = None
@@ -145,7 +136,6 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
         # the memory checkpointer); closed in cleanup().
         self._checkpointer_cm = None
         self._store = None
-        self._llm = None
 
         # Session tracking
         self.session_id = "default_session"
@@ -163,10 +153,6 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
         """Return 'langgraph'."""
         return "langgraph"
 
-    def _resolve_model_for_config(self, config: AgentConfig | None) -> str:
-        """The bare model id an agent runs on (None: the default model)."""
-        return self._resolved(config).record.model
-
     def _get_state_tools(self) -> list:
         """Return LangGraph-native state tools using Command."""
         from agentic_cli.tools.langgraph.state_tools import (
@@ -175,7 +161,7 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
         return [save_plan, get_plan, save_tasks, get_tasks]
 
     async def _do_initialize(self) -> None:
-        """LangGraph-specific initialization: checkpointer, graph, LLM."""
+        """LangGraph-specific initialization: checkpointer, graph, models."""
         logger.info("initializing_langgraph_services", app_name=self.app_name)
 
         # Create checkpointer and store
@@ -202,14 +188,10 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
             for config in self._agent_configs
         }
 
-        # Build and compile graph via builder. Each agent runs on the bare id
-        # of its resolved model (the builder's model code predates references).
-        default_model = self._resolve_model_for_config(None)
+        # Build and compile the graph. Each agent runs on a chat model built
+        # now, once, from the model resolved for it at startup.
         graph = self._builder.build(
-            self._agent_configs,
-            default_model,
-            tool_overrides=tool_overrides,
-            models={c.name: self._resolve_model_for_config(c) for c in self._agent_configs},
+            self._agent_configs, self._resolved_models, tool_overrides=tool_overrides
         )
         self._graph = graph
 
@@ -224,9 +206,6 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
             self._compiled_graph = graph.compile(**compile_kwargs)
         else:
             self._compiled_graph = graph.compile()
-
-        # Initialize default LLM
-        self._llm = self._builder.get_llm(default_model)
 
         logger.info(
             "langgraph_services_initialized",
@@ -251,7 +230,6 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
         self._compiled_graph = None
         self._checkpointer = None
         self._store = None
-        self._llm = None
         self._initialized = False
         await self._close_catalog()
 
@@ -369,10 +347,11 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
                                 full_response_parts.append(text)
 
                 elif event_kind == "on_chat_model_end":
-                    # Yield the complete accumulated response
+                    # Yield the complete accumulated response, its thinking
+                    # first (a message may hold only thinking and tool calls)
                     output = event_data.get("output")
-                    if output and hasattr(output, "content") and output.content:
-                        blocks = self._extract_content_blocks(output.content)
+                    if output is not None and hasattr(output, "content"):
+                        blocks = self._output_blocks(output)
                         for block_type, text in blocks:
                             if text:
                                 if block_type == "thinking":
@@ -506,6 +485,28 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
             current_task_description=progress.get("current_task_description"),
         )
 
+    def _output_blocks(self, output: Any) -> list[tuple[str, str]]:
+        """A model's answer as (type, text) pairs, 'thinking' or 'text', in order.
+
+        A LangChain message's ``content_blocks`` gives every provider's
+        reasoning as standard ``reasoning`` blocks: Claude's thinking,
+        Gemini's thoughts, GPT's reasoning summary, and the reasoning an
+        OpenAI-compatible server sends beside its answer. Its raw content
+        holds them in each provider's own shape, or not at all. Anything
+        without ``content_blocks`` is read from its raw content.
+        """
+        blocks = getattr(output, "content_blocks", None)
+        if not isinstance(blocks, list):
+            return self._extract_content_blocks(output.content)
+        pairs = []
+        for block in blocks:
+            kind = block.get("type")
+            if kind == "reasoning" and block.get("reasoning"):
+                pairs.append(("thinking", block["reasoning"]))
+            elif kind == "text" and block.get("text"):
+                pairs.append(("text", block["text"]))
+        return pairs
+
     def _extract_content_blocks(
         self, content: Any
     ) -> list[tuple[str, str]]:
@@ -551,21 +552,25 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
         return blocks
 
     async def generate_simple(self, prompt: str, max_tokens: int = 500) -> str:
-        """Generate a simple text response using the current model."""
+        """Generate a simple text response on the default model.
+
+        The model is built for the call through the LangChain adapter, with
+        thinking off where the model allows it and the caller's
+        ``max_tokens`` (``_simple_model``). The answer is its text, without
+        its thinking.
+        """
         if not self._initialized:
             await self.initialize_services()
 
-        if not self._llm:
-            self._llm = self._builder.get_llm(self._resolve_model_for_config(None))
-
         from langchain_core.messages import HumanMessage
 
-        response = await self._llm.ainvoke(
-            [HumanMessage(content=prompt)],
-            max_tokens=max_tokens,
-        )
+        from agentic_cli.workflow.langchain_models import build_chat_model
 
-        return response.content if hasattr(response, "content") else str(response)
+        model = build_chat_model(
+            self._simple_model(max_tokens), settings=self._settings, app_name=self.app_name
+        )
+        response = await model.ainvoke([HumanMessage(content=prompt)])
+        return str(response.text)
 
     # -------------------------------------------------------------------------
     # Session save/resume hooks
