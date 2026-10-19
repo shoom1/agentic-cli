@@ -39,6 +39,16 @@ def test_html2text_is_declared():
     )
 
 
+def test_openai_is_declared():
+    """The ADK model factory builds GPT, OpenRouter and endpoint models on ADK's
+    OpenAI classes, which import ``openai``; google-adk pulls it only through
+    an extra."""
+    assert "openai" in _dep_names(), (
+        "openai is imported by the ADK model factory (google.adk.integrations.openai) "
+        "but is not declared in pyproject.toml [project.dependencies]."
+    )
+
+
 def test_the_model_table_ships_in_the_wheel():
     """``agentic_cli.models`` reads ``data/table.json`` at run time.
 
