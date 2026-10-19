@@ -15,6 +15,7 @@ from typing import AsyncGenerator, Any, Callable
 
 from google.genai import types
 from google.adk import Runner
+from google.adk.apps import App
 from google.adk.agents import LlmAgent, Agent
 from google.adk.planners import BuiltInPlanner
 from google.adk.sessions import InMemorySessionService, BaseSessionService, Session
@@ -751,7 +752,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         """Create ADK plugins and store references for later access.
 
         Returns:
-            List of BasePlugin instances to pass to Runner(plugins=...).
+            List of BasePlugin instances for the runner's App(plugins=...).
         """
         from agentic_cli.workflow.adk.task_progress_plugin import TaskProgressPlugin
         from agentic_cli.workflow.adk.tool_error_plugin import ToolErrorPlugin
@@ -834,13 +835,13 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         else:
             self._root_agent = self._create_agents()
 
-        # Create runner with plugins
-        self._runner = Runner(
-            app_name=self.app_name,
-            agent=self._root_agent,
-            session_service=self._session_service,
+        # The plugins belong to the App; ADK deprecates Runner(plugins=...).
+        app = App(
+            name=self.app_name,
+            root_agent=self._root_agent,
             plugins=self._init_plugins(),
         )
+        self._runner = Runner(app=app, session_service=self._session_service)
 
         logger.info(
             "services_initialized",
