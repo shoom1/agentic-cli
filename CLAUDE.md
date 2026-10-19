@@ -8,7 +8,7 @@ Agentic CLI is a shared library providing the core infrastructure for building d
 
 - **Language**: Python 3.12+
 - **CLI UI**: `thinking-prompt` - enhanced CLI with thinking boxes and markdown
-- **Workflow**: Google ADK + LangGraph - dual orchestration backends (selectable via settings)
+- **Workflow**: Google ADK 2 (2.12+) + LangGraph - dual orchestration backends (selectable via settings)
 - **Config**: `pydantic-settings` - type-safe configuration
 - **Logging**: `structlog` - structured logging
 
@@ -181,6 +181,7 @@ Workflow:
 
 ### Console Output
 All console output must go through `ThinkingPromptSession` methods. Never use `rich.Console` or `print()` directly.
+Python warnings print to stderr, over the UI, so `BaseCLIApp` installs `cli/app.py::_install_adk_notice_hook`: ADK's `[EXPERIMENTAL] feature … is enabled` notices are logged at debug (`adk_experimental_feature`), and every other warning goes to the previous `warnings.showwarning`.
 
 Available session methods:
 - `session.add_response(text, markdown=True)` - Display text/markdown response

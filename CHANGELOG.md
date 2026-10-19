@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **agentic-cli runs on ADK 2.** It requires `google-adk[mcp]>=2.12,<3`
+  (0.6.x required `>=1.34,<2`) and `google-genai>=2.30,<3`, and declares
+  `sqlalchemy[asyncio]>=2,<3` itself, so installs pull SQLAlchemy and MCP SDK
+  2.x. ADK's `db` extra is not used: besides SQLAlchemy it brings Spanner,
+  gRPC and Alembic, which nothing here needs. Sessions saved by 0.6.x open
+  unchanged. The runner is built from an ADK `App`, which validates its name,
+  so an `app_name` ADK rejects (it must start with a letter and hold only
+  letters, digits, `_` and `-`, and cannot be `user`) now fails with a
+  `ValueError` when the ADK manager is built, not on the first turn. The CLI
+  logs ADK's `[EXPERIMENTAL] feature … is enabled` warnings at debug instead
+  of printing them over the UI. An app that calls ADK's own APIs follows
+  ADK's 2.0 migration notes; one that uses only agentic-cli's API changes
+  nothing.
 - **A resource capability that names no resource is an error.** Registering
   a tool whose `filesystem.*`, `http.*` or `shell.*` capability has neither
   `target_arg=` nor `target=` raises `ValueError` (it warned since 0.6.1).
@@ -94,6 +107,10 @@ further deprecation step.
   from `FAST_MODEL_MAP`). A settings file or environment that still sets them
   keeps loading; the values are ignored.
 - **`tools.webfetch.ValidationResult.resolved_ip`**, which nothing read.
+- **`agentic_cli.workflow.adk.transfer_tool_description`**, the plugin that
+  rewrote the description ADK 1.x gave its `transfer_to_agent` tool (it told
+  the model to call `TransferToAgentTool`). ADK 2's description is correct,
+  so the plugin had nothing left to do. Nothing replaces it.
 
 ## [0.6.4] - 2026-10-18
 

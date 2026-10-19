@@ -62,6 +62,9 @@ Agentic CLI provides the core infrastructure for building interactive CLI applic
 pip install agentic-cli
 ```
 
+This installs Google ADK 2 (2.12 or later) with MCP support, and SQLAlchemy for
+the durable session store.
+
 ### With LangGraph Support
 
 ```bash
