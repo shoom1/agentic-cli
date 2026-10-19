@@ -221,10 +221,16 @@ class TestGemini:
         assert http.timeout == 600_000  # milliseconds: google-genai's own default is none
 
     @pytest.mark.parametrize(
-        "effort, budget", [("low", 4096), ("medium", 12288), ("high", 24576)]
+        "model, effort, budget",
+        [
+            ("gemini-2.5-flash", "low", 4096),
+            ("gemini-2.5-flash", "medium", 12288),
+            ("gemini-2.5-flash", "high", 24576),
+            ("gemini-2.5-pro", "high", 24576),
+        ],
     )
-    def test_gemini_2_5_thinks_on_a_budget(self, settings, effort, budget):
-        config = thinking_config(build("gemini-2.5-flash", settings, effort=effort))
+    def test_gemini_2_5_thinks_on_a_budget(self, settings, model, effort, budget):
+        config = thinking_config(build(model, settings, effort=effort))
 
         assert config.thinking_budget == budget
         assert config.thinking_level is None  # Gemini 2.5 answers a level with HTTP 400
@@ -271,11 +277,14 @@ class TestGemini:
 
         assert config.thinking_level == Level.MINIMAL
 
-    def test_the_agent_s_mode_wins_over_the_global_effort(self, settings):
-        on = thinking_config(build("gemini-2.5-flash", settings, effort="none", thinking="high"))
-        off = thinking_config(build("gemini-2.5-flash", settings, effort="high", thinking="none"))
+    @pytest.mark.parametrize(
+        "model, high", [("gemini-2.5-flash", 24576), ("claude-sonnet-4-5", 32000)]
+    )
+    def test_the_agent_s_mode_wins_over_the_global_effort(self, settings, model, high):
+        on = thinking_config(build(model, settings, effort="none", thinking="high"))
+        off = thinking_config(build(model, settings, effort="high", thinking="none"))
 
-        assert (on.thinking_budget, off.thinking_budget) == (24576, 0)
+        assert (on.thinking_budget, off.thinking_budget) == (high, 0)
 
     def test_the_model_decides_budget_or_level(self, settings):
         gemini_2_5 = thinking_config(build("gemini-2.5-flash", settings, effort="medium"))
@@ -361,12 +370,18 @@ class TestClaude:
         "model, budget",
         [
             ("claude-opus-4-8", -1),
+            ("claude-opus-4-7", -1),
+            ("claude-opus-4-6", -1),
             ("claude-sonnet-4-6", -1),
             ("claude-fable-5", -1),
             ("claude-opus-4-5", 32000),
+            ("claude-sonnet-4-5", 32000),
             ("claude-haiku-4-5", 32000),
+            ("claude-sonnet-4", 32000),
+            ("claude-3-5-sonnet", 32000),
             # A dated id is its version, not its date: Claude 4.0, on a budget.
             ("claude-opus-4-20250514", 32000),
+            ("claude-sonnet-4-20250514", 32000),
             ("claude-opus-4-1-20250805", 32000),
             ("claude-haiku-4-5-20251001", 32000),
         ],
@@ -383,6 +398,7 @@ class TestClaude:
             ("claude-sonnet-4-5", {"max_tokens": 20000}, 20000),
             ("claude-opus-4-7", {"effort": "high"}, 8192),  # adaptive: no budget to fit
             ("claude-opus-4-7", {"effort": "high", "max_tokens": 20000}, 20000),
+            ("claude-sonnet-4-5", {"effort": "high"}, 40192),  # the budget plus 8192
             ("claude-sonnet-4-5", {"effort": "high", "max_tokens": 10000}, 40192),
         ],
     )
@@ -476,6 +492,7 @@ class TestNativeAdkConfig:
         assert isinstance(llm, AnthropicLlm)
         assert not isinstance(llm, Claude)
         assert (llm.model, llm.max_tokens) == ("claude-opus-4-8", 8192)
+        assert llm.client is None  # ADK's own client, keyed by ANTHROPIC_API_KEY
 
 
 # --- OpenAI -------------------------------------------------------------------------

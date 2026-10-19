@@ -19,11 +19,8 @@ from typing import TYPE_CHECKING, AsyncIterator
 
 from agentic_cli.logging import Loggers
 
-# Re-export factory helpers for backward compatibility
-from agentic_cli.workflow.factory import (  # noqa: F401
-    _is_claude_model,
-    create_workflow_manager_from_settings,
-)
+# Re-export the factory for backward compatibility
+from agentic_cli.workflow.factory import create_workflow_manager_from_settings  # noqa: F401
 
 if TYPE_CHECKING:
     from agentic_cli.cli.usage_tracker import UsageTracker

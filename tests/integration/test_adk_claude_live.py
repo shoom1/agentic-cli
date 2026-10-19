@@ -10,14 +10,12 @@ Marked ``@pytest.mark.llm`` (skipped by default in a plain run; the integration
     #   LIVE_CLAUDE_47PLUS_MODEL=claude-opus-4-8   only if you have access; enables the 400 test
 
 They exercise ``DirectAnthropicLlm.generate_content_async`` directly (no session
-/ runner) so they target the new code with minimal scaffolding. Requests use a
-tiny ``max_tokens`` to stay cheap. Assertions are structural (got a response /
-got a 400), not exact text.
-
-Deferred (can't be tested on this branch yet):
-- Adaptive thinking via ADK — needs the google-adk >= 1.34 bump (1.33 raises on a
-  negative thinking_budget before any request is sent).
-- Effort routed through the manager's planner — the manager doesn't set effort yet.
+/ runner): the class a bare ``claude-*`` string resolves to, ADK's direct-API
+``AnthropicLlm`` with its own client. Effort goes in an
+``AnthropicGenerateContentConfig``, as the model factory sends it. Requests use
+a tiny ``max_tokens`` to stay cheap. Assertions are structural (got a response /
+got a 400), not exact text. Every provider through the model factory and the
+manager: ``test_models_live_adk.py``.
 """
 
 from __future__ import annotations
@@ -30,6 +28,7 @@ pytest.importorskip("google.adk")
 pytest.importorskip("anthropic")
 
 from google.genai import types  # noqa: E402
+from google.adk.models.anthropic_llm import AnthropicGenerateContentConfig  # noqa: E402
 from google.adk.models.llm_request import LlmRequest  # noqa: E402
 
 from agentic_cli.workflow.adk.anthropic_llm import DirectAnthropicLlm  # noqa: E402
@@ -52,9 +51,12 @@ MODEL_47PLUS = os.getenv("LIVE_CLAUDE_47PLUS_MODEL")  # e.g. claude-opus-4-8
 # ---------------------------------------------------------------------------
 
 
-def _request(text: str, *, thinking_budget: int | None = None, tools=None) -> LlmRequest:
-    config = types.GenerateContentConfig(
+def _request(
+    text: str, *, thinking_budget: int | None = None, effort: str | None = None, tools=None
+) -> LlmRequest:
+    config = AnthropicGenerateContentConfig(
         system_instruction="You are a helpful, concise assistant.",
+        effort=effort,
     )
     if thinking_budget is not None:
         config.thinking_config = types.ThinkingConfig(thinking_budget=thinking_budget)
@@ -149,13 +151,13 @@ class TestLiveBudgetThinking:
 
 class TestLiveEffort:
     async def test_effort_low_accepted(self):
-        llm = DirectAnthropicLlm(model=MODEL, max_tokens=256, effort="low")
-        responses = await _collect(llm, _request("Name one primary color."))
+        llm = DirectAnthropicLlm(model=MODEL, max_tokens=256)
+        responses = await _collect(llm, _request("Name one primary color.", effort="low"))
         assert _text(responses).strip(), "effort=low request should return text"
 
     async def test_effort_high_accepted(self):
-        llm = DirectAnthropicLlm(model=MODEL, max_tokens=512, effort="high")
-        responses = await _collect(llm, _request("Name one primary color."))
+        llm = DirectAnthropicLlm(model=MODEL, max_tokens=512)
+        responses = await _collect(llm, _request("Name one primary color.", effort="high"))
         assert _text(responses).strip(), "effort=high request should return text"
 
 
@@ -166,9 +168,10 @@ class TestLiveEffort:
 
 class TestLiveAdaptiveThinking:
     async def test_adaptive_plus_effort(self):
-        llm = DirectAnthropicLlm(model=MODEL, max_tokens=2048, effort="high")
+        llm = DirectAnthropicLlm(model=MODEL, max_tokens=2048)
         responses = await _collect(
-            llm, _request("What is 12 * 12? Think briefly.", thinking_budget=-1)
+            llm,
+            _request("What is 12 * 12? Think briefly.", thinking_budget=-1, effort="high"),
         )
         assert _text(responses).strip() or any(
             getattr(p, "thought", None) for p in _all_parts(responses)
@@ -182,13 +185,14 @@ class TestLiveAdaptiveThinking:
 class TestLiveAdaptiveOn47Plus:
     async def test_adaptive_succeeds_where_budget_400s(self):
         # Same model that 400s on budget_tokens succeeds with adaptive + effort.
-        llm = DirectAnthropicLlm(model=MODEL_47PLUS, max_tokens=2048, effort="high")
+        llm = DirectAnthropicLlm(model=MODEL_47PLUS, max_tokens=2048)
         req = LlmRequest(
             model=MODEL_47PLUS,
             contents=[types.Content(role="user", parts=[types.Part(text="Name one color.")])],
-            config=types.GenerateContentConfig(
+            config=AnthropicGenerateContentConfig(
                 system_instruction="You are a helpful, concise assistant.",
                 thinking_config=types.ThinkingConfig(thinking_budget=-1),
+                effort="high",
             ),
         )
         responses = await _collect(llm, req)

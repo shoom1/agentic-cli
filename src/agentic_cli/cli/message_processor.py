@@ -316,9 +316,10 @@ class MessageProcessor:
         would duplicate the turn and repeat any tool calls it made.
 
         Retrying belongs at the provider/model-client boundary, which can
-        prove nothing was accepted: ADK's ``HttpRetryOptions`` (configured in
-        ``_get_generate_content_config``) retries transient 5xx inside the
-        client, and the Anthropic client retries per ``retry_max_attempts``.
+        prove nothing was accepted: on ADK, Gemini's ``HttpRetryOptions``
+        (configured in ``workflow/adk/model_factory.py``) retry transient 5xx
+        inside the client, and the Anthropic and OpenAI clients retry per
+        ``retry_max_attempts``.
         A rate limit that still surfaces here fails the turn explicitly.
 
         Cancellation is symmetric: whether the *user* cancels (Ctrl+C) or the

@@ -293,8 +293,8 @@ class LangGraphBuilder:
 
         if model.startswith("gemini-"):
             # Gemini 3 takes a discrete thinking_level; Gemini 2.5 only accepts a
-            # numeric thinking_budget and rejects thinking_level (400). Mirrors
-            # the ADK split in GoogleADKWorkflowManager._get_planner.
+            # numeric thinking_budget and rejects thinking_level (400). On ADK
+            # the model's record decides (workflow/adk/model_factory.py).
             if "gemini-3" in model:
                 is_gemini_3_pro = "pro" in model  # 3 Pro lacks "medium"
                 level = "high" if (effort == "medium" and is_gemini_3_pro) else effort

@@ -18,16 +18,15 @@ from google.adk import Runner
 from google.adk.apps import App
 from google.adk.apps.app import validate_app_name
 from google.adk.agents import LlmAgent, Agent
-from google.adk.planners import BuiltInPlanner
+from google.adk.models.llm_request import LlmRequest
 from google.adk.sessions import InMemorySessionService, BaseSessionService, Session
 from google.adk.tools import LongRunningFunctionTool
 
-from agentic_cli.models import ProviderKind
 from agentic_cli.workflow.base_manager import BaseWorkflowManager
 from agentic_cli.workflow.events import WorkflowEvent, EventType
 from agentic_cli.workflow.config import AgentConfig, validate_agent_graph
-from agentic_cli.workflow.model_settings import ModelSettings, ThinkingSettings
 from agentic_cli.workflow.adk.event_processor import ADKEventProcessor
+from agentic_cli.workflow.adk.model_factory import build_adk_model
 from agentic_cli.workflow.adk.permission_plugin import PermissionPlugin
 from agentic_cli.workflow.adk.plugins import LLMLoggingPlugin
 from agentic_cli.workflow.service_registry import JOB_MANAGER
@@ -46,46 +45,6 @@ logger = Loggers.workflow()
 logging.getLogger("google_genai.types").setLevel(logging.ERROR)
 
 _RESULT_SUMMARY_LIMIT = 1000
-
-# Anthropic/Claude thinking on ADK (native AnthropicLlm, direct API).
-# Effort → thinking budget in tokens (mirrors the LangGraph Claude budgets).
-_CLAUDE_THINKING_BUDGETS = {"low": 4096, "medium": 10000, "high": 32000}
-# Anthropic requires budget_tokens >= 1024 when thinking is enabled.
-_ANTHROPIC_MIN_THINKING_BUDGET = 1024
-# Default max_tokens when no ModelSettings.max_tokens is given.
-_DEFAULT_ANTHROPIC_MAX_TOKENS = 8192
-# Output headroom reserved above the thinking budget (Anthropic counts thinking
-# tokens toward max_tokens and requires max_tokens > budget_tokens).
-_ANTHROPIC_OUTPUT_HEADROOM = 8192
-
-
-def _is_anthropic_model(model: str | None) -> bool:
-    """True for Claude/Anthropic model ids (string check, no settings needed)."""
-    return bool(model) and model.startswith("claude")
-
-
-# Claude >= 4.6 deprecates/removes ``budget_tokens`` (400 on 4.7+/Fable); those
-# use adaptive thinking + ``output_config.effort``. <= 4.5 keep the legacy
-# numeric-budget path (effort also unsupported on Sonnet 4.5 / Haiku 4.5).
-_ANTHROPIC_ADAPTIVE_MIN = (4, 6)
-# Generic thinking level -> Anthropic effort. ``xhigh``/``max`` are not exposed
-# via the generic knob; use a per-agent native override for those.
-_GENERIC_TO_EFFORT = {"low": "low", "medium": "medium", "high": "high"}
-
-
-def _claude_version(model: str) -> tuple[int, ...]:
-    """Numeric version tuple from a Claude id (``claude-opus-4-8`` -> ``(4, 8)``).
-
-    Version components are 1-2 digits; longer numeric segments are date stamps
-    (``claude-opus-4-20250514``) and must be ignored, else the date would be
-    read as a minor version and push the model past the adaptive threshold.
-    """
-    return tuple(int(p) for p in model.split("-") if p.isdigit() and len(p) <= 2)
-
-
-def _anthropic_uses_adaptive(model: str | None) -> bool:
-    """True for Claude models that require adaptive thinking (>= 4.6)."""
-    return _is_anthropic_model(model) and _claude_version(model) >= _ANTHROPIC_ADAPTIVE_MIN
 
 
 def _check_app_name(app_name: str) -> None:
@@ -147,13 +106,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         async for event in manager.process("Hello", user_id="user1"):
             print(event.content)
     """
-
-    # Transitional, until the ADK model factory lands: the agents are built by
-    # the 0.6 model code below, which knows Gemini and Claude and the generic
-    # thinking modes only (see BaseWorkflowManager._backend_model_problem).
-    _BUILDABLE_PROVIDER_KINDS = frozenset({ProviderKind.GOOGLE, ProviderKind.ANTHROPIC})
-    _UNDERSTOOD_THINKING_MODES = frozenset({"none", "low", "medium", "high", "budget"})
-    _BACKEND_NAME = "ADK"
 
     def __init__(
         self,
@@ -227,50 +179,37 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         return "adk"
 
     async def generate_simple(self, prompt: str, max_tokens: int = 500) -> str:
-        """Generate a simple text response using the current model.
+        """Generate a short text with the default model, outside the agent workflow.
 
-        Used for internal operations like summarization. Does not go through
-        the full agent workflow.
+        Used for internal operations such as summaries. The default model is
+        built through the model factory, as an agent's is, with thinking off
+        where the model allows it and ``max_tokens`` as its limit, so every
+        provider can write them.
 
         Args:
-            prompt: The prompt to send
-            max_tokens: Maximum tokens in response
+            prompt: The prompt to send.
+            max_tokens: The output limit.
 
         Returns:
-            Generated text response
+            The answer's text, without the model's thoughts.
         """
         await self._ensure_initialized()
-        default = self._resolved(None).record
-
-        # Claude models are not served by the genai client — use the Anthropic
-        # SDK directly (ANTHROPIC_API_KEY is exported during initialization).
-        if default.kind is ProviderKind.ANTHROPIC:
-            from anthropic import AsyncAnthropic
-
-            client = AsyncAnthropic()
-            message = await client.messages.create(
-                model=default.model,
-                max_tokens=max_tokens,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            return "".join(
-                block.text
-                for block in message.content
-                if getattr(block, "type", None) == "text"
-            )
-
-        from google import genai
-
-        client = genai.Client()
-        response = await client.aio.models.generate_content(
-            model=default.model,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                max_output_tokens=max_tokens,
-            ),
+        built = build_adk_model(
+            self._simple_model(max_tokens), settings=self._settings, app_name=self.app_name
         )
+        request = LlmRequest(
+            model=built.model.model,
+            contents=[types.Content(role="user", parts=[types.Part.from_text(text=prompt)])],
+            config=built.generate_content_config,
+        )
+        if built.planner is not None:
+            built.planner.apply_thinking_config(request)
 
-        return response.text or ""
+        text: list[str] = []
+        async for response in built.model.generate_content_async(request, stream=False):
+            parts = response.content.parts if response.content is not None else None
+            text.extend(part.text for part in parts or [] if part.text and not part.thought)
+        return "".join(text)
 
     async def cleanup(self) -> None:
         """Clean up workflow manager resources.
@@ -382,251 +321,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             sessions_preserved=preserve_sessions,
         )
 
-    def _resolve_model_for_config(self, config: "AgentConfig | None") -> str:
-        """The bare model id an agent runs on (None: the default model).
-
-        The model code below predates references and roles: it takes the
-        resolved record's id, and recognizes the provider from it.
-        """
-        return self._resolved(config).record.model
-
-    def _resolve_thinking(
-        self, config: "AgentConfig | None"
-    ) -> ThinkingSettings | None:
-        """Resolve thinking settings: per-agent override, else global effort.
-
-        Returns None when thinking is disabled (no per-agent setting and the
-        global ``thinking_effort`` is ``"none"``).
-        """
-        ms = config.model_settings if config is not None else None
-        if ms is not None and ms.thinking is not None:
-            return ms.thinking
-        global_effort = self._settings.thinking_effort
-        if global_effort == "none":
-            return None
-        return ThinkingSettings(mode=global_effort)
-
-    def _get_planner(
-        self, config: "AgentConfig | None" = None
-    ) -> BuiltInPlanner | None:
-        """Get planner with thinking configuration for an agent.
-
-        Thinking is resolved per-agent (``config.model_settings.thinking``) with
-        a fallback to the global ``settings.thinking_effort``.
-
-        Per family: Claude >= 4.6 uses adaptive thinking (negative budget) +
-        effort; Claude <= 4.5 and Gemini 2.5 are numeric-budget-based; Gemini 3
-        takes a discrete ``thinking_level`` (Gemini 2.5 rejects it with a 400).
-        """
-        thinking = self._resolve_thinking(config)
-        if thinking is None or thinking.mode == "none":
-            return None
-
-        resolved = self._resolved(config)
-        model = resolved.record.model
-
-        if resolved.thinking is None:  # the model has no thinking knob
-            logger.debug("thinking_not_supported", model=model, mode=thinking.mode)
-            return None
-
-        if _is_anthropic_model(model):
-            if _anthropic_uses_adaptive(model):
-                # Claude >= 4.6 rejects budget_tokens; use adaptive thinking. ADK
-                # (>= 1.34) maps a negative thinking_budget to {type:"adaptive"}.
-                # Depth is controlled by output_config.effort, set on the model
-                # instance (see _anthropic_effort / DirectAnthropicLlm).
-                thinking_config = types.ThinkingConfig(thinking_budget=-1)
-            else:
-                # Legacy Claude (<= 4.5): numeric budget_tokens (>= 1024). The same
-                # budget sizes max_tokens in _anthropic_max_tokens (Anthropic
-                # requires max_tokens > budget).
-                thinking_config = types.ThinkingConfig(
-                    include_thoughts=True,
-                    thinking_budget=self._anthropic_thinking_budget(config),
-                )
-        elif thinking.mode == "budget":
-            budget = (
-                thinking.budget_tokens if thinking.budget_tokens is not None else 12288
-            )
-            thinking_config = types.ThinkingConfig(
-                include_thoughts=True, thinking_budget=budget
-            )
-        elif "gemini-3" in model:
-            thinking_config = self._gemini3_thinking_config(thinking.mode, model)
-        else:
-            thinking_config = self._gemini25_thinking_config(thinking.mode)
-
-        logger.debug("planner_created", model=model, mode=thinking.mode)
-        return BuiltInPlanner(thinking_config=thinking_config)
-
-    def _gemini3_thinking_config(
-        self, effort: str, model: str
-    ) -> "types.ThinkingConfig":
-        """Build a Gemini 3 thinking config using the discrete ``thinking_level``.
-
-        Gemini 3 Pro supports only LOW and HIGH (MEDIUM falls back to HIGH);
-        Gemini 3 Flash additionally supports MINIMAL/MEDIUM.
-        """
-        is_pro = "pro" in model
-
-        if effort == "low":
-            level = types.ThinkingLevel.LOW
-        elif effort == "medium":
-            if is_pro:
-                level = types.ThinkingLevel.HIGH
-                logger.debug(
-                    "thinking_level_fallback",
-                    model=model,
-                    requested="medium",
-                    actual="high",
-                    reason="Gemini 3 Pro only supports LOW and HIGH",
-                )
-            else:
-                level = types.ThinkingLevel.MEDIUM
-        else:  # high
-            level = types.ThinkingLevel.HIGH
-
-        return types.ThinkingConfig(include_thoughts=True, thinking_level=level)
-
-    def _gemini25_thinking_config(self, effort: str) -> "types.ThinkingConfig":
-        """Build a Gemini 2.5 thinking config using the numeric ``thinking_budget``.
-
-        2.5 models reject ``thinking_level``. Budgets are chosen within the
-        range valid across the 2.5 family (Flash/Pro/Flash-Lite all accept
-        4096–24576 tokens).
-        """
-        budget = {"low": 4096, "medium": 12288, "high": 24576}[effort]
-        return types.ThinkingConfig(include_thoughts=True, thinking_budget=budget)
-
-    def _anthropic_thinking_budget(self, config: "AgentConfig | None") -> int:
-        """Resolved Anthropic thinking budget in tokens for an agent.
-
-        Mirrors the LangGraph Claude budgets; ``budget`` mode passes the explicit
-        value through. Floored at Anthropic's minimum (1024). Returns 0 when
-        thinking is disabled. The same number sizes the agent's ``max_tokens``.
-        """
-        thinking = self._resolve_thinking(config)
-        if thinking is None or thinking.mode == "none":
-            return 0
-        if thinking.mode == "budget":
-            budget = thinking.budget_tokens if thinking.budget_tokens is not None else 12288
-        else:
-            budget = _CLAUDE_THINKING_BUDGETS.get(thinking.mode, 10000)
-        return max(budget, _ANTHROPIC_MIN_THINKING_BUDGET)
-
-    def _anthropic_effort(self, config: "AgentConfig | None") -> str | None:
-        """Anthropic ``output_config.effort`` for an agent, or ``None``.
-
-        Only adaptive-capable Claude (>= 4.6) takes effort; older models reject
-        it and stay on the budget path. Maps the generic ``low/medium/high``
-        level; ``none``/``budget`` modes yield no effort (disabled / pure
-        adaptive — the model picks the depth).
-        """
-        if not _anthropic_uses_adaptive(self._resolve_model_for_config(config)):
-            return None
-        thinking = self._resolve_thinking(config)
-        if thinking is None or thinking.mode in ("none", "budget"):
-            return None
-        return _GENERIC_TO_EFFORT.get(thinking.mode)
-
-    def _anthropic_max_tokens(self, config: "AgentConfig | None") -> int:
-        """``max_tokens`` for an Anthropic agent.
-
-        ADK's ``AnthropicLlm`` reads ``max_tokens`` from the model instance (not
-        ``GenerateContentConfig``). On the legacy budget path Anthropic counts
-        thinking tokens toward ``max_tokens`` and requires ``max_tokens > budget``,
-        so we size it above the budget. Adaptive thinking has no fixed budget, so
-        we just honour the ``ModelSettings.max_tokens`` floor (or the default).
-        """
-        ms = config.model_settings if config is not None else None
-        base = ms.max_tokens if (ms is not None and ms.max_tokens) else _DEFAULT_ANTHROPIC_MAX_TOKENS
-        if _anthropic_uses_adaptive(self._resolve_model_for_config(config)):
-            return base
-        budget = self._anthropic_thinking_budget(config)
-        if budget:
-            return max(base, budget + _ANTHROPIC_OUTPUT_HEADROOM)
-        return base
-
-    def _build_model_arg(self, config: "AgentConfig | None"):
-        """Resolve the ``model`` argument for an ``LlmAgent``.
-
-        Anthropic/Claude models are returned as a direct-API ``DirectAnthropicLlm``
-        instance: passing the bare ``claude-*`` string would make ADK's
-        ``LLMRegistry`` resolve it to the Vertex ``Claude`` class (which needs
-        GOOGLE_CLOUD_PROJECT/LOCATION). The instance carries the coordinated
-        ``max_tokens`` and, for adaptive models, ``effort``. Gemini/Gemma pass
-        through as plain strings for native registry resolution.
-        """
-        model = self._resolve_model_for_config(config)
-        if not _is_anthropic_model(model):
-            return model
-        from agentic_cli.workflow.adk.anthropic_llm import DirectAnthropicLlm
-
-        return DirectAnthropicLlm(
-            model=model,
-            max_tokens=self._anthropic_max_tokens(config),
-            effort=self._anthropic_effort(config),
-            # An explicit (non-default) timeout keeps large-max_tokens requests
-            # off the SDK's streaming-required guard; retries honour settings.
-            request_timeout=getattr(self._settings, "anthropic_request_timeout", 900.0),
-            max_retries=getattr(self._settings, "retry_max_attempts", None),
-        )
-
-    def _get_generate_content_config(
-        self, config: "AgentConfig | None" = None
-    ) -> types.GenerateContentConfig:
-        """Build GenerateContentConfig with retry HTTP options and per-agent params.
-
-        Args:
-            config: Agent config whose ``model_settings`` (if any) supply
-                generation params merged on top of the retry options.
-
-        Returns:
-            GenerateContentConfig with HttpRetryOptions plus any per-agent params.
-        """
-        http_options = types.HttpOptions(
-            retry_options=types.HttpRetryOptions(
-                initial_delay=self._settings.retry_initial_delay,
-                attempts=self._settings.retry_max_attempts,
-                exp_base=self._settings.retry_backoff_factor,
-                http_status_codes=[500, 502, 503, 504],  # Don't auto-retry 429
-            )
-        )
-        kwargs: dict[str, Any] = {"http_options": http_options}
-        ms = config.model_settings if config is not None else None
-        if ms is not None:
-            kwargs.update(self._generate_config_kwargs_from_settings(ms))
-        return types.GenerateContentConfig(**kwargs)
-
-    def _generate_config_kwargs_from_settings(
-        self, ms: ModelSettings
-    ) -> dict[str, Any]:
-        """Translate neutral ModelSettings into GenerateContentConfig kwargs.
-
-        Maps neutral field names (``max_tokens`` -> ``max_output_tokens``) and
-        passes ``extra`` through, filtered to valid GenerateContentConfig fields
-        (unknown keys are logged and dropped). Thinking is handled by the planner.
-        """
-        out: dict[str, Any] = {}
-        if ms.temperature is not None:
-            out["temperature"] = ms.temperature
-        if ms.top_p is not None:
-            out["top_p"] = ms.top_p
-        if ms.top_k is not None:
-            out["top_k"] = ms.top_k
-        if ms.max_tokens is not None:
-            out["max_output_tokens"] = ms.max_tokens
-        if ms.stop_sequences is not None:
-            out["stop_sequences"] = ms.stop_sequences
-        if ms.extra:
-            valid = set(types.GenerateContentConfig.model_fields)
-            for key, value in ms.extra.items():
-                if key in valid:
-                    out[key] = value
-                else:
-                    logger.warning("model_settings_extra_ignored", key=key)
-        return out
-
     def _get_state_tools(self) -> list:
         """Return ADK-native state tools using ToolContext.state."""
         from agentic_cli.tools.adk.state_tools import (
@@ -718,18 +412,25 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         service_map: dict,
         sub_agents: list[Agent] | None = None,
     ) -> Agent:
-        """Construct one ``LlmAgent`` from a config (with resolved sub-agents)."""
+        """Construct one ``LlmAgent`` from a config (with resolved sub-agents).
+
+        Its model, generation settings and thinking come from the model
+        initialization resolved for it, built by the model factory.
+        """
+        built = build_adk_model(
+            self._resolved_models[config.name], settings=self._settings, app_name=self.app_name
+        )
         return LlmAgent(
             name=config.name,
-            model=self._build_model_arg(config),
+            model=built.model,
             instruction=config.get_prompt(self._settings),
             tools=self._wrap_long_running(
                 self._assemble_agent_tools(config, service_map)
             ),
             description=config.description,
             sub_agents=sub_agents or [],
-            planner=self._get_planner(config),
-            generate_content_config=self._get_generate_content_config(config),
+            planner=built.planner,
+            generate_content_config=built.generate_content_config,
         )
 
     def _create_agents(self) -> Agent:

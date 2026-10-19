@@ -38,6 +38,7 @@ from agentic_cli.models import (
     resolve_model,
 )
 from agentic_cli.workflow.config import AgentConfig
+from agentic_cli.workflow.model_settings import ModelSettings, ThinkingSettings
 from agentic_cli.workflow.sessions import (
     SessionRef,
     get_active_turn,
@@ -1075,6 +1076,27 @@ class BaseWorkflowManager(ABC):
         roles = model_services.role_map_from_settings(self._settings, self._model_override)
         catalog = ModelCatalog(endpoints=endpoints)  # never loaded: the shipped table
         return self._resolve_for(config, roles, catalog, endpoints)
+
+    def _simple_model(self, max_tokens: int) -> ResolvedModel:
+        """The default model as ``generate_simple`` runs it.
+
+        Resolved again from the default model's reference, which carries the
+        global thinking effort: here thinking is ``none`` (off wherever the
+        model allows it) and ``max_tokens`` is the caller's. Only after
+        initialization.
+        """
+        default = self._default_model
+        return resolve_model(
+            agent=None,
+            spec=str(default.ref),
+            generation=ModelSettings(
+                max_tokens=max_tokens, thinking=ThinkingSettings(mode="none")
+            ),
+            thinking_effort="none",
+            roles=RoleMap(default_model=None, model_roles={}),  # a reference needs none
+            catalog=self._catalog,
+            endpoints={default.endpoint.name: default.endpoint},
+        )
 
     def _default_ref_without_listings(self) -> ModelRef:
         """The default role's model, from settings and the shipped table only."""
