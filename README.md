@@ -331,7 +331,7 @@ A model is named the same way in `default_model`, `model_roles`,
 | `anthropic:claude-sonnet-4-6` | `provider:model`. The provider is `google`, `anthropic`, `openai`, `openrouter`, or one of your endpoints |
 | `openrouter:qwen/qwen3-235b-a22b:free` | Split on the first colon only, so the model id keeps its own colons |
 | `gemini-2.5-flash`, `claude-sonnet-4-6`, `gpt-5.5`, `o3` | A bare `gemini-`, `claude-`, `gpt-` or `o<digit>` id names its provider |
-| `fast` | Any other bare name is a role |
+| `fast` | Any other bare name is a role. A role name has no digits, so a bare `qwen3-32b` is an error that asks for its provider (`local-vllm:qwen3-32b`) |
 
 A role names a model by what it is for:
 
@@ -434,8 +434,9 @@ an agent.
   chooses among the endpoints you defined (`default_model`, `model_roles`,
   `pinned_models`); a reference to one you did not define fails at startup.
 - The key comes only from the environment variable `api_key_env` names, and is
-  never stored. Without `api_key_env` the client sends the placeholder key
-  `EMPTY`.
+  never stored. If that variable is not set, startup fails, naming it (a
+  `.env` file does not set it). Without `api_key_env` the client sends the
+  placeholder key `EMPTY`.
 - An endpoint's name is lowercase letters, digits, `_` and `-`, starting with a
   letter, and cannot be a built-in provider's. `base_url` is `http` or
   `https`, with no user name, password, query or fragment.
@@ -539,9 +540,9 @@ What it costs:
   resending the prefix. ADK makes a new one after 10 invocations. Google bills
   the cache's storage until it expires (30 minutes after it is made) or is
   replaced, and the tokens read from it at its lower cached rate, so a short
-  session can cost more than it saves. Creating a cache may take at most 60
-  seconds: a create that fails or hangs costs that turn its caching, never the
-  turn.
+  session can cost more than it saves. Creating a cache, or deleting an old
+  one, may take at most 60 seconds, and an agent tries at most once a turn: a
+  create that fails or hangs costs that turn its caching, never the turn.
 
 To turn caching off, set `"prompt_caching_enabled": false` in
 `~/.my_app/settings.json`; a project file cannot set it. On ADK, `/status`
