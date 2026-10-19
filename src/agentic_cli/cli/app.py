@@ -77,6 +77,29 @@ class _AdkUncachedTransferFilter(logging.Filter):
         return False
 
 
+# While prompt caching is on, ADK's Gemini context cache warns through stdlib
+# logging when it cannot create a cache or delete an old one (an expired cache
+# is already gone on Google's side). The turn goes on uncached, so the warning
+# has nothing for the user mid-conversation.
+_ADK_CACHE_LOGGER = "google_adk.google.adk.models.gemini_context_cache_manager"
+_ADK_CACHE_FAILURES = (
+    ("Failed to create cache", "adk_cache_create_failed"),
+    ("Failed to cleanup cache", "adk_cache_cleanup_failed"),
+)
+
+
+class _AdkCacheFailureFilter(logging.Filter):
+    """Turns ADK's context-cache failure warnings into debug log entries."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        for prefix, event in _ADK_CACHE_FAILURES:
+            if message.startswith(prefix):
+                logger.debug(event, message=message)
+                return False
+        return True
+
+
 def _install_adk_notice_hook() -> None:
     """Log ADK's notices instead of printing them.
 
@@ -84,12 +107,18 @@ def _install_adk_notice_hook() -> None:
     up, to stderr, which in the CLI lands over the terminal UI. The hook logs
     ADK's experimental-feature notices at debug and passes every other warning
     to the hook it replaced; a filter on ADK's runner logger does the same for
-    its context-cache advice. Only the CLI installs them, so library users and
-    the test suite keep Python's own handling. Installing twice changes nothing.
+    its context-cache advice, and one on its context-cache logger for a cache
+    it could not create or delete. Only the CLI installs them, so library users
+    and the test suite keep Python's own handling. Installing twice changes
+    nothing.
     """
-    runner_logger = logging.getLogger(_ADK_RUNNER_LOGGER)
-    if not any(isinstance(f, _AdkUncachedTransferFilter) for f in runner_logger.filters):
-        runner_logger.addFilter(_AdkUncachedTransferFilter())
+    for name, kind in (
+        (_ADK_RUNNER_LOGGER, _AdkUncachedTransferFilter),
+        (_ADK_CACHE_LOGGER, _AdkCacheFailureFilter),
+    ):
+        adk_logger = logging.getLogger(name)
+        if not any(isinstance(f, kind) for f in adk_logger.filters):
+            adk_logger.addFilter(kind())
 
     previous = warnings.showwarning
     if getattr(previous, "_logs_adk_notices", False):

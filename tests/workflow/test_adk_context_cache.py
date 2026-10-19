@@ -447,3 +447,127 @@ class TestGeminiOnTheWire:
 
         assert [r.url.path for r in api.requests] == [GENERATE, GENERATE]
         assert all("cachedContent" not in body for body in api.bodies)
+
+
+# --- what a cache failure may cost a turn ---------------------------------------------
+
+DELETE = "/v1beta/" + CACHE_NAME
+
+
+def expired_create(request: httpx.Request) -> dict:
+    """The Gemini API, whose caches have expired by the next turn (as after a
+    pause of half an hour), so ADK deletes each one before it makes the next."""
+    if request.url.path == CREATE:
+        return {"name": CACHE_NAME, "model": "models/gemini-2.5-flash",
+                "expireTime": "2020-01-01T00:00:00Z"}
+    return gemini_api(request)
+
+
+class UnansweredDelete(httpx.AsyncBaseTransport):
+    """The Gemini API behind ``api``, except that deleting a cache is never
+    answered: given up at the request's read timeout, and at once without one
+    (a real server would hold it forever). Records each deadline."""
+
+    def __init__(self, api: FakeAPI) -> None:
+        self.api = api
+        self.deadlines: list[float | None] = []
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        if request.method != "DELETE":
+            return await self.api.transport.handle_async_request(request)
+        self.api.requests.append(request)
+        deadline = request.extensions["timeout"]["read"]
+        self.deadlines.append(deadline)
+        if deadline is not None:
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(asyncio.Event().wait(), deadline)
+        raise httpx.ReadTimeout("timed out", request=request)
+
+
+class ToolSteps:
+    """The Gemini API for turns of ``steps`` tool calls and then an answer;
+    ``create`` answers a cache creation."""
+
+    def __init__(self, steps: int, create) -> None:
+        self.steps, self.create, self.generated = steps, create, 0
+
+    def __call__(self, request: httpx.Request) -> dict | httpx.Response:
+        if request.url.path == CREATE:
+            return self.create(request)
+        self.generated += 1
+        if (self.generated - 1) % (self.steps + 1) < self.steps:
+            part = {"functionCall": {"name": "get_plan", "args": {}}}
+        else:
+            part = {"text": "ok"}
+        answer = gemini_api(request)
+        answer["candidates"][0]["content"]["parts"] = [part]
+        return answer
+
+
+def paths_per_turn(api: FakeAPI, marks: list[int]) -> list[list[str]]:
+    edges = [*marks, len(api.requests)]
+    return [[r.url.path for r in api.requests[a:b]] for a, b in zip(edges, edges[1:])]
+
+
+class TestCacheFailuresCostAtMostTheirTurn:
+    """A cache that cannot be made or removed costs at most one bounded attempt
+    a turn: never the turn, and not one attempt per tool step."""
+
+    async def test_deleting_an_expired_cache_is_bounded(self, monkeypatch):
+        keys(monkeypatch, "google")
+        # The Gemini client's own bound, shortened so that the test waits it out.
+        from agentic_cli.workflow.adk import model_factory
+
+        monkeypatch.setattr(model_factory, "_GEMINI_CLIENT_TIMEOUT_MS", 200, raising=False)
+        api = FakeAPI(expired_create)
+        unanswered = UnansweredDelete(api)
+        route_gemini(monkeypatch, api, unanswered)
+        manager = solo_gemini()
+        try:
+            await turn(manager, "Hello")
+            await turn(manager, "Again")
+            started = time.monotonic()
+            third = await turn(manager, "Once more")
+            elapsed = time.monotonic() - started
+        finally:
+            await manager.cleanup()
+
+        assert unanswered.deadlines == [0.2]
+        assert [e.content for e in third if e.type == EventType.TEXT] == ["ok"]
+        assert elapsed < 5
+
+    @pytest.mark.parametrize("failure", ["refused", "hung"])
+    async def test_a_failing_cache_creation_is_tried_once_a_turn(self, monkeypatch, failure):
+        keys(monkeypatch, "google")
+        if failure == "refused":
+            api = FakeAPI(ToolSteps(3, refused_create))
+            route_gemini(monkeypatch, api)
+        else:
+            monkeypatch.setattr(adk_manager, "_CACHE_CREATE_TIMEOUT_MS", 200, raising=False)
+            api = FakeAPI(ToolSteps(3, gemini_api))
+            route_gemini(monkeypatch, api, UnansweredCreate(api))
+        manager = solo_gemini()
+        marks = []
+        try:
+            for text in ("Hello", "Again"):
+                marks.append(len(api.requests))
+                answer = await turn(manager, text)
+                assert [e.content for e in answer if e.type == EventType.TEXT] == ["ok"]
+        finally:
+            await manager.cleanup()
+
+        assert [turn.count(CREATE) for turn in paths_per_turn(api, marks)] == [1, 1]
+        assert all("cachedContent" not in body for body in api.bodies if "contents" in body)
+
+    async def test_a_tool_using_first_turn_still_caches_from_its_second_call(self, monkeypatch):
+        keys(monkeypatch, "google")
+        api = FakeAPI(ToolSteps(3, gemini_api))
+        route_gemini(monkeypatch, api)
+        manager = solo_gemini()
+        try:
+            await turn(manager, "Hello")
+        finally:
+            await manager.cleanup()
+
+        assert [r.url.path for r in api.requests] == [GENERATE, CREATE, *[GENERATE] * 3]
+        assert [body.get("cachedContent") for body in api.bodies[2:]] == [CACHE_NAME] * 3

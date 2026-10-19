@@ -28,6 +28,7 @@ from tests.demo_isolation import suppress_global_logging_config
 
 NOTICE = "[EXPERIMENTAL] feature FeatureName.JSON_SCHEMA_FOR_FUNC_DECL is enabled."
 ADK_RUNNER_LOGGER = "google_adk.google.adk.runners"
+ADK_CACHE_LOGGER = "google_adk.google.adk.models.gemini_context_cache_manager"
 
 
 class _LogRecorder:
@@ -58,9 +59,10 @@ def logged(monkeypatch) -> list[dict]:
 
 @pytest.fixture(autouse=True)
 def _restore_adk_runner_filters(monkeypatch):
-    """The hook adds a filter to ADK's runner logger; take it off after each test."""
-    runner_logger = logging.getLogger(ADK_RUNNER_LOGGER)
-    monkeypatch.setattr(runner_logger, "filters", list(runner_logger.filters))
+    """The hook adds filters to ADK's loggers; take them off after each test."""
+    for name in (ADK_RUNNER_LOGGER, ADK_CACHE_LOGGER):
+        adk_logger = logging.getLogger(name)
+        monkeypatch.setattr(adk_logger, "filters", list(adk_logger.filters))
 
 
 @pytest.fixture
@@ -202,3 +204,44 @@ async def test_adks_context_cache_advice_is_logged_not_printed(logged, tmp_path,
     advice = [e for e in logged if e["event"] == "adk_uncached_agent_transfer"]
     assert [e["log_level"] for e in advice] == ["debug"]
     assert "has no context_cache_config" in advice[0]["message"]
+
+
+# --- ADK's context-cache failures ----------------------------------------------------
+#
+# While prompt caching is on, ADK warns through stdlib logging when it cannot
+# create a Gemini cache or delete an old one (an expired cache is already gone
+# from Google's side, so deleting it fails). The turn goes on uncached; the
+# warning would print over the UI mid-conversation.
+
+
+@pytest.mark.parametrize(
+    "template, value, event",
+    [
+        ("Failed to create cache: %s", "500 INTERNAL", "adk_cache_create_failed"),
+        ("Failed to cleanup cache %s: %s", ("cachedContents/c1", "404 NOT_FOUND"),
+         "adk_cache_cleanup_failed"),
+    ],
+)
+def test_adks_cache_failures_are_logged_not_printed(logged, caplog, template, value, event):
+    _install_adk_notice_hook()
+    cache_logger = logging.getLogger(ADK_CACHE_LOGGER)
+    args = value if isinstance(value, tuple) else (value,)
+
+    with caplog.at_level(logging.WARNING, logger=ADK_CACHE_LOGGER):
+        cache_logger.warning(template, *args)
+
+    assert [r for r in caplog.records if r.name == ADK_CACHE_LOGGER] == []
+    (entry,) = [e for e in logged if e["event"] == event]
+    assert entry["log_level"] == "debug"
+    assert entry["message"] == template % args
+
+
+def test_other_cache_warnings_still_reach_their_handlers(logged, caplog):
+    _install_adk_notice_hook()
+
+    with caplog.at_level(logging.WARNING, logger=ADK_CACHE_LOGGER):
+        logging.getLogger(ADK_CACHE_LOGGER).warning("Something else went wrong")
+
+    assert [r.getMessage() for r in caplog.records if r.name == ADK_CACHE_LOGGER] == [
+        "Something else went wrong"
+    ]

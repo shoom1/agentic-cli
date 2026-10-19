@@ -183,6 +183,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **agentic-cli depends on `openai`** (`openai>=2.20,<3`, the floor of
   google-adk's own extra), because ADK's GPT and OpenAI-compatible model
   classes import it.
+- **A Gemini cache costs a turn at most one bounded attempt.** Deleting an
+  agent's old cache (ADK does so once it has expired or served 10 turns) may
+  take at most 60 seconds, as creating one may; before, google-genai sent the
+  delete with no timeout, so an unanswered one held the turn. After a create
+  that fails or times out, the agent makes no further attempt until its next
+  turn, where ADK would have tried again at every tool step. ADK's warnings
+  for a cache it could not create or delete are logged at debug
+  (`adk_cache_create_failed`, `adk_cache_cleanup_failed`) instead of printing
+  over the UI.
 - **An endpoint whose `api_key_env` names a variable that is not set fails
   at startup,** naming the endpoint and the variable, for each agent that
   runs on it. Its requests would carry the placeholder key and fail with a

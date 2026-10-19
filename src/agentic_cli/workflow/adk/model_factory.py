@@ -140,13 +140,27 @@ def _gemini(resolved: ResolvedModel, settings: "BaseSettings") -> AdkModel:
     return AdkModel(
         model=Gemini(
             model=resolved.record.model,
-            client_kwargs={"api_key": resolved.endpoint.api_key},
+            client_kwargs={
+                "api_key": resolved.endpoint.api_key,
+                # A bound for the calls ADK makes without a config of their
+                # own; a request's own options (generation's above, a cache
+                # create's) replace it.
+                "http_options": types.HttpOptions(timeout=_GEMINI_CLIENT_TIMEOUT_MS),
+            },
         ),
         generate_content_config=_config(
             resolved, types.GenerateContentConfig, http_options=http_options
         ),
         planner=planner,
     )
+
+
+# How long a Gemini call without options of its own may take, in milliseconds.
+# ADK's context cache deletes an agent's expired cache with no options, and
+# google-genai then sets no timeout at all, so a delete that is never answered
+# would hold the turn. With this, it costs at most this long, and the turn
+# goes on.
+_GEMINI_CLIENT_TIMEOUT_MS = 60_000
 
 
 def _claude(resolved: ResolvedModel, settings: "BaseSettings") -> AdkModel:

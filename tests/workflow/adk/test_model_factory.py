@@ -208,7 +208,11 @@ class TestGemini:
 
         assert type(built.model) is Gemini
         assert built.model.model == "gemini-2.5-flash"
-        assert built.model.client_kwargs == {"api_key": "g-test-key"}
+        assert built.model.client_kwargs == {
+            "api_key": "g-test-key",
+            # Bounds the calls ADK makes without options of their own.
+            "http_options": types.HttpOptions(timeout=60_000),
+        }
         assert type(built.generate_content_config) is types.GenerateContentConfig
 
     def test_retries_and_a_timeout_ride_in_the_config(self, settings):

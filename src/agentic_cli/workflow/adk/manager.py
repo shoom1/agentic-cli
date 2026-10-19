@@ -56,7 +56,8 @@ _CACHING = (CacheMechanism.ANTHROPIC, CacheMechanism.GEMINI)
 # Generation's own timeout sits on each request's config, not on the client
 # that creates the cache, so without this a hung create would hang the turn. A
 # create that fails costs only that turn's cache: ADK logs it and sends the
-# request uncached.
+# request uncached, and ContextCachePlugin keeps it from trying again at every
+# tool step of the turn.
 _CACHE_CREATE_TIMEOUT_MS = 60_000
 
 
@@ -571,11 +572,18 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             self._root_agent = self._create_agents()
 
         # The plugins belong to the App; ADK deprecates Runner(plugins=...).
+        context_cache = self._context_cache_config()
+        plugins = self._init_plugins()
+        if context_cache is not None:
+            from agentic_cli.workflow.adk.context_cache_plugin import ContextCachePlugin
+
+            # One Gemini cache attempt a turn, not one per tool step.
+            plugins.append(ContextCachePlugin())
         app = App(
             name=self.app_name,
             root_agent=self._root_agent,
-            plugins=self._init_plugins(),
-            context_cache_config=self._context_cache_config(),
+            plugins=plugins,
+            context_cache_config=context_cache,
         )
         self._runner = Runner(app=app, session_service=self._session_service)
         # Usage events name the default model, resolved for this initialization.
