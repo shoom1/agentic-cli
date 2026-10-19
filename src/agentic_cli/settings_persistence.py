@@ -30,6 +30,8 @@ CREDENTIAL_KEY_RE = re.compile(r"(?i)(api_?key|secret|token|password|credential)
 SECRET_FIELDS = frozenset({
     "google_api_key",
     "anthropic_api_key",
+    "openai_api_key",
+    "openrouter_api_key",
     "tavily_api_key",
     "brave_api_key",
     "postgres_uri",  # connection string embeds user:password@host
@@ -49,8 +51,10 @@ SECRET_FIELDS = frozenset({
 # (config._AllowlistFilterSource) and the save-side split
 # (SettingsPersistence.save), so writer and reader cannot drift apart.
 PROJECT_SETTABLE_KEYS = frozenset({
-    # model / behavior
-    "default_model", "thinking_effort", "orchestrator",
+    # model / behavior. model_roles and pinned_models choose among the providers
+    # and endpoints the user defined; model_endpoints (base URLs a key is sent
+    # to) is deliberately absent.
+    "default_model", "model_roles", "pinned_models", "thinking_effort", "orchestrator",
     "context_window_trigger_tokens", "context_window_target_tokens",
     # retry / request timeouts (not code paths)
     "retry_max_attempts", "retry_initial_delay", "retry_backoff_factor",
@@ -78,7 +82,7 @@ def is_secret_field(name: str, field: Any | None = None) -> bool:
     """Whether a settings field holds a credential and must never be saved.
 
     True for ``SECRET_FIELDS``, for any name that looks like a credential
-    (``CREDENTIAL_KEY_RE``: an application's own ``openai_api_key``, say) and
+    (``CREDENTIAL_KEY_RE``: an application's own ``mistral_api_key``, say) and
     for any field typed ``SecretStr``/``SecretBytes``.
     """
     if name in SECRET_FIELDS or CREDENTIAL_KEY_RE.search(name):

@@ -13,6 +13,13 @@ from typing import Literal, TYPE_CHECKING
 from pydantic import AliasChoices, BaseModel, Field, field_validator
 
 from agentic_cli.logging import Loggers
+from agentic_cli.models import (
+    EndpointSpec,
+    ModelSpecError,
+    RoleMap,
+    parse_ref,
+    validate_endpoint_name,
+)
 from agentic_cli.workflow.models import ModelFamily, ModelRegistry
 
 if TYPE_CHECKING:
@@ -81,6 +88,36 @@ class WorkflowSettingsMixin:
         description="Controls depth of reasoning for models that support it",
         json_schema_extra={"ui_order": 20},
     )
+    # Models and providers (agentic_cli.models). Provisional in 0.7.0.
+    #
+    # model_endpoints is user-only (not in PROJECT_SETTABLE_KEYS): it holds base
+    # URLs, so a project file that could set it could send the user's key to
+    # its own server. model_roles and pinned_models only choose among providers
+    # and endpoints the user defined, so a project may set them.
+    model_endpoints: dict[str, EndpointSpec] = Field(
+        default_factory=dict,
+        title="Model Endpoints",
+        description=(
+            "OpenAI-compatible servers (vLLM and the like) by name: base_url, the "
+            "environment variable holding the key (api_key_env), and the models "
+            "served. User settings only."
+        ),
+    )
+    model_roles: dict[str, str] = Field(
+        default_factory=dict,
+        title="Model Roles",
+        description=(
+            "The model for each role other than default (fast, strong, or an app's "
+            "own), as a provider:model reference or a model id"
+        ),
+        json_schema_extra={"ui_order": 11},
+    )
+    pinned_models: list[str] = Field(
+        default_factory=list,
+        title="Pinned Models",
+        description="Models the model pickers always offer, as provider:model references",
+        json_schema_extra={"ui_order": 12},
+    )
 
     # Context window management
     context_window_enabled: bool = Field(
@@ -121,6 +158,21 @@ class WorkflowSettingsMixin:
         default=None,
         description="Anthropic API key for Claude models",
         validation_alias=AliasChoices("ANTHROPIC_API_KEY", "anthropic_api_key"),
+        repr=False,
+    )
+    # The OpenAI and OpenRouter keys are never exported to the process
+    # environment (see export_api_keys_to_env): the model adapters pass every
+    # key to its client explicitly.
+    openai_api_key: str | None = Field(
+        default=None,
+        description="OpenAI API key for GPT models",
+        validation_alias=AliasChoices("OPENAI_API_KEY", "openai_api_key"),
+        repr=False,
+    )
+    openrouter_api_key: str | None = Field(
+        default=None,
+        description="OpenRouter API key for the models OpenRouter serves",
+        validation_alias=AliasChoices("OPENROUTER_API_KEY", "openrouter_api_key"),
         repr=False,
     )
     tavily_api_key: str | None = Field(
@@ -381,6 +433,31 @@ class WorkflowSettingsMixin:
         description="Shared host dir mounted at /workspace/outputs for FINAL deliverables (default: <workspace_dir>/artifacts).",
         json_schema_extra={"ui_order": 134},
     )
+
+    @field_validator("model_endpoints")
+    @classmethod
+    def _validate_endpoint_names(cls, v: dict[str, EndpointSpec]) -> dict[str, EndpointSpec]:
+        """Endpoint names are provider names in references: no built-in's name."""
+        for name in v:
+            validate_endpoint_name(name)
+        return v
+
+    @field_validator("model_roles")
+    @classmethod
+    def _validate_model_roles(cls, v: dict[str, str]) -> dict[str, str]:
+        """Each role names a model, never another role, and default is default_model."""
+        RoleMap(default_model=None, model_roles=v)
+        return v
+
+    @field_validator("pinned_models")
+    @classmethod
+    def _validate_pinned_models(cls, v: list[str]) -> list[str]:
+        for index, spec in enumerate(v):
+            try:
+                parse_ref(spec)
+            except ModelSpecError as exc:
+                raise ValueError(f"pinned_models[{index}]: {exc}") from None
+        return v
 
     @field_validator("sandbox_network")
     @classmethod
@@ -727,6 +804,10 @@ class WorkflowSettingsMixin:
         for every later one.) A key unset in settings leaves the environment
         untouched. Credentials are process-global; SettingsContext does not
         isolate them.
+
+        Only the Google and Anthropic keys are exported. ``openai_api_key`` and
+        ``openrouter_api_key`` never are: the model adapters pass every key to
+        its client explicitly, so nothing needs them in the environment.
         """
         import os
 

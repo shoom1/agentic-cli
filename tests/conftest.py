@@ -75,7 +75,13 @@ class MockContext:
         workspace_dir = Path(self._temp_dir.name)
 
         # Preserve and clear relevant environment variables
-        env_vars = ["GOOGLE_API_KEY", "ANTHROPIC_API_KEY", "SERPER_API_KEY"]
+        env_vars = [
+            "GOOGLE_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "OPENAI_API_KEY",
+            "OPENROUTER_API_KEY",
+            "SERPER_API_KEY",
+        ]
         for var in env_vars:
             self._original_env[var] = os.environ.get(var)
             if var in os.environ:

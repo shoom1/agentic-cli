@@ -39,6 +39,31 @@ def test_html2text_is_declared():
     )
 
 
+def test_the_model_table_ships_in_the_wheel():
+    """``agentic_cli.models`` reads ``data/table.json`` at run time.
+
+    hatchling puts every file under a listed package into the wheel, except
+    what the build config excludes and what ``.gitignore`` ignores. This pins
+    all three; the wheel acceptance test checks the installed file itself.
+    """
+    import subprocess
+
+    root = _PYPROJECT.parent
+    table = root / "src" / "agentic_cli" / "models" / "data" / "table.json"
+    assert table.is_file()
+
+    wheel = tomllib.loads(_PYPROJECT.read_text())["tool"]["hatch"]["build"]["targets"]["wheel"]
+    assert "src/agentic_cli" in wheel["packages"]
+    assert not {"exclude", "only-include", "artifacts"} & set(wheel), wheel
+
+    ignored = subprocess.run(
+        ["git", "check-ignore", "-q", str(table)], cwd=root, capture_output=True
+    )
+    if ignored.returncode == 128:  # not a git checkout (e.g. an sdist)
+        return
+    assert ignored.returncode == 1, "data/table.json is git-ignored, so hatchling leaves it out"
+
+
 # --- Optional-capability isolation -------------------------------------------
 #
 # The heavyweight capability stacks live behind extras (``kb``: torch /

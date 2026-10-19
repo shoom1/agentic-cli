@@ -217,6 +217,12 @@ class BaseSettings(WorkflowSettingsMixin, AppSettingsMixin, CLISettingsMixin, Py
         env_file_encoding="utf-8",
         env_nested_delimiter="__",
         extra="ignore",
+        # Settings hold credentials, and a rejected value can be one: a key
+        # written inline in a model_endpoints entry, or a password in its
+        # base_url. Pydantic honours this only on the outermost model, so the
+        # nested EndpointSpec's own setting does not cover it here. Errors
+        # still name the setting and say what was expected.
+        hide_input_in_errors=True,
     )
 
     def __init__(self, **values: Any) -> None:

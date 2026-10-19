@@ -79,7 +79,7 @@ class TestSaveOnlyGivenKeys:
 
 
 class AppSettings(BaseSettings):
-    openai_api_key: str | None = Field(default=None)
+    mistral_api_key: str | None = Field(default=None)
     service_token: SecretStr | None = Field(default=None)
     report_style: str = Field(default="plain")
 
@@ -87,18 +87,18 @@ class AppSettings(BaseSettings):
 class TestCredentialFieldsAreNeverWritten:
     def test_full_save_skips_domain_credentials(self, fs):
         settings = AppSettings(
-            openai_api_key="value-1", service_token="value-2", report_style="fancy",
+            mistral_api_key="value-1", service_token="value-2", report_style="fancy",
         )
         SettingsPersistence(APP).save(settings)
         written = {**_read(fs["project"]), **_read(fs["user"])}
         assert written.get("report_style") == "fancy"
-        assert "openai_api_key" not in written
+        assert "mistral_api_key" not in written
         assert "service_token" not in written
 
     def test_keyed_save_skips_domain_credentials(self, fs):
-        settings = AppSettings(openai_api_key="value-1")
-        SettingsPersistence(APP).save(settings, keys={"openai_api_key"})
-        assert "openai_api_key" not in {**_read(fs["project"]), **_read(fs["user"])}
+        settings = AppSettings(mistral_api_key="value-1")
+        SettingsPersistence(APP).save(settings, keys={"mistral_api_key"})
+        assert "mistral_api_key" not in {**_read(fs["project"]), **_read(fs["user"])}
 
 
 class TestSettingsCommandSavesTheChanges:

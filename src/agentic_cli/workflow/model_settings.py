@@ -15,21 +15,27 @@ have no neutral field; each backend filters it to keys it understands.
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
-# Thinking modes. ``none`` disables thinking; ``low``/``medium``/``high`` map to
-# the model-family's discrete effort levels; ``budget`` uses an explicit token
-# budget (see ``ThinkingSettings.budget_tokens``).
-ThinkingMode = Literal["none", "low", "medium", "high", "budget"]
+# Thinking modes: a lowercase name. ``none`` turns thinking off wherever the
+# model allows it; ``low``/``medium``/``high`` are the model's own levels;
+# ``budget`` uses an explicit token budget (see ``ThinkingSettings.budget_tokens``).
+# Any other name is a native level of the model (``minimal``, ``xhigh``, ``max``
+# on models that have them), checked against the model's ladder when the
+# workflow resolves its agents (``agentic_cli.models.resolve_model``).
+ThinkingMode = Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9_]*$")]
 
 
 class ThinkingSettings(BaseModel):
     """Per-agent thinking/reasoning configuration.
 
     Attributes:
-        mode: Effort level, or ``"budget"`` to use an explicit token budget.
+        mode: ``none``, ``low``, ``medium``, ``high``, ``budget`` (an explicit
+            token budget), or a native level of the agent's model such as
+            ``xhigh``; resolving the agent's model rejects a level the model
+            lacks.
         budget_tokens: Explicit thinking-token budget (only used when
             ``mode == "budget"``).
     """

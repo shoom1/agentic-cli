@@ -1,0 +1,1021 @@
+{
+  "version": 1,
+  "about": "agentic-cli's shipped model table: family rules (first match wins, per provider) and per-model numbers. Live listings and the user's endpoint declarations take precedence over every value here.",
+  "providers": {
+    "google": {
+      "fallback_models": [
+        "gemini-3.1-pro-preview",
+        "gemini-3.1-flash-lite-preview",
+        "gemini-2.5-pro",
+        "gemini-2.5-flash"
+      ],
+      "fallback_source": "agentic-cli 0.6.x ModelRegistry.FALLBACK_GOOGLE",
+      "rules": [
+        {
+          "match": "^gemini-2\\.5-flash-lite(-preview(-[0-9-]+)?)?$",
+          "tier": "fast",
+          "thinking": {
+            "mechanism": "gemini_budget",
+            "budgets": [4096, 12288, 24576],
+            "budget_range": [512, 24576],
+            "can_disable": true
+          },
+          "cache": "gemini",
+          "reasoning_text": true,
+          "sampling": "always",
+          "source": "Gemini 2.5 flash-lite: budget thinking, 512-24576, and 0 turns thinking off. agentic-cli 0.6.x budgets for low/medium/high (adk/manager.py, langgraph/graph_builder.py); budget range from the Gemini API thinking guide (ai.google.dev/gemini-api/docs/thinking), as the profiles carry no budget ranges"
+        },
+        {
+          "match": "^gemini-2\\.5-flash(-preview(-[0-9-]+)?)?$",
+          "tier": "default",
+          "thinking": {
+            "mechanism": "gemini_budget",
+            "budgets": [4096, 12288, 24576],
+            "budget_range": [1, 24576],
+            "can_disable": true
+          },
+          "cache": "gemini",
+          "reasoning_text": true,
+          "sampling": "always",
+          "source": "Gemini 2.5 flash: budget thinking, 1-24576, and 0 turns thinking off. agentic-cli 0.6.x budgets for low/medium/high (adk/manager.py, langgraph/graph_builder.py); budget range from the Gemini API thinking guide (ai.google.dev/gemini-api/docs/thinking), as the profiles carry no budget ranges"
+        },
+        {
+          "match": "^gemini-2\\.5-pro(-preview(-[0-9-]+)?)?$",
+          "tier": "strong",
+          "thinking": {
+            "mechanism": "gemini_budget",
+            "budgets": [4096, 12288, 24576],
+            "budget_range": [128, 32768],
+            "can_disable": false
+          },
+          "cache": "gemini",
+          "reasoning_text": true,
+          "sampling": "always",
+          "source": "Gemini 2.5 pro: budget thinking, 128-32768, and thinking cannot be turned off. agentic-cli 0.6.x budgets for low/medium/high (adk/manager.py, langgraph/graph_builder.py); budget range from the Gemini API thinking guide (ai.google.dev/gemini-api/docs/thinking), as the profiles carry no budget ranges"
+        },
+        {
+          "match": "^gemini-[3-9](\\.\\d+)?-pro(-preview(-[0-9-]+)?)?$",
+          "tier": "strong",
+          "thinking": {
+            "mechanism": "gemini_level",
+            "levels": ["low", "high"],
+            "can_disable": false,
+            "generic_map": {
+              "medium": "high"
+            }
+          },
+          "cache": "gemini",
+          "reasoning_text": true,
+          "sampling": "always",
+          "source": "Gemini 3 Pro: levels low and high only, medium becomes high. Gemini 3 and later take a discrete thinking_level and cannot turn thinking off (none = the lowest level); agentic-cli 0.6.x thinking-level mapping; ladders from the langchain-google-genai 4.4.2 bundled profiles (models.dev, MIT), 2026-10"
+        },
+        {
+          "match": "^gemini-[3-9](\\.\\d+)?-flash-lite(-preview(-[0-9-]+)?)?$",
+          "tier": "fast",
+          "thinking": {
+            "mechanism": "gemini_level",
+            "levels": ["minimal", "low", "medium", "high"],
+            "can_disable": false
+          },
+          "cache": "gemini",
+          "reasoning_text": true,
+          "sampling": "always",
+          "source": "Gemini 3 Flash-Lite. Gemini 3 and later take a discrete thinking_level and cannot turn thinking off (none = the lowest level); agentic-cli 0.6.x thinking-level mapping; ladders from the langchain-google-genai 4.4.2 bundled profiles (models.dev, MIT), 2026-10"
+        },
+        {
+          "match": "^gemini-[3-9](\\.\\d+)?-flash(-preview(-[0-9-]+)?)?$",
+          "tier": "default",
+          "thinking": {
+            "mechanism": "gemini_level",
+            "levels": ["minimal", "low", "medium", "high"],
+            "can_disable": false
+          },
+          "cache": "gemini",
+          "reasoning_text": true,
+          "sampling": "always",
+          "source": "Gemini 3 Flash. Gemini 3 and later take a discrete thinking_level and cannot turn thinking off (none = the lowest level); agentic-cli 0.6.x thinking-level mapping; ladders from the langchain-google-genai 4.4.2 bundled profiles (models.dev, MIT), 2026-10"
+        },
+        {
+          "match": "^gemini-[3-9]",
+          "thinking": {
+            "mechanism": "gemini_level",
+            "levels": ["low", "high"],
+            "can_disable": false,
+            "generic_map": {
+              "medium": "high"
+            }
+          },
+          "cache": "gemini",
+          "reasoning_text": true,
+          "sampling": "always",
+          "source": "Other Gemini 3+ models: no tier; the levels every Gemini 3 model takes. Gemini 3 and later take a discrete thinking_level and cannot turn thinking off (none = the lowest level); agentic-cli 0.6.x thinking-level mapping; ladders from the langchain-google-genai 4.4.2 bundled profiles (models.dev, MIT), 2026-10"
+        }
+      ],
+      "models": {
+        "gemini-2.5-flash": {
+          "display_name": "Gemini 2.5 Flash",
+          "context_window": 1048576,
+          "max_output": 65536,
+          "tools": true,
+          "image_input": true,
+          "reasoning_text": true,
+          "source": "langchain-google-genai 4.4.2 bundled profiles (models.dev, MIT), 2026-10"
+        },
+        "gemini-2.5-flash-lite": {
+          "display_name": "Gemini 2.5 Flash-Lite",
+          "context_window": 1048576,
+          "max_output": 65536,
+          "tools": true,
+          "image_input": true,
+          "reasoning_text": true,
+          "source": "langchain-google-genai 4.4.2 bundled profiles (models.dev, MIT), 2026-10"
+        },
+        "gemini-2.5-pro": {
+          "display_name": "Gemini 2.5 Pro",
+          "context_window": 1048576,
+          "max_output": 65536,
+          "tools": true,
+          "image_input": true,
+          "reasoning_text": true,
+          "source": "langchain-google-genai 4.4.2 bundled profiles (models.dev, MIT), 2026-10"
+        },
+        "gemini-3-flash-preview": {
+          "display_name": "Gemini 3 Flash Preview",
+          "context_window": 1048576,
+          "max_output": 65536,
+          "tools": true,
+          "image_input": true,
+          "reasoning_text": true,
+          "thinking": {
+            "levels": ["minimal", "low", "medium", "high"]
+          },
+          "source": "langchain-google-genai 4.4.2 bundled profiles (models.dev, MIT), 2026-10"
+        },
+        "gemini-3.1-flash-lite": {
+          "display_name": "Gemini 3.1 Flash Lite",
+          "context_window": 1048576,
+          "max_output": 65536,
+          "tools": true,
+          "image_input": true,
+          "reasoning_text": true,
+          "thinking": {
+            "levels": ["minimal", "low", "medium", "high"]
+          },
+          "source": "langchain-google-genai 4.4.2 bundled profiles (models.dev, MIT), 2026-10"
+        },
+        "gemini-3.1-flash-lite-preview": {
+          "display_name": "Gemini 3.1 Flash Lite Preview",
+          "context_window": 1048576,
+          "max_output": 65536,
+          "tools": true,
+          "image_input": true,
+          "reasoning_text": true,
+          "thinking": {
+            "levels": ["minimal", "low", "medium", "high"]
+          },
+          "source": "langchain-google-genai 4.4.2 bundled profiles (models.dev, MIT), 2026-10"
+        },
+        "gemini-3.1-pro-preview": {
+          "display_name": "Gemini 3.1 Pro Preview",
+          "context_window": 1048576,
+          "max_output": 65536,
+          "tools": true,
+          "image_input": true,
+          "reasoning_text": true,
+          "thinking": {
+            "levels": ["low", "medium", "high"]
+          },
+          "source": "langchain-google-genai 4.4.2 bundled profiles (models.dev, MIT), 2026-10"
+        },
+        "gemini-3.5-flash": {
+          "display_name": "Gemini 3.5 Flash",
+          "context_window": 1048576,
+          "max_output": 65536,
+          "tools": true,
+          "image_input": true,
+          "reasoning_text": true,
+          "thinking": {
+            "levels": ["minimal", "low", "medium", "high"]
+          },
+          "source": "langchain-google-genai 4.4.2 bundled profiles (models.dev, MIT), 2026-10"
+        },
+        "gemini-3.5-flash-lite": {
+          "display_name": "Gemini 3.5 Flash Lite",
+          "context_window": 1048576,
+          "max_output": 65536,
+          "tools": true,
+          "image_input": true,
+          "reasoning_text": true,
+          "thinking": {
+            "levels": ["minimal", "low", "medium", "high"]
+          },
+          "source": "langchain-google-genai 4.4.2 bundled profiles (models.dev, MIT), 2026-10"
+        },
+        "gemini-3.6-flash": {
+          "display_name": "Gemini 3.6 Flash",
+          "context_window": 1048576,
+          "max_output": 65536,
+          "tools": true,
+          "image_input": true,
+          "reasoning_text": true,
+          "thinking": {
+            "levels": ["minimal", "low", "medium", "high"]
+          },
+          "source": "langchain-google-genai 4.4.2 bundled profiles (models.dev, MIT), 2026-10"
+        },
+        "gemini-3.7-flash": {
+          "display_name": "Gemini 3.7 Flash",
+          "context_window": 1048576,
+          "max_output": 65536,
+          "tools": true,
+          "image_input": true,
+          "reasoning_text": true,
+          "source": "langchain-google-genai 4.4.2 bundled profiles (models.dev, MIT), 2026-10"
+        },
+        "gemini-3.8-flash": {
+          "display_name": "Gemini 3.8 Flash",
+          "context_window": 1048576,
+          "max_output": 65536,
+          "tools": true,
+          "image_input": true,
+          "reasoning_text": true,
+          "source": "langchain-google-genai 4.4.2 bundled profiles (models.dev, MIT), 2026-10"
+        },
+        "gemini-4-argon": {
+          "display_name": "Gemini 4 Argon",
+          "context_window": 1048576,
+          "max_output": 65536,
+          "tools": true,
+          "image_input": true,
+          "reasoning_text": true,
+          "sampling": "never",
+          "thinking": {
+            "levels": ["low", "medium", "high"]
+          },
+          "source": "langchain-google-genai 4.4.2 bundled profiles (models.dev, MIT), 2026-10"
+        }
+      }
+    },
+    "anthropic": {
+      "fallback_models": [
+        "claude-sonnet-4-6",
+        "claude-opus-4-6",
+        "claude-sonnet-4-5",
+        "claude-sonnet-4",
+        "claude-haiku-4-5"
+      ],
+      "fallback_source": "agentic-cli 0.6.x ModelRegistry.FALLBACK_ANTHROPIC, plus claude-haiku-4-5 for the fast tier",
+      "rules": [
+        {
+          "match": "^claude-fable-",
+          "thinking": {
+            "mechanism": "anthropic_adaptive",
+            "levels": ["low", "medium", "high", "max"]
+          },
+          "cache": "anthropic",
+          "reasoning_text": true,
+          "sampling": "never",
+          "source": "Claude Fable: no tier, and it takes no sampling parameters. Claude 4.6 and later: adaptive thinking sized by effort (budget_tokens is rejected from 4.7); version check from agentic-cli 0.6.x (_anthropic_uses_adaptive), used when no listing says otherwise; effort ladders from the langchain-anthropic 1.7.6 bundled profiles (models.dev, MIT), 2026-10"
+        },
+        {
+          "match": "^claude-haiku-",
+          "min_version": [4, 6],
+          "tier": "fast",
+          "thinking": {
+            "mechanism": "anthropic_adaptive",
+            "levels": ["low", "medium", "high", "max"]
+          },
+          "cache": "anthropic",
+          "reasoning_text": true,
+          "sampling": "without_thinking",
+          "source": "Claude 4.6 and later: adaptive thinking sized by effort (budget_tokens is rejected from 4.7); version check from agentic-cli 0.6.x (_anthropic_uses_adaptive), used when no listing says otherwise; effort ladders from the langchain-anthropic 1.7.6 bundled profiles (models.dev, MIT), 2026-10"
+        },
+        {
+          "match": "^claude-haiku-",
+          "tier": "fast",
+          "thinking": {
+            "mechanism": "anthropic_budget",
+            "budgets": [4096, 10000, 32000],
+            "budget_range": [1024, 128000]
+          },
+          "cache": "anthropic",
+          "reasoning_text": true,
+          "sampling": "without_thinking",
+          "source": "Claude up to 4.5: enabled thinking with budget_tokens (at least 1024). agentic-cli 0.6.x budgets for low/medium/high (adk/manager.py, langgraph/graph_builder.py); the range's top is the largest Claude max output, and the model's own max output bounds the budget at resolution"
+        },
+        {
+          "match": "^claude-sonnet-",
+          "min_version": [4, 6],
+          "tier": "default",
+          "thinking": {
+            "mechanism": "anthropic_adaptive",
+            "levels": ["low", "medium", "high", "max"]
+          },
+          "cache": "anthropic",
+          "reasoning_text": true,
+          "sampling": "without_thinking",
+          "source": "Claude 4.6 and later: adaptive thinking sized by effort (budget_tokens is rejected from 4.7); version check from agentic-cli 0.6.x (_anthropic_uses_adaptive), used when no listing says otherwise; effort ladders from the langchain-anthropic 1.7.6 bundled profiles (models.dev, MIT), 2026-10"
+        },
+        {
+          "match": "^claude-sonnet-",
+          "tier": "default",
+          "thinking": {
+            "mechanism": "anthropic_budget",
+            "budgets": [4096, 10000, 32000],
+            "budget_range": [1024, 128000]
+          },
+          "cache": "anthropic",
+          "reasoning_text": true,
+          "sampling": "without_thinking",
+          "source": "Claude up to 4.5: enabled thinking with budget_tokens (at least 1024). agentic-cli 0.6.x budgets for low/medium/high (adk/manager.py, langgraph/graph_builder.py); the range's top is the largest Claude max output, and the model's own max output bounds the budget at resolution"
+        },
+        {
+          "match": "^claude-opus-",
+          "min_version": [4, 6],
+          "tier": "strong",
+          "thinking": {
+            "mechanism": "anthropic_adaptive",
+            "levels": ["low", "medium", "high", "max"]
+          },
+          "cache": "anthropic",
+          "reasoning_text": true,
+          "sampling": "without_thinking",
+          "source": "Claude 4.6 and later: adaptive thinking sized by effort (budget_tokens is rejected from 4.7); version check from agentic-cli 0.6.x (_anthropic_uses_adaptive), used when no listing says otherwise; effort ladders from the langchain-anthropic 1.7.6 bundled profiles (models.dev, MIT), 2026-10"
+        },
+        {
+          "match": "^claude-opus-",
+          "tier": "strong",
+          "thinking": {
+            "mechanism": "anthropic_budget",
+            "budgets": [4096, 10000, 32000],
+            "budget_range": [1024, 128000]
+          },
+          "cache": "anthropic",
+          "reasoning_text": true,
+          "sampling": "without_thinking",
+          "source": "Claude up to 4.5: enabled thinking with budget_tokens (at least 1024). agentic-cli 0.6.x budgets for low/medium/high (adk/manager.py, langgraph/graph_builder.py); the range's top is the largest Claude max output, and the model's own max output bounds the budget at resolution"
+        },
+        {
+          "match": "^claude-",
+          "min_version": [4, 6],
+          "thinking": {
+            "mechanism": "anthropic_adaptive",
+            "levels": ["low", "medium", "high", "max"]
+          },
+          "cache": "anthropic",
+          "reasoning_text": true,
+          "sampling": "without_thinking",
+          "source": "Other Claude models: no tier. Claude 4.6 and later: adaptive thinking sized by effort (budget_tokens is rejected from 4.7); version check from agentic-cli 0.6.x (_anthropic_uses_adaptive), used when no listing says otherwise; effort ladders from the langchain-anthropic 1.7.6 bundled profiles (models.dev, MIT), 2026-10"
+        },
+        {
+          "match": "^claude-",
+          "thinking": {
+            "mechanism": "anthropic_budget",
+            "budgets": [4096, 10000, 32000],
+            "budget_range": [1024, 128000]
+          },
+          "cache": "anthropic",
+          "reasoning_text": true,
+          "sampling": "without_thinking",
+          "source": "Other Claude models: no tier. Claude up to 4.5: enabled thinking with budget_tokens (at least 1024). agentic-cli 0.6.x budgets for low/medium/high (adk/manager.py, langgraph/graph_builder.py); the range's top is the largest Claude max output, and the model's own max output bounds the budget at resolution"
+        }
+      ],
+      "models": {
+        "claude-fable-5": {
+          "display_name": "Claude Fable 5",
+          "context_window": 1000000,
+          "max_output": 128000,
+          "tools": true,
+          "image_input": true,
+          "reasoning_text": true,
+          "sampling": "never",
+          "thinking": {
+            "levels": ["low", "medium", "high", "xhigh", "max"],
+            "can_disable": false
+          },
+          "source": "langchain-anthropic 1.7.6 bundled profiles (models.dev, MIT), 2026-10; cannot turn thinking off (thinking is always on for Claude Fable 5): https://platform.claude.com/docs/en/build-with-claude/thinking"
+        },
+        "claude-fable-5-1": {
+          "display_name": "Claude Fable 5.1",
+          "context_window": 1000000,
+          "max_output": 128000,
+          "tools": true,
+          "image_input": true,
+          "reasoning_text": true,
+          "sampling": "never",
+          "thinking": {
+            "levels": ["low", "medium", "high", "xhigh", "max"],
+            "can_disable": false
+          },
+          "source": "langchain-anthropic 1.7.6 bundled profiles (models.dev, MIT), 2026-10; cannot turn thinking off (thinking is always on for Claude Fable 5.1): https://platform.claude.com/docs/en/build-with-claude/thinking"
+        },
+        "claude-haiku-4-5": {
+          "display_name": "Claude Haiku 4.5 (latest)",
+          "context_window": 200000,
+          "max_output": 64000,
+          "tools": true,
+          "image_input": true,
+          "reasoning_text": true,
+          "source": "langchain-anthropic 1.7.6 bundled profiles (models.dev, MIT), 2026-10"
+        },
+        "claude-haiku-5-5": {
+          "display_name": "Claude Haiku 5.5",
+          "context_window": 1000000,
+          "max_output": 128000,
+          "tools": true,
+          "image_input": true,
+          "reasoning_text": true,
+          "sampling": "never",
+          "source": "langchain-anthropic 1.7.6 bundled profiles (models.dev, MIT), 2026-10"
+        },
+        "claude-opus-4-5": {
+          "display_name": "Claude Opus 4.5 (latest)",
+          "context_window": 200000,
+          "max_output": 64000,
+          "tools": true,
+          "image_input": true,
+          "reasoning_text": true,
+          "source": "langchain-anthropic 1.7.6 bundled profiles (models.dev, MIT), 2026-10"
+        },
+        "claude-opus-4-6": {
+          "display_name": "Claude Opus 4.6",
+          "context_window": 1000000,
+          "max_output": 128000,
+          "tools": true,
+          "image_input": true,
+          "reasoning_text": true,
+          "thinking": {
+            "levels": ["low", "medium", "high", "max"]
+          },
+          "source": "langchain-anthropic 1.7.6 bundled profiles (models.dev, MIT), 2026-10"
+        },
+        "claude-opus-4-7": {
+          "display_name": "Claude Opus 4.7",
+          "context_window": 1000000,
+          "max_output": 128000,
+          "tools": true,
+          "image_input": true,
+          "reasoning_text": true,
+          "sampling": "never",
+          "thinking": {
+            "levels": ["low", "medium", "high", "xhigh", "max"]
+          },
+          "source": "langchain-anthropic 1.7.6 bundled profiles (models.dev, MIT), 2026-10"
+        },
+        "claude-opus-4-8": {
+          "display_name": "Claude Opus 4.8",
+          "context_window": 1000000,
+          "max_output": 128000,
+          "tools": true,
+          "image_input": true,
+          "reasoning_text": true,
+          "sampling": "never",
+          "thinking": {
+            "levels": ["low", "medium", "high", "xhigh", "max"]
+          },
+          "source": "langchain-anthropic 1.7.6 bundled profiles (models.dev, MIT), 2026-10"
+        },
+        "claude-opus-5": {
+          "display_name": "Claude Opus 5",
+          "context_window": 1000000,
+          "max_output": 128000,
+          "tools": true,
+          "image_input": true,
+          "reasoning_text": true,
+          "sampling": "never",
+          "thinking": {
+            "levels": ["low", "medium", "high", "xhigh", "max"]
+          },
+          "source": "langchain-anthropic 1.7.6 bundled profiles (models.dev, MIT), 2026-10"
+        },
+        "claude-opus-5-5": {
+          "display_name": "Claude Opus 5.5",
+          "context_window": 1000000,
+          "max_output": 128000,
+          "tools": true,
+          "image_input": true,
+          "reasoning_text": true,
+          "sampling": "never",
+          "thinking": {
+            "levels": ["low", "medium", "high", "xhigh", "max"],
+            "can_disable": false
+          },
+          "source": "langchain-anthropic 1.7.6 bundled profiles (models.dev, MIT), 2026-10; cannot turn thinking off: model-layer design (approved 2026-10-19)"
+        },
+        "claude-sonnet-4-5": {
+          "display_name": "Claude Sonnet 4.5 (latest)",
+          "context_window": 200000,
+          "max_output": 64000,
+          "tools": true,
+          "image_input": true,
+          "reasoning_text": true,
+          "source": "langchain-anthropic 1.7.6 bundled profiles (models.dev, MIT), 2026-10"
+        },
+        "claude-sonnet-4-6": {
+          "display_name": "Claude Sonnet 4.6",
+          "context_window": 1000000,
+          "max_output": 128000,
+          "tools": true,
+          "image_input": true,
+          "reasoning_text": true,
+          "thinking": {
+            "levels": ["low", "medium", "high", "max"]
+          },
+          "source": "langchain-anthropic 1.7.6 bundled profiles (models.dev, MIT), 2026-10"
+        },
+        "claude-sonnet-5": {
+          "display_name": "Claude Sonnet 5",
+          "context_window": 1000000,
+          "max_output": 128000,
+          "tools": true,
+          "image_input": true,
+          "reasoning_text": true,
+          "sampling": "never",
+          "thinking": {
+            "levels": ["low", "medium", "high", "xhigh", "max"]
+          },
+          "source": "langchain-anthropic 1.7.6 bundled profiles (models.dev, MIT), 2026-10"
+        },
+        "claude-sonnet-5-5": {
+          "display_name": "Claude Sonnet 5.5",
+          "context_window": 1000000,
+          "max_output": 128000,
+          "tools": true,
+          "image_input": true,
+          "reasoning_text": true,
+          "sampling": "never",
+          "thinking": {
+            "levels": ["low", "medium", "high", "xhigh", "max"],
+            "can_disable": false
+          },
+          "source": "langchain-anthropic 1.7.6 bundled profiles (models.dev, MIT), 2026-10; cannot turn thinking off (Claude Sonnet 5.5 rejects disabled thinking at every effort): https://platform.claude.com/docs/en/build-with-claude/thinking"
+        }
+      }
+    },
+    "openai": {
+      "curated": [
+        "gpt-6.1-sol",
+        "gpt-6-sol",
+        "gpt-6-luna",
+        "gpt-6-astra",
+        "gpt-5.6",
+        "gpt-5.6-sol",
+        "gpt-5.6-luna",
+        "gpt-5.6-terra",
+        "gpt-5.5",
+        "gpt-5.5-pro",
+        "gpt-5.4",
+        "gpt-5.4-pro",
+        "gpt-5.4-mini",
+        "gpt-5.4-nano",
+        "gpt-5.2",
+        "gpt-5.2-pro",
+        "gpt-5.1",
+        "gpt-5",
+        "gpt-5-pro",
+        "gpt-5-mini",
+        "gpt-5-nano",
+        "o4-mini",
+        "o3",
+        "o3-pro",
+        "o3-mini",
+        "o1",
+        "o1-pro",
+        "gpt-4.1",
+        "gpt-4.1-mini",
+        "gpt-4.1-nano",
+        "gpt-4o",
+        "gpt-4o-mini"
+      ],
+      "curated_source": "langchain-openai 1.7.2 bundled profiles (models.dev, MIT), 2026-10: chat and tool-calling models with a full profile; no dated snapshots, -latest or -chat-latest aliases, codex, realtime, image, audio or embedding models, and not the pre-4o gpt-4, gpt-4-turbo or gpt-3.5-turbo",
+      "rules": [
+        {
+          "match": "^(gpt-[5-9](\\.\\d+)?|o\\d+)-(mini|nano)$",
+          "tier": "fast",
+          "thinking": {
+            "mechanism": "effort",
+            "levels": ["low", "medium", "high"]
+          },
+          "cache": "none",
+          "reasoning_text": true,
+          "sampling": "never",
+          "source": "-mini and -nano: fast. OpenAI reasoning models (gpt-5*, gpt-6*, o<digit>*): reasoning effort, and no sampling parameters; effort ladders from the langchain-openai 1.7.2 bundled profiles (models.dev, MIT), 2026-10; without one, the low/medium/high every reasoning model takes"
+        },
+        {
+          "match": "^(gpt-[5-9](\\.\\d+)?|o\\d+)-pro$",
+          "tier": "strong",
+          "thinking": {
+            "mechanism": "effort",
+            "levels": ["low", "medium", "high"]
+          },
+          "cache": "none",
+          "reasoning_text": true,
+          "sampling": "never",
+          "source": "-pro: strong. OpenAI reasoning models (gpt-5*, gpt-6*, o<digit>*): reasoning effort, and no sampling parameters; effort ladders from the langchain-openai 1.7.2 bundled profiles (models.dev, MIT), 2026-10; without one, the low/medium/high every reasoning model takes"
+        },
+        {
+          "match": "^(gpt-[5-9](\\.\\d+)?|o\\d+)$",
+          "tier": "default",
+          "thinking": {
+            "mechanism": "effort",
+            "levels": ["low", "medium", "high"]
+          },
+          "cache": "none",
+          "reasoning_text": true,
+          "sampling": "never",
+          "source": "The plain model: default. OpenAI reasoning models (gpt-5*, gpt-6*, o<digit>*): reasoning effort, and no sampling parameters; effort ladders from the langchain-openai 1.7.2 bundled profiles (models.dev, MIT), 2026-10; without one, the low/medium/high every reasoning model takes"
+        },
+        {
+          "match": "^(?!.*-chat)(gpt-[5-9]|o\\d)",
+          "thinking": {
+            "mechanism": "effort",
+            "levels": ["low", "medium", "high"]
+          },
+          "cache": "none",
+          "reasoning_text": true,
+          "sampling": "never",
+          "source": "Other reasoning models: no tier. OpenAI reasoning models (gpt-5*, gpt-6*, o<digit>*): reasoning effort, and no sampling parameters; effort ladders from the langchain-openai 1.7.2 bundled profiles (models.dev, MIT), 2026-10; without one, the low/medium/high every reasoning model takes"
+        },
+        {
+          "match": "^gpt-",
+          "cache": "none",
+          "reasoning_text": false,
+          "sampling": "always",
+          "source": "Other GPT models (gpt-4.1, gpt-4o, chat aliases): no thinking knob, no tier"
+        }
+      ],
+      "models": {
+        "gpt-6.1-sol": {
+          "display_name": "GPT-6.1 Sol",
+          "context_window": 1050000,
+          "max_output": 128000,
+          "tools": true,
+          "image_input": true,
+          "reasoning_text": true,
+          "sampling": "never",
+          "source": "langchain-openai 1.7.2 bundled profiles (models.dev, MIT), 2026-10"
+        },
+        "gpt-6-sol": {
+          "display_name": "GPT-6 Sol",
+          "context_window": 1050000,
+          "max_output": 128000,
+          "tools": true,
+          "image_input": true,
+          "reasoning_text": true,
+          "sampling": "never",
+          "thinking": {
+            "levels": ["none", "low", "medium", "high", "xhigh", "max"]
+          },
+          "source": "langchain-openai 1.7.2 bundled profiles (models.dev, MIT), 2026-10"
+        },
+        "gpt-6-luna": {
+          "display_name": "GPT-6 Luna",
+          "context_window": 1050000,
+          "max_output": 128000,
+          "tools": true,
+          "image_input": true,
+          "reasoning_text": true,
+          "sampling": "never",
+          "thinking": {
+            "levels": ["none", "low", "medium", "high", "xhigh", "max"]
+          },
+          "source": "langchain-openai 1.7.2 bundled profiles (models.dev, MIT), 2026-10"
+        },
+        "gpt-6-astra": {
+          "display_name": "GPT-6 Astra",
+          "context_window": 1050000,
+          "max_output": 128000,
+          "tools": true,
+          "image_input": true,
+          "reasoning_text": true,
+          "sampling": "never",
+          "thinking": {
+            "levels": ["low", "medium", "high", "xhigh", "max"]
+          },
+          "source": "langchain-openai 1.7.2 bundled profiles (models.dev, MIT), 2026-10"
+        },
+        "gpt-5.6": {
+          "display_name": "GPT-5.6",
+          "context_window": 1050000,
+          "max_output": 128000,
+          "tools": true,
+          "image_input": true,
+          "reasoning_text": true,
+          "sampling": "never",
+          "thinking": {
+            "levels": ["none", "low", "medium", "high", "xhigh", "max"]
+          },
+          "source": "langchain-openai 1.7.2 bundled profiles (models.dev, MIT), 2026-10"
+        },
+        "gpt-5.6-sol": {
+          "display_name": "GPT-5.6 Sol",
+          "context_window": 1050000,
+          "max_output": 128000,
+          "tools": true,
+          "image_input": true,
+          "reasoning_text": true,
+          "sampling": "never",
+          "thinking": {
+            "levels": ["none", "low", "medium", "high", "xhigh", "max"]
+          },
+          "source": "langchain-openai 1.7.2 bundled profiles (models.dev, MIT), 2026-10"
+        },
+        "gpt-5.6-luna": {
+          "display_name": "GPT-5.6 Luna",
+          "context_window": 1050000,
+          "max_output": 128000,
+          "tools": true,
+          "image_input": true,
+          "reasoning_text": true,
+          "sampling": "never",
+          "thinking": {
+            "levels": ["none", "low", "medium", "high", "xhigh", "max"]
+          },
+          "source": "langchain-openai 1.7.2 bundled profiles (models.dev, MIT), 2026-10"
+        },
+        "gpt-5.6-terra": {
+          "display_name": "GPT-5.6 Terra",
+          "context_window": 1050000,
+          "max_output": 128000,
+          "tools": true,
+          "image_input": true,
+          "reasoning_text": true,
+          "sampling": "never",
+          "thinking": {
+            "levels": ["none", "low", "medium", "high", "xhigh", "max"]
+          },
+          "source": "langchain-openai 1.7.2 bundled profiles (models.dev, MIT), 2026-10"
+        },
+        "gpt-5.5": {
+          "display_name": "GPT-5.5",
+          "context_window": 1050000,
+          "max_output": 128000,
+          "tools": true,
+          "image_input": true,
+          "reasoning_text": true,
+          "sampling": "never",
+          "thinking": {
+            "levels": ["none", "low", "medium", "high", "xhigh"]
+          },
+          "source": "langchain-openai 1.7.2 bundled profiles (models.dev, MIT), 2026-10"
+        },
+        "gpt-5.5-pro": {
+          "display_name": "GPT-5.5 Pro",
+          "context_window": 1050000,
+          "max_output": 128000,
+          "tools": true,
+          "image_input": true,
+          "reasoning_text": true,
+          "sampling": "never",
+          "thinking": {
+            "levels": ["none", "low", "medium", "high", "xhigh"]
+          },
+          "source": "langchain-openai 1.7.2 bundled profiles (models.dev, MIT), 2026-10"
+        },
+        "gpt-5.4": {
+          "display_name": "GPT-5.4",
+          "context_window": 1050000,
+          "max_output": 128000,
+          "tools": true,
+          "image_input": true,
+          "reasoning_text": true,
+          "thinking": {
+            "levels": ["none", "low", "medium", "high", "xhigh"]
+          },
+          "source": "langchain-openai 1.7.2 bundled profiles (models.dev, MIT), 2026-10"
+        },
+        "gpt-5.4-pro": {
+          "display_name": "GPT-5.4 Pro",
+          "context_window": 1050000,
+          "max_output": 128000,
+          "tools": true,
+          "image_input": true,
+          "reasoning_text": true,
+          "sampling": "never",
+          "thinking": {
+            "levels": ["none", "low", "medium", "high", "xhigh"]
+          },
+          "source": "langchain-openai 1.7.2 bundled profiles (models.dev, MIT), 2026-10"
+        },
+        "gpt-5.4-mini": {
+          "display_name": "GPT-5.4 mini",
+          "context_window": 400000,
+          "max_output": 128000,
+          "tools": true,
+          "image_input": true,
+          "reasoning_text": true,
+          "thinking": {
+            "levels": ["none", "low", "medium", "high", "xhigh"]
+          },
+          "source": "langchain-openai 1.7.2 bundled profiles (models.dev, MIT), 2026-10"
+        },
+        "gpt-5.4-nano": {
+          "display_name": "GPT-5.4 nano",
+          "context_window": 400000,
+          "max_output": 128000,
+          "tools": true,
+          "image_input": true,
+          "reasoning_text": true,
+          "thinking": {
+            "levels": ["none", "low", "medium", "high", "xhigh"]
+          },
+          "source": "langchain-openai 1.7.2 bundled profiles (models.dev, MIT), 2026-10"
+        },
+        "gpt-5.2": {
+          "display_name": "GPT-5.2",
+          "context_window": 272000,
+          "max_output": 128000,
+          "tools": true,
+          "image_input": true,
+          "reasoning_text": true,
+          "thinking": {
+            "levels": ["none", "low", "medium", "high", "xhigh"]
+          },
+          "source": "langchain-openai 1.7.2 bundled profiles (models.dev, MIT), 2026-10"
+        },
+        "gpt-5.2-pro": {
+          "display_name": "GPT-5.2 Pro",
+          "context_window": 272000,
+          "max_output": 128000,
+          "tools": true,
+          "image_input": true,
+          "reasoning_text": true,
+          "sampling": "never",
+          "thinking": {
+            "levels": ["none", "low", "medium", "high", "xhigh"]
+          },
+          "source": "langchain-openai 1.7.2 bundled profiles (models.dev, MIT), 2026-10"
+        },
+        "gpt-5.1": {
+          "display_name": "GPT-5.1",
+          "context_window": 272000,
+          "max_output": 128000,
+          "tools": true,
+          "image_input": true,
+          "reasoning_text": true,
+          "thinking": {
+            "levels": ["none", "low", "medium", "high"]
+          },
+          "source": "langchain-openai 1.7.2 bundled profiles (models.dev, MIT), 2026-10"
+        },
+        "gpt-5": {
+          "display_name": "GPT-5",
+          "context_window": 272000,
+          "max_output": 128000,
+          "tools": true,
+          "image_input": true,
+          "reasoning_text": true,
+          "sampling": "never",
+          "thinking": {
+            "levels": ["minimal", "low", "medium", "high"]
+          },
+          "source": "langchain-openai 1.7.2 bundled profiles (models.dev, MIT), 2026-10"
+        },
+        "gpt-5-pro": {
+          "display_name": "GPT-5 Pro",
+          "context_window": 272000,
+          "max_output": 272000,
+          "tools": true,
+          "image_input": true,
+          "reasoning_text": true,
+          "sampling": "never",
+          "thinking": {
+            "levels": ["none", "low", "medium", "high", "xhigh"]
+          },
+          "source": "langchain-openai 1.7.2 bundled profiles (models.dev, MIT), 2026-10"
+        },
+        "gpt-5-mini": {
+          "display_name": "GPT-5 Mini",
+          "context_window": 272000,
+          "max_output": 128000,
+          "tools": true,
+          "image_input": true,
+          "reasoning_text": true,
+          "sampling": "never",
+          "thinking": {
+            "levels": ["minimal", "low", "medium", "high"]
+          },
+          "source": "langchain-openai 1.7.2 bundled profiles (models.dev, MIT), 2026-10"
+        },
+        "gpt-5-nano": {
+          "display_name": "GPT-5 Nano",
+          "context_window": 272000,
+          "max_output": 128000,
+          "tools": true,
+          "image_input": true,
+          "reasoning_text": true,
+          "sampling": "never",
+          "thinking": {
+            "levels": ["minimal", "low", "medium", "high"]
+          },
+          "source": "langchain-openai 1.7.2 bundled profiles (models.dev, MIT), 2026-10"
+        },
+        "o4-mini": {
+          "display_name": "o4-mini",
+          "context_window": 200000,
+          "max_output": 100000,
+          "tools": true,
+          "image_input": true,
+          "reasoning_text": true,
+          "sampling": "never",
+          "source": "langchain-openai 1.7.2 bundled profiles (models.dev, MIT), 2026-10"
+        },
+        "o3": {
+          "display_name": "o3",
+          "context_window": 200000,
+          "max_output": 100000,
+          "tools": true,
+          "image_input": true,
+          "reasoning_text": true,
+          "sampling": "never",
+          "source": "langchain-openai 1.7.2 bundled profiles (models.dev, MIT), 2026-10"
+        },
+        "o3-pro": {
+          "display_name": "o3-pro",
+          "context_window": 200000,
+          "max_output": 100000,
+          "tools": true,
+          "image_input": true,
+          "reasoning_text": true,
+          "sampling": "never",
+          "source": "langchain-openai 1.7.2 bundled profiles (models.dev, MIT), 2026-10"
+        },
+        "o3-mini": {
+          "display_name": "o3-mini",
+          "context_window": 200000,
+          "max_output": 100000,
+          "tools": true,
+          "image_input": false,
+          "reasoning_text": true,
+          "sampling": "never",
+          "source": "langchain-openai 1.7.2 bundled profiles (models.dev, MIT), 2026-10"
+        },
+        "o1": {
+          "display_name": "o1",
+          "context_window": 200000,
+          "max_output": 100000,
+          "tools": true,
+          "image_input": true,
+          "reasoning_text": true,
+          "sampling": "never",
+          "source": "langchain-openai 1.7.2 bundled profiles (models.dev, MIT), 2026-10"
+        },
+        "o1-pro": {
+          "display_name": "o1-pro",
+          "context_window": 200000,
+          "max_output": 100000,
+          "tools": true,
+          "image_input": true,
+          "reasoning_text": true,
+          "sampling": "never",
+          "source": "langchain-openai 1.7.2 bundled profiles (models.dev, MIT), 2026-10"
+        },
+        "gpt-4.1": {
+          "display_name": "GPT-4.1",
+          "context_window": 1047576,
+          "max_output": 32768,
+          "tools": true,
+          "image_input": true,
+          "reasoning_text": false,
+          "source": "langchain-openai 1.7.2 bundled profiles (models.dev, MIT), 2026-10"
+        },
+        "gpt-4.1-mini": {
+          "display_name": "GPT-4.1 mini",
+          "context_window": 1047576,
+          "max_output": 32768,
+          "tools": true,
+          "image_input": true,
+          "reasoning_text": false,
+          "source": "langchain-openai 1.7.2 bundled profiles (models.dev, MIT), 2026-10"
+        },
+        "gpt-4.1-nano": {
+          "display_name": "GPT-4.1 nano",
+          "context_window": 1047576,
+          "max_output": 32768,
+          "tools": true,
+          "image_input": true,
+          "reasoning_text": false,
+          "source": "langchain-openai 1.7.2 bundled profiles (models.dev, MIT), 2026-10"
+        },
+        "gpt-4o": {
+          "display_name": "GPT-4o",
+          "context_window": 128000,
+          "max_output": 16384,
+          "tools": true,
+          "image_input": true,
+          "reasoning_text": false,
+          "source": "langchain-openai 1.7.2 bundled profiles (models.dev, MIT), 2026-10"
+        },
+        "gpt-4o-mini": {
+          "display_name": "GPT-4o mini",
+          "context_window": 128000,
+          "max_output": 16384,
+          "tools": true,
+          "image_input": true,
+          "reasoning_text": false,
+          "source": "langchain-openai 1.7.2 bundled profiles (models.dev, MIT), 2026-10"
+        }
+      }
+    }
+  }
+}
