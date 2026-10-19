@@ -49,6 +49,33 @@ def test_openai_is_declared():
     )
 
 
+#: The ``langgraph`` extra's floors: Deep Agents' (0.7.0). The LangChain model
+#: adapter needs what they bring: ChatAnthropic's ``reasoning_effort`` and
+#: summarized adaptive thinking, Gemini's ``reasoning_effort``, the profile's
+#: effort fields, and ``ChatOpenRouter``.
+_LANGGRAPH_FLOORS = {
+    "langchain": "1.4.6",
+    "langchain-core": "1.6.11",
+    "langchain-anthropic": "1.7.6",
+    "langchain-google-genai": "4.4.2",
+    "langchain-openai": "1.7",
+    "langchain-openrouter": "0.2",
+}
+
+
+def test_the_langgraph_extra_has_the_model_adapter_floors():
+    from packaging.requirements import Requirement
+
+    extra = tomllib.loads(_PYPROJECT.read_text())["project"]["optional-dependencies"]
+    floors = {}
+    for spec in extra["langgraph"]:
+        requirement = Requirement(spec)
+        floors[requirement.name.lower()] = next(
+            (s.version for s in requirement.specifier if s.operator == ">="), None
+        )
+    assert {name: floors.get(name) for name in _LANGGRAPH_FLOORS} == _LANGGRAPH_FLOORS
+
+
 def test_the_model_table_ships_in_the_wheel():
     """``agentic_cli.models`` reads ``data/table.json`` at run time.
 

@@ -41,15 +41,27 @@ class FakeAPI:
 
     @property
     def transport(self) -> httpx.MockTransport:
-        return httpx.MockTransport(self._handle)
+        return httpx.MockTransport(self._handler(httpx))
 
-    def http_client(self) -> httpx.AsyncClient:
-        return httpx.AsyncClient(transport=self.transport)
+    def http_client(self, library: ModuleType = httpx) -> Any:
+        """An async client of ``library`` (``httpx`` or ``httpx2``) that sends here."""
+        return library.AsyncClient(transport=library.MockTransport(self._handler(library)))
 
-    def _handle(self, request: httpx.Request) -> httpx.Response:
-        self.requests.append(request)
-        answer = self.answer(request) if callable(self.answer) else self.answer
-        return answer if isinstance(answer, httpx.Response) else httpx.Response(200, json=answer)
+    def _handler(self, library: ModuleType) -> Callable[[Any], Any]:
+        def handle(request: Any) -> Any:
+            self.requests.append(request)
+            answer = self.answer(request) if callable(self.answer) else self.answer
+            if isinstance(answer, library.Response):
+                return answer
+            if isinstance(answer, httpx.Response):  # a client of another library asked
+                return library.Response(
+                    answer.status_code,
+                    headers=answer.headers.multi_items(),
+                    content=answer.content,
+                )
+            return library.Response(200, json=answer)
+
+        return handle
 
 
 def http_library(client: Any) -> ModuleType:
@@ -63,24 +75,10 @@ def http_library(client: Any) -> ModuleType:
     return getattr(base, "httpx2", httpx)
 
 
-def library_client(api: FakeAPI, library: ModuleType) -> Any:
-    """An async client of ``library`` (``httpx`` or ``httpx2``) whose requests ``api`` answers."""
-    if library is httpx:
-        return api.http_client()
-
-    def handle(request: Any) -> Any:
-        answer = api._handle(request)
-        return library.Response(
-            answer.status_code, headers=answer.headers.multi_items(), content=answer.content
-        )
-
-    return library.AsyncClient(transport=library.MockTransport(handle))
-
-
 def serve(model: Any, api: FakeAPI) -> None:
     """Send ``model``'s requests to ``api``, keeping its client's key, timeout and retries."""
     model.client = model.client.with_options(
-        http_client=library_client(api, http_library(model.client))
+        http_client=api.http_client(http_library(model.client))
     )
 
 
