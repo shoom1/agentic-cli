@@ -9,6 +9,8 @@ This module provides the base CLI application that:
 from __future__ import annotations
 
 import asyncio
+import re
+import warnings
 from typing import TYPE_CHECKING, Any
 
 from prompt_toolkit.completion import Completer, Completion
@@ -41,6 +43,37 @@ logger = Loggers.cli()
 # default_model. A synthetic key without an entry here is treated as writing
 # a field of the same name.
 _UI_KEY_TARGET_FIELDS = {"model": "default_model"}
+
+
+# === ADK experimental-feature notices ===
+
+# ADK 2 announces each experimental feature it enables with a UserWarning:
+# "[EXPERIMENTAL] feature FeatureName.JSON_SCHEMA_FOR_FUNC_DECL is enabled."
+_ADK_EXPERIMENTAL_NOTICE = re.compile(r"\[EXPERIMENTAL\] feature (?P<feature>\S+) is enabled")
+
+
+def _install_adk_notice_hook() -> None:
+    """Log ADK's experimental-feature notices instead of printing them.
+
+    Python prints warnings to stderr, which in the CLI lands over the terminal
+    UI. The hook logs these notices at debug and passes every other warning to
+    the hook it replaced. Only the CLI installs it, so library users and the
+    test suite keep Python's own handling. Installing it twice changes nothing.
+    """
+    previous = warnings.showwarning
+    if getattr(previous, "_logs_adk_notices", False):
+        return
+
+    def showwarning(message, category, filename, lineno, file=None, line=None):
+        notice = _ADK_EXPERIMENTAL_NOTICE.match(str(message))
+        if notice and issubclass(category, UserWarning):
+            feature = notice["feature"].removeprefix("FeatureName.")
+            logger.debug("adk_experimental_feature", feature=feature)
+            return
+        previous(message, category, filename, lineno, file, line)
+
+    showwarning._logs_adk_notices = True
+    warnings.showwarning = showwarning
 
 
 # === Slash Command Completer ===
@@ -143,6 +176,7 @@ class BaseCLIApp:
         self._app_info = app_info
         self._settings = settings
         configure_logging(self._settings)
+        _install_adk_notice_hook()
 
         logger.info("app_starting", app_name=self._settings.app_name)
 
