@@ -22,12 +22,14 @@ classifiers = [
 ]
 dependencies = [
     "thinking-prompt>=0.3.0,<0.4",  # 0.4 renames and removes the UI API we use
-    "google-adk>=1.34,<2",  # >=1.34: Anthropic adaptive thinking (negative budget)
+    # 2.12: the version 0.7.0 was tested on. [mcp]: MCP servers
+    # (AgentConfig.mcp_servers) on every install; ADK 2 made the SDK an extra.
+    "google-adk[mcp]>=2.12,<3",
     # ADK's Claude path (google.adk.models.anthropic_llm) and our DirectAnthropicLlm
     # import `anthropic` at module load; google-adk only pulls it via optional extras,
     # so declare it directly (>=0.78 matches google-adk's own floor).
     "anthropic>=0.78",
-    "google-genai>=2.0,<3",  # imported directly (google.genai.types); was the adk[genai] extra
+    "google-genai>=2.30,<3",  # imported directly (google.genai.types); ADK 2.12 needs 2.30
     "pydantic>=2.0.0",
     "pydantic-settings>=2.0.0",
     "PyYAML>=6.0",
@@ -41,8 +43,11 @@ dependencies = [
     "html2text>=2020.1.16",  # eager import in tools/webfetch/converter.py
     "jupyter_client>=8.0.0",
     "ipykernel>=6.0.0",
-    # Durable sessions: ADK DatabaseSessionService (SQLAlchemy async) needs an
-    # async SQLite driver + greenlet; persistence is on by default.
+    # Durable sessions (on by default): ADK's DatabaseSessionService runs on
+    # SQLAlchemy's async engine, with an async SQLite driver and greenlet.
+    # ADK 2 moved SQLAlchemy to its `db` extra, which also brings Spanner,
+    # gRPC and Alembic that nothing here uses, so it is declared directly.
+    "sqlalchemy[asyncio]>=2,<3",
     "aiosqlite>=0.20.0",
     "greenlet>=3.0.0",
 ]

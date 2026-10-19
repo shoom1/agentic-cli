@@ -233,15 +233,15 @@ class TestTransferDeclarationIsCorrected:
         assert f'{TRANSFER_TOOL_NAME}(agent_name="' in description
 
     def test_agent_name_enum_and_schema_are_preserved(self):
-        before = _tool()._get_declaration().parameters.model_dump(exclude_none=True)
+        before = _tool()._get_declaration().parameters_json_schema
 
         request = _misleading_request()
         correct_transfer_declaration(request)
-        after = request.config.tools[0].function_declarations[0].parameters
+        after = request.config.tools[0].function_declarations[0].parameters_json_schema
 
-        assert after.properties["agent_name"].enum == AGENT_NAMES
-        assert after.required == ["agent_name"]
-        assert after.model_dump(exclude_none=True) == before
+        assert after["properties"]["agent_name"]["enum"] == AGENT_NAMES
+        assert after["required"] == ["agent_name"]
+        assert after == before
 
     def test_correction_is_idempotent(self):
         request = _misleading_request()
@@ -299,8 +299,9 @@ class TestAgainstTheInstalledAdk:
         # Whichever branch ran, the contract the model needs is intact.
         declaration = request.config.tools[0].function_declarations[0]
         assert declaration.name == TRANSFER_TOOL_NAME
-        assert declaration.parameters.properties["agent_name"].enum == AGENT_NAMES
-        assert declaration.parameters.required == ["agent_name"]
+        schema = declaration.parameters_json_schema
+        assert schema["properties"]["agent_name"]["enum"] == AGENT_NAMES
+        assert schema["required"] == ["agent_name"]
 
 
 class TestOnlyTheNativeToolIsRewritten:
