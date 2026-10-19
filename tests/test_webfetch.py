@@ -757,8 +757,9 @@ class TestWorkflowManagerIntegration:
         assert manager.llm_summarizer is None
 
     @pytest.mark.asyncio
-    async def test_manager_becomes_summarizer_when_required(self):
+    async def test_manager_becomes_summarizer_when_required(self, tmp_path, monkeypatch):
         """Test that the manager itself becomes the llm_summarizer when required."""
+        from agentic_cli.config import BaseSettings
         from agentic_cli.workflow.base_manager import BaseWorkflowManager
         from agentic_cli.workflow.config import AgentConfig
         from agentic_cli.workflow.events import WorkflowEvent, UserInputRequest
@@ -807,7 +808,16 @@ class TestWorkflowManagerIntegration:
             tools=[web_fetch],
         )
 
-        manager = TestWorkflowManager(agent_configs=[agent_config])
+        # Initialization resolves a default model, so give it a key and keep
+        # the developer's own settings out (CI has neither).
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        for variable in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY"):
+            monkeypatch.delenv(variable, raising=False)
+        monkeypatch.setenv("GOOGLE_API_KEY", "test-google-key")
+        manager = TestWorkflowManager(
+            agent_configs=[agent_config], settings=BaseSettings(session_store="memory")
+        )
 
         # Before initialization, summarizer should be None
         assert manager.llm_summarizer is None
