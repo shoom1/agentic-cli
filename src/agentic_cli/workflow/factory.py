@@ -24,15 +24,6 @@ def _is_claude_model(model: str | None) -> bool:
     return model is not None and model.startswith("claude-")
 
 
-def _resolve_effective_model(
-    model: str | None, settings: "BaseSettings"
-) -> str | None:
-    """Resolve the effective model from explicit override or settings."""
-    if model:
-        return model
-    return getattr(settings, "default_model", None)
-
-
 def create_workflow_manager_from_settings(
     agent_configs: list["AgentConfig"],
     settings: "BaseSettings",
@@ -53,7 +44,8 @@ def create_workflow_manager_from_settings(
         agent_configs: List of agent configurations.
         settings: Application settings (determines orchestrator type).
         app_name: Application name for services.
-        model: Model override.
+        model: The manager's own default model, a ``provider:model``
+            reference or a model id; it takes the ``default`` role.
         **kwargs: Additional arguments passed to the specific manager.
 
     Returns:

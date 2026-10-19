@@ -8,6 +8,8 @@ and apply across all projects.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 import structlog
 
@@ -23,6 +25,7 @@ def _make_app(settings, keys: list[str]) -> BaseCLIApp:
 
     app = _App.__new__(_App)
     app._settings = settings
+    app._workflow_controller = SimpleNamespace(is_ready=False)
     return app
 
 
@@ -35,7 +38,7 @@ def isolated_settings(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(home))
     from agentic_cli.config import BaseSettings
 
-    # A key so get_available_models() is non-empty and "model" can render
+    # A key so the model picker has options and "model" can render
     return BaseSettings(google_api_key="test-key")
 
 

@@ -81,7 +81,8 @@ class TestClaudeCacheControl:
             return mock_llm
 
         manager._builder.get_llm = mock_get_llm
-        node_fn = manager._builder._create_agent_node(agent_config, manager.model)
+        model = manager._resolve_model_for_config(agent_config)  # the bare id
+        node_fn = manager._builder._create_agent_node(agent_config, model)
 
         # Run the node
         import asyncio
@@ -135,9 +136,8 @@ class TestClaudeCacheControl:
         import asyncio
 
         state = {"messages": [{"role": "user", "content": "hello"}]}
-        asyncio.run(
-            manager._builder._create_agent_node(agent_config, manager.model)(state)
-        )
+        model = manager._resolve_model_for_config(agent_config)  # the bare id
+        asyncio.run(manager._builder._create_agent_node(agent_config, model)(state))
 
         sys_msgs = [m for m in captured_messages if isinstance(m, SystemMessage)]
         assert len(sys_msgs) == 1
@@ -179,9 +179,8 @@ class TestClaudeCacheControl:
         import asyncio
 
         state = {"messages": [{"role": "user", "content": "hello"}]}
-        asyncio.run(
-            manager._builder._create_agent_node(agent_config, manager.model)(state)
-        )
+        model = manager._resolve_model_for_config(agent_config)  # the bare id
+        asyncio.run(manager._builder._create_agent_node(agent_config, model)(state))
 
         sys_msgs = [m for m in captured_messages if isinstance(m, SystemMessage)]
         assert len(sys_msgs) == 1

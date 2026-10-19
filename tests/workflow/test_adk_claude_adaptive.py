@@ -15,6 +15,7 @@ import pytest
 
 pytest.importorskip("google.adk")
 
+from agentic_cli.models import ModelResolutionError  # noqa: E402
 from agentic_cli.workflow.adk.manager import (  # noqa: E402
     GoogleADKWorkflowManager,
     _anthropic_uses_adaptive,
@@ -30,9 +31,11 @@ LEGACY = "claude-sonnet-4-5"   # <= 4.5
 
 
 def _manager(mock_context, model: str) -> GoogleADKWorkflowManager:
-    return GoogleADKWorkflowManager(
-        agent_configs=[], settings=mock_context.settings, model=model
+    # Keys, so a helper called before initialization can resolve its agent.
+    settings = mock_context.settings.model_copy(
+        update={"google_api_key": "test-key", "anthropic_api_key": "test-key"}
     )
+    return GoogleADKWorkflowManager(agent_configs=[], settings=settings, model=model)
 
 
 def _cfg(model_settings=None, model=None) -> AgentConfig:
@@ -113,12 +116,13 @@ class TestAdaptiveEffort:
         )
         assert arg.effort is None
 
-    def test_no_effort_for_budget_mode(self, mock_context):
+    def test_budget_mode_is_an_error_on_an_adaptive_model(self, mock_context):
+        """0.6 sent pure adaptive thinking for it; 0.7 refuses it at startup."""
         mgr = _manager(mock_context, ADAPTIVE)
-        arg = mgr._build_model_arg(
-            _cfg(ModelSettings(thinking=ThinkingSettings(mode="budget", budget_tokens=5000)))
-        )
-        assert arg.effort is None
+        with pytest.raises(ModelResolutionError, match="thinking mode 'budget' is not available"):
+            mgr._build_model_arg(
+                _cfg(ModelSettings(thinking=ThinkingSettings(mode="budget", budget_tokens=5000)))
+            )
 
     def test_no_effort_when_thinking_disabled(self, mock_context):
         mgr = _manager(mock_context, ADAPTIVE)

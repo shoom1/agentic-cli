@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from typing import AsyncGenerator, Any, Callable, Literal, TYPE_CHECKING
 
+from agentic_cli.models import ProviderKind
 from agentic_cli.workflow.base_manager import BaseWorkflowManager
 from agentic_cli.workflow.events import WorkflowEvent, EventType
 from agentic_cli.workflow.config import AgentConfig
@@ -81,6 +82,16 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
             print(event.content)
     """
 
+    # Transitional, until the LangChain model factory lands: the graph's LLMs
+    # are built by the 0.6 code in graph_builder.py, which knows Gemini,
+    # Claude and GPT and the generic thinking modes only (see
+    # BaseWorkflowManager._backend_model_problem).
+    _BUILDABLE_PROVIDER_KINDS = frozenset(
+        {ProviderKind.GOOGLE, ProviderKind.ANTHROPIC, ProviderKind.OPENAI}
+    )
+    _UNDERSTOOD_THINKING_MODES = frozenset({"none", "low", "medium", "high", "budget"})
+    _BACKEND_NAME = "LangGraph"
+
     def __init__(
         self,
         agent_configs: list[AgentConfig],
@@ -96,7 +107,8 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
             agent_configs: List of agent configurations.
             settings: Application settings (uses get_settings() if not provided).
             app_name: Application name for services.
-            model: Model override (auto-detected from API keys if not provided).
+            model: This manager's default model, a ``provider:model`` reference
+                or a model id (see ``BaseWorkflowManager``).
             checkpointer: Checkpointer type for state persistence.
                          "memory" for in-memory, "postgres" for PostgreSQL,
                          "sqlite" for SQLite. None to disable checkpointing.
@@ -151,6 +163,10 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
         """Return 'langgraph'."""
         return "langgraph"
 
+    def _resolve_model_for_config(self, config: AgentConfig | None) -> str:
+        """The bare model id an agent runs on (None: the default model)."""
+        return self._resolved(config).record.model
+
     def _get_state_tools(self) -> list:
         """Return LangGraph-native state tools using Command."""
         from agentic_cli.tools.langgraph.state_tools import (
@@ -186,9 +202,14 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
             for config in self._agent_configs
         }
 
-        # Build and compile graph via builder
+        # Build and compile graph via builder. Each agent runs on the bare id
+        # of its resolved model (the builder's model code predates references).
+        default_model = self._resolve_model_for_config(None)
         graph = self._builder.build(
-            self._agent_configs, self.model, tool_overrides=tool_overrides,
+            self._agent_configs,
+            default_model,
+            tool_overrides=tool_overrides,
+            models={c.name: self._resolve_model_for_config(c) for c in self._agent_configs},
         )
         self._graph = graph
 
@@ -205,7 +226,7 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
             self._compiled_graph = graph.compile()
 
         # Initialize default LLM
-        self._llm = self._builder.get_llm(self.model)
+        self._llm = self._builder.get_llm(default_model)
 
         logger.info(
             "langgraph_services_initialized",
@@ -232,6 +253,7 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
         self._store = None
         self._llm = None
         self._initialized = False
+        await self._close_catalog()
 
         # Clean up managers (sandbox, etc.)
         self._cleanup_managers()
@@ -534,7 +556,7 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
             await self.initialize_services()
 
         if not self._llm:
-            self._llm = self._builder.get_llm(self.model)
+            self._llm = self._builder.get_llm(self._resolve_model_for_config(None))
 
         from langchain_core.messages import HumanMessage
 

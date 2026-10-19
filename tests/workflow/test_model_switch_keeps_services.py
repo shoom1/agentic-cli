@@ -16,7 +16,6 @@ is stubbed.
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import AsyncMock
 
 import pytest
 
@@ -72,7 +71,6 @@ async def manager(request, ctx):
         settings=ctx.settings,
         model=MODELS[0],
     )
-    mgr._model_registry.refresh = AsyncMock()  # the built-in list, no network
     await mgr.initialize_services()
     try:
         yield mgr

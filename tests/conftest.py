@@ -19,8 +19,8 @@ os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
 import tempfile
 from pathlib import Path
-from typing import Generator
-from unittest.mock import patch
+from typing import Any, Generator
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -136,6 +136,25 @@ class MockContext:
         return Path(self._temp_dir.name)
 
 
+def settings_double(**attributes: Any) -> MagicMock:
+    """A ``MagicMock`` settings object whose model settings resolve.
+
+    A workflow manager resolves its models every time it initializes, so a
+    stand-in for settings needs real model values: the model fields'
+    defaults and a Google key (a fake one; ``export_api_keys_to_env`` is a
+    mock here, so it never reaches the environment). ``attributes`` override.
+    """
+    settings = MagicMock()
+    settings.app_name = "test-app"
+    settings.google_api_key = "test-key"
+    for name in ("anthropic_api_key", "openai_api_key", "openrouter_api_key", "default_model"):
+        setattr(settings, name, None)
+    settings.model_roles, settings.model_endpoints, settings.pinned_models = {}, {}, []
+    settings.thinking_effort = "medium"
+    settings.configure_mock(**attributes)
+    return settings
+
+
 def _clear_settings() -> None:
     _config._settings_instance = None
     set_context_settings(None)
@@ -154,6 +173,31 @@ def _no_settings_from_other_tests() -> Generator[None, None, None]:
     _clear_settings()
     yield
     _clear_settings()
+
+
+@pytest.fixture(autouse=True)
+def _no_model_listings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Workflow managers list no models and touch no model cache in tests.
+
+    A manager builds a ``ModelCatalog`` when it initializes and lists every
+    provider it has a key for, caching the result in ``~/.{app}/model_cache.json``.
+    Here its catalog is never loaded: each provider stays unattempted, so any
+    well-formed model id is accepted and roles come from the shipped table's
+    fallback models, as with 0.6's registry before a refresh. A test that
+    wants listings patches ``model_services.build_catalog`` itself
+    (``tests/workflow/test_manager_models.py``).
+    """
+    from agentic_cli.models import ModelCatalog
+    from agentic_cli.workflow import model_services
+
+    class _UnlistedCatalog(ModelCatalog):
+        async def load(self) -> None:
+            return None
+
+    def build_catalog(settings, endpoints, *, transport=None):
+        return _UnlistedCatalog(endpoints=endpoints)
+
+    monkeypatch.setattr(model_services, "build_catalog", build_catalog, raising=False)
 
 
 @pytest.fixture

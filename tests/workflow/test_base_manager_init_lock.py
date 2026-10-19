@@ -8,9 +8,9 @@ service creation). An asyncio lock serializes them.
 """
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock
 
 from agentic_cli.workflow.base_manager import BaseWorkflowManager
+from tests.conftest import settings_double
 
 
 class _CountingManager(BaseWorkflowManager):
@@ -43,16 +43,11 @@ class _CountingManager(BaseWorkflowManager):
 
 
 def _settings():
-    s = MagicMock()
-    s.app_name = "test-app"
-    s.google_api_key = None
-    s.anthropic_api_key = None
-    return s
+    return settings_double()
 
 
 def _manager():
     m = _CountingManager(_settings())
-    m._model_registry = MagicMock(refresh=AsyncMock())
     m._ensure_managers_initialized = lambda: None
     return m
 

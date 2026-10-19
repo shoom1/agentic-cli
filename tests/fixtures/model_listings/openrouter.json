@@ -1,0 +1,84 @@
+{
+  "data": [
+    {
+      "id": "qwen/qwen3-235b-a22b",
+      "canonical_slug": "qwen/qwen3-235b-a22b-04-28",
+      "hugging_face_id": "Qwen/Qwen3-235B-A22B",
+      "name": "Qwen: Qwen3 235B A22B",
+      "created": 1745875757,
+      "description": "Qwen3-235B-A22B is a 235B parameter mixture-of-experts (MoE) model.",
+      "context_length": 131072,
+      "architecture": {
+        "modality": "text->text",
+        "input_modalities": ["text"],
+        "output_modalities": ["text"],
+        "tokenizer": "Qwen3",
+        "instruct_type": "qwen3"
+      },
+      "pricing": {"prompt": "0.00000013", "completion": "0.0000006", "request": "0", "image": "0", "web_search": "0", "internal_reasoning": "0"},
+      "top_provider": {"context_length": 131072, "max_completion_tokens": 8192, "is_moderated": false},
+      "per_request_limits": null,
+      "supported_parameters": ["frequency_penalty", "include_reasoning", "max_tokens", "presence_penalty", "reasoning", "response_format", "seed", "stop", "temperature", "tool_choice", "tools", "top_k", "top_p"]
+    },
+    {
+      "id": "qwen/qwen3-235b-a22b:free",
+      "canonical_slug": "qwen/qwen3-235b-a22b-04-28",
+      "hugging_face_id": "Qwen/Qwen3-235B-A22B",
+      "name": "Qwen: Qwen3 235B A22B (free)",
+      "created": 1745875757,
+      "description": "Qwen3-235B-A22B is a 235B parameter mixture-of-experts (MoE) model.",
+      "context_length": 40960,
+      "architecture": {
+        "modality": "text->text",
+        "input_modalities": ["text"],
+        "output_modalities": ["text"],
+        "tokenizer": "Qwen3",
+        "instruct_type": "qwen3"
+      },
+      "pricing": {"prompt": "0", "completion": "0", "request": "0", "image": "0", "web_search": "0", "internal_reasoning": "0"},
+      "top_provider": {"context_length": 40960, "max_completion_tokens": null, "is_moderated": false},
+      "per_request_limits": null,
+      "supported_parameters": ["include_reasoning", "max_tokens", "reasoning", "stop", "temperature", "top_p"]
+    },
+    {
+      "id": "anthropic/claude-sonnet-4.5",
+      "canonical_slug": "anthropic/claude-4.5-sonnet-20250929",
+      "hugging_face_id": "",
+      "name": "Anthropic: Claude Sonnet 4.5",
+      "created": 1759161676,
+      "description": "Claude Sonnet 4.5 is Anthropic's most advanced Sonnet model to date.",
+      "context_length": 1000000,
+      "architecture": {
+        "modality": "text+image->text",
+        "input_modalities": ["text", "image", "file"],
+        "output_modalities": ["text"],
+        "tokenizer": "Claude",
+        "instruct_type": null
+      },
+      "pricing": {"prompt": "0.000003", "completion": "0.000015", "request": "0", "image": "0.0048", "web_search": "0.01", "internal_reasoning": "0", "input_cache_read": "0.0000003", "input_cache_write": "0.00000375"},
+      "top_provider": {"context_length": 1000000, "max_completion_tokens": 64000, "is_moderated": true},
+      "per_request_limits": null,
+      "supported_parameters": ["include_reasoning", "max_tokens", "reasoning", "response_format", "stop", "structured_outputs", "temperature", "tool_choice", "tools", "top_k", "top_p"]
+    },
+    {
+      "id": "meta-llama/llama-3.3-70b-instruct",
+      "canonical_slug": "meta-llama/llama-3.3-70b-instruct",
+      "hugging_face_id": "meta-llama/Llama-3.3-70B-Instruct",
+      "name": "Meta: Llama 3.3 70B Instruct",
+      "created": 1733506137,
+      "description": "The Meta Llama 3.3 multilingual large language model (LLM).",
+      "context_length": 131072,
+      "architecture": {
+        "modality": "text->text",
+        "input_modalities": ["text"],
+        "output_modalities": ["text"],
+        "tokenizer": "Llama3",
+        "instruct_type": "llama3"
+      },
+      "pricing": {"prompt": "0.00000013", "completion": "0.00000039", "request": "0", "image": "0", "web_search": "0", "internal_reasoning": "0"},
+      "top_provider": {"context_length": 131072, "max_completion_tokens": 16384, "is_moderated": false},
+      "per_request_limits": null,
+      "supported_parameters": ["frequency_penalty", "max_tokens", "presence_penalty", "repetition_penalty", "response_format", "seed", "stop", "temperature", "tool_choice", "tools", "top_k", "top_p"]
+    }
+  ]
+}

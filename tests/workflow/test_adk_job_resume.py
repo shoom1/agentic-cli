@@ -79,8 +79,6 @@ def _resume_manager(runner: _FakeRunner, *, session_exists: bool = True) -> Goog
     # Turns serialize on the manager's turn lock (see the concurrency contract).
     mgr._turn_lock = asyncio.Lock()
     mgr._lifecycle_lock = asyncio.Lock()
-    mgr._model = "gemini-2.5-flash"
-    mgr._model_resolved = True
     mgr._on_event = None
     # Turn admission re-checks that the backend is live while holding the turn
     # lock, so the double has to present a complete one.

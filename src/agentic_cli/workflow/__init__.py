@@ -29,7 +29,6 @@ from agentic_cli.workflow.adk_config_bridge import (
     translate_adk_yaml,
 )
 from agentic_cli.workflow.settings import WorkflowSettingsMixin
-from agentic_cli.workflow.models import ModelFamily, ModelInfo, ModelRegistry
 from agentic_cli.workflow.service_registry import get_service, get_service_registry
 
 # Heavy imports - lazy loaded on first access
@@ -79,10 +78,6 @@ __all__ = [
     "MCPServerConfig",
     # Settings mixin
     "WorkflowSettingsMixin",
-    # Model registry
-    "ModelFamily",
-    "ModelInfo",
-    "ModelRegistry",
     # Managers (lazy)
     "GoogleADKWorkflowManager",
     "LangGraphWorkflowManager",

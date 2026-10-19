@@ -1,0 +1,40 @@
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Qwen/Qwen3-32B",
+      "object": "model",
+      "created": 1760918400,
+      "owned_by": "vllm",
+      "root": "Qwen/Qwen3-32B",
+      "parent": null,
+      "max_model_len": 32768,
+      "permission": [
+        {
+          "id": "modelperm-6f1f0a2e9c7b4d1e8a3b5c7d9e1f2a3b",
+          "object": "model_permission",
+          "created": 1760918400,
+          "allow_create_engine": false,
+          "allow_sampling": true,
+          "allow_logprobs": true,
+          "allow_search_indices": false,
+          "allow_view": true,
+          "allow_fine_tuning": false,
+          "organization": "*",
+          "group": null,
+          "is_blocking": false
+        }
+      ]
+    },
+    {
+      "id": "qwen3-sql-lora",
+      "object": "model",
+      "created": 1760918400,
+      "owned_by": "vllm",
+      "root": "/adapters/qwen3-sql-lora",
+      "parent": "Qwen/Qwen3-32B",
+      "max_model_len": 32768,
+      "permission": []
+    }
+  ]
+}

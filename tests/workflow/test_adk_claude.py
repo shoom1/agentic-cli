@@ -26,9 +26,11 @@ CLAUDE = "claude-sonnet-4-5"
 
 
 def _manager(mock_context, model: str) -> GoogleADKWorkflowManager:
-    return GoogleADKWorkflowManager(
-        agent_configs=[], settings=mock_context.settings, model=model
+    # Keys, so a helper called before initialization can resolve its agent.
+    settings = mock_context.settings.model_copy(
+        update={"google_api_key": "test-key", "anthropic_api_key": "test-key"}
     )
+    return GoogleADKWorkflowManager(agent_configs=[], settings=settings, model=model)
 
 
 def _cfg(model_settings=None, model=None) -> AgentConfig:

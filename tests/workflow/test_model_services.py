@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
+import json
+import stat
 from pathlib import Path
 
+import httpx
 import pytest
 
 from agentic_cli.config import BaseSettings
 from agentic_cli.models import ModelRef, ModelSpecError, ProviderKind, RoleMap
 from agentic_cli.workflow import model_services
+
+# Bound before the test-suite guard (conftest ``_no_model_listings``) replaces
+# the module attribute: these tests check the real builder.
+from agentic_cli.workflow.model_services import build_catalog
 
 _KEY_VARS = ("GOOGLE_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY")
 
@@ -81,8 +88,11 @@ def test_role_map_from_settings():
 
 
 def test_a_default_model_that_names_a_role_is_an_error():
-    with pytest.raises(ModelSpecError, match="default_model"):
-        model_services.role_map_from_settings(BaseSettings(default_model="fast"))
+    """Settings reject it when they load; the role map rejects a manager's own."""
+    with pytest.raises(ValueError, match="default_model"):
+        BaseSettings(default_model="fast")
+    with pytest.raises(ModelSpecError, match="manager's model"):
+        model_services.role_map_from_settings(BaseSettings(), manager_model="fast")
 
 
 def test_model_cache_path_is_in_the_user_folder(tmp_path):
@@ -91,3 +101,18 @@ def test_model_cache_path_is_in_the_user_folder(tmp_path):
     assert model_services.model_cache_path(settings) == (
         Path(tmp_path / "home") / ".research_demo" / "model_cache.json"
     )
+
+
+async def test_build_catalog_caches_listings_in_the_user_folder():
+    settings = BaseSettings(google_api_key="k-g")
+    endpoints = model_services.endpoints_from_settings(settings)
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json={"models": []}))
+
+    catalog = build_catalog(settings, endpoints, transport=transport)
+    await catalog.load()
+
+    cache = model_services.model_cache_path(settings)
+    assert json.loads(cache.read_text())["providers"]["google"]["ok"] is True
+    assert stat.S_IMODE(cache.stat().st_mode) == 0o600
+    assert b"k-g" not in cache.read_bytes()
+    assert catalog.is_authoritative("google")

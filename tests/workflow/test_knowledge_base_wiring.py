@@ -54,6 +54,14 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path / "project")
 
 
+def _hermetic(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    for variable in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY"):
+        monkeypatch.delenv(variable, raising=False)
+    monkeypatch.setenv("GOOGLE_API_KEY", "test-google-key")
+
+
 def _manager(tmp_path, required, workspace=None) -> _Manager:
     settings = BaseSettings(workspace_dir=workspace or tmp_path / "workspace", knowledge_base_use_mock=True)
     mgr = _Manager(agent_configs=[], settings=settings)
@@ -70,10 +78,13 @@ def test_one_knowledge_base_over_both_scopes(tmp_path):
     assert kb.scopes == ("project", "user")
 
 
-async def test_service_init_publishes_the_knowledge_base_and_no_0_6_3_keys(tmp_path):
+async def test_service_init_publishes_the_knowledge_base_and_no_0_6_3_keys(tmp_path, monkeypatch):
     from agentic_cli.tools.knowledge_tools import kb_search
     from agentic_cli.workflow.config import AgentConfig
 
+    # Initialization resolves a default model, so give it a key and keep the
+    # developer's own settings out (CI has neither).
+    _hermetic(tmp_path, monkeypatch)
     settings = BaseSettings(workspace_dir=tmp_path / "workspace", knowledge_base_use_mock=True)
     config = AgentConfig(name="a", prompt="p", tools=[kb_search])
     mgr = _Manager(agent_configs=[config], settings=settings)

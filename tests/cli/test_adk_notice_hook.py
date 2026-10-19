@@ -14,7 +14,6 @@ from __future__ import annotations
 import logging
 import sys
 import warnings
-from unittest.mock import AsyncMock
 
 import pytest
 from thinking_prompt import AppInfo
@@ -160,7 +159,6 @@ async def test_adks_context_cache_advice_is_logged_not_printed(logged, tmp_path,
             settings=ctx.settings,
             model="gemini-2.5-flash",
         )
-        manager._model_registry.refresh = AsyncMock()  # the built-in list, no network
         try:
             with caplog.at_level(logging.WARNING, logger=ADK_RUNNER_LOGGER):
                 await manager.initialize_services()

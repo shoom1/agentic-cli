@@ -22,23 +22,94 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   packages' bundled profiles, models.dev data). `RoleMap` maps the `default`,
   `fast` and `strong` roles (and an app's own) to models, and `resolve_model`
   decides one agent's model, thinking value, `max_tokens` and sampling
-  settings. Nothing in the workflow uses the package yet; the next changes
-  move model discovery and both backends onto it.
-- **Model settings**, which nothing reads yet: `openai_api_key`
-  (`OPENAI_API_KEY`) and `openrouter_api_key` (`OPENROUTER_API_KEY`), secrets
-  like the other keys (never saved, kept out of `repr`, and not exported to
-  the process environment); `model_endpoints`, the user's OpenAI-compatible
-  servers by name (`base_url`, the variable holding the key in
-  `api_key_env`, and the models served); `model_roles`, a model per role; and
-  `pinned_models`, models the pickers always offer. `model_endpoints` is
+  settings. `ModelCatalog` merges the shipped table, live model listings and
+  the user's endpoint declarations into one record per model, decides which
+  ids a provider rejects, and caches the listings (see Changed). The workflow
+  resolves every agent's model through it; the backends still build their
+  models with their 0.6 code until their model adapters land.
+- **Model settings**: `openai_api_key` (`OPENAI_API_KEY`) and
+  `openrouter_api_key` (`OPENROUTER_API_KEY`), secrets like the other keys
+  (never saved, kept out of `repr`, and not exported to the process
+  environment); `model_endpoints`, the user's OpenAI-compatible servers by
+  name (`base_url`, the variable holding the key in `api_key_env`, and the
+  models served); `model_roles`, a model per role; and `pinned_models`,
+  models the `/settings` model picker always offers. The catalog lists each
+  provider and endpoint with these, and an agent may name a role
+  (`AgentConfig(model="fast")`). `model_endpoints` is
   user-only: it holds the addresses a key is sent to, so a project
   `./.<app>/settings.json` or a cwd `.env` that sets it is ignored with a
   warning, and a save writes it to `~/.<app>/settings.json`. `model_roles`
   and `pinned_models` are project-settable. `workflow.model_services` turns
-  these settings into the package's arguments.
+  these settings into the package's arguments, and builds the catalog
+  (`build_catalog`).
+- **`BaseWorkflowManager.catalog`**, the `ModelCatalog` the manager loaded
+  (None before it initializes): `catalog.records("google")`,
+  `catalog.record(ModelRef("google", "gemini-2.5-flash"))`,
+  `catalog.status()` and `await catalog.refresh()`.
 
 ### Changed
 
+- **Models are named by reference or role, and resolved once, at startup.**
+  `default_model`, `AgentConfig.model`, `Manager(model=...)` and
+  `reinitialize(model=...)` take a `provider:model` reference or a bare model
+  id as before; an agent's `model` may also be a role (`fast`, `strong`, or
+  one the app names) mapped in `model_roles`. An agent without a `model`
+  runs on the `default` role: `default_model`, else the newest default-tier
+  model of the first provider with a key, in the order Google, Anthropic,
+  OpenAI (with a Google key and no listing yet, `gemini-2.5-flash`, as in
+  0.6). `initialize_services()` resolves the default model and every agent
+  before it builds anything, and raises one `SettingsValidationError` that
+  lists every agent that cannot run (an undefined endpoint, a provider
+  without its key, a model the provider's fresh listing lacks, a thinking
+  mode the model does not take), each naming the agent, the model and the
+  allowed values. `validate=False` skips only the static checks of
+  `validate_settings`. A bare agent `model` that is not a model id (such as
+  `"mystery-model"`) is now an app role: it runs on the default model, with
+  a warning once per process, where 0.6 refused to start; map it in
+  `model_roles` or name the model.
+- **`manager.model` is a `provider:model` reference** (`google:gemini-2.5-flash`,
+  not `gemini-2.5-flash`), and so is the model the status bar shows. Code
+  that compared it to a bare id compares to the reference, or takes
+  `manager.model.partition(":")[2]`. Before initialization it is computed
+  from the settings without the network.
+- **Startup no longer lists models every time.** 0.6 listed the Google and
+  Anthropic models at every start. Listings are now cached for 24 hours in
+  `~/.<app>/model_cache.json` (private, versioned, holding no key), and
+  startup waits only for a provider that has a key and no cache entry, all
+  of them at once and each for at most 10 seconds; an older entry is used
+  while it is listed again in the background. As in 0.6, an id unknown to a
+  provider is rejected only when that provider's own listing succeeded; a
+  failed, untried or older listing accepts it. After a key change to an
+  account with other models, delete the cache file to list again at once.
+- **`budget` thinking on a model without budget thinking fails at startup.**
+  Gemini 3 and adaptive Claude (4.6 and later) take levels, not budgets; 0.6
+  reinterpreted `budget` on them (as a raw budget, or as plain adaptive
+  thinking). Use `low`, `medium` or `high`.
+- **Until the model adapters land later in 0.7.0,** the ADK backend runs
+  Google and Anthropic models only, and the LangGraph backend Google,
+  Anthropic and OpenAI models; another provider, or a per-agent native
+  thinking level (`xhigh`, `max`, `minimal`), fails at startup with a message
+  naming the agent. The backends build each agent from its resolved model's
+  id, and the LangGraph backend passes `openai_api_key` to its OpenAI client.
+- **`validate_settings(settings, agent_configs=None)` checks without the
+  network.** It checks that every model reference parses, that every
+  endpoint a reference names is defined, that every provider a model runs on
+  (the default model, each agent's, each role an agent names) has its key,
+  and that some provider has one. Whether a model exists is checked at
+  startup, against the catalog. It no longer rewrites `default_model` or an
+  agent's `model`: the deprecated-model upgrade is gone (see Removed).
+- **A model a cached listing lacks is listed again before startup refuses
+  it.** A listing under 24 hours old can predate a model the provider now
+  serves (one released since, or newly open to the account), so that provider
+  is listed again, once, and the new listing decides.
+- **`settings.set_model()` checks only the reference** (a role, or a
+  malformed one, raises `ValueError`); `/settings` reinitializes the workflow
+  and rolls the change back if the model cannot run. `default_model` must be
+  a reference or a model id wherever it is set: a role, or a malformed value,
+  fails when settings load, naming `default_model`.
+- **The `/settings` model picker offers `provider:model` references**: the
+  runnable models of each provider with a key (once the workflow is ready,
+  from its listings), endpoint models, and pinned models.
 - **agentic-cli runs on ADK 2.** It requires `google-adk[mcp]>=2.12,<3`
   (0.6.x required `>=1.34,<2`) and `google-genai>=2.30,<3`, and declares
   `sqlalchemy[asyncio]>=2,<3` itself, so installs pull SQLAlchemy and MCP SDK
@@ -136,7 +207,7 @@ further deprecation step.
   `ToolRegistry.get_functions` (name the tools in `AgentConfig.tools`, which
   the framework resolves through the registry; `list_tools()` lists
   definitions, not callables to hand an agent), `ModelRegistry.set_default`,
-  `ModelRegistry.discovery_complete` (`is_authoritative_for(model)`),
+  `ModelRegistry.discovery_complete` (`manager.catalog.is_authoritative(provider)`),
   `ModelSettings.common_params`, `workflow.retry.parse_retry_delay`
   (`is_rate_limit_error` stays), `file_utils.file_lock` and `FileLockTimeout`,
   `sandbox.backends.detect.docker_available` (`detect_docker().available`),
@@ -145,14 +216,50 @@ further deprecation step.
   and `get_log_file_path` (the log is `~/.{app_name}/logs/llm_events.jsonl`).
 - **Settings helpers** `is_google_model`, `is_anthropic_model`,
   `default_model_google`, `default_model_anthropic` and
-  `ensure_workspace_exists`. Use `ModelRegistry.get_family(model)` and
-  `ModelRegistry.get_default(family)`, and
+  `ensure_workspace_exists`. Use `parse_ref(model).provider == "google"`
+  (`from agentic_cli.models import parse_ref`); for a provider's newest
+  default-tier model, `max((r for r in manager.catalog.records("google") if
+  r.tier == "default"), key=lambda r: version_key(r.model)).model` (with
+  `version_key` from `agentic_cli.models`); and
   `settings.workspace_dir.mkdir(parents=True, exist_ok=True)`.
 - **Settings `webfetch_model` (`AGENTIC_WEBFETCH_MODEL`) and
   `sandbox_packages`**, which nothing read (the summarizer picks its model
   from `FAST_MODEL_MAP`). A settings file or environment that still sets them
   keeps loading; the values are ignored.
 - **`tools.webfetch.ValidationResult.resolved_ip`**, which nothing read.
+- **`agentic_cli.workflow.models`**: `ModelRegistry`, `ModelFamily`,
+  `ModelInfo` and `DiscoveryState`, and their exports from
+  `agentic_cli.workflow`. The model catalog replaces the registry, through
+  `BaseWorkflowManager.catalog` once the manager is initialized
+  (`from agentic_cli.models import ThinkingMechanism, parse_ref`):
+  `get_available_models()` is `catalog.picker_refs()` (every runnable
+  `provider:model`) or `catalog.records("google")`;
+  `get_family(model)` is `parse_ref(model).provider`;
+  `get_default(family)` is `manager.model`;
+  `resolve_model(model)` is `catalog.record(parse_ref(model))`, which raises
+  `ModelResolutionError` when the provider's fresh listing lacks the model;
+  `is_authoritative_for(model)` is
+  `catalog.is_authoritative(parse_ref(model).provider)`;
+  `supports_thinking(model)` is
+  `catalog.record(parse_ref(model)).thinking.mechanism is not ThinkingMechanism.NONE`;
+  and `await registry.refresh(...)` is `await catalog.refresh()`.
+- **`BaseWorkflowManager.model_registry`**. Use `manager.catalog`.
+- **Settings helpers** `get_model()`, `get_available_models()`,
+  `supports_thinking_effort()`, `check_model()`, `set_model_registry()`,
+  `has_google_key`, `has_anthropic_key` and `has_any_api_key`, and the
+  constant `workflow.settings.THINKING_EFFORT_LEVELS`. `get_model()` is
+  `manager.model`; `has_google_key` is `bool(settings.google_api_key)`;
+  `has_any_api_key` is `any(model_services.provider_keys(settings).values())`
+  (`from agentic_cli.workflow import model_services`);
+  `check_model(model)` is `validate_settings(settings)` before startup, and
+  `manager.catalog.record(parse_ref(model))` after it;
+  `THINKING_EFFORT_LEVELS` is
+  `typing.get_args(BaseSettings.model_fields["thinking_effort"].annotation)`.
+  The others are covered in the `ModelRegistry` entry above.
+- **The deprecated-model upgrade.** 0.6 replaced a model its registry
+  marked deprecated with the newest of its family and tier; no listing ever
+  set the mark. A model a provider no longer lists fails at startup when the
+  provider's listing is fresh: name a current one.
 - **`agentic_cli.workflow.adk.transfer_tool_description`**, the plugin that
   rewrote the description ADK 1.x gave its `transfer_to_agent` tool (it told
   the model to call `TransferToAgentTool`). ADK 2's description is correct,

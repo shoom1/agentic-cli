@@ -6,6 +6,7 @@ import logging
 
 import pytest
 
+from agentic_cli.models import roles as roles_module
 from agentic_cli.models import (
     ModelRef,
     ModelResolutionError,
@@ -193,6 +194,10 @@ class TestAppRoles:
             "google", "gemini-2.5-pro"
         )
 
+    @pytest.fixture(autouse=True)
+    def _no_role_warned_yet(self, monkeypatch):
+        monkeypatch.setattr(roles_module, "_WARNED_ROLES", set())
+
     def test_an_unmapped_app_role_falls_back_to_default_with_one_warning(self, caplog):
         roles = _roles(default_model="anthropic:claude-sonnet-4-5")
 
@@ -205,6 +210,18 @@ class TestAppRoles:
         assert len(warnings) == 1
         assert "vision" in warnings[0].getMessage()
         assert "model_roles" in warnings[0].getMessage()
+
+    def test_the_warning_comes_once_per_process_not_per_role_map(self, caplog):
+        """R17: a reinitialize builds a new role map; the user was already told."""
+        with caplog.at_level(logging.WARNING, logger="agentic_cli.models.roles"):
+            for _ in range(3):
+                roles = _roles(default_model="anthropic:claude-sonnet-4-5")
+                roles.resolve("vision", catalog=CATALOG, endpoints=endpoints())
+            roles.resolve("critic", catalog=CATALOG, endpoints=endpoints())
+
+        warned = [r.getMessage() for r in caplog.records if r.name == "agentic_cli.models.roles"]
+        assert len(warned) == 2
+        assert "'vision'" in warned[0] and "'critic'" in warned[1]
 
     def test_an_invalid_role_name_is_an_error(self):
         with pytest.raises(ModelSpecError):
