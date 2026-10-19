@@ -159,6 +159,16 @@ class TestWheelIsSelfContained:
             f"(looked under {pkg_dir})"
         )
 
+    def test_framework_package_data_is_present(self, installed_wheel, sandbox):
+        """The framework's own data: the shipped model table."""
+        home, cwd = sandbox
+        imports = probe_child_imports(
+            str(installed_wheel["python"]), cwd=cwd, home=home
+        )
+        table = imports.framework.parent / "models" / "data" / "table.json"
+
+        assert table.is_file(), f"the installed wheel has no {table}"
+
     def test_console_script_is_installed_and_executable(self, installed_wheel):
         console = installed_wheel["console"]
         assert console.exists(), (

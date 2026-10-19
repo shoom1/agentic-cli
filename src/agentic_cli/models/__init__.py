@@ -11,6 +11,8 @@ both); each backend's adapter turns what it resolves into SDK objects.
   OpenAI-compatible endpoints.
 - ``records``: ``ModelRecord``, what is known about one model, and its
   ``ThinkingRule``.
+- ``table``: the shipped table (``data/table.json``): family rules, per-model
+  numbers and the fallback model lists.
 """
 
 from agentic_cli.models.endpoints import (
@@ -38,6 +40,7 @@ from agentic_cli.models.refs import (
     validate_endpoint_name,
     validate_role_name,
 )
+from agentic_cli.models.table import ShippedTable, load_table, version_key
 
 __all__ = [
     "BUILTIN_PROVIDERS",
@@ -52,11 +55,14 @@ __all__ = [
     "OPENROUTER_BASE_URL",
     "ProviderKind",
     "RoleRef",
+    "ShippedTable",
     "ThinkingMechanism",
     "ThinkingRule",
     "build_endpoints",
+    "load_table",
     "parse_ref",
     "parse_spec",
     "validate_endpoint_name",
     "validate_role_name",
+    "version_key",
 ]
