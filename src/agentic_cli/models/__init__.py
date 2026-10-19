@@ -13,10 +13,15 @@ both); each backend's adapter turns what it resolves into SDK objects.
   ``ThinkingRule``.
 - ``table``: the shipped table (``data/table.json``): family rules, per-model
   numbers and the fallback model lists.
+- ``roles``: ``RoleMap``, role names to references, computed from the
+  providers with a key when unmapped.
+- ``resolve``: ``resolve_model``, one agent's model, thinking, ``max_tokens``
+  and sampling settings as a ``ResolvedModel``.
 """
 
 from agentic_cli.models.endpoints import (
     OPENROUTER_BASE_URL,
+    PROVIDER_KEY_ENV,
     DeclaredModel,
     Endpoint,
     EndpointSpec,
@@ -40,28 +45,47 @@ from agentic_cli.models.refs import (
     validate_endpoint_name,
     validate_role_name,
 )
+from agentic_cli.models.resolve import (
+    CatalogView,
+    GenerationSettings,
+    ModelResolutionError,
+    NativeThinking,
+    ResolvedModel,
+    ThinkingIntent,
+    resolve_model,
+)
+from agentic_cli.models.roles import RoleMap
 from agentic_cli.models.table import ShippedTable, load_table, version_key
 
 __all__ = [
     "BUILTIN_PROVIDERS",
     "BUILTIN_ROLES",
     "CacheMechanism",
+    "CatalogView",
     "DeclaredModel",
     "Endpoint",
     "EndpointSpec",
+    "GenerationSettings",
     "ModelRecord",
     "ModelRef",
+    "ModelResolutionError",
     "ModelSpecError",
+    "NativeThinking",
     "OPENROUTER_BASE_URL",
+    "PROVIDER_KEY_ENV",
     "ProviderKind",
+    "ResolvedModel",
+    "RoleMap",
     "RoleRef",
     "ShippedTable",
+    "ThinkingIntent",
     "ThinkingMechanism",
     "ThinkingRule",
     "build_endpoints",
     "load_table",
     "parse_ref",
     "parse_spec",
+    "resolve_model",
     "validate_endpoint_name",
     "validate_role_name",
     "version_key",

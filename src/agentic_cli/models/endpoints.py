@@ -38,6 +38,17 @@ class ProviderKind(str, Enum):
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
+#: The environment variable each provider's SDK and documentation name for its
+#: key, for messages that tell the user what to set (never to read a key).
+PROVIDER_KEY_ENV: Mapping[str, str] = MappingProxyType(
+    {
+        "google": "GOOGLE_API_KEY",
+        "anthropic": "ANTHROPIC_API_KEY",
+        "openai": "OPENAI_API_KEY",
+        "openrouter": "OPENROUTER_API_KEY",
+    }
+)
+
 # Each built-in provider and its kind; the provider name is the kind's value.
 _BUILTIN_KINDS: tuple[ProviderKind, ...] = (
     ProviderKind.GOOGLE,
