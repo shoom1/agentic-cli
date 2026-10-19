@@ -7,8 +7,10 @@ tests read is the request ADK's own model class builds.
 
 from __future__ import annotations
 
+import importlib
 import json
 from collections.abc import Callable
+from types import ModuleType
 from typing import Any
 
 import httpx
@@ -46,9 +48,36 @@ class FakeAPI:
         return answer if isinstance(answer, httpx.Response) else httpx.Response(200, json=answer)
 
 
+def http_library(client: Any) -> ModuleType:
+    """The HTTP package an SDK client (or client class) takes its ``http_client`` from.
+
+    anthropic 1.x runs on ``httpx2`` and rejects ``httpx`` objects; openai, and
+    anthropic before 1.0, take ``httpx``.
+    """
+    cls = client if isinstance(client, type) else type(client)
+    base = importlib.import_module(f"{cls.__module__.partition('.')[0]}._base_client")
+    return getattr(base, "httpx2", httpx)
+
+
+def library_client(api: FakeAPI, library: ModuleType) -> Any:
+    """An async client of ``library`` (``httpx`` or ``httpx2``) whose requests ``api`` answers."""
+    if library is httpx:
+        return api.http_client()
+
+    def handle(request: Any) -> Any:
+        answer = api._handle(request)
+        return library.Response(
+            answer.status_code, headers=answer.headers.multi_items(), content=answer.content
+        )
+
+    return library.AsyncClient(transport=library.MockTransport(handle))
+
+
 def serve(model: Any, api: FakeAPI) -> None:
     """Send ``model``'s requests to ``api``, keeping its client's key, timeout and retries."""
-    model.client = model.client.with_options(http_client=api.http_client())
+    model.client = model.client.with_options(
+        http_client=library_client(api, http_library(model.client))
+    )
 
 
 def anthropic_message(*blocks: dict[str, Any], model: str = "claude-sonnet-4-5") -> dict[str, Any]:

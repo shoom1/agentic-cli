@@ -40,6 +40,8 @@ from agentic_cli.workflow.model_settings import ModelSettings, ThinkingSettings 
 from tests.models.fakes import ProviderAPI, hang, recorded, refuse  # noqa: E402
 from tests.workflow.adk.fakes import (  # noqa: E402
     FakeAPI,
+    http_library,
+    library_client,
     anthropic_message,
     chat_completion,
     openai_response,
@@ -115,8 +117,10 @@ LOCAL = {
 def route(monkeypatch, sdk, client_class: str, api: FakeAPI) -> None:
     """Send the requests of every ``sdk.<client_class>`` the factory builds to ``api``."""
     real = getattr(sdk, client_class)
+    library = http_library(real)
     monkeypatch.setattr(
-        sdk, client_class, lambda **kwargs: real(http_client=api.http_client(), **kwargs)
+        sdk, client_class,
+        lambda **kwargs: real(http_client=library_client(api, library), **kwargs),
     )
 
 
