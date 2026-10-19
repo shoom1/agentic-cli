@@ -1,0 +1,15 @@
+{
+  "object": "list",
+  "data": [
+    {"id": "gpt-5.5", "object": "model", "created": 1772668800, "owned_by": "system"},
+    {"id": "gpt-5.5-2026-03-05", "object": "model", "created": 1772668800, "owned_by": "system"},
+    {"id": "gpt-5.5-pro", "object": "model", "created": 1772668800, "owned_by": "system"},
+    {"id": "gpt-5.4-mini", "object": "model", "created": 1767225600, "owned_by": "system"},
+    {"id": "gpt-5-codex", "object": "model", "created": 1757894400, "owned_by": "system"},
+    {"id": "o3", "object": "model", "created": 1744761600, "owned_by": "system"},
+    {"id": "gpt-4.1", "object": "model", "created": 1744329600, "owned_by": "system"},
+    {"id": "gpt-4o-mini-tts", "object": "model", "created": 1742403600, "owned_by": "system"},
+    {"id": "text-embedding-3-small", "object": "model", "created": 1705948997, "owned_by": "system"},
+    {"id": "whisper-1", "object": "model", "created": 1677532384, "owned_by": "openai-internal"}
+  ]
+}
