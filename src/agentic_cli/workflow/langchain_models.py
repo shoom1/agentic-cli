@@ -40,12 +40,12 @@ too.
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 import httpx
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import BaseMessage
+from langchain_core.messages import AIMessage, BaseMessage
 from langchain_openai import ChatOpenAI
 
 from agentic_cli.logging import Loggers
@@ -338,3 +338,60 @@ def _keep_reasoning(message: BaseMessage, fields: Mapping[str, Any]) -> None:
     if isinstance(reasoning, str) and reasoning:
         message.additional_kwargs["reasoning_content"] = reasoning
     message.response_metadata["model_provider"] = _COMPATIBLE_PROVIDER
+
+
+# --- reasoning across providers --------------------------------------------------------
+
+#: The tag each provider's class gives its AI messages
+#: (``response_metadata["model_provider"]``).
+_PROVIDER_TAGS = {
+    ProviderKind.GOOGLE: "google_genai",
+    ProviderKind.ANTHROPIC: "anthropic",
+    ProviderKind.OPENAI: "openai",
+    ProviderKind.OPENROUTER: "openrouter",
+    ProviderKind.OPENAI_COMPATIBLE: _COMPATIBLE_PROVIDER,
+}
+_REASONING_BLOCKS = frozenset({"thinking", "redacted_thinking", "reasoning"})
+_REASONING_FIELDS = frozenset({"reasoning_content", "reasoning", "reasoning_details"})
+
+
+def without_foreign_reasoning(
+    messages: Sequence[BaseMessage], kind: ProviderKind
+) -> list[BaseMessage]:
+    """``messages`` for a model of ``kind``, without other providers' reasoning.
+
+    A model switch that keeps the session, or a tree of agents on several
+    providers, sends a model AI messages another provider wrote. Their
+    reasoning belongs to that provider: Claude rejects a thinking block it did
+    not sign, Gemini drops a foreign one with a warning on every call, and
+    OpenRouter would take an endpoint's reasoning as its own. Each such
+    message is copied without its reasoning blocks and fields; the answer,
+    tool calls and the given messages themselves are left as they are, and a
+    message of the model's own provider keeps its reasoning (Claude's signed
+    thinking must go back within a tool loop).
+    """
+    own = _PROVIDER_TAGS[kind]
+    kept: list[BaseMessage] = []
+    for message in messages:
+        if not isinstance(message, AIMessage) or message.response_metadata.get(
+            "model_provider"
+        ) == own:
+            kept.append(message)
+            continue
+        content = message.content
+        if isinstance(content, list):
+            content = [
+                block
+                for block in content
+                if not (isinstance(block, dict) and block.get("type") in _REASONING_BLOCKS)
+            ]
+        fields = {
+            key: value
+            for key, value in message.additional_kwargs.items()
+            if key not in _REASONING_FIELDS
+        }
+        if content == message.content and len(fields) == len(message.additional_kwargs):
+            kept.append(message)
+        else:
+            kept.append(message.model_copy(update={"content": content, "additional_kwargs": fields}))
+    return kept

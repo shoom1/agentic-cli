@@ -218,6 +218,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     sent `ChatGoogleGenerativeAI`'s 0.7.
   - Thinking text reaches the thinking box for every provider. 0.6 showed
     none (see Fixed).
+- **On LangGraph, a model is never sent another provider's reasoning.** A
+  `/settings` switch that keeps the session, or a tree of agents on several
+  providers, puts one provider's AI messages before another's model. Each
+  agent's request now leaves out the reasoning other providers wrote:
+  Claude rejects a thinking block it did not sign, which after a switch from
+  Gemini failed every later turn, and Gemini warned over the UI on every call
+  about each foreign block it dropped. The checkpoint keeps the reasoning, and
+  a model's own reasoning still goes back to it.
 - **On LangGraph, `prompt_caching_enabled` marks Claude's system prompt only
   for Claude on Anthropic's API.** The model's record decides this, not its
   name. 0.6 marked any model whose id began with `claude-`, including one

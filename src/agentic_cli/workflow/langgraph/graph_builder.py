@@ -225,6 +225,8 @@ class LangGraphBuilder:
         Returns:
             Async function that processes state through the agent.
         """
+        from agentic_cli.workflow import langchain_models
+
         agent_tools = tools or config.tools or []
         llm = chat_model.bind_tools(agent_tools) if agent_tools else chat_model
         # Claude on Anthropic's API caches the system prompt it is told to; a
@@ -288,7 +290,11 @@ class LangGraphBuilder:
                         "agent": config.name,
                     })
 
-            messages.extend(conversation)
+            # Another provider's reasoning (a model switch, a mixed tree) is
+            # not this model's to read; the checkpoint keeps it.
+            messages.extend(
+                langchain_models.without_foreign_reasoning(conversation, model.record.kind)
+            )
 
             # Invoke LLM
             try:
