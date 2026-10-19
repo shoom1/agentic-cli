@@ -30,7 +30,6 @@ from pathlib import Path
 
 import pytest
 
-from agentic_cli.workflow.adk.transfer_tool_description import TRANSFER_TOOL_NAME
 from agentic_cli.workflow.events import EventType
 from agentic_cli.workflow.factory import create_workflow_manager_from_settings
 from agentic_cli.workflow.settings import OrchestratorType
@@ -56,6 +55,9 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 from examples.research_demo.agents import AGENT_CONFIGS  # noqa: E402
 from examples.research_demo.settings import ResearchDemoSettings  # noqa: E402
+
+#: ADK's routing tool, which the coordinator calls to delegate.
+TRANSFER_TOOL_NAME = "transfer_to_agent"
 
 
 _has_any_key = bool(

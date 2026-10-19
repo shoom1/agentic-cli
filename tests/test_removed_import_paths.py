@@ -17,6 +17,7 @@ import pytest
         "agentic_cli.knowledge_base",
         "agentic_cli.knowledge_base.manager",
         "agentic_cli.tools.kb_convert",
+        "agentic_cli.workflow.adk.transfer_tool_description",
     ],
 )
 def test_a_removed_module_cannot_be_imported(module, monkeypatch):
