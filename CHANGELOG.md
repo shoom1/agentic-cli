@@ -79,8 +79,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of them at once and each for at most 10 seconds; an older entry is used
   while it is listed again in the background. As in 0.6, an id unknown to a
   provider is rejected only when that provider's own listing succeeded; a
-  failed, untried or older listing accepts it. After a key change to an
-  account with other models, delete the cache file to list again at once.
+  failed, untried or older listing accepts it. A model the cached listing
+  lacks (one released since, or newly open to the account) is listed again,
+  once, before startup refuses it. After a key change to another account,
+  delete the cache file to list again at once.
 - **`budget` thinking on a model without budget thinking fails at startup.**
   Gemini 3 and adaptive Claude (4.6 and later) take levels, not budgets; 0.6
   reinterpreted `budget` on them (as a raw budget, or as plain adaptive

@@ -126,6 +126,8 @@ class _Provider:
     failure: Listing | None = None
     #: A cached entry that a background refresh should replace.
     due: bool = False
+    #: The fresh listing was read from the cache, not listed by this catalog.
+    from_cache: bool = False
     #: Every id ``record()`` knows, and the records ``records()`` offers.
     accepted: Mapping[str, ModelRecord] = field(default_factory=dict)
     offered: tuple[ModelRecord, ...] = ()
@@ -171,6 +173,8 @@ class ModelCatalog:
         self._kept: dict[str, _CacheEntry] = {}
         self._refresh_task: asyncio.Task[None] | None = None
         self._closed = False
+        # Providers whose cached listing rejected an id (``confirm_rejections``).
+        self._cached_rejections: set[str] = set()
 
     # --- loading and refreshing --------------------------------------------
 
@@ -234,6 +238,27 @@ class ModelCatalog:
         await asyncio.gather(*(self._list(name) for name in listable))
         return [self._status(name) for name in names]
 
+    async def confirm_rejections(self) -> bool:
+        """List again each provider whose cached listing rejected an id.
+
+        A listing read from the cache can predate a model the provider now
+        serves (a release, a plan upgrade, another account's key). A caller
+        about to refuse to start lists those providers again, once, and asks
+        ``record()`` again: the new listing decides, and a failed one accepts
+        the id, as any failed listing does.
+
+        Returns:
+            Whether any provider was listed again.
+        """
+        names = [
+            name for name in self._cached_rejections if self._providers[name].from_cache
+        ]
+        self._cached_rejections.clear()
+        if not names:
+            return False
+        await asyncio.gather(*(self._list(name, startup=True) for name in names))
+        return True
+
     async def aclose(self) -> None:
         """Cancel and await the background refresh. Idempotent."""
         self._closed = True
@@ -262,6 +287,8 @@ class ModelCatalog:
         if found is not None:
             return found
         if provider.state is ProviderState.FRESH:
+            if provider.from_cache:
+                self._cached_rejections.add(ref.provider)
             models = [record.model for record in provider.offered]
             shown = ", ".join(models[:_MESSAGE_MODELS]) or "none"
             if len(models) > _MESSAGE_MODELS:
@@ -350,6 +377,7 @@ class ModelCatalog:
                 listing.error,
             )
         provider.due = False
+        provider.from_cache = False
         self._rebuild(provider)
         self._write_cache()
 
@@ -368,6 +396,7 @@ class ModelCatalog:
             provider.listing, provider.failure = listing, None
             provider.state = ProviderState.FRESH if fresh else ProviderState.STALE
             provider.due = not fresh
+            provider.from_cache = fresh
         else:
             provider.listing, provider.failure = None, listing
             provider.state = ProviderState.DEGRADED

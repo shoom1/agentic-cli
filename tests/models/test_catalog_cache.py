@@ -7,14 +7,21 @@ while a background refresh runs; a broken file is ignored and listed again
 
 from __future__ import annotations
 
+import copy
 import json
 import stat
 import time
 
 import pytest
 
-from agentic_cli.models import EndpointSpec, ModelCatalog, ModelRef, ProviderState
-from tests.models.fakes import Clock, ProviderAPI, endpoints, hang, refuse
+from agentic_cli.models import (
+    EndpointSpec,
+    ModelCatalog,
+    ModelRef,
+    ModelResolutionError,
+    ProviderState,
+)
+from tests.models.fakes import Clock, ProviderAPI, endpoints, hang, recorded, refuse
 
 DAY = 86400.0
 KEYS = {
@@ -308,3 +315,86 @@ async def test_a_timestamp_from_the_future_is_stale(cache):
 
     assert states(catalog) == {"google": ProviderState.STALE}
     await catalog.aclose()
+
+
+# --- a cached listing that rejects an id ---------------------------------------------
+#
+# A listing read from the cache can predate a model the provider now serves (a
+# release, a plan upgrade, another account's key). Before such a listing
+# rejects an id for good, the provider is listed again, once.
+
+NEW = ModelRef("anthropic", "claude-sonnet-5-6")
+
+
+def _serving(model_id: str) -> dict:
+    """Anthropic's recorded listing, plus a model released after it was cached."""
+    payload = copy.deepcopy(recorded("anthropic"))
+    payload["data"].insert(0, dict(payload["data"][0], id=model_id, display_name=model_id))
+    return payload
+
+
+async def _cached_an_hour_ago(cache, clock) -> None:
+    await make(cache, anthropic=KEYS["anthropic"], clock=clock).load()
+    clock.now += 3600
+
+
+async def test_a_cached_listing_that_rejects_an_id_is_listed_again_once(cache):
+    clock = Clock()
+    await _cached_an_hour_ago(cache, clock)
+    api = ProviderAPI(anthropic=_serving(NEW.model))
+    catalog = make(cache, api, anthropic=KEYS["anthropic"], clock=clock)
+    await catalog.load()
+    assert api.calls == []
+
+    with pytest.raises(ModelResolutionError, match="not available"):
+        catalog.record(NEW)
+    assert await catalog.confirm_rejections() is True
+
+    assert api.calls == ["anthropic"]
+    assert catalog.record(NEW).model == NEW.model
+    assert await catalog.confirm_rejections() is False
+    assert api.calls == ["anthropic"]
+    # The new listing is cached: the next start knows the model.
+    assert NEW.model in [m["id"] for m in read(cache)["providers"]["anthropic"]["models"]]
+
+
+async def test_an_id_the_provider_still_lacks_is_rejected_by_the_new_listing(cache):
+    clock = Clock()
+    await _cached_an_hour_ago(cache, clock)
+    api = ProviderAPI()
+    catalog = make(cache, api, anthropic=KEYS["anthropic"], clock=clock)
+    await catalog.load()
+    with pytest.raises(ModelResolutionError):
+        catalog.record(NEW)
+
+    assert await catalog.confirm_rejections() is True
+
+    with pytest.raises(ModelResolutionError, match="not available"):
+        catalog.record(NEW)
+    assert await catalog.confirm_rejections() is False
+    assert api.calls == ["anthropic"]
+
+
+async def test_when_listing_again_fails_the_id_is_accepted(cache):
+    clock = Clock()
+    await _cached_an_hour_ago(cache, clock)
+    catalog = make(cache, ProviderAPI(anthropic=500), anthropic=KEYS["anthropic"], clock=clock)
+    await catalog.load()
+    with pytest.raises(ModelResolutionError):
+        catalog.record(NEW)
+
+    assert await catalog.confirm_rejections() is True
+
+    # As for any failed listing: the provider's ids are not checked.
+    assert catalog.record(NEW).model == NEW.model
+
+
+async def test_a_rejection_by_a_listing_from_this_start_is_not_listed_again(cache):
+    api = ProviderAPI()
+    catalog = make(cache, api, anthropic=KEYS["anthropic"])
+    await catalog.load()
+    with pytest.raises(ModelResolutionError):
+        catalog.record(NEW)
+
+    assert await catalog.confirm_rejections() is False
+    assert api.calls == ["anthropic"]

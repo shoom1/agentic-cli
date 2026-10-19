@@ -974,14 +974,23 @@ class BaseWorkflowManager(ABC):
         """Build and load the model catalog, then resolve every model.
 
         The catalog is owned from here on: ``_release_resources`` closes it.
-        Loading lists only the providers the cache cannot answer for.
+        Loading lists only the providers the cache cannot answer for, and a
+        provider whose cached listing rejected a model is listed again, once,
+        before startup fails on it.
         """
+        from agentic_cli.config import SettingsValidationError
         from agentic_cli.workflow import model_services
 
         endpoints = model_services.endpoints_from_settings(self._settings)
         self._catalog = model_services.build_catalog(self._settings, endpoints)
         await self._catalog.load()
-        self._resolve_models(endpoints)
+        try:
+            self._resolve_models(endpoints)
+        except SettingsValidationError:
+            # A cached listing can predate a model the provider now serves.
+            if not await self._catalog.confirm_rejections():
+                raise
+            self._resolve_models(endpoints)
 
     def _resolve_models(self, endpoints: Mapping[str, Endpoint]) -> None:
         """Resolve the default model and every agent's, all or nothing.
