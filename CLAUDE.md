@@ -181,7 +181,7 @@ Workflow:
 
 ### Console Output
 All console output must go through `ThinkingPromptSession` methods. Never use `rich.Console` or `print()` directly.
-Python warnings print to stderr, over the UI, so `BaseCLIApp` installs `cli/app.py::_install_adk_notice_hook`: ADK's `[EXPERIMENTAL] feature … is enabled` notices are logged at debug (`adk_experimental_feature`), and every other warning goes to the previous `warnings.showwarning`.
+Python warnings, and the stdlib logging `configure_logging` sets up, print to stderr, over the UI, so `BaseCLIApp` installs `cli/app.py::_install_adk_notice_hook`: ADK's `[EXPERIMENTAL] feature … is enabled` notices are logged at debug (`adk_experimental_feature`), and every other warning goes to the previous `warnings.showwarning`; a filter on ADK's runner logger (`google_adk.google.adk.runners`) logs its "has no context_cache_config" advice at debug too (`adk_uncached_agent_transfer`). Any other ADK warning that lands over the UI is handled the same narrow way, never by silencing the whole `google_adk` logger tree.
 
 Available session methods:
 - `session.add_response(text, markdown=True)` - Display text/markdown response
