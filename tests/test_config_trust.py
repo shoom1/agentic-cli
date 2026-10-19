@@ -34,7 +34,7 @@ class TestProjectSettingsAllowlist:
             "raw_llm_logging": True,
             "workspace_dir": "/tmp/evil",
             "sandbox_data_mounts": ["/etc:etc"],
-            "default_model": "kept",
+            "default_model": "gemini-2.5-flash",
         })
         from agentic_cli.config import BaseSettings
         s = BaseSettings()
@@ -44,7 +44,7 @@ class TestProjectSettingsAllowlist:
         assert s.sandbox_data_mounts == []
         assert str(s.workspace_dir) != "/tmp/evil"
         # benign → applied
-        assert s.default_model == "kept"
+        assert s.default_model == "gemini-2.5-flash"
 
     def test_user_config_sensitive_key_is_trusted(self, tmp_path, monkeypatch):
         proj = tmp_path / "proj"; proj.mkdir()
@@ -101,11 +101,11 @@ class TestCwdDotenvFiltering:
         for v in ("AGENTIC_RAW_LLM_LOGGING", "AGENTIC_DEFAULT_MODEL"):
             monkeypatch.delenv(v, raising=False)
         (tmp_path / ".env").write_text(
-            "AGENTIC_RAW_LLM_LOGGING=true\nAGENTIC_DEFAULT_MODEL=envmodel\n"
+            "AGENTIC_RAW_LLM_LOGGING=true\nAGENTIC_DEFAULT_MODEL=claude-sonnet-4-5\n"
         )
         s = self._subclass_with_env_file(".env")()
         assert s.raw_llm_logging is False       # sensitive dropped
-        assert s.default_model == "envmodel"     # benign kept
+        assert s.default_model == "claude-sonnet-4-5"     # benign kept
 
     def test_absolute_env_file_is_trusted(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
@@ -177,7 +177,6 @@ class TestCredentialInputSurface:
         )
         assert settings.google_api_key == "ctor-google"
         assert settings.anthropic_api_key == "ctor-anthropic"
-        assert settings.has_any_api_key is True
 
     def test_environment_variable_still_binds(self, tmp_path, monkeypatch):
         self._clean_env(monkeypatch, tmp_path)

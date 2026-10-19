@@ -22,7 +22,6 @@ from agentic_cli.logging import Loggers
 # Re-export factory helpers for backward compatibility
 from agentic_cli.workflow.factory import (  # noqa: F401
     _is_claude_model,
-    _resolve_effective_model,
     create_workflow_manager_from_settings,
 )
 
@@ -222,7 +221,7 @@ class WorkflowController:
 
     @property
     def model(self) -> str | None:
-        """Get the current model name, or None if not initialized."""
+        """The workflow's default model (``provider:model``), or None before one exists."""
         if self._workflow is None:
             return None
         return self._workflow.model

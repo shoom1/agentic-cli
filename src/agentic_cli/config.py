@@ -32,7 +32,7 @@ Settings Loading Priority (highest to lowest):
 import re
 from contextvars import ContextVar, Token
 from pathlib import Path
-from typing import Callable, Generator, Any, Sequence, Tuple, Type
+from typing import Generator, Any, Tuple, Type
 from contextlib import contextmanager
 
 from pydantic import AliasChoices
@@ -43,7 +43,6 @@ from pydantic_settings import (
 )
 
 from agentic_cli.workflow.settings import WorkflowSettingsMixin
-from agentic_cli.workflow.models import ModelRegistry
 from agentic_cli.settings_mixins import AppSettingsMixin, CLISettingsMixin
 # PROJECT_SETTABLE_KEYS lives in settings_persistence so the save-side split
 # and the load-side filter below share one definition (and because the reverse
@@ -470,141 +469,137 @@ class SettingsValidationError(Exception):
     pass
 
 
-def _effective_models(
-    settings: BaseSettings, agent_configs: Any | None
-) -> list[tuple[str, str, Callable[[str], None]]]:
-    """Every model that will actually be used, with a way to rewrite it.
-
-    The configured ``default_model`` plus each agent's ``model`` override — an
-    override pointing at a provider with no credential fails just as hard as a
-    bad default, only later and less legibly.
-
-    Each entry carries an ``apply`` callback that writes a resolved id back to
-    where the model came from. A deprecated alias resolves to its live
-    replacement, and that replacement has to reach the runtime: a config value
-    loaded from settings.json or the environment never passes through
-    ``set_model()``, so validating it and discarding the result left the dead
-    id to be sent to the provider.
-    """
-    entries: list[tuple[str, str, Callable[[str], None]]] = []
-
-    if settings.default_model:
-
-        def _apply_default(resolved: str) -> None:
-            object.__setattr__(settings, "default_model", resolved)
-
-        entries.append(("default_model", settings.default_model, _apply_default))
-
-    for config in agent_configs or []:
-        model = getattr(config, "model", None)
-        if not model:
-            continue
-
-        def _apply_override(resolved: str, cfg: Any = config) -> None:
-            cfg.model = resolved
-
-        entries.append(
-            (f"agent '{getattr(config, 'name', '?')}'", model, _apply_override)
-        )
-    return entries
-
-
 def validate_settings(
     settings: BaseSettings, agent_configs: Any | None = None
 ) -> None:
-    """Validate settings for runtime use.
+    """Check, before any network call, that the model settings can work.
 
-    Performs validation that can only be done at runtime:
-    - API key availability
-    - Model availability and provider credentials, for the default model *and*
-      every per-agent model override
-    - Path accessibility
+    The static half of model validation:
 
-    Every effective model goes through ``settings.check_model()`` — the same
-    rules ``set_model()`` applies, so the setter and startup validation can
-    never disagree. Model availability is judged per provider: a model is
-    rejected as unknown only when *its own* provider answered the listing.
+    - every reference parses: ``default_model``, ``model_roles``,
+      ``pinned_models`` and each agent's ``model`` (a role must map to a
+      model, never another role);
+    - every endpoint a reference names is defined in ``model_endpoints``;
+    - every provider a model will run on has a key: the default model's,
+      each agent's, and that of each role an agent names;
+    - some provider has a key (or an endpoint is defined).
 
-    Not purely a check: a **deprecated alias is rewritten in place** to the live
-    model it resolves to, on ``settings.default_model`` and on each
-    ``AgentConfig.model``. That is the only point at which a value loaded from
-    settings.json or the environment can be corrected, and the runtime reads
-    those attributes directly.
-
-    Rewrites are **all-or-nothing**: nothing is written until every model has
-    validated. Applying them as each model was checked left the configuration
-    half-rewritten by a call that raised, so a retry validated something the
-    user never wrote.
-
-    Args:
-        settings: Settings to validate
-        agent_configs: Optional agent configs whose ``model`` overrides are
-            validated — and, when deprecated, upgraded — alongside
-            ``default_model``.
-
-    Raises:
-        SettingsValidationError: If validation fails
-    """
-    _validate_settings_with_models(settings, agent_configs)
-
-
-def _validate_settings_with_models(
-    settings: BaseSettings,
-    agent_configs: Any | None = None,
-    extra_models: "Sequence[tuple[str, str]] | None" = None,
-) -> dict[str, str]:
-    """:func:`validate_settings` plus models that do not live in settings.
-
-    Internal. A workflow manager's own model — ``Manager(model=...)``,
-    ``reinitialize(model=...)``, or one cached before discovery ran — has to be
-    validated in the *same* all-or-nothing pass as ``default_model`` and the
-    agent overrides, but it is the manager's state to rewrite, not settings'.
-    So it is passed in here and its resolution handed back, keeping
-    ``validate_settings()``'s public contract (returns None) intact.
+    Whether a model exists, and which thinking modes it takes, need the
+    provider's listing: a workflow manager checks them when it resolves its
+    agents against the model catalog at startup.
 
     Args:
         settings: Settings to validate.
-        agent_configs: Optional agent configs, as for ``validate_settings``.
-        extra_models: ``(label, model)`` pairs to validate alongside them.
-
-    Returns:
-        ``{label: resolved_model}`` for every entry in ``extra_models`` (the
-        input model when it needed no rewrite).
+        agent_configs: Optional agent configs whose ``model`` is checked too.
 
     Raises:
-        SettingsValidationError: If validation fails.
+        SettingsValidationError: Listing every problem, one per line.
     """
-    errors = []
-
-    if not settings.has_any_api_key:
-        errors.append(
-            "No API keys configured. Set GOOGLE_API_KEY or ANTHROPIC_API_KEY."
-        )
-
-    entries = list(_effective_models(settings, agent_configs))
-    resolutions: dict[str, str] = {}
-
-    def _record(label: str) -> Callable[[str], None]:
-        def _apply(resolved: str) -> None:
-            resolutions[label] = resolved
-
-        return _apply
-
-    for label, model in extra_models or ():
-        entries.append((label, model, _record(label)))
-
-    pending: list[tuple[Callable[[str], None], str]] = []
-    for label, model, apply_resolved in entries:
-        try:
-            resolved = settings.check_model(model, label=label)
-        except ValueError as exc:
-            errors.append(str(exc))
-            continue
-        pending.append((apply_resolved, resolved))
-
+    errors = _model_settings_problems(settings, agent_configs)
     if errors:
         raise SettingsValidationError("\n".join(errors))
 
-    for apply_resolved, resolved in pending:
-        apply_resolved(resolved)
-    return resolutions
+
+def _model_settings_problems(
+    settings: BaseSettings,
+    agent_configs: Any | None = None,
+    *,
+    manager_model: str | None = None,
+) -> list[str]:
+    """:func:`validate_settings`' findings, without raising.
+
+    Internal. ``manager_model`` is a workflow manager's own model override,
+    which takes the ``default`` role for that manager; with it,
+    ``default_model`` is not what runs there, so its key is not required.
+    """
+    from agentic_cli.models import (
+        PROVIDER_KEY_ENV,
+        ModelRef,
+        ModelSpecError,
+        ProviderKind,
+        RoleRef,
+        parse_ref,
+        parse_spec,
+    )
+    from agentic_cli.workflow import model_services
+
+    errors: list[str] = []
+    endpoints = model_services.endpoints_from_settings(settings)
+    if not any(endpoint.has_credentials for endpoint in endpoints.values()):
+        variables = list(PROVIDER_KEY_ENV.values())
+        errors.append(
+            f"No model provider is configured: set {', '.join(variables[:-1])} or "
+            f"{variables[-1]}, or define an endpoint in model_endpoints (user settings)."
+        )
+
+    # Every reference a setting or an agent names, and those a model runs on.
+    named: list[tuple[str, ModelRef]] = []
+    runs: list[tuple[str, ModelRef]] = []
+
+    def setting(who: str, spec: str | None) -> ModelRef | None:
+        try:
+            ref = parse_ref(spec)
+        except ModelSpecError as exc:
+            errors.append(f"{who}: {exc}")
+            return None
+        named.append((who, ref))
+        return ref
+
+    parsed_so_far = len(errors)
+    if manager_model:
+        ref = setting("The manager's model", manager_model)
+        if ref is not None:
+            runs.append(("Default model", ref))
+    if settings.default_model:
+        ref = setting("default_model", settings.default_model)
+        if ref is not None and not manager_model:
+            runs.append(("default_model", ref))
+    for role, spec in settings.model_roles.items():
+        setting(f"model_roles[{role!r}]", spec)
+    roles = None
+    if len(errors) == parsed_so_far:
+        try:
+            roles = model_services.role_map_from_settings(settings, manager_model)
+        except ModelSpecError as exc:  # a role name, or a mapping of default
+            errors.append(str(exc))
+    for index, spec in enumerate(settings.pinned_models):
+        setting(f"pinned_models[{index}]", spec)
+
+    for config in agent_configs or []:
+        spec = getattr(config, "model", None)
+        if not spec:
+            continue
+        who = f"Agent {getattr(config, 'name', '?')!r}"
+        try:
+            parsed = parse_spec(spec)
+        except ModelSpecError as exc:
+            errors.append(f"{who}: {exc}")
+            continue
+        if isinstance(parsed, RoleRef):
+            # A mapped role runs on its model; an unmapped one is computed
+            # from the catalog at startup.
+            mapped = roles.spec_for(parsed.role) if roles is not None else None
+            if mapped is not None and parsed.role != "default":
+                runs.append((f"{who} (role {parsed.role!r})", mapped))
+            continue
+        named.append((who, parsed))
+        runs.append((who, parsed))
+
+    defined = ", ".join(
+        sorted(n for n, e in endpoints.items() if e.kind is ProviderKind.OPENAI_COMPATIBLE)
+    )
+    for who, ref in named:
+        if ref.provider not in endpoints:
+            errors.append(
+                f"{who}: model {str(ref)!r} names endpoint {ref.provider!r}, which is not "
+                f"defined in model_endpoints (user settings); defined endpoints: "
+                f"{defined or 'none'}."
+            )
+    for who, ref in runs:
+        endpoint = endpoints.get(ref.provider)
+        if endpoint is not None and not endpoint.has_credentials:
+            variable = PROVIDER_KEY_ENV.get(ref.provider, "the provider's API key")
+            errors.append(
+                f"{who}: model {str(ref)!r} needs the {ref.provider} API key; set {variable}."
+            )
+    return errors

@@ -82,6 +82,33 @@ class TestTopLevelExports:
         assert agentic_cli.WorkflowState is WorkflowState
 
 
+class TestModelsExports:
+    """The model layer is ``agentic_cli.models`` (provisional in 0.7.0); the
+    workflow package no longer carries a model registry."""
+
+    @pytest.mark.parametrize(
+        "name",
+        ["ModelCatalog", "ProviderState", "ProviderStatus", "ModelRecord", "ModelRef",
+         "RoleMap", "ResolvedModel", "resolve_model", "parse_spec", "ModelResolutionError"],
+    )
+    def test_exported_from_the_models_package(self, name: str):
+        import agentic_cli.models as models
+
+        assert name in models.__all__
+        assert getattr(models, name) is not None
+
+    def test_the_catalog_is_the_defining_object(self):
+        import agentic_cli.models as models
+        from agentic_cli.models.catalog import ModelCatalog
+
+        assert models.ModelCatalog is ModelCatalog
+
+    def test_the_workflow_exports_no_model_registry(self):
+        import agentic_cli.workflow as workflow
+
+        assert not {"ModelRegistry", "ModelFamily", "ModelInfo"} & set(workflow.__all__)
+
+
 class TestToolsExports:
     """``declare_tool`` is how an application declares a tool it implements
     per-backend; it sits next to ``register_tool`` in the tools package."""

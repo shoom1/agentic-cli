@@ -143,7 +143,7 @@ class TestLangGraphWorkflowManagerCreation:
             model="gemini-2.5-flash",
         )
 
-        assert manager.model == "gemini-2.5-flash"
+        assert manager.model == "google:gemini-2.5-flash"
 
     def test_manager_model_resolved_from_settings(self, agent_configs):
         """Test model is resolved from settings when not overridden."""
@@ -161,10 +161,8 @@ class TestLangGraphWorkflowManagerCreation:
                 settings=fresh_settings,
             )
 
-            # Model should be resolved lazily to the default Google model
-            model = manager.model
-            assert model is not None
-            assert model.startswith("gemini-")
+            # Without a default_model, the newest default-tier Google model.
+            assert manager.model.startswith("google:gemini-")
         finally:
             # Clean up
             if "GOOGLE_API_KEY" in os.environ:

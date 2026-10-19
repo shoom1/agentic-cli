@@ -152,12 +152,12 @@ class TestChildEnvironmentIsHermetic:
 
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.chdir(tmp_path)
-        monkeypatch.setenv("RESEARCH_DEMO_DEFAULT_MODEL", "sentinel-model")
+        monkeypatch.setenv("RESEARCH_DEMO_DEFAULT_MODEL", "gemini-sentinel-9")
 
         settings = ResearchDemoSettings(
             workspace_dir=tmp_path / "ws", _env_file=None
         )
-        assert settings.default_model == "sentinel-model"
+        assert settings.default_model == "gemini-sentinel-9"
 
 
 class TestConsoleSmoke:

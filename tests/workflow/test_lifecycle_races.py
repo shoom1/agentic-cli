@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -29,6 +29,7 @@ from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager  # noqa: E
 from agentic_cli.workflow.base_manager import BaseWorkflowManager  # noqa: E402
 from agentic_cli.workflow.config import AgentConfig  # noqa: E402
 from agentic_cli.workflow.events import EventType, WorkflowEvent  # noqa: E402
+from tests.conftest import settings_double  # noqa: E402
 from agentic_cli.workflow.service_registry import SANDBOX_MANAGER  # noqa: E402
 from tests.conftest import MockContext  # noqa: E402
 
@@ -69,7 +70,6 @@ class _AdmissionHarness:
         self.manager._do_initialize = _do_initialize
         self.manager._get_or_create_session = _get_or_create
         self.manager._run_and_stream = _stream
-        self.manager._model_registry = MagicMock(refresh=AsyncMock())
         self.manager._ensure_managers_initialized = lambda: None
         self.manager._validate_agent_graph = lambda: None
 
@@ -214,12 +214,7 @@ class _SlowServiceManager(BaseWorkflowManager):
 
 
 def _slow_manager(gate: threading.Event) -> _SlowServiceManager:
-    settings = MagicMock()
-    settings.app_name = "test-app"
-    settings.google_api_key = None
-    settings.anthropic_api_key = None
-    manager = _SlowServiceManager(settings, gate)
-    manager._model_registry = MagicMock(refresh=AsyncMock())
+    manager = _SlowServiceManager(settings_double(), gate)
     return manager
 
 

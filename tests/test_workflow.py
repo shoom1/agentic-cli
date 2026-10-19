@@ -323,13 +323,9 @@ class TestWorkflowManagerLifecycle:
     @pytest.fixture
     def mock_settings(self):
         """Create mock settings for testing."""
-        settings = MagicMock()
-        settings.app_name = "test_app"
-        settings.thinking_effort = "medium"
-        settings.get_model.return_value = "gemini-3-flash-preview"
-        settings.supports_thinking_effort.return_value = True
-        settings.export_api_keys_to_env = MagicMock()
-        return settings
+        from tests.conftest import settings_double
+
+        return settings_double(app_name="test_app", default_model="gemini-3-flash-preview")
 
     @pytest.fixture
     def agent_configs(self):
@@ -366,9 +362,8 @@ class TestWorkflowManagerLifecycle:
             model="claude-sonnet-4",
         )
 
-        assert manager.model == "claude-sonnet-4"
-        # Model should not call settings.get_model since it was provided
-        mock_settings.get_model.assert_not_called()
+        # The override takes the default role; the model is its reference.
+        assert manager.model == "anthropic:claude-sonnet-4"
 
     def test_model_resolved_from_settings(self, mock_settings, agent_configs):
         """Test model is resolved from settings when not provided."""
@@ -379,11 +374,8 @@ class TestWorkflowManagerLifecycle:
             settings=mock_settings,
         )
 
-        # Access model property to trigger resolution
-        model = manager.model
-
-        assert model == "gemini-3-flash-preview"
-        mock_settings.get_model.assert_called_once()
+        # Before initialization the settings name it, without the network.
+        assert manager.model == "google:gemini-3-flash-preview"
 
     def test_settings_property(self, mock_settings, agent_configs):
         """Test settings property returns correct settings."""
@@ -452,13 +444,13 @@ class TestWorkflowManagerLifecycle:
             manager = GoogleADKWorkflowManager(
                 agent_configs=agent_configs,
                 settings=mock_settings,
-                model="old-model",
+                model="gemini-2.5-flash",
             )
             manager._initialized = True
 
-            await manager.reinitialize(model="new-model")
+            await manager.reinitialize(model="gemini-2.5-pro")
 
-            assert manager.model == "new-model"
+            assert manager.model == "google:gemini-2.5-pro"
 
     @pytest.mark.asyncio
     async def test_reinitialize_resolves_model_from_settings(
@@ -467,7 +459,7 @@ class TestWorkflowManagerLifecycle:
         """Test reinitialize re-resolves model from settings when not specified."""
         from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager
 
-        mock_settings.get_model.return_value = "resolved-model"
+        mock_settings.default_model = "claude-opus-4-7"
 
         with patch.object(
             GoogleADKWorkflowManager, "_initialize_locked", new_callable=AsyncMock
@@ -475,14 +467,14 @@ class TestWorkflowManagerLifecycle:
             manager = GoogleADKWorkflowManager(
                 agent_configs=agent_configs,
                 settings=mock_settings,
-                model="initial-model",
+                model="gemini-2.5-flash",
             )
             manager._initialized = True
 
             await manager.reinitialize()
 
-            # Model should be re-resolved
-            assert manager.model == "resolved-model"
+            # The override is dropped: the default comes from settings again.
+            assert manager.model == "anthropic:claude-opus-4-7"
 
     @pytest.mark.asyncio
     async def test_reinitialize_preserves_sessions_by_default(
@@ -505,7 +497,7 @@ class TestWorkflowManagerLifecycle:
             manager._initialized = True
             manager._root_agent = MagicMock()
 
-            await manager.reinitialize(model="new-model", preserve_sessions=True)
+            await manager.reinitialize(model="gemini-2.5-pro", preserve_sessions=True)
 
             # Session service should be preserved
             assert manager._session_service is old_session_service

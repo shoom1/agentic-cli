@@ -266,9 +266,13 @@ class TestSingleRoot:
 class TestValidationHappensBeforeAllocation:
     """A static graph error must not cost discovery or service construction."""
 
-    async def test_bad_graph_fails_before_discovery_and_services(self):
-        from unittest.mock import AsyncMock, MagicMock
+    async def test_bad_graph_fails_before_discovery_and_services(self, monkeypatch):
+        from agentic_cli.workflow import model_services
 
+        catalogs: list = []
+        monkeypatch.setattr(
+            model_services, "build_catalog", lambda *args, **kwargs: catalogs.append(args)
+        )
         with MockContext(google_api_key="test-key") as ctx:
             mgr = GoogleADKWorkflowManager(
                 agent_configs=[
@@ -276,8 +280,6 @@ class TestValidationHappensBeforeAllocation:
                 ],
                 settings=ctx.settings,
             )
-            refresh = AsyncMock()
-            mgr._model_registry = MagicMock(refresh=refresh)
             created: list[str] = []
             mgr._ensure_managers_initialized = lambda: created.append("services")
             mgr._make_session_service = lambda: created.append("session") or object()
@@ -285,6 +287,6 @@ class TestValidationHappensBeforeAllocation:
             with pytest.raises(AgentGraphError, match="ghost"):
                 await mgr.initialize_services()
 
-            refresh.assert_not_awaited()
+            assert catalogs == [], "models were listed before validation"
             assert created == [], "resources were allocated before validation"
             assert mgr.is_initialized is False

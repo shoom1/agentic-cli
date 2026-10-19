@@ -9,7 +9,7 @@ A built-in role nobody mapped takes the newest model of its tier from the
 first provider with a key, in the order Google, Anthropic, OpenAI: Flash-Lite /
 Flash / Pro, Haiku / Sonnet / Opus, mini / standard / pro. OpenRouter and the
 user's endpoints never fill a role on their own; the user maps them. An app
-role nobody mapped falls back to ``default``, with a one-time warning.
+role nobody mapped falls back to ``default``, with a warning once per process.
 
 A role's value is always a model, never another role.
 """
@@ -39,6 +39,9 @@ logger = logging.getLogger(__name__)
 
 #: The providers that fill an unmapped built-in role, in order.
 _ROLE_PROVIDERS = ("google", "anthropic", "openai")
+#: App roles already warned about as unmapped. Once per process: a manager
+#: builds a new map on every reinitialize, and the user was told already.
+_WARNED_ROLES: set[str] = set()
 
 
 class RoleMap:
@@ -78,7 +81,6 @@ class RoleMap:
                 raise ModelSpecError(f"{key}: {exc}") from None
             roles[role] = _ref_setting(key, spec)
         self._roles = roles
-        self._warned: set[str] = set()
 
     def spec_for(self, role: str) -> ModelRef | None:
         """The reference mapped to ``role``, or None when it is computed later."""
@@ -102,8 +104,8 @@ class RoleMap:
             return mapped
         if role in BUILTIN_ROLES:
             return self._computed(role, catalog, endpoints)
-        if role not in self._warned:
-            self._warned.add(role)
+        if role not in _WARNED_ROLES:
+            _WARNED_ROLES.add(role)
             logger.warning(
                 "Role %r is not mapped; using the default model. "
                 "Map it in model_roles to choose one.",

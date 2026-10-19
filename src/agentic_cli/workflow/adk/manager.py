@@ -22,6 +22,7 @@ from google.adk.planners import BuiltInPlanner
 from google.adk.sessions import InMemorySessionService, BaseSessionService, Session
 from google.adk.tools import LongRunningFunctionTool
 
+from agentic_cli.models import ProviderKind
 from agentic_cli.workflow.base_manager import BaseWorkflowManager
 from agentic_cli.workflow.events import WorkflowEvent, EventType
 from agentic_cli.workflow.config import AgentConfig, validate_agent_graph
@@ -147,6 +148,13 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             print(event.content)
     """
 
+    # Transitional, until the ADK model factory lands: the agents are built by
+    # the 0.6 model code below, which knows Gemini and Claude and the generic
+    # thinking modes only (see BaseWorkflowManager._backend_model_problem).
+    _BUILDABLE_PROVIDER_KINDS = frozenset({ProviderKind.GOOGLE, ProviderKind.ANTHROPIC})
+    _UNDERSTOOD_THINKING_MODES = frozenset({"none", "low", "medium", "high", "budget"})
+    _BACKEND_NAME = "ADK"
+
     def __init__(
         self,
         agent_configs: list[AgentConfig],
@@ -163,7 +171,8 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                           is treated as the root/coordinator agent.
             settings: Application settings (uses get_settings() if not provided)
             app_name: Application name for services (uses settings.app_name if not provided)
-            model: Model override (auto-detected from API keys if not provided)
+            model: This manager's default model, a ``provider:model`` reference
+                or a model id (see ``BaseWorkflowManager``)
             on_event: Optional hook to transform/filter events before yielding
             adk_config_path: Optional path to a native ADK ``root_agent.yaml``.
                 When set, the agent tree is built via ADK ``from_config`` instead
@@ -231,15 +240,16 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             Generated text response
         """
         await self._ensure_initialized()
+        default = self._resolved(None).record
 
         # Claude models are not served by the genai client — use the Anthropic
         # SDK directly (ANTHROPIC_API_KEY is exported during initialization).
-        if _is_anthropic_model(self.model):
+        if default.kind is ProviderKind.ANTHROPIC:
             from anthropic import AsyncAnthropic
 
             client = AsyncAnthropic()
             message = await client.messages.create(
-                model=self.model,
+                model=default.model,
                 max_tokens=max_tokens,
                 messages=[{"role": "user", "content": prompt}],
             )
@@ -253,7 +263,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
 
         client = genai.Client()
         response = await client.aio.models.generate_content(
-            model=self.model,
+            model=default.model,
             contents=prompt,
             config=types.GenerateContentConfig(
                 max_output_tokens=max_tokens,
@@ -305,6 +315,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             self._llm_logging_plugin = None
 
         await self._aclose_owned(session_service, "session_service")
+        await self._close_catalog()
 
         # Clean up managers (sandbox, jobs, etc.)
         self._cleanup_managers()
@@ -372,10 +383,12 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         )
 
     def _resolve_model_for_config(self, config: "AgentConfig | None") -> str:
-        """Return the effective model for an agent (per-config override or default)."""
-        if config is not None and config.model:
-            return config.model
-        return self.model
+        """The bare model id an agent runs on (None: the default model).
+
+        The model code below predates references and roles: it takes the
+        resolved record's id, and recognizes the provider from it.
+        """
+        return self._resolved(config).record.model
 
     def _resolve_thinking(
         self, config: "AgentConfig | None"
@@ -409,9 +422,10 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         if thinking is None or thinking.mode == "none":
             return None
 
-        model = self._resolve_model_for_config(config)
+        resolved = self._resolved(config)
+        model = resolved.record.model
 
-        if not self._settings.supports_thinking_effort(model):
+        if resolved.thinking is None:  # the model has no thinking knob
             logger.debug("thinking_not_supported", model=model, mode=thinking.mode)
             return None
 
@@ -849,6 +863,8 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             plugins=self._init_plugins(),
         )
         self._runner = Runner(app=app, session_service=self._session_service)
+        # Usage events name the default model, resolved for this initialization.
+        self._event_processor.model = self.model
 
         logger.info(
             "services_initialized",
@@ -860,7 +876,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
     def _validate_agent_graph(self) -> None:
         """Reject an unbuildable agent graph before anything is allocated.
 
-        Runs at the top of initialization — ahead of model discovery, service
+        Runs at the top of initialization — ahead of model listings, service
         construction and the session service — so a static configuration error
         costs no network call and leaves nothing to roll back.
         """
@@ -964,9 +980,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         logger.info("processing_message", message_length=len(message))
 
         async with self._turn_admission():
-            # Sync event processor model (may have been lazily resolved)
-            self._event_processor.model = self.model
-
             # Context setup
             with self._workflow_context(session_id=current_session_id, user_id=user_id):
                 # Session handling
@@ -1120,8 +1133,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         # Same admission as process(): a resume is a turn, must not interleave
         # with a user turn, and must not run against a released backend.
         async with self._turn_admission():
-            self._event_processor.model = self.model
-
             with self._workflow_context(session_id=session_id, user_id=user_id):
                 # The pending call lives in the existing session; don't create a
                 # new empty one (that would have no call to answer).

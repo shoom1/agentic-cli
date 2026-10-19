@@ -40,11 +40,11 @@ agentic-cli/
 │   │   ├── service_registry.py # get_service/require_service + ContextVar registry
 │   │   ├── events.py         # WorkflowEvent, EventType
 │   │   ├── config.py         # AgentConfig
-│   │   ├── models.py
 │   │   ├── settings.py       # Workflow/tool settings schema
 │   │   ├── retry.py          # Rate-limit retry helpers
 │   │   ├── tool_summaries.py
 │   │   ├── memory_services.py # Settings → agentic_cli.memory arguments (KBs, memory store)
+│   │   ├── model_services.py # Settings → agentic_cli.models arguments (keys, endpoints, roles); build_catalog
 │   │   ├── permissions/      # Framework-independent capability engine
 │   │   │   ├── engine.py     # PermissionEngine (deny-wins, default-ASK)
 │   │   │   ├── capabilities.py # Capability, EXEMPT
@@ -102,6 +102,15 @@ agentic-cli/
 │   │       ├── convert.py    # convert_document (HTML main text via trafilatura, html2text fallback; pypdf), own _charset.py
 │   │       ├── vector_store.py, bm25_index.py (+ _bm25_backends.py), concepts.py, sidecar.py
 │   │       └── _mock_vector_store.py, _mock_bm25.py
+│   ├── models/               # Model knowledge (provisional); imports nothing else from agentic_cli, no provider SDK
+│   │   ├── refs.py           # parse_spec/parse_ref: provider:model, bare ids, role names
+│   │   ├── endpoints.py      # ProviderKind, EndpointSpec (settings), Endpoint, build_endpoints
+│   │   ├── records.py        # ModelRecord, ThinkingRule
+│   │   ├── table.py          # ShippedTable, load_table() (data/table.json: family rules, numbers, fallbacks)
+│   │   ├── roles.py          # RoleMap: default / fast / strong / app roles → references
+│   │   ├── resolve.py        # resolve_model → ResolvedModel (thinking, max_tokens, sampling)
+│   │   ├── catalog.py        # ModelCatalog: declarations + listings + table, validation, listing cache
+│   │   └── discovery/        # One lister per provider kind, over httpx
 │   └── persistence/
 │       └── session.py        # SessionPersistence
 ├── tests/
@@ -196,6 +205,7 @@ Available session methods:
 
 - **Framework**: pytest with `asyncio_mode = "auto"`
 - **MockContext**: From `tests/conftest.py` — provides isolated settings and temp dirs for all tests
+- **Model listings**: `tests/conftest.py::_no_model_listings` keeps every manager's model catalog unloaded (no network, no `~/.<app>/model_cache.json`), so any well-formed model id is accepted; a test that wants listings patches `model_services.build_catalog` with `tests/models/fakes.py::ProviderAPI`
 - **MockVectorStore** (`agentic_cli.memory.kb`) and **MockEmbeddingService** (`agentic_cli.memory`): for testing without ML dependencies
 - **`kb` extra tests**: import faiss, bm25s, rank_bm25, sentence_transformers or trafilatura with `require_kb_module(name)` (`tests/memory/kb_extra.py`), not `pytest.importorskip`. Without the extra the test skips; CI's `kb-extra` job installs it and sets `KB_REQUIRE_EXTRA=1`, so a missing library fails there instead of skipping. No offline test loads an embedding model.
 - **Integration tests**: `tests/integration/` covers ADK and LangGraph pipeline tests

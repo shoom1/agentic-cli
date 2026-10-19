@@ -15,7 +15,6 @@ import pytest
 from agentic_cli.cli.workflow_controller import WorkflowController
 from agentic_cli.workflow.factory import (
     _is_claude_model,
-    _resolve_effective_model,
     create_workflow_manager_from_settings,
 )
 from agentic_cli.workflow.config import AgentConfig
@@ -82,20 +81,6 @@ class TestIsClaudeModel:
 
     def test_none(self):
         assert _is_claude_model(None) is False
-
-
-class TestResolveEffectiveModel:
-    def test_explicit_model_takes_precedence(self):
-        settings = _make_settings(default_model="gemini-2.5-pro")
-        assert _resolve_effective_model("claude-sonnet-4", settings) == "claude-sonnet-4"
-
-    def test_falls_back_to_settings(self):
-        settings = _make_settings(default_model="claude-opus-4")
-        assert _resolve_effective_model(None, settings) == "claude-opus-4"
-
-    def test_returns_none_when_nothing_set(self):
-        settings = _make_settings(default_model=None)
-        assert _resolve_effective_model(None, settings) is None
 
 
 # --- Factory routing tests (backend = orchestrator setting only) ---

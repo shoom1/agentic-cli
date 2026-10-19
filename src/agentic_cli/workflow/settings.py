@@ -8,7 +8,7 @@ HITL (human-in-the-loop), memory management, API keys, and tool configuration.
 from __future__ import annotations
 
 from enum import Enum
-from typing import Literal, TYPE_CHECKING
+from typing import Literal, get_args
 
 from pydantic import AliasChoices, BaseModel, Field, field_validator
 
@@ -20,22 +20,11 @@ from agentic_cli.models import (
     parse_ref,
     validate_endpoint_name,
 )
-from agentic_cli.workflow.models import ModelFamily, ModelRegistry
-
-if TYPE_CHECKING:
-    pass
 
 logger = Loggers.config()
 
-# Thinking effort levels (module-level constant for backward compatibility)
-THINKING_EFFORT_LEVELS = ModelRegistry.THINKING_EFFORT_LEVELS
-
-# Which environment variable supplies each provider's credential (for error
-# messages — the value is never echoed).
-_PROVIDER_ENV_VAR = {
-    ModelFamily.GEMINI: "GOOGLE_API_KEY",
-    ModelFamily.CLAUDE: "ANTHROPIC_API_KEY",
-}
+#: The global thinking effort, applied to every agent without its own.
+_ThinkingEffort = Literal["none", "low", "medium", "high"]
 
 
 class PermissionRuleConfig(BaseModel):
@@ -63,8 +52,9 @@ class WorkflowSettingsMixin:
     """Settings for agentic workflow configuration.
 
     Mixin class that provides workflow-specific settings including:
-    - Model selection and configuration
-    - API keys and provider detection
+    - Model selection: the default model, roles, pinned models and the
+      user's endpoints (read through ``workflow.model_services``)
+    - Provider API keys
     - Orchestrator and retry settings
     - Tool configuration (web search/fetch, KB, shell, executor)
     - HITL and persistence settings
@@ -79,10 +69,14 @@ class WorkflowSettingsMixin:
     default_model: str | None = Field(
         default=None,
         title="Model",
-        description="Default model to use (auto-detected if not set)",
+        description=(
+            "The default model, as a provider:model reference or a model id "
+            "(when unset, the newest default-tier model of the first provider "
+            "with a key)"
+        ),
         json_schema_extra={"ui_order": 10},
     )
-    thinking_effort: Literal["none", "low", "medium", "high"] = Field(
+    thinking_effort: _ThinkingEffort = Field(
         default="medium",
         title="Thinking Effort",
         description="Controls depth of reasoning for models that support it",
@@ -434,6 +428,17 @@ class WorkflowSettingsMixin:
         json_schema_extra={"ui_order": 134},
     )
 
+    @field_validator("default_model")
+    @classmethod
+    def _validate_default_model(cls, v: str | None) -> str | None:
+        """A model, never a role: ``default`` is the role it fills."""
+        if v is not None:
+            try:
+                parse_ref(v)
+            except ModelSpecError as exc:
+                raise ValueError(f"default_model: {exc}") from None
+        return v
+
     @field_validator("model_endpoints")
     @classmethod
     def _validate_endpoint_names(cls, v: dict[str, EndpointSpec]) -> dict[str, EndpointSpec]:
@@ -640,152 +645,32 @@ class WorkflowSettingsMixin:
         json_schema_extra={"ui_order": 170},
     )
 
-    # === Model registry (not a pydantic field) ===
-    # Set by BaseWorkflowManager after refresh()
-    _model_registry: ModelRegistry | None = None
-
-    def set_model_registry(self, registry: ModelRegistry) -> None:
-        """Attach a populated ModelRegistry to this settings instance."""
-        object.__setattr__(self, "_model_registry", registry)
-
-    # === API key properties ===
-
-    @property
-    def has_google_key(self) -> bool:
-        """Check if Google API key is available."""
-        return bool(self.google_api_key)
-
-    @property
-    def has_anthropic_key(self) -> bool:
-        """Check if Anthropic API key is available."""
-        return bool(self.anthropic_api_key)
-
-    @property
-    def has_any_api_key(self) -> bool:
-        """Check if any API key is available."""
-        return self.has_google_key or self.has_anthropic_key
-
-    # === Model helpers ===
-
-    def _get_registry(self) -> ModelRegistry:
-        """Get the model registry (creates a default if none attached)."""
-        reg = getattr(self, "_model_registry", None)
-        if reg is not None:
-            return reg
-        # Return a fresh (un-refreshed) registry for fallback usage
-        return ModelRegistry()
-
-    def get_model(self) -> str:
-        """Get the model to use based on configuration and available keys.
-
-        Resolution order:
-        1. Explicitly configured default_model
-        2. Google model (if Google API key available)
-        3. Anthropic model (if Anthropic API key available)
-
-        Returns:
-            Model name string
-
-        Raises:
-            RuntimeError: If no API keys are available
-        """
-        if self.default_model:
-            return self.default_model
-
-        registry = self._get_registry()
-
-        if self.has_google_key:
-            return registry.get_default(ModelFamily.GEMINI)
-        if self.has_anthropic_key:
-            return registry.get_default(ModelFamily.CLAUDE)
-
-        raise RuntimeError(
-            "No API keys found. Please set GOOGLE_API_KEY or ANTHROPIC_API_KEY."
-        )
-
-    def get_available_models(self) -> list[str]:
-        """Get list of models available based on configured API keys."""
-        registry = self._get_registry()
-        return registry.get_available_models(
-            google_key=self.has_google_key,
-            anthropic_key=self.has_anthropic_key,
-        )
-
-    def supports_thinking_effort(self, model: str | None = None) -> bool:
-        """Check if the model supports thinking effort configuration."""
-        model = model or self.get_model()
-        registry = self._get_registry()
-        return registry.supports_thinking(model)
-
-    def check_model(self, model: str, *, label: str = "model") -> str:
-        """Validate one model against credentials and discovery authority.
-
-        The single rule set shared by ``set_model()`` and ``validate_settings()``
-        so a model the setter accepts can never be rejected at startup (or the
-        reverse):
-
-        1. the provider must be derivable from the id;
-        2. that provider's credential must be configured;
-        3. a deprecated alias resolves to its replacement (warned);
-        4. an unknown model is rejected only when that provider's listing is
-           authoritative — a degraded/unattempted listing cannot disprove it,
-           and is logged instead.
-
-        Args:
-            model: Model identifier to check.
-            label: What is being checked, for the error message.
-
-        Returns:
-            The resolved model id (differs only for a deprecated alias).
-
-        Raises:
-            ValueError: With an actionable message; never includes a credential.
-        """
-        registry = self._get_registry()
-        try:
-            family = registry.get_family(model)
-        except ValueError:
-            raise ValueError(
-                f"Model '{model}' ({label}) is not available: its provider "
-                "cannot be determined from the model id."
-            ) from None
-
-        if not self._has_credential_for(family):
-            env_var = _PROVIDER_ENV_VAR.get(family, "the provider API key")
-            raise ValueError(
-                f"Model '{model}' ({label}) is not available: it needs a "
-                f"{family.value} credential. Set {env_var}."
-            )
-
-        resolved = registry.resolve_model(model)  # raises when authoritative
-        if resolved == model and model not in self.get_available_models():
-            # Not authoritative (else resolve_model would have raised), so the
-            # static list simply lags reality.
-            logger.warning("model_not_in_static_list", model=model, source=label)
-        return resolved
-
-    def _has_credential_for(self, family: ModelFamily) -> bool:
-        """Whether the credential a model family needs is configured."""
-        if family is ModelFamily.GEMINI:
-            return self.has_google_key
-        if family is ModelFamily.CLAUDE:
-            return self.has_anthropic_key
-        return False
+    # === Model setters ===
 
     def set_model(self, model: str) -> None:
-        """Set the default model, validating it exactly as startup would.
+        """Set the default model: a ``provider:model`` reference or a model id.
+
+        Only the reference is checked here. Whether its provider has a key and
+        whether the model exists are checked when the workflow resolves its
+        models (``/settings`` reinitializes it, and rolls the change back if
+        that fails).
 
         Raises:
-            ValueError: If the model is unusable (see :meth:`check_model`).
+            ValueError: If ``model`` is malformed or names a role.
         """
-        object.__setattr__(self, "default_model", self.check_model(model))
+        parse_ref(model)
+        object.__setattr__(self, "default_model", model)
 
     def set_thinking_effort(self, effort: str) -> None:
-        """Set the thinking effort level."""
-        if effort not in THINKING_EFFORT_LEVELS:
+        """Set the global thinking effort.
+
+        Raises:
+            ValueError: If ``effort`` is not none, low, medium or high.
+        """
+        levels = get_args(_ThinkingEffort)
+        if effort not in levels:
             raise ValueError(
-                f"Invalid thinking effort '{effort}'. "
-                f"Valid levels: {', '.join(THINKING_EFFORT_LEVELS)}"
+                f"Invalid thinking effort '{effort}'. Valid levels: {', '.join(levels)}"
             )
         object.__setattr__(self, "thinking_effort", effort)
 

@@ -8,7 +8,7 @@ HITL) based on tool requirements, creating them lazily when needed.
 
 It also provides shared implementations for:
 - User input handling (callback-based)
-- Model resolution (lazy resolution from settings)
+- Models: the model catalog, and every agent's model resolved at startup
 """
 
 from __future__ import annotations
@@ -18,15 +18,26 @@ import contextlib
 import inspect
 from abc import ABC, abstractmethod
 from contextvars import ContextVar, Token
-from typing import Any, AsyncGenerator, Awaitable, Callable, Iterator, TYPE_CHECKING
+from typing import Any, AsyncGenerator, Awaitable, Callable, Iterator, Mapping, TYPE_CHECKING
 
 from agentic_cli.workflow.events import (
     UserInputRequest,
     UserInputUnavailable,
     WorkflowEvent,
 )
+from agentic_cli.models import (
+    CatalogView,
+    Endpoint,
+    ModelCatalog,
+    ModelRef,
+    ModelResolutionError,
+    ModelSpecError,
+    ProviderKind,
+    ResolvedModel,
+    RoleMap,
+    resolve_model,
+)
 from agentic_cli.workflow.config import AgentConfig
-from agentic_cli.workflow.models import ModelRegistry
 from agentic_cli.workflow.sessions import (
     SessionRef,
     get_active_turn,
@@ -54,6 +65,13 @@ if TYPE_CHECKING:
     from agentic_cli.tools.sandbox.manager import SandboxManager
 
 logger = Loggers.workflow()
+
+# How a transitional backend gate names the providers it can build.
+_PROVIDER_LABELS = {
+    ProviderKind.GOOGLE: "Google",
+    ProviderKind.ANTHROPIC: "Anthropic",
+    ProviderKind.OPENAI: "OpenAI",
+}
 
 
 class BaseWorkflowManager(ABC):
@@ -109,7 +127,11 @@ class BaseWorkflowManager(ABC):
             agent_configs: List of agent configurations defining the workflow.
             settings: Application settings (resolved via get_settings() if None).
             app_name: Application name for services.
-            model: Model override (auto-detected from API keys if not provided).
+            model: This manager's default model, as a ``provider:model``
+                reference or a model id (never a role). It takes the
+                ``default`` role for this manager only; without it, the
+                default is ``settings.default_model``, else the newest
+                default-tier model of the first provider with a key.
             on_event: Optional hook to transform/filter events before yielding.
         """
         from agentic_cli.config import get_settings
@@ -131,9 +153,13 @@ class BaseWorkflowManager(ABC):
         self._turn_lock = asyncio.Lock()
         self._on_event = on_event
 
-        # Model resolution (lazy)
-        self._model: str | None = model
-        self._model_resolved: bool = model is not None
+        # Models. The override takes the default role for this manager; the
+        # catalog and the resolved models are built by each initialization
+        # (see _load_models) and the catalog is released with the backend.
+        self._model_override: str | None = model
+        self._catalog: ModelCatalog | None = None
+        self._default_model: ResolvedModel | None = None
+        self._resolved_models: dict[str, ResolvedModel] = {}
 
         # User input handling (callback-only), context-local — see
         # set_input_callback(). One ContextVar per manager; there are only ever
@@ -141,9 +167,6 @@ class BaseWorkflowManager(ABC):
         self._user_input_callback: ContextVar[
             Callable[[UserInputRequest], Awaitable[str]] | None
         ] = ContextVar(f"agentic_cli_input_callback_{id(self):x}", default=None)
-
-        # Model registry
-        self._model_registry = ModelRegistry()
 
         # Resolve string / dotted-path tool refs to callables BEFORE manager
         # detection and tool assembly (both key on ``tool.__name__``).
@@ -220,9 +243,9 @@ class BaseWorkflowManager(ABC):
         return self._initialized
 
     @property
-    def model_registry(self) -> ModelRegistry:
-        """Get the model registry."""
-        return self._model_registry
+    def catalog(self) -> ModelCatalog | None:
+        """The model catalog this manager loaded; None until it initializes."""
+        return self._catalog
 
     @property
     def required_managers(self) -> set[str]:
@@ -850,16 +873,20 @@ class BaseWorkflowManager(ABC):
 
     @property
     def model(self) -> str:
-        """Get the model name, resolving from settings if needed.
+        """The default model, as a ``provider:model`` reference.
 
-        This is resolved lazily to allow startup without API keys.
-        Subclasses can override if they need custom model resolution.
+        After initialization, the model the ``default`` role resolved to.
+        Before it, the model the settings (or this manager's override) name,
+        computed without the network when no setting names one.
+
+        Raises:
+            ModelResolutionError: Before initialization, if no setting names a
+                default model and no provider with a key can supply one.
+            ModelSpecError: If the override or a role setting is malformed.
         """
-        if not self._model_resolved:
-            self._model = self._settings.get_model()
-            self._model_resolved = True
-            logger.info("model_resolved", model=self._model)
-        return self._model  # type: ignore[return-value]
+        if self._default_model is not None:
+            return str(self._default_model.ref)
+        return str(self._default_ref_without_listings())
 
     async def initialize_services(self, validate: bool = True) -> None:
         """Initialize backend services asynchronously.
@@ -878,80 +905,209 @@ class BaseWorkflowManager(ABC):
             await self._initialize_locked(validate=validate)
 
     async def _initialize_locked(self, validate: bool = True) -> None:
-        """Initialization body. The caller must hold ``_lifecycle_lock``."""
+        """Initialization body. The caller must hold ``_lifecycle_lock``.
+
+        Args:
+            validate: Check the model settings before anything is allocated
+                (``config.validate_settings``). Model resolution itself always
+                runs: the backend builds its agents from it.
+        """
         if self._initialized:
             return
 
-        # Validate the declared agent graph before anything is allocated or
-        # any network call is made: a bad graph is a static configuration
-        # error and should not cost a model listing or an embedding model.
+        # Validate the declared agent graph, and the model settings, before
+        # anything is allocated or any network call is made: a static
+        # configuration error should not cost a model listing or an
+        # embedding model.
         self._validate_agent_graph()
+        if validate:
+            self._validate_model_settings()
 
         self._settings.export_api_keys_to_env()
 
-        # Discover models BEFORE validating them: the static fallback list
-        # would otherwise reject a model that exists but predates the list.
-        await self._model_registry.refresh(
-            google_api_key=self._settings.google_api_key,
-            anthropic_api_key=self._settings.anthropic_api_key,
-        )
-        self._settings.set_model_registry(self._model_registry)
-
-        if validate:
-            self._validate_models()
-
-        # Create services BEFORE backend init so _build_tools() can
-        # produce factory-bound tools during agent/graph creation.
-        # Construction is offloaded to a worker thread (heavy constructors)
-        # and published transactionally — see _construct_services.
         try:
+            # Load the catalog, then resolve every agent's model against it,
+            # before services are built: a model that cannot run fails startup
+            # with nothing else allocated.
+            await self._load_models()
+            # Create services BEFORE backend init so _build_tools() can
+            # produce factory-bound tools during agent/graph creation.
+            # Construction is offloaded to a worker thread (heavy constructors)
+            # and published transactionally — see _construct_services.
             await self._construct_services()
             await self._do_initialize()
         except BaseException:
-            # Roll back: services (and any backend resource the partial
-            # _do_initialize created) must not outlive the failed attempt.
+            # Roll back: the catalog, services (and any backend resource the
+            # partial _do_initialize created) must not outlive the attempt.
             await self._release_resources()
             raise
         self._initialized = True
+        # Older cached listings are refreshed now, in the background; the
+        # catalog swaps each result in as it arrives.
+        self._catalog.start_background_refresh()
 
-    # Label for this manager's own model in validation errors.
-    _MODEL_OVERRIDE_LABEL = "workflow model"
+    # --- models ------------------------------------------------------------
 
-    def _validate_models(self) -> None:
-        """Validate every model this manager will actually use, and normalize it.
+    # Transitional, until each backend builds its models through its adapter
+    # (0.7.0 sub-project 3): the provider kinds its model code can build (None:
+    # all), and the thinking modes it understands (None: all). A backend
+    # narrows them; resolution then rejects anything else at startup.
+    _BUILDABLE_PROVIDER_KINDS: "frozenset[ProviderKind] | None" = None
+    _UNDERSTOOD_THINKING_MODES: "frozenset[str] | None" = None
+    _BACKEND_NAME = "workflow"
 
-        ``settings.default_model`` and the per-agent overrides are validated by
-        ``validate_settings``. This manager's *own* model is not in settings at
-        all — it comes from ``Manager(model=...)``, ``reinitialize(model=...)``,
-        or a ``settings.get_model()`` cached before discovery ran — so it is
-        passed into the same all-or-nothing pass rather than checked separately:
-        an unusable id must fail startup, and a deprecated one must be replaced
-        by the id the runtime then sends.
+    def _validate_model_settings(self) -> None:
+        """The static model checks (``validate_settings``), with this manager's override.
 
         Raises:
-            SettingsValidationError: If any effective model is unusable.
+            SettingsValidationError: Listing every problem.
         """
-        from agentic_cli.config import _validate_settings_with_models
+        from agentic_cli.config import SettingsValidationError, _model_settings_problems
 
-        extras: list[tuple[str, str]] = []
-        if self._model_resolved and self._model:
-            extras.append((self._MODEL_OVERRIDE_LABEL, self._model))
+        errors = _model_settings_problems(
+            self._settings, self._agent_configs, manager_model=self._model_override
+        )
+        if errors:
+            raise SettingsValidationError("\n".join(errors))
 
-        resolved = _validate_settings_with_models(
-            self._settings, self._agent_configs, extras
+    async def _load_models(self) -> None:
+        """Build and load the model catalog, then resolve every model.
+
+        The catalog is owned from here on: ``_release_resources`` closes it.
+        Loading lists only the providers the cache cannot answer for.
+        """
+        from agentic_cli.workflow import model_services
+
+        endpoints = model_services.endpoints_from_settings(self._settings)
+        self._catalog = model_services.build_catalog(self._settings, endpoints)
+        await self._catalog.load()
+        self._resolve_models(endpoints)
+
+    def _resolve_models(self, endpoints: Mapping[str, Endpoint]) -> None:
+        """Resolve the default model and every agent's, all or nothing.
+
+        Every agent is resolved before any backend object is built, and every
+        problem is reported at once.
+
+        Raises:
+            SettingsValidationError: Listing each agent (or the default model)
+                that cannot run, with the model and the allowed values.
+        """
+        from agentic_cli.config import SettingsValidationError
+        from agentic_cli.workflow import model_services
+
+        try:
+            roles = model_services.role_map_from_settings(self._settings, self._model_override)
+        except ModelSpecError as exc:
+            raise SettingsValidationError(str(exc)) from None
+
+        errors: list[str] = []
+        resolved: dict[str, ResolvedModel] = {}
+        default = None
+        for config in (None, *self._agent_configs):
+            try:
+                model = self._resolve_for(config, roles, self._catalog, endpoints)
+            except ModelResolutionError as exc:
+                errors.append(str(exc))
+                continue
+            problem = self._backend_model_problem(model, config)
+            if problem is not None:
+                errors.append(problem)
+            elif config is None:
+                default = model
+            else:
+                resolved[config.name] = model
+        if errors:
+            raise SettingsValidationError("\n".join(errors))
+
+        self._default_model, self._resolved_models = default, resolved
+        logger.info(
+            "models_resolved",
+            default=str(default.ref),
+            agents={name: str(model.ref) for name, model in resolved.items()},
         )
 
-        replacement = resolved.get(self._MODEL_OVERRIDE_LABEL)
-        if replacement is not None and replacement != self._model:
-            logger.info(
-                "model_override_resolved", requested=self._model, model=replacement
+    def _resolve_for(
+        self,
+        config: AgentConfig | None,
+        roles: RoleMap,
+        catalog: CatalogView,
+        endpoints: Mapping[str, Endpoint],
+    ) -> ResolvedModel:
+        """One agent's model (None: the manager's default model)."""
+        return resolve_model(
+            agent=config.name if config is not None else None,
+            spec=config.model if config is not None else None,
+            generation=config.model_settings if config is not None else None,
+            thinking_effort=self._settings.thinking_effort,
+            roles=roles,
+            catalog=catalog,
+            endpoints=endpoints,
+        )
+
+    def _resolved(self, config: AgentConfig | None) -> ResolvedModel:
+        """An agent's resolved model (None: the manager's default model).
+
+        After initialization, what its resolution pass decided. Before it (a
+        backend helper called on its own), the agent is resolved now against
+        the shipped table, without the network.
+
+        Raises:
+            ModelResolutionError: Before initialization, if it cannot be.
+        """
+        if config is None:
+            if self._default_model is not None:
+                return self._default_model
+        elif config.name in self._resolved_models:
+            return self._resolved_models[config.name]
+        from agentic_cli.workflow import model_services
+
+        endpoints = model_services.endpoints_from_settings(self._settings)
+        roles = model_services.role_map_from_settings(self._settings, self._model_override)
+        catalog = ModelCatalog(endpoints=endpoints)  # never loaded: the shipped table
+        return self._resolve_for(config, roles, catalog, endpoints)
+
+    def _default_ref_without_listings(self) -> ModelRef:
+        """The default role's model, from settings and the shipped table only."""
+        from agentic_cli.workflow import model_services
+
+        endpoints = model_services.endpoints_from_settings(self._settings)
+        roles = model_services.role_map_from_settings(self._settings, self._model_override)
+        catalog = ModelCatalog(endpoints=endpoints)  # never loaded: the shipped table
+        return roles.resolve("default", catalog=catalog, endpoints=endpoints)
+
+    def _backend_model_problem(
+        self, model: ResolvedModel, config: AgentConfig | None
+    ) -> str | None:
+        """Why this backend cannot run ``model`` yet, or None (transitional).
+
+        Until a backend's model adapter lands, its 0.6 model code builds the
+        agents from the resolved model's bare id: it can build only some
+        providers, and understands only the generic thinking modes.
+        """
+        who = f"Agent {config.name!r}" if config is not None else "Default model"
+        kinds = self._BUILDABLE_PROVIDER_KINDS
+        if kinds is not None and model.record.kind not in kinds:
+            names = [_PROVIDER_LABELS.get(k, k.value) for k in ProviderKind if k in kinds]
+            usable = ", ".join(names[:-1]) + f" or {names[-1]}" if len(names) > 1 else names[0]
+            return (
+                f"{who}: model {model.ref} is not supported by the {self._BACKEND_NAME} "
+                f"backend yet; use a {usable} model."
             )
-            self._model = replacement
+        modes = self._UNDERSTOOD_THINKING_MODES
+        settings = config.model_settings if config is not None else None
+        thinking = settings.thinking if settings is not None else None
+        if modes is not None and thinking is not None and thinking.mode not in modes:
+            return (
+                f"{who}: thinking mode {thinking.mode!r} is not supported by the "
+                f"{self._BACKEND_NAME} backend yet."
+            )
+        return None
 
     def _validate_agent_graph(self) -> None:
         """Validate the declared agent graph. Backends may narrow this.
 
-        Runs before discovery and service creation so a static configuration
+        Runs before model listings and service creation so a static configuration
         error surfaces immediately and costs nothing.
         """
         return None
@@ -1010,9 +1166,16 @@ class BaseWorkflowManager(ABC):
         """Release everything this manager owns. Idempotent, never raises.
 
         Backends override to add their own resources (ADK closes the session
-        service); the base releases the service registry.
+        service); the base releases the model catalog and the service
+        registry.
         """
+        await self._close_catalog()
         self._cleanup_managers()
+
+    async def _close_catalog(self) -> None:
+        """Release the model catalog (its background refresh). Idempotent."""
+        catalog, self._catalog = self._catalog, None
+        await self._aclose_owned(catalog, "model_catalog")
 
     @abstractmethod
     async def _do_initialize(self) -> None:
@@ -1023,13 +1186,14 @@ class BaseWorkflowManager(ABC):
         ...
 
     def _reset_model(self, model: str | None) -> None:
-        """Reset model state for reinitialisation."""
-        if model is not None:
-            self._model = model
-            self._model_resolved = True
-        else:
-            self._model = None
-            self._model_resolved = False
+        """Set this manager's model override for the next initialization.
+
+        ``None`` drops the override: the default comes from settings again.
+        The models the last initialization resolved are forgotten.
+        """
+        self._model_override = model
+        self._default_model = None
+        self._resolved_models = {}
 
     @abstractmethod
     async def process(

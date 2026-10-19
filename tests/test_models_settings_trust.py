@@ -67,13 +67,16 @@ def _read(path: Path) -> dict:
 
 class TestModelEndpointsAreUserOnly:
     def test_a_project_file_cannot_define_an_endpoint(self, isolated):
-        _write(_project_file(isolated), {"model_endpoints": ENDPOINTS, "default_model": "kept"})
+        _write(
+            _project_file(isolated),
+            {"model_endpoints": ENDPOINTS, "default_model": "gemini-2.5-flash"},
+        )
 
         with structlog.testing.capture_logs() as logs:
             settings = BaseSettings()
 
         assert settings.model_endpoints == {}
-        assert settings.default_model == "kept"
+        assert settings.default_model == "gemini-2.5-flash"
         assert any(
             e.get("event") == "untrusted_project_setting_ignored" and e.get("key") == "model_endpoints"
             for e in logs

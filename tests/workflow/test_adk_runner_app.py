@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import textwrap
 import warnings
-from unittest.mock import AsyncMock
 
 import pytest
 
@@ -58,7 +57,6 @@ def _native_yaml(tmp_path):
 
 
 async def _initialized(manager: GoogleADKWorkflowManager) -> list[warnings.WarningMessage]:
-    manager._model_registry.refresh = AsyncMock()  # the built-in list, no network
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         await manager.initialize_services()

@@ -2,6 +2,7 @@
 
 import os
 from pathlib import Path
+from typing import get_args
 from unittest.mock import patch
 
 import pytest
@@ -17,8 +18,7 @@ from agentic_cli.config import (
     set_settings,
     validate_settings,
 )
-from agentic_cli.workflow.models import ModelFamily, ModelRegistry
-from agentic_cli.workflow.settings import THINKING_EFFORT_LEVELS
+from agentic_cli.workflow.config import AgentConfig
 
 
 class TestBaseSettings:
@@ -63,84 +63,50 @@ class TestBaseSettings:
             getattr(settings, name)
 
 
-class TestAPIKeyManagement:
-    """Tests for API key detection and management."""
-
-    def test_no_api_keys(self, settings_no_keys: BaseSettings):
-        """Test behavior when no API keys are set."""
-        assert not settings_no_keys.has_google_key
-        assert not settings_no_keys.has_anthropic_key
-        assert not settings_no_keys.has_any_api_key
-
-        with pytest.raises(RuntimeError, match="No API keys found"):
-            settings_no_keys.get_model()
-
-    def test_google_key_only(self, settings_google_only: BaseSettings):
-        """Test behavior with only Google API key."""
-        assert settings_google_only.has_google_key
-        assert not settings_google_only.has_anthropic_key
-        assert settings_google_only.has_any_api_key
-
-        model = settings_google_only.get_model()
-        assert model == ModelRegistry().get_default(ModelFamily.GEMINI)
-
-    def test_anthropic_key_only(self, settings_anthropic_only: BaseSettings):
-        """Test behavior with only Anthropic API key."""
-        assert not settings_anthropic_only.has_google_key
-        assert settings_anthropic_only.has_anthropic_key
-        assert settings_anthropic_only.has_any_api_key
-
-        model = settings_anthropic_only.get_model()
-        assert model == ModelRegistry().get_default(ModelFamily.CLAUDE)
-
-    def test_both_keys(self, settings_both_keys: BaseSettings):
-        """Test behavior with both API keys - Google should be preferred."""
-        assert settings_both_keys.has_google_key
-        assert settings_both_keys.has_anthropic_key
-        assert settings_both_keys.has_any_api_key
-
-        # Google is preferred when both are available
-        model = settings_both_keys.get_model()
-        assert model == ModelRegistry().get_default(ModelFamily.GEMINI)
-
-    def test_get_available_models(self, settings_both_keys: BaseSettings):
-        """Test getting available models based on API keys."""
-        models = settings_both_keys.get_available_models()
-
-        for google_model in ModelRegistry.FALLBACK_GOOGLE:
-            assert google_model in models
-        for anthropic_model in ModelRegistry.FALLBACK_ANTHROPIC:
-            assert anthropic_model in models
-
 class TestModelConfiguration:
-    """Tests for model configuration."""
+    """``set_model`` (the ``/settings`` model picker's setter) checks the reference only.
 
-    def test_set_model_valid(self, settings_google_only: BaseSettings):
-        """Test setting a valid model."""
+    Whether the provider has a key, and whether the model exists, is decided
+    when the workflow resolves its models (and rolls the change back if it
+    cannot start), not by the setter.
+    """
+
+    def test_set_model_keeps_the_reference_as_given(self, settings_google_only: BaseSettings):
         settings_google_only.set_model("gemini-2.5-flash")
         assert settings_google_only.default_model == "gemini-2.5-flash"
-        assert settings_google_only.get_model() == "gemini-2.5-flash"
 
-    def test_set_model_invalid(self, settings_google_only: BaseSettings):
-        """Test setting an invalid model raises error."""
-        with pytest.raises(ValueError, match="not available"):
-            settings_google_only.set_model("invalid-model")
+        settings_google_only.set_model("google:gemini-2.5-pro")
+        assert settings_google_only.default_model == "google:gemini-2.5-pro"
 
-    def test_set_model_unavailable_provider(self, settings_google_only: BaseSettings):
-        """Test setting a model from unavailable provider."""
-        with pytest.raises(ValueError, match="not available"):
-            settings_google_only.set_model("claude-sonnet-4")
+    def test_set_model_does_not_check_the_key(self, settings_google_only: BaseSettings):
+        settings_google_only.set_model("anthropic:claude-sonnet-4-5")
+        assert settings_google_only.default_model == "anthropic:claude-sonnet-4-5"
+
+    @pytest.mark.parametrize("spec", ["strong", "invalid-model", "gemini", "anthropic:", ""])
+    def test_set_model_rejects_a_role_or_a_malformed_reference(
+        self, settings_google_only: BaseSettings, spec: str
+    ):
+        with pytest.raises(ValueError):
+            settings_google_only.set_model(spec)
+        assert settings_google_only.default_model is None
+
+    def test_default_model_cannot_be_a_role_in_a_settings_source(self, temp_workspace: Path):
+        with patch.dict(os.environ, {"AGENTIC_DEFAULT_MODEL": "fast"}, clear=True):
+            with pytest.raises(ValueError, match="default_model"):
+                BaseSettings(workspace_dir=temp_workspace)
 
 
 class TestThinkingEffort:
     """Tests for thinking effort configuration."""
 
     def test_set_thinking_effort_valid(self, temp_workspace: Path):
-        """Test setting valid thinking effort levels."""
+        """Every value the field takes is accepted by the setter."""
         with patch.dict(os.environ, {}, clear=True):
             settings = BaseSettings(workspace_dir=temp_workspace)
 
-        for level in THINKING_EFFORT_LEVELS:
+        levels = get_args(BaseSettings.model_fields["thinking_effort"].annotation)
+        assert levels == ("none", "low", "medium", "high")
+        for level in levels:
             settings.set_thinking_effort(level)
             assert settings.thinking_effort == level
 
@@ -152,15 +118,12 @@ class TestThinkingEffort:
         with pytest.raises(ValueError, match="Invalid thinking effort"):
             settings.set_thinking_effort("invalid")
 
-    def test_supports_thinking_effort(self, settings_both_keys: BaseSettings):
-        """Test thinking effort support detection."""
-        # Anthropic models support thinking
-        assert settings_both_keys.supports_thinking_effort("claude-sonnet-4")
-        assert settings_both_keys.supports_thinking_effort("claude-opus-4")
+    def test_a_native_level_is_per_agent_only(self, temp_workspace: Path):
+        with patch.dict(os.environ, {}, clear=True):
+            settings = BaseSettings(workspace_dir=temp_workspace)
 
-        # Gemini 2.5+ supports thinking
-        assert settings_both_keys.supports_thinking_effort("gemini-2.5-pro")
-        assert settings_both_keys.supports_thinking_effort("gemini-3-flash-preview")
+        with pytest.raises(ValueError, match="Invalid thinking effort"):
+            settings.set_thinking_effort("xhigh")
 
 
 class TestGlobalSettings:
@@ -359,45 +322,130 @@ class TestSettingsContext:
 
 
 class TestSettingsValidation:
-    """Tests for settings validation."""
+    """``validate_settings``: the static check, before any network call (R11).
 
-    def test_validate_no_api_keys(self, temp_workspace: Path):
-        """Test validation fails with no API keys."""
-        with patch.dict(os.environ, {}, clear=True):
-            settings = BaseSettings(workspace_dir=temp_workspace)
+    Every reference parses, every endpoint referenced exists, every provider a
+    model will run on has a key, and some provider has one. Whether a model
+    exists, and its thinking modes, are checked when the workflow resolves its
+    agents against the model catalog.
+    """
 
-        with pytest.raises(SettingsValidationError, match="No API keys"):
+    @staticmethod
+    def _settings(temp_workspace: Path, env: dict | None = None, **values) -> BaseSettings:
+        with patch.dict(os.environ, env or {}, clear=True):
+            return BaseSettings(workspace_dir=temp_workspace, **values)
+
+    def test_no_provider_is_an_error_naming_every_variable(self, temp_workspace: Path):
+        settings = self._settings(temp_workspace)
+
+        with pytest.raises(SettingsValidationError) as caught:
             validate_settings(settings)
 
-    def test_validate_with_api_key(self, temp_workspace: Path):
-        """Test validation passes with API key."""
-        with patch.dict(os.environ, {"GOOGLE_API_KEY": "test-key"}, clear=True):
-            settings = BaseSettings(workspace_dir=temp_workspace)
+        message = str(caught.value)
+        for variable in ("GOOGLE_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY",
+                         "OPENROUTER_API_KEY", "model_endpoints"):
+            assert variable in message
 
-        # Should not raise
+    @pytest.mark.parametrize("variable", ["GOOGLE_API_KEY", "ANTHROPIC_API_KEY",
+                                          "OPENAI_API_KEY", "OPENROUTER_API_KEY"])
+    def test_any_one_provider_key_is_enough(self, temp_workspace: Path, variable: str):
+        validate_settings(self._settings(temp_workspace, {variable: "test-key"}))
+
+    def test_an_endpoint_is_a_provider(self, temp_workspace: Path):
+        settings = self._settings(
+            temp_workspace,
+            model_endpoints={"local-vllm": {"base_url": "http://localhost:8000/v1"}},
+            default_model="local-vllm:Qwen/Qwen3-32B",
+        )
+
         validate_settings(settings)
 
-    def test_validate_invalid_model(self, temp_workspace: Path):
-        """Test validation fails with invalid model."""
-        with patch.dict(os.environ, {"GOOGLE_API_KEY": "test-key"}, clear=True):
-            settings = BaseSettings(
-                workspace_dir=temp_workspace,
-                default_model="invalid-model",
-            )
+    def test_a_valid_model(self, temp_workspace: Path):
+        settings = self._settings(
+            temp_workspace, {"GOOGLE_API_KEY": "test-key"}, default_model="gemini-2.5-pro"
+        )
 
-        with pytest.raises(SettingsValidationError, match="not available"):
+        assert validate_settings(settings) is None
+
+    def test_an_unknown_model_id_is_left_to_the_catalog(self, temp_workspace: Path):
+        """Existence needs a listing; the static check accepts a well-formed id."""
+        settings = self._settings(
+            temp_workspace, {"GOOGLE_API_KEY": "test-key"}, default_model="gemini-9-ultra"
+        )
+
+        validate_settings(settings)
+
+    def test_the_default_model_needs_its_provider_s_key(self, temp_workspace: Path):
+        settings = self._settings(
+            temp_workspace, {"GOOGLE_API_KEY": "test-key"}, default_model="claude-sonnet-4"
+        )
+
+        with pytest.raises(SettingsValidationError, match="default_model.*set ANTHROPIC_API_KEY"):
             validate_settings(settings)
 
-    def test_validate_valid_model(self, temp_workspace: Path):
-        """Test validation passes with valid model."""
-        with patch.dict(os.environ, {"GOOGLE_API_KEY": "test-key"}, clear=True):
-            settings = BaseSettings(
-                workspace_dir=temp_workspace,
-                default_model="gemini-2.5-pro",
-            )
+    def test_an_agent_model_needs_its_provider_s_key(self, temp_workspace: Path):
+        """A per-agent override fails as hard as a bad default, only later."""
+        settings = self._settings(temp_workspace, {"GOOGLE_API_KEY": "test-key"})
+        agents = [AgentConfig(name="writer", prompt="p", model="claude-sonnet-4-5")]
 
-        # Should not raise
-        validate_settings(settings)
+        with pytest.raises(SettingsValidationError, match="Agent 'writer'.*ANTHROPIC_API_KEY"):
+            validate_settings(settings, agents)
+
+        validate_settings(settings, [AgentConfig(name="w", prompt="p", model="gemini-2.5-pro")])
+
+    def test_a_role_an_agent_uses_needs_its_provider_s_key(self, temp_workspace: Path):
+        settings = self._settings(
+            temp_workspace, {"GOOGLE_API_KEY": "test-key"},
+            model_roles={"strong": "anthropic:claude-opus-4-7"},
+        )
+        agents = [AgentConfig(name="critic", prompt="p", model="strong")]
+
+        with pytest.raises(SettingsValidationError, match="Agent 'critic'.*ANTHROPIC_API_KEY"):
+            validate_settings(settings, agents)
+        # A mapping no agent uses costs nothing.
+        validate_settings(settings, [AgentConfig(name="w", prompt="p")])
+
+    def test_a_malformed_agent_model_is_an_error(self, temp_workspace: Path):
+        settings = self._settings(temp_workspace, {"GOOGLE_API_KEY": "test-key"})
+        agents = [AgentConfig(name="writer", prompt="p", model="gemini")]
+
+        with pytest.raises(SettingsValidationError, match="Agent 'writer'.*'gemini'"):
+            validate_settings(settings, agents)
+
+    def test_an_undefined_endpoint_is_an_error_naming_the_setting(self, temp_workspace: Path):
+        settings = self._settings(
+            temp_workspace, {"GOOGLE_API_KEY": "test-key"},
+            model_roles={"fast": "local-vllm:qwen"}, pinned_models=["other-box:llama"],
+        )
+        agents = [AgentConfig(name="writer", prompt="p", model="third-box:mistral")]
+
+        with pytest.raises(SettingsValidationError) as caught:
+            validate_settings(settings, agents)
+
+        message = str(caught.value)
+        assert "model_roles['fast']" in message and "'local-vllm'" in message
+        assert "pinned_models[0]" in message and "'other-box'" in message
+        assert "Agent 'writer'" in message and "'third-box'" in message
+
+    def test_every_problem_is_reported_at_once(self, temp_workspace: Path):
+        settings = self._settings(temp_workspace, default_model="claude-sonnet-4")
+        agents = [AgentConfig(name="writer", prompt="p", model="gpt-5.5")]
+
+        with pytest.raises(SettingsValidationError) as caught:
+            validate_settings(settings, agents)
+
+        lines = str(caught.value).splitlines()
+        assert len(lines) == 3  # no provider, default_model, the writer
+
+    def test_returns_none_and_keeps_its_public_signature(self, temp_workspace: Path):
+        import inspect
+
+        settings = self._settings(temp_workspace, {"GOOGLE_API_KEY": "test-key"})
+
+        assert validate_settings(settings, []) is None
+        assert list(inspect.signature(validate_settings).parameters) == [
+            "settings", "agent_configs",
+        ]
 
 
 class TestSettingsJsonLoading:

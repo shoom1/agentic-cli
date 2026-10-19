@@ -57,8 +57,7 @@ def _manager(session_service) -> GoogleADKWorkflowManager:
     mgr._root_agent = object()
     mgr._initialized = True
     mgr._llm_logging_plugin = None
-    mgr._model = "gemini-2.5-flash"
-    mgr._model_resolved = True
+    mgr._catalog = None
     mgr._session_service_pinned = False
     mgr._carried_service_keys = frozenset()
     mgr._lifecycle_lock = asyncio.Lock()
@@ -110,8 +109,6 @@ def _real_manager(monkeypatch=None):
     session service only when one is not already held (which is exactly how
     ``reinitialize(preserve_sessions=True)`` avoids building a replacement).
     """
-    from unittest.mock import AsyncMock, MagicMock
-
     from agentic_cli.workflow.config import AgentConfig
     from tests.conftest import MockContext
 
@@ -120,7 +117,6 @@ def _real_manager(monkeypatch=None):
     mgr = GoogleADKWorkflowManager(
         agent_configs=[AgentConfig(name="a", prompt="p")], settings=ctx.settings
     )
-    mgr._model_registry = MagicMock(refresh=AsyncMock())
     mgr._ensure_managers_initialized = lambda: None
 
     created: list[_AsyncClosable] = []
@@ -322,8 +318,6 @@ class TestPartialConstructionRollsBack:
 
     @staticmethod
     def _manager_needing(*services: str):
-        from unittest.mock import MagicMock
-
         from agentic_cli.workflow.base_manager import BaseWorkflowManager
 
         class _Manager(BaseWorkflowManager):
@@ -346,10 +340,9 @@ class TestPartialConstructionRollsBack:
             async def cleanup(self):
                 await self._release_resources()
 
-        settings = MagicMock()
-        settings.app_name = "test-app"
-        settings.max_concurrent_jobs = 2
-        mgr = _Manager(agent_configs=[], settings=settings)
+        from tests.conftest import settings_double
+
+        mgr = _Manager(agent_configs=[], settings=settings_double(max_concurrent_jobs=2))
         mgr._required_managers = set(services)
         return mgr
 
@@ -403,7 +396,6 @@ class TestPartialConstructionRollsBack:
         )
 
         mgr = self._manager_needing("sandbox_manager", "job_manager")
-        mgr._model_registry = SimpleNamespace(refresh=_noop_refresh)
 
         with pytest.raises(RuntimeError, match="jobs blew up"):
             await mgr.initialize_services(validate=False)
@@ -418,10 +410,6 @@ def _raising_ctor(message: str):
         raise RuntimeError(message)
 
     return _ctor
-
-
-async def _noop_refresh(**kwargs):
-    return None
 
 
 class TestCloserIsolation:

@@ -6,9 +6,11 @@ and LLM factory logic from the runtime process loop.
 
 from __future__ import annotations
 
+import re
 from collections import deque
-from typing import Any, Callable, TYPE_CHECKING
+from typing import Any, Callable, Mapping, TYPE_CHECKING
 
+from agentic_cli.models import ProviderKind, ThinkingMechanism, load_table, parse_ref
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.langgraph.permission_wrap import wrap_tool_for_permission
 from agentic_cli.logging import Loggers
@@ -52,6 +54,7 @@ class LangGraphBuilder:
         agent_configs: list[AgentConfig],
         default_model: str,
         tool_overrides: dict[str, list] | None = None,
+        models: Mapping[str, str] | None = None,
     ):
         """Build the LangGraph workflow from agent configs.
 
@@ -64,6 +67,9 @@ class LangGraphBuilder:
             tool_overrides: Optional mapping of agent name to pre-built tool lists.
                            When provided, these replace ``config.tools`` for tool
                            node creation and LLM binding.
+            models: Each agent's model id, by agent name (the manager passes
+                    the resolved models); an agent not in it runs on its
+                    ``config.model``, else ``default_model``.
 
         Returns:
             An uncompiled StateGraph.
@@ -85,10 +91,13 @@ class LangGraphBuilder:
         def _get_tools(config: AgentConfig) -> list:
             return _overrides.get(config.name, config.tools or [])
 
+        def _model_for(config: AgentConfig) -> str:
+            return (models or {}).get(config.name) or config.model or default_model
+
         # Create nodes for each agent with retry policy
         for config in agent_configs:
             node_fn = self._create_agent_node(
-                config, default_model, tools=_get_tools(config) or None,
+                config, _model_for(config), tools=_get_tools(config) or None,
             )
             graph.add_node(config.name, node_fn, retry_policy=retry_policy)
 
@@ -188,11 +197,15 @@ class LangGraphBuilder:
         """
         thinking = self.get_thinking_config(model)
 
-        # OpenAI models
-        if model.startswith("gpt-") or model.startswith("o1"):
+        # OpenAI models. The key is passed explicitly: openai_api_key is not
+        # exported to the environment.
+        if model.startswith("gpt-") or re.match(r"o\d", model):
             try:
                 from langchain_openai import ChatOpenAI
-                return ChatOpenAI(model=model)
+                kwargs = {"model": model}
+                if self._settings.openai_api_key:
+                    kwargs["api_key"] = self._settings.openai_api_key
+                return ChatOpenAI(**kwargs)
             except ImportError:
                 raise ImportError(
                     f"Model {model} requires langchain-openai. "
@@ -233,14 +246,14 @@ class LangGraphBuilder:
                 )
 
         # Unknown model - try to infer from available API keys
-        if self._settings.has_google_key:
+        if self._settings.google_api_key:
             try:
                 from langchain_google_genai import ChatGoogleGenerativeAI
                 return ChatGoogleGenerativeAI(model=model)
             except ImportError:
                 pass
 
-        if self._settings.has_anthropic_key:
+        if self._settings.anthropic_api_key:
             try:
                 from langchain_anthropic import ChatAnthropic
                 return ChatAnthropic(model=model)
@@ -266,7 +279,7 @@ class LangGraphBuilder:
             Provider-specific thinking config dict, or None.
         """
         effort = self._settings.thinking_effort
-        if effort == "none" or not self._settings.supports_thinking_effort(model):
+        if effort == "none" or not _has_thinking_knob(model):
             return None
 
         if model.startswith("claude-"):
@@ -314,13 +327,13 @@ class LangGraphBuilder:
         )
 
     def _create_agent_node(
-        self, config: AgentConfig, default_model: str, tools: list | None = None,
+        self, config: AgentConfig, model: str, tools: list | None = None,
     ) -> Callable:
         """Create a LangGraph node function for an agent.
 
         Args:
             config: Agent configuration.
-            default_model: Fallback model name.
+            model: The model id the agent runs on.
 
         Returns:
             Async function that processes state through the agent.
@@ -330,9 +343,8 @@ class LangGraphBuilder:
             """Process state through this agent."""
             from langchain_core.messages import SystemMessage
 
-            # Get LLM for this agent (use config model or default)
-            model_name = config.model or default_model
-            llm = self.get_llm(model_name)
+            # Get LLM for this agent
+            llm = self.get_llm(model)
 
             # Bind tools if available
             agent_tools = tools or config.tools or []
@@ -346,7 +358,7 @@ class LangGraphBuilder:
 
             system_prompt = config.get_prompt()
             if system_prompt:
-                if self._settings.prompt_caching_enabled and model_name.startswith("claude-"):
+                if self._settings.prompt_caching_enabled and model.startswith("claude-"):
                     messages.append(
                         SystemMessage(
                             content=[{
@@ -466,3 +478,14 @@ class LangGraphBuilder:
             return "__end__"
 
         return router
+
+
+def _has_thinking_knob(model: str) -> bool:
+    """Whether a bare model id has a thinking knob, by the shipped model table."""
+    try:
+        ref = parse_ref(model)
+        kind = ProviderKind(ref.provider)
+    except ValueError:
+        return False
+    record = load_table().record_for(ref.provider, kind, ref.model)
+    return record.thinking.mechanism is not ThinkingMechanism.NONE

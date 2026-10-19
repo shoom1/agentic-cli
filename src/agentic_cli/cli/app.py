@@ -261,7 +261,9 @@ class BaseCLIApp:
         """Get field names to display in the settings dialog.
 
         Override to customize which settings appear in the UI.
-        Default: model, thinking_effort
+        Default: model, thinking_effort. ``model`` offers the model catalog's
+        runnable models as ``provider:model`` references and writes
+        ``default_model``.
 
         Only project-scoped settings may appear: a key whose target field is
         not in PROJECT_SETTABLE_KEYS is excluded by _build_ui_items (with a
@@ -299,15 +301,9 @@ class BaseCLIApp:
 
             # Handle special 'model' field with dynamic options
             if key == "model":
-                available_models = list(self._settings.get_available_models())
+                available_models, current_model = self._model_choices()
                 if not available_models:
                     continue  # Skip if no models available
-
-                # Get current model
-                try:
-                    current_model = self._settings.get_model()
-                except RuntimeError:
-                    current_model = None
 
                 # Create a synthetic field for model selection
                 from pydantic.fields import FieldInfo
@@ -338,6 +334,37 @@ class BaseCLIApp:
 
         # Sort by order and return items only
         return [item for _, item in sorted(items, key=lambda x: x[0])]
+
+    def _model_choices(self) -> tuple[list[str], str | None]:
+        """The model picker's options and current value, as ``provider:model``.
+
+        Once the workflow is ready, its catalog's runnable models (listings
+        included) and its default model; before that, the shipped table's
+        models of each provider with a key, and the default model the
+        settings name (or compute). Models a role names, and pinned ones,
+        are offered too.
+        """
+        from agentic_cli.models import ModelCatalog, ModelResolutionError
+        from agentic_cli.workflow import model_services
+
+        try:
+            roles = model_services.role_map_from_settings(self._settings)
+        except ValueError:
+            return [], None
+        controller = self._workflow_controller
+        workflow = controller.workflow if controller.is_ready else None
+        if workflow is not None and workflow.catalog is not None:
+            catalog, current = workflow.catalog, workflow.model
+        else:
+            endpoints = model_services.endpoints_from_settings(self._settings)
+            catalog = ModelCatalog(endpoints=endpoints)  # not loaded: the shipped table
+            try:
+                current = str(roles.resolve("default", catalog=catalog, endpoints=endpoints))
+            except ModelResolutionError:
+                current = None
+        referenced = [*([current] if current else []), *roles.referenced()]
+        options = catalog.picker_refs(referenced=referenced, pinned=self._settings.pinned_models)
+        return options, current
 
     async def save_settings(
         self, keys: "Iterable[str] | None" = None

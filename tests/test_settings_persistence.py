@@ -126,7 +126,7 @@ class TestTrustSplitSave:
         proj_dir = isolated_fs / ".agentic_cli"
         proj_dir.mkdir()
         (proj_dir / "settings.json").write_text(
-            json.dumps({"raw_llm_logging": True, "default_model": "stale-model"})
+            json.dumps({"raw_llm_logging": True, "default_model": "gemini-2.5-pro"})
         )
 
         settings = BaseSettings(

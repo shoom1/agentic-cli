@@ -8,28 +8,24 @@ Gemini 2.5 models only accept a numeric ``thinking_budget`` and reject
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import pytest
 
 pytest.importorskip("google.adk")
 
 from google.genai import types  # noqa: E402
 
+from agentic_cli.config import BaseSettings  # noqa: E402
 from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager  # noqa: E402
 
 
-def _planner_for(model: str, effort: str, supports: bool = True):
-    """Call _get_planner on a bare manager with a stubbed settings object."""
-    mgr = GoogleADKWorkflowManager.__new__(GoogleADKWorkflowManager)
-    # `model` is a lazily-resolved read-only property; pin it so the getter
-    # returns our value instead of resolving from settings.
-    mgr._model = model
-    mgr._model_resolved = True
-    mgr._settings = SimpleNamespace(
-        thinking_effort=effort,
-        supports_thinking_effort=lambda m=None: supports,
-    )
+def _planner_for(model: str, effort: str):
+    """Call _get_planner for a manager whose default model is ``model``.
+
+    Whether the model has a thinking knob comes from its record (the shipped
+    table here: the manager is not initialized, so nothing was listed).
+    """
+    settings = BaseSettings(google_api_key="test-key", thinking_effort=effort)
+    mgr = GoogleADKWorkflowManager(agent_configs=[], settings=settings, model=model)
     return mgr._get_planner()
 
 
@@ -79,4 +75,4 @@ class TestNoPlanner:
         assert _planner_for("gemini-2.5-flash", "none") is None
 
     def test_unsupported_model_returns_no_planner(self):
-        assert _planner_for("gemini-2.0-flash", "high", supports=False) is None
+        assert _planner_for("gemini-2.0-flash", "high") is None
