@@ -293,9 +293,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   offers `provider:model` references to the models that can run: those of
   each provider with a key (once the workflow is ready, from its listings),
   endpoint models, and the OpenRouter models a role maps or `pinned_models`
-  lists. A role's picker shows the model it maps, or the one it resolves to.
-  Picking a role saves `model_roles` to the project settings file and
-  reinitializes the workflow with its sessions kept, as a model change does;
+  lists. A role's picker shows the model it maps, or the one it resolves to,
+  and its menu shows each reference whole (the dialog is 80 columns wide).
+  Picking a role saves that role alone into the project settings file's
+  `model_roles` (the roles from the user file, the environment or the app's
+  defaults stay where they are) and reinitializes the workflow with its
+  sessions kept, as a model change does;
   a role the workflow cannot run is rolled back. The Thinking Effort
   picker's description says what the effort means for the default model,
   such as `high → anthropic:claude-sonnet-4-6: adaptive, effort high`.

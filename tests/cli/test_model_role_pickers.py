@@ -26,7 +26,7 @@ import structlog
 from agentic_cli.cli.app import BaseCLIApp
 from agentic_cli.cli.settings_command import SettingsCommand
 from agentic_cli.cli.workflow_controller import WorkflowController
-from agentic_cli.config import BaseSettings
+from agentic_cli.config import BaseSettings, validate_settings
 from agentic_cli.models import ModelCatalog, ModelRef, ProviderKind, load_table
 from agentic_cli.workflow import model_services
 from agentic_cli.workflow.config import AgentConfig
@@ -123,6 +123,36 @@ async def test_once_the_workflow_is_ready_the_pickers_offer_its_catalog():
         assert items[key].options == runnable, key
     assert items["model_role:fast"].default == "google:gemini-2.5-flash-lite"  # listed
     assert items["model"].default == "google:gemini-3-flash-preview"
+
+
+async def test_a_picker_s_menu_shows_every_model_whole():
+    """With listings in, a picker offers many references; its open menu must
+    show each one whole, or the models cannot be told apart."""
+    from thinking_prompt.settings_dialog import DropdownControl, DropdownItem
+
+    settings = BaseSettings(google_api_key="k-g", anthropic_api_key="k-a")
+    catalog = ModelCatalog(
+        endpoints=model_services.endpoints_from_settings(settings),
+        transport=ProviderAPI().transport,
+    )
+    await catalog.load()
+    workflow = SimpleNamespace(catalog=catalog, model="google:gemini-3-flash-preview")
+
+    items = _items(_app(settings, workflow))
+
+    for key in PICKERS:
+        item = items[key]
+        assert isinstance(item, DropdownItem), key
+        control = DropdownControl(item)
+        control._build_menu()
+        menu = control._menu_window
+        width = menu.width - len(menu.right_margins)  # the scrollbar takes a column
+        content = control._menu_control.create_content(width, len(item.options))
+        shown = [
+            "".join(text for _, text in content.get_line(i)).strip()
+            for i in range(content.line_count)
+        ]
+        assert shown == item.options, key
 
 
 def test_a_mapped_role_shows_its_model():
@@ -330,6 +360,58 @@ async def test_picking_a_role_saves_it_to_the_project_and_reinitializes_keeping_
     assert not _user_file(home).exists()
     assert "Fast Model: google:gemini-2.5-pro" in app.successes
     assert not app.errors
+
+
+# A pick saves only itself: the settings know roles from the user file, the
+# environment and the app's defaults too, merged, and none of those belongs in
+# a project file a teammate pulls. These tests load the settings from files.
+
+
+def _write(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data))
+
+
+async def test_a_pick_saves_only_that_role_to_the_project_file(home, monkeypatch):
+    _write(_user_file(home), {
+        "model_endpoints": {"local-vllm": {"base_url": "http://gpu-box:8000/v1"}},
+        "model_roles": {"strong": "local-vllm:Qwen/Qwen3-32B"},
+    })
+    _write(_project_file(home), {"model_roles": {"fast": "google:gemini-2.5-flash-lite"}})
+    monkeypatch.setenv("GOOGLE_API_KEY", "k-g")
+    settings = BaseSettings()
+    assert settings.model_roles == {
+        "strong": "local-vllm:Qwen/Qwen3-32B", "fast": "google:gemini-2.5-flash-lite",
+    }
+    app = _dialog_app(
+        settings, FakeManager(settings), dialog_result={"model_role:fast": "google:gemini-2.5-pro"}
+    )
+
+    await _run_dialog(app)
+
+    assert json.loads(_project_file(home).read_text()) == {
+        "model_roles": {"fast": "google:gemini-2.5-pro"}
+    }
+    assert settings.model_roles["strong"] == "local-vllm:Qwen/Qwen3-32B"  # still in use here
+    # A teammate who pulls the project file, without the user's endpoint, starts.
+    _user_file(home).unlink()
+    validate_settings(BaseSettings())
+
+
+async def test_a_role_from_the_environment_is_not_made_permanent(home, monkeypatch):
+    monkeypatch.setenv("AGENTIC_MODEL_ROLES", json.dumps({"strong": "anthropic:claude-opus-4-6"}))
+    monkeypatch.setenv("GOOGLE_API_KEY", "k-g")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k-a")
+    settings = BaseSettings()
+    app = _dialog_app(
+        settings, FakeManager(settings), dialog_result={"model_role:fast": "google:gemini-2.5-pro"}
+    )
+
+    await _run_dialog(app)
+
+    assert json.loads(_project_file(home).read_text()) == {
+        "model_roles": {"fast": "google:gemini-2.5-pro"}
+    }
 
 
 async def test_a_role_the_workflow_cannot_run_is_rolled_back(home):

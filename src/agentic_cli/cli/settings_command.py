@@ -46,6 +46,8 @@ class SettingsCommand(Command):
             title="Settings",
             items=items,
             can_cancel=True,
+            # Room for a model picker's row: its label and a whole reference.
+            width=80,
         )
         result = await app.session.show_dialog(dialog)
 
@@ -63,6 +65,14 @@ class SettingsCommand(Command):
         changed = {k for k, v in after.items() if before.get(k) != v}
         if not changed:
             return
+        # A dict the dialog edits entry by entry saves only the entries that
+        # changed: its live value merges entries from the user file, the
+        # environment and the app's defaults, none of which belongs in the
+        # project file a teammate pulls.
+        for key in _SAVED_BY_ENTRY & changed:
+            changed.discard(key)
+            old, new = before.get(key) or {}, after.get(key) or {}
+            changed |= {f"{key}.{entry}" for entry, value in new.items() if old.get(entry) != value}
 
         try:
             if _accepts_keyword(app.save_settings, "keys"):
@@ -72,6 +82,10 @@ class SettingsCommand(Command):
             app.session.add_success(_saved_message(saved))
         except Exception as e:
             app.session.add_warning(f"Settings applied but not saved: {e}")
+
+
+# Dict settings the dialog edits one entry at a time (a role's model picker).
+_SAVED_BY_ENTRY = {"model_roles"}
 
 
 def _saved_message(saved) -> str:

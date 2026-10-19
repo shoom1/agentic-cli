@@ -185,6 +185,10 @@ class SettingsPersistence:
 
         With ``keys``, only those fields are written, each merged into its
         file (the ``/settings`` command passes the fields the user changed).
+        A key ``field.entry`` names one entry of a project-settable dict field
+        (``model_roles.fast``): that entry is merged into the project file's
+        own dict, and the rest of the live dict, which may hold entries from
+        the user file, the environment or the app's defaults, is left out.
         Without it, the whole live settings object is written as described
         below, which also persists values that came from the environment or
         were derived at startup.
@@ -264,17 +268,30 @@ class SettingsPersistence:
         from agentic_cli.file_utils import atomic_write_text
 
         fields = type(settings).model_fields
+        entries: dict[str, set[str]] = {}
+        for key in keys:
+            field, dot, entry = key.partition(".")
+            if dot and entry and field in PROJECT_SETTABLE_KEYS and field in fields:
+                entries.setdefault(field, set()).add(entry)
         keys = {k for k in keys if k in fields}
-        dump = self._serialize_paths(settings.model_dump(include=keys))
+        entry_fields = sorted(set(entries) - keys)
+        dump = self._serialize_paths(settings.model_dump(include=keys | set(entry_fields)))
 
         project_path = self.project_config_path
         project_updates = {k: dump[k] for k in sorted(keys) if k in PROJECT_SETTABLE_KEYS}
-        if project_updates:
+        if project_updates or entry_fields:
             existing = self._read_object(project_path)
             # Keep the file's other allowlisted entries; drop stale ones the
             # loader would ignore anyway.
             merged = {k: v for k, v in existing.items() if k in PROJECT_SETTABLE_KEYS}
             merged.update(project_updates)
+            for field in entry_fields:
+                own = merged.get(field)
+                live = dump[field] or {}
+                merged[field] = {
+                    **(own if isinstance(own, dict) else {}),
+                    **{entry: live[entry] for entry in sorted(entries[field]) if entry in live},
+                }
             project_path.parent.mkdir(parents=True, exist_ok=True)
             atomic_write_text(project_path, json.dumps(merged, indent=2, default=str))
 
@@ -291,7 +308,7 @@ class SettingsPersistence:
             project_path=project_path,
             user_path=user_path,
             user_scoped_keys=user_keys,
-            project_keys=tuple(project_updates),
+            project_keys=(*project_updates, *entry_fields),
         )
 
     def _merge_user(

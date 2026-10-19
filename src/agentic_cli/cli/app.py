@@ -882,6 +882,7 @@ class BaseCLIApp:
 def _model_picker(key: str, choices: _ModelChoices) -> Any:
     """The dialog item of one model picker: ``model`` or ``model_role:<role>``."""
     from pydantic.fields import FieldInfo
+    from thinking_prompt.settings_dialog import DropdownItem
 
     from agentic_cli.cli.settings_introspection import field_to_ui_item
 
@@ -893,12 +894,22 @@ def _model_picker(key: str, choices: _ModelChoices) -> Any:
         title = _setting_label(key)
         description = f"Agents whose model is {role!r} run on it"
     field = FieldInfo(default=None, title=title, description=description)
-    return field_to_ui_item(
+    item = field_to_ui_item(
         key=key,
         field=field,
         current_value=choices.current.get(role),
         dynamic_options=choices.options,
     )
+    if isinstance(item, DropdownItem):
+        # A dropdown's default width cuts a reference to its first 14
+        # characters ("google:gemini-"), so the models cannot be told apart.
+        item.width, item.max_width = None, _MODEL_PICKER_MAX_WIDTH
+    return item
+
+
+# The widest a model picker's dropdown grows: a reference and its padding.
+# SettingsCommand's dialog leaves room for it beside the longest label.
+_MODEL_PICKER_MAX_WIDTH = 48
 
 
 def _resolved_role(

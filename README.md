@@ -434,8 +434,8 @@ an agent.
   chooses among the endpoints you defined (`default_model`, `model_roles`,
   `pinned_models`); a reference to one you did not define fails at startup.
 - The key comes only from the environment variable `api_key_env` names, and is
-  never stored. If that variable is not set, startup fails, naming it (a
-  `.env` file does not set it). Without `api_key_env` the client sends the
+  never stored. If that variable is not set, startup fails for a model that
+  runs on the endpoint, naming the variable (a `.env` file does not set it). Without `api_key_env` the client sends the
   placeholder key `EMPTY`.
 - An endpoint's name is lowercase letters, digits, `_` and `-`, starting with a
   letter, and cannot be a built-in provider's. `base_url` is `http` or
