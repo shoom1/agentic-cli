@@ -29,6 +29,10 @@ where its ADK class reads it:
   carries attribution headers naming the app). The reasoning parameter goes
   in ``extra_body``: OpenRouter's ``reasoning.effort``, or what the endpoint
   declares, ``chat_template_kwargs.enable_thinking`` or ``reasoning_effort``.
+
+The timeouts, the placeholder key, OpenRouter's headers and the reasoning
+parameter come from ``workflow/model_wire.py``, which the LangChain adapter
+reads too.
 """
 
 from __future__ import annotations
@@ -43,17 +47,19 @@ from google.genai import types
 
 from agentic_cli.logging import Loggers
 from agentic_cli.models import NativeThinking, ProviderKind, ResolvedModel, ThinkingMechanism
+from agentic_cli.workflow.model_wire import (
+    CONNECT_TIMEOUT,
+    PLACEHOLDER_KEY,
+    REQUEST_TIMEOUT,
+    openrouter_headers,
+    reasoning_body,
+)
 
 if TYPE_CHECKING:
     from agentic_cli.config import BaseSettings
 
 logger = Loggers.workflow()
 
-# A request to a provider without a timeout setting ends after this long: the
-# OpenAI SDK's own default, set explicitly. google-genai has no default, so a
-# hung Gemini connection would otherwise hang the turn.
-_REQUEST_TIMEOUT = 600.0
-_CONNECT_TIMEOUT = 5.0
 # google-genai retries these itself. A 429 is not retried: the turn fails with
 # a rate-limit error the CLI reports.
 _GEMINI_RETRY_STATUS_CODES = [500, 502, 503, 504]
@@ -65,10 +71,6 @@ _GEMINI_LEVELS = {
 }
 # ADK's AnthropicLlm reads a negative thinking budget as adaptive thinking.
 _ADAPTIVE = -1
-# The key an endpoint without one is sent: a local server without
-# authentication expects some key, and the client must never fall back to
-# OPENAI_API_KEY and send the user's OpenAI key to it.
-_PLACEHOLDER_KEY = "EMPTY"
 
 
 @dataclass(frozen=True)
@@ -117,7 +119,7 @@ def _gemini(resolved: ResolvedModel, settings: "BaseSettings") -> AdkModel:
     from google.adk.models import Gemini
 
     http_options = types.HttpOptions(
-        timeout=int(_REQUEST_TIMEOUT * 1000),  # milliseconds
+        timeout=int(REQUEST_TIMEOUT * 1000),  # milliseconds
         retry_options=types.HttpRetryOptions(
             initial_delay=settings.retry_initial_delay,
             attempts=settings.retry_max_attempts,
@@ -242,7 +244,7 @@ def _openai_compatible(
     endpoint = resolved.endpoint
     headers = None
     if endpoint.kind is ProviderKind.OPENROUTER:
-        headers = {"HTTP-Referer": app_name, "X-Title": app_name}
+        headers = openrouter_headers(app_name)
     client = _openai_client(
         resolved, settings, base_url=endpoint.base_url, default_headers=headers
     )
@@ -251,31 +253,19 @@ def _openai_compatible(
             model=resolved.record.model,
             max_tokens=resolved.max_tokens,
             client=client,
-            extra_body=_reasoning_body(resolved),
+            extra_body=reasoning_body(resolved),
         ),
         generate_content_config=_config(resolved, types.GenerateContentConfig),
         planner=None,
     )
 
 
-def _reasoning_body(resolved: ResolvedModel) -> dict[str, Any]:
-    """The request fields that set an OpenAI-compatible model's thinking."""
-    thinking = resolved.thinking
-    if thinking is None:
-        return {}
-    if thinking.mechanism is ThinkingMechanism.CHAT_TEMPLATE:
-        return {"chat_template_kwargs": {"enable_thinking": thinking.enabled}}
-    if resolved.endpoint.kind is ProviderKind.OPENROUTER:
-        return {"reasoning": {"effort": thinking.level}}
-    return {"reasoning_effort": thinking.level}  # an endpoint that declares effort
-
-
 def _openai_client(resolved: ResolvedModel, settings: "BaseSettings", **kwargs: Any):
     from openai import AsyncOpenAI
 
     return AsyncOpenAI(
-        api_key=resolved.endpoint.api_key or _PLACEHOLDER_KEY,
-        timeout=httpx.Timeout(_REQUEST_TIMEOUT, connect=_CONNECT_TIMEOUT),
+        api_key=resolved.endpoint.api_key or PLACEHOLDER_KEY,
+        timeout=httpx.Timeout(REQUEST_TIMEOUT, connect=CONNECT_TIMEOUT),
         max_retries=settings.retry_max_attempts,
         **kwargs,
     )

@@ -117,6 +117,11 @@ _OPTIONAL_ROOTS = {
     "langgraph",
     "langchain",
     "langchain_core",
+    "langchain_anthropic",
+    "langchain_google_genai",
+    "langchain_openai",
+    "langchain_openrouter",
+    "openrouter",
 }
 
 
@@ -159,3 +164,10 @@ def test_base_package_imports_without_optional_extras():
 def test_tools_package_imports_without_optional_extras():
     """Tool auto-discovery must not pull the kb/langgraph stacks."""
     assert _import_with_optionals_blocked("agentic_cli.tools") == set()
+
+
+def test_the_adk_model_path_imports_without_the_langgraph_extra():
+    """The wire details both adapters share (``workflow/model_wire.py``) bring
+    no LangChain package to an ADK-only install."""
+    assert _import_with_optionals_blocked("agentic_cli.workflow.model_wire") == set()
+    assert _import_with_optionals_blocked("agentic_cli.workflow.adk.model_factory") == set()
