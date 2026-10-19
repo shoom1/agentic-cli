@@ -34,7 +34,7 @@ from agentic_cli.settings_persistence import PROJECT_SETTABLE_KEYS
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
 
-    from agentic_cli.models import CatalogView, Endpoint, RoleMap
+    from agentic_cli.models import CatalogView, Endpoint, ModelRef, ResolvedModel, RoleMap
     from agentic_cli.settings_persistence import SettingsSaveResult
     from agentic_cli.workflow import GoogleADKWorkflowManager, EventType, WorkflowEvent
     from agentic_cli.workflow.base_manager import BaseWorkflowManager
@@ -584,8 +584,11 @@ class BaseCLIApp:
 
         # Reinitialize workflow if needed
         controller = self._workflow_controller
+        switched: list[str] = []
         if needs_reinit and controller.is_ready:
-            previous_model = controller.workflow.model
+            previous = controller.workflow
+            previous_model = previous.model
+            previous_models = dict(getattr(previous, "agent_models", {}))
             try:
                 await controller.reinitialize(model=new_model)
             except Exception as e:
@@ -605,10 +608,17 @@ class BaseCLIApp:
                             f"{restore_error}"
                         )
                 return False
+            # An orchestrator swap starts another manager: nothing carries over.
+            if controller.workflow is previous:
+                switched = _provider_switches(
+                    previous_models, getattr(previous, "agent_models", {})
+                )
 
         # Report changes
         for key, value in changes.items():
             self.session.add_success(f"{_setting_label(key)}: {value}")
+        for notice in switched:
+            self.session.add_message("system", notice)
         return True
 
     def _register_builtin_commands(self) -> None:
@@ -922,6 +932,28 @@ def _resolved_role(
         return str(roles.resolve(role, catalog=catalog, endpoints=endpoints))
     except ModelResolutionError:
         return None
+
+
+def _provider_switches(
+    before: Mapping[str, ResolvedModel], after: Mapping[str, ResolvedModel]
+) -> list[str]:
+    """What each switch to another provider's model costs, one line per switch.
+
+    The conversation is kept, but no model is sent another provider's
+    reasoning (both backends leave it out), and the new provider has none of
+    the old one's prompt cache. A switch within one provider loses neither.
+    """
+    agents: dict[tuple[ModelRef, ModelRef], list[str]] = {}
+    for name, model in after.items():
+        old = before.get(name)
+        if old is not None and old.record.kind is not model.record.kind:
+            agents.setdefault((old.ref, model.ref), []).append(name)
+    return [
+        f"{', '.join(names)}: {old} → {new}. The conversation is kept, but earlier "
+        f"reasoning from {old.provider} is not sent to the new model, and the prompt "
+        "cache starts over."
+        for (old, new), names in agents.items()
+    ]
 
 
 def _snapshot_settings(settings: BaseSettings) -> tuple[dict[str, Any], set[str]]:
