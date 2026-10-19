@@ -641,7 +641,10 @@ class WorkflowSettingsMixin:
     prompt_caching_enabled: bool = Field(
         default=True,
         title="Prompt Caching",
-        description="Enable prompt caching for supported models (reduces cost and latency)",
+        description=(
+            "Cache prompts on Claude (both backends) and Gemini (ADK only, whose caches "
+            "are billed for storage); reduces cost and latency"
+        ),
         json_schema_extra={"ui_order": 170},
     )
 
