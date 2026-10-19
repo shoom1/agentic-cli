@@ -21,6 +21,12 @@ model whose chat template switches thinking).
 A last case runs two Claude turns in one session with prompt caching on (the
 default): the second reads the prompt the first cached. Its model:
 LIVE_ADK_CLAUDE_CACHE_MODEL.
+
+The switch cases run a turn, a /settings model switch to another provider
+that keeps the session, and a second turn, Gemini to Claude and back: the
+second model must not be sent the first one's thoughts, which it would
+refuse. They need both keys (models: LIVE_ADK_GEMINI_MODEL,
+LIVE_ADK_GEMINI_3_MODEL, LIVE_ADK_CLAUDE_BUDGET_MODEL).
 """
 
 from __future__ import annotations
@@ -195,3 +201,54 @@ async def test_a_second_claude_turn_reads_the_cache(listed, tmp_path):
     ]
     assert cached, "the second turn reported no usage"
     assert max(cached) > 0, f"the second turn read nothing from the cache: {cached}"
+
+
+_BOTH_KEYS = pytest.mark.skipif(
+    not (os.environ.get("GOOGLE_API_KEY") and os.environ.get("ANTHROPIC_API_KEY")),
+    reason="GOOGLE_API_KEY and ANTHROPIC_API_KEY are both needed",
+)
+_GEMINI_25 = os.getenv("LIVE_ADK_GEMINI_MODEL", "google:gemini-2.5-flash")
+_GEMINI_3 = os.getenv("LIVE_ADK_GEMINI_3_MODEL", "google:gemini-3-flash-preview")
+# A budget Claude thinks at every effort but none, so its thoughts are in the session.
+_CLAUDE = os.getenv("LIVE_ADK_CLAUDE_BUDGET_MODEL", "anthropic:claude-sonnet-4-5")
+
+
+async def _switch(before: str, after: str, tmp_path) -> tuple[list, list]:
+    """One turn on ``before``, a /settings switch to ``after`` keeping the
+    session, and one turn on ``after``."""
+    settings = BaseSettings(workspace_dir=tmp_path, session_store="memory", thinking_effort="low")
+    manager = GoogleADKWorkflowManager(
+        agent_configs=[AgentConfig(name="assistant", prompt="You are a careful assistant.")],
+        settings=settings,
+        model=before,
+    )
+    try:
+        first = await collect_events(manager, PROMPT, session_id="switch")
+        await manager.reinitialize(model=after, preserve_sessions=True)
+        second = await collect_events(
+            manager, "And 6 times 8? Reply with the number only.", session_id="switch"
+        )
+    finally:
+        await manager.cleanup()
+    assert_no_errors(first)
+    return first, second
+
+
+@_BOTH_KEYS
+@pytest.mark.parametrize("before, after", [
+    pytest.param(_GEMINI_25, _CLAUDE, id="gemini-2.5-to-claude"),
+    pytest.param(_GEMINI_3, _CLAUDE, id="gemini-3-to-claude"),
+    pytest.param(_CLAUDE, _GEMINI_25, id="claude-to-gemini-2.5"),
+    pytest.param(_CLAUDE, _GEMINI_3, id="claude-to-gemini-3"),
+])
+async def test_a_model_switch_keeps_the_conversation(before, after, listed, tmp_path):
+    """A /settings switch to another provider keeps the session: the new
+    model continues a conversation whose earlier turns carry the old one's
+    thoughts, which only the old provider can read."""
+    first, second = await _switch(before, after, tmp_path)
+
+    if before in (_GEMINI_25, _CLAUDE):  # Gemini 3 may answer without visible thoughts
+        assert find_events(first, EventType.THINKING), "no thoughts to carry over"
+    assert_no_errors(second)
+    answer = "".join(event.content or "" for event in find_events(second, EventType.TEXT))
+    assert "48" in answer

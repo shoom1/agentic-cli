@@ -62,6 +62,8 @@ agentic-cli/
 │   │   │   ├── permission_plugin.py # PermissionPlugin (gates tool calls)
 │   │   │   ├── task_progress_plugin.py # Emits TASK_PROGRESS events
 │   │   │   ├── tool_error_plugin.py # Tool exception → error result (turn survives)
+│   │   │   ├── context_cache_plugin.py # One Gemini cache attempt a turn
+│   │   │   ├── foreign_reasoning_plugin.py # No model is sent another provider's thoughts
 │   │   │   └── plugins.py    # LLM traffic logging (raw_llm_logging)
 │   │   └── langgraph/        # LangGraph orchestrator
 │   │       ├── manager.py    # LangGraphWorkflowManager

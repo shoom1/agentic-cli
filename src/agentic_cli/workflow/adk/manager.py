@@ -574,6 +574,14 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         # The plugins belong to the App; ADK deprecates Runner(plugins=...).
         context_cache = self._context_cache_config()
         plugins = self._init_plugins()
+        if not self._adk_config_path:
+            from agentic_cli.workflow.adk.foreign_reasoning_plugin import ForeignReasoningPlugin
+
+            # A model switch keeps the session: no model is sent the thoughts
+            # another provider wrote, which it would refuse.
+            plugins.append(ForeignReasoningPlugin({
+                name: model.record.kind.value for name, model in self._resolved_models.items()
+            }))
         if context_cache is not None:
             from agentic_cli.workflow.adk.context_cache_plugin import ContextCachePlugin
 
