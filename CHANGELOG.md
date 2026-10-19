@@ -71,7 +71,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   environment); `model_endpoints`, the user's OpenAI-compatible servers by
   name (`base_url`, the variable holding the key in `api_key_env`, and the
   models served); `model_roles`, a model per role; and `pinned_models`,
-  models the `/settings` model picker always offers. The catalog lists each
+  models the `/settings` model pickers always offer. The catalog lists each
   provider and endpoint with these, and an agent may name a role
   (`AgentConfig(model="fast")`). `model_endpoints` is
   user-only: it holds the addresses a key is sent to, so a project
@@ -89,6 +89,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (None before it initializes): `catalog.records("google")`,
   `catalog.record(ModelRef("google", "gemini-2.5-flash"))`,
   `catalog.status()` and `await catalog.refresh()`.
+- **`/models`** shows what the model catalog knows. First a row per provider
+  and endpoint: whether it has credentials, whether its listing is fresh,
+  stale, failed or not tried, when it was fetched, how many models it
+  offers, and the last error. Then the models of each provider with
+  credentials: the reference, context window, max output, thinking mechanism
+  and levels, tools, cache mechanism, where the values came from, and the
+  roles that use the model. `/models <text>` shows only the references that
+  contain the text, ignoring case. `/models refresh` lists every provider
+  again now and reports whose models changed and which listings failed. It
+  works before the workflow is initialized, from the model cache, and never
+  shows a key.
 
 ### Changed
 
@@ -123,7 +134,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   while it is listed again in the background. As in 0.6, an id unknown to a
   provider is rejected only when that provider's own listing succeeded; a
   failed, untried or older listing accepts it. After a key change to an
-  account with other models, delete the cache file to list again at once.
+  account with other models, run `/models refresh` to list again at once.
 - **`budget` thinking on a model without budget thinking fails at startup.**
   Gemini 3 and adaptive Claude (4.6 and later) take levels, not budgets; 0.6
   reinterpreted `budget` on them (as a raw budget, or as plain adaptive
@@ -162,8 +173,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **ADK's "Sampling parameters … are ignored" warning no longer prints over
   the UI.** Temperature, top-p and top-k are dropped, with a debug log,
   before ADK sees them, whenever the model rejects them in its
-  configuration: Claude while it thinks, Claude 4.6 and later, and GPT
-  reasoning models.
+  configuration: Claude while it thinks, the Claude models that take none at
+  all (Opus 4.7 and later, Sonnet 5 and later, and Fable), and GPT reasoning
+  models.
 - **The ADK backend caches prompts.** `prompt_caching_enabled` (on by
   default) was ignored on ADK. Now, while it is on and any agent runs on
   Claude or Gemini (an agent without a `model` runs on the default model),
@@ -275,9 +287,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and rolls the change back if the model cannot run. `default_model` must be
   a reference or a model id wherever it is set: a role, or a malformed value,
   fails when settings load, naming `default_model`.
-- **The `/settings` model picker offers `provider:model` references**: the
-  runnable models of each provider with a key (once the workflow is ready,
-  from its listings), endpoint models, and pinned models.
+- **`/settings` has a model picker per role.** The model picker, now
+  Default Model (`default_model`), has two companions: Fast Model and Strong
+  Model, which write `model_roles["fast"]` and `model_roles["strong"]`. Each
+  offers `provider:model` references to the models that can run: those of
+  each provider with a key (once the workflow is ready, from its listings),
+  endpoint models, and the OpenRouter models a role maps or `pinned_models`
+  lists. A role's picker shows the model it maps, or the one it resolves to,
+  and its menu shows each reference whole (the dialog is 80 columns wide).
+  Picking a role saves that role alone into the project settings file's
+  `model_roles` (the roles from the user file, the environment or the app's
+  defaults stay where they are) and reinitializes the workflow with its
+  sessions kept, as a model change does;
+  a role the workflow cannot run is rolled back. The Thinking Effort
+  picker's description says what the effort means for the default model,
+  such as `high → anthropic:claude-sonnet-4-6: adaptive, effort high`.
+  `BaseCLIApp.get_ui_setting_keys()` now returns
+  `["model", "model_role:fast", "model_role:strong", "thinking_effort"]`. An
+  app that overrides it with a list of its own shows only the pickers it
+  lists: extend the default instead
+  (`return [*super().get_ui_setting_keys(), "verbose_thinking"]`), and add
+  `"model_role:<role>"` for a picker of one of its own roles.
+  `settings.update_setting("model_role:<role>", ref)`, and the new
+  `settings.set_model_role(role, ref)`, map one role.
 - **agentic-cli runs on ADK 2.** It requires `google-adk[mcp]>=2.12,<3`
   (0.6.x required `>=1.34,<2`) and `google-genai>=2.30,<3`, and declares
   `sqlalchemy[asyncio]>=2,<3` itself, so installs pull SQLAlchemy and MCP SDK
@@ -316,7 +348,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 
 The APIs that 0.6.1, 0.6.3 and 0.6.4 deprecated for 0.7.0 are gone, with no
-further deprecation step.
+further deprecation step. So are the 0.6 model registry and the backends'
+model code, which the model layer replaces (see Added) without a deprecation
+step; each entry says what to use instead.
 
 - **`agentic_cli.knowledge_base`** (all ten modules, with the
   `KnowledgeBaseManager(settings=...)` signature, `extract_text_from_pdf` and
@@ -391,9 +425,9 @@ further deprecation step.
   `version_key` from `agentic_cli.models`); and
   `settings.workspace_dir.mkdir(parents=True, exist_ok=True)`.
 - **Settings `webfetch_model` (`AGENTIC_WEBFETCH_MODEL`) and
-  `sandbox_packages`**, which nothing read (the summarizer picks its model
-  from `FAST_MODEL_MAP`). A settings file or environment that still sets them
-  keeps loading; the values are ignored.
+  `sandbox_packages`**, which nothing read (`web_fetch` summarizes with the
+  workflow's default model, through `generate_simple`). A settings file or
+  environment that still sets them keeps loading; the values are ignored.
 - **`tools.webfetch.ValidationResult.resolved_ip`**, which nothing read.
 - **`agentic_cli.workflow.models`**: `ModelRegistry`, `ModelFamily`,
   `ModelInfo` and `DiscoveryState`, and their exports from

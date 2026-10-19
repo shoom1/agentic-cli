@@ -2,12 +2,14 @@
 
 ``ModelSettings`` carries generation parameters (temperature, top-p/k, max
 tokens, stop sequences, thinking/reasoning effort) for a single agent,
-independent of the orchestration backend. Each workflow manager translates
-these neutral fields into its backend's native config:
+independent of the orchestration backend. ``agentic_cli.models.resolve_model``
+turns them, with the agent's model record, into a ``ResolvedModel``, and each
+backend's adapter builds its native objects from that:
 
-- ADK   -> ``google.genai.types.GenerateContentConfig`` + a ``BuiltInPlanner``
-           (for the thinking config).
-- LangGraph (deferred) -> ``init_chat_model`` keyword arguments.
+- ADK       -> ``workflow.adk.model_factory.build_adk_model``: the model
+               instance, its ``GenerateContentConfig`` and a ``BuiltInPlanner``.
+- LangGraph -> ``workflow.langchain_models.build_chat_model``: a LangChain
+               chat model.
 
 The ``extra`` dict is an escape hatch for provider-specific parameters that
 have no neutral field; each backend filters it to keys it understands.

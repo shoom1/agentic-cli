@@ -29,9 +29,11 @@ class AgentConfig:
             when the workflow manager is constructed.
         sub_agents: Names of agents that this agent can delegate to
         description: Short description for routing/logging
-        model: Optional model override (defaults to manager's model)
+        model: The agent's model: a ``provider:model`` reference, a bare
+            model id, or a role (``fast``, ``strong``, or the app's own).
+            None runs it on the ``default`` role (the manager's model).
         model_settings: Optional per-agent generation parameters (temperature,
-            thinking, etc.). Currently consumed by the ADK backend only.
+            thinking, etc.), applied on both backends.
         mcp_servers: Optional MCP servers whose tools are exposed to this agent.
             Currently consumed by the ADK backend only.
         skills: Optional skill references (Agent Skills / SKILL.md folders) —

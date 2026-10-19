@@ -6,7 +6,8 @@ A framework for building domain-specific agentic CLI applications powered by LLM
 
 Agentic CLI provides the core infrastructure for building interactive CLI applications that leverage LLM agents for complex tasks. It offers:
 
-- **Pluggable Orchestration**: Choose between Google ADK (which runs both Gemini and Anthropic models) or LangGraph for agent workflows
+- **Pluggable Orchestration**: Choose between Google ADK or LangGraph for agent workflows; both run every model provider
+- **Any Model, Per Agent**: Gemini, Claude, GPT, OpenRouter's models and your own OpenAI-compatible server (vLLM), mixed in one agent tree; models named by reference or role, with one set of thinking levels
 - **Rich Terminal UI**: Dual thinking boxes, markdown rendering, and streaming responses via `thinking-prompt`
 - **Declarative Agents**: Define agents with simple configuration objects
 - **Native Tool Architecture**: Backend-specific tool factories for ADK and LangGraph, with automatic HITL confirmation for dangerous tools
@@ -15,7 +16,7 @@ Agentic CLI provides the core infrastructure for building interactive CLI applic
 - **Semantic Memory**: Embedding-backed memory with lifecycle management, contradiction detection, and forgetting policy
 - **Durable Sessions**: Conversations persist continuously by default (SQLite; PostgreSQL or ephemeral memory optional) and resume across CLI restarts with `--session <id>`
 - **Context Window Management**: Native trim detection and token-usage visibility
-- **Dynamic Model Registry**: Live model discovery from provider APIs
+- **Model Catalog**: Live model listings from each provider, cached for a day, shown by `/models`
 - **Type-safe Configuration**: Composable settings mixins (`pydantic-settings`)
 
 ## Architecture
@@ -52,24 +53,33 @@ Agentic CLI provides the core infrastructure for building interactive CLI applic
 ## Requirements
 
 - Python 3.12+
-- Google API key (for Gemini models) or Anthropic API key (for Claude models)
+- A key for at least one model provider (Google, Anthropic, OpenAI or OpenRouter), or an OpenAI-compatible server of your own (see [Models and providers](#models-and-providers))
 
 ## Installation
 
-### Basic Installation (Google ADK — Gemini and Claude)
+### Basic Installation (Google ADK)
 
 ```bash
 pip install agentic-cli
 ```
 
-This installs Google ADK 2 (2.12 or later) with MCP support, and SQLAlchemy for
-the durable session store.
+This installs Google ADK 2 (2.12 or later) with MCP support, SQLAlchemy for
+the durable session store, and the OpenAI SDK (for GPT, OpenRouter and
+OpenAI-compatible servers). The ADK backend runs every provider.
 
 ### With LangGraph Support
 
 ```bash
 pip install agentic-cli[langgraph]
 ```
+
+The extra installs the LangChain packages the LangGraph backend builds its
+models with (`langchain-google-genai`, `langchain-anthropic`,
+`langchain-openai`, `langchain-openrouter`). They bring two constraints a
+core install does not have: `pydantic` stays below 2.13 (every `openrouter`
+release caps it there), and `anthropic` moves to 1.x, which runs on `httpx2`,
+so code that hands the Anthropic SDK an `httpx` client passes an `httpx2`
+one instead.
 
 ### Development Installation
 
@@ -137,7 +147,7 @@ python my_app.py
 
 Uses Google's Agent Development Kit for orchestration. Best for:
 - Simple agent hierarchies
-- Google Gemini models with native thinking support
+- Prompt caching on Claude and Gemini (see [Prompt caching](#prompt-caching))
 - Quick prototyping
 
 ```python
@@ -146,11 +156,15 @@ from agentic_cli import GoogleADKWorkflowManager
 manager = GoogleADKWorkflowManager(
     agent_configs=AGENTS,
     settings=settings,
-    model="gemini-2.5-flash",  # Optional: auto-detected from API keys
+    model="google:gemini-2.5-flash",  # Optional: the default model otherwise
 )
 ```
 
 ADK integrations:
+- **Model factory** — `workflow.adk.model_factory.build_adk_model` builds each
+  agent's model from its resolved model: ADK's `Gemini`, `AnthropicLlm` and
+  `OpenAIResponsesLlm`, and `OpenAICompatibleLlm` for OpenRouter and your
+  endpoints, which shows their reasoning text
 - **PermissionPlugin** — evaluates each tool's declared capabilities against the permission engine and prompts the user when no rule matches
 - **LLMLoggingPlugin** — structured logging of LLM requests/responses
 - **TaskProgressPlugin** — streams the task checklist into its own thinking box
@@ -159,7 +173,6 @@ ADK integrations:
 
 Uses LangGraph for orchestration. Best for:
 - Cyclical workflows (self-validation, iterative refinement)
-- Model-agnostic operation (OpenAI, Anthropic, Google via GenAI)
 - State checkpointing and time-travel debugging
 - Complex multi-agent coordination
 
@@ -174,8 +187,13 @@ manager = LangGraphWorkflowManager(
 ```
 
 Features:
-- **Explicit provider support**: Uses `langchain-google-genai` for Gemini (not VertexAI)
-- **Thinking mode**: Native support for Claude and Gemini thinking/reasoning
+- **One chat model per agent**: `workflow.langchain_models.build_chat_model` builds
+  it once, from the agent's resolved model, with its key, timeout and retries:
+  `ChatGoogleGenerativeAI` (the Gemini API, not Vertex AI), `ChatAnthropic`,
+  `ChatOpenAI` on the Responses API, `ChatOpenRouter`, and `OpenAICompatibleChat`
+  for your endpoints
+- **Per-agent settings and thinking**: each agent's `model_settings` apply, and
+  thinking text reaches the thinking box for every provider
 - **Retry policies**: Automatic retry with exponential backoff
 - **Permission wrapper**: Wraps each tool to gate execution through the permission engine
 - **Event streaming**: Real-time workflow events via `WorkflowEvent`
@@ -188,9 +206,10 @@ Requires: `pip install agentic-cli[langgraph]`
 |---------|------------|-----------|
 | Setup complexity | Simple | Moderate |
 | Cyclical workflows | Limited | Native |
-| Multi-provider | Gemini + Anthropic (Claude runs natively via `DirectAnthropicLlm`) | OpenAI, Anthropic, Google (GenAI) |
+| Model providers | Gemini, Claude, GPT (Responses API), OpenRouter, OpenAI-compatible endpoints | The same |
 | State persistence | SQLite (default), PostgreSQL, or memory | Memory, PostgreSQL, or SQLite |
-| Thinking support | Native (Gemini & Claude) | Native (Claude & Gemini) |
+| Thinking support | Every model with a thinking knob, one set of levels | The same |
+| Prompt caching | Claude (three breakpoints) and Gemini (server-side caches) | Claude on Anthropic's API (one breakpoint) |
 | Retry handling | Built-in | Built-in with backoff |
 | Permission gate | PermissionPlugin | wrap_tool_for_permission |
 | Context trimming | Native | Native |
@@ -244,8 +263,9 @@ filtered down to an explicit allowlist of benign keys (model and behaviour
 settings, timeouts, sandbox *resource* limits, `session_store`, log verbosity).
 Security-relevant keys set from an untrusted source — executor backend, sandbox
 image/mounts/user, OS-sandbox policy, `skills_dirs`, shell sandbox settings,
-`workspace_dir`, `raw_llm_logging`, permission rules, and any credential — are
-dropped with a logged warning rather than applied.
+`workspace_dir`, `raw_llm_logging`, permission rules, `model_endpoints` (the
+addresses a key is sent to), and any credential — are dropped with a logged
+warning rather than applied.
 
 **Consequence:** put API keys in real environment variables or an
 absolute/user-level file. A key placed in a cwd `.env` is deliberately ignored.
@@ -256,8 +276,14 @@ absolute/user-level file. A key placed in a cwd `.env` is deliberately ignored.
 |---------|--------------|---------|-------------|
 | `google_api_key` | `GOOGLE_API_KEY` | None | Google API key for Gemini |
 | `anthropic_api_key` | `ANTHROPIC_API_KEY` | None | Anthropic API key for Claude |
-| `default_model` | `AGENTIC_DEFAULT_MODEL` | Auto | Model to use |
+| `openai_api_key` | `OPENAI_API_KEY` | None | OpenAI API key for GPT |
+| `openrouter_api_key` | `OPENROUTER_API_KEY` | None | OpenRouter API key |
+| `default_model` | `AGENTIC_DEFAULT_MODEL` | Auto | The default model: a `provider:model` reference or a model id |
+| `model_roles` | `AGENTIC_MODEL_ROLES` | {} | A model per role: `fast`, `strong`, or an app's own |
+| `pinned_models` | `AGENTIC_PINNED_MODELS` | [] | Models the `/settings` model pickers always offer |
+| `model_endpoints` | `AGENTIC_MODEL_ENDPOINTS` | {} | Your OpenAI-compatible servers (never from a project file) |
 | `thinking_effort` | `AGENTIC_THINKING_EFFORT` | "medium" | Thinking level: none, low, medium, high |
+| `prompt_caching_enabled` | `AGENTIC_PROMPT_CACHING_ENABLED` | true | Prompt caching: Claude, and Gemini on ADK |
 | `orchestrator` | `AGENTIC_ORCHESTRATOR` | "adk" | Orchestrator: `adk` or `langgraph` |
 | `langgraph_checkpointer` | `AGENTIC_LANGGRAPH_CHECKPOINTER` | "memory" | `memory`, `postgres`, or `null` |
 | `workspace_dir` | `AGENTIC_WORKSPACE_DIR` | ~/.agentic | Storage directory |
@@ -284,6 +310,292 @@ with SettingsContext(custom_settings):
     # All code here uses custom_settings
     result = my_tool()
 ```
+
+## Models and providers
+
+Each agent runs on a model named by a reference or a role, decided once, when
+the workflow starts. Both backends run every provider: Gemini, Claude, GPT,
+OpenRouter's models, and models on an OpenAI-compatible server of your own
+(vLLM and the like), and one agent tree can mix them. What agentic-cli knows
+about models lives in `agentic_cli.models` (provisional in 0.7.0: its names
+may still change): a table of model families shipped with the package, merged
+with each provider's live model list.
+
+### References and roles
+
+A model is named the same way in `default_model`, `model_roles`,
+`pinned_models`, `AgentConfig.model`, `Manager(model=...)` and agent YAML:
+
+| You write | It means |
+|-----------|----------|
+| `anthropic:claude-sonnet-4-6` | `provider:model`. The provider is `google`, `anthropic`, `openai`, `openrouter`, or one of your endpoints |
+| `openrouter:qwen/qwen3-235b-a22b:free` | Split on the first colon only, so the model id keeps its own colons |
+| `gemini-2.5-flash`, `claude-sonnet-4-6`, `gpt-5.5`, `o3` | A bare `gemini-`, `claude-`, `gpt-` or `o<digit>` id names its provider |
+| `fast` | Any other bare name is a role. A role name has no digits, so a bare `qwen3-32b` is an error that asks for its provider (`local-vllm:qwen3-32b`) |
+
+A role names a model by what it is for:
+
+- `default` is `default_model`. An agent without a `model` runs on it.
+- `fast` and `strong` are mapped in `model_roles`.
+- An app adds a role by naming it in an agent (`AgentConfig(model="vision")`),
+  and may ship a mapping by overriding the `model_roles` default in its
+  settings class. An app role nobody mapped runs on the default model, with a
+  warning.
+- A role maps to a model, never to another role, and `model_roles` cannot map
+  `default`.
+
+A built-in role nobody mapped takes the newest model of its tier from the first
+provider with a key, in the order Google, Anthropic, OpenAI. With only a Google
+key and no `default_model`, that is Gemini Flash, as in 0.6. OpenRouter models
+and your endpoints never fill a role on their own: map them.
+
+| Provider | `fast` | `default` | `strong` |
+|----------|--------|-----------|----------|
+| Google | Flash-Lite | Flash | Pro |
+| Anthropic | Haiku | Sonnet | Opus |
+| OpenAI | mini | standard | pro |
+
+A project chooses its models in `./.my_app/settings.json`:
+
+```json
+{
+  "default_model": "anthropic:claude-sonnet-4-6",
+  "model_roles": {
+    "fast": "google:gemini-2.5-flash-lite",
+    "strong": "openrouter:qwen/qwen3-235b-a22b"
+  },
+  "pinned_models": ["openrouter:meta-llama/llama-3.3-70b-instruct"]
+}
+```
+
+and its agents name roles or models:
+
+```python
+from agentic_cli import AgentConfig
+
+AGENTS = [
+    AgentConfig(name="coordinator", prompt="Plan the work.", sub_agents=["drafter", "checker"]),
+    AgentConfig(name="drafter", prompt="Draft quickly.", model="fast"),
+    AgentConfig(name="checker", prompt="Check carefully.", model="strong"),
+]
+```
+
+The coordinator runs on Claude Sonnet 4.6, the drafter on Gemini 2.5
+Flash-Lite, and the checker on Qwen3 through OpenRouter. Every model is checked
+when the workflow starts: a reference to an endpoint you did not define, a
+provider without its key, or a model its provider's listing lacks fails with
+one error that names each agent concerned.
+
+### Provider keys
+
+| Provider | Setting | Environment variable |
+|----------|---------|----------------------|
+| Google (the Gemini API) | `google_api_key` | `GOOGLE_API_KEY` |
+| Anthropic | `anthropic_api_key` | `ANTHROPIC_API_KEY` |
+| OpenAI | `openai_api_key` | `OPENAI_API_KEY` |
+| OpenRouter | `openrouter_api_key` | `OPENROUTER_API_KEY` |
+
+Keys are never saved and never shown (not in `repr`, not by `/models`), and a
+project settings file or a cwd `.env` cannot set them: put them in the
+environment or a user-level dotenv file (see
+[Precedence and the trust boundary](#precedence-and-the-trust-boundary)). Each
+model's client is given its key. Google, Anthropic and OpenAI models go to
+their SDK's default host; Vertex AI is not supported.
+
+### Your own servers: vLLM and other OpenAI-compatible endpoints
+
+Define an endpoint in your user settings, `~/.my_app/settings.json`:
+
+```json
+{
+  "model_endpoints": {
+    "local-vllm": {
+      "base_url": "http://localhost:8000/v1",
+      "api_key_env": "LOCAL_VLLM_KEY",
+      "models": {
+        "Qwen/Qwen3-32B": {
+          "context_window": 32768,
+          "max_output": 8192,
+          "thinking": "chat_template"
+        }
+      }
+    }
+  }
+}
+```
+
+`local-vllm:Qwen/Qwen3-32B` is then a reference like any other, for a role or
+an agent.
+
+- **Only your user settings (or the environment) can define an endpoint.**
+  `model_endpoints` holds the addresses a key is sent to. A project settings
+  file, which a cloned repository can ship, or a cwd `.env` that sets it is
+  ignored with a warning, and `/settings` never writes it there. A project
+  chooses among the endpoints you defined (`default_model`, `model_roles`,
+  `pinned_models`); a reference to one you did not define fails at startup.
+- The key comes only from the environment variable `api_key_env` names, and is
+  never stored. If that variable is not set, startup fails for a model that
+  runs on the endpoint, naming the variable (a `.env` file does not set it). Without `api_key_env` the client sends the
+  placeholder key `EMPTY`.
+- An endpoint's name is lowercase letters, digits, `_` and `-`, starting with a
+  letter, and cannot be a built-in provider's. `base_url` is `http` or
+  `https`, with no user name, password, query or fragment.
+- What you can declare about a model: `context_window`, `max_output`, `tools`
+  (default `true`), `image_input` (`false`), `reasoning_text` (`true`) and
+  `thinking`: `none` (the default), `chat_template` (vLLM's
+  `chat_template_kwargs.enable_thinking`), or `effort` (`reasoning_effort`,
+  with the model's `effort_levels`, by default `low`, `medium` and `high`).
+- A model the server serves but you did not declare is assumed to take tools,
+  with the server's `max_model_len` as its context window.
+- Reasoning text shows only when the server runs with a reasoning parser.
+
+### Thinking
+
+`thinking_effort` (`none`, `low`, `medium` or `high`; `medium` by default)
+applies to every agent that sets no thinking of its own. An agent sets its own
+in `model_settings`, with one of those, `budget`, or a native level of its
+model:
+
+```python
+from agentic_cli import AgentConfig, ModelSettings, ThinkingSettings
+
+reviewer = AgentConfig(
+    name="reviewer",
+    prompt="Review the draft.",
+    model="anthropic:claude-opus-4-7",
+    model_settings=ModelSettings(thinking=ThinkingSettings(mode="xhigh")),
+)
+```
+
+What a level means depends on how the model thinks:
+
+| The model thinks by | `none` | `low` / `medium` / `high` | `budget` (`budget_tokens=N`) |
+|---------------------|--------|---------------------------|------------------------------|
+| A budget: Gemini 2.5 | Off (budget 0); Pro, which cannot stop, its minimum | 4096 / 12288 / 24576 tokens | N, within the model's range |
+| Levels: Gemini 3 | Its lowest level | Its `low` / `medium` / `high` (3 Pro: `medium` is `high`) | Error |
+| Adaptive thinking: Claude 4.6 and later | Off; on the models that cannot stop (below), effort `low` | Effort `low` / `medium` / `high` | Error |
+| A budget: Claude up to 4.5 | Off | 4096 / 10000 / 32000 tokens | N, at least 1024 |
+| Reasoning effort: GPT and OpenRouter reasoning models, endpoints that declare `effort` | The lowest effort the model has | Effort `low` / `medium` / `high` | Error |
+| A chat template: endpoints that declare `chat_template` | `enable_thinking: false` | `enable_thinking: true` | Error |
+
+- Some Claude models cannot turn thinking off: Opus 5.5, Sonnet 5.5, Fable 5
+  and Fable 5.1 answer thinking `disabled` with HTTP 400. On them `none` runs
+  adaptive thinking at effort `low`. Anthropic's model listing says which
+  models cannot (`capabilities.thinking.types.disabled`); without a listing,
+  the shipped table names these four.
+- `high` is the model's own `high`, not its top level (Claude's top is `max`).
+- A native level, such as `minimal`, `xhigh` or `max`, works on a model that
+  has it.
+- A level the model lacks, or `budget` on a model without budget thinking,
+  fails at startup with an error that names the agent, the model and the levels
+  it takes.
+- A model with no thinking knob ignores the setting.
+- `/settings` shows what the effort means for the default model, such as
+  `high → anthropic:claude-sonnet-4-6: adaptive, effort high`, or
+  `none → anthropic:claude-sonnet-5-5: adaptive, effort low`.
+
+### Other per-agent settings
+
+`ModelSettings` also takes `temperature`, `top_p`, `top_k`, `max_tokens`,
+`stop_sequences` and `extra`, and both backends apply them:
+
+- `max_tokens` is the agent's value, else the provider's default (8192 for
+  Claude), within the model's max output. On Claude with a thinking budget it
+  is raised to at least the budget plus 8192, since thinking counts against it.
+- Temperature, top-p and top-k are dropped, with a debug log, where the model
+  rejects them: Claude while it thinks, the Claude models that take none at
+  all (Opus 4.7 and later, Sonnet 5 and later, Fable), and GPT reasoning
+  models.
+- `extra` passes provider-specific fields. A field the model's client does not
+  take is logged and dropped.
+
+### Prompt caching
+
+`prompt_caching_enabled` (on by default) turns caching on for the whole app.
+What it does depends on the backend and the model:
+
+- **On ADK**, the app gets ADK's context cache when any agent runs on Claude or
+  Gemini (an agent without a `model` runs on the default model). A native ADK
+  YAML app (`adk_config_path`) has no agent list to check, so its default model
+  decides. The cache belongs to the app: the setting turns it on or off for
+  every agent at once.
+- **On LangGraph**, it marks the system prompt of Claude on Anthropic's API:
+  one cache breakpoint. LangGraph creates no Gemini cache.
+- GPT, OpenRouter and endpoint models get nothing from it on either backend.
+  OpenAI caches long prompts on its own.
+
+What it costs:
+
+- **Claude**: on ADK, every request from the first turn marks three cache
+  breakpoints, on the last tool, the system instruction and the conversation
+  so far. A cache write costs 1.25 times the input price and a read about a
+  tenth of it (less on Opus 5.5 and Fable 5.1). The cache lives 5 minutes and
+  each read renews it, so a conversation's first turn costs a little more and
+  each later turn within 5 minutes much less. ADK's 1800-second TTL keeps
+  Claude on that 5-minute cache: the hour-long one costs twice the input price
+  to write.
+- **Gemini** (ADK only): from an agent's second turn, once its system
+  instruction, tools and conversation reach 2048 tokens (4096 on Gemini 3), ADK
+  creates a cache on Google's side and later requests name it instead of
+  resending the prefix. ADK makes a new one after 10 invocations. Google bills
+  the cache's storage until it expires (30 minutes after it is made) or is
+  replaced, and the tokens read from it at its lower cached rate, so a short
+  session can cost more than it saves. Creating a cache, or deleting an old
+  one, may take at most 60 seconds, and an agent tries at most once a turn: a
+  create that fails or hangs costs that turn its caching, never the turn.
+
+To turn caching off, set `"prompt_caching_enabled": false` in
+`~/.my_app/settings.json`; a project file cannot set it. On ADK, `/status`
+shows the cached tokens read so far. A system prompt that changes every turn
+(a timestamp, say) defeats both caches.
+
+### The model catalog and `/models`
+
+The catalog merges three sources, highest precedence first: your endpoint
+declarations, each provider's live model list, and the shipped table (model
+families, tiers, thinking rules, and the numbers used when a listing fails).
+
+- Listings are cached in `~/.my_app/model_cache.json` (private, versioned,
+  holding no key) for 24 hours. Startup waits only to list a provider with a
+  key, or an endpoint, that has no cache entry yet: all of them at once, each
+  for at most 10 seconds. An older entry is used while it is listed again in
+  the background.
+- A model a provider does not list is rejected only when that provider's
+  listing is fresh. A failed, untried or older listing accepts any id.
+- `/models` shows each provider's status (credentials, whether its listing is
+  fresh, stale, failed or not tried, when it was fetched, how many models, and
+  the last error), then the models of each provider with a key: reference,
+  context window, max output, thinking, tools, cache, where the values came
+  from, and the roles that use the model. It works before the workflow is
+  initialized, from the cache.
+- `/models <text>` shows only the models whose reference contains the text,
+  ignoring case: `/models qwen` among OpenRouter's hundreds.
+- `/models refresh` lists every provider again now, and says which providers'
+  models changed. Run it after a key change to an account with other models.
+- `/settings` has a model picker for the default model and one for each of
+  the `fast` and `strong` roles. Each offers the models that can run: those of
+  each provider with a key, your endpoints' models, and the OpenRouter models a
+  role maps or `pinned_models` lists. Picking a role writes `model_roles` to
+  the project settings file and restarts the workflow on it, keeping the
+  conversation. An app adds a picker for a role of its own with the key
+  `model_role:<role>` in `get_ui_setting_keys()`.
+- In code, an initialized manager's `manager.catalog` gives
+  `catalog.records("google")`, `catalog.status()` and `await catalog.refresh()`,
+  and `manager.model` is the default model's reference.
+
+### How each backend runs them
+
+- Both backends run every provider and build each agent's model once, when the
+  workflow starts: ADK with `workflow.adk.model_factory.build_adk_model`,
+  LangGraph with `workflow.langchain_models.build_chat_model`.
+- GPT runs on OpenAI's Responses API on both, without storing responses
+  (`store=False`). OpenRouter and endpoints run on Chat Completions.
+- Each agent's `model_settings` apply on both, and thinking text reaches the
+  thinking box for every provider.
+- The `[langgraph]` extra pins `pydantic` below 2.13 and brings `anthropic` 1.x
+  (see [Installation](#with-langgraph-support)).
+- On ADK, GPT's reasoning is not passed back across tool calls, and neither is
+  OpenRouter's `reasoning_details`; LangGraph passes both back.
 
 ## Agent Configuration
 
@@ -348,7 +660,8 @@ configs = [coordinator, researcher, analyst]
 | `tools` | list[Callable] | Available tool functions |
 | `sub_agents` | list[str] | Names of agents this one can delegate to |
 | `description` | str | Short description for routing (defaults to `""`) |
-| `model` | str \| None | Model override (defaults to manager's model) |
+| `model` | str \| None | A model reference (`anthropic:claude-sonnet-4-6`), a bare model id, or a role (`fast`); without one, the `default` role (see [Models and providers](#models-and-providers)) |
+| `model_settings` | ModelSettings \| None | The agent's thinking, `max_tokens`, sampling settings and `extra` (see [Thinking](#thinking)) |
 
 The agent graph is validated before anything is allocated — ahead of model
 discovery and service creation. Duplicate names, unknown `sub_agents`
@@ -356,9 +669,9 @@ references, self-references, delegation cycles, a sub-agent shared by two
 parents, and **more than one root** raise `AgentGraphError` naming the
 offending agents. Exactly one agent may be unreferenced: the runner starts from
 a single root, so agents under any other root would never run. Agents are built
-in dependency order, so declaration order does not matter. A per-agent `model`
-override is validated against the configured provider credentials at startup,
-alongside `default_model`.
+in dependency order, so declaration order does not matter. Then every agent's
+model is resolved, with the default model, before anything is built: an agent
+whose model cannot run fails startup, named in the error.
 
 A callable `prompt` may take **no arguments** (including all-defaulted ones) or
 **exactly one argument**, which receives the manager's settings. Other
@@ -744,7 +1057,8 @@ Built-in slash commands available in all apps:
 | `/status` | | Show current session, workflow, and context-window status |
 | `/clear` | | Clear the screen |
 | `/exit` | `/quit` | Exit the application |
-| `/settings` | | Interactive settings editor (with persistence) |
+| `/settings` | `/set`, `/config` | Interactive settings editor: the default model, the `fast` and `strong` roles' models, thinking effort (saved to the project file) |
+| `/models` | | Each provider's listing status and models (`/models <text>` filters, `/models refresh` lists again) |
 | `/sandbox` | `/sb` | List / reset stateful sandbox sessions |
 | `/jobs` | | List and manage long-running background jobs (`/jobs all`, `/jobs <id>`, `/jobs cancel <id>`, `/jobs clean`) |
 | `/resume` | | Resume the agent with results from finished background jobs |
@@ -901,7 +1215,7 @@ agentic-cli/
 │   ├── cli/
 │   │   ├── app.py                # BaseCLIApp
 │   │   ├── commands.py           # Command, CommandRegistry
-│   │   ├── builtin_commands.py   # help/status/clear/exit/sandbox/papers/sessions
+│   │   ├── builtin_commands.py   # help/status/clear/exit/sandbox/jobs/resume/papers/sessions/models
 │   │   ├── settings_command.py   # /settings
 │   │   ├── settings_introspection.py
 │   │   ├── workflow_controller.py
@@ -912,14 +1226,20 @@ agentic-cli/
 │   │   ├── factory.py            # create_workflow_manager_from_settings
 │   │   ├── service_registry.py   # Unified service ContextVar for tools
 │   │   ├── events.py             # WorkflowEvent, EventType
-│   │   ├── models.py             # Shared data models
 │   │   ├── config.py             # AgentConfig
 │   │   ├── settings.py           # WorkflowSettingsMixin
 │   │   ├── retry.py              # Exponential-backoff retry
 │   │   ├── tool_summaries.py     # Tool result one-liner summaries
 │   │   ├── memory_services.py    # Settings → agentic_cli.memory arguments
+│   │   ├── model_services.py     # Settings → agentic_cli.models arguments; build_catalog
+│   │   ├── model_settings.py     # ModelSettings, ThinkingSettings (per agent)
+│   │   ├── model_wire.py         # What both adapters send to OpenAI-compatible servers
+│   │   ├── langchain_models.py   # build_chat_model: a resolved model → LangChain chat model
 │   │   ├── adk/
 │   │   │   ├── manager.py                # GoogleADKWorkflowManager
+│   │   │   ├── model_factory.py          # build_adk_model: a resolved model → ADK model + config
+│   │   │   ├── openai_compatible.py      # OpenAICompatibleLlm (OpenRouter, endpoints)
+│   │   │   ├── anthropic_llm.py          # DirectAnthropicLlm (bare claude-* in ADK YAML)
 │   │   │   ├── event_processor.py
 │   │   │   ├── plugins.py                # LLMLoggingPlugin
 │   │   │   ├── permission_plugin.py      # PermissionPlugin (capability gating)
@@ -984,6 +1304,15 @@ agentic-cli/
 │   │       ├── convert.py                # convert_document: trafilatura / html2text, pypdf, text
 │   │       ├── vector_store.py, bm25_index.py (+ _bm25_backends.py), concepts.py, sidecar.py
 │   │       └── _mock_vector_store.py, _mock_bm25.py
+│   ├── models/                   # Model knowledge (provisional); no provider SDK
+│   │   ├── refs.py                   # provider:model references, bare ids, role names
+│   │   ├── endpoints.py              # ProviderKind, EndpointSpec, Endpoint, build_endpoints
+│   │   ├── records.py                # ModelRecord, ThinkingRule
+│   │   ├── table.py, data/table.json # The shipped table: families, tiers, numbers, fallbacks
+│   │   ├── roles.py                  # RoleMap: roles → references
+│   │   ├── resolve.py                # resolve_model → ResolvedModel
+│   │   ├── catalog.py                # ModelCatalog: listings, validation, the listing cache
+│   │   └── discovery/                # One lister per provider, over httpx
 │   └── persistence/              # (sessions are persisted natively by each
 │                                 #  orchestrator's store; the legacy JSON
 │                                 #  SessionPersistence layer was removed)

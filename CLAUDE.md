@@ -9,6 +9,7 @@ Agentic CLI is a shared library providing the core infrastructure for building d
 - **Language**: Python 3.12+
 - **CLI UI**: `thinking-prompt` - enhanced CLI with thinking boxes and markdown
 - **Workflow**: Google ADK 2 (2.12+) + LangGraph - dual orchestration backends (selectable via settings)
+- **Models**: `agentic_cli.models` (provisional) - references, roles, the shipped table and the catalog, with no provider SDK (listers over `httpx`); two adapters build the SDK objects: ADK's own model classes (`Gemini`, `AnthropicLlm`, `OpenAIResponsesLlm`, plus our `OpenAICompatibleLlm`, on the `openai` SDK) and the LangChain partner packages (`langchain-google-genai`, `langchain-anthropic`, `langchain-openai`, `langchain-openrouter`; the `langgraph` extra)
 - **Config**: `pydantic-settings` - type-safe configuration
 - **Logging**: `structlog` - structured logging
 
@@ -26,9 +27,9 @@ agentic-cli/
 │   ├── paths.py              # resolve_path: the one interpretation of a path argument
 │   ├── logging.py
 │   ├── cli/
-│   │   ├── app.py            # BaseCLIApp
+│   │   ├── app.py            # BaseCLIApp (/settings model pickers: _model_choices)
 │   │   ├── commands.py       # Command, CommandRegistry
-│   │   ├── builtin_commands.py
+│   │   ├── builtin_commands.py # /help, /status, /models (ModelsCommand), /sessions, ...
 │   │   ├── workflow_controller.py  # WorkflowController (lazy/background init, orchestrator swap)
 │   │   ├── message_processor.py    # WorkflowEvent → ThinkingPromptSession rendering
 │   │   ├── settings_command.py     # /settings command
@@ -211,6 +212,7 @@ Available session methods:
 - **Framework**: pytest with `asyncio_mode = "auto"`
 - **MockContext**: From `tests/conftest.py` — provides isolated settings and temp dirs for all tests
 - **Model listings**: `tests/conftest.py::_no_model_listings` keeps every manager's model catalog unloaded (no network, no `~/.<app>/model_cache.json`), so any well-formed model id is accepted; a test that wants listings patches `model_services.build_catalog` with `tests/models/fakes.py::ProviderAPI`
+- **Provider fakes**: model requests never reach a provider. `tests/workflow/adk/fakes.py::FakeAPI` serves an ADK-built model's client (`serve()`) and records the bodies it sends; `tests/workflow/langchain_fakes.py`'s `route*` helpers send a LangChain chat model's client to it, with the SSE replies a LangGraph turn needs. A test-first run against the old code must fail offline too, so stub any client the old code would build
 - **MockVectorStore** (`agentic_cli.memory.kb`) and **MockEmbeddingService** (`agentic_cli.memory`): for testing without ML dependencies
 - **`kb` extra tests**: import faiss, bm25s, rank_bm25, sentence_transformers or trafilatura with `require_kb_module(name)` (`tests/memory/kb_extra.py`), not `pytest.importorskip`. Without the extra the test skips; CI's `kb-extra` job installs it and sets `KB_REQUIRE_EXTRA=1`, so a missing library fails there instead of skipping. No offline test loads an embedding model.
 - **Integration tests**: `tests/integration/` covers ADK and LangGraph pipeline tests

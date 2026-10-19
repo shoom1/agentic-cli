@@ -190,6 +190,16 @@ class TestCommandsBeforeReadiness:
         assert len(demo_app.session.warnings()) == 1
         assert "initializing" in demo_app.session.warnings()[0].lower()
 
+    async def test_models_answers_and_says_the_workflow_is_not_ready(self, demo_app):
+        await demo_app.process_input("/models")
+
+        assert demo_app.session.errors() == [], (
+            f"/models errored before readiness: {demo_app.session.errors()}"
+        )
+        messages = [c[2] for c in demo_app.session.calls if c[0] == "message"]
+        assert any("not initialized" in m for m in messages)
+        assert demo_app.session.rich(), "/models showed no provider status"
+
     async def test_the_command_is_still_registered_and_echoed(self, demo_app):
         """A warning must come from the command, not from it being unknown."""
         await demo_app.process_input("/memory")
@@ -197,6 +207,17 @@ class TestCommandsBeforeReadiness:
         echoed = [c for c in demo_app.session.calls if c[0] == "message"]
         assert ("message", "user", "/memory") in echoed
         assert not any("Unknown command" in e for e in demo_app.session.errors())
+
+
+class TestSettingsDialog:
+    def test_the_demo_keeps_every_framework_picker(self, demo_app):
+        """The demo adds verbose_thinking; it must not drop the role pickers."""
+        from agentic_cli import BaseCLIApp
+
+        framework = BaseCLIApp.get_ui_setting_keys(demo_app)
+
+        assert {"model", "model_role:fast", "model_role:strong"} <= set(framework)
+        assert demo_app.get_ui_setting_keys() == [*framework, "verbose_thinking"]
 
 
 class TestMessageRouting:

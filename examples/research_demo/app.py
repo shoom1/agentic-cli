@@ -80,6 +80,7 @@ class ResearchDemoApp(BaseCLIApp):
     def get_ui_setting_keys(self) -> list[str]:
         """Get field names to display in the settings dialog.
 
-        Includes verbose_thinking in addition to standard settings.
+        The framework's (the model pickers and the thinking effort), then
+        verbose_thinking.
         """
-        return ["model", "thinking_effort", "verbose_thinking"]
+        return [*super().get_ui_setting_keys(), "verbose_thinking"]

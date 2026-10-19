@@ -12,6 +12,8 @@ import asyncio
 import logging
 import re
 import warnings
+from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from prompt_toolkit.completion import Completer, Completion
@@ -25,13 +27,14 @@ from agentic_cli.cli.commands import Command, CommandRegistry
 from agentic_cli.cli.message_processor import MessageProcessor
 from agentic_cli.cli.usage_tracker import UsageTracker
 from agentic_cli.cli.workflow_controller import WorkflowController
-from agentic_cli.config import BaseSettings
+from agentic_cli.config import MODEL_ROLE_KEY_PREFIX, BaseSettings
 from agentic_cli.logging import Loggers, configure_logging
 from agentic_cli.settings_persistence import PROJECT_SETTABLE_KEYS
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Sequence
 
+    from agentic_cli.models import CatalogView, Endpoint, RoleMap
     from agentic_cli.settings_persistence import SettingsSaveResult
     from agentic_cli.workflow import GoogleADKWorkflowManager, EventType, WorkflowEvent
     from agentic_cli.workflow.base_manager import BaseWorkflowManager
@@ -41,9 +44,46 @@ logger = Loggers.cli()
 
 # Synthetic dialog keys → the settings field their setter actually writes.
 # "model" is not a field; update_setting() routes it via set_model() to
-# default_model. A synthetic key without an entry here is treated as writing
-# a field of the same name.
+# default_model. Every "model_role:<role>" key (a role's model picker) writes
+# model_roles, through set_model_role() (see _ui_key_target_field). A
+# synthetic key without an entry here is treated as writing a field of the
+# same name.
 _UI_KEY_TARGET_FIELDS = {"model": "default_model"}
+
+
+def _ui_key_target_field(key: str) -> str:
+    """The settings field a ``/settings`` dialog key writes."""
+    if key.startswith(MODEL_ROLE_KEY_PREFIX):
+        return "model_roles"
+    return _UI_KEY_TARGET_FIELDS.get(key, key)
+
+
+def _is_model_picker(key: str) -> bool:
+    return key == "model" or key.startswith(MODEL_ROLE_KEY_PREFIX)
+
+
+def _setting_label(key: str) -> str:
+    """How messages name a dialog key: ``Thinking Effort``, ``Fast Model``."""
+    if key.startswith(MODEL_ROLE_KEY_PREFIX):
+        return f"{key.removeprefix(MODEL_ROLE_KEY_PREFIX).title()} Model"
+    return key.replace("_", " ").title()
+
+
+@dataclass(frozen=True)
+class _ModelChoices:
+    """What the ``/settings`` model pickers offer and show, from one catalog.
+
+    Attributes:
+        options: The runnable references every model picker offers.
+        current: Each role's model now, by role (``default`` included); None
+            when nothing can fill it.
+        thinking: What the thinking effort means for the default model, as
+            ``high → provider:model: <label>``; None when it cannot be said.
+    """
+
+    options: list[str]
+    current: Mapping[str, str | None]
+    thinking: str | None
 
 
 # === ADK notices ===
@@ -297,9 +337,11 @@ class BaseCLIApp:
         """Get field names to display in the settings dialog.
 
         Override to customize which settings appear in the UI.
-        Default: model, thinking_effort. ``model`` offers the model catalog's
-        runnable models as ``provider:model`` references and writes
-        ``default_model``.
+        Default: model, model_role:fast, model_role:strong, thinking_effort.
+        ``model`` and each ``model_role:<role>`` are model pickers: they
+        offer the model catalog's runnable models as ``provider:model``
+        references, and write ``default_model`` and ``model_roles[<role>]``.
+        An app adds a picker for a role of its own as ``model_role:<role>``.
 
         Only project-scoped settings may appear: a key whose target field is
         not in PROJECT_SETTABLE_KEYS is excluded by _build_ui_items (with a
@@ -309,53 +351,47 @@ class BaseCLIApp:
         Returns:
             List of field names that should appear in the settings UI
         """
-        return ["model", "thinking_effort"]
+        return ["model", "model_role:fast", "model_role:strong", "thinking_effort"]
 
     def _build_ui_items(self) -> list[Any]:
         """Build UI items from settings fields using introspection.
 
         Uses get_ui_setting_keys() to determine which fields to show,
         then converts each field to an appropriate UI control using
-        the field's type annotation and metadata.
+        the field's type annotation and metadata. The model pickers come
+        from the model catalog (``_model_choices``), and the thinking
+        effort's description says what it means for the default model.
 
         Returns:
             List of thinking_prompt UI items sorted by ui_order
         """
         from agentic_cli.cli.settings_introspection import field_to_ui_item, get_ui_order
 
+        keys = self.get_ui_setting_keys()
+        roles = [
+            key.removeprefix(MODEL_ROLE_KEY_PREFIX)
+            for key in keys
+            if key.startswith(MODEL_ROLE_KEY_PREFIX)
+        ]
+        choices: _ModelChoices | None = None  # one catalog for every picker
         items: list[tuple[int, Any]] = []
 
-        for key in self.get_ui_setting_keys():
+        for key in keys:
             # Project-scope guard: the dialog may only expose settings the
             # project file can persist (PROJECT_SETTABLE_KEYS). A user-scoped
             # key would save to the user ~/.{app}/settings.json and leak the
-            # change across all projects of the app.
-            target_field = _UI_KEY_TARGET_FIELDS.get(key, key)
-            if target_field not in PROJECT_SETTABLE_KEYS:
+            # change across all projects of the app. model_endpoints is one:
+            # it holds the addresses a key is sent to.
+            if _ui_key_target_field(key) not in PROJECT_SETTABLE_KEYS:
                 logger.warning("user_scoped_setting_excluded_from_ui", key=key)
                 continue
 
-            # Handle special 'model' field with dynamic options
-            if key == "model":
-                available_models, current_model = self._model_choices()
-                if not available_models:
-                    continue  # Skip if no models available
-
-                # Create a synthetic field for model selection
-                from pydantic.fields import FieldInfo
-                model_field = FieldInfo(
-                    default=None,
-                    title="Model",
-                    description="Select the AI model to use",
-                    json_schema_extra={"ui_order": 10},
-                )
-                item = field_to_ui_item(
-                    key="model",
-                    field=model_field,
-                    current_value=current_model,
-                    dynamic_options=available_models,
-                )
-                items.append((10, item))
+            if _is_model_picker(key):
+                choices = choices or self._model_choices(roles)
+                if not choices.options:
+                    continue  # no provider to pick from
+                # The default model first, then the roles in the app's order.
+                items.append((10 if key == "model" else 11, _model_picker(key, choices)))
                 continue
 
             # Handle regular fields from settings
@@ -365,42 +401,84 @@ class BaseCLIApp:
                 field = settings_cls.model_fields[key]
                 current = getattr(self._settings, key, None)
                 item = field_to_ui_item(key, field, current)
+                if key == "thinking_effort":
+                    choices = choices or self._model_choices(roles)
+                    item.description = choices.thinking or item.description
                 order = get_ui_order(field)
                 items.append((order, item))
 
         # Sort by order and return items only
         return [item for _, item in sorted(items, key=lambda x: x[0])]
 
-    def _model_choices(self) -> tuple[list[str], str | None]:
-        """The model picker's options and current value, as ``provider:model``.
+    def _model_choices(self, roles: "Sequence[str]" = ()) -> _ModelChoices:
+        """The model pickers' options, each role's model, and the thinking description.
 
-        Once the workflow is ready, its catalog's runnable models (listings
-        included) and its default model; before that, the shipped table's
-        models of each provider with a key, and the default model the
-        settings name (or compute). Models a role names, and pinned ones,
-        are offered too.
+        Once the workflow is ready, from its catalog (listings included) and
+        its default model; before that, from the shipped table's models of
+        each provider with a key, and the default model the settings name (or
+        compute). A role shows the model it maps, else the one it resolves
+        to (an app's own role runs on the default model). Models a role
+        names, and pinned ones, are offered too.
+
+        Args:
+            roles: The roles other than ``default`` whose model to show.
         """
-        from agentic_cli.models import ModelCatalog, ModelResolutionError
+        from agentic_cli.models import BUILTIN_ROLES, ModelCatalog
         from agentic_cli.workflow import model_services
 
         try:
-            roles = model_services.role_map_from_settings(self._settings)
+            role_map = model_services.role_map_from_settings(self._settings)
         except ValueError:
-            return [], None
+            return _ModelChoices(options=[], current={}, thinking=None)
+        endpoints = model_services.endpoints_from_settings(self._settings)
         controller = self._workflow_controller
         workflow = controller.workflow if controller.is_ready else None
         if workflow is not None and workflow.catalog is not None:
-            catalog, current = workflow.catalog, workflow.model
+            catalog, default = workflow.catalog, workflow.model
         else:
-            endpoints = model_services.endpoints_from_settings(self._settings)
             catalog = ModelCatalog(endpoints=endpoints)  # not loaded: the shipped table
-            try:
-                current = str(roles.resolve("default", catalog=catalog, endpoints=endpoints))
-            except ModelResolutionError:
-                current = None
-        referenced = [*([current] if current else []), *roles.referenced()]
-        options = catalog.picker_refs(referenced=referenced, pinned=self._settings.pinned_models)
-        return options, current
+            default = _resolved_role(role_map, "default", catalog, endpoints)
+
+        current: dict[str, str | None] = {"default": default}
+        for role in roles:
+            mapped = role_map.spec_for(role)
+            if mapped is not None:
+                current[role] = str(mapped)
+            elif role in BUILTIN_ROLES:
+                current[role] = _resolved_role(role_map, role, catalog, endpoints)
+            else:
+                current[role] = default
+        referenced = [*(ref for ref in current.values() if ref), *role_map.referenced()]
+        return _ModelChoices(
+            options=catalog.picker_refs(referenced=referenced, pinned=self._settings.pinned_models),
+            current=current,
+            thinking=self._thinking_meaning(default, catalog, endpoints),
+        )
+
+    def _thinking_meaning(
+        self, model: str | None, catalog: "CatalogView", endpoints: "Mapping[str, Endpoint]"
+    ) -> str | None:
+        """``high → anthropic:claude-sonnet-4-6: adaptive, effort high``: the
+        thinking effort, resolved on ``model`` as the workflow resolves it."""
+        from agentic_cli.models import ModelResolutionError, RoleMap, resolve_model
+
+        if model is None:
+            return None
+        effort = self._settings.thinking_effort
+        try:
+            resolved = resolve_model(
+                agent=None,
+                spec=model,
+                generation=None,
+                thinking_effort=effort,
+                roles=RoleMap(default_model=None, model_roles={}),  # a reference needs none
+                catalog=catalog,
+                endpoints=endpoints,
+            )
+        except ModelResolutionError:
+            return None
+        meaning = resolved.thinking.label if resolved.thinking else "ignored (no thinking knob)"
+        return f"{effort} → {resolved.ref}: {meaning}"
 
     async def save_settings(
         self, keys: "Iterable[str] | None" = None
@@ -468,9 +546,11 @@ class BaseCLIApp:
         unusable stays in memory to be saved by ``/settings``.
 
         Settings are applied in two ways:
-        1. Special settings (model, thinking_effort) use dedicated setters
-           and may trigger workflow reinitialization
+        1. Special settings (model, a role's model, thinking_effort) use
+           dedicated setters and trigger workflow reinitialization
         2. All other settings are applied directly to the settings object
+
+        A reinitialization keeps the sessions, as a model switch does.
 
         Args:
             changes: Dictionary of changed settings (key -> new_value)
@@ -488,17 +568,18 @@ class BaseCLIApp:
 
         # `orchestrator` triggers a reinit too: the controller swaps the backend
         # when it changes (otherwise the change only took effect on restart).
+        # So does a role's model ("model_role:<role>"): agents resolve their
+        # roles when the workflow initializes.
         reinit_settings = {"model", "thinking_effort", "orchestrator"}
 
         for key, value in changes.items():
             try:
                 self._settings.update_setting(key, value)
-                if key in reinit_settings:
+                if key in reinit_settings or key.startswith(MODEL_ROLE_KEY_PREFIX):
                     needs_reinit = True
             except ValueError as e:
                 _restore_settings(self._settings, snapshot)
-                label = key.replace("_", " ").title()
-                self.session.add_error(f"Failed to set {label}: {e}")
+                self.session.add_error(f"Failed to set {_setting_label(key)}: {e}")
                 return False
 
         # Reinitialize workflow if needed
@@ -527,8 +608,7 @@ class BaseCLIApp:
 
         # Report changes
         for key, value in changes.items():
-            label = key.replace("_", " ").title()
-            self.session.add_success(f"{label}: {value}")
+            self.session.add_success(f"{_setting_label(key)}: {value}")
         return True
 
     def _register_builtin_commands(self) -> None:
@@ -543,6 +623,7 @@ class BaseCLIApp:
             ResumeCommand,
             PapersCommand,
             SessionsCommand,
+            ModelsCommand,
         )
         from agentic_cli.cli.settings_command import SettingsCommand
 
@@ -556,6 +637,7 @@ class BaseCLIApp:
         self.command_registry.register(SettingsCommand())
         self.command_registry.register(PapersCommand())
         self.command_registry.register(SessionsCommand())
+        self.command_registry.register(ModelsCommand())
 
     async def process_input(self, user_input: str) -> None:
         """Process user input.
@@ -795,6 +877,51 @@ class BaseCLIApp:
 
         logger.info("app_ending")
         self.session.add_message("system", "Goodbye!")
+
+
+def _model_picker(key: str, choices: _ModelChoices) -> Any:
+    """The dialog item of one model picker: ``model`` or ``model_role:<role>``."""
+    from pydantic.fields import FieldInfo
+    from thinking_prompt.settings_dialog import DropdownItem
+
+    from agentic_cli.cli.settings_introspection import field_to_ui_item
+
+    if key == "model":
+        role, title = "default", "Default Model"
+        description = "Agents without a model of their own run on it"
+    else:
+        role = key.removeprefix(MODEL_ROLE_KEY_PREFIX)
+        title = _setting_label(key)
+        description = f"Agents whose model is {role!r} run on it"
+    field = FieldInfo(default=None, title=title, description=description)
+    item = field_to_ui_item(
+        key=key,
+        field=field,
+        current_value=choices.current.get(role),
+        dynamic_options=choices.options,
+    )
+    if isinstance(item, DropdownItem):
+        # A dropdown's default width cuts a reference to its first 14
+        # characters ("google:gemini-"), so the models cannot be told apart.
+        item.width, item.max_width = None, _MODEL_PICKER_MAX_WIDTH
+    return item
+
+
+# The widest a model picker's dropdown grows: a reference and its padding.
+# SettingsCommand's dialog leaves room for it beside the longest label.
+_MODEL_PICKER_MAX_WIDTH = 48
+
+
+def _resolved_role(
+    roles: "RoleMap", role: str, catalog: "CatalogView", endpoints: "Mapping[str, Endpoint]"
+) -> str | None:
+    """The reference ``role`` resolves to, or None when nothing can fill it."""
+    from agentic_cli.models import ModelResolutionError
+
+    try:
+        return str(roles.resolve(role, catalog=catalog, endpoints=endpoints))
+    except ModelResolutionError:
+        return None
 
 
 def _snapshot_settings(settings: BaseSettings) -> tuple[dict[str, Any], set[str]]:
