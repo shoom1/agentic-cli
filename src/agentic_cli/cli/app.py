@@ -48,13 +48,20 @@ _UI_KEY_TARGET_FIELDS = {"model": "default_model"}
 
 # === ADK notices ===
 
-# ADK 2 announces each experimental feature it enables with a UserWarning:
-# "[EXPERIMENTAL] feature FeatureName.JSON_SCHEMA_FOR_FUNC_DECL is enabled."
-_ADK_EXPERIMENTAL_NOTICE = re.compile(r"\[EXPERIMENTAL\] feature (?P<feature>\S+) is enabled")
+# ADK 2 announces each experimental feature it uses with a UserWarning, in one
+# of two forms: a feature flag ("[EXPERIMENTAL] feature
+# FeatureName.JSON_SCHEMA_FOR_FUNC_DECL is enabled."), or a class or function
+# marked experimental ("[EXPERIMENTAL] GeminiContextCacheManager: This feature
+# is experimental and may change ...", from a Gemini agent's first turn while
+# prompt caching is on).
+_ADK_EXPERIMENTAL_NOTICE = re.compile(
+    r"\[EXPERIMENTAL\] (?:feature (?P<feature>\S+) is enabled|(?P<name>\w+): )"
+)
 
 # ADK 2's runner warns, through stdlib logging, that an app with sub-agents has
-# no context_cache_config. agentic-cli does not expose that setting, so the
-# advice is not something a user of the CLI can act on.
+# no context_cache_config. The ADK manager sets one while prompt caching is on
+# and a model caches, so the advice comes only when the user turned caching
+# off or no model caches: it has nothing left to tell them.
 _ADK_RUNNER_LOGGER = "google_adk.google.adk.runners"
 _ADK_UNCACHED_TRANSFER = "can transfer between agents but has no context_cache_config"
 
@@ -70,6 +77,29 @@ class _AdkUncachedTransferFilter(logging.Filter):
         return False
 
 
+# While prompt caching is on, ADK's Gemini context cache warns through stdlib
+# logging when it cannot create a cache or delete an old one (an expired cache
+# is already gone on Google's side). The turn goes on uncached, so the warning
+# has nothing for the user mid-conversation.
+_ADK_CACHE_LOGGER = "google_adk.google.adk.models.gemini_context_cache_manager"
+_ADK_CACHE_FAILURES = (
+    ("Failed to create cache", "adk_cache_create_failed"),
+    ("Failed to cleanup cache", "adk_cache_cleanup_failed"),
+)
+
+
+class _AdkCacheFailureFilter(logging.Filter):
+    """Turns ADK's context-cache failure warnings into debug log entries."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        for prefix, event in _ADK_CACHE_FAILURES:
+            if message.startswith(prefix):
+                logger.debug(event, message=message)
+                return False
+        return True
+
+
 def _install_adk_notice_hook() -> None:
     """Log ADK's notices instead of printing them.
 
@@ -77,12 +107,18 @@ def _install_adk_notice_hook() -> None:
     up, to stderr, which in the CLI lands over the terminal UI. The hook logs
     ADK's experimental-feature notices at debug and passes every other warning
     to the hook it replaced; a filter on ADK's runner logger does the same for
-    its context-cache advice. Only the CLI installs them, so library users and
-    the test suite keep Python's own handling. Installing twice changes nothing.
+    its context-cache advice, and one on its context-cache logger for a cache
+    it could not create or delete. Only the CLI installs them, so library users
+    and the test suite keep Python's own handling. Installing twice changes
+    nothing.
     """
-    runner_logger = logging.getLogger(_ADK_RUNNER_LOGGER)
-    if not any(isinstance(f, _AdkUncachedTransferFilter) for f in runner_logger.filters):
-        runner_logger.addFilter(_AdkUncachedTransferFilter())
+    for name, kind in (
+        (_ADK_RUNNER_LOGGER, _AdkUncachedTransferFilter),
+        (_ADK_CACHE_LOGGER, _AdkCacheFailureFilter),
+    ):
+        adk_logger = logging.getLogger(name)
+        if not any(isinstance(f, kind) for f in adk_logger.filters):
+            adk_logger.addFilter(kind())
 
     previous = warnings.showwarning
     if getattr(previous, "_logs_adk_notices", False):
@@ -91,7 +127,7 @@ def _install_adk_notice_hook() -> None:
     def showwarning(message, category, filename, lineno, file=None, line=None):
         notice = _ADK_EXPERIMENTAL_NOTICE.match(str(message))
         if notice and issubclass(category, UserWarning):
-            feature = notice["feature"].removeprefix("FeatureName.")
+            feature = (notice["feature"] or notice["name"]).removeprefix("FeatureName.")
             logger.debug("adk_experimental_feature", feature=feature)
             return
         previous(message, category, filename, lineno, file, line)

@@ -18,6 +18,7 @@ from google.adk import Runner
 from google.adk.apps import App
 from google.adk.apps.app import validate_app_name
 from google.adk.agents import LlmAgent, Agent
+from google.adk.agents.context_cache_config import ContextCacheConfig
 from google.adk.models.llm_request import LlmRequest
 from google.adk.sessions import InMemorySessionService, BaseSessionService, Session
 from google.adk.tools import LongRunningFunctionTool
@@ -36,6 +37,7 @@ from agentic_cli.config import (
     get_settings,
 )
 from agentic_cli.logging import Loggers, bind_context
+from agentic_cli.models import CacheMechanism
 
 
 logger = Loggers.workflow()
@@ -45,6 +47,18 @@ logger = Loggers.workflow()
 logging.getLogger("google_genai.types").setLevel(logging.ERROR)
 
 _RESULT_SUMMARY_LIMIT = 1000
+
+# The cache mechanisms ADK's context cache serves: Claude's breakpoints and
+# Gemini's server-side caches.
+_CACHING = (CacheMechanism.ANTHROPIC, CacheMechanism.GEMINI)
+
+# How long ADK may take to create a Gemini context cache, in milliseconds.
+# Generation's own timeout sits on each request's config, not on the client
+# that creates the cache, so without this a hung create would hang the turn. A
+# create that fails costs only that turn's cache: ADK logs it and sends the
+# request uncached, and ContextCachePlugin keeps it from trying again at every
+# tool step of the turn.
+_CACHE_CREATE_TIMEOUT_MS = 60_000
 
 
 def _check_app_name(app_name: str) -> None:
@@ -558,10 +572,18 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             self._root_agent = self._create_agents()
 
         # The plugins belong to the App; ADK deprecates Runner(plugins=...).
+        context_cache = self._context_cache_config()
+        plugins = self._init_plugins()
+        if context_cache is not None:
+            from agentic_cli.workflow.adk.context_cache_plugin import ContextCachePlugin
+
+            # One Gemini cache attempt a turn, not one per tool step.
+            plugins.append(ContextCachePlugin())
         app = App(
             name=self.app_name,
             root_agent=self._root_agent,
-            plugins=self._init_plugins(),
+            plugins=plugins,
+            context_cache_config=context_cache,
         )
         self._runner = Runner(app=app, session_service=self._session_service)
         # Usage events name the default model, resolved for this initialization.
@@ -572,6 +594,36 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             model=self.model,
             agent_name=self._root_agent.name if self._root_agent else None,
             required_managers=list(self._required_managers),
+            context_cache=app.context_cache_config is not None,
+        )
+
+    def _context_cache_config(self) -> ContextCacheConfig | None:
+        """The app's context cache, or None for no caching.
+
+        ADK caches for every agent of an app through one config, so it is set
+        when ``prompt_caching_enabled`` is on and any agent's model caches (an
+        agent without a model is resolved to the default). A native ADK YAML
+        app builds no agent from a resolved model, so its default model
+        decides. ADK then marks cache breakpoints on every Claude request, and
+        keeps a server-side cache per Gemini agent from its second turn
+        (Google bills its storage while it lives); GPT, OpenRouter and
+        endpoint models are untouched.
+
+        ADK's defaults stand: a 1800-second TTL, which keeps Claude on its
+        cheaper 5-minute cache, and a Gemini cache replaced after 10
+        invocations. Only creating a Gemini cache gets a bound,
+        ``_CACHE_CREATE_TIMEOUT_MS``.
+        """
+        if not self._settings.prompt_caching_enabled:
+            return None
+        if self._adk_config_path:
+            models = [self._default_model]
+        else:
+            models = list(self._resolved_models.values())
+        if not any(m is not None and m.record.cache in _CACHING for m in models):
+            return None
+        return ContextCacheConfig(
+            create_http_options=types.HttpOptions(timeout=_CACHE_CREATE_TIMEOUT_MS)
         )
 
     def _validate_agent_graph(self) -> None:

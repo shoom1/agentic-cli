@@ -39,8 +39,12 @@ class FakeAPI:
     def bodies(self) -> list[dict[str, Any]]:
         return [json.loads(request.content) for request in self.requests]
 
+    @property
+    def transport(self) -> httpx.MockTransport:
+        return httpx.MockTransport(self._handle)
+
     def http_client(self) -> httpx.AsyncClient:
-        return httpx.AsyncClient(transport=httpx.MockTransport(self._handle))
+        return httpx.AsyncClient(transport=self.transport)
 
     def _handle(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)

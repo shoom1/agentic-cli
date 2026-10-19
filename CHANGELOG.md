@@ -145,9 +145,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before ADK sees them, whenever the model rejects them in its
   configuration: Claude while it thinks, Claude 4.6 and later, and GPT
   reasoning models.
+- **The ADK backend caches prompts.** `prompt_caching_enabled` (on by
+  default) was ignored on ADK. Now, while it is on and any agent runs on
+  Claude or Gemini (an agent without a `model` runs on the default model),
+  the ADK app gets ADK's context cache, with ADK's defaults: a 1800-second
+  TTL, and a Gemini cache made again after 10 invocations. A native ADK YAML
+  app (`adk_config_path`) caches when its default model is Claude or Gemini.
+  The cache belongs to the app, so the setting turns it on or off for every
+  agent at once. What it does, and what it costs:
+  - **Claude**: from the first turn, every request marks three cache
+    breakpoints, on the last tool, the system instruction and the
+    conversation so far. Claude bills a cache write at 1.25 times the input
+    price and a read at a tenth of it or less, so a conversation's first turn
+    costs a little more and each later one much less. The cache lasts 5
+    minutes, and each read starts the 5 minutes again; ADK asks for Claude's
+    hour-long cache, whose writes cost twice the input price, only for a TTL
+    of an hour or more.
+  - **Gemini**: from an agent's second turn, ADK creates a cache on Google's
+    side holding its system instruction, tools and conversation so far,
+    once that prefix reaches 2048 tokens (4096 on Gemini 3), and later
+    requests name the cache instead of sending the prefix again. Google bills
+    the cache's storage until it expires (30 minutes after it is made) or
+    ADK replaces it, and bills the tokens read from it at its lower cached
+    rate. A session that ends soon after its cache is made pays for the
+    storage until the cache expires. Creating a cache may take at most 60
+    seconds: a create that fails or hangs costs that turn its caching, never
+    the turn, since ADK then sends the request uncached.
+  - **GPT, OpenRouter and endpoint models**: ADK sends them nothing new.
+
+  Set `prompt_caching_enabled` to `false` (in `~/.<app>/settings.json`) to
+  turn it off. While the app caches, ADK no longer advises an app with
+  sub-agents to set a `context_cache_config`; when it does not, the CLI still
+  logs that advice at debug. The CLI also logs at debug the notice ADK gives
+  on a caching Gemini agent's first turn
+  (`[EXPERIMENTAL] GeminiContextCacheManager: …`), as it does ADK's other
+  experimental notices, so it does not print over the UI.
 - **agentic-cli depends on `openai`** (`openai>=2.20,<3`, the floor of
   google-adk's own extra), because ADK's GPT and OpenAI-compatible model
   classes import it.
+- **A Gemini cache costs a turn at most one bounded attempt.** Deleting an
+  agent's old cache (ADK does so once it has expired or served 10 turns) may
+  take at most 60 seconds, as creating one may; before, google-genai sent the
+  delete with no timeout, so an unanswered one held the turn. After a create
+  that fails or times out, the agent makes no further attempt until its next
+  turn, where ADK would have tried again at every tool step. ADK's warnings
+  for a cache it could not create or delete are logged at debug
+  (`adk_cache_create_failed`, `adk_cache_cleanup_failed`) instead of printing
+  over the UI.
 - **An endpoint whose `api_key_env` names a variable that is not set fails
   at startup,** naming the endpoint and the variable, for each agent that
   runs on it. Its requests would carry the placeholder key and fail with a
@@ -187,11 +231,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   settings, knowledge base, fetched pages) are found by name, so move those
   folders to the new name to keep them. The CLI logs ADK's
   `[EXPERIMENTAL] feature … is enabled` warnings, and ADK's advice that an app
-  with sub-agents set a `context_cache_config` (which agentic-cli does not
-  expose), at debug instead of printing them over the UI. An app that calls
-  ADK's own APIs follows ADK's 2.0 migration notes; one that uses only
-  agentic-cli's API changes nothing, unless its `app_name` is one ADK
-  rejects.
+  with sub-agents set a `context_cache_config` (which ADK now gives only to
+  an app that does not cache; see the caching entry above), at debug instead
+  of printing them over the UI. An app that calls ADK's own APIs follows
+  ADK's 2.0 migration notes; one that uses only agentic-cli's API changes
+  nothing, unless its `app_name` is one ADK rejects.
 - **A resource capability that names no resource is an error.** Registering
   a tool whose `filesystem.*`, `http.*` or `shell.*` capability has neither
   `target_arg=` nor `target=` raises `ValueError` (it warned since 0.6.1).
