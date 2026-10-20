@@ -6,16 +6,16 @@ A framework for building domain-specific agentic CLI applications powered by LLM
 
 Agentic CLI provides the core infrastructure for building interactive CLI applications that leverage LLM agents for complex tasks. It offers:
 
-- **Pluggable Orchestration**: Choose between Google ADK or LangGraph for agent workflows; both run every model provider
+- **Pluggable Orchestration**: Choose Google ADK (the default) or Deep Agents for agent workflows; both run every model provider. LangGraph is deprecated and will be removed in 0.8.0
 - **Any Model, Per Agent**: Gemini, Claude, GPT, OpenRouter's models and your own OpenAI-compatible server (vLLM), mixed in one agent tree; models named by reference or role, with one set of thinking levels
 - **Rich Terminal UI**: Dual thinking boxes, markdown rendering, and streaming responses via `thinking-prompt`
 - **Declarative Agents**: Define agents with simple configuration objects
-- **Native Tool Architecture**: Backend-specific tool factories for ADK and LangGraph, with automatic HITL confirmation for dangerous tools
+- **Native Tool Architecture**: Backend-specific tool factories for each backend, with automatic HITL confirmation for dangerous tools
 - **Built-in Tools**: Python execution, stateful sandbox, file operations, web search, web fetch, arXiv search
 - **Knowledge Base**: Semantic + BM25 hybrid search with RRF fusion, per-document markdown sidecars, and agent-authored concept pages
 - **Semantic Memory**: Embedding-backed memory with lifecycle management, contradiction detection, and forgetting policy
 - **Durable Sessions**: Conversations persist continuously by default (SQLite; PostgreSQL or ephemeral memory optional) and resume across CLI restarts with `--session <id>`
-- **Context Window Management**: Native trim detection and token-usage visibility
+- **Context Window Management**: Native trim detection, summarization near the model's input budget on Deep Agents, and token-usage visibility
 - **Model Catalog**: Live model listings from each provider, cached for a day, shown by `/models`
 - **Type-safe Configuration**: Composable settings mixins (`pydantic-settings`)
 
@@ -35,13 +35,16 @@ Agentic CLI provides the core infrastructure for building interactive CLI applic
 │  - Agent orchestration, event streaming                             │
 │  - Session save/resume, usage tracking, context-trim detection      │
 │  - Service registry: shared state for tools (KB, memory, sandbox…)  │
-├─────────────────────────────┬───────────────────────────────────────┤
-│   GoogleADKWorkflowManager  │     LangGraphWorkflowManager          │
-│   (default)                 │     (optional: langgraph extra)       │
-│   + PermissionPlugin        │     + wrap_tool_for_permission        │
-│   + LLMLoggingPlugin        │     + native ToolNode                 │
-│   + TaskProgressPlugin      │                                       │
-└─────────────────────────────┴───────────────────────────────────────┘
+├─────────────────────────────────────────────────────────────────────┤
+│  GoogleADKWorkflowManager (default)                                 │
+│  + PermissionPlugin, LLMLoggingPlugin, TaskProgressPlugin           │
+├─────────────────────────────────────────────────────────────────────┤
+│  DeepAgentsWorkflowManager (deepagents extra)                       │
+│  + PermissionMiddleware, SubAgentMiddleware (task), summarization   │
+├─────────────────────────────────────────────────────────────────────┤
+│  LangGraphWorkflowManager (langgraph extra; deprecated)             │
+│  + wrap_tool_for_permission, native ToolNode                        │
+└─────────────────────────────────────────────────────────────────────┘
                                  │
                                  ▼
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -67,19 +70,32 @@ This installs Google ADK 2 (2.12 or later) with MCP support, SQLAlchemy for
 the durable session store, and the OpenAI SDK (for GPT, OpenRouter and
 OpenAI-compatible servers). The ADK backend runs every provider.
 
-### With LangGraph Support
+### With Deep Agents
+
+```bash
+pip install 'agentic-cli[deepagents]'
+```
+
+The extra installs the Deep Agents backend: Deep Agents (0.7.x, held below
+0.8 while it is in beta), the LangChain packages it builds its models with
+(`langchain-google-genai`, `langchain-anthropic`, `langchain-openai`,
+`langchain-openrouter`), LangGraph's sqlite and Postgres checkpointers for its
+sessions, and `langchain-mcp-adapters` for MCP servers. The LangChain packages
+bring two constraints a core install does not have: `pydantic` stays below
+2.13 (every `openrouter` release caps it there), and `anthropic` moves to 1.x,
+which runs on `httpx2`, so code that hands the Anthropic SDK an `httpx` client
+passes an `httpx2` one instead. Set `orchestrator` to `deepagents` to run on
+it (see [Workflow Managers](#workflow-managers)).
+
+### With LangGraph Support (deprecated)
 
 ```bash
 pip install agentic-cli[langgraph]
 ```
 
-The extra installs the LangChain packages the LangGraph backend builds its
-models with (`langchain-google-genai`, `langchain-anthropic`,
-`langchain-openai`, `langchain-openrouter`). They bring two constraints a
-core install does not have: `pydantic` stays below 2.13 (every `openrouter`
-release caps it there), and `anthropic` moves to 1.x, which runs on `httpx2`,
-so code that hands the Anthropic SDK an `httpx` client passes an `httpx2`
-one instead.
+The LangGraph backend is deprecated and will be removed in 0.8.0; move to
+[Deep Agents](#with-deep-agents). The extra installs the same LangChain model
+packages, with the same two constraints. It installs beside `deepagents`.
 
 ### Development Installation
 
@@ -169,7 +185,79 @@ ADK integrations:
 - **LLMLoggingPlugin** — structured logging of LLM requests/responses
 - **TaskProgressPlugin** — streams the task checklist into its own thinking box
 
-### LangGraphWorkflowManager
+### DeepAgentsWorkflowManager
+
+Builds each agent as a LangChain `create_agent` graph with selected Deep
+Agents middleware (its `task` delegation and its summarization) and, on
+Claude, LangChain's Anthropic prompt caching. Deep Agents' file tools, virtual
+filesystem and `write_todos` are not used: the agents run on the framework's
+tools, permission engine and models, as on ADK. Best for:
+- A coordinator that stays in charge and hands each sub-agent a brief
+- Long conversations, summarized before they outgrow the model
+- Apps moving off the LangGraph backend
+
+```python
+from agentic_cli import DeepAgentsWorkflowManager
+
+manager = DeepAgentsWorkflowManager(
+    agent_configs=AGENTS,
+    settings=settings,
+    model="anthropic:claude-sonnet-4-6",  # Optional: the default model otherwise
+)
+```
+
+What it supports:
+- **Delegation through `task`**: a coordinator (an agent with `sub_agents`)
+  gets Deep Agents' `task` tool, which lists each sub-agent as
+  `- name: description`, so give sub-agents real descriptions. A sub-agent
+  sees only the brief the coordinator writes, and the coordinator's plan and
+  tasks, never the conversation. Its last answer is the call's result, and the
+  coordinator answers the user. Two sub-agents can run at once. `task` is a
+  reserved tool name.
+- **The permission gate on every call**: `PermissionMiddleware`, in every
+  agent's stack, identifies each tool by the object the registry issued and
+  asks through the input callback, for sub-agents' calls too. A tool that
+  raises fails its call with `{"success": false, "error": "..."}`, as on ADK,
+  and the turn goes on.
+- **Sessions**: `session_store` picks a LangGraph checkpointer: sqlite (the
+  default) in `{workspace}/sessions/checkpoints.db`, next to ADK's
+  `sessions.db`, Postgres at `postgres_uri`, or memory. Each conversation is
+  the thread of its whole `SessionRef`, so two users never share one.
+- **Context**: Deep Agents' summarization runs in every agent, at 85% of the
+  model's input budget (95% of its context window, less its `max_tokens`),
+  keeping the newest 10% of that budget word for word. The checkpoint keeps
+  every message. With `context_window_enabled`,
+  `context_window_trigger_tokens` and `context_window_target_tokens` set the
+  thresholds instead.
+- **Prompt caching** on Claude, as on ADK (see [Prompt caching](#prompt-caching)).
+- **MCP tools, Agent Skills, raw LLM logging and job resume**, from the same
+  `AgentConfig.mcp_servers`, `AgentConfig.skills`, `raw_llm_logging` and
+  `job_auto_resume` (or `/resume`) as on ADK. An MCP tool is gated under the
+  `mcp` capability, with its name as the target.
+
+How it differs from ADK:
+- **Delegation**: on ADK, a coordinator transfers the conversation to a
+  sub-agent (`transfer_to_agent`), which sees all of it and answers the user.
+  On Deep Agents, the sub-agent gets a brief and the coordinator answers.
+- **No Gemini explicit caches**: Gemini runs on its implicit caching, which is
+  automatic and bills no storage.
+- **No code-execution events**: `CODE_EXECUTION`, `EXECUTABLE_CODE` and
+  `FILE_DATA` come from Gemini's code execution on ADK.
+- **A finished job** reaches the root agent as a message of its own, which
+  opens with `[Automatic job notification — not written by the user]`, rather
+  than as the result of the call that started it.
+- **Its own sessions**: neither backend reads the other's, so switching the
+  orchestrator starts a new conversation.
+
+Requires: `pip install 'agentic-cli[deepagents]'`
+
+### LangGraphWorkflowManager (deprecated)
+
+Deprecated in 0.7.0 and removed in 0.8.0: use
+[Deep Agents](#deepagentsworkflowmanager) instead. Building it raises a
+`DeprecationWarning`, the CLI warns at startup when `orchestrator` is
+`langgraph`, and sessions saved by it do not carry over. Its known defects
+stay unfixed.
 
 Uses LangGraph for orchestration. Best for:
 - Cyclical workflows (self-validation, iterative refinement)
@@ -202,26 +290,31 @@ Requires: `pip install agentic-cli[langgraph]`
 
 ### Comparison
 
-| Feature | Google ADK | LangGraph |
-|---------|------------|-----------|
-| Setup complexity | Simple | Moderate |
-| Cyclical workflows | Limited | Native |
-| Model providers | Gemini, Claude, GPT (Responses API), OpenRouter, OpenAI-compatible endpoints | The same |
-| State persistence | SQLite (default), PostgreSQL, or memory | Memory, PostgreSQL, or SQLite |
-| Thinking support | Every model with a thinking knob, one set of levels | The same |
-| Prompt caching | Claude (three breakpoints) and Gemini (server-side caches) | Claude on Anthropic's API (one breakpoint) |
-| Retry handling | Built-in | Built-in with backoff |
-| Permission gate | PermissionPlugin | wrap_tool_for_permission |
-| Context trimming | Native | Native |
+| Feature | Google ADK | Deep Agents | LangGraph (deprecated) |
+|---------|------------|-------------|------------------------|
+| Install | Core | `deepagents` extra | `langgraph` extra |
+| Model providers | Gemini, Claude, GPT (Responses API), OpenRouter, OpenAI-compatible endpoints | The same | The same |
+| Delegation | `transfer_to_agent`: the sub-agent takes the conversation | `task`: the sub-agent gets a brief, the coordinator answers | Routing between agent nodes |
+| State persistence | SQLite (default), PostgreSQL, or memory | The same, as a LangGraph checkpointer | Memory, PostgreSQL, or SQLite |
+| Thinking support | Every model with a thinking knob, one set of levels | The same | The same |
+| Prompt caching | Claude (three breakpoints) and Gemini (server-side caches) | Claude (three breakpoints) | Claude on Anthropic's API (one breakpoint) |
+| Context | None on normal turns (`context_window_enabled` applies only to Gemini's Live API) | Summarization near the input budget | Trimming, with `context_window_enabled` |
+| MCP tools, Agent Skills | Yes | Yes | Ignored, with a warning |
+| Raw LLM logging, job resume | Yes | Yes | No |
+| Code-execution events | Gemini's | None | None |
+| Retry handling | Built-in | Built-in | Built-in with backoff |
+| Permission gate | PermissionPlugin | PermissionMiddleware | wrap_tool_for_permission |
 
 ### Auto-selection via Settings
 
 ```python
 from agentic_cli import create_workflow_manager_from_settings
 
-settings = BaseSettings(orchestrator="langgraph")  # or "adk" (default)
+settings = BaseSettings(orchestrator="deepagents")  # or "adk" (the default)
 manager = create_workflow_manager_from_settings(agent_configs=AGENTS, settings=settings)
 ```
+
+`orchestrator="langgraph"` still works in 0.7.x, with a deprecation warning.
 
 ## Configuration
 
@@ -284,8 +377,8 @@ absolute/user-level file. A key placed in a cwd `.env` is deliberately ignored.
 | `model_endpoints` | `AGENTIC_MODEL_ENDPOINTS` | {} | Your OpenAI-compatible servers (never from a project file) |
 | `thinking_effort` | `AGENTIC_THINKING_EFFORT` | "medium" | Thinking level: none, low, medium, high |
 | `prompt_caching_enabled` | `AGENTIC_PROMPT_CACHING_ENABLED` | true | Prompt caching: Claude, and Gemini on ADK |
-| `orchestrator` | `AGENTIC_ORCHESTRATOR` | "adk" | Orchestrator: `adk` or `langgraph` |
-| `langgraph_checkpointer` | `AGENTIC_LANGGRAPH_CHECKPOINTER` | "memory" | `memory`, `postgres`, or `null` |
+| `orchestrator` | `AGENTIC_ORCHESTRATOR` | "adk" | Orchestrator: `adk`, `deepagents`, or `langgraph` (deprecated) |
+| `session_store` | `AGENTIC_SESSION_STORE` | "sqlite" | Where conversations are kept: `sqlite`, `postgres`, or `memory` |
 | `workspace_dir` | `AGENTIC_WORKSPACE_DIR` | ~/.agentic | Storage directory |
 | `log_level` | `AGENTIC_LOG_LEVEL` | "warning" | Logging level |
 | `tavily_api_key` | `TAVILY_API_KEY` | None | Tavily API key for web search |
@@ -314,7 +407,7 @@ with SettingsContext(custom_settings):
 ## Models and providers
 
 Each agent runs on a model named by a reference or a role, decided once, when
-the workflow starts. Both backends run every provider: Gemini, Claude, GPT,
+the workflow starts. Every backend runs every provider: Gemini, Claude, GPT,
 OpenRouter's models, and models on an OpenAI-compatible server of your own
 (vLLM and the like), and one agent tree can mix them. What agentic-cli knows
 about models lives in `agentic_cli.models` (provisional in 0.7.0: its names
@@ -497,7 +590,7 @@ What a level means depends on how the model thinks:
 ### Other per-agent settings
 
 `ModelSettings` also takes `temperature`, `top_p`, `top_k`, `max_tokens`,
-`stop_sequences` and `extra`, and both backends apply them:
+`stop_sequences` and `extra`, and every backend applies them:
 
 - `max_tokens` is the agent's value, else the provider's default (8192 for
   Claude), within the model's max output. On Claude with a thinking budget it
@@ -519,21 +612,25 @@ What it does depends on the backend and the model:
   YAML app (`adk_config_path`) has no agent list to check, so its default model
   decides. The cache belongs to the app: the setting turns it on or off for
   every agent at once.
+- **On Deep Agents**, each agent on Claude on Anthropic's API marks three cache
+  breakpoints, as on ADK: its system prompt, its last tool and the
+  conversation, for 5 minutes. A sub-agent's own prompt and tools are cached
+  too. Gemini gets no explicit cache, only its implicit caching.
 - **On LangGraph**, it marks the system prompt of Claude on Anthropic's API:
   one cache breakpoint. LangGraph creates no Gemini cache.
-- GPT, OpenRouter and endpoint models get nothing from it on either backend.
+- GPT, OpenRouter and endpoint models get nothing from it on any backend.
   OpenAI caches long prompts on its own.
 
 What it costs:
 
-- **Claude**: on ADK, every request from the first turn marks three cache
-  breakpoints, on the last tool, the system instruction and the conversation
-  so far. A cache write costs 1.25 times the input price and a read about a
-  tenth of it (less on Opus 5.5 and Fable 5.1). The cache lives 5 minutes and
-  each read renews it, so a conversation's first turn costs a little more and
-  each later turn within 5 minutes much less. ADK's 1800-second TTL keeps
-  Claude on that 5-minute cache: the hour-long one costs twice the input price
-  to write.
+- **Claude**: on ADK and Deep Agents, every request from the first turn marks
+  three cache breakpoints, on the last tool, the system instruction and the
+  conversation so far. A cache write costs 1.25 times the input price and a
+  read about a tenth of it (less on Opus 5.5 and Fable 5.1). The cache lives
+  5 minutes and each read renews it, so a conversation's first turn costs a
+  little more and each later turn within 5 minutes much less. ADK's
+  1800-second TTL keeps Claude on that 5-minute cache: the hour-long one costs
+  twice the input price to write.
 - **Gemini** (ADK only): from an agent's second turn, once its system
   instruction, tools and conversation reach 2048 tokens (4096 on Gemini 3), ADK
   creates a cache on Google's side and later requests name it instead of
@@ -545,9 +642,9 @@ What it costs:
   create that fails or hangs costs that turn its caching, never the turn.
 
 To turn caching off, set `"prompt_caching_enabled": false` in
-`~/.my_app/settings.json`; a project file cannot set it. On ADK, `/status`
-shows the cached tokens read so far. A system prompt that changes every turn
-(a timestamp, say) defeats both caches.
+`~/.my_app/settings.json`; a project file cannot set it. On ADK and Deep
+Agents, `/status` shows the cached tokens read so far. A system prompt that
+changes every turn (a timestamp, say) defeats both caches.
 
 ### The model catalog and `/models`
 
@@ -585,17 +682,19 @@ families, tiers, thinking rules, and the numbers used when a listing fails).
 
 ### How each backend runs them
 
-- Both backends run every provider and build each agent's model once, when the
-  workflow starts: ADK with `workflow.adk.model_factory.build_adk_model`,
-  LangGraph with `workflow.langchain_models.build_chat_model`.
-- GPT runs on OpenAI's Responses API on both, without storing responses
+- Every backend runs every provider and builds each agent's model once, when
+  the workflow starts: ADK with `workflow.adk.model_factory.build_adk_model`,
+  Deep Agents and LangGraph with `workflow.langchain_models.build_chat_model`.
+- GPT runs on OpenAI's Responses API on all of them, without storing responses
   (`store=False`). OpenRouter and endpoints run on Chat Completions.
-- Each agent's `model_settings` apply on both, and thinking text reaches the
-  thinking box for every provider.
-- The `[langgraph]` extra pins `pydantic` below 2.13 and brings `anthropic` 1.x
-  (see [Installation](#with-langgraph-support)).
+- Each agent's `model_settings` apply on every backend, and thinking text
+  reaches the thinking box for every provider.
+- The `[deepagents]` and `[langgraph]` extras pin `pydantic` below 2.13 and
+  bring `anthropic` 1.x (see [Installation](#with-deep-agents)).
 - On ADK, GPT's reasoning is not passed back across tool calls, and neither is
-  OpenRouter's `reasoning_details`; LangGraph passes both back.
+  OpenRouter's `reasoning_details`; Deep Agents and LangGraph pass both back.
+- After a switch to another provider's model, no backend sends the new model
+  the old one's reasoning.
 
 ## Agent Configuration
 
@@ -659,9 +758,11 @@ configs = [coordinator, researcher, analyst]
 | `prompt` | str \| Callable | System instruction; a callable may take no arguments or a single `settings` argument |
 | `tools` | list[Callable] | Available tool functions |
 | `sub_agents` | list[str] | Names of agents this one can delegate to |
-| `description` | str | Short description for routing (defaults to `""`) |
+| `description` | str | Short description for routing (defaults to `""`). On Deep Agents the coordinator's `task` tool lists it; without one the agent is "The <name> agent." |
 | `model` | str \| None | A model reference (`anthropic:claude-sonnet-4-6`), a bare model id, or a role (`fast`); without one, the `default` role (see [Models and providers](#models-and-providers)) |
 | `model_settings` | ModelSettings \| None | The agent's thinking, `max_tokens`, sampling settings and `extra` (see [Thinking](#thinking)) |
+| `mcp_servers` | list[MCPServerConfig] | MCP servers whose tools the agent gets (ADK and Deep Agents) |
+| `skills` | list[str] | Agent Skills: a skill folder's path, or a name under `skills_dirs` (ADK and Deep Agents) |
 
 The agent graph is validated before anything is allocated — ahead of model
 discovery and service creation. Duplicate names, unknown `sub_agents`
@@ -741,7 +842,7 @@ def search_database(query: str, limit: int = 10) -> dict:
     return {"success": True, "results": results, "count": len(results)}
 ```
 
-**Registration is required for a tool to run.** The permission engine is on by default, and any tool without a capability declaration is denied at call time (fail-closed) on both the ADK and LangGraph backends. You can still pass raw callables into `AgentConfig.tools`, but unless they are registered with `@register_tool` they will be blocked — register every tool with `capabilities=` (or `EXEMPT` for pure, side-effect-free functions). Registration also gives the tool registry metadata and tool-summary formatting.
+**Registration is required for a tool to run.** The permission engine is on by default, and any tool without a capability declaration is denied at call time (fail-closed) on every backend. You can still pass raw callables into `AgentConfig.tools`, but unless they are registered with `@register_tool` they will be blocked — register every tool with `capabilities=` (or `EXEMPT` for pure, side-effect-free functions). Registration also gives the tool registry metadata and tool-summary formatting.
 
 Identity is the *object the registry issued*, not the name: a callable the
 registry never issued is denied however it is named, and is left untouched by
@@ -782,6 +883,9 @@ Variants share one identity and one permission contract while keeping their own
 signature and docstring, and a bare name that maps to several variants raises
 rather than silently picking one by import order.
 
+The framework reserves `task`, Deep Agents' delegation tool, whichever backend
+runs: registering another tool named `task` raises.
+
 ### Capabilities
 
 Tool access is gated by the **permission engine** (see the HITL section below). Each registered tool declares what it touches via `capabilities=`:
@@ -789,7 +893,7 @@ Tool access is gated by the **permission engine** (see the HITL section below). 
 - **`Capability("namespace.action", target_arg="...")`** — e.g. `Capability("filesystem.write", target_arg="path")`, `Capability("http.read", target_arg="url")`, `Capability("shell.exec", target_arg="command")`. The engine resolves `target_arg` against the actual tool-call arguments and matches against rules.
 - **`Capability("namespace.action", target="...")`** — a fixed target, for a tool that always reaches the same resource, e.g. `Capability("http.read", target="https://export.arxiv.org/api/query")`.
 - Filesystem, network (`http.*`) and shell capabilities must name their resource with `target_arg` or `target`. Without one the target would be the wildcard, so registering the tool raises `ValueError`: remembering an approval of it would approve the capability for every resource.
-- **`EXEMPT`** — opts the tool out of the engine entirely. Use for tools that need no permission check: pure functions with no side effects, and backend-internal tools (e.g. ADK `transfer_to_agent`, backend state tools).
+- **`EXEMPT`** — opts the tool out of the engine entirely. Use for tools that need no permission check: pure functions with no side effects, and backend-internal tools (e.g. ADK `transfer_to_agent`, Deep Agents' `task`, backend state tools).
 
 ### Built-in Tools
 
@@ -1100,13 +1204,16 @@ class MyApp(BaseCLIApp):
 | `THINKING` | Model reasoning |
 | `TOOL_CALL` | Tool invocation |
 | `TOOL_RESULT` | Tool result |
-| `CODE_EXECUTION` | Code execution result |
-| `EXECUTABLE_CODE` | Code the model intends to run |
-| `FILE_DATA` | Binary/file payload from a tool |
+| `CODE_EXECUTION` | Code execution result (Gemini on ADK) |
+| `EXECUTABLE_CODE` | Code the model intends to run (Gemini on ADK) |
+| `FILE_DATA` | Binary/file payload from a tool (ADK) |
 | `ERROR` | Error message (`recoverable`, `error_code` metadata) |
 | `TASK_PROGRESS` | Task checklist update (drives the task box) |
-| `CONTEXT_TRIMMED` | Context trimming event (drop count, remaining tokens) |
+| `CONTEXT_TRIMMED` | Context trimming event (drop count, remaining tokens), or a summary on Deep Agents (`source="summarization"`) |
 | `LLM_REQUEST` / `LLM_RESPONSE` / `LLM_USAGE` | LLM traffic + token accounting |
+
+On Deep Agents every event carries `metadata["agent"]`, the agent that
+produced it, and `LLM_USAGE` names that agent's own model.
 
 ### Processing Events
 
@@ -1149,11 +1256,13 @@ See the `examples/` directory for complete working examples:
 
 **Getting Started**
 - `hello_agent.py` — Simple assistant using Google ADK
-- `hello_langgraph.py` — Same assistant using LangGraph orchestration
+- `hello_deepagents.py` — Same assistant using Deep Agents orchestration
+- `hello_langgraph.py` — Same assistant using LangGraph orchestration (deprecated; removed in 0.8.0)
 
 **Feature Demos**
 - `arxiv_demo.py` — ArXiv paper search and analysis
 - `fileops_demo.py` — File operation tools (read, write, grep, glob)
+- `jobs_demo.py` — Long-running background jobs with a live status-bar monitor; a finished job resumes the agent (ADK, or Deep Agents with `AGENTIC_ORCHESTRATOR=deepagents`)
 - `memory_demo.py` — Memory persistence system (save/search/update/delete)
 - `shell_demo.py` — Shell security pattern detection
 - `webfetch_demo.py` — Web fetching and summarization
@@ -1172,7 +1281,14 @@ python examples/hello_agent.py
 python examples/fileops_demo.py
 python examples/shell_demo.py
 
-# Or with LangGraph
+# Or with Deep Agents
+pip install 'agentic-cli[deepagents]'
+python examples/hello_deepagents.py
+
+# Jobs demo on Deep Agents
+AGENTIC_ORCHESTRATOR=deepagents python examples/jobs_demo.py
+
+# Or with LangGraph (deprecated)
 pip install agentic-cli[langgraph]
 python examples/hello_langgraph.py
 
@@ -1235,6 +1351,11 @@ agentic-cli/
 │   │   ├── model_settings.py     # ModelSettings, ThinkingSettings (per agent)
 │   │   ├── model_wire.py         # What both adapters send to OpenAI-compatible servers
 │   │   ├── langchain_models.py   # build_chat_model: a resolved model → LangChain chat model
+│   │   ├── checkpointers.py      # open_checkpointer: memory / sqlite / Postgres (Deep Agents, LangGraph)
+│   │   ├── llm_log.py            # LLMLogWriter: the raw_llm_logging JSONL file, redact_secrets
+│   │   ├── tool_errors.py        # A raising tool's error result (ADK and Deep Agents)
+│   │   ├── sessions.py           # SessionRef, the active turn, the active tool call
+│   │   ├── mcp.py                # MCPServerConfig → ADK toolset / langchain-mcp-adapters connection
 │   │   ├── adk/
 │   │   │   ├── manager.py                # GoogleADKWorkflowManager
 │   │   │   ├── model_factory.py          # build_adk_model: a resolved model → ADK model + config
@@ -1244,7 +1365,17 @@ agentic-cli/
 │   │   │   ├── plugins.py                # LLMLoggingPlugin
 │   │   │   ├── permission_plugin.py      # PermissionPlugin (capability gating)
 │   │   │   └── task_progress_plugin.py
-│   │   ├── langgraph/
+│   │   ├── deepagents/                   # The Deep Agents backend (deepagents extra)
+│   │   │   ├── manager.py                # DeepAgentsWorkflowManager
+│   │   │   ├── agent_builder.py          # One create_agent graph per AgentConfig; task delegation
+│   │   │   ├── middleware.py             # Permission gate, tool errors, active tool call, foreign reasoning
+│   │   │   ├── tools.py                  # Framework tools → LangChain tools
+│   │   │   ├── event_processor.py        # The stream → WorkflowEvents; the run callback
+│   │   │   ├── sessions.py               # Threads keyed by SessionRef; the session hooks
+│   │   │   ├── summarization.py          # Thresholds from the input budget; no archive
+│   │   │   ├── mcp_tools.py              # MCPSessions: one session per agent and server
+│   │   │   └── state.py                  # AgentCliState: plan and tasks
+│   │   ├── langgraph/                    # Deprecated; removed in 0.8.0
 │   │   │   ├── manager.py                # LangGraphWorkflowManager
 │   │   │   ├── graph_builder.py
 │   │   │   ├── permission_wrap.py        # wrap_tool_for_permission
@@ -1277,11 +1408,15 @@ agentic-cli/
 │   │   ├── webfetch_tool.py      # web_fetch (orchestrator)
 │   │   ├── pdf_utils.py          # PDF text extraction helpers
 │   │   ├── memory_tools.py       # save/search/update/delete (store: agentic_cli.memory)
-│   │   ├── _core/                # Shared planning/task logic
+│   │   ├── _core/                # Shared planning/task logic, backend-neutral declarations
 │   │   │   ├── planning.py
-│   │   │   └── tasks.py
+│   │   │   ├── tasks.py
+│   │   │   ├── state_tools.py    # save_plan / get_plan / save_tasks / get_tasks, declared
+│   │   │   └── delegation.py     # task, declared (Deep Agents' delegation tool)
 │   │   ├── adk/state_tools.py       # ADK-native planning/task tools
-│   │   ├── langgraph/state_tools.py # LangGraph-native planning/task tools
+│   │   ├── langgraph/state_tools.py # LangGraph-library planning/task tools (Deep Agents, LangGraph)
+│   │   ├── skills/               # Agent Skills: SkillStore, ADK toolset, LangChain tools (langchain_tools.py)
+│   │   ├── jobs/                 # Long-running jobs: JobManager, backends, job_* tools, resume.py
 │   │   ├── sandbox/
 │   │   │   ├── __init__.py       # sandbox_execute tool
 │   │   │   ├── manager.py        # SandboxManager + session lifecycle
@@ -1318,14 +1453,15 @@ agentic-cli/
 │                                 #  SessionPersistence layer was removed)
 ├── examples/
 │   ├── hello_agent.py            # Basic ADK example
-│   ├── hello_langgraph.py        # Basic LangGraph example
+│   ├── hello_deepagents.py       # Basic Deep Agents example
+│   ├── hello_langgraph.py        # Basic LangGraph example (deprecated)
 │   ├── *_demo.py                 # Feature demonstration scripts
 │   └── research_demo/            # Full-featured example (pip-installable)
 └── tests/
     ├── conftest.py               # MockContext and shared fixtures
     ├── tools/                    # Tool-specific tests (incl. sandbox)
     ├── workflow/                 # Workflow unit tests
-    └── integration/              # ADK + LangGraph pipeline tests
+    └── integration/              # ADK, Deep Agents and LangGraph pipeline tests
 ```
 
 ## License

@@ -256,7 +256,8 @@ class MessageProcessor:
         icon = "✓" if record.state.value == "succeeded" else "✗"
 
         # Resume only if the backend supports it AND the originating conversation
-        # is still available (after a restart the in-memory ADK session is gone).
+        # is still available (with session_store='memory' it is gone after a
+        # restart, on ADK and Deep Agents alike, and a deleted one is gone too).
         # Otherwise surface a notice — the result stays reachable by job id.
         resumable = hasattr(
             workflow, "resume_with_job_result"

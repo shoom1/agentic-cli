@@ -5,8 +5,10 @@ imports at startup. Light types (EventType, AgentConfig, etc.)
 are available immediately.
 
 Submodules:
-- langgraph/: LangGraph-specific implementation (manager, state, middleware, persistence, tools)
-- adk/: Google ADK-specific implementation (placeholder for future refactoring)
+- adk/: the Google ADK backend (the default)
+- deepagents/: the Deep Agents backend (the ``deepagents`` extra)
+- langgraph/: the LangGraph backend (the ``langgraph`` extra; deprecated, removed
+  in 0.8.0)
 """
 
 # Light imports - always available (fast)
@@ -35,7 +37,9 @@ from agentic_cli.workflow.service_registry import get_service, get_service_regis
 _lazy_imports = {
     # ADK manager
     "GoogleADKWorkflowManager": "agentic_cli.workflow.adk.manager",
-    # LangGraph manager (both old and new paths)
+    # Deep Agents manager (the deepagents extra)
+    "DeepAgentsWorkflowManager": "agentic_cli.workflow.deepagents",
+    # LangGraph manager (both old and new paths; deprecated, removed in 0.8.0)
     "LangGraphWorkflowManager": "agentic_cli.workflow.langgraph.manager",
     "LangGraphManager": "agentic_cli.workflow.langgraph.manager",
     # LangGraph state types (for backward compatibility)
@@ -80,6 +84,7 @@ __all__ = [
     "WorkflowSettingsMixin",
     # Managers (lazy)
     "GoogleADKWorkflowManager",
+    "DeepAgentsWorkflowManager",
     "LangGraphWorkflowManager",
     "LangGraphManager",
     # LangGraph state (lazy, for backward compatibility)

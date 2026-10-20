@@ -9,12 +9,16 @@ agent orchestration. It offers:
   model (workflow/langchain_models.py)
 - State checkpointing for long-running tasks
 
+Deprecated in 0.7.0 and removed in 0.8.0: the ``deepagents`` orchestrator
+(``workflow/deepagents/``) replaces it. Its known defects stay unfixed.
+
 Requires the 'langgraph' optional dependency:
     pip install agentic-cli[langgraph]
 """
 
 from __future__ import annotations
 
+import warnings
 from typing import AsyncGenerator, Any, Callable, Literal, TYPE_CHECKING
 
 from agentic_cli.workflow.base_manager import BaseWorkflowManager
@@ -29,7 +33,18 @@ if TYPE_CHECKING:
 
 logger = Loggers.workflow()
 
-# AgentConfig fields the LangGraph backend does not (yet) consume.
+# What constructing the manager tells a library user. Python's default filters
+# show a DeprecationWarning only when it is blamed on code run as __main__: a
+# script that builds the manager itself sees it, while the CLI, which builds it
+# through the factory, never prints it over the terminal UI (the CLI shows its
+# own notice instead).
+_DEPRECATION = (
+    "LangGraphWorkflowManager is deprecated and will be removed in agentic-cli "
+    "0.8.0; use the deepagents orchestrator."
+)
+
+# AgentConfig fields the LangGraph backend ignores. The ADK and Deep Agents
+# backends use them.
 _ADK_ONLY_FIELDS = ("mcp_servers", "skills")
 
 
@@ -51,6 +66,11 @@ def _ignored_adk_only_fields(
 
 class LangGraphWorkflowManager(BaseWorkflowManager):
     """LangGraph-based workflow manager for agentic applications.
+
+    .. deprecated:: 0.7.0
+        Removed in 0.8.0. Use the ``deepagents`` orchestrator
+        (``DeepAgentsWorkflowManager``); sessions saved by this backend do not
+        carry over. Constructing it issues a ``DeprecationWarning``.
 
     This manager uses LangGraph for agent orchestration, providing:
     - Explicit graph-based workflow control
@@ -105,6 +125,9 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
                          "sqlite" for SQLite. None to disable checkpointing.
             on_event: Optional hook to transform/filter events before yielding.
         """
+        # First, so a manager that fails to build still says it is deprecated;
+        # blamed on the caller, whose module Python's filters then judge.
+        warnings.warn(_DEPRECATION, DeprecationWarning, stacklevel=2)
         super().__init__(
             agent_configs=agent_configs,
             settings=settings,
@@ -113,14 +136,18 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
             on_event=on_event,
         )
 
-        # These AgentConfig fields are consumed by the ADK backend only; warn
-        # once if an app set them while running on (or routed to) LangGraph.
+        # LangGraph ignores these AgentConfig fields, which the ADK and Deep
+        # Agents backends use; warn once if an app set them while running on
+        # (or routed to) LangGraph.
         ignored = _ignored_adk_only_fields(self._agent_configs)
         if ignored:
             logger.warning(
                 "langgraph_ignoring_adk_only_fields",
                 agents=ignored,
-                note="mcp_servers/skills are consumed by the ADK backend only",
+                note=(
+                    "mcp_servers/skills are used by the ADK and Deep Agents "
+                    "backends; LangGraph ignores them"
+                ),
             )
 
         self._checkpointer_type = checkpointer

@@ -57,6 +57,23 @@ class TestManagerWarns:
             a and a[0] == "langgraph_ignoring_adk_only_fields" for a, _ in calls
         )
 
+    def test_the_warning_names_the_backends_that_use_them(self, mock_context, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            mgr_mod.logger, "warning", lambda *a, **k: calls.append((a, k))
+        )
+        cfg = AgentConfig(name="a", prompt="p", skills=["x"])
+        LangGraphWorkflowManager(
+            agent_configs=[cfg], settings=mock_context.settings, model="gemini-2.5-flash"
+        )
+        (note,) = [
+            k["note"] for a, k in calls if a and a[0] == "langgraph_ignoring_adk_only_fields"
+        ]
+        assert note == (
+            "mcp_servers/skills are used by the ADK and Deep Agents backends; "
+            "LangGraph ignores them"
+        )
+
     @pytest.mark.parametrize(
         "fields", [{}, {"model_settings": ModelSettings(temperature=0.5)}], ids=["none", "model"]
     )

@@ -3,6 +3,9 @@
 This example demonstrates using the LangGraph orchestration backend
 instead of Google ADK for agent workflows.
 
+The LangGraph backend is deprecated and will be removed in agentic-cli 0.8.0,
+with this example; hello_deepagents.py runs the same assistant on Deep Agents.
+
 Run with: python examples/hello_langgraph.py
 
 Requires LangGraph dependencies:

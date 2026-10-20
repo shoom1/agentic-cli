@@ -39,6 +39,8 @@ class TestLazyPackageRoot:
     def test_every_exported_name_resolves(self, name: str):
         if name == "LangGraphWorkflowManager":
             pytest.importorskip("langgraph")
+        if name == "DeepAgentsWorkflowManager":
+            pytest.importorskip("deepagents")
         assert getattr(agentic_cli, name) is not None
 
     def test_subpackages_stay_reachable_as_attributes(self):
@@ -80,6 +82,37 @@ class TestTopLevelExports:
         assert agentic_cli.TurnResult is TurnResult
         assert agentic_cli.TurnStatus is TurnStatus
         assert agentic_cli.WorkflowState is WorkflowState
+
+
+class TestBackendExports:
+    """Each backend's manager is exported from the root and from
+    ``agentic_cli.workflow``, loaded on first use: the extras' backends only
+    when an application asks for them."""
+
+    @pytest.mark.parametrize("package", ["agentic_cli", "agentic_cli.workflow"])
+    def test_the_deep_agents_manager_is_exported(self, package: str):
+        import importlib
+
+        exported = importlib.import_module(package).__all__
+        assert {"GoogleADKWorkflowManager", "DeepAgentsWorkflowManager",
+                "LangGraphWorkflowManager"} <= set(exported)
+
+    def test_the_exports_are_the_defining_class(self):
+        pytest.importorskip("deepagents")
+        import agentic_cli.workflow as workflow
+        from agentic_cli.workflow.deepagents import DeepAgentsWorkflowManager
+
+        assert agentic_cli.DeepAgentsWorkflowManager is DeepAgentsWorkflowManager
+        assert workflow.DeepAgentsWorkflowManager is DeepAgentsWorkflowManager
+
+    def test_the_workflow_package_loads_no_extra_backend(self):
+        loaded = _run_fresh(
+            "import sys, agentic_cli.workflow; "
+            "print(sorted(m for m in ('deepagents', 'langgraph', "
+            "'agentic_cli.workflow.deepagents', 'agentic_cli.workflow.langgraph') "
+            "if m in sys.modules))"
+        )
+        assert loaded == "[]"
 
 
 class TestModelsExports:

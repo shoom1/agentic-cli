@@ -43,7 +43,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `model_endpoints` entry declares. One agent tree can mix providers, and a
   per-agent native thinking level (`xhigh`, `max`, `minimal`) runs on ADK.
 - **The LangGraph backend runs every provider too**, through a LangChain
-  adapter that Deep Agents will share:
+  adapter that the Deep Agents backend shares (see below):
   `workflow.langchain_models.build_chat_model(resolved, settings=..., app_name=...)`
   builds an agent's model as a LangChain chat model.
   - Gemini runs on `ChatGoogleGenerativeAI` and Claude on `ChatAnthropic`.
@@ -63,7 +63,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   window included. The OpenAI-compatible wire details both adapters send
   (timeouts, the placeholder key, OpenRouter's headers, the reasoning
   parameter) live in `workflow.model_wire`, so an agent sends the same
-  parameters on either backend. One LangGraph agent tree can mix providers,
+  parameters on any backend. One LangGraph agent tree can mix providers,
   and a per-agent native thinking level runs on LangGraph as on ADK.
 - **Model settings**: `openai_api_key` (`OPENAI_API_KEY`) and
   `openrouter_api_key` (`OPENROUTER_API_KEY`), secrets like the other keys
@@ -94,7 +94,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A `/settings` switch to another provider's model says what it costs.**
   One system line per switch names the agents and both models: the
   conversation is kept, but the earlier reasoning from the old provider is
-  not sent to the new model (neither backend sends one provider's reasoning
+  not sent to the new model (no backend sends one provider's reasoning
   to another), and the prompt cache starts over. A switch within one
   provider loses neither and stays silent.
 - **`/models`** shows what the model catalog knows. First a row per provider
@@ -110,13 +110,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shows a key.
 - **A Deep Agents orchestrator: `orchestrator="deepagents"`**, installed by
   the new `deepagents` extra (`pip install 'agentic-cli[deepagents]'`; it
-  installs beside `langgraph`). `DeepAgentsWorkflowManager`
-  (`agentic_cli.workflow.deepagents`) builds each `AgentConfig` as a
-  LangChain `create_agent` graph with selected Deep Agents middleware, on
-  the agent's own model, tools and prompt, under the framework's permission
-  engine; Deep Agents' file tools, `write_todos` and harness profiles are
-  not used. ADK stays the default. Without the extra, the orchestrator
-  raises `ImportError` with that install hint.
+  installs beside `langgraph`, and its LangChain packages are the
+  `langgraph` extra's, with the same effects on `anthropic`, `openai` and
+  `pydantic`; see Changed). `DeepAgentsWorkflowManager`
+  (`agentic_cli.workflow.deepagents`, also exported from `agentic_cli` and
+  `agentic_cli.workflow`) builds each `AgentConfig` as a LangChain
+  `create_agent` graph with selected Deep Agents middleware, on the agent's
+  own model, tools and prompt, under the framework's permission engine; Deep
+  Agents' file tools, `write_todos` and harness profiles are not used. It
+  replaces the LangGraph backend, which is deprecated (see Deprecated). ADK
+  stays the default. Without the extra, the orchestrator raises
+  `ImportError` with that install hint. MCP tools, raw LLM logging, Agent
+  Skills and job resume run on it too (the entries below), and
+  `examples/hello_deepagents.py` is the hello example on it.
   - **Delegation.** A coordinator delegates through Deep Agents' `task` tool
     (`description`, the brief; `subagent_type`, the sub-agent's name), which
     lists each sub-agent as `- name: description`; one without a
@@ -147,8 +153,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     database, never share a conversation through one session id.
     `session_store` picks the checkpointer: sqlite (the default) in
     `{workspace}/sessions/checkpoints.db`, next to ADK's `sessions.db`
-    (`sqlite_uri` may point both backends at one file: their tables do not
-    collide), Postgres at `postgres_uri`, or memory. Every session hook
+    (`sqlite_uri` may point ADK and Deep Agents at one file: their tables do
+    not collide), Postgres at `postgres_uri`, or memory. Every session hook
     takes `user_id`. `list_sessions` gives each session's `last_update`
     (epoch seconds) and `message_count`, `delete_session` also removes the
     sub-agents' checkpoints and returns False for an unknown id, and
@@ -248,7 +254,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   without a `call_id` takes the call's id from it (and its name, unless the
   tool gives one). So `examples/jobs_demo.py`'s `run_shell_job`, which reads
   its call id from ADK's `tool_context` (None on Deep Agents), runs
-  unchanged. Both backends build the payload with
+  unchanged. ADK and Deep Agents both build the payload with
   `agentic_cli.tools.jobs.resume.job_result_payload(record, result)`; what
   ADK sends is unchanged.
 
@@ -305,7 +311,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   An endpoint without `api_key_env` is sent the placeholder key `EMPTY`,
   never `OPENAI_API_KEY`.
 - **Thinking `none` turns thinking off wherever the model allows it**, on
-  both backends. 0.6 sent Gemini no thinking config for `none`, so Gemini
+  every backend. 0.6 sent Gemini no thinking config for `none`, so Gemini
   2.5 Flash and Pro, and Gemini 3, kept thinking at their own default. Now Gemini 2.5
   Flash gets a budget of 0. A model that cannot stop thinking gets its
   least: Gemini 2.5 Pro a budget of 128, Gemini 3 its lowest level, and
@@ -316,11 +322,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `disabled` explicitly.
 - **`generate_simple`, which writes summaries, runs on any default model.**
   It builds the default model through the backend's adapter (the ADK model
-  factory, or the LangChain adapter on LangGraph), with thinking off where
-  the model allows it and the caller's `max_tokens`, and returns the answer
-  without its thinking. 0.6 called the
-  Anthropic SDK for Claude and the Gemini API for anything else, so a GPT,
-  OpenRouter or endpoint default model could not summarize.
+  factory, or the LangChain adapter on Deep Agents and LangGraph), with
+  thinking off where the model allows it and the caller's `max_tokens`, and
+  returns the answer without its thinking. 0.6 called the Anthropic SDK for
+  Claude and the Gemini API for anything else, so a GPT, OpenRouter or
+  endpoint default model could not summarize.
 - **ADK's "Sampling parameters … are ignored" warning no longer prints over
   the UI.** Temperature, top-p and top-k are dropped, with a debug log,
   before ADK sees them, whenever the model rejects them in its
@@ -525,6 +531,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on Deep Agents it picks the summarization thresholds, and
   `prompt_caching_enabled` says Claude is cached on every backend and
   Gemini's explicit caches only on ADK. Only the descriptions change.
+
+### Deprecated
+
+- **The LangGraph backend** (`orchestrator="langgraph"`,
+  `LangGraphWorkflowManager` and its alias `LangGraphManager`, and the
+  `langgraph` extra) is deprecated and will be removed in 0.8.0, with
+  `workflow/langgraph/`. Move to the Deep Agents backend (see Added): install
+  `agentic-cli[deepagents]` and set `orchestrator` to `deepagents`. An app
+  that builds its manager itself builds
+  `DeepAgentsWorkflowManager(agent_configs=..., settings=...)`, which takes no
+  `checkpointer=`: it opens its own from `session_store`. Sessions saved by
+  LangGraph do not carry over; they stay in `{workspace}/checkpoints.db`,
+  untouched. The CLI says this in one warning at startup when the
+  orchestrator is `langgraph`, and again on a `/settings` switch to it, and
+  the `orchestrator` setting's description marks it. Building
+  `LangGraphWorkflowManager` issues a `DeprecationWarning`. Python's default
+  filters show it only when code run as `__main__` builds the manager, so a
+  manager built by `create_workflow_manager_from_settings`, as the CLI builds
+  it, prints nothing. A test suite that turns warnings into errors can ignore
+  this one with the filter
+  `ignore:LangGraphWorkflowManager is deprecated:DeprecationWarning`. The
+  backend's known defects stay unfixed. `tools/langgraph/state_tools.py`
+  stays, since Deep Agents runs on the LangGraph library.
 
 ### Removed
 

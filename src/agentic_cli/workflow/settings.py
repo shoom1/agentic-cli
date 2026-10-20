@@ -310,7 +310,8 @@ class WorkflowSettingsMixin:
         title="Orchestrator",
         description=(
             "Workflow orchestrator backend: adk (the default), deepagents "
-            "(pip install 'agentic-cli[deepagents]') or langgraph"
+            "(pip install 'agentic-cli[deepagents]') or langgraph (deprecated, "
+            "removed in 0.8.0)"
         ),
         json_schema_extra={"ui_order": 100},  # Advanced setting
     )
