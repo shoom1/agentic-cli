@@ -8,6 +8,7 @@ the follow-up turn — exercised against a fake runner (no live model).
 from __future__ import annotations
 
 import asyncio
+import json
 
 from types import SimpleNamespace
 
@@ -144,6 +145,75 @@ async def test_resume_fetches_result_from_job_manager_when_omitted():
     [ev async for ev in mgr.resume_with_job_result(_record())]
     fr = runner.calls[0].new_message.parts[0].function_response
     assert fr.response["result_summary"] == "fetched:j1"
+
+
+# What ADK sent before the payload moved to ``tools/jobs/resume.py``, byte for
+# byte (json.dumps tells 0 from false and keeps the key order).
+_HINT = "Full result via job_result('{0}'); logs via job_logs('{0}')."
+_PINNED_PAYLOADS = [
+    pytest.param(
+        {}, "build output",
+        '{"job_id": "j1", "tool": "run_shell_job", "state": "succeeded", "exit_code": 0, '
+        '"result_summary": "build output", "hint": "' + _HINT.format("j1") + '"}',
+        id="succeeded",
+    ),
+    pytest.param(
+        {"state": JobState.FAILED, "exit_code": 2, "error": "exit 2: no such file"}, None,
+        '{"job_id": "j1", "tool": "run_shell_job", "state": "failed", "exit_code": 2, '
+        '"error": "exit 2: no such file", "hint": "' + _HINT.format("j1") + '"}',
+        id="failed",
+    ),
+    pytest.param(
+        {"state": JobState.CANCELLED, "exit_code": None}, None,
+        '{"job_id": "j1", "tool": "run_shell_job", "state": "cancelled", '
+        '"hint": "' + _HINT.format("j1") + '"}',
+        id="cancelled",
+    ),
+    pytest.param(
+        {}, "x" * 1500,
+        '{"job_id": "j1", "tool": "run_shell_job", "state": "succeeded", "exit_code": 0, '
+        '"result_summary": "' + "x" * 1000 + '\\u2026 (+500 chars)", '
+        '"hint": "' + _HINT.format("j1") + '"}',
+        id="long",
+    ),
+    pytest.param(
+        {}, {"rows": 3, "ok": True},
+        '{"job_id": "j1", "tool": "run_shell_job", "state": "succeeded", "exit_code": 0, '
+        '"result_summary": "{\'rows\': 3, \'ok\': True}", "hint": "' + _HINT.format("j1") + '"}',
+        id="not-text",
+    ),
+    pytest.param(
+        {}, "café ✓",
+        '{"job_id": "j1", "tool": "run_shell_job", "state": "succeeded", "exit_code": 0, '
+        '"result_summary": "caf\\u00e9 \\u2713", "hint": "' + _HINT.format("j1") + '"}',
+        id="unicode",
+    ),
+    pytest.param(
+        {"error": ""}, "",
+        '{"job_id": "j1", "tool": "run_shell_job", "state": "succeeded", "exit_code": 0, '
+        '"result_summary": "", "hint": "' + _HINT.format("j1") + '"}',
+        id="empty",
+    ),
+]
+
+
+@pytest.mark.parametrize(("over", "result", "sent"), _PINNED_PAYLOADS)
+async def test_resume_payload_is_unchanged(over, result, sent):
+    runner = _FakeRunner()
+    mgr = _resume_manager(runner)
+
+    [ev async for ev in mgr.resume_with_job_result(_record(**over), result=result)]
+
+    fr = runner.calls[0].new_message.parts[0].function_response
+    assert json.dumps(fr.response) == sent
+
+
+@pytest.mark.parametrize(("over", "result", "sent"), _PINNED_PAYLOADS)
+def test_the_shared_payload_is_the_one_adk_sends(over, result, sent):
+    """Deep Agents' notification carries the same payload (``tools/jobs/resume.py``)."""
+    from agentic_cli.tools.jobs.resume import job_result_payload
+
+    assert json.dumps(job_result_payload(_record(**over), result)) == sent
 
 
 async def test_resume_missing_call_id_yields_nothing():

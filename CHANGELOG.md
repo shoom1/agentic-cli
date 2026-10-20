@@ -227,6 +227,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `adk_inject_state` frontmatter keys, stay ADK-only.
   `agentic_cli.tools.skills.make_skill_tools(skills)` returns the tools and
   the instruction.
+- **Job resume on Deep Agents** (`job_auto_resume`, `/resume`). A
+  long-running tool's call gets the tool's pending result at once, and the
+  turn ends. When the job finishes, `resume_with_job_result(record)` runs a
+  turn in the job's conversation whose input is one user message the
+  framework writes: `[Automatic job notification — not written by the
+  user]`, then, as JSON, the summary-and-pointer payload ADK sends as the
+  pending call's result. The root agent receives it, also for a job a
+  sub-agent started. The message is marked in its `response_metadata`
+  (`{"agentic_cli": {"kind": "job_result", "job_id": ...}}`), which no
+  provider is sent; `recent_messages`, and so fact extraction, leaves it
+  out, and the checkpoint keeps it for the model. `can_resume` needs the
+  record's session and user, and that conversation in this app: with sqlite
+  or Postgres a job that finishes after a restart still resumes, while with
+  `memory` after a restart, or once the session was deleted, the CLI shows
+  its "finished while its conversation was unavailable" notice and no turn
+  runs. Each tool call runs as the active tool call
+  (`agentic_cli.workflow.sessions.get_active_tool_call()`, a
+  `ToolCallRef(call_id, name)`), and `JobManager.submit(resume_on_complete=True)`
+  without a `call_id` takes the call's id from it (and its name, unless the
+  tool gives one). So `examples/jobs_demo.py`'s `run_shell_job`, which reads
+  its call id from ADK's `tool_context` (None on Deep Agents), runs
+  unchanged. Both backends build the payload with
+  `agentic_cli.tools.jobs.resume.job_result_payload(record, result)`; what
+  ADK sends is unchanged.
 
 ### Changed
 

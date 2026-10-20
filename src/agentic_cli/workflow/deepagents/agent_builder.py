@@ -24,7 +24,9 @@ other), then the model side and the tool side.
   ``prompt_caching_enabled`` the cache marks land on the final request
   (``AnthropicPromptCachingMiddleware``: the system prompt, the last tool and
   the conversation, for 5 minutes, as on ADK).
-- Tool side: the permission gate and, inside it, the tool-error middleware.
+- Tool side, outermost first: the permission gate, the tool-error
+  middleware, and the active tool call (a job a tool starts is linked to its
+  call), so only a call the gate let through runs as one.
 
 The model side is built from the agent's resolved model and the settings; a
 tree built without settings (a unit test's) has the tool side only.
@@ -51,6 +53,7 @@ from agentic_cli.tools.registry import (
 )
 from agentic_cli.workflow.config import AgentConfig, AgentGraphError
 from agentic_cli.workflow.deepagents.middleware import (
+    ActiveToolCallMiddleware,
     ForeignReasoningMiddleware,
     PermissionMiddleware,
     ToolCallErrorMiddleware,
@@ -165,7 +168,11 @@ def _middleware(
     if subagents:
         stack.append(_delegation(subagents))
     stack += model_side
-    stack += [PermissionMiddleware(config.name, bound=bound), ToolCallErrorMiddleware()]
+    stack += [
+        PermissionMiddleware(config.name, bound=bound),
+        ToolCallErrorMiddleware(),
+        ActiveToolCallMiddleware(),
+    ]
     return stack
 
 

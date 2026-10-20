@@ -49,6 +49,7 @@ from agentic_cli.workflow.deepagents import agent_builder, summarization  # noqa
 from agentic_cli.workflow.deepagents.agent_builder import build_agent_tree  # noqa: E402
 from agentic_cli.workflow.deepagents.manager import DeepAgentsWorkflowManager  # noqa: E402
 from agentic_cli.workflow.deepagents.middleware import (  # noqa: E402
+    ActiveToolCallMiddleware,
     ForeignReasoningMiddleware,
     PermissionMiddleware,
     ToolCallErrorMiddleware,
@@ -317,7 +318,7 @@ class TestTheStack:
         assert [type(m) for m in lead] == [
             PatchToolCallsMiddleware, SubAgentMiddleware, ForeignReasoningMiddleware,
             ReportingSummarizationMiddleware, AnthropicPromptCachingMiddleware,
-            PermissionMiddleware, ToolCallErrorMiddleware,
+            PermissionMiddleware, ToolCallErrorMiddleware, ActiveToolCallMiddleware,
         ]
         assert issubclass(ReportingSummarizationMiddleware, SummarizationMiddleware)
         assert lead[2].kind is ProviderKind.ANTHROPIC
@@ -326,6 +327,7 @@ class TestTheStack:
         assert [type(m) for m in created["helper"]["middleware"]] == [
             PatchToolCallsMiddleware, ForeignReasoningMiddleware,
             ReportingSummarizationMiddleware, PermissionMiddleware, ToolCallErrorMiddleware,
+            ActiveToolCallMiddleware,
         ]
         assert created["helper"]["middleware"][1].kind is ProviderKind.GOOGLE
         assert created["helper"]["middleware"][2].agent == "helper"

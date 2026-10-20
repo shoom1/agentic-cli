@@ -7,6 +7,8 @@ gets these; sub-agents are gated as strictly as the root.
   engine, identifying the tool by the object the registry issued.
 - :class:`ToolCallErrorMiddleware`, inside the gate, gives a tool that raised
   the error result ADK's ``ToolErrorPlugin`` gives, so the turn goes on.
+- :class:`ActiveToolCallMiddleware`, innermost, runs each tool as the active
+  tool call, which links a job the tool starts to its call.
 - :class:`ForeignReasoningMiddleware`, on the model side, sends no model
   another provider's reasoning.
 
@@ -38,6 +40,11 @@ from agentic_cli.tools.registry import ToolDefinition, get_registry, identify_to
 from agentic_cli.workflow.langchain_models import without_foreign_reasoning
 from agentic_cli.workflow.permissions.capabilities import _CapabilityExempt
 from agentic_cli.workflow.service_registry import PERMISSION_ENGINE, get_service
+from agentic_cli.workflow.sessions import (
+    ToolCallRef,
+    reset_active_tool_call,
+    set_active_tool_call,
+)
 from agentic_cli.workflow.tool_errors import tool_error_result, unknown_tool_result
 
 logger = Loggers.workflow()
@@ -232,6 +239,45 @@ class ToolCallErrorMiddleware(AgentMiddleware):
             if _is_delegation(request.tool):
                 raise
             return _error_message(request.tool_call, error)
+
+
+class ActiveToolCallMiddleware(AgentMiddleware):
+    """Each tool runs with its own call as the active tool call.
+
+    The call's ``(id, name)`` is set around the tool and reset afterwards,
+    however it ends (``workflow.sessions.set_active_tool_call``).
+    ``JobManager.submit`` reads it, so a job a long-running tool starts is
+    linked to that call even when the tool, written for ADK, reads its call
+    id from a ``tool_context`` that is None here. Each call runs in its own
+    task, so parallel calls never see each other's; a sub-agent's call runs
+    inside its coordinator's ``task`` call and restores it when done.
+    """
+
+    async def awrap_tool_call(
+        self,
+        request: ToolCallRequest,
+        handler: Callable[[ToolCallRequest], Awaitable[_ToolResult]],
+    ) -> _ToolResult:
+        token = set_active_tool_call(_call_ref(request.tool_call))
+        try:
+            return await handler(request)
+        finally:
+            reset_active_tool_call(token)
+
+    def wrap_tool_call(
+        self,
+        request: ToolCallRequest,
+        handler: Callable[[ToolCallRequest], _ToolResult],
+    ) -> _ToolResult:
+        token = set_active_tool_call(_call_ref(request.tool_call))
+        try:
+            return handler(request)
+        finally:
+            reset_active_tool_call(token)
+
+
+def _call_ref(call: ToolCall) -> ToolCallRef:
+    return ToolCallRef(call_id=call["id"], name=call["name"])
 
 
 class ForeignReasoningMiddleware(AgentMiddleware):

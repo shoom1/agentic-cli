@@ -10,6 +10,11 @@ sub-agents' included, also carries the three values in its metadata
 Sub-agent checkpoints sit in the same thread under their task's namespace
 (``tools:<task-id>``): a listing keeps the root namespace (``""``), and
 deleting the thread removes them with it.
+
+A finished job reports to the conversation in a ``HumanMessage`` of its own
+(``job_notification``), marked in its ``response_metadata``, which no
+provider adapter sends. The model reads it as the rest of the conversation;
+``recent`` leaves it out, because the user did not write it.
 """
 
 from __future__ import annotations
@@ -20,6 +25,7 @@ from typing import TYPE_CHECKING, Any
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
+from agentic_cli.tools.jobs.resume import JOB_NOTICE_HEADER, job_result_payload
 from agentic_cli.workflow.sessions import SessionRef
 
 if TYPE_CHECKING:
@@ -27,6 +33,12 @@ if TYPE_CHECKING:
 
 #: The namespace of the root agent's checkpoints.
 _ROOT = ""
+
+#: Where a message the framework wrote is marked (``response_metadata``).
+_MARK = "agentic_cli"
+
+#: The mark's ``kind`` on a job notification.
+JOB_RESULT = "job_result"
 
 
 def thread_id(ref: SessionRef) -> str:
@@ -65,6 +77,29 @@ def run_config(ref: SessionRef, **extra: Any) -> dict[str, Any]:
         },
         **extra,
     }
+
+
+def job_notification(record: Any, result: Any) -> HumanMessage:
+    """The message that tells the root agent ``record``'s job finished.
+
+    Its text is ``JOB_NOTICE_HEADER``, then the payload ADK sends as the
+    pending call's result (``job_result_payload``), as JSON.
+
+    Args:
+        record: The finished ``JobRecord``.
+        result: The job's result, or None.
+    """
+    payload = job_result_payload(record, result)
+    return HumanMessage(
+        content=f"{JOB_NOTICE_HEADER}\n{json.dumps(payload, ensure_ascii=False)}",
+        response_metadata={_MARK: {"kind": JOB_RESULT, "job_id": record.job_id}},
+    )
+
+
+def is_job_notification(message: BaseMessage) -> bool:
+    """Whether ``message`` is a job notification (by its mark, never its text)."""
+    mark = message.response_metadata.get(_MARK)
+    return isinstance(mark, dict) and mark.get("kind") == JOB_RESULT
 
 
 class CheckpointSessions:
@@ -127,12 +162,14 @@ class CheckpointSessions:
         """The last ``limit`` user and assistant texts of ``ref``'s conversation.
 
         Each is ``{"role": "user" | "assistant", "content": <text>}``, the
-        message's text blocks joined; tool calls and results, reasoning and
-        messages without text are left out.
+        message's text blocks joined; tool calls and results, reasoning,
+        messages without text and job notifications are left out.
         """
         out: list[dict] = []
         for message in _messages(await self._root(ref)):
             if isinstance(message, HumanMessage):
+                if is_job_notification(message):
+                    continue
                 role = "user"
             elif isinstance(message, AIMessage):
                 role = "assistant"

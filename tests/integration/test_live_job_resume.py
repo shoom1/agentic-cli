@@ -1,4 +1,4 @@
-"""Live end-to-end validation of ADK push/resume (phase-2 milestone 2).
+"""Live end-to-end validation of push/resume (phase-2 milestone 2, and 5 on Deep Agents).
 
 Drives the *real* resume mechanic against a live Gemini model in a single
 process: turn 1 calls a long-running tool (which starts a job and leaves the
@@ -8,10 +8,13 @@ call pending); we then hand the finished result back via
 This is the test that answers the open "pending-response shape" question — it is
 parametrized on whether the tool's initial return is a ``{"status":"pending"}``
 dict or ``None`` — and proves ADK accepts a second ``FunctionResponse`` for an
-already-pending long-running call.
+already-pending long-running call. On Deep Agents the call keeps its pending
+result, and the root is told in a notification message of its own; the job
+is linked to its call through the active tool call, since the tool's
+``tool_context`` is None there.
 
-Marked ``@pytest.mark.llm`` (skipped by default; costs a few real calls). ADK
-only, so it requires GOOGLE_API_KEY:
+Marked ``@pytest.mark.llm`` (skipped by default; costs a few real calls). Every
+case runs on Gemini, so it requires GOOGLE_API_KEY:
 
     conda run -n agenticcli python -m pytest tests/integration/test_live_job_resume.py -v -m llm
 """
@@ -34,6 +37,7 @@ from agentic_cli.workflow.events import EventType
 from agentic_cli.workflow.factory import create_workflow_manager_from_settings
 from agentic_cli.workflow.permissions import Capability
 from agentic_cli.workflow.service_registry import JOB_MANAGER, get_service
+from agentic_cli.workflow.settings import OrchestratorType
 
 from tests.integration.helpers import find_events, find_tool_calls
 
@@ -168,6 +172,64 @@ async def test_long_running_tool_then_resume(live_settings, return_none: bool):
             f"resume produced no model text (shape={'none' if return_none else 'pending_dict'}); "
             f"events: {[(e.type, e.content[:40]) for e in turn2]}"
         )
+    finally:
+        manager.clear_input_callback()
+        await manager.cleanup()
+
+
+async def test_deepagents_long_running_tool_then_resume(live_settings):
+    """Deep Agents: the job is linked to its call, then a notification turn reports it."""
+    pytest.importorskip("deepagents")
+    _SHAPE["return_none"] = False
+    live_settings.orchestrator = OrchestratorType.DEEPAGENTS
+
+    manager = create_workflow_manager_from_settings(
+        agent_configs=[_AGENT], settings=live_settings
+    )
+    assert manager.backend_type == "deepagents"
+
+    async def _auto_input(request) -> str:  # noqa: ANN001
+        return "yes, proceed"
+
+    manager.set_input_callback(_auto_input)
+    try:
+        session_id = "live-resume-deepagents"
+        turn1 = []
+        async for ev in manager.process(
+            message="Start a background job now.", user_id="tester", session_id=session_id
+        ):
+            turn1.append(ev)
+
+        calls = find_tool_calls(turn1, "live_resume_probe")
+        assert calls, (
+            "model did not call the long-running tool; calls: "
+            f"{[c.metadata.get('tool_name') for c in find_tool_calls(turn1)]}"
+        )
+        jm = manager.job_manager
+        awaiting = [r for r in jm.list() if r.resume_on_complete]
+        assert len(awaiting) == 1, f"expected one resume-flagged job, got {awaiting}"
+        record = awaiting[0]
+        # tool_context is None here: the id came from the active tool call.
+        assert record.call_id == calls[0].metadata["tool_call_id"]
+        assert record.session_id == session_id and record.user_id == "tester"
+        assert await manager.can_resume(record) is True
+
+        _wait_terminal(jm, record.job_id)
+        record = jm.get(record.job_id)
+
+        turn2 = []
+        async for ev in manager.resume_with_job_result(record):
+            turn2.append(ev)
+
+        assert not find_events(turn2, EventType.ERROR), (
+            f"the resume turn failed: {find_events(turn2, EventType.ERROR)}"
+        )
+        assert find_events(turn2, EventType.TEXT), (
+            f"resume produced no model text; events: "
+            f"{[(e.type, e.content[:40]) for e in turn2]}"
+        )
+        recent = await manager.recent_messages(session_id, user_id="tester")
+        assert not [m for m in recent if "Automatic job notification" in m["content"]]
     finally:
         manager.clear_input_callback()
         await manager.cleanup()

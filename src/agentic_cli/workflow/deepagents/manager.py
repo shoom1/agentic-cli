@@ -12,7 +12,9 @@ reopens them. An agent's ``skills`` become the skill tools ADK offers
 (``tools/skills/langchain_tools.py``), with ADK's instruction appended to its
 prompt. With ``raw_llm_logging`` on, a turn's every model call is logged
 (``LLM_REQUEST``/``LLM_RESPONSE``, in the stream and in
-``~/.{app_name}/logs/llm_events.jsonl``).
+``~/.{app_name}/logs/llm_events.jsonl``). A long-running job that finishes
+resumes its conversation with a turn of its own, opened by a notification to
+the root agent (``resume_with_job_result``).
 
 Lifecycle follows ADK's contract (``workflow/adk/manager.py``): initialization,
 ``reinitialize`` and ``cleanup`` hold the lifecycle lock and then the turn
@@ -50,11 +52,16 @@ from agentic_cli.workflow.deepagents.event_processor import (
     RunCallback,
 )
 from agentic_cli.workflow.deepagents.mcp_tools import MCPSessions, without_clashes
-from agentic_cli.workflow.deepagents.sessions import CheckpointSessions, run_config
+from agentic_cli.workflow.deepagents.sessions import (
+    CheckpointSessions,
+    job_notification,
+    run_config,
+)
 from agentic_cli.workflow.deepagents.tools import to_langchain_tools
 from agentic_cli.workflow.events import WorkflowEvent
 from agentic_cli.workflow.langchain_models import build_chat_model
 from agentic_cli.workflow.llm_log import LLMLogWriter
+from agentic_cli.workflow.service_registry import JOB_MANAGER
 
 if TYPE_CHECKING:
     from contextlib import AbstractAsyncContextManager
@@ -459,16 +466,103 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
 
         async with self._turn_admission():
             with self._workflow_context(session_id=current_session_id, user_id=user_id):
-                notices, self._pending_notices = self._pending_notices, []
-                for notice in notices:
-                    notice = self._apply_event_hook(notice)
-                    if notice is not None:
-                        yield notice
+                for notice in self._take_notices():
+                    yield notice
                 ref = self.session_ref(current_session_id, user_id)
                 async for event in self._run_turn(
                     ref, {"messages": [HumanMessage(content=message)]}
                 ):
                     yield event
+
+    async def can_resume(self, record) -> bool:
+        """True iff the job's conversation is still there to resume into.
+
+        It needs the record's session and user, and that conversation in this
+        app, holding a message. The call id is not needed: the root agent is
+        told in a message of its own, not as a second result for the call.
+        With a durable ``session_store`` (sqlite, the default, or postgres) a
+        job that finishes after a restart still resumes. After the session
+        was deleted, or with ``memory`` once the process restarted, it does
+        not, and the CLI says the job finished while its conversation was
+        unavailable.
+        """
+        if not (record.session_id and record.user_id) or self._sessions is None:
+            return False
+        return await self._sessions.exists(
+            self.session_ref(record.session_id, record.user_id)
+        )
+
+    async def resume_with_job_result(
+        self, record, result: Any = None
+    ) -> AsyncGenerator[WorkflowEvent, None]:
+        """Tell the root agent a long-running job finished, in a turn of its own.
+
+        The turn's input is one ``HumanMessage`` (``sessions.job_notification``):
+        ``JOB_NOTICE_HEADER``, then the payload ADK sends, as JSON, marked so
+        ``recent_messages`` leaves it out. It cannot be the call's
+        ``ToolMessage``: the call already has its pending result, and
+        Anthropic and OpenAI take one result per call. The root receives it
+        whichever agent started the job, since a sub-agent's run ended when
+        its ``task`` returned. Otherwise it is a turn like any other: it waits
+        for the turn lock and runs under the record's session and user. A
+        record without its session or user, or whose conversation is not
+        there (deleted, or another user's or app's), runs nothing and starts
+        no conversation.
+
+        Args:
+            record: The finished ``JobRecord``.
+            result: The job's result; fetched from the JobManager if omitted.
+
+        Yields:
+            The turn's ``WorkflowEvent``s, each through ``on_event``.
+        """
+        session_id, user_id = record.session_id, record.user_id
+        if not session_id or not user_id:
+            logger.warning(
+                "job_resume_missing_ids",
+                job_id=getattr(record, "job_id", None),
+                have_session=bool(session_id),
+                have_user=bool(user_id),
+            )
+            return
+
+        bind_context(session_id=session_id, user_id=user_id)
+
+        async with self._turn_admission():
+            with self._workflow_context(session_id=session_id, user_id=user_id):
+                ref = self.session_ref(session_id, user_id)
+                # Streaming into a thread that is not there would start one.
+                if not await self._sessions.exists(ref):
+                    logger.warning(
+                        "job_resume_session_missing",
+                        job_id=record.job_id,
+                        session_id=session_id,
+                    )
+                    return
+
+                if result is None:
+                    jobs = self._services.get(JOB_MANAGER)
+                    if jobs is not None:
+                        result = jobs.result(record.job_id)
+
+                logger.info(
+                    "job_resume_started",
+                    job_id=record.job_id,
+                    call_id=record.call_id,
+                    state=record.state.value,
+                )
+                for notice in self._take_notices():
+                    yield notice
+                async for event in self._run_turn(
+                    ref, {"messages": [job_notification(record, result)]}
+                ):
+                    yield event
+
+    def _take_notices(self) -> list[WorkflowEvent]:
+        """The pending notices, through ``on_event``; they open one turn only."""
+        notices, self._pending_notices = self._pending_notices, []
+        hooked = (self._apply_event_hook(notice) for notice in notices)
+        return [notice for notice in hooked if notice is not None]
 
     async def _run_turn(
         self, ref: "SessionRef", graph_input: dict[str, Any]

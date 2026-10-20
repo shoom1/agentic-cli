@@ -41,6 +41,7 @@ from agentic_cli.workflow.config import AgentConfig, AgentGraphError  # noqa: E4
 from agentic_cli.workflow.deepagents import agent_builder  # noqa: E402
 from agentic_cli.workflow.deepagents.agent_builder import build_agent_tree  # noqa: E402
 from agentic_cli.workflow.deepagents.middleware import (  # noqa: E402
+    ActiveToolCallMiddleware,
     PermissionMiddleware,
     ToolCallErrorMiddleware,
 )
@@ -164,7 +165,8 @@ class TestTheTree:
         assert state["messages"][-1].text == "Hi."
         assert root.checkpointer is saver
         assert [type(m) for m in created["solo"]["middleware"]] == [
-            PatchToolCallsMiddleware, PermissionMiddleware, ToolCallErrorMiddleware
+            PatchToolCallsMiddleware, PermissionMiddleware, ToolCallErrorMiddleware,
+            ActiveToolCallMiddleware,
         ]
 
     async def test_each_agent_runs_on_its_own_model_and_prompt(self, created):
@@ -380,7 +382,7 @@ class TestWhatASubAgentSees:
 
 
 class TestEveryStack:
-    def test_the_gate_and_the_error_middleware_in_order(self, created):
+    def test_the_gate_the_error_and_the_active_call_middleware_in_order(self, created):
         configs = [
             AgentConfig(name="coordinator", prompt="p", sub_agents=["lead"]),
             AgentConfig(name="lead", prompt="p", sub_agents=["worker"], description="l"),
@@ -391,12 +393,13 @@ class TestEveryStack:
 
         delegating = [
             PatchToolCallsMiddleware, SubAgentMiddleware,
-            PermissionMiddleware, ToolCallErrorMiddleware,
+            PermissionMiddleware, ToolCallErrorMiddleware, ActiveToolCallMiddleware,
         ]
         assert [type(m) for m in created["coordinator"]["middleware"]] == delegating
         assert [type(m) for m in created["lead"]["middleware"]] == delegating
         assert [type(m) for m in created["worker"]["middleware"]] == [
-            PatchToolCallsMiddleware, PermissionMiddleware, ToolCallErrorMiddleware
+            PatchToolCallsMiddleware, PermissionMiddleware, ToolCallErrorMiddleware,
+            ActiveToolCallMiddleware,
         ]
         for name, kwargs in created.items():
             (gate,) = [m for m in kwargs["middleware"] if isinstance(m, PermissionMiddleware)]
