@@ -22,6 +22,10 @@ Middleware hooks' updates are not output (``PatchToolCallsMiddleware`` re-adds
 the whole history when it patches it), and a model call inside a tool
 (``generate_simple``) is no node at all, so it cannot leak into the answer.
 Every event carries ``metadata["agent"]``.
+
+What happens inside a node and is no node output (a summary call and the
+summary it made) reaches ``RunCallback`` instead, the turn's LangChain
+callback handler.
 """
 
 from __future__ import annotations
@@ -30,16 +34,23 @@ import json
 from collections import deque
 from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, Any
+from uuid import UUID
 
 from langchain_core.callbacks import AsyncCallbackHandler
 from langchain_core.messages import AIMessage, ToolMessage
 
 from agentic_cli.tools._core.delegation import TASK_TOOL
 from agentic_cli.tools._core.tasks import task_progress_data
+from agentic_cli.workflow.deepagents.summarization import CONTEXT_SUMMARIZED
 from agentic_cli.workflow.events import WorkflowEvent
 
 if TYPE_CHECKING:
+    from langchain_core.outputs import LLMResult
+
     from agentic_cli.models import ResolvedModel
+
+#: The tag LangChain's summarization puts on its summary call's run metadata.
+_SUMMARY_SOURCE = "summarization"
 
 Namespace = tuple[str, ...]
 
@@ -201,23 +212,32 @@ class DeepAgentsEventProcessor:
         ]
 
     def _usage(self, agent: str, usage: Mapping[str, Any]) -> WorkflowEvent:
-        inputs = usage.get("input_token_details") or {}
-        outputs = usage.get("output_token_details") or {}
         model = self._agent_models.get(agent) or self._agent_models.get(self._root)
-        return WorkflowEvent.llm_usage(
-            model=str(model.ref) if model is not None else "unknown",
-            prompt_tokens=usage.get("input_tokens"),
-            completion_tokens=usage.get("output_tokens"),
-            total_tokens=usage.get("total_tokens"),
-            thinking_tokens=outputs.get("reasoning"),
-            cached_tokens=inputs.get("cache_read"),
-            cache_creation_tokens=inputs.get("cache_creation"),
-        )
+        return usage_event(model, usage)
 
     @staticmethod
     def _attributed(event: WorkflowEvent, agent: str) -> WorkflowEvent:
         event.metadata["agent"] = agent
         return event
+
+
+def usage_event(model: "ResolvedModel | None", usage: Mapping[str, Any]) -> WorkflowEvent:
+    """``LLM_USAGE`` for a call on ``model`` that reported ``usage``.
+
+    ``usage`` is LangChain's ``usage_metadata``: cache reads and writes are its
+    ``input_token_details``, thinking its ``output_token_details.reasoning``.
+    """
+    inputs = usage.get("input_token_details") or {}
+    outputs = usage.get("output_token_details") or {}
+    return WorkflowEvent.llm_usage(
+        model=str(model.ref) if model is not None else "unknown",
+        prompt_tokens=usage.get("input_tokens"),
+        completion_tokens=usage.get("output_tokens"),
+        total_tokens=usage.get("total_tokens"),
+        thinking_tokens=outputs.get("reasoning"),
+        cached_tokens=inputs.get("cache_read"),
+        cache_creation_tokens=inputs.get("cache_creation"),
+    )
 
 
 def _delegated_to(payload: dict) -> str | None:
@@ -240,14 +260,69 @@ class RunCallback(AsyncCallbackHandler):
     """Collects one turn's events that the stream cannot carry.
 
     Attached to the turn's run config, LangChain hands it to every model call
-    in the run, sub-agents' and tools' included. The manager drains it after
-    each stream item, so what it collected goes out in order with the rest.
+    in the run, sub-agents' and tools' included. The manager drains it at each
+    stream item, before that item's own events: what it collected happened
+    inside the node whose output the item is.
+
+    - A summary call (run metadata ``lc_source="summarization"``) reports its
+      ``LLM_USAGE``, with ``purpose="summarization"``, on the model of the
+      agent it summarized for.
+    - A summary applied (``CONTEXT_SUMMARIZED``) is ``CONTEXT_TRIMMED``, with
+      ``source="summarization"``.
+
+    Args:
+        root: The root agent, for a call no agent is named on.
+        agent_models: Each agent's resolved model, by name.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, root: str, agent_models: Mapping[str, "ResolvedModel"]) -> None:
         super().__init__()
+        self._root = root
+        self._agent_models = agent_models
         # A sync tool's model call reports from LangChain's executor thread.
         self._events: deque[WorkflowEvent] = deque()
+        # Summary call run id -> the agent it summarizes for.
+        self._summaries: dict[UUID, str] = {}
+
+    async def on_chat_model_start(
+        self,
+        serialized: dict[str, Any],
+        messages: list[list[Any]],
+        *,
+        run_id: UUID,
+        metadata: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        metadata = metadata or {}
+        if metadata.get("lc_source") == _SUMMARY_SOURCE:
+            # create_agent names its runs after the agent.
+            self._summaries[run_id] = metadata.get("lc_agent_name") or self._root
+
+    async def on_llm_end(self, response: "LLMResult", *, run_id: UUID, **kwargs: Any) -> None:
+        agent = self._summaries.pop(run_id, None)
+        if agent is None:
+            return
+        event = usage_event(self._agent_models.get(agent), _usage_of(response))
+        event.metadata.update(purpose=_SUMMARY_SOURCE, agent=agent)
+        self._emit(event)
+
+    async def on_llm_error(self, error: BaseException, *, run_id: UUID, **kwargs: Any) -> None:
+        self._summaries.pop(run_id, None)
+
+    async def on_custom_event(
+        self, name: str, data: Any, *, run_id: UUID, **kwargs: Any
+    ) -> None:
+        if name != CONTEXT_SUMMARIZED or not isinstance(data, dict):
+            return
+        agent = data.get("agent") or self._root
+        event = WorkflowEvent.context_trimmed(
+            messages_before=data["messages_before"],
+            messages_after=data["messages_after"],
+            source=_SUMMARY_SOURCE,
+            agent=agent,
+        )
+        event.metadata["messages_summarized"] = data["messages_summarized"]
+        self._emit(event)
 
     def _emit(self, event: WorkflowEvent) -> None:
         self._events.append(event)
@@ -258,3 +333,13 @@ class RunCallback(AsyncCallbackHandler):
         while self._events:
             events.append(self._events.popleft())
         return events
+
+
+def _usage_of(response: "LLMResult") -> Mapping[str, Any]:
+    """The usage a chat model reported for its (first) generation, or none."""
+    for generations in response.generations:
+        for generation in generations:
+            usage = getattr(getattr(generation, "message", None), "usage_metadata", None)
+            if usage:
+                return usage
+    return {}

@@ -227,3 +227,19 @@ class TestContextWindowTracking:
         tracker.reset()
         assert tracker.last_prompt_tokens == 0
         assert tracker.context_trimmed_count == 0
+
+    def test_a_summary_call_counts_but_is_not_the_context(self):
+        """A summarization call's prompt is the history it condenses, not the
+        conversation's context: it adds to the totals only."""
+        tracker = UsageTracker()
+        tracker.record({"prompt_tokens": 10000, "completion_tokens": 100})
+
+        result = tracker.record(
+            {"prompt_tokens": 7000, "completion_tokens": 400, "purpose": "summarization"}
+        )
+
+        assert result is False
+        assert tracker.context_trimmed_count == 0
+        assert tracker.last_prompt_tokens == 10000
+        assert (tracker.prompt_tokens, tracker.completion_tokens) == (17000, 500)
+        assert tracker.invocation_count == 2

@@ -381,7 +381,7 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             agent_models=self._resolved_models,
             session_id=ref.session_id,
         )
-        callback = RunCallback()
+        callback = RunCallback(root=self._root_name, agent_models=self._resolved_models)
         stream = self._root.astream(
             graph_input,
             run_config(ref, callbacks=[callback]),
@@ -393,8 +393,10 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             # aclosing: a cancelled turn closes the stream, and its tasks, now.
             async with contextlib.aclosing(stream):
                 async for namespace, mode, payload in stream:
-                    events = processor.process(namespace, mode, payload)
-                    for event in events + callback.drain():
+                    # What the callback collected happened inside the node this
+                    # item reports (a summary before the answer it made room for).
+                    events = callback.drain() + processor.process(namespace, mode, payload)
+                    for event in events:
                         event = self._apply_event_hook(event)
                         if event is not None:
                             count += 1

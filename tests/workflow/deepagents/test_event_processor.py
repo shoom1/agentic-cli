@@ -479,7 +479,7 @@ class TestAttribution:
 
 class TestRunCallback:
     def test_drain_hands_over_what_was_collected_once(self):
-        callback = RunCallback()
+        callback = RunCallback(root="coordinator", agent_models=MODELS)
         first, second = WorkflowEvent.text("a"), WorkflowEvent.text("b")
 
         callback._emit(first)

@@ -118,7 +118,13 @@ class WorkflowSettingsMixin:
     context_window_enabled: bool = Field(
         default=False,
         title="Context Window Management",
-        description="Enable automatic context window management to prevent overflow",
+        description=(
+            "Manage the context window with the two token counts below. On Deep "
+            "Agents, summarization is always on and this picks its thresholds: "
+            "off, automatic ones from the model's input budget; on, the trigger "
+            "(capped at the automatic one, if the model's window is known) and "
+            "the tail kept"
+        ),
         json_schema_extra={"ui_order": 25},
     )
     context_window_trigger_tokens: int = Field(
@@ -663,8 +669,8 @@ class WorkflowSettingsMixin:
         default=True,
         title="Prompt Caching",
         description=(
-            "Cache prompts on Claude (both backends) and Gemini (ADK only, whose caches "
-            "are billed for storage); reduces cost and latency"
+            "Cache prompts on Claude (every backend) and Gemini (explicit caches on "
+            "ADK only, billed for storage); reduces cost and latency"
         ),
         json_schema_extra={"ui_order": 170},
     )

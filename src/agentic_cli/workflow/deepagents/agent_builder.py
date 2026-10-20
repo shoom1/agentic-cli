@@ -16,8 +16,18 @@ with it.
 Every stack, outermost first: ``PatchToolCallsMiddleware`` (answers a tool
 call a cancelled turn left without a result, before each run), the
 coordinator's ``SubAgentMiddleware`` (so its ``task`` tool is gated like any
-other), then the tool side: the permission gate and, inside it, the
-tool-error middleware.
+other), then the model side and the tool side.
+
+- Model side, outermost first: other providers' reasoning is left out of the
+  request (``ForeignReasoningMiddleware``), Deep Agents' summarization counts
+  exactly what will be sent (``summarization.py``), and on Claude with
+  ``prompt_caching_enabled`` the cache marks land on the final request
+  (``AnthropicPromptCachingMiddleware``: the system prompt, the last tool and
+  the conversation, for 5 minutes, as on ADK).
+- Tool side: the permission gate and, inside it, the tool-error middleware.
+
+The model side is built from the agent's resolved model and the settings; a
+tree built without settings (a unit test's) has the tool side only.
 """
 
 from __future__ import annotations
@@ -28,16 +38,20 @@ from typing import TYPE_CHECKING
 from deepagents import CompiledSubAgent, SubAgentMiddleware
 from deepagents.middleware.patch_tool_calls import PatchToolCallsMiddleware
 from langchain.agents import create_agent
+from langchain_anthropic.middleware import AnthropicPromptCachingMiddleware
 
 from agentic_cli.logging import Loggers
+from agentic_cli.models import CacheMechanism
 from agentic_cli.tools._core.delegation import TASK_TOOL
 from agentic_cli.tools.registry import bind_tool_identity, get_registry
 from agentic_cli.workflow.config import AgentConfig, AgentGraphError
 from agentic_cli.workflow.deepagents.middleware import (
+    ForeignReasoningMiddleware,
     PermissionMiddleware,
     ToolCallErrorMiddleware,
 )
 from agentic_cli.workflow.deepagents.state import AgentCliState
+from agentic_cli.workflow.deepagents.summarization import build_summarization
 
 if TYPE_CHECKING:
     from langchain.agents.middleware import AgentMiddleware
@@ -71,8 +85,8 @@ def build_agent_tree(
         configs: The agents.
         chat_models: Each agent's chat model, by name.
         resolved: Each agent's resolved model, by name. With ``settings``,
-            this is what the model-side middleware (context management and
-            prompt caching) is configured from.
+            this is what the model-side middleware (foreign reasoning,
+            summarization and prompt caching) is configured from.
         tools: Each agent's LangChain tools, by name (none if absent).
         prompts: Each agent's system prompt, already resolved.
         settings: The manager's settings.
@@ -94,11 +108,14 @@ def build_agent_tree(
         subagents = [
             _subagent(config_map[sub], build(sub)) for sub in config.sub_agents
         ]
+        model = chat_models[name]
         return create_agent(
-            model=chat_models[name],
+            model=model,
             tools=_own_tools(config, tools.get(name, []), delegates=bool(subagents)),
             system_prompt=prompts[name],
-            middleware=_middleware(config, subagents),
+            middleware=_middleware(
+                config, subagents, model_side=_model_side(model, resolved.get(name), settings)
+            ),
             state_schema=AgentCliState,
             name=name,
             checkpointer=checkpointer if name == root else None,
@@ -125,12 +142,36 @@ def _own_tools(
 
 
 def _middleware(
-    config: AgentConfig, subagents: list[CompiledSubAgent]
+    config: AgentConfig,
+    subagents: list[CompiledSubAgent],
+    *,
+    model_side: list["AgentMiddleware"],
 ) -> list["AgentMiddleware"]:
     stack: list[AgentMiddleware] = [PatchToolCallsMiddleware()]
     if subagents:
         stack.append(_delegation(subagents))
+    stack += model_side
     stack += [PermissionMiddleware(config.name), ToolCallErrorMiddleware()]
+    return stack
+
+
+def _model_side(
+    model: "BaseChatModel",
+    resolved: "ResolvedModel | None",
+    settings: "BaseSettings | None",
+) -> list["AgentMiddleware"]:
+    """What shapes each of the agent's model requests, outermost first."""
+    if resolved is None or settings is None:
+        return []
+    stack: list[AgentMiddleware] = [
+        ForeignReasoningMiddleware(resolved.record.kind),
+        build_summarization(model, resolved, settings),
+    ]
+    if resolved.record.cache is CacheMechanism.ANTHROPIC and settings.prompt_caching_enabled:
+        # The system prompt is a plain string: the middleware marks it.
+        stack.append(
+            AnthropicPromptCachingMiddleware(ttl="5m", unsupported_model_behavior="ignore")
+        )
     return stack
 
 

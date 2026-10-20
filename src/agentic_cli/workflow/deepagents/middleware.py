@@ -7,6 +7,8 @@ gets these; sub-agents are gated as strictly as the root.
   engine, identifying the tool by the object the registry issued.
 - :class:`ToolCallErrorMiddleware`, inside the gate, gives a tool that raised
   the error result ADK's ``ToolErrorPlugin`` gives, so the turn goes on.
+- :class:`ForeignReasoningMiddleware`, on the model side, sends no model
+  another provider's reasoning.
 
 A gate or error result is the call's ``ToolMessage`` with ``status="error"``
 and the result dict as JSON content: the model reads it and carries on.
@@ -16,16 +18,24 @@ from __future__ import annotations
 
 import json
 from collections.abc import Awaitable, Callable
+from typing import Any
 
-from langchain.agents.middleware import AgentMiddleware, ToolCallRequest
+from langchain.agents.middleware import (
+    AgentMiddleware,
+    ModelRequest,
+    ModelResponse,
+    ToolCallRequest,
+)
 from langchain_core.messages import ToolCall, ToolMessage
 from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.errors import GraphBubbleUp
 from langgraph.types import Command
 
 from agentic_cli.logging import Loggers
+from agentic_cli.models import ProviderKind
 from agentic_cli.tools._core.delegation import TASK_TOOL
 from agentic_cli.tools.registry import ToolDefinition, get_registry, identify_tool
+from agentic_cli.workflow.langchain_models import without_foreign_reasoning
 from agentic_cli.workflow.permissions.capabilities import _CapabilityExempt
 from agentic_cli.workflow.service_registry import PERMISSION_ENGINE, get_service
 from agentic_cli.workflow.tool_errors import tool_error_result, unknown_tool_result
@@ -220,3 +230,39 @@ class ToolCallErrorMiddleware(AgentMiddleware):
             if _is_delegation(request.tool):
                 raise
             return _error_message(request.tool_call, error)
+
+
+class ForeignReasoningMiddleware(AgentMiddleware):
+    """No model is sent another provider's reasoning.
+
+    A model switch that keeps the session sends the new model AI messages
+    another provider wrote, whose reasoning it would refuse (Claude rejects a
+    thinking block it did not sign) or warn about. Each request goes out
+    through ``without_foreign_reasoning``; the state, and so the checkpoint,
+    keeps every message as it was, and a model's own reasoning goes back to
+    it.
+
+    Args:
+        kind: The provider of the agent's model.
+    """
+
+    def __init__(self, kind: ProviderKind) -> None:
+        super().__init__()
+        self.kind = kind
+
+    def _own(self, request: ModelRequest) -> ModelRequest:
+        return request.override(messages=without_foreign_reasoning(request.messages, self.kind))
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
+    ) -> Any:
+        return await handler(self._own(request))
+
+    def wrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], ModelResponse],
+    ) -> Any:
+        return handler(self._own(request))

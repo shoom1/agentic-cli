@@ -17,5 +17,10 @@ import deepagents  # noqa: F401
 import langchain.agents  # noqa: F401
 
 from agentic_cli.workflow.deepagents.manager import DeepAgentsWorkflowManager  # noqa: E402
+from agentic_cli.workflow.deepagents.summarization import install_history_filters  # noqa: E402
+
+# Deep Agents' "older messages will not be recoverable" notice is wrong for
+# this backend (the checkpoint keeps them); it would print over the UI.
+install_history_filters()
 
 __all__ = ["DeepAgentsWorkflowManager"]
