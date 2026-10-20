@@ -162,7 +162,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     the model's input budget (0.95 of its context window, less its
     `max_tokens`), keeping the newest 10% word for word. With
     `context_window_enabled`, `context_window_trigger_tokens` (capped at
-    that) and `context_window_target_tokens` decide instead, also for a
+    that, the kept tail lowered in proportion) and
+    `context_window_target_tokens` decide instead, also for a
     model whose window is unknown, which otherwise gets Deep Agents' fixed
     defaults. The checkpoint
     keeps every message. Each summary is a `CONTEXT_TRIMMED` event

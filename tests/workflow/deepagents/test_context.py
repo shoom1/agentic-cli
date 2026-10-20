@@ -202,8 +202,20 @@ class TestThresholds:
     def test_the_trigger_is_capped_at_the_automatic_one(self):
         sonnet = resolved(SONNET_THINKING, effort="high")
 
+        # The kept tail shrinks with it: 20,000 · 127,336 / 500,000.
         assert summarization_thresholds(sonnet, context(True, 500_000, 20_000)) == (
-            ("tokens", 127_336), ("tokens", 20_000)
+            ("tokens", 127_336), ("tokens", 5_093)
+        )
+
+    def test_a_capped_trigger_keeps_the_tail_below_it(self):
+        # A 4,000-token window: B = 3,800, the automatic trigger 3,230. The
+        # default 100,000 / 80,000 would keep more than the whole budget.
+        small_window = dataclasses.replace(
+            windowed(resolved(SONNET_THINKING), 4_000), max_tokens=None
+        )
+
+        assert summarization_thresholds(small_window, context(True)) == (
+            ("tokens", 3_230), ("tokens", 2_584)
         )
 
     def test_off_the_settings_are_ignored(self):
@@ -511,6 +523,28 @@ class TestSummarizationInATurn:
         second = server.requests()[1][0]["content"]
         assert "A summary of 10 messages." in second
         assert "Turn 6:" in second and "Turn 11:" not in second
+
+    async def test_with_context_window_settings_a_small_model_keeps_answering(
+        self, hermetic, monkeypatch
+    ):
+        # The default 100,000 / 80,000 on the 4,000-token model: the trigger is
+        # capped, and so must the tail be, or nothing can ever be summarized.
+        settings = _settings(
+            model_endpoints=SMALL, default_model="local:small", context_window_enabled=True
+        )
+        server = EndpointAPI(**{"Answer.": [chat_completion(f"Answer {n}.") for n in range(1, 12)]})
+        route(monkeypatch, openai, "AsyncOpenAI", server.api)
+        manager = _manager(settings, [_agent("solo", "Answer.")])
+        try:
+            turns = [await turn(manager, f"Turn {n}: {USER_TURN}") for n in range(1, 12)]
+        finally:
+            await manager.cleanup()
+
+        assert [e.content for t in turns for e in t if e.type is EventType.ERROR] == []
+        assert [[e.content for e in t if e.type is EventType.TEXT] for t in turns] == [
+            [f"Answer {n}."] for n in range(1, 12)
+        ]
+        assert any(e.type is EventType.CONTEXT_TRIMMED for t in turns for e in t)
 
     async def test_a_tool_result_too_big_for_the_window_ends_the_turn(self, small, monkeypatch):
         server = EndpointAPI(**{"Answer.": [_call("huge_report", {}, "c1")]})

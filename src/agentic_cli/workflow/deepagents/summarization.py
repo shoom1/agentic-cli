@@ -97,9 +97,13 @@ def summarization_thresholds(
         automatic = ("tokens", int(0.85 * budget)), ("tokens", int(0.10 * budget))
     if settings.context_window_enabled:
         trigger = settings.context_window_trigger_tokens
-        if automatic is not None:
-            trigger = min(trigger, automatic[0][1])
-        return ("tokens", trigger), ("tokens", settings.context_window_target_tokens)
+        keep = settings.context_window_target_tokens
+        if automatic is not None and trigger > automatic[0][1]:
+            # The trigger must fit the budget, and the kept tail shrinks with
+            # it: a tail as large as the budget leaves nothing to summarize.
+            keep = int(keep * automatic[0][1] / trigger)
+            trigger = automatic[0][1]
+        return ("tokens", trigger), ("tokens", keep)
     return automatic
 
 

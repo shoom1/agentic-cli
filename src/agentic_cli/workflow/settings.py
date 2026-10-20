@@ -122,8 +122,8 @@ class WorkflowSettingsMixin:
             "Manage the context window with the two token counts below. On Deep "
             "Agents, summarization is always on and this picks its thresholds: "
             "off, automatic ones from the model's input budget; on, the trigger "
-            "(capped at the automatic one, if the model's window is known) and "
-            "the tail kept"
+            "and the tail kept (if the model's window is known and the trigger is "
+            "above the automatic one, both are lowered in proportion)"
         ),
         json_schema_extra={"ui_order": 25},
     )
