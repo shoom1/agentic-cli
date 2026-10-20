@@ -298,7 +298,7 @@ Requires: `pip install agentic-cli[langgraph]`
 | State persistence | SQLite (default), PostgreSQL, or memory | The same, as a LangGraph checkpointer | Memory, PostgreSQL, or SQLite |
 | Thinking support | Every model with a thinking knob, one set of levels | The same | The same |
 | Prompt caching | Claude (three breakpoints) and Gemini (server-side caches) | Claude (three breakpoints) | Claude on Anthropic's API (one breakpoint) |
-| Context | Native trimming | Summarization near the input budget | Native trimming |
+| Context | None on normal turns (`context_window_enabled` applies only to Gemini's Live API) | Summarization near the input budget | Trimming, with `context_window_enabled` |
 | MCP tools, Agent Skills | Yes | Yes | Ignored, with a warning |
 | Raw LLM logging, job resume | Yes | Yes | No |
 | Code-execution events | Gemini's | None | None |
