@@ -9,8 +9,8 @@ uses, they are now carried over, also through a switch that fails, so that
 restoring the previous model keeps them. ``preserve_sessions=False`` still
 starts afresh.
 
-These run real ADK and LangGraph managers; only the network model listing
-is stubbed.
+These run real ADK, LangGraph and Deep Agents managers; only the network
+model listing is stubbed.
 """
 
 from __future__ import annotations
@@ -59,11 +59,23 @@ def _langgraph_manager_cls():
     return LangGraphWorkflowManager
 
 
-@pytest.fixture(params=["adk", "langgraph"])
+def _deepagents_manager_cls():
+    pytest.importorskip("deepagents")
+    from agentic_cli.workflow.deepagents import DeepAgentsWorkflowManager
+
+    return DeepAgentsWorkflowManager
+
+
+_MANAGERS = {
+    "adk": lambda: GoogleADKWorkflowManager,
+    "langgraph": _langgraph_manager_cls,
+    "deepagents": _deepagents_manager_cls,
+}
+
+
+@pytest.fixture(params=sorted(_MANAGERS))
 async def manager(request, ctx):
-    manager_cls = (
-        GoogleADKWorkflowManager if request.param == "adk" else _langgraph_manager_cls()
-    )
+    manager_cls = _MANAGERS[request.param]()
     mgr = manager_cls(
         agent_configs=[
             AgentConfig(name="a", prompt="p", tools=[sandbox_execute, job_list])

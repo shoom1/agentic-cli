@@ -94,3 +94,26 @@ class TestSettingsUiScopeGuard:
             e.get("event") == EXCLUDED_EVENT and e.get("key") == "log_activity"
             for e in logs
         )
+
+
+class TestOrchestratorPicker:
+    """An app that shows ``orchestrator`` gets a picker of every backend."""
+
+    def test_it_offers_every_orchestrator(self, isolated_settings):
+        from thinking_prompt import InlineSelectItem
+
+        app = _make_app(isolated_settings, ["orchestrator"])
+
+        (item,) = app._build_ui_items()
+
+        assert isinstance(item, InlineSelectItem)
+        assert item.options == ["adk", "langgraph", "deepagents"]
+        assert item.default == "adk"
+
+    def test_it_shows_the_current_one(self, isolated_settings):
+        isolated_settings.orchestrator = "deepagents"
+        app = _make_app(isolated_settings, ["orchestrator"])
+
+        (item,) = app._build_ui_items()
+
+        assert item.default == "deepagents"

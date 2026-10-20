@@ -46,6 +46,7 @@ class OrchestratorType(str, Enum):
 
     ADK = "adk"
     LANGGRAPH = "langgraph"
+    DEEPAGENTS = "deepagents"
 
 
 class WorkflowSettingsMixin:
@@ -301,7 +302,10 @@ class WorkflowSettingsMixin:
     orchestrator: OrchestratorType = Field(
         default=OrchestratorType.ADK,
         title="Orchestrator",
-        description="Workflow orchestrator backend",
+        description=(
+            "Workflow orchestrator backend: adk (the default), deepagents "
+            "(pip install 'agentic-cli[deepagents]') or langgraph"
+        ),
         json_schema_extra={"ui_order": 100},  # Advanced setting
     )
 
@@ -545,14 +549,18 @@ class WorkflowSettingsMixin:
     )
 
     # Session persistence — durable conversations across restarts.
-    # Drives BOTH backends: ADK uses DatabaseSessionService, LangGraph uses a
-    # persistent checkpointer (both keyed by session_id). "memory" = ephemeral.
+    # Drives every backend: ADK uses DatabaseSessionService, LangGraph and Deep
+    # Agents a persistent checkpointer. "memory" = ephemeral. Each backend
+    # keeps its own sessions; none reads another's.
     session_store: Literal["memory", "sqlite", "postgres"] = Field(
         default="sqlite",
         title="Session Store",
         description=(
             "Where conversations are persisted: sqlite (default, a single file), "
-            "postgres (shared/multi-instance via Postgres URI), or memory (ephemeral)."
+            "postgres (shared/multi-instance via Postgres URI), or memory (ephemeral). "
+            "ADK keeps them in {workspace}/sessions/sessions.db and Deep Agents in "
+            "{workspace}/sessions/checkpoints.db; sessions do not move between "
+            "backends, so switching the orchestrator starts a new conversation."
         ),
         json_schema_extra={"ui_order": 145},
     )
@@ -570,23 +578,32 @@ class WorkflowSettingsMixin:
     # now enabled by passing a code executor to ``make_skill_toolset`` — the
     # thing that actually makes it work — instead of by a switch that cannot.
 
-    # Persistence settings (LangGraph)
+    # Where the session store lives (session_store picks which one).
     postgres_uri: str | None = Field(
         default=None,
         title="PostgreSQL URI",
-        description="PostgreSQL connection URI for persistent storage",
+        description=(
+            "PostgreSQL connection URI for session_store=postgres: ADK's sessions "
+            "and the Deep Agents and LangGraph checkpoints; sessions do not move "
+            "between backends"
+        ),
         json_schema_extra={"ui_order": 146},
     )
     sqlite_uri: str | None = Field(
         default=None,
         title="SQLite URI",
-        description="SQLite connection URI or file path for persistent storage",
+        description=(
+            "SQLite file for session_store=sqlite, as a sqlite:/// URI or a path "
+            "(default: ADK's and Deep Agents' own files under {workspace}/sessions/). "
+            "ADK and Deep Agents may share one file: their tables do not collide, "
+            "and sessions do not move between backends"
+        ),
         json_schema_extra={"ui_order": 147},
     )
     store_type: Literal["memory", "postgres"] | None = Field(
         default="memory",
         title="Store Type",
-        description="Store type for long-term memory (memory or postgres)",
+        description="LangGraph only: store type for long-term memory (memory or postgres)",
         json_schema_extra={"ui_order": 148},
     )
 

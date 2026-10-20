@@ -15,3 +15,7 @@ Installed by the ``deepagents`` extra: ``pip install 'agentic-cli[deepagents]'``
 # imports Deep Agents.
 import deepagents  # noqa: F401
 import langchain.agents  # noqa: F401
+
+from agentic_cli.workflow.deepagents.manager import DeepAgentsWorkflowManager  # noqa: E402
+
+__all__ = ["DeepAgentsWorkflowManager"]

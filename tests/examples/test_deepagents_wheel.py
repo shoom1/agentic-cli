@@ -5,7 +5,8 @@ whatever the developer's environment has installed. That cannot catch an
 extra whose pins do not resolve together, a pin that admits a release the
 backend cannot import, or a backend module the wheel leaves out. This builds
 the wheel, installs it with ``[deepagents]`` into an isolated virtualenv, and
-asks that interpreter to import the backend.
+asks that interpreter to import the backend and to build a manager through
+the factory, agents and all (offline: the probe lists no models).
 
 Opt-in on the same two axes as ``test_research_demo_wheel.py``: the ``wheel``
 marker *and* ``AGENTIC_WHEEL_ACCEPTANCE=1``, because building a wheel and
@@ -118,3 +119,64 @@ def test_the_backend_imports_from_the_isolated_install(installed_extra, tmp_path
     )
     # The extra's pin: deepagents>=0.7.28,<0.8.
     assert found["deepagents"].startswith("0.7."), found["deepagents"]
+
+
+#: Builds and initializes a delegating Deep Agents manager in the child, offline:
+#: its catalog lists no provider (as the offline suite's conftest arranges), and
+#: building chat models sends nothing.
+_BUILD_A_MANAGER = """
+import asyncio, json
+
+from agentic_cli.config import BaseSettings
+from agentic_cli.models import ModelCatalog
+from agentic_cli.workflow import AgentConfig, create_workflow_manager_from_settings
+from agentic_cli.workflow import model_services
+
+
+class Unlisted(ModelCatalog):
+    async def load(self):
+        return None
+
+
+model_services.build_catalog = lambda settings, endpoints, *, transport=None: Unlisted(
+    endpoints=endpoints
+)
+
+
+async def main():
+    settings = BaseSettings(
+        orchestrator="deepagents", session_store="memory", google_api_key="probe-key",
+        default_model="google:gemini-2.5-flash",
+    )
+    manager = create_workflow_manager_from_settings(
+        [AgentConfig(name="lead", prompt="Lead.", sub_agents=["helper"]),
+         AgentConfig(name="helper", prompt="Help.", description="Helps.")],
+        settings,
+    )
+    await manager.initialize_services()
+    try:
+        found = {
+            "class": type(manager).__name__,
+            "backend": manager.backend_type,
+            "initialized": manager.is_initialized,
+            "agents": sorted(manager.agent_models),
+        }
+    finally:
+        await manager.cleanup()
+    # Last: the manager logs to stdout (nothing configured logging here).
+    print(json.dumps(found))
+
+
+asyncio.run(main())
+"""
+
+
+def test_a_manager_builds_from_a_minimal_config(installed_extra, tmp_path):
+    found = _probe(installed_extra, _BUILD_A_MANAGER, tmp_path)
+
+    assert found == {
+        "class": "DeepAgentsWorkflowManager",
+        "backend": "deepagents",
+        "initialized": True,
+        "agents": ["helper", "lead"],
+    }

@@ -56,9 +56,18 @@ class TestEagerImport:
 
     @pytest.fixture
     def fresh_backend(self, monkeypatch):
-        """Forget the backend package so the next import runs it again."""
+        """Forget the backend package so the next import runs it again.
+
+        The import binds the new package on ``agentic_cli.workflow`` too, so
+        that attribute is restored with ``sys.modules``: otherwise later tests
+        would reach two copies of every backend module, one by import and one
+        by attribute.
+        """
+        import agentic_cli.workflow
+
         for name in [m for m in sys.modules if m == _BACKEND or m.startswith(_BACKEND + ".")]:
             monkeypatch.delitem(sys.modules, name)
+        monkeypatch.delattr(agentic_cli.workflow, "deepagents", raising=False)
 
     @pytest.mark.parametrize("missing", ["deepagents", "langchain.agents"])
     def test_a_missing_dependency_fails_the_import(self, fresh_backend, monkeypatch, missing):

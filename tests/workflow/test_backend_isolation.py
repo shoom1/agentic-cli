@@ -1,16 +1,19 @@
 """Import-hygiene tests enforcing backend isolation.
 
-ADK and LangGraph are pluggable orchestrators behind BaseWorkflowManager.
-Neither backend should depend on the other — shared logic lives in
-workflow.* (e.g. workflow.events, workflow.service_registry, workflow.permissions).
-If one backend imports from the other, adding a third orchestrator would
-drag the dependency along.
+ADK, LangGraph and Deep Agents are pluggable orchestrators behind
+BaseWorkflowManager. No backend should depend on another — shared logic lives
+in workflow.* (e.g. workflow.events, workflow.service_registry,
+workflow.permissions, workflow.checkpointers). If one backend imports from
+another, adding or removing an orchestrator would drag the dependency along.
+Deep Agents may use the LangGraph *library* state tools
+(``agentic_cli.tools.langgraph``), which are not the LangGraph backend.
 """
 
 from __future__ import annotations
 
 import re
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -26,6 +29,10 @@ _ADK_IMPORT = re.compile(
 )
 _LG_IMPORT = re.compile(
     r"^\s*(from\s+agentic_cli\.workflow\.langgraph|import\s+agentic_cli\.workflow\.langgraph)",
+    re.MULTILINE,
+)
+_DA_IMPORT = re.compile(
+    r"^\s*(from\s+agentic_cli\.workflow\.deepagents|import\s+agentic_cli\.workflow\.deepagents)",
     re.MULTILINE,
 )
 
@@ -56,5 +63,34 @@ def test_adk_does_not_import_from_langgraph():
             offenders.append(str(pyfile))
     assert not offenders, (
         "ADK backend must not import from workflow.langgraph.*. "
+        f"Offending files: {offenders}."
+    )
+
+
+# Scanned by path, not imported: the scan needs no ``deepagents`` extra.
+_DEEPAGENTS = SimpleNamespace(
+    __file__=str(Path(agentic_cli.workflow.adk.__file__).parents[1] / "deepagents" / "__init__.py")
+)
+
+
+def _offenders(pkg, pattern: re.Pattern) -> list[str]:
+    return [str(f) for f in _python_files(pkg) if pattern.search(f.read_text())]
+
+
+def test_deepagents_imports_neither_other_backend():
+    assert _python_files(_DEEPAGENTS), "the Deep Agents backend was not found"
+    offenders = _offenders(_DEEPAGENTS, _ADK_IMPORT) + _offenders(_DEEPAGENTS, _LG_IMPORT)
+    assert not offenders, (
+        "Deep Agents backend must not import from workflow.adk.* or "
+        f"workflow.langgraph.*. Offending files: {offenders}."
+    )
+
+
+def test_no_other_backend_imports_deepagents():
+    offenders = _offenders(agentic_cli.workflow.adk, _DA_IMPORT) + _offenders(
+        agentic_cli.workflow.langgraph, _DA_IMPORT
+    )
+    assert not offenders, (
+        "ADK and LangGraph must not import from workflow.deepagents.*. "
         f"Offending files: {offenders}."
     )

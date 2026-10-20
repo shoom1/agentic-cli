@@ -3,7 +3,8 @@
 ``ScriptedChat`` answers each model call with the next scripted ``AIMessage``
 and records what it was sent, so a test can drive a whole agent tree offline
 and then read every agent's requests. It stands in for the provider models
-``build_chat_model`` builds; tests of what reaches a provider use
+``build_chat_model`` builds (``ScriptedModels`` stands in for the function
+itself, for a manager); tests of what reaches a provider use
 ``tests/workflow/langchain_fakes.py`` and ``FakeAPI`` instead.
 """
 
@@ -57,13 +58,15 @@ class ScriptedChat(BaseChatModel):
 
     Attributes:
         label: Names the model in failures.
-        script: The answers, one per model call.
+        script: The answers, one per model call. An exception in it is
+            raised by that call instead, as a provider error would be.
         requests: The messages of each call, system message included.
         bound: The tool schemas of each ``bind_tools`` call.
     """
 
     label: str = "model"
-    script: list[AIMessage] = Field(default_factory=list)
+    # AIMessages and exceptions (Any: pydantic would coerce a union to AIMessage).
+    script: list[Any] = Field(default_factory=list)
     requests: list[list[BaseMessage]] = Field(default_factory=list)
     bound: list[list[dict]] = Field(default_factory=list)
 
@@ -82,6 +85,8 @@ class ScriptedChat(BaseChatModel):
                 f"{self.label}: no scripted answer for call {len(self.requests)}"
             )
         answer = self.script[len(self.requests) - 1]
+        if isinstance(answer, Exception):
+            raise answer
         return ChatResult(generations=[ChatGeneration(message=answer)])
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs: Any) -> ChatResult:
@@ -105,3 +110,28 @@ class ScriptedChat(BaseChatModel):
 
     def tool_schema(self, name: str, call: int = 0) -> dict:
         return next(schema for schema in self.bound[call] if schema["name"] == name)
+
+
+class ScriptedModels:
+    """Stands in for ``build_chat_model``: each agent's ``ScriptedChat``, by name.
+
+    Patch ``agentic_cli.workflow.deepagents.manager.build_chat_model`` with an
+    instance, and a manager builds every agent on its scripted model. A
+    rebuild (a model switch) gets the same instance back, so one script runs
+    across the whole test.
+
+    Attributes:
+        chats: Each agent's model.
+        built: The resolved model of every build, in order.
+    """
+
+    def __init__(self, **scripts: Sequence[AIMessage | Exception]) -> None:
+        self.chats = {
+            name: ScriptedChat(label=name, script=list(script))
+            for name, script in scripts.items()
+        }
+        self.built: list[Any] = []
+
+    def __call__(self, resolved: Any, *, settings: Any, app_name: str) -> ScriptedChat:
+        self.built.append(resolved)
+        return self.chats[resolved.agent]

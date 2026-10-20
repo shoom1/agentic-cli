@@ -11,6 +11,7 @@ takes come from that backend's entry.
 from __future__ import annotations
 
 import importlib
+import importlib.util
 from unittest.mock import MagicMock
 
 import pytest
@@ -28,7 +29,22 @@ from agentic_cli.workflow.settings import OrchestratorType  # noqa: E402
 
 ADK_CLASS = "agentic_cli.workflow.adk.manager.GoogleADKWorkflowManager"
 LANGGRAPH_CLASS = "agentic_cli.workflow.langgraph.LangGraphWorkflowManager"
-NOT_ADK = [o for o in OrchestratorType if o is not OrchestratorType.ADK]
+DEEPAGENTS_CLASS = "agentic_cli.workflow.deepagents.DeepAgentsWorkflowManager"
+
+#: A case that imports the Deep Agents backend needs its extra.
+_needs_deepagents = pytest.mark.skipif(
+    importlib.util.find_spec("deepagents") is None, reason="needs the deepagents extra"
+)
+
+
+def _each(orchestrators) -> list:
+    return [
+        pytest.param(o, marks=_needs_deepagents) if o is OrchestratorType.DEEPAGENTS else o
+        for o in orchestrators
+    ]
+
+
+NOT_ADK = _each(o for o in OrchestratorType if o is not OrchestratorType.ADK)
 
 
 @pytest.fixture
@@ -95,6 +111,10 @@ class TestEntries:
             "agentic_cli.workflow.langgraph:LangGraphWorkflowManager",
             "langgraph",
         )
+        assert factory._BACKENDS[OrchestratorType.DEEPAGENTS] == (
+            "agentic_cli.workflow.deepagents:DeepAgentsWorkflowManager",
+            "deepagents",
+        )
 
     @pytest.mark.parametrize(
         "orchestrator, cls",
@@ -105,6 +125,12 @@ class TestEntries:
     )
     def test_each_orchestrator_resolves_to_its_class(self, orchestrator, cls):
         assert factory._load_backend(orchestrator) is cls
+
+    @_needs_deepagents
+    def test_deepagents_resolves_to_its_class(self):
+        from agentic_cli.workflow.deepagents import DeepAgentsWorkflowManager
+
+        assert factory._load_backend(OrchestratorType.DEEPAGENTS) is DeepAgentsWorkflowManager
 
 
 class TestOrchestratorValue:
@@ -137,6 +163,19 @@ class TestInstallHints:
         assert str(exc.value) == (
             "The langgraph orchestrator needs the 'langgraph' extra. "
             "Install with: pip install 'agentic-cli[langgraph]'\n"
+            f"Original error: {error}"
+        )
+        assert exc.value.__cause__ is error
+
+    def test_a_missing_deepagents_extra_gives_its_install_hint(self, monkeypatch):
+        error = _missing(monkeypatch, "agentic_cli.workflow.deepagents")
+
+        with pytest.raises(ImportError) as exc:
+            factory._load_backend(OrchestratorType.DEEPAGENTS)
+
+        assert str(exc.value) == (
+            "The deepagents orchestrator needs the 'deepagents' extra. "
+            "Install with: pip install 'agentic-cli[deepagents]'\n"
             f"Original error: {error}"
         )
         assert exc.value.__cause__ is error
@@ -207,6 +246,21 @@ class TestConstructorArguments:
             "checkpointer": "sqlite"
         }
         assert factory._backend_kwargs(OrchestratorType.ADK, settings) == {}
+        # Deep Agents opens its own checkpointer from the settings.
+        assert factory._backend_kwargs(OrchestratorType.DEEPAGENTS, settings) == {}
+
+    @_needs_deepagents
+    def test_deepagents_gets_no_checkpointer(self, monkeypatch, configs):
+        cls = MagicMock()
+        monkeypatch.setattr(DEEPAGENTS_CLASS, cls)
+
+        manager = create_workflow_manager_from_settings(
+            configs, _settings(OrchestratorType.DEEPAGENTS, session_store="sqlite"), model="m"
+        )
+
+        assert manager is cls.return_value
+        assert "checkpointer" not in cls.call_args.kwargs
+        assert cls.call_args.kwargs["model"] == "m"
 
     def test_caller_kwargs_reach_the_backend(self, monkeypatch, configs):
         cls = MagicMock()
@@ -226,7 +280,8 @@ class TestNativeAdkConfig:
         adk = MagicMock()
         other = MagicMock()
         monkeypatch.setattr(ADK_CLASS, adk)
-        monkeypatch.setattr(LANGGRAPH_CLASS, other)
+        module, _, name = factory._BACKENDS[orchestrator][0].partition(":")
+        monkeypatch.setattr(f"{module}.{name}", other)
 
         manager = create_workflow_manager_from_settings(
             configs,
@@ -254,7 +309,7 @@ class TestNativeAdkConfig:
         adk.assert_called_once()
         assert not [e for e in logged if e["log_level"] == "warning"]
 
-    @pytest.mark.parametrize("orchestrator", list(OrchestratorType))
+    @pytest.mark.parametrize("orchestrator", _each(OrchestratorType))
     def test_translate_mode_routes_to_the_configured_backend(
         self, monkeypatch, orchestrator
     ):
