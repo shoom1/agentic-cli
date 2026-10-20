@@ -607,7 +607,11 @@ class WorkflowSettingsMixin:
             return uri.replace("postgresql://", "postgresql+asyncpg://", 1)
         # sqlite (default)
         if self.sqlite_uri:
-            return self.sqlite_uri.replace("sqlite:///", "sqlite+aiosqlite:///", 1)
+            # One reading of sqlite_uri for every backend: a sqlite:/// or
+            # sqlite+aiosqlite:/// URI, or a file path.
+            from agentic_cli.workflow.checkpointers import sqlite_file
+
+            return f"sqlite+aiosqlite:///{sqlite_file(self.sqlite_uri)}"
         path = self.sessions_dir / "sessions.db"
         return f"sqlite+aiosqlite:///{path}"
 
