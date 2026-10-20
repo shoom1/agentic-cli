@@ -41,8 +41,8 @@ logger = Loggers.workflow()
 
 CheckpointerKind = Literal["memory", "sqlite", "postgres"]
 
-# The URI forms ``sqlite_uri`` takes on ADK (``session_db_url`` turns the first
-# into the second). What follows the prefix is the file, as SQLAlchemy reads it:
+# The URI forms ``sqlite_uri`` takes (ADK's ``session_db_url`` reads it through
+# ``sqlite_file`` too). What follows the prefix is the file, as SQLAlchemy reads it:
 # ``sqlite:///rel.db`` is relative, ``sqlite:////abs/x.db`` absolute.
 _SQLITE_URI_PREFIXES = ("sqlite:///", "sqlite+aiosqlite:///")
 

@@ -191,16 +191,24 @@ class TestDeepAgentsSqlitePath:
         adk_file = Path(settings.session_db_url().split(":///", 1)[1])
         assert adk_file.parent == path.parent
 
-    @pytest.mark.parametrize("scheme", ["sqlite:///", "sqlite+aiosqlite:///"])
-    def test_a_sqlite_uri_names_the_file_adk_uses(self, isolated, scheme):
+    @pytest.mark.parametrize("form", ["sqlite:///", "sqlite+aiosqlite:///", ""])
+    async def test_every_sqlite_uri_form_names_the_file_adk_opens(self, isolated, form):
+        from google.adk.sessions import DatabaseSessionService
+
         target = isolated / "shared" / "app.db"
-        settings = _settings(isolated, sqlite_uri=f"{scheme}{target}")
+        settings = _settings(isolated, sqlite_uri=f"{form}{target}")
 
         path = deepagents_sqlite_path(settings)
 
         assert path == target
         assert path.parent.is_dir()
-        assert Path(settings.session_db_url().split(":///", 1)[1]) == target
+        assert settings.session_db_url() == f"sqlite+aiosqlite:///{target}"
+        service = DatabaseSessionService(db_url=settings.session_db_url())
+        try:
+            await service.create_session(app_name="app", user_id="u", session_id="s")
+        finally:
+            await service.close()
+        assert target.is_file()
 
     def test_a_plain_path_is_used_as_it_is(self, isolated):
         target = isolated / "elsewhere" / "c.db"

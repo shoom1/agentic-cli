@@ -589,6 +589,10 @@ step; each entry says what to use instead.
   directory cannot be created** (`~/.{app_name}/logs`, under a home that is
   read-only or not a directory). Nothing is logged then, as when a write
   fails.
+- **ADK opens every `sqlite_uri` form the setting describes.** A file path
+  failed with `Invalid database URL format`, and a `sqlite+aiosqlite:///` URI
+  became `sqlite+aiosqlite+aiosqlite:///` and failed to create its engine.
+  Both now open the file they name, as a `sqlite:///` URI always did.
 - **A sqlite or Postgres checkpointer whose table setup fails no longer
   leaks its connection.** The connection was opened, `setup()` raised, and
   the caller never received the context manager that could close it.
