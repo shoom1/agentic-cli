@@ -352,6 +352,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   value can be a credential (a key written inline in a `model_endpoints`
   entry, or a password in its `base_url`). The error still names the setting
   and says what it expects.
+- **The workflow factory imports a backend only when it is chosen, and only
+  that import reports a missing extra.** Each orchestrator has one entry
+  (its manager class and its extra) in `workflow/factory.py`. Without the
+  `langgraph` extra, `orchestrator="langgraph"` raises `ImportError` with
+  `Install with: pip install 'agentic-cli[langgraph]'` and the original
+  error. An `ImportError` raised inside a manager's constructor now reaches
+  the caller as itself; 0.6 reported it as the missing extra. A native ADK
+  YAML config still runs on ADK, with the same warning, whichever
+  orchestrator is set.
+- **The checkpointer factory and the raw LLM log are shared modules.**
+  `agentic_cli.workflow.checkpointers.open_checkpointer(kind, *,
+  sqlite_path=None, postgres_uri=None)` opens the memory, sqlite or Postgres
+  checkpointer for any LangChain-based backend, and returns it with the
+  context manager that owns its connection. LangGraph's
+  `create_checkpointer(type, settings)` calls it and keeps its own file:
+  `sqlite_uri` as given, else `{workspace}/checkpoints.db`.
+  `agentic_cli.workflow.llm_log` holds the `raw_llm_logging` writer
+  (`LLMLogWriter`, writing `~/.{app_name}/logs/llm_events.jsonl`,
+  owner-only) and `redact_secrets`; ADK's `LLMLoggingPlugin` writes through
+  it. The old import paths keep working
+  (`agentic_cli.workflow.langgraph.persistence.create_checkpointer`,
+  `agentic_cli.workflow.adk.plugins.LLMLoggingPlugin`), and neither backend's
+  sessions nor its log records change.
 
 ### Removed
 
@@ -562,6 +585,13 @@ step; each entry says what to use instead.
   have. It now reads each answer's standard content blocks, so Claude's
   thinking, Gemini's thoughts, GPT's reasoning summary and an
   OpenAI-compatible server's reasoning reach the thinking box.
+- **`raw_llm_logging` on ADK no longer stops initialization when its log
+  directory cannot be created** (`~/.{app_name}/logs`, under a home that is
+  read-only or not a directory). Nothing is logged then, as when a write
+  fails.
+- **A sqlite or Postgres checkpointer whose table setup fails no longer
+  leaks its connection.** The connection was opened, `setup()` raised, and
+  the caller never received the context manager that could close it.
 
 ## [0.6.4] - 2026-10-18
 

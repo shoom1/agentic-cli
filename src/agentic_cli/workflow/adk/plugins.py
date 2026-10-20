@@ -6,17 +6,18 @@ Provides framework-level cross-cutting concerns as ADK Plugins:
 
 from __future__ import annotations
 
-import json
-import re
 import time
 from collections import deque
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
 from google.adk.plugins.base_plugin import BasePlugin
 
 from agentic_cli.workflow.events import WorkflowEvent
+from agentic_cli.workflow.llm_log import LLMLogWriter
+
+# The redaction moved to ``workflow.llm_log``; its old private name still imports.
+from agentic_cli.workflow.llm_log import redact_secrets as _redact_secrets  # noqa: F401
 from agentic_cli.logging import Loggers
 
 if TYPE_CHECKING:
@@ -25,30 +26,18 @@ if TYPE_CHECKING:
 
 logger = Loggers.workflow()
 
-# Best-effort redaction of provider secrets before they hit the log file.
-_SECRET_RE = re.compile(
-    r"(sk-[A-Za-z0-9_\-]{16,}"      # Anthropic / OpenAI keys
-    r"|AIza[A-Za-z0-9_\-]{16,}"     # Google API keys
-    r"|Bearer\s+[A-Za-z0-9._\-]{10,})",  # bearer tokens
-    re.IGNORECASE,
-)
-
-
-def _redact_secrets(text: str) -> str:
-    """Mask obvious API-key/token patterns in a serialized log line."""
-    return _SECRET_RE.sub("[REDACTED]", text)
-
 
 class LLMLoggingPlugin(BasePlugin):
     """ADK Plugin that captures raw LLM request/response traffic for debugging.
 
     Replaces the old per-agent LLMEventLogger with a single global plugin
     that applies to all agents via the Runner. Events are written to a
-    JSON Lines file and buffered in memory for programmatic access.
+    JSON Lines file (through the shared ``workflow.llm_log.LLMLogWriter``)
+    and buffered in memory for programmatic access.
 
     Attributes:
         model_name: Default model name (used if not in request)
-        app_name: Application name for log directory (./.{app_name}/logs/)
+        app_name: Application name for log directory (~/.{app_name}/logs/)
         max_events: Maximum events to buffer in memory (oldest are dropped)
         include_messages: Whether to include full message history
         include_raw_parts: Whether to include raw response parts
@@ -72,21 +61,10 @@ class LLMLoggingPlugin(BasePlugin):
         self._events: deque[WorkflowEvent] = deque(maxlen=max_events)
         self._request_timestamps: dict[str, float] = {}
 
-        # Initialize log file under the user's home — NOT the (often
-        # git-tracked) project dir — since it holds full conversations.
-        log_dir = Path.home() / f".{self.app_name}" / "logs"
-        log_dir.mkdir(parents=True, exist_ok=True)
-        try:
-            log_dir.chmod(0o700)
-        except OSError:
-            pass
-        self._log_file: Path = log_dir / "llm_events.jsonl"
-        # Create (or tighten) with owner-only perms before anything is written.
-        try:
-            self._log_file.touch(exist_ok=True)
-            self._log_file.chmod(0o600)
-        except OSError:
-            pass
+        # The log lives under the user's home — NOT the (often git-tracked)
+        # project dir — since it holds full conversations.
+        self._log = LLMLogWriter(self.app_name)
+        self._log_file: Path = self._log.path
 
     # ------------------------------------------------------------------
     # ADK Plugin callbacks
@@ -246,19 +224,7 @@ class LLMLoggingPlugin(BasePlugin):
 
     def _write_to_log(self, event: WorkflowEvent) -> None:
         """Write event to JSON Lines log file."""
-        record = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "type": event.type.value,
-            "content": event.content,
-            "metadata": event.metadata,
-        }
-
-        try:
-            line = _redact_secrets(json.dumps(record, default=str))
-            with open(self._log_file, "a", encoding="utf-8") as f:
-                f.write(line + "\n")
-        except OSError:
-            pass
+        self._log.write(event)
 
     def _serialize_contents(self, contents: list[Any]) -> list[dict[str, Any]]:
         """Serialize Content objects to dictionaries."""
