@@ -38,6 +38,7 @@ from agentic_cli.config import (
 )
 from agentic_cli.logging import Loggers, bind_context
 from agentic_cli.models import CacheMechanism
+from agentic_cli.tools.jobs.resume import job_result_payload
 
 
 logger = Loggers.workflow()
@@ -45,8 +46,6 @@ logger = Loggers.workflow()
 # Suppress Google GenAI SDK warning about non-text parts (function_call) in
 # mixed responses. We already handle all part types individually in process_part.
 logging.getLogger("google_genai.types").setLevel(logging.ERROR)
-
-_RESULT_SUMMARY_LIMIT = 1000
 
 # The cache mechanisms ADK's context cache serves: Claude's breakpoints and
 # Gemini's server-side caches.
@@ -74,20 +73,6 @@ def _check_app_name(app_name: str) -> None:
         raise ValueError(
             f"app_name {app_name!r} cannot be used with the ADK backend: {exc}"
         ) from exc
-
-
-def _summarize_result(result: Any) -> str | None:
-    """Render a job result as a short string for the resume payload.
-
-    Truncates to keep the resumed turn's context lean; the agent pulls the full
-    result via the ``job_result`` tool when it needs it.
-    """
-    if result is None:
-        return None
-    text = result if isinstance(result, str) else repr(result)
-    if len(text) > _RESULT_SUMMARY_LIMIT:
-        return text[:_RESULT_SUMMARY_LIMIT] + f"… (+{len(text) - _RESULT_SUMMARY_LIMIT} chars)"
-    return text
 
 
 class GoogleADKWorkflowManager(BaseWorkflowManager):
@@ -913,7 +898,8 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                 function_response = types.FunctionResponse(
                     id=record.call_id,
                     name=record.call_name or record.tool,
-                    response=self._job_result_payload(record, result),
+                    # A summary and a pointer, not the raw result.
+                    response=job_result_payload(record, result),
                 )
                 new_message = types.Content(
                     role="user",
@@ -929,31 +915,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     run_config=self._build_run_config(),
                 ):
                     yield event
-
-    @staticmethod
-    def _job_result_payload(record, result: Any) -> dict:
-        """Build the FunctionResponse payload — a summary + pointer, not raw data.
-
-        Keeps the resumed turn's context lean; the agent can pull the full
-        result/logs via ``job_result``/``job_logs`` using the job_id.
-        """
-        payload: dict[str, Any] = {
-            "job_id": record.job_id,
-            "tool": record.tool,
-            "state": record.state.value,
-        }
-        if record.exit_code is not None:
-            payload["exit_code"] = record.exit_code
-        if record.error:
-            payload["error"] = record.error
-        summary = _summarize_result(result)
-        if summary is not None:
-            payload["result_summary"] = summary
-        payload["hint"] = (
-            f"Full result via job_result('{record.job_id}'); "
-            f"logs via job_logs('{record.job_id}')."
-        )
-        return payload
 
     # -------------------------------------------------------------------------
     # Sessions (native — DatabaseSessionService persists events continuously)

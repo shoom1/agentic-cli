@@ -5,6 +5,9 @@ session_id)`` — the ADK session services key on exactly that, and any
 replacement backend has to carry the same information. ``SessionRef`` makes
 that identity explicit so a session created for one user cannot be looked up,
 listed, or deleted as another user's by accident.
+
+Two context-local markers say what is running now: the turn (its
+``SessionRef``) and, inside it, the tool call (``ToolCallRef``).
 """
 
 from __future__ import annotations
@@ -59,3 +62,47 @@ def reset_active_turn(token: Token) -> None:
 def get_active_turn() -> "SessionRef | None":
     """The turn executing in this context, or None when idle."""
     return _active_turn.get()
+
+
+@dataclass(frozen=True, slots=True)
+class ToolCallRef:
+    """One tool call of a turn, as the model made it.
+
+    Attributes:
+        call_id: The model's id for the call (its ``tool_call_id``).
+        name: The tool the model called.
+    """
+
+    call_id: str
+    name: str
+
+
+# The tool call whose tool is running in this context. Set around each call
+# (Deep Agents' ``ActiveToolCallMiddleware``) so ``JobManager.submit`` can link
+# a job to the call that started it when the tool does not say which. A
+# ContextVar for the same reason as the active turn: parallel calls, and a
+# sub-agent's calls inside its coordinator's ``task`` call, each run in their
+# own context and never see one another's.
+_active_tool_call: ContextVar["ToolCallRef | None"] = ContextVar(
+    "agentic_cli_active_tool_call", default=None
+)
+
+
+def set_active_tool_call(ref: "ToolCallRef | None") -> Token:
+    """Mark ``ref`` as the tool call running in this context.
+
+    Returns:
+        Token for :func:`reset_active_tool_call`, which restores the call
+        that was active before (a sub-agent's call nests inside ``task``).
+    """
+    return _active_tool_call.set(ref)
+
+
+def reset_active_tool_call(token: Token) -> None:
+    """Restore the tool call recorded before the matching :func:`set_active_tool_call`."""
+    _active_tool_call.reset(token)
+
+
+def get_active_tool_call() -> "ToolCallRef | None":
+    """The tool call running in this context, or None outside one."""
+    return _active_tool_call.get()

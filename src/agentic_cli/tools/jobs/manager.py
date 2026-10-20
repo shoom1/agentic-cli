@@ -237,7 +237,7 @@ class JobRecord:
     session_id: str | None = None      # conversation that launched the job
     user_id: str | None = None
     resume_on_complete: bool = False   # wake the agent with the result when terminal
-    call_id: str | None = None         # ADK function_call_id / LangGraph tool_call_id
+    call_id: str | None = None         # ADK function_call_id / LangChain tool_call_id
     call_name: str | None = None       # function name to answer on resume
     resume_state: str = ResumeState.PENDING.value   # see ResumeState
     resume_error: str | None = None    # why delivery failed, when it did
@@ -374,8 +374,12 @@ class JobManager:
         When ``resume_on_complete`` is set the job is flagged so the harness can
         auto-resume the agent with the result once it finishes (phase 2). The
         originating ``session_id``/``user_id`` are auto-filled from the active
-        workflow turn when not supplied; ``call_id``/``call_name`` (which only
-        the calling tool knows) identify the pending tool call to answer.
+        workflow turn when not supplied. ``call_id``/``call_name`` identify the
+        tool call that started the job (ADK answers it on resume); without a
+        ``call_id`` they come from the active tool call, which Deep Agents sets
+        around each call, so a tool that reads its id from ADK's
+        ``tool_context`` (None there) is linked all the same. A ``call_id`` or
+        ``call_name`` the tool passes wins.
         """
         if backend not in self._backends:
             raise ValueError(
@@ -383,6 +387,8 @@ class JobManager:
             )
         if resume_on_complete and (session_id is None or user_id is None):
             session_id, user_id = self._fill_turn_context(session_id, user_id)
+        if resume_on_complete and call_id is None:
+            call_id, call_name = self._fill_tool_call(call_name)
         with self._lock:
             job_id = uuid.uuid4().hex[:12]
             rec = JobRecord(
@@ -428,6 +434,20 @@ class JobManager:
                 have_user=user_id is not None,
             )
         return session_id, user_id
+
+    @staticmethod
+    def _fill_tool_call(call_name: str | None) -> tuple[str | None, str | None]:
+        """The active tool call's id, and its name unless the tool gave one.
+
+        Outside a tool call (ADK, LangGraph, a job started by the harness)
+        there is none, and both are left as they are.
+        """
+        from agentic_cli.workflow.sessions import get_active_tool_call
+
+        active = get_active_tool_call()
+        if active is None:
+            return None, call_name
+        return active.call_id, call_name or active.name
 
     def get(self, job_id: str) -> JobRecord | None:
         """The job, refreshed from durable state, or None if it is gone."""

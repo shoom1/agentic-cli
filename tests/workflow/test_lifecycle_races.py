@@ -113,7 +113,7 @@ class _DeepAgentsAdmissionHarness:
 
         async def _do_initialize() -> None:
             self.inits += 1
-            self.manager._sessions = SimpleNamespace()
+            self.manager._sessions = SimpleNamespace(exists=self._exists)
             self.manager._root_name = "a"
             self.manager._root = SimpleNamespace(name=f"backend-{self.inits}")
 
@@ -125,6 +125,10 @@ class _DeepAgentsAdmissionHarness:
         self.manager._do_initialize = _do_initialize
         self.manager._run_turn = _run_turn
         self.manager._ensure_managers_initialized = lambda: None
+
+    @staticmethod
+    async def _exists(ref) -> bool:
+        return True
 
     async def drain(self, session_id: str) -> list[str]:
         return [
@@ -199,8 +203,8 @@ class TestTurnAdmissionRechecksReadiness:
         finally:
             ctx.__exit__(None, None, None)
 
-    async def test_resume_turn_rechecks_too(self):
-        h, ctx = _admission_harness()
+    async def test_resume_turn_rechecks_too(self, backend):
+        h, ctx = _admission_harness(backend)
         try:
             await h.manager.initialize_services(validate=False)
             record = SimpleNamespace(

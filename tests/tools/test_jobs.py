@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import subprocess
@@ -332,6 +333,77 @@ class TestResumeMetadata:
         jm_reloaded = JobManager(base_dir=base)
         assert jm_reloaded.get(rec.job_id).resumed is True  # type: ignore[union-attr]
         assert jm_reloaded.awaiting_resume() == []
+
+
+@contextlib.contextmanager
+def _active_tool_call(call_id: str, name: str):
+    """Run the block as Deep Agents runs a tool: inside its own tool call."""
+    from agentic_cli.workflow.sessions import (
+        ToolCallRef,
+        reset_active_tool_call,
+        set_active_tool_call,
+    )
+
+    token = set_active_tool_call(ToolCallRef(call_id, name))
+    try:
+        yield
+    finally:
+        reset_active_tool_call(token)
+
+
+class TestTheActiveToolCall:
+    """A resumable job is linked to the tool call that started it.
+
+    On Deep Agents a tool written for ADK gets ``tool_context=None``, so the
+    call id it would read there is None; the backend's tool middleware makes
+    each call the active tool call instead, and ``submit`` reads it.
+    """
+
+    def test_a_resumable_job_takes_the_active_call(self, jm: JobManager):
+        with _active_tool_call("call-7", "run_shell_job"):
+            rec = jm.submit(
+                tool="run_shell_job", backend="subprocess", spec={"command": "echo x"},
+                resume_on_complete=True, session_id="s", user_id="u",
+            )
+
+        assert (rec.call_id, rec.call_name) == ("call-7", "run_shell_job")
+        reloaded = JobManager(base_dir=jm.base_dir).get(rec.job_id)
+        assert (reloaded.call_id, reloaded.call_name) == ("call-7", "run_shell_job")
+
+    def test_an_explicit_call_id_wins(self, jm: JobManager):
+        with _active_tool_call("call-7", "other_tool"):
+            rec = jm.submit(
+                tool="t", backend="subprocess", spec={"command": "echo x"},
+                resume_on_complete=True, call_id="fc-1", session_id="s", user_id="u",
+            )
+
+        # The tool named its call: nothing of the active one is taken.
+        assert (rec.call_id, rec.call_name) == ("fc-1", "t")
+
+    def test_an_explicit_call_name_is_kept(self, jm: JobManager):
+        """``examples/jobs_demo.py``'s shape: its own name, the id from ``tool_context``."""
+        with _active_tool_call("call-7", "run_shell_job"):
+            rec = jm.submit(
+                tool="run_shell_job", backend="subprocess", spec={"command": "echo x"},
+                resume_on_complete=True, call_id=None, call_name="shell",
+                session_id="s", user_id="u",
+            )
+
+        assert (rec.call_id, rec.call_name) == ("call-7", "shell")
+
+    def test_without_an_active_call_nothing_is_filled(self, jm: JobManager):
+        rec = jm.submit(
+            tool="t", backend="subprocess", spec={"command": "echo x"},
+            resume_on_complete=True, session_id="s", user_id="u",
+        )
+
+        assert (rec.call_id, rec.call_name) == (None, "t")
+
+    def test_a_fire_and_forget_job_is_not_linked(self, jm: JobManager):
+        with _active_tool_call("call-7", "run_shell_job"):
+            rec = jm.submit(tool="t", backend="subprocess", spec={"command": "echo x"})
+
+        assert (rec.call_id, rec.call_name) == (None, None)
 
 
 class TestResumeLifecycle:
