@@ -5,6 +5,9 @@
 so dropping the reference leaked its connection pool. Cleanup now awaits the
 close contract, stays idempotent, and never closes a service it handed over
 (``reinitialize(preserve_sessions=True)``).
+
+The Deep Agents backend owns its checkpointer's connection on the same terms
+(the classes at the end).
 """
 
 from __future__ import annotations
@@ -444,3 +447,206 @@ class TestCloserIsolation:
         await mgr.cleanup()
 
         assert service.closes == 1
+
+
+# ---------------------------------------------------------------------------
+# Deep Agents: the checkpointer's connection is owned the same way
+# ---------------------------------------------------------------------------
+
+
+class _CountedConnection:
+    """Stands in for the context manager that owns a saver's connection."""
+
+    def __init__(self, fail: bool = False) -> None:
+        self.closes = 0
+        self.fail = fail
+
+    async def __aexit__(self, *exc) -> None:
+        self.closes += 1
+        if self.fail:
+            raise RuntimeError("close blew up")
+
+
+def _deepagents_manager(connection):
+    """A ready Deep Agents manager holding ``connection``, without __init__."""
+    pytest.importorskip("deepagents")
+    from agentic_cli.workflow.deepagents.manager import DeepAgentsWorkflowManager
+
+    mgr = DeepAgentsWorkflowManager.__new__(DeepAgentsWorkflowManager)
+    mgr._settings = SimpleNamespace(app_name="test", default_user="u")
+    mgr._app_name = "test"
+    mgr._services = {}
+    mgr._checkpointer = object()
+    mgr._checkpointer_cm = connection
+    mgr._checkpointer_pinned = False
+    mgr._sessions = object()
+    mgr._root = object()
+    mgr._root_name = "a"
+    mgr._initialized = True
+    mgr._catalog = None
+    mgr._carried_service_keys = frozenset()
+    mgr._lifecycle_lock = asyncio.Lock()
+    mgr._turn_lock = asyncio.Lock()
+    return mgr
+
+
+class TestDeepAgentsCheckpointerClose:
+    async def test_cleanup_closes_the_connection(self):
+        connection = _CountedConnection()
+        mgr = _deepagents_manager(connection)
+
+        await mgr.cleanup()
+
+        assert connection.closes == 1
+        assert (mgr._checkpointer, mgr._checkpointer_cm, mgr._sessions) == (None, None, None)
+        assert mgr.is_initialized is False
+
+    async def test_cleanup_is_idempotent(self):
+        connection = _CountedConnection()
+        mgr = _deepagents_manager(connection)
+
+        await mgr.cleanup()
+        await mgr.cleanup()
+
+        assert connection.closes == 1
+
+    async def test_an_in_memory_saver_has_nothing_to_close(self):
+        mgr = _deepagents_manager(None)
+        await mgr.cleanup()  # must not raise
+        assert mgr._checkpointer is None
+
+    async def test_a_failing_close_does_not_block_shutdown(self):
+        closed: list[str] = []
+        mgr = _deepagents_manager(_CountedConnection(fail=True))
+        mgr._services = {"job_manager": SimpleNamespace(close=lambda: closed.append("jobs"))}
+
+        await mgr.cleanup()  # swallowed and logged
+
+        assert mgr._checkpointer is None
+        assert closed == ["jobs"]
+
+
+@pytest.fixture
+def deepagents_manager(monkeypatch):
+    """A Deep Agents manager built through ``__init__``, on counted connections.
+
+    ``open_checkpointer`` hands out an in-memory saver with a counted
+    connection each time it is called; ``state["boom"]`` makes building the
+    agents fail, after the checkpointer was opened.
+    """
+    pytest.importorskip("deepagents")
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    from agentic_cli.workflow.config import AgentConfig
+    from agentic_cli.workflow.deepagents import manager as manager_module
+    from tests.conftest import MockContext
+    from tests.workflow.deepagents.fakes import ScriptedModels
+
+    created: list[_CountedConnection] = []
+
+    async def _open(kind, **kwargs):
+        connection = _CountedConnection()
+        created.append(connection)
+        return InMemorySaver(), connection
+
+    state = {"boom": False}
+    real_build = manager_module.build_agent_tree
+
+    def _build(*args, **kwargs):
+        if state["boom"]:
+            raise RuntimeError("backend init failed")
+        return real_build(*args, **kwargs)
+
+    monkeypatch.setattr(manager_module, "open_checkpointer", _open)
+    monkeypatch.setattr(manager_module, "build_agent_tree", _build)
+    monkeypatch.setattr(manager_module, "build_chat_model", ScriptedModels(a=[]))
+    with MockContext(google_api_key="test-key") as ctx:
+        mgr = manager_module.DeepAgentsWorkflowManager(
+            agent_configs=[AgentConfig(name="a", prompt="p")], settings=ctx.settings
+        )
+        yield mgr, created, state
+
+
+class TestDeepAgentsReinitializeTransaction:
+    """The same transaction as ADK's, over the checkpointer."""
+
+    async def test_preserved_checkpointer_is_reused_not_replaced(self, deepagents_manager):
+        mgr, created, _state = deepagents_manager
+        await mgr.initialize_services()
+        saver = mgr._checkpointer
+
+        await mgr.reinitialize(preserve_sessions=True)
+
+        assert mgr._checkpointer is saver, "the live checkpointer was swapped"
+        assert len(created) == 1, "a replacement was opened"
+        assert created[0].closes == 0, "the preserved connection was closed"
+        assert mgr.is_initialized is True
+        await mgr.cleanup()
+
+    async def test_discarded_checkpointer_is_closed_and_replaced(self, deepagents_manager):
+        mgr, created, _state = deepagents_manager
+        await mgr.initialize_services()
+        saver = mgr._checkpointer
+
+        await mgr.reinitialize(preserve_sessions=False)
+
+        assert created[0].closes == 1
+        assert mgr._checkpointer is not saver
+        assert len(created) == 2
+        await mgr.cleanup()
+
+    async def test_failed_reinit_keeps_the_preserved_checkpointer(self, deepagents_manager):
+        mgr, created, state = deepagents_manager
+        await mgr.initialize_services()
+        saver = mgr._checkpointer
+
+        state["boom"] = True
+        with pytest.raises(RuntimeError, match="backend init failed"):
+            await mgr.reinitialize(preserve_sessions=True)
+
+        assert created[0].closes == 0, "the preserved checkpointer was lost"
+        assert mgr._checkpointer is saver
+        assert mgr.is_initialized is False, "a failed reinit must not look ready"
+        assert len(created) == 1
+        await mgr.cleanup()
+        assert created[0].closes == 1
+
+    async def test_failed_reinit_closes_the_replacement_it_opened(self, deepagents_manager):
+        mgr, created, state = deepagents_manager
+        await mgr.initialize_services()
+
+        state["boom"] = True
+        with pytest.raises(RuntimeError):
+            await mgr.reinitialize(preserve_sessions=False)
+
+        assert created[0].closes == 1  # discarded on purpose
+        assert len(created) == 2
+        assert created[1].closes == 1, "the replacement leaked"
+        assert mgr._checkpointer is None
+        assert mgr.is_initialized is False
+
+    async def test_a_failed_initialization_is_rolled_back(self, deepagents_manager):
+        mgr, created, state = deepagents_manager
+        state["boom"] = True
+
+        with pytest.raises(RuntimeError, match="backend init failed"):
+            await mgr.initialize_services()
+
+        assert len(created) == 1
+        assert created[0].closes == 1, "the checkpointer's connection leaked"
+        assert mgr._checkpointer is None
+        assert mgr.is_initialized is False
+        assert mgr.services == {}
+
+    async def test_it_can_be_initialized_after_a_failure(self, deepagents_manager):
+        mgr, created, state = deepagents_manager
+        state["boom"] = True
+        with pytest.raises(RuntimeError):
+            await mgr.initialize_services()
+
+        state["boom"] = False
+        await mgr.initialize_services()
+
+        assert mgr.is_initialized is True
+        assert len(created) == 2 and created[1].closes == 0
+        await mgr.cleanup()

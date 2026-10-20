@@ -8,9 +8,11 @@ Type → UI Control Mapping:
     - str → TextItem (text input)
     - int, float → TextItem (with validation)
     - Literal["a", "b", "c"] → InlineSelectItem (options from literal)
+    - an Enum (e.g. OrchestratorType) → InlineSelectItem (its members' values)
     - Field with json_schema_extra={"options": [...]} → InlineSelectItem/DropdownItem
 """
 
+from enum import Enum
 from typing import Any, get_args, get_origin, Literal, TYPE_CHECKING
 
 from pydantic.fields import FieldInfo
@@ -81,6 +83,19 @@ def field_to_ui_item(
             description=description,
             options=options,
             default=str(current_value) if current_value is not None else options[0],
+        )
+
+    # An Enum offers its members' values, as a Literal offers its own: the
+    # value is what a setting accepts and what the dialog writes back.
+    if isinstance(annotation, type) and issubclass(annotation, Enum):
+        options = [str(member.value) for member in annotation]
+        current = current_value.value if isinstance(current_value, Enum) else current_value
+        return InlineSelectItem(
+            key=key,
+            label=label,
+            description=description,
+            options=options,
+            default=str(current) if current is not None else options[0],
         )
 
     # Check for explicit options in json_schema_extra

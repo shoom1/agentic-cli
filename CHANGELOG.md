@@ -108,6 +108,80 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   again now and reports whose models changed and which listings failed. It
   works before the workflow is initialized, from the model cache, and never
   shows a key.
+- **A Deep Agents orchestrator: `orchestrator="deepagents"`**, installed by
+  the new `deepagents` extra (`pip install 'agentic-cli[deepagents]'`; it
+  installs beside `langgraph`). `DeepAgentsWorkflowManager`
+  (`agentic_cli.workflow.deepagents`) builds each `AgentConfig` as a
+  LangChain `create_agent` graph with selected Deep Agents middleware, on
+  the agent's own model, tools and prompt, under the framework's permission
+  engine; Deep Agents' file tools, `write_todos` and harness profiles are
+  not used. ADK stays the default. Without the extra, the orchestrator
+  raises `ImportError` with that install hint.
+  - **Delegation.** A coordinator delegates through Deep Agents' `task` tool
+    (`description`, the brief; `subagent_type`, the sub-agent's name), which
+    lists each sub-agent as `- name: description`; one without a
+    description is offered as "The <name> agent." with a warning. A
+    sub-agent sees only the brief and the coordinator's `plan` and `tasks`,
+    never the conversation, and its last text is the call's result. Two
+    sub-agents may run at once.
+  - **Tools.** Every tool call, in every agent, passes the permission gate,
+    which identifies the tool by the object the registry issued and asks
+    through the input callback, sub-agents' calls included. A tool that
+    raises fails its call with `{"success": false, "error": "<tool> failed:
+    <Type>: <message>"}`, as on ADK, and the turn goes on. A sync tool runs
+    on LangChain's executor thread, where the service registry, the active
+    turn and the input callback are visible. A parameter named
+    `tool_context` is hidden from the model and passed `None`, so a tool
+    written for ADK loads unchanged.
+  - **Events.** One per finished message, as on ADK, each with
+    `metadata["agent"]`. `LLM_USAGE` names that agent's own model and
+    carries cache reads and writes and thinking tokens, and `TASK_PROGRESS`
+    comes in the same step as the `save_tasks` call. A model call inside a
+    tool (the `generate_simple` summaries) never shows as text. A turn that
+    fails (a provider error, a context overflow) ends with one `ERROR`; the
+    next turn continues after the user's message, and a tool call that a
+    cancelled or failed turn left open is answered first, so the provider
+    accepts the request.
+  - **Sessions.** Each conversation is the thread of its whole
+    `(app_name, user_id, session_id)`, so two users, or two apps sharing a
+    database, never share a conversation through one session id.
+    `session_store` picks the checkpointer: sqlite (the default) in
+    `{workspace}/sessions/checkpoints.db`, next to ADK's `sessions.db`
+    (`sqlite_uri` may point both backends at one file: their tables do not
+    collide), Postgres at `postgres_uri`, or memory. Every session hook
+    takes `user_id`. `list_sessions` gives each session's `last_update`
+    (epoch seconds) and `message_count`, `delete_session` also removes the
+    sub-agents' checkpoints and returns False for an unknown id, and
+    `recent_messages` is the user's and the assistant's text.
+  - **Lifecycle, as on ADK.** A cleanup or a model switch waits for the
+    running turn. A failed initialization closes the checkpointer it
+    opened. A model switch (`reinitialize(preserve_sessions=True)`) keeps the
+    same checkpointer and connection, also when it fails, so a retry
+    continues the conversation.
+  - **Context.** Deep Agents' summarization runs in every agent: at 85% of
+    the model's input budget (0.95 of its context window, less its
+    `max_tokens`), keeping the newest 10% word for word. With
+    `context_window_enabled`, `context_window_trigger_tokens` (capped at
+    that, the kept tail lowered in proportion) and
+    `context_window_target_tokens` decide instead, also for a
+    model whose window is unknown, which otherwise gets Deep Agents' fixed
+    defaults. The checkpoint
+    keeps every message. Each summary is a `CONTEXT_TRIMMED` event
+    (`source="summarization"`) with the summary call's own `LLM_USAGE`
+    (`purpose="summarization"`), which the status bar adds to the totals
+    but does not take as the context size. A sub-agent's `LLM_USAGE`
+    (`purpose="subagent"`) counts the same way: its prompt is its brief.
+    On Claude, with
+    `prompt_caching_enabled`, the system prompt, the last tool and the
+    conversation are cached for 5 minutes, as on ADK. After a model switch
+    no model is sent another provider's reasoning.
+
+  Sessions saved by the LangGraph backend do not carry over: they stay in
+  `{workspace}/checkpoints.db`, untouched, and switching the orchestrator
+  starts a new conversation, as it always has.
+- **`task` is a reserved tool name**: the framework declares it for Deep
+  Agents' delegation tool, so registering another tool named `task` raises,
+  whichever backend runs.
 
 ### Changed
 
@@ -375,6 +449,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`agentic_cli.workflow.langgraph.persistence.create_checkpointer`,
   `agentic_cli.workflow.adk.plugins.LLMLoggingPlugin`), and neither backend's
   sessions nor its log records change.
+- **The session settings say where each backend keeps its sessions.**
+  `session_store`, `sqlite_uri` and `postgres_uri` name ADK's and Deep
+  Agents' locations and say that sessions do not move between backends.
+  `store_type` is marked LangGraph-only, `context_window_enabled` says that
+  on Deep Agents it picks the summarization thresholds, and
+  `prompt_caching_enabled` says Claude is cached on every backend and
+  Gemini's explicit caches only on ADK. Only the descriptions change.
 
 ### Removed
 
@@ -596,6 +677,9 @@ step; each entry says what to use instead.
 - **A sqlite or Postgres checkpointer whose table setup fails no longer
   leaks its connection.** The connection was opened, `setup()` raised, and
   the caller never received the context manager that could close it.
+- **An Enum setting in the `/settings` dialog is a picker.** An app that
+  showed `orchestrator` got a text field holding `OrchestratorType.ADK`; it
+  now offers `adk`, `langgraph` and `deepagents`.
 
 ## [0.6.4] - 2026-10-18
 

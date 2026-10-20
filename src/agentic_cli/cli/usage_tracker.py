@@ -53,6 +53,11 @@ class UsageTracker:
         Detects context trimming via token-drop heuristic when the
         caller has not already reported a CONTEXT_TRIMMED event.
 
+        A summarization call (``purpose="summarization"``) or a sub-agent's call
+        (``purpose="subagent"``) adds to the totals only: its prompt is the
+        history it condenses or the brief it was given, not the conversation's
+        context, so it neither sets the context size nor counts as a drop.
+
         Args:
             metadata: Metadata dict from a WorkflowEvent (LLM_USAGE type).
             context_trimmed_already: Set True if a CONTEXT_TRIMMED event
@@ -64,7 +69,9 @@ class UsageTracker:
         """
         prev_prompt = self.last_prompt_tokens
         current_prompt = metadata.get("prompt_tokens") or 0
-        self.last_prompt_tokens = current_prompt
+        context_call = metadata.get("purpose") not in ("summarization", "subagent")
+        if context_call:
+            self.last_prompt_tokens = current_prompt
 
         self.prompt_tokens += current_prompt
         self.completion_tokens += metadata.get("completion_tokens") or 0
@@ -77,7 +84,8 @@ class UsageTracker:
         # Token-drop heuristic: if prompt_tokens dropped and no explicit
         # trim event was already received, infer context was trimmed.
         if (
-            not context_trimmed_already
+            context_call
+            and not context_trimmed_already
             and prev_prompt > 0
             and current_prompt < prev_prompt
         ):

@@ -18,7 +18,13 @@ import langchain_google_genai.chat_models as google_chat_models
 import openrouter
 from google.genai import types
 
-from tests.workflow.adk.fakes import FakeAPI, anthropic_message, chat_completion, http_library
+from tests.workflow.adk.fakes import (
+    FakeAPI,
+    anthropic_message,
+    chat_completion,
+    http_library,
+    openai_response,
+)
 
 
 def route(monkeypatch, module, client_class: str, api: FakeAPI) -> None:
@@ -71,6 +77,23 @@ def gemini_response(*parts: dict[str, Any]) -> dict[str, Any]:
             "finishReason": "STOP",
         }],
         "usageMetadata": {"promptTokenCount": 3, "candidatesTokenCount": 1, "totalTokenCount": 4},
+    }
+
+
+def openai_function_call(
+    name: str, arguments: dict[str, Any], call_id: str, *, model: str = "gpt-5.5"
+) -> dict[str, Any]:
+    """An OpenAI Responses API response that calls one tool."""
+    return {
+        **openai_response(model=model),
+        "output": [{
+            "type": "function_call",
+            "id": f"fc_{call_id}",
+            "call_id": call_id,
+            "name": name,
+            "arguments": json.dumps(arguments),
+            "status": "completed",
+        }],
     }
 
 

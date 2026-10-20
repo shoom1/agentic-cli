@@ -5,7 +5,10 @@ DatabaseSessionService); a brand-new Manager 2 over the same store resumes the
 same session_id and the model answers with it — proving cross-restart durability
 with full fidelity, no custom snapshot.
 
-@pytest.mark.llm, ADK-only (needs GOOGLE_API_KEY); skipped by default:
+The same check runs on the LangGraph and Deep Agents backends (their
+persistent checkpointers).
+
+@pytest.mark.llm (needs GOOGLE_API_KEY); skipped by default:
 
     conda run -n agenticcli python -m pytest tests/integration/test_live_durable_sessions.py -v -m llm
 """
@@ -113,5 +116,40 @@ async def test_langgraph_session_survives_a_fresh_manager(tmp_path: Path, monkey
         assert await m2.session_exists(sid) is True
         answer = await _run(m2, _ASK, sid, user)
         assert _NAME in answer.lower(), f"langgraph did not recall across restart: {answer!r}"
+    finally:
+        await m2.cleanup()
+
+
+async def test_deepagents_session_survives_a_fresh_manager(tmp_path: Path, monkeypatch):
+    """The same durability check on the Deep Agents backend.
+
+    Its sqlite checkpointer lives at {workspace}/sessions/checkpoints.db, and
+    the thread is the whole (app, user, session) triple.
+    """
+    pytest.importorskip("deepagents")
+
+    monkeypatch.chdir(tmp_path)
+    settings = BaseSettings(
+        workspace_dir=tmp_path,
+        session_store="sqlite",
+        permissions_enabled=False,
+        orchestrator="deepagents",
+    )
+    set_settings(settings)
+    sid = "da-durable-project"
+    user = settings.default_user
+
+    m1 = create_workflow_manager_from_settings(agent_configs=[_AGENT], settings=settings)
+    assert m1.backend_type == "deepagents"
+    await _run(m1, _TELL, sid, user)
+    await m1.cleanup()
+    assert (tmp_path / "sessions" / "checkpoints.db").is_file()
+
+    m2 = create_workflow_manager_from_settings(agent_configs=[_AGENT], settings=settings)
+    await m2.initialize_services()
+    try:
+        assert await m2.session_exists(sid) is True
+        answer = await _run(m2, _ASK, sid, user)
+        assert _NAME in answer.lower(), f"deepagents did not recall across restart: {answer!r}"
     finally:
         await m2.cleanup()

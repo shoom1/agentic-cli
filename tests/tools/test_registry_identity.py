@@ -747,9 +747,12 @@ class TestReplacedStateToolIsNotInjected:
                 "application"
             )
         finally:
+            # Undo the replacement whole: the variants were also marked
+            # retired, which would keep every later manager from injecting them.
             registry._tools["save_plan"] = original
             for variant in original.variants:
                 registry.bind_identity(variant, original)
+                registry._retired.discard(variant)
 
 
 class TestIdentityIsPerRegistry:

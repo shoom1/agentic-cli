@@ -30,6 +30,10 @@ _BACKENDS: dict[OrchestratorType, tuple[str, str]] = {
         "agentic_cli.workflow.langgraph:LangGraphWorkflowManager",
         "langgraph",
     ),
+    OrchestratorType.DEEPAGENTS: (
+        "agentic_cli.workflow.deepagents:DeepAgentsWorkflowManager",
+        "deepagents",
+    ),
 }
 
 
@@ -40,6 +44,7 @@ def _langgraph_kwargs(settings: "BaseSettings") -> dict[str, Any]:
 
 
 # Constructor arguments that only one backend takes, by that backend's entry.
+# Deep Agents takes none: it opens its own checkpointer from the settings.
 _BACKEND_KWARGS: dict[OrchestratorType, Callable[["BaseSettings"], dict[str, Any]]] = {
     OrchestratorType.LANGGRAPH: _langgraph_kwargs,
 }

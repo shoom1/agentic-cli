@@ -12,6 +12,9 @@ Two defects:
    does not stop the thread, so a rolled-back initialization was followed,
    moments later, by that thread publishing services into a manager that had
    already been cleaned up — leaking a sandbox/job manager nobody would close.
+
+The admission tests run on every backend that implements the contract (ADK
+and Deep Agents).
 """
 
 from __future__ import annotations
@@ -40,7 +43,13 @@ from tests.conftest import MockContext  # noqa: E402
 
 
 class _AdmissionHarness:
-    """An ADK manager whose stream and initialization the test drives."""
+    """An ADK manager whose stream and initialization the test drives.
+
+    ``backend`` names the handle a turn runs on (ADK's runner), and
+    ``backend_at_stream`` records the one each stream ran against.
+    """
+
+    backend = "_runner"
 
     def __init__(self, ctx) -> None:
         self.manager = GoogleADKWorkflowManager(
@@ -49,7 +58,7 @@ class _AdmissionHarness:
         self.manager._event_processor = SimpleNamespace(model=None)
         self.inits = 0
         self.streams: list[str] = []
-        self.runner_at_stream: list[object] = []
+        self.backend_at_stream: list[object] = []
 
         async def _do_initialize() -> None:
             self.inits += 1
@@ -57,14 +66,14 @@ class _AdmissionHarness:
                 get_session=self._get_session
             )
             self.manager._root_agent = SimpleNamespace(name="a")
-            self.manager._runner = SimpleNamespace(name=f"runner-{self.inits}")
+            self.manager._runner = SimpleNamespace(name=f"backend-{self.inits}")
 
         async def _get_or_create(user_id, session_id):
             return SimpleNamespace(id=session_id)
 
         async def _stream(*, session_id, user_id, new_message, run_config):
             self.streams.append(session_id)
-            self.runner_at_stream.append(self.manager._runner)
+            self.backend_at_stream.append(self.manager._runner)
             yield WorkflowEvent(type=EventType.TEXT, content=session_id)
 
         self.manager._do_initialize = _do_initialize
@@ -84,16 +93,65 @@ class _AdmissionHarness:
         ]
 
 
-def _admission_harness():
+class _DeepAgentsAdmissionHarness:
+    """A Deep Agents manager whose stream and initialization the test drives.
+
+    Its turn runs on the compiled root agent (``_root``).
+    """
+
+    backend = "_root"
+
+    def __init__(self, ctx) -> None:
+        from agentic_cli.workflow.deepagents import DeepAgentsWorkflowManager
+
+        self.manager = DeepAgentsWorkflowManager(
+            agent_configs=[AgentConfig(name="a", prompt="p")], settings=ctx.settings
+        )
+        self.inits = 0
+        self.streams: list[str] = []
+        self.backend_at_stream: list[object] = []
+
+        async def _do_initialize() -> None:
+            self.inits += 1
+            self.manager._sessions = SimpleNamespace()
+            self.manager._root_name = "a"
+            self.manager._root = SimpleNamespace(name=f"backend-{self.inits}")
+
+        async def _run_turn(ref, graph_input):
+            self.streams.append(ref.session_id)
+            self.backend_at_stream.append(self.manager._root)
+            yield WorkflowEvent(type=EventType.TEXT, content=ref.session_id)
+
+        self.manager._do_initialize = _do_initialize
+        self.manager._run_turn = _run_turn
+        self.manager._ensure_managers_initialized = lambda: None
+
+    async def drain(self, session_id: str) -> list[str]:
+        return [
+            e.content
+            async for e in self.manager.process("hi", "u", session_id=session_id)
+        ]
+
+
+def _admission_harness(backend: str = "adk"):
+    harness = _AdmissionHarness
+    if backend == "deepagents":
+        pytest.importorskip("deepagents")
+        harness = _DeepAgentsAdmissionHarness
     ctx = MockContext(google_api_key="test-key")
     ctx.__enter__()
-    return _AdmissionHarness(ctx), ctx
+    return harness(ctx), ctx
+
+
+@pytest.fixture(params=["adk", "deepagents"])
+def backend(request) -> str:
+    return request.param
 
 
 class TestTurnAdmissionRechecksReadiness:
-    async def test_turn_queued_behind_cleanup_reinitializes(self):
+    async def test_turn_queued_behind_cleanup_reinitializes(self, backend):
         """Cleanup lands between the turn's init and its admission."""
-        h, ctx = _admission_harness()
+        h, ctx = _admission_harness(backend)
         try:
             await h.manager.initialize_services(validate=False)
             assert h.inits == 1
@@ -107,19 +165,19 @@ class TestTurnAdmissionRechecksReadiness:
             # Release the manager's resources while the turn waits for
             # admission (the turn already passed _ensure_initialized).
             await h.manager._release_resources()
-            assert h.manager._runner is None
+            assert getattr(h.manager, h.backend) is None
             h.manager._turn_lock.release()
 
             assert await asyncio.wait_for(turn, timeout=2) == ["sess-a"]
             assert h.inits == 2, "the turn ran against the released backend"
-            assert h.runner_at_stream[-1] is not None
-            assert h.runner_at_stream[-1].name == "runner-2"
+            assert h.backend_at_stream[-1] is not None
+            assert h.backend_at_stream[-1].name == "backend-2"
         finally:
             ctx.__exit__(None, None, None)
 
-    async def test_turn_fails_cleanly_when_the_backend_cannot_be_revived(self):
+    async def test_turn_fails_cleanly_when_the_backend_cannot_be_revived(self, backend):
         """No silent AttributeError on a ``None`` runner."""
-        h, ctx = _admission_harness()
+        h, ctx = _admission_harness(backend)
         try:
             await h.manager.initialize_services(validate=False)
 
