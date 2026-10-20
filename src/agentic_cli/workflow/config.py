@@ -35,10 +35,11 @@ class AgentConfig:
         model_settings: Optional per-agent generation parameters (temperature,
             thinking, etc.), applied on both backends.
         mcp_servers: Optional MCP servers whose tools are exposed to this agent.
-            Currently consumed by the ADK backend only.
+            Consumed by the ADK and Deep Agents backends; LangGraph ignores them.
         skills: Optional skill references (Agent Skills / SKILL.md folders) —
             each a path to a skill directory or a name resolved under
-            ``settings.skills_dirs``. Currently consumed by the ADK backend only.
+            ``settings.skills_dirs``. Consumed by the ADK and Deep Agents
+            backends; LangGraph ignores them.
         include_state_tools: Whether to auto-inject plan/task state tools (default True)
     """
 
