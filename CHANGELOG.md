@@ -211,6 +211,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   error. The setting applies from the next turn. Usage is still reported by
   the stream's `LLM_USAGE` alone, and a log that cannot be written is
   skipped.
+- **Agent Skills on Deep Agents** (`AgentConfig.skills`, resolved as on ADK:
+  a path to a skill folder, or a name under `skills_dirs`). An agent with
+  skills gets the tools ADK offers, `list_skills`, `load_skill` and
+  `load_skill_resource`, with ADK's arguments, results and error texts, and
+  ADK's skills instruction at the end of its system prompt; as on ADK there
+  is no `run_skill_script`. A resource is read from the skill as it was
+  loaded. A PNG, JPEG, GIF or WebP image reaches a Claude, Gemini or OpenAI
+  model with its result; any other binary resource, and any image on
+  OpenRouter or an endpoint, is a status naming its type and size. The
+  tools need no permission, as on ADK. An agent whose own tools already use
+  one of these names fails to initialize with `AgentGraphError`, and an MCP
+  tool of such a name is skipped with the `mcp_tool_skipped` notice. ADK's
+  unload, search and lifecycle modes, and the `adk_additional_tools` and
+  `adk_inject_state` frontmatter keys, stay ADK-only.
+  `agentic_cli.tools.skills.make_skill_tools(skills)` returns the tools and
+  the instruction.
 
 ### Changed
 

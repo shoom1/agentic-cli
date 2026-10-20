@@ -8,8 +8,10 @@ checkpointer opened from ``session_store``, which this manager owns: its
 connection is closed on cleanup and by a failed initialization, and a model
 switch keeps it. The agents' MCP sessions (``mcp_tools``) are its too: they
 open at initialization, and every release closes them, so a model switch
-reopens them. With ``raw_llm_logging`` on, a turn's every model call is
-logged (``LLM_REQUEST``/``LLM_RESPONSE``, in the stream and in
+reopens them. An agent's ``skills`` become the skill tools ADK offers
+(``tools/skills/langchain_tools.py``), with ADK's instruction appended to its
+prompt. With ``raw_llm_logging`` on, a turn's every model call is logged
+(``LLM_REQUEST``/``LLM_RESPONSE``, in the stream and in
 ``~/.{app_name}/logs/llm_events.jsonl``).
 
 Lifecycle follows ADK's contract (``workflow/adk/manager.py``): initialization,
@@ -33,9 +35,15 @@ from agentic_cli.config import BaseSettings
 from agentic_cli.constants import truncate
 from agentic_cli.logging import Loggers, bind_context
 from agentic_cli.tools.registry import ToolDefinition, identify_tool
+from agentic_cli.tools.skills import SkillStore
+from agentic_cli.tools.skills.langchain_tools import SKILL_TOOL_NAMES, make_skill_tools
 from agentic_cli.workflow.base_manager import BaseWorkflowManager
 from agentic_cli.workflow.checkpointers import deepagents_sqlite_path, open_checkpointer
-from agentic_cli.workflow.config import AgentConfig, validate_agent_graph
+from agentic_cli.workflow.config import (
+    AgentConfig,
+    AgentGraphError,
+    validate_agent_graph,
+)
 from agentic_cli.workflow.deepagents.agent_builder import build_agent_tree
 from agentic_cli.workflow.deepagents.event_processor import (
     DeepAgentsEventProcessor,
@@ -61,6 +69,11 @@ logger = Loggers.workflow()
 
 #: Longest error text a failed turn's log line carries.
 _MAX_LOGGED_ERROR = 500
+
+
+def _with_instruction(prompt: str, instruction: str) -> str:
+    """``prompt`` with ``instruction`` appended, joined as ADK appends one."""
+    return f"{prompt}\n\n{instruction}" if prompt else instruction
 
 
 class DeepAgentsWorkflowManager(BaseWorkflowManager):
@@ -172,7 +185,7 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         )
 
     async def _do_initialize(self) -> None:
-        """Open (or keep) the checkpointer, open the MCP sessions, build the agents."""
+        """Open (or keep) the checkpointer; build the agents, skills and MCP tools."""
         logger.info("initializing_services", app_name=self.app_name, backend="deepagents")
 
         # A preserving reinitialize keeps the live checkpointer: reuse it
@@ -202,6 +215,13 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         tools: dict[str, list[BaseTool]] = {}
         for config in self._agent_configs:
             own = to_langchain_tools(self._build_tools(config, service_map))
+            # Skill tools before MCP tools: an MCP tool named like one is skipped.
+            if config.skills:
+                skill_tools, instruction = self._skill_tools(config, own)
+                own = [*own, *skill_tools]
+                prompts[config.name] = _with_instruction(
+                    prompts[config.name], instruction
+                )
             if config.mcp_servers:
                 own = await self._with_mcp_tools(config, own)
             tools[config.name] = own
@@ -231,6 +251,36 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             session_store=self._settings.session_store,
             required_managers=list(self._required_managers),
         )
+
+    def _skill_tools(
+        self, config: AgentConfig, tools: list[BaseTool]
+    ) -> tuple[list[BaseTool], str]:
+        """``config``'s skills as skill tools, and the instruction its prompt gets.
+
+        The skills resolve as on ADK: a path to a skill folder, or a name under
+        ``skills_dirs``.
+
+        Raises:
+            ValueError: A skill cannot be found or loaded (``SkillStore``).
+            AgentGraphError: The agent's own tools already use a skill tool's
+                name; two tools of one name would leave one unreachable.
+        """
+        taken = [tool.name for tool in tools if tool.name in SKILL_TOOL_NAMES]
+        if taken:
+            *rest, last = SKILL_TOOL_NAMES
+            raise AgentGraphError(
+                f"Agent {config.name!r} has skills, whose tools are "
+                f"{', '.join(rest)} and {last}, so its own tools cannot include "
+                f"{taken[0]!r}; rename that tool."
+            )
+        skills = SkillStore(self._settings.skills_dirs or []).resolve(config.skills)
+        skill_tools, instruction = make_skill_tools(
+            skills, provider=self._resolved_models[config.name].record.kind
+        )
+        logger.debug(
+            "skill_tools_attached", agent=config.name, skills=[s.name for s in skills]
+        )
+        return skill_tools, instruction
 
     async def _with_mcp_tools(
         self, config: AgentConfig, tools: list[BaseTool]
