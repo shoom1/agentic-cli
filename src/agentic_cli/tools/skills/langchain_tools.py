@@ -15,8 +15,12 @@ backend marks a failure (ADK reads it from the ``error`` key).
 What differs from ADK:
 
 - A binary resource: ADK answers with a status and then adds the bytes to the
-  next request as a user message. Here the result carries them, after the same
-  status and the same lead-in text.
+  next request as a user message, once. Here the result carries them, after
+  the same status and the same lead-in text, so they stay in the conversation:
+  only a PNG, JPEG, GIF or WebP image goes out this way, and only to a provider
+  that takes an image in a tool result (Anthropic, Google, OpenAI). Any other
+  binary resource, or any provider else, gets a status naming the file's type
+  and size instead, because a refused block would fail every later request.
 - ``load_skill``'s result (the instructions) stays in the conversation on both
   backends, but here summarization may condense it; the model can then load
   the skill again.
@@ -43,6 +47,7 @@ from typing import Any
 from google.adk.skills.prompt import format_skills_as_xml
 from langchain_core.tools import BaseTool, StructuredTool, ToolException
 
+from agentic_cli.models import ProviderKind
 from agentic_cli.tools.registry import bind_tool_identity, get_registry
 from agentic_cli.workflow.sessions import get_active_turn
 
@@ -137,6 +142,13 @@ _DECLARATIONS: dict[str, tuple[str, dict[str, Any]]] = {
     ),
 }
 
+#: The images every provider that takes one in a tool result accepts.
+_IMAGE_TYPES = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
+
+#: The providers whose tool results may carry an image. Chat Completions
+#: (OpenRouter, OpenAI-compatible endpoints) carries text only.
+_IMAGE_PROVIDERS = frozenset({ProviderKind.ANTHROPIC, ProviderKind.GOOGLE, ProviderKind.OPENAI})
+
 #: ADK's status for a binary resource.
 BINARY_FILE_DETECTED = (
     "Binary file detected. The content has been injected into the"
@@ -146,11 +158,16 @@ BINARY_FILE_DETECTED = (
 _NO_TURN = object()
 
 
-def make_skill_tools(skills: Sequence[Any]) -> tuple[list[BaseTool], str]:
+def make_skill_tools(
+    skills: Sequence[Any], *, provider: ProviderKind | None = None
+) -> tuple[list[BaseTool], str]:
     """One agent's skills as its three skill tools, and its skills instruction.
 
     Args:
         skills: Loaded ADK ``Skill`` objects (``SkillStore.resolve``).
+        provider: The agent's model's provider kind. A binary resource is sent
+            as an image only to a provider that reads one in a tool result;
+            without it, every binary resource is a status.
 
     Returns:
         The tools, bound to the framework's skill tool definitions, and the
@@ -163,7 +180,7 @@ def make_skill_tools(skills: Sequence[Any]) -> tuple[list[BaseTool], str]:
     """
     if not skills:
         return [], ""
-    answers = _SkillAnswers(skills)
+    answers = _SkillAnswers(skills, images=provider in _IMAGE_PROVIDERS)
     tools = [
         _tool(LIST_SKILLS, answers.list_skills),
         _tool(LOAD_SKILL, answers.load_skill),
@@ -208,7 +225,8 @@ def _error_content(error: ToolException) -> str:
 class _SkillAnswers:
     """What one agent's skill tools answer, from its skills in memory."""
 
-    def __init__(self, skills: Sequence[Any]) -> None:
+    def __init__(self, skills: Sequence[Any], *, images: bool = False) -> None:
+        self._images = images
         self._skills: dict[str, Any] = {}
         for skill in skills:
             if skill.name in self._skills:
@@ -260,7 +278,7 @@ class _SkillAnswers:
                 "RESOURCE_NOT_FOUND",
             )
         if isinstance(content, bytes):
-            return _binary(skill_name, file_path, content)
+            return _binary(skill_name, file_path, content, images=self._images)
         return {"skill_name": skill_name, "file_path": file_path, "content": content}
 
     def _skill(self, skill_name: str) -> Any:
@@ -301,19 +319,36 @@ def _resource(skill: Any, file_path: str) -> str | bytes | None:
     )
 
 
-def _binary(skill_name: str, file_path: str, data: bytes) -> list[dict[str, Any]]:
-    """ADK's status, then the bytes as ADK adds them to the request."""
+def _binary(
+    skill_name: str, file_path: str, data: bytes, *, images: bool
+) -> dict[str, Any] | list[dict[str, Any]]:
+    """ADK's status, then the bytes as ADK adds them to the request.
+
+    The bytes stay in the conversation (ADK sends them once), so they go out
+    only as an image the provider reads in a tool result (``images``); a block
+    it refused would fail every later request. Anything else is a status
+    naming the file's type and size.
+    """
+    mime_type = mimetypes.guess_type(file_path)[0] or "application/octet-stream"
+    if not (images and mime_type in _IMAGE_TYPES):
+        return {
+            "skill_name": skill_name,
+            "file_path": file_path,
+            "status": (
+                f"Binary file detected ({mime_type}, {len(data)} bytes)."
+                " Its content cannot be shown in this conversation."
+            ),
+        }
     status = {
         "skill_name": skill_name,
         "file_path": file_path,
         "status": BINARY_FILE_DETECTED,
     }
-    mime_type = mimetypes.guess_type(file_path)[0] or "application/octet-stream"
     return [
         {"type": "text", "text": json.dumps(status, ensure_ascii=False)},
         {"type": "text", "text": f"The content of binary file '{file_path}' is:"},
         {
-            "type": "image" if mime_type.startswith("image/") else "file",
+            "type": "image",
             "base64": base64.b64encode(data).decode("ascii"),
             "mime_type": mime_type,
         },

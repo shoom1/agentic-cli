@@ -274,7 +274,9 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
                 f"{taken[0]!r}; rename that tool."
             )
         skills = SkillStore(self._settings.skills_dirs or []).resolve(config.skills)
-        skill_tools, instruction = make_skill_tools(skills)
+        skill_tools, instruction = make_skill_tools(
+            skills, provider=self._resolved_models[config.name].record.kind
+        )
         logger.debug(
             "skill_tools_attached", agent=config.name, skills=[s.name for s in skills]
         )

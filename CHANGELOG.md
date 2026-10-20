@@ -217,7 +217,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `load_skill_resource`, with ADK's arguments, results and error texts, and
   ADK's skills instruction at the end of its system prompt; as on ADK there
   is no `run_skill_script`. A resource is read from the skill as it was
-  loaded, and a binary one (an image) reaches the model with its result. The
+  loaded. A PNG, JPEG, GIF or WebP image reaches a Claude, Gemini or OpenAI
+  model with its result; any other binary resource, and any image on
+  OpenRouter or an endpoint, is a status naming its type and size. The
   tools need no permission, as on ADK. An agent whose own tools already use
   one of these names fails to initialize with `AgentGraphError`, and an MCP
   tool of such a name is skipped with the `mcp_tool_skipped` notice. ADK's

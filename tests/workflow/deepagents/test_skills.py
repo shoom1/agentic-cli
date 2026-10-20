@@ -45,6 +45,7 @@ from langchain_core.messages import ToolMessage  # noqa: E402
 from langchain_core.tools import BaseTool, StructuredTool  # noqa: E402
 from pydantic import Field  # noqa: E402
 
+from agentic_cli.models import ProviderKind  # noqa: E402
 from agentic_cli.tools.registry import get_registry, identify_tool  # noqa: E402
 from agentic_cli.tools.skills import SkillStore, make_skill_toolset  # noqa: E402
 from agentic_cli.tools.skills.langchain_tools import (  # noqa: E402
@@ -391,6 +392,33 @@ class TestAsOnADK:
         (result,) = of(events, EventType.TOOL_RESULT)
         assert result.metadata["success"] is True
 
+    async def test_an_endpoint_agent_gets_a_binary_resource_as_a_status(
+        self, tmp_path, monkeypatch, skills_dir
+    ):
+        # A Chat Completions tool message carries text only: the agent's own
+        # provider decides, not the default model's.
+        (tmp_path / "home").mkdir()
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        endpoints = {"local": {"base_url": "http://localhost:8000/v1",
+                               "models": {"small": {"context_window": 32_000}}}}
+        call = ("load_skill_resource", {"skill_name": "pdf-tools", "file_path": "assets/logo.png"})
+        models = scripted(monkeypatch, writer=_steps(call))
+        with MockContext(
+            session_store="memory", skills_dirs=[str(skills_dir)], model_endpoints=endpoints
+        ) as context:
+            manager = DeepAgentsWorkflowManager(
+                agent_configs=[_writer()], settings=context.settings, model="local:small"
+            )
+            try:
+                await turn(manager)
+            finally:
+                await manager.cleanup()
+
+        (message,) = _tool_messages(models.chats["writer"], 1, 1)
+        assert isinstance(message.content, str)
+        assert "cannot be shown" in json.loads(message.content)["status"]
+
 
 # --- the tools ------------------------------------------------------------------------
 
@@ -425,6 +453,39 @@ class TestMakeSkillTools:
 
         assert json.loads(loaded.content)["instructions"] == "# pdf-tools\nFollow these instructions."
         assert json.loads(resource.content)["content"] == "# Guide\nRead me first.\n"
+
+    async def test_a_binary_resource_is_sent_only_where_it_can_be_read(self, skills_dir):
+        """Bytes go out only as an image every media-capable provider accepts,
+        and only to such a provider; anything else would be refused or dropped,
+        and would stay in the conversation, so it is a status instead."""
+        spreadsheet = skills_dir / "pdf-tools" / "assets" / "data.xlsx"
+        spreadsheet.write_bytes(b"PK\x03\x04\xff\xfe\x00sheet")  # not UTF-8: binary
+        skills = _skills(skills_dir)
+
+        async def load(provider, file_path):
+            tool = make_skill_tools(skills, provider=provider)[0][2]
+            message = await tool.ainvoke(
+                _call(tool, {"skill_name": "pdf-tools", "file_path": file_path})
+            )
+            return message.content
+
+        for provider in (ProviderKind.ANTHROPIC, ProviderKind.GOOGLE, ProviderKind.OPENAI):
+            image = await load(provider, "assets/logo.png")
+            assert [block["type"] for block in image] == ["text", "text", "image"]
+        for provider, file_path in [
+            (None, "assets/logo.png"),
+            (ProviderKind.OPENROUTER, "assets/logo.png"),
+            (ProviderKind.OPENAI_COMPATIBLE, "assets/logo.png"),
+            (ProviderKind.ANTHROPIC, "assets/data.xlsx"),
+            (ProviderKind.GOOGLE, "assets/data.xlsx"),
+        ]:
+            content = await load(provider, file_path)
+            assert isinstance(content, str), (provider, file_path)
+            status = json.loads(content)
+            assert (status["skill_name"], status["file_path"]) == ("pdf-tools", file_path)
+            assert status["status"].startswith("Binary file detected (")
+            assert "cannot be shown" in status["status"]
+            assert "injected" not in status["status"]
 
     def test_duplicate_skill_names_raise_as_on_adk(self, skills_dir):
         skill = _skills(skills_dir)[0]
