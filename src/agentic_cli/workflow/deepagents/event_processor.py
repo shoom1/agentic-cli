@@ -24,21 +24,24 @@ the whole history when it patches it), and a model call inside a tool
 Every event carries ``metadata["agent"]``.
 
 What happens inside a node and is no node output (a summary call and the
-summary it made) reaches ``RunCallback`` instead, the turn's LangChain
-callback handler.
+summary it made, and with ``raw_llm_logging`` every model call) reaches
+``RunCallback`` instead, the turn's LangChain callback handler.
 """
 
 from __future__ import annotations
 
 import json
+import time
 from collections import deque
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from langchain_core.callbacks import AsyncCallbackHandler
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, ToolMessage
 
+from agentic_cli.constants import truncate
 from agentic_cli.tools._core.delegation import TASK_TOOL
 from agentic_cli.tools._core.tasks import task_progress_data
 from agentic_cli.workflow.deepagents.summarization import CONTEXT_SUMMARIZED
@@ -48,9 +51,22 @@ if TYPE_CHECKING:
     from langchain_core.outputs import LLMResult
 
     from agentic_cli.models import ResolvedModel
+    from agentic_cli.workflow.llm_log import LLMLogWriter
 
 #: The tag LangChain's summarization puts on its summary call's run metadata.
 _SUMMARY_SOURCE = "summarization"
+
+#: Why a model call was made (a raw log record's ``purpose``): an agent's own
+#: step, a summary of its history, or a call one of its tools made.
+PURPOSE_AGENT = "agent"
+PURPOSE_SUMMARY = _SUMMARY_SOURCE
+PURPOSE_TOOL = "tool"
+
+#: Longest error text a raw log record carries.
+_MAX_ERROR = 500
+
+#: LangChain's message types as the roles a provider knows.
+_ROLES = {"human": "user", "ai": "assistant", "system": "system", "tool": "tool"}
 
 Namespace = tuple[str, ...]
 
@@ -266,6 +282,19 @@ def _delegated_to(payload: dict) -> str | None:
     return subagent if isinstance(subagent, str) else None
 
 
+@dataclass
+class _ModelCall:
+    """One model call in flight: whose, why, on what, since when."""
+
+    agent: str
+    purpose: str
+    model: str
+    started: float
+
+    def latency_ms(self) -> float:
+        return (time.perf_counter() - self.started) * 1000
+
+
 class RunCallback(AsyncCallbackHandler):
     """Collects one turn's events that the stream cannot carry.
 
@@ -279,20 +308,35 @@ class RunCallback(AsyncCallbackHandler):
       agent it summarized for.
     - A summary applied (``CONTEXT_SUMMARIZED``) is ``CONTEXT_TRIMMED``, with
       ``source="summarization"``.
+    - With ``llm_log`` (``raw_llm_logging``), every model call is an
+      ``LLM_REQUEST`` and an ``LLM_RESPONSE``, also written to the log. Each
+      names its ``agent`` (``lc_agent_name``: for a call a tool made, the
+      agent whose tool it is) and its ``purpose``: ``"agent"``,
+      ``"summarization"`` or ``"tool"``. It records what LangChain sends, not
+      the HTTP body, and adds no ``LLM_USAGE``: the stream reports usage.
 
     Args:
         root: The root agent, for a call no agent is named on.
         agent_models: Each agent's resolved model, by name.
+        llm_log: Where raw LLM traffic is written; None logs none.
     """
 
-    def __init__(self, *, root: str, agent_models: Mapping[str, "ResolvedModel"]) -> None:
+    def __init__(
+        self,
+        *,
+        root: str,
+        agent_models: Mapping[str, "ResolvedModel"],
+        llm_log: "LLMLogWriter | None" = None,
+    ) -> None:
         super().__init__()
         self._root = root
         self._agent_models = agent_models
+        self._llm_log = llm_log
         # A sync tool's model call reports from LangChain's executor thread.
         self._events: deque[WorkflowEvent] = deque()
-        # Summary call run id -> the agent it summarizes for.
-        self._summaries: dict[UUID, str] = {}
+        # The calls in flight that are reported when they end, by run id:
+        # summary calls, and every call when logging.
+        self._calls: dict[UUID, _ModelCall] = {}
 
     async def on_chat_model_start(
         self,
@@ -304,20 +348,47 @@ class RunCallback(AsyncCallbackHandler):
         **kwargs: Any,
     ) -> None:
         metadata = metadata or {}
-        if metadata.get("lc_source") == _SUMMARY_SOURCE:
-            # create_agent names its runs after the agent.
-            self._summaries[run_id] = metadata.get("lc_agent_name") or self._root
+        purpose = _purpose(metadata)
+        if self._llm_log is None and purpose != PURPOSE_SUMMARY:
+            return
+        # create_agent names its runs after the agent, and a tool's runs
+        # inherit the name of the agent whose tool it is.
+        agent = metadata.get("lc_agent_name") or self._root
+        params = kwargs.get("invocation_params") or {}
+        call = _ModelCall(
+            agent=agent,
+            purpose=purpose,
+            model=_model_id(params) or self._model_ref(agent),
+            started=time.perf_counter(),
+        )
+        self._calls[run_id] = call
+        if self._llm_log is not None:
+            sent = messages[0] if messages else []
+            self._log(_request_event(call, sent, params), run_id)
 
     async def on_llm_end(self, response: "LLMResult", *, run_id: UUID, **kwargs: Any) -> None:
-        agent = self._summaries.pop(run_id, None)
-        if agent is None:
+        call = self._calls.pop(run_id, None)
+        if call is None:
             return
-        event = usage_event(self._agent_models.get(agent), _usage_of(response))
-        event.metadata.update(purpose=_SUMMARY_SOURCE, agent=agent)
-        self._emit(event)
+        if self._llm_log is not None:
+            self._log(_response_event(call, response), run_id)
+        if call.purpose == PURPOSE_SUMMARY:
+            event = usage_event(self._agent_models.get(call.agent), _usage_of(response))
+            event.metadata.update(purpose=PURPOSE_SUMMARY, agent=call.agent)
+            self._emit(event)
 
     async def on_llm_error(self, error: BaseException, *, run_id: UUID, **kwargs: Any) -> None:
-        self._summaries.pop(run_id, None)
+        call = self._calls.pop(run_id, None)
+        if call is None or self._llm_log is None:
+            return
+        event = WorkflowEvent.llm_response(
+            model=call.model,
+            error_code=type(error).__name__,
+            error_message=truncate(str(error), _MAX_ERROR),
+            author=call.agent,
+        )
+        event.metadata["latency_ms"] = call.latency_ms()
+        self._log(_attributed_call(event, call), run_id)
 
     async def on_custom_event(
         self, name: str, data: Any, *, run_id: UUID, **kwargs: Any
@@ -334,6 +405,16 @@ class RunCallback(AsyncCallbackHandler):
         event.metadata["messages_summarized"] = data["messages_summarized"]
         self._emit(event)
 
+    def _model_ref(self, agent: str) -> str:
+        model = self._agent_models.get(agent)
+        return str(model.ref) if model is not None else "unknown"
+
+    def _log(self, event: WorkflowEvent, run_id: UUID) -> None:
+        """Stream a raw record and write it (a failed write is skipped)."""
+        event.metadata["run_id"] = str(run_id)
+        self._emit(event)
+        self._llm_log.write(event)
+
     def _emit(self, event: WorkflowEvent) -> None:
         self._events.append(event)
 
@@ -343,6 +424,115 @@ class RunCallback(AsyncCallbackHandler):
         while self._events:
             events.append(self._events.popleft())
         return events
+
+
+def _purpose(metadata: Mapping[str, Any]) -> str:
+    """Why a model call was made, from its run metadata.
+
+    A summary call carries ``lc_source``; a call a tool made runs under the
+    ``tools`` node; every other call is an agent's step (its ``model`` node).
+    """
+    if metadata.get("lc_source") == _SUMMARY_SOURCE:
+        return PURPOSE_SUMMARY
+    if metadata.get("langgraph_node") == "tools":
+        return PURPOSE_TOOL
+    return PURPOSE_AGENT
+
+
+def _model_id(params: Mapping[str, Any]) -> str | None:
+    """The model a chat model sends a call to, from its invocation parameters."""
+    model = params.get("model") or params.get("model_name")
+    return str(model) if model else None
+
+
+def _request_event(
+    call: _ModelCall, messages: list[BaseMessage], params: Mapping[str, Any]
+) -> WorkflowEvent:
+    """``LLM_REQUEST`` for a call sending ``messages`` with ``params``.
+
+    The system prompt is ``system_instruction``, the tools are their names,
+    and ``config`` is every other parameter sent (the cache marks among
+    them: Claude's ``cache_control``).
+    """
+    system = [m.text for m in messages if isinstance(m, SystemMessage)]
+    event = WorkflowEvent.llm_request(
+        model=call.model,
+        messages=[
+            _message_record(message)
+            for message in messages
+            if not isinstance(message, SystemMessage)
+        ],
+        tools=_tool_names(params.get("tools")),
+        system_instruction="\n".join(system) if system else None,
+        config={key: value for key, value in params.items() if key != "tools"},
+    )
+    return _attributed_call(event, call)
+
+
+def _response_event(call: _ModelCall, response: "LLMResult") -> WorkflowEvent:
+    """``LLM_RESPONSE`` for a call that answered ``response``."""
+    generation = next((g for gens in response.generations for g in gens), None)
+    message = getattr(generation, "message", None)
+    info = {**(getattr(generation, "generation_info", None) or {})}
+    if isinstance(message, AIMessage):
+        info = {**message.response_metadata, **info}
+    finish = info.get("finish_reason") or info.get("stop_reason") or info.get("status")
+    answered = isinstance(message, AIMessage)
+    event = WorkflowEvent.llm_response(
+        model=call.model,
+        content=message.text if answered else None,
+        finish_reason=str(finish) if finish else None,
+        model_version=info.get("model_name") or info.get("model") or None,
+        author=call.agent,
+        raw_parts=list(message.content_blocks) if answered else None,
+    )
+    event.metadata["latency_ms"] = call.latency_ms()
+    if answered and message.usage_metadata:
+        event.metadata["usage"] = dict(message.usage_metadata)
+    return _attributed_call(event, call)
+
+
+def _attributed_call(event: WorkflowEvent, call: _ModelCall) -> WorkflowEvent:
+    event.metadata.update(agent=call.agent, purpose=call.purpose)
+    return event
+
+
+def _message_record(message: BaseMessage) -> dict[str, Any]:
+    """One message sent, as a raw log record holds it."""
+    record: dict[str, Any] = {
+        "role": _ROLES.get(message.type, message.type),
+        "content": message.content,
+    }
+    if isinstance(message, AIMessage) and message.tool_calls:
+        record["tool_calls"] = [
+            {"name": call["name"], "args": call["args"], "id": call["id"]}
+            for call in message.tool_calls
+        ]
+    if isinstance(message, ToolMessage):
+        record["tool_call_id"] = message.tool_call_id
+        if message.status == "error":
+            record["status"] = "error"
+    if message.name:
+        record["name"] = message.name
+    return record
+
+
+def _tool_names(tools: Any) -> list[str] | None:
+    """The names of the tools a call offers, in either provider format.
+
+    Anthropic's schemas name themselves (``{"name": ...}``); OpenAI's, and
+    the Gemini adapter's, name their function (``{"function": {"name": ...}}``).
+    """
+    if not tools:
+        return None
+    names = []
+    for tool in tools:
+        if not isinstance(tool, Mapping):
+            continue
+        name = tool.get("name") or (tool.get("function") or {}).get("name")
+        if name:
+            names.append(str(name))
+    return names
 
 
 def _usage_of(response: "LLMResult") -> Mapping[str, Any]:

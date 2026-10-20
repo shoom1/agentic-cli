@@ -182,6 +182,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`task` is a reserved tool name**: the framework declares it for Deep
   Agents' delegation tool, so registering another tool named `task` raises,
   whichever backend runs.
+- **MCP servers' tools on Deep Agents** (`AgentConfig.mcp_servers`, the same
+  `MCPServerConfig` as on ADK). Each agent's servers open when the workflow
+  initializes, one session per agent and server, and a model switch reopens
+  them. As on ADK, `tool_filter` selects by the server's own tool names and
+  `tool_name_prefix` renames each tool to `<prefix>_<name>`. Every call is
+  gated under the `mcp` capability with the tool's name as the target: a
+  rule such as `{"capability": "mcp", "target": "notion_*"}` allows a
+  server's tools, and without one the user is asked. A text result is the
+  tool's text, images pass through, and an MCP error result is
+  `{"success": false, "error": "<its text>"}`. A server that does not start
+  within its `timeout` (5 seconds by default) leaves the agent without its
+  tools, and a tool whose name the agent already has, or `task`, is
+  skipped. Neither stops the app: the next turn opens with a recoverable
+  `ERROR` (`error_code` `mcp_unavailable` or `mcp_tool_skipped`) naming the
+  server. `workflow.mcp.to_langchain_connection(cfg)` gives the
+  `langchain-mcp-adapters` connection for a config.
+- **Raw LLM logging on Deep Agents** (`raw_llm_logging`). Every model call
+  of a turn is an `LLM_REQUEST` and an `LLM_RESPONSE`, in the stream and in
+  `~/.<app>/logs/llm_events.jsonl` (owner-only, keys and tokens masked), as
+  on ADK: each agent's and sub-agent's calls, the summary calls, and a call a
+  tool makes (the `generate_simple` summaries of `web_fetch` and the
+  knowledge base), which ADK's log does not see. Each record names its
+  `agent` and its `purpose` (`agent`, `summarization` or `tool`). A request
+  holds the model, the messages, the tool names, the system prompt and the
+  other parameters sent (Claude's `cache_control` among them); a response
+  holds the text and parts, finish reason, model version, usage, latency or
+  error. The setting applies from the next turn. Usage is still reported by
+  the stream's `LLM_USAGE` alone, and a log that cannot be written is
+  skipped.
 
 ### Changed
 

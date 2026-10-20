@@ -8,7 +8,9 @@ checkpointer opened from ``session_store``, which this manager owns: its
 connection is closed on cleanup and by a failed initialization, and a model
 switch keeps it. The agents' MCP sessions (``mcp_tools``) are its too: they
 open at initialization, and every release closes them, so a model switch
-reopens them.
+reopens them. With ``raw_llm_logging`` on, a turn's every model call is
+logged (``LLM_REQUEST``/``LLM_RESPONSE``, in the stream and in
+``~/.{app_name}/logs/llm_events.jsonl``).
 
 Lifecycle follows ADK's contract (``workflow/adk/manager.py``): initialization,
 ``reinitialize`` and ``cleanup`` hold the lifecycle lock and then the turn
@@ -44,6 +46,7 @@ from agentic_cli.workflow.deepagents.sessions import CheckpointSessions, run_con
 from agentic_cli.workflow.deepagents.tools import to_langchain_tools
 from agentic_cli.workflow.events import WorkflowEvent
 from agentic_cli.workflow.langchain_models import build_chat_model
+from agentic_cli.workflow.llm_log import LLMLogWriter
 
 if TYPE_CHECKING:
     from contextlib import AbstractAsyncContextManager
@@ -123,6 +126,9 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
 
         # The agents' MCP sessions, and which tool objects are theirs.
         self._mcp = MCPSessions()
+
+        # The raw LLM log, made on the first turn that logs (it creates the file).
+        self._llm_log: LLMLogWriter | None = None
 
         # Notices for the next turn to open with, as recoverable ERROR events
         # (an MCP server that could not start, an MCP tool skipped).
@@ -426,7 +432,11 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             agent_models=self._resolved_models,
             session_id=ref.session_id,
         )
-        callback = RunCallback(root=self._root_name, agent_models=self._resolved_models)
+        callback = RunCallback(
+            root=self._root_name,
+            agent_models=self._resolved_models,
+            llm_log=self._raw_llm_log(),
+        )
         stream = self._root.astream(
             graph_input,
             run_config(ref, callbacks=[callback]),
@@ -467,12 +477,26 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
                 yield event
         logger.info("message_processed", event_count=count)
 
+    def _raw_llm_log(self) -> LLMLogWriter | None:
+        """The raw LLM log when ``raw_llm_logging`` is on, read for each turn.
+
+        The same writer serves every turn; one whose directory cannot be made
+        logs nothing (its records still reach the stream).
+        """
+        if not self._settings.raw_llm_logging:
+            return None
+        if self._llm_log is None:
+            self._llm_log = LLMLogWriter(self._settings.app_name)
+        return self._llm_log
+
     async def generate_simple(self, prompt: str, max_tokens: int = 500) -> str:
         """Generate a short text with the default model, outside the agents.
 
         Used for internal operations such as summaries. The model is built for
         the call through the LangChain adapter, with thinking off where the
         model allows it and ``max_tokens`` as its limit (``_simple_model``).
+        Called by a tool during a turn, it runs in that turn's run, so the raw
+        LLM log records it under the agent whose tool called it.
 
         Returns:
             The answer's text, without its thinking.
