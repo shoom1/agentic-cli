@@ -316,6 +316,39 @@ def _record(events) -> UsageTracker:
 
 
 class TestUsageAndCache:
+    async def test_a_delegation_is_not_taken_for_a_trimmed_context(
+        self, hermetic, monkeypatch
+    ):
+        """The worker's prompt is its brief: the status bar keeps the
+        coordinator's context and reports no trim."""
+
+        def reply(input_tokens: int, block: dict) -> dict:
+            stop = "tool_use" if block["type"] == "tool_use" else "end_turn"
+            return {**anthropic_message(block, model="claude-opus-4-7"), "stop_reason": stop,
+                    "usage": {"input_tokens": input_tokens, "output_tokens": 10}}
+
+        brief = {"description": "Look it up.", "subagent_type": "worker"}
+        claude = Claude(**{
+            "Lead.": [
+                reply(5000, {"type": "tool_use", "id": "t1", "name": "task", "input": brief}),
+                reply(5100, {"type": "text", "text": "All done."}),
+            ],
+            "Work.": [reply(400, {"type": "text", "text": "Worker done."})],
+        })
+        route(monkeypatch, anthropic, "AsyncClient", claude.api)
+        manager = manager_for([LEAD, AgentConfig(name="worker", prompt="Work.", description="Works.")])
+        try:
+            events = await turn(manager, "Go.")
+        finally:
+            await manager.cleanup()
+
+        tracker = UsageTracker()
+        trims = [tracker.record(e.metadata) for e in of(events, EventType.LLM_USAGE)]
+        assert trims == [False, False, False]
+        assert tracker.context_trimmed_count == 0
+        assert tracker.last_prompt_tokens == 5100
+        assert tracker.prompt_tokens == 10500
+
     async def test_claude_cache_reads_and_writes_reach_the_status_bar(
         self, hermetic, monkeypatch
     ):

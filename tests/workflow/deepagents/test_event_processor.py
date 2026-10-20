@@ -391,6 +391,21 @@ class TestUsage:
         assert usage.metadata["agent"] == "researcher"
         assert "cached_tokens" not in usage.metadata
 
+    def test_a_sub_agents_usage_is_not_the_conversations_context(self):
+        processor = _processor()
+        _delegated(processor, (), SUB, "researcher")
+        message = AIMessage(
+            "Found.", usage_metadata={"input_tokens": 5, "output_tokens": 2, "total_tokens": 7}
+        )
+
+        (sub,) = [e for e in processor.process((SUB,), "updates", _model_update(message))
+                  if e.type is EventType.LLM_USAGE]
+        (root,) = [e for e in processor.process((), "updates", _model_update(message))
+                   if e.type is EventType.LLM_USAGE]
+
+        assert sub.metadata["purpose"] == "subagent"
+        assert "purpose" not in root.metadata
+
     def test_a_message_without_usage_reports_none(self):
         events = _processor().process((), "updates", _model_update(AIMessage("Hi.")))
 

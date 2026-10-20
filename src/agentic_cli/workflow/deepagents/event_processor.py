@@ -213,7 +213,11 @@ class DeepAgentsEventProcessor:
 
     def _usage(self, agent: str, usage: Mapping[str, Any]) -> WorkflowEvent:
         model = self._agent_models.get(agent) or self._agent_models.get(self._root)
-        return usage_event(model, usage)
+        event = usage_event(model, usage)
+        if agent != self._root:
+            # A sub-agent's prompt is its brief, not the conversation's context.
+            event.metadata["purpose"] = "subagent"
+        return event
 
     @staticmethod
     def _attributed(event: WorkflowEvent, agent: str) -> WorkflowEvent:

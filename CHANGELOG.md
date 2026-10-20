@@ -168,7 +168,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     keeps every message. Each summary is a `CONTEXT_TRIMMED` event
     (`source="summarization"`) with the summary call's own `LLM_USAGE`
     (`purpose="summarization"`), which the status bar adds to the totals
-    but does not take as the context size. On Claude, with
+    but does not take as the context size. A sub-agent's `LLM_USAGE`
+    (`purpose="subagent"`) counts the same way: its prompt is its brief.
+    On Claude, with
     `prompt_caching_enabled`, the system prompt, the last tool and the
     conversation are cached for 5 minutes, as on ADK. After a model switch
     no model is sent another provider's reasoning.

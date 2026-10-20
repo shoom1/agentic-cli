@@ -243,3 +243,20 @@ class TestContextWindowTracking:
         assert tracker.last_prompt_tokens == 10000
         assert (tracker.prompt_tokens, tracker.completion_tokens) == (17000, 500)
         assert tracker.invocation_count == 2
+
+    def test_a_sub_agent_call_counts_but_is_not_the_context(self):
+        """A sub-agent's prompt is its brief, not the conversation's context:
+        it adds to the totals only, and the coordinator's next call is no drop."""
+        tracker = UsageTracker()
+        tracker.record({"prompt_tokens": 5000, "completion_tokens": 20})
+
+        result = tracker.record(
+            {"prompt_tokens": 400, "completion_tokens": 30, "purpose": "subagent"}
+        )
+
+        assert result is False
+        assert tracker.last_prompt_tokens == 5000
+        assert tracker.record({"prompt_tokens": 5100, "completion_tokens": 10}) is False
+        assert tracker.context_trimmed_count == 0
+        assert tracker.last_prompt_tokens == 5100
+        assert (tracker.prompt_tokens, tracker.completion_tokens) == (10500, 60)
