@@ -526,6 +526,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `prompt_caching_enabled` says Claude is cached on every backend and
   Gemini's explicit caches only on ADK. Only the descriptions change.
 
+### Deprecated
+
+- **The LangGraph backend** (`orchestrator="langgraph"`,
+  `LangGraphWorkflowManager` and its alias `LangGraphManager`, and the
+  `langgraph` extra) is deprecated and will be removed in 0.8.0, with
+  `workflow/langgraph/`. Move to the Deep Agents backend (see Added): install
+  `agentic-cli[deepagents]` and set `orchestrator` to `deepagents`. An app
+  that builds its manager itself builds
+  `DeepAgentsWorkflowManager(agent_configs=..., settings=...)`, which takes no
+  `checkpointer=`: it opens its own from `session_store`. Sessions saved by
+  LangGraph do not carry over; they stay in `{workspace}/checkpoints.db`,
+  untouched. The CLI says this in one warning at startup when the
+  orchestrator is `langgraph`, and again on a `/settings` switch to it, and
+  the `orchestrator` setting's description marks it. Building
+  `LangGraphWorkflowManager` issues a `DeprecationWarning`. Python's default
+  filters show it only when code run as `__main__` builds the manager, so a
+  manager built by `create_workflow_manager_from_settings`, as the CLI builds
+  it, prints nothing. A test suite that turns warnings into errors can ignore
+  this one with the filter
+  `ignore:LangGraphWorkflowManager is deprecated:DeprecationWarning`. The
+  backend's known defects stay unfixed. `tools/langgraph/state_tools.py`
+  stays, since Deep Agents runs on the LangGraph library.
+
 ### Removed
 
 The APIs that 0.6.1, 0.6.3 and 0.6.4 deprecated for 0.7.0 are gone, with no

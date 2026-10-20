@@ -30,6 +30,7 @@ from agentic_cli.cli.workflow_controller import WorkflowController
 from agentic_cli.config import MODEL_ROLE_KEY_PREFIX, BaseSettings
 from agentic_cli.logging import Loggers, configure_logging
 from agentic_cli.settings_persistence import PROJECT_SETTABLE_KEYS
+from agentic_cli.workflow.settings import OrchestratorType
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
@@ -174,6 +175,34 @@ def _install_adk_notice_hook() -> None:
 
     showwarning._logs_adk_notices = True
     warnings.showwarning = showwarning
+
+
+# === Deprecated orchestrators ===
+
+# What the CLI tells a user of the LangGraph backend, deprecated in 0.7.0: once
+# at startup, and again on a /settings switch to it. The manager's own
+# DeprecationWarning is for library users; Python's default filters keep it off
+# the terminal, so this is what a CLI user reads.
+_LANGGRAPH_DEPRECATION = (
+    "The LangGraph backend is deprecated and will be removed in 0.8.0. Set "
+    "orchestrator to deepagents (pip install 'agentic-cli[deepagents]'); "
+    "sessions saved by LangGraph do not carry over."
+)
+
+
+def _runs_langgraph(settings: BaseSettings) -> bool:
+    """Whether ``settings`` choose the LangGraph backend.
+
+    Read as the factory reads it: an ``OrchestratorType``, or its plain value
+    on a settings class that declares ``orchestrator: str``.
+    """
+    return getattr(settings, "orchestrator", None) == OrchestratorType.LANGGRAPH
+
+
+def _warn_if_langgraph(settings: BaseSettings, session: ThinkingPromptSession) -> None:
+    """Warn, through the session, when ``settings`` choose the LangGraph backend."""
+    if _runs_langgraph(settings):
+        session.add_warning(_LANGGRAPH_DEPRECATION)
 
 
 # === Slash Command Completer ===
@@ -550,7 +579,9 @@ class BaseCLIApp:
            dedicated setters and trigger workflow reinitialization
         2. All other settings are applied directly to the settings object
 
-        A reinitialization keeps the sessions, as a model switch does.
+        A reinitialization keeps the sessions, as a model switch does. A
+        switch to the deprecated LangGraph orchestrator ends with its
+        deprecation warning.
 
         Args:
             changes: Dictionary of changed settings (key -> new_value)
@@ -565,6 +596,7 @@ class BaseCLIApp:
         needs_reinit = False
         new_model = changes.get("model")
         snapshot = _snapshot_settings(self._settings)
+        was_langgraph = _runs_langgraph(self._settings)
 
         # `orchestrator` triggers a reinit too: the controller swaps the backend
         # when it changes (otherwise the change only took effect on restart).
@@ -619,6 +651,8 @@ class BaseCLIApp:
             self.session.add_success(f"{_setting_label(key)}: {value}")
         for notice in switched:
             self.session.add_message("system", notice)
+        if not was_langgraph:  # a switch to it, not a change made while on it
+            _warn_if_langgraph(self._settings, self.session)
         return True
 
     def _register_builtin_commands(self) -> None:
@@ -858,6 +892,10 @@ class BaseCLIApp:
         job_monitor = JobMonitor(
             self.session, self._workflow_controller, settings=self._settings
         )
+
+        # Once, before anything waits for the workflow: a backend that cannot
+        # start (its extra missing, or a key) is still deprecated.
+        _warn_if_langgraph(self._settings, self.session)
 
         async with self._workflow_controller.background_init(self.session):
             # Adopt this run's session id (generated or --session) so every turn

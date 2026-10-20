@@ -132,6 +132,11 @@ markers = [
     "latex: tests that require a host TeX engine (select with -m latex; set LATEX_REQUIRE=1 to fail instead of skip when absent)",
     "wheel: acceptance tests that build and install the wheel (select with -m wheel; excluded from the offline suite because they download dependencies)",
 ]
+# The suite tests the deprecated LangGraph backend until 0.8.0 removes it;
+# tests/cli/test_langgraph_deprecation.py checks the warning itself.
+filterwarnings = [
+    "ignore:LangGraphWorkflowManager is deprecated:DeprecationWarning",
+]
 
 [tool.ruff]
 line-length = 88

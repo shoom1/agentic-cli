@@ -169,7 +169,9 @@ def probe_child_imports(python: str, cwd: Path, home: Path) -> ChildImports:
     )
 
 
-def run_console_smoke(argv: list[str], cwd: Path, home: Path) -> SmokeResult:
+def run_console_smoke(
+    argv: list[str], cwd: Path, home: Path, *, env: dict[str, str] | None = None
+) -> SmokeResult:
     """Drive a console command through startup → /help → /exit.
 
     Every wait is an ``expect`` on observable output, never a sleep, so the
@@ -182,6 +184,8 @@ def run_console_smoke(argv: list[str], cwd: Path, home: Path) -> SmokeResult:
         cwd: Working directory for the child — keeps ``./.research_demo/``
             (project KB, permission workdir) out of the repo.
         home: Value for ``HOME``.
+        env: The child's whole environment; ``child_env(home)`` when omitted.
+            A test that needs one more variable starts from ``child_env``.
 
     Returns:
         The full ANSI-stripped transcript plus the process's exit status.
@@ -193,7 +197,7 @@ def run_console_smoke(argv: list[str], cwd: Path, home: Path) -> SmokeResult:
         argv[0],
         list(argv[1:]),
         cwd=str(cwd),
-        env=child_env(home),
+        env=child_env(home) if env is None else env,
         encoding="utf-8",
         codec_errors="replace",
         timeout=STARTUP_TIMEOUT,
