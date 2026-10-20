@@ -354,7 +354,11 @@ class TestUsageAndCache:
     ):
         reply = {**anthropic_message({"type": "text", "text": "Hi."}, model="claude-opus-4-7"),
                  "usage": {"input_tokens": 50, "output_tokens": 7,
-                           "cache_read_input_tokens": 1200, "cache_creation_input_tokens": 300}}
+                           "cache_read_input_tokens": 1200, "cache_creation_input_tokens": 300,
+                           # The API also breaks the writes down by TTL, and
+                           # langchain-anthropic then zeroes "cache_creation".
+                           "cache_creation": {"ephemeral_5m_input_tokens": 300,
+                                              "ephemeral_1h_input_tokens": 0}}}
         api = FakeAPI(reply)
         route(monkeypatch, anthropic, "AsyncClient", api)
         manager = manager_for([AgentConfig(name="solo", prompt="Answer.")])

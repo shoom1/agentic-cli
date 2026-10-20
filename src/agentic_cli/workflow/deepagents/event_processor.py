@@ -233,6 +233,12 @@ def usage_event(model: "ResolvedModel | None", usage: Mapping[str, Any]) -> Work
     """
     inputs = usage.get("input_token_details") or {}
     outputs = usage.get("output_token_details") or {}
+    # When Anthropic breaks cache writes down by TTL, langchain-anthropic
+    # reports them under these keys and sets "cache_creation" to 0.
+    by_ttl = sum(
+        inputs.get(key) or 0
+        for key in ("ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens")
+    )
     return WorkflowEvent.llm_usage(
         model=str(model.ref) if model is not None else "unknown",
         prompt_tokens=usage.get("input_tokens"),
@@ -240,7 +246,7 @@ def usage_event(model: "ResolvedModel | None", usage: Mapping[str, Any]) -> Work
         total_tokens=usage.get("total_tokens"),
         thinking_tokens=outputs.get("reasoning"),
         cached_tokens=inputs.get("cache_read"),
-        cache_creation_tokens=inputs.get("cache_creation"),
+        cache_creation_tokens=by_ttl or inputs.get("cache_creation"),
     )
 
 

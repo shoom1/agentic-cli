@@ -375,6 +375,27 @@ class TestUsage:
             "agent": "coordinator",
         }
 
+    def test_cache_writes_broken_down_by_ttl_are_counted(self):
+        # langchain-anthropic's mapping of the API's per-TTL breakdown.
+        message = AIMessage("Hi.", usage_metadata={
+            "input_tokens": 1550,
+            "output_tokens": 7,
+            "total_tokens": 1557,
+            "input_token_details": {
+                "cache_read": 1200, "cache_creation": 0,
+                "ephemeral_5m_input_tokens": 250, "ephemeral_1h_input_tokens": 50,
+            },
+        })
+
+        (usage,) = [
+            e for e in _processor().process((), "updates", _model_update(message))
+            if e.type is EventType.LLM_USAGE
+        ]
+
+        assert (usage.metadata["cached_tokens"], usage.metadata["cache_creation_tokens"]) == (
+            1200, 300
+        )
+
     def test_a_sub_agents_usage_is_on_its_own_model(self):
         processor = _processor()
         _delegated(processor, (), SUB, "researcher")
