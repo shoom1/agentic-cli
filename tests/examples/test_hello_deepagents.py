@@ -125,29 +125,53 @@ def test_the_example_builds_its_manager_and_runs_its_tools(run_child):
     assert result.stderr == ""
 
 
-def test_the_calculator_evaluates_arithmetic_only(tmp_path):
-    """``calculate`` is EXEMPT, so it runs without asking: it must not run code."""
+def _calculate(tmp_path, expressions: list[str]) -> list[dict]:
+    """``calculate``'s answers to ``expressions``, from a fresh interpreter."""
     code = (
-        "import importlib.util, json; "
+        "import importlib.util, json, sys; "
         f"spec = importlib.util.spec_from_file_location('hello_deepagents', {str(_EXAMPLE)!r}); "
         "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m); "
-        "print(json.dumps([m.calculate(e) for e in "
-        "['sqrt(16) + 2 ** 3', '__import__(\"os\").getcwd()', '().__class__', "
-        "'9 ** 9 ** 9', '1 / 0']]))"
+        "print(json.dumps([m.calculate(e) for e in json.loads(sys.argv[1])]))"
     )
-    (tmp_path / "home").mkdir()
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
     result = subprocess.run(
-        [sys.executable, "-c", code],
+        [sys.executable, "-c", code, json.dumps(expressions)],
         cwd=str(tmp_path),
-        env=child_env(tmp_path / "home"),
+        env=child_env(home),
         capture_output=True,
         text=True,
         timeout=STEP_TIMEOUT,
     )
 
     assert result.returncode == 0, result.stderr
-    answers = json.loads(result.stdout.strip().splitlines()[-1])
+    return json.loads(result.stdout.strip().splitlines()[-1])
+
+
+def test_the_calculator_evaluates_arithmetic_only(tmp_path):
+    """``calculate`` is EXEMPT, so it runs without asking: it must not run code."""
+    answers = _calculate(tmp_path, [
+        "sqrt(16) + 2 ** 3", '__import__("os").getcwd()', "().__class__", "9 ** 9 ** 9", "1 / 0",
+    ])
+
     assert answers[0] == {"success": True, "expression": "sqrt(16) + 2 ** 3", "result": 12.0}
     assert [a["success"] for a in answers[1:]] == [False, False, False, False]
     assert answers[1]["error"] == "unsupported expression: __import__('os').getcwd()"
     assert answers[3]["error"] == "exponent too large"
+
+
+def test_the_calculator_answers_at_once_or_refuses(tmp_path):
+    """A sync tool runs on an executor thread, and a bigint holds the GIL: the CLI would freeze."""
+    answers = _calculate(tmp_path, [
+        "(((10 ** 100) ** 100) ** 100) ** 100",  # every exponent within the bound
+        "round(1, -10 ** 8)",  # an int's round computes 10 ** 10 ** 8
+        "(10 ** 100) ** 50",  # 5,001 digits, more than an int prints
+        "-" * 3000 + "1",  # deeper than the interpreter recurses
+        "2 ** 100 * 3",
+    ])
+
+    assert [a.get("error") for a in answers[:3]] == [
+        "number too large", "ndigits too large", "number too large",
+    ]
+    assert answers[3]["success"] is False
+    assert answers[4] == {"success": True, "expression": "2 ** 100 * 3", "result": 3 * 2 ** 100}

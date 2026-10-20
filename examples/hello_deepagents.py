@@ -76,22 +76,50 @@ _OPERATORS = {
     ast.Div: operator.truediv, ast.Pow: operator.pow, ast.Mod: operator.mod,
     ast.USub: operator.neg, ast.UAdd: operator.pos,
 }
+_MAX_BITS = 10_000  # about 3,000 digits: quick to compute, and to print
+
+
+def _round(number, ndigits=None):
+    """``round``, with few digits: an int's ``round(1, -10**8)`` computes 10**10**8."""
+    if ndigits is not None and abs(ndigits) > 100:
+        raise ValueError("ndigits too large")
+    return round(number, ndigits)
+
+
 _FUNCTIONS = {
-    "abs": abs, "round": round, "min": min, "max": max,
+    "abs": abs, "round": _round, "min": min, "max": max,
     "sqrt": math.sqrt, "sin": math.sin, "cos": math.cos, "tan": math.tan,
 }
 _CONSTANTS = {"pi": math.pi, "e": math.e}
 
 
+def _sized(value: float) -> float:
+    """``value``, unless it is an int too large to work with."""
+    if isinstance(value, int) and value.bit_length() > _MAX_BITS:
+        raise ValueError("number too large")
+    return value
+
+
 def _evaluate(node: ast.AST) -> float:
-    """Evaluate arithmetic: numbers, operators, and the names above, nothing else."""
+    """Evaluate arithmetic: numbers, operators, and the names above, nothing else.
+
+    It runs in the tool's thread and holds the GIL, so every step is bounded:
+    no int grows past ``_MAX_BITS``, and a power that would is refused before
+    it is computed.
+    """
     if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
         return node.value
     if isinstance(node, ast.BinOp) and type(node.op) in _OPERATORS:
         left, right = _evaluate(node.left), _evaluate(node.right)
-        if isinstance(node.op, ast.Pow) and abs(right) > 100:
-            raise ValueError("exponent too large")  # 9**9**9 would never finish
-        return _OPERATORS[type(node.op)](left, right)
+        if isinstance(node.op, ast.Pow):
+            if abs(right) > 100:
+                raise ValueError("exponent too large")  # 9**9**9 would never finish
+            if (
+                isinstance(left, int) and isinstance(right, int)
+                and left.bit_length() * right > _MAX_BITS
+            ):
+                raise ValueError("number too large")  # nor (((10**100)**100)**100)**100
+        return _sized(_OPERATORS[type(node.op)](left, right))
     if isinstance(node, ast.UnaryOp) and type(node.op) in _OPERATORS:
         return _OPERATORS[type(node.op)](_evaluate(node.operand))
     if isinstance(node, ast.Name) and node.id in _CONSTANTS:
@@ -102,7 +130,7 @@ def _evaluate(node: ast.AST) -> float:
         and node.func.id in _FUNCTIONS
         and not node.keywords
     ):
-        return _FUNCTIONS[node.func.id](*(_evaluate(arg) for arg in node.args))
+        return _sized(_FUNCTIONS[node.func.id](*(_evaluate(arg) for arg in node.args)))
     raise ValueError(f"unsupported expression: {ast.unparse(node)}")
 
 
@@ -111,7 +139,9 @@ def calculate(expression: str) -> dict:
     """Evaluate a mathematical expression (e.g., "2 + 2" or "sqrt(16)")."""
     try:
         result = _evaluate(ast.parse(expression, mode="eval").body)
-    except (SyntaxError, ValueError, TypeError, ArithmeticError) as e:
+    except (
+        SyntaxError, ValueError, TypeError, ArithmeticError, RecursionError, MemoryError
+    ) as e:
         return {"success": False, "expression": expression, "error": str(e)}
     return {"success": True, "expression": expression, "result": result}
 
