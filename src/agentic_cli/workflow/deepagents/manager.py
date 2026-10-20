@@ -6,7 +6,11 @@ turn's ``SessionRef`` (``sessions``). The stream's node outputs become
 ``WorkflowEvent``s (``event_processor``). Conversations live in a LangGraph
 checkpointer opened from ``session_store``, which this manager owns: its
 connection is closed on cleanup and by a failed initialization, and a model
-switch keeps it.
+switch keeps it. The agents' MCP sessions (``mcp_tools``) are its too: they
+open at initialization, and every release closes them, so a model switch
+reopens them. With ``raw_llm_logging`` on, a turn's every model call is
+logged (``LLM_REQUEST``/``LLM_RESPONSE``, in the stream and in
+``~/.{app_name}/logs/llm_events.jsonl``).
 
 Lifecycle follows ADK's contract (``workflow/adk/manager.py``): initialization,
 ``reinitialize`` and ``cleanup`` hold the lifecycle lock and then the turn
@@ -28,6 +32,7 @@ from langchain_core.messages import HumanMessage
 from agentic_cli.config import BaseSettings
 from agentic_cli.constants import truncate
 from agentic_cli.logging import Loggers, bind_context
+from agentic_cli.tools.registry import ToolDefinition, identify_tool
 from agentic_cli.workflow.base_manager import BaseWorkflowManager
 from agentic_cli.workflow.checkpointers import deepagents_sqlite_path, open_checkpointer
 from agentic_cli.workflow.config import AgentConfig, validate_agent_graph
@@ -36,14 +41,17 @@ from agentic_cli.workflow.deepagents.event_processor import (
     DeepAgentsEventProcessor,
     RunCallback,
 )
+from agentic_cli.workflow.deepagents.mcp_tools import MCPSessions, without_clashes
 from agentic_cli.workflow.deepagents.sessions import CheckpointSessions, run_config
 from agentic_cli.workflow.deepagents.tools import to_langchain_tools
 from agentic_cli.workflow.events import WorkflowEvent
 from agentic_cli.workflow.langchain_models import build_chat_model
+from agentic_cli.workflow.llm_log import LLMLogWriter
 
 if TYPE_CHECKING:
     from contextlib import AbstractAsyncContextManager
 
+    from langchain_core.tools import BaseTool
     from langgraph.checkpoint.base import BaseCheckpointSaver
     from langgraph.graph.state import CompiledStateGraph
 
@@ -116,7 +124,14 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         self._root: CompiledStateGraph | None = None
         self._root_name: str | None = None
 
-        # Notices for the next turn to open with, as recoverable ERROR events.
+        # The agents' MCP sessions, and which tool objects are theirs.
+        self._mcp = MCPSessions()
+
+        # The raw LLM log, made on the first turn that logs (it creates the file).
+        self._llm_log: LLMLogWriter | None = None
+
+        # Notices for the next turn to open with, as recoverable ERROR events
+        # (an MCP server that could not start, an MCP tool skipped).
         self._pending_notices: list[WorkflowEvent] = []
 
         logger.debug(
@@ -157,7 +172,7 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         )
 
     async def _do_initialize(self) -> None:
-        """Open (or keep) the checkpointer, then build the agent tree."""
+        """Open (or keep) the checkpointer, open the MCP sessions, build the agents."""
         logger.info("initializing_services", app_name=self.app_name, backend="deepagents")
 
         # A preserving reinitialize keeps the live checkpointer: reuse it
@@ -184,6 +199,12 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
                 config.name: config.get_prompt(self._settings)
                 for config in self._agent_configs
             }
+        tools: dict[str, list[BaseTool]] = {}
+        for config in self._agent_configs:
+            own = to_langchain_tools(self._build_tools(config, service_map))
+            if config.mcp_servers:
+                own = await self._with_mcp_tools(config, own)
+            tools[config.name] = own
         self._root = build_agent_tree(
             self._agent_configs,
             chat_models={
@@ -195,13 +216,11 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
                 for config in self._agent_configs
             },
             resolved=self._resolved_models,
-            tools={
-                config.name: to_langchain_tools(self._build_tools(config, service_map))
-                for config in self._agent_configs
-            },
+            tools=tools,
             prompts=prompts,
             settings=self._settings,
             checkpointer=self._checkpointer,
+            bound=self._identify_tool,
         )
         self._root_name = graph.root_name
 
@@ -212,6 +231,34 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             session_store=self._settings.session_store,
             required_managers=list(self._required_managers),
         )
+
+    async def _with_mcp_tools(
+        self, config: AgentConfig, tools: list[BaseTool]
+    ) -> list[BaseTool]:
+        """``tools`` and the tools of ``config``'s MCP servers, opened now.
+
+        A server that cannot start, and a tool whose name is taken, become
+        notices for the next turn; the agent runs without them.
+        """
+        loaded, unavailable = await self._mcp.start(config.name, config.mcp_servers)
+        kept, skipped = without_clashes(config.name, tools, loaded)
+        for message, code in [
+            *((message, "mcp_unavailable") for message in unavailable),
+            *((message, "mcp_tool_skipped") for message in skipped),
+        ]:
+            notice = WorkflowEvent.error(message, error_code=code, recoverable=True)
+            notice.metadata["agent"] = config.name
+            self._pending_notices.append(notice)
+        return [*tools, *kept]
+
+    def _identify_tool(self, obj: object) -> ToolDefinition | None:
+        """What a tool object is: an open MCP session's tool, else a framework tool.
+
+        Every agent's permission gate asks this first (``build_agent_tree``'s
+        ``bound``).
+        """
+        definition = self._mcp.identify(obj)
+        return definition if definition is not None else identify_tool(obj)
 
     async def cleanup(self) -> None:
         """Release everything this manager owns.
@@ -227,10 +274,11 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
     async def _release_resources(self, keep_checkpointer: bool = False) -> None:
         """Release owned resources; never raises.
 
-        The checkpointer's connection is closed, not merely dropped.
-        ``reinitialize(preserve_sessions=True)`` keeps the checkpointer instead
-        and reuses it, and so does the rollback of a failed attempt inside it
-        (the checkpointer is pinned then).
+        The MCP sessions are closed on every path, a model switch's included,
+        and the notices about them dropped. The checkpointer's connection is
+        closed, not merely dropped; ``reinitialize(preserve_sessions=True)``
+        keeps the checkpointer instead and reuses it, and so does the rollback
+        of a failed attempt inside it (the checkpointer is pinned then).
 
         Args:
             keep_checkpointer: Keep the checkpointer, its connection and the
@@ -247,7 +295,10 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         self._root = None
         self._root_name = None
         self._initialized = False
+        self._pending_notices = []
 
+        # Never raises; each session's owner leaves it even if this is cancelled.
+        await self._mcp.aclose()
         await self._close_connection(connection)
         await self._close_catalog()
         self._cleanup_managers()
@@ -381,7 +432,11 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             agent_models=self._resolved_models,
             session_id=ref.session_id,
         )
-        callback = RunCallback(root=self._root_name, agent_models=self._resolved_models)
+        callback = RunCallback(
+            root=self._root_name,
+            agent_models=self._resolved_models,
+            llm_log=self._raw_llm_log(),
+        )
         stream = self._root.astream(
             graph_input,
             run_config(ref, callbacks=[callback]),
@@ -422,12 +477,26 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
                 yield event
         logger.info("message_processed", event_count=count)
 
+    def _raw_llm_log(self) -> LLMLogWriter | None:
+        """The raw LLM log when ``raw_llm_logging`` is on, read for each turn.
+
+        The same writer serves every turn; one whose directory cannot be made
+        logs nothing (its records still reach the stream).
+        """
+        if not self._settings.raw_llm_logging:
+            return None
+        if self._llm_log is None:
+            self._llm_log = LLMLogWriter(self._settings.app_name)
+        return self._llm_log
+
     async def generate_simple(self, prompt: str, max_tokens: int = 500) -> str:
         """Generate a short text with the default model, outside the agents.
 
         Used for internal operations such as summaries. The model is built for
         the call through the LangChain adapter, with thinking off where the
         model allows it and ``max_tokens`` as its limit (``_simple_model``).
+        Called by a tool during a turn, it runs in that turn's run, so the raw
+        LLM log records it under the agent whose tool called it.
 
         Returns:
             The answer's text, without its thinking.

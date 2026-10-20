@@ -68,7 +68,8 @@ class PermissionMiddleware(AgentMiddleware):
     name or equality, in this order:
 
     1. ``bound(tool)``: objects the framework built and bound (``task``, the
-       skill tools, the MCP tools).
+       skill tools, the MCP tools). The MCP tools are bound in their
+       manager's own map, which the manager chains before the registry's.
     2. For a tool whose type is exactly ``StructuredTool``, the callable it
        will run: ``.coroutine`` if it has one (the async path runs it), else
        ``.func``. That is what a ``StructuredTool`` is contracted to run; a
@@ -89,7 +90,8 @@ class PermissionMiddleware(AgentMiddleware):
     Args:
         agent_name: The agent whose stack this is (for logs).
         bound: Resolves a tool object the framework bound. Defaults to the
-            framework registry's identity map.
+            framework registry's identity map; a Deep Agents manager passes
+            its MCP tools' map chained before it.
     """
 
     def __init__(

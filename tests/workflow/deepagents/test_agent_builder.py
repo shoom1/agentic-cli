@@ -14,6 +14,7 @@ The models are scripted (``fakes.ScriptedChat``); nothing reaches a provider.
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -22,6 +23,7 @@ pytest.importorskip("deepagents")
 from deepagents import SubAgentMiddleware  # noqa: E402
 from deepagents.middleware.patch_tool_calls import PatchToolCallsMiddleware  # noqa: E402
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage  # noqa: E402
+from langchain_core.tools import StructuredTool  # noqa: E402
 from langgraph.checkpoint.memory import InMemorySaver  # noqa: E402
 
 from agentic_cli.tools.langgraph.state_tools import (  # noqa: E402
@@ -29,7 +31,12 @@ from agentic_cli.tools.langgraph.state_tools import (  # noqa: E402
     save_plan,
     save_tasks,
 )
-from agentic_cli.tools.registry import get_registry, identify_tool, register_tool  # noqa: E402
+from agentic_cli.tools.registry import (  # noqa: E402
+    ToolDefinition,
+    get_registry,
+    identify_tool,
+    register_tool,
+)
 from agentic_cli.workflow.config import AgentConfig, AgentGraphError  # noqa: E402
 from agentic_cli.workflow.deepagents import agent_builder  # noqa: E402
 from agentic_cli.workflow.deepagents.agent_builder import build_agent_tree  # noqa: E402
@@ -40,6 +47,7 @@ from agentic_cli.workflow.deepagents.middleware import (  # noqa: E402
 from agentic_cli.workflow.deepagents.state import AgentCliState  # noqa: E402
 from agentic_cli.workflow.deepagents.tools import to_langchain_tools  # noqa: E402
 from agentic_cli.workflow.permissions import EXEMPT  # noqa: E402
+from agentic_cli.workflow.permissions.capabilities import Capability  # noqa: E402
 from tests.workflow.deepagents.fakes import ScriptedChat, ai, task  # noqa: E402
 
 
@@ -394,6 +402,59 @@ class TestEveryStack:
             (gate,) = [m for m in kwargs["middleware"] if isinstance(m, PermissionMiddleware)]
             assert gate.agent_name == name
             assert kwargs["state_schema"] is AgentCliState
+
+    async def test_every_gate_resolves_bound_objects_with_the_given_resolver(
+        self, monkeypatch
+    ):
+        """A manager's own bindings (its MCP tools) reach every agent's gate."""
+
+        async def remote_op(q: str) -> str:
+            return "remote"
+
+        remote = StructuredTool.from_function(coroutine=remote_op, description="d")
+        mcp = ToolDefinition(name="remote_op", description="d", func=None,
+                             capabilities=[Capability("mcp", target="remote_op")])
+        asked: list[object] = []
+
+        def bound(obj: object) -> ToolDefinition | None:
+            asked.append(obj)
+            return mcp if obj is remote else identify_tool(obj)
+
+        researcher = ScriptedChat(label="researcher", script=[
+            ai(calls=[("remote_op", {"q": "x"}, "r1")]), ai("Remote."),
+        ])
+        coordinator = ScriptedChat(label="coordinator", script=[
+            ai(calls=[task("researcher", "Ask.", "c1")]), ai("Done."),
+        ])
+        root = build_agent_tree(
+            [COORDINATOR, RESEARCHER],
+            chat_models={"coordinator": coordinator, "researcher": researcher},
+            resolved={},
+            tools={"researcher": [remote]},
+            prompts={"coordinator": "c", "researcher": "r"},
+            settings=None,
+            checkpointer=InMemorySaver(),
+            bound=bound,
+        )
+        # No engine and permissions off: a resolved tool runs, an unresolved
+        # one is still denied.
+        monkeypatch.setattr(
+            "agentic_cli.config.get_settings",
+            lambda: SimpleNamespace(permissions_enabled=False),
+        )
+
+        await _turn(root)
+
+        assert _tool_message(researcher.conversation(1), "r1").text == "remote"
+        assert remote in asked  # the sub-agent's gate asked it
+        assert any(identify_tool(obj) is get_registry().get("task") for obj in asked)
+
+    def test_by_default_the_gate_asks_the_framework_registry(self, created):
+        _tree([RESEARCHER], {"researcher": ScriptedChat()})
+
+        (gate,) = [m for m in created["researcher"]["middleware"]
+                   if isinstance(m, PermissionMiddleware)]
+        assert gate._bound is identify_tool
 
     async def test_a_sub_agent_is_gated_and_survives_a_raising_tool(self):
         def scratch(path: str) -> dict:

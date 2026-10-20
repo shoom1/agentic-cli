@@ -1,12 +1,16 @@
 """Backend-neutral MCP (Model Context Protocol) server configuration.
 
 ``MCPServerConfig`` describes how to reach an MCP server (stdio subprocess or
-remote SSE/HTTP). ``to_adk_toolset`` materializes it into an ADK ``MCPToolset``
-that can be appended to an agent's ``tools`` list; ADK connects lazily on first
-use, so construction is synchronous.
+remote SSE/HTTP). Each backend materializes it its own way:
 
-LangGraph materialization (via ``langchain-mcp-adapters``) is deferred — see the
-implementation plan.
+- ADK: ``to_adk_toolset`` builds an ``MCPToolset`` that is appended to an
+  agent's ``tools`` list; ADK connects lazily on first use, so construction is
+  synchronous.
+- Deep Agents: ``to_langchain_connection`` gives the connection
+  ``langchain-mcp-adapters`` opens a session from; the backend opens one per
+  (agent, server) at initialization (``workflow/deepagents/mcp_tools.py``).
+
+The LangGraph backend ignores ``mcp_servers``.
 """
 
 from __future__ import annotations
@@ -106,3 +110,33 @@ def to_adk_toolset(cfg: MCPServerConfig) -> Any:
     if cfg.tool_name_prefix:
         kwargs["tool_name_prefix"] = cfg.tool_name_prefix
     return _McpToolset(**kwargs)
+
+
+def to_langchain_connection(cfg: MCPServerConfig) -> dict[str, Any]:
+    """The ``langchain-mcp-adapters`` connection for an MCP server config.
+
+    ``http`` is the adapter's ``streamable_http``. Unset fields are left out,
+    as ADK leaves them: a stdio server without ``env`` gets the MCP SDK's
+    default environment. The adapter's stdio session takes no ``timeout``;
+    for every transport the backend bounds the server's start with it.
+    """
+    if cfg.transport == "stdio":
+        connection: dict[str, Any] = {
+            "transport": "stdio",
+            "command": cfg.command,
+            # Required by the adapter, even when empty.
+            "args": list(cfg.args),
+        }
+        if cfg.env:
+            connection["env"] = dict(cfg.env)
+        return connection
+
+    connection = {
+        "transport": "sse" if cfg.transport == "sse" else "streamable_http",
+        "url": cfg.url,
+    }
+    if cfg.headers:
+        connection["headers"] = dict(cfg.headers)
+    if cfg.timeout is not None:
+        connection["timeout"] = cfg.timeout
+    return connection
