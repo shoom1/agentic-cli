@@ -32,7 +32,7 @@ tree built without settings (a unit test's) has the tool side only.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING
 
 from deepagents import CompiledSubAgent, SubAgentMiddleware
@@ -43,7 +43,12 @@ from langchain_anthropic.middleware import AnthropicPromptCachingMiddleware
 from agentic_cli.logging import Loggers
 from agentic_cli.models import CacheMechanism
 from agentic_cli.tools._core.delegation import TASK_TOOL
-from agentic_cli.tools.registry import bind_tool_identity, get_registry
+from agentic_cli.tools.registry import (
+    ToolDefinition,
+    bind_tool_identity,
+    get_registry,
+    identify_tool,
+)
 from agentic_cli.workflow.config import AgentConfig, AgentGraphError
 from agentic_cli.workflow.deepagents.middleware import (
     ForeignReasoningMiddleware,
@@ -75,6 +80,7 @@ def build_agent_tree(
     prompts: Mapping[str, str],
     settings: "BaseSettings | None",
     checkpointer: "BaseCheckpointSaver | None",
+    bound: Callable[[object], ToolDefinition | None] = identify_tool,
 ) -> "CompiledStateGraph":
     """Build every agent, bottom-up, and return the root.
 
@@ -94,6 +100,10 @@ def build_agent_tree(
             inherit it through LangGraph's nested-graph rules, so their
             checkpoints sit in the root's thread under their task's
             namespace.
+        bound: What every agent's permission gate asks first, for a tool
+            object the framework built and bound. Defaults to the framework
+            registry's identity map; a manager with tool objects of its own
+            (its MCP tools) passes its map chained before it.
 
     Raises:
         AgentGraphError: A coordinator's own tools include one named
@@ -114,7 +124,10 @@ def build_agent_tree(
             tools=_own_tools(config, tools.get(name, []), delegates=bool(subagents)),
             system_prompt=prompts[name],
             middleware=_middleware(
-                config, subagents, model_side=_model_side(model, resolved.get(name), settings)
+                config,
+                subagents,
+                model_side=_model_side(model, resolved.get(name), settings),
+                bound=bound,
             ),
             state_schema=AgentCliState,
             name=name,
@@ -146,12 +159,13 @@ def _middleware(
     subagents: list[CompiledSubAgent],
     *,
     model_side: list["AgentMiddleware"],
+    bound: Callable[[object], ToolDefinition | None],
 ) -> list["AgentMiddleware"]:
     stack: list[AgentMiddleware] = [PatchToolCallsMiddleware()]
     if subagents:
         stack.append(_delegation(subagents))
     stack += model_side
-    stack += [PermissionMiddleware(config.name), ToolCallErrorMiddleware()]
+    stack += [PermissionMiddleware(config.name, bound=bound), ToolCallErrorMiddleware()]
     return stack
 
 

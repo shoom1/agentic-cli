@@ -467,12 +467,24 @@ class _CountedConnection:
             raise RuntimeError("close blew up")
 
 
-def _deepagents_manager(connection):
+class _CountedMCP:
+    """Stands in for a manager's MCP sessions (whose ``aclose`` never raises)."""
+
+    def __init__(self) -> None:
+        self.closes = 0
+
+    async def aclose(self) -> None:
+        self.closes += 1
+
+
+def _deepagents_manager(connection, mcp=None):
     """A ready Deep Agents manager holding ``connection``, without __init__."""
     pytest.importorskip("deepagents")
     from agentic_cli.workflow.deepagents.manager import DeepAgentsWorkflowManager
 
     mgr = DeepAgentsWorkflowManager.__new__(DeepAgentsWorkflowManager)
+    mgr._mcp = mcp or _CountedMCP()
+    mgr._pending_notices = []
     mgr._settings = SimpleNamespace(app_name="test", default_user="u")
     mgr._app_name = "test"
     mgr._services = {}
@@ -524,6 +536,36 @@ class TestDeepAgentsCheckpointerClose:
 
         assert mgr._checkpointer is None
         assert closed == ["jobs"]
+
+
+class TestDeepAgentsMCPClose:
+    """The MCP sessions close on every release, a preserving one included."""
+
+    async def test_cleanup_closes_them_with_the_checkpointer(self):
+        connection, mcp = _CountedConnection(), _CountedMCP()
+        mgr = _deepagents_manager(connection, mcp)
+
+        await mgr.cleanup()
+
+        assert (mcp.closes, connection.closes) == (1, 1)
+
+    async def test_a_release_that_keeps_the_checkpointer_still_closes_them(self):
+        connection, mcp = _CountedConnection(), _CountedMCP()
+        mgr = _deepagents_manager(connection, mcp)
+        mgr._checkpointer_pinned = True  # the rollback inside a model switch
+
+        await mgr._release_resources()
+        await mgr._release_resources(keep_checkpointer=True)
+
+        assert (mcp.closes, connection.closes) == (2, 0)
+
+    async def test_their_notices_go_with_them(self):
+        mgr = _deepagents_manager(None)
+        mgr._pending_notices = [object()]
+
+        await mgr.cleanup()
+
+        assert mgr._pending_notices == []
 
 
 @pytest.fixture

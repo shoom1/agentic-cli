@@ -16,6 +16,7 @@ from agentic_cli.workflow.mcp import (  # noqa: E402
     MCPServerConfig,
     build_connection_params,
     to_adk_toolset,
+    to_langchain_connection,
 )
 
 
@@ -89,6 +90,56 @@ class TestToAdkToolset:
             MCPServerConfig(name="s", command="echo", tool_filter=["a", "b"])
         )
         assert isinstance(ts, McpToolset)
+
+
+class TestToLangchainConnection:
+    """The connection ``langchain-mcp-adapters`` opens a session from (Deep Agents)."""
+
+    def test_stdio(self):
+        cfg = MCPServerConfig(
+            name="notion", command="npx", args=["-y", "srv"], env={"A": "B"}, timeout=9
+        )
+        assert to_langchain_connection(cfg) == {
+            "transport": "stdio", "command": "npx", "args": ["-y", "srv"], "env": {"A": "B"},
+        }
+
+    def test_stdio_without_env_inherits_the_default_environment(self):
+        # As on ADK: no env given means the MCP SDK's default environment, and
+        # the adapter requires args even when there are none.
+        assert to_langchain_connection(MCPServerConfig(name="s", command="srv")) == {
+            "transport": "stdio", "command": "srv", "args": [],
+        }
+
+    def test_sse(self):
+        cfg = MCPServerConfig(
+            name="s", transport="sse", url="https://x/sse", headers={"H": "V"}, timeout=7.5
+        )
+        assert to_langchain_connection(cfg) == {
+            "transport": "sse", "url": "https://x/sse", "headers": {"H": "V"}, "timeout": 7.5,
+        }
+
+    def test_http_is_streamable_http_and_unset_fields_are_left_out(self):
+        cfg = MCPServerConfig(name="s", transport="http", url="https://x/mcp")
+        assert to_langchain_connection(cfg) == {
+            "transport": "streamable_http", "url": "https://x/mcp",
+        }
+
+    @pytest.mark.parametrize("cfg", [
+        MCPServerConfig(name="s", command="srv", args=["a"], env={"A": "B"}),
+        MCPServerConfig(name="s", transport="sse", url="https://x", headers={"H": "V"},
+                        timeout=1),
+        MCPServerConfig(name="s", transport="http", url="https://x", headers={"H": "V"},
+                        timeout=1),
+    ], ids=["stdio", "sse", "http"])
+    def test_every_key_is_one_the_adapter_takes(self, cfg):
+        sessions = pytest.importorskip("langchain_mcp_adapters.sessions")
+        connection = to_langchain_connection(cfg)
+        typed = {
+            "stdio": sessions.StdioConnection,
+            "sse": sessions.SSEConnection,
+            "streamable_http": sessions.StreamableHttpConnection,
+        }[connection["transport"]]
+        assert set(connection) <= set(typed.__annotations__)
 
 
 class TestAgentLoaderMCP:
