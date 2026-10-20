@@ -4,7 +4,7 @@ This package provides the core infrastructure for building CLI applications
 powered by LLM agents, including:
 
 - CLI framework with thinking boxes and rich output
-- Workflow management for agent orchestration (Google ADK or LangGraph)
+- Workflow management for agent orchestration (Google ADK or Deep Agents)
 - Generic tools (search, code execution, document generation)
 - Knowledge base with vector search
 - Session persistence
@@ -14,9 +14,12 @@ agents, prompts, and configuration.
 
 Orchestrator Selection:
 - Default: Google ADK (GoogleADKWorkflowManager)
-- Optional: LangGraph (LangGraphWorkflowManager) - requires `pip install agentic-cli[langgraph]`
+- Optional: Deep Agents (DeepAgentsWorkflowManager) - requires
+  `pip install 'agentic-cli[deepagents]'`
+- Deprecated, removed in 0.8.0: LangGraph (LangGraphWorkflowManager) - requires
+  `pip install 'agentic-cli[langgraph]'`
 
-Use settings.orchestrator = "langgraph" or the factory function
+Use settings.orchestrator = "deepagents" or the factory function
 `create_workflow_manager_from_settings()` to switch orchestrators.
 
 Every name is loaded on first use, so importing one part of the framework
@@ -39,6 +42,7 @@ _lazy_imports = {
     # Workflow
     "BaseWorkflowManager": "agentic_cli.workflow.base_manager",
     "GoogleADKWorkflowManager": "agentic_cli.workflow.adk.manager",
+    "DeepAgentsWorkflowManager": "agentic_cli.workflow.deepagents",
     "LangGraphWorkflowManager": "agentic_cli.workflow.langgraph.manager",
     "AgentConfig": "agentic_cli.workflow.config",
     "AgentGraphError": "agentic_cli.workflow.config",
@@ -90,6 +94,7 @@ if TYPE_CHECKING:
     from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager
     from agentic_cli.workflow.base_manager import BaseWorkflowManager
     from agentic_cli.workflow.config import AgentConfig, AgentGraphError
+    from agentic_cli.workflow.deepagents import DeepAgentsWorkflowManager
     from agentic_cli.workflow.events import EventType, WorkflowEvent
     from agentic_cli.workflow.factory import create_workflow_manager_from_settings
     from agentic_cli.workflow.langgraph.manager import LangGraphWorkflowManager
@@ -126,7 +131,8 @@ __all__ = [
     # Workflow
     "BaseWorkflowManager",  # lazy
     "GoogleADKWorkflowManager",  # lazy (Google ADK)
-    "LangGraphWorkflowManager",  # lazy (requires langgraph extra)
+    "DeepAgentsWorkflowManager",  # lazy (requires deepagents extra)
+    "LangGraphWorkflowManager",  # lazy (requires langgraph extra; removed in 0.8.0)
     "AgentConfig",
     "AgentGraphError",
     "ModelSettings",
