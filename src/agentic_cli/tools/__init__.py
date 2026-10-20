@@ -16,6 +16,11 @@ Framework Tools:
 For resilience patterns, use tenacity, pybreaker, aiolimiter directly.
 """
 
+# Framework-reserved tool names, declared before any tool module registers
+# (importing the registry imports this package first): `task`, the Deep
+# Agents delegation tool, so an application tool cannot take the name.
+from agentic_cli.tools._core import delegation as _delegation  # noqa: F401
+
 from agentic_cli.tools.executor import SafePythonExecutor, MockPythonExecutor, ExecutionTimeoutError
 from agentic_cli.tools.shell import shell_executor, is_shell_enabled
 

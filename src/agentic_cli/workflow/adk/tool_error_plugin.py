@@ -8,7 +8,9 @@ application's own tool) the same shape, so the model reads the error and can
 recover. ``asyncio.CancelledError`` is not an ``Exception`` and never reaches
 the callback, so cancelling a turn still cancels it.
 
-LangGraph needs no equivalent: its ``ToolNode`` runs with
+The result comes from ``workflow/tool_errors.py``, which the Deep Agents
+backend's tool-error middleware uses too, so both answer the model in the same
+words. LangGraph needs no equivalent: its ``ToolNode`` runs with
 ``handle_tool_errors=True``.
 """
 
@@ -18,16 +20,11 @@ from typing import Any, TYPE_CHECKING
 
 from google.adk.plugins.base_plugin import BasePlugin
 
-from agentic_cli.constants import truncate
-from agentic_cli.logging import Loggers
+from agentic_cli.workflow.tool_errors import tool_error_result
 
 if TYPE_CHECKING:
     from google.adk.tools import BaseTool
     from google.adk.tools.tool_context import ToolContext
-
-logger = Loggers.workflow()
-
-_MAX_MESSAGE = 500
 
 
 class ToolErrorPlugin(BasePlugin):
@@ -44,16 +41,4 @@ class ToolErrorPlugin(BasePlugin):
         tool_context: "ToolContext | None",
         error: Exception,
     ) -> dict:
-        logger.warning(
-            "tool_raised",
-            tool=tool.name,
-            error_type=type(error).__name__,
-            error=truncate(str(error), _MAX_MESSAGE),
-            exc_info=error,
-        )
-        return {
-            "success": False,
-            "error": truncate(
-                f"{tool.name} failed: {type(error).__name__}: {error}", _MAX_MESSAGE
-            ),
-        }
+        return tool_error_result(tool.name, error)
