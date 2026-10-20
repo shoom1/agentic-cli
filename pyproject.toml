@@ -93,6 +93,24 @@ langgraph = [
     "langgraph-checkpoint-sqlite>=2.0",
     "langgraph-checkpoint-postgres>=2.0",
 ]
+deepagents = [
+    # The Deep Agents backend (orchestrator = "deepagents"). Deep Agents is
+    # beta and releases about twice a week, so it is held below the next minor
+    # and upgraded in deliberate changes.
+    "deepagents>=0.7.28,<0.8",
+    # The LangChain model adapter's floors, as in the langgraph extra.
+    "langchain>=1.4.6",
+    "langchain-core>=1.6.11",
+    "langchain-openai>=1.7",
+    "langchain-anthropic>=1.7.6",
+    "langchain-google-genai>=4.4.2",
+    "langchain-openrouter>=0.2",
+    # Sessions: the async savers behind session_store (sqlite, postgres).
+    "langgraph-checkpoint-sqlite>=3.1",
+    "langgraph-checkpoint-postgres>=3.1",
+    # MCP servers (AgentConfig.mcp_servers) as LangChain tools.
+    "langchain-mcp-adapters>=0.3",
+]
 
 [project.scripts]
 research-demo = "research_demo.__main__:main"
