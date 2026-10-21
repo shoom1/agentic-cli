@@ -63,6 +63,45 @@ class TestSkillStore:
         with pytest.raises(ValueError, match="not found"):
             SkillStore([str(tmp_path)]).resolve(["nope"])
 
+    def test_a_name_is_looked_up_only_under_skills_dirs(self, tmp_path, monkeypatch):
+        """A checkout's folder named after a skill cannot stand in for it."""
+        skills_dir = tmp_path / "skills"
+        _make_skill(skills_dir, desc="The configured skill.")
+        checkout = tmp_path / "checkout"
+        _make_skill(checkout, desc="A folder in the checkout.")
+        monkeypatch.chdir(checkout)
+        skills = SkillStore([str(skills_dir)]).resolve(["pdf-tools"])
+        assert [s.description for s in skills] == ["The configured skill."]
+
+    def test_a_name_found_only_in_the_working_directory_is_not_found(
+        self, tmp_path, monkeypatch
+    ):
+        _make_skill(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        with pytest.raises(ValueError, match="not found"):
+            SkillStore().resolve(["pdf-tools"])
+
+    @pytest.mark.parametrize("ref", ["./pdf-tools", "skills/pdf-tools", ".."])
+    def test_a_relative_path_is_refused(self, tmp_path, monkeypatch, ref):
+        _make_skill(tmp_path)
+        _make_skill(tmp_path / "skills")
+        monkeypatch.chdir(tmp_path)
+        with pytest.raises(ValueError, match="absolute"):
+            SkillStore([str(tmp_path / "skills")]).resolve([ref])
+
+    def test_a_relative_skills_dir_is_refused(self, tmp_path, monkeypatch):
+        """A relative entry would look names up in the working directory."""
+        _make_skill(tmp_path / "skills")
+        monkeypatch.chdir(tmp_path)
+        with pytest.raises(ValueError, match="absolute"):
+            SkillStore(["skills"]).resolve(["pdf-tools"])
+
+    def test_a_skills_dir_may_start_at_home(self, tmp_path, monkeypatch):
+        _make_skill(tmp_path / "skills")
+        monkeypatch.setenv("HOME", str(tmp_path))
+        skills = SkillStore(["~/skills"]).resolve(["pdf-tools"])
+        assert [s.name for s in skills] == ["pdf-tools"]
+
 
 # ---------------------------------------------------------------------------
 # make_skill_toolset (script gating)

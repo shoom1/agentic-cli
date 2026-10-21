@@ -762,7 +762,7 @@ configs = [coordinator, researcher, analyst]
 | `model` | str \| None | A model reference (`anthropic:claude-sonnet-4-6`), a bare model id, or a role (`fast`); without one, the `default` role (see [Models and providers](#models-and-providers)) |
 | `model_settings` | ModelSettings \| None | The agent's thinking, `max_tokens`, sampling settings and `extra` (see [Thinking](#thinking)) |
 | `mcp_servers` | list[MCPServerConfig] | MCP servers whose tools the agent gets (ADK and Deep Agents) |
-| `skills` | list[str] | Agent Skills: a skill folder's path, or a name under `skills_dirs` (ADK and Deep Agents) |
+| `skills` | list[str] | Agent Skills: a skill folder's absolute path, or a name under `skills_dirs` (ADK and Deep Agents; never looked up in the working directory) |
 
 The agent graph is validated before anything is allocated — ahead of model
 discovery and service creation. Duplicate names, unknown `sub_agents`

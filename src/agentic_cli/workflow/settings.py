@@ -576,7 +576,10 @@ class WorkflowSettingsMixin:
     skills_dirs: list[str] = Field(
         default_factory=list,
         title="Skills Directories",
-        description="Directories searched for named skills (Agent Skills / SKILL.md folders)",
+        description=(
+            "Absolute directories searched for named skills "
+            "(Agent Skills / SKILL.md folders)"
+        ),
         json_schema_extra={"ui_order": 141},
     )
     # NOTE: ``skill_scripts_enabled`` was removed. Turning it on exposed ADK's
