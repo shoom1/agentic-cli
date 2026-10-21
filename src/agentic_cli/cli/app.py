@@ -29,7 +29,7 @@ from agentic_cli.cli.usage_tracker import UsageTracker
 from agentic_cli.cli.workflow_controller import WorkflowController
 from agentic_cli.config import MODEL_ROLE_KEY_PREFIX, BaseSettings
 from agentic_cli.logging import Loggers, configure_logging
-from agentic_cli.settings_persistence import PROJECT_SETTABLE_KEYS
+from agentic_cli.settings_persistence import PROJECT_SETTABLE_KEYS, USER_PREFERENCE_KEYS
 from agentic_cli.workflow.settings import OrchestratorType
 
 if TYPE_CHECKING:
@@ -65,11 +65,21 @@ def _is_model_picker(key: str) -> bool:
     return key == "model" or key.startswith(MODEL_ROLE_KEY_PREFIX)
 
 
-def _setting_label(key: str) -> str:
-    """How messages name a dialog key: ``Thinking Effort``, ``Fast Model``."""
+def _setting_label(key: str, settings: BaseSettings) -> str:
+    """How messages name a dialog key, as the dialog labels it: by the field's
+    title (``UI Theme``, ``Max Retry Attempts``), ``Fast Model`` for a role's
+    model picker, and otherwise by the key title-cased (``Model``)."""
     if key.startswith(MODEL_ROLE_KEY_PREFIX):
-        return f"{key.removeprefix(MODEL_ROLE_KEY_PREFIX).title()} Model"
+        return _role_picker_label(key)
+    field = type(settings).model_fields.get(key)
+    if field is not None and field.title:
+        return field.title
     return key.replace("_", " ").title()
+
+
+def _role_picker_label(key: str) -> str:
+    """A role's model picker, ``model_role:fast``, is ``Fast Model``."""
+    return f"{key.removeprefix(MODEL_ROLE_KEY_PREFIX).title()} Model"
 
 
 @dataclass(frozen=True)
@@ -349,7 +359,7 @@ class BaseCLIApp:
         self.session = ThinkingPromptSession(
             message=">>> ",
             app_info=self._app_info,
-            theme=self.get_theme("dark"),
+            theme=self.get_theme(settings.ui_theme),
             history=InMemoryHistory(),
             completer=completer,
             complete_while_typing=True,
@@ -360,6 +370,8 @@ class BaseCLIApp:
             # A finished box's text is not printed: the status lines a box
             # shows are not part of the conversation.
             echo_thinking=False,
+            # Where a dialog that names no placement is drawn.
+            dialog_placement=settings.dialog_placement,
         )
 
         # === State ===
@@ -374,8 +386,10 @@ class BaseCLIApp:
         Any other name (``"light"``, ``"mono"``, ``"terminal"``, ``"auto"``)
         is returned as it is, for thinking-prompt's own theme: colors tuned
         for a dark background would be unreadable on a light one. ``"auto"``
-        picks dark or light from the terminal, so agentic-cli's colors do not
-        apply there.
+        lets thinking-prompt choose from the terminal (mono under
+        ``NO_COLOR``, light or dark from ``COLORFGBG``, else the terminal's
+        own colors), so agentic-cli's colors do not apply there. The session
+        is built in ``get_theme(settings.ui_theme)``.
 
         Override to recolor a theme, e.g. for ``"dark"`` return
         ``dataclasses.replace(ThinkingPromptStyles.dark(), thinking_box=...)``
@@ -402,10 +416,15 @@ class BaseCLIApp:
         references, and write ``default_model`` and ``model_roles[<role>]``.
         An app adds a picker for a role of its own as ``model_role:<role>``.
 
-        Only project-scoped settings may appear: a key whose target field is
-        not in PROJECT_SETTABLE_KEYS is excluded by _build_ui_items (with a
+        Only project-scoped settings and the user's preferences may appear.
+        A key whose target field is in neither PROJECT_SETTABLE_KEYS nor
+        USER_PREFERENCE_KEYS is excluded by _build_ui_items (with a
         warning), because a /settings edit to it would persist in the user
-        ~/.{app}/settings.json and apply across all projects of the app.
+        ~/.{app}/settings.json and apply across all projects of the app. The
+        preferences (``ui_theme``, ``dialog_placement``) are meant to apply
+        everywhere, so they are saved there; the default list leaves them
+        out, and an app shows them by listing them:
+        ``[*super().get_ui_setting_keys(), "ui_theme", "dialog_placement"]``.
 
         Returns:
             List of field names that should appear in the settings UI
@@ -435,14 +454,17 @@ class BaseCLIApp:
         ]
         choices: _ModelChoices | None = None  # one catalog for every picker
         items: list[tuple[int, Field]] = []
+        shown = PROJECT_SETTABLE_KEYS | USER_PREFERENCE_KEYS
 
         for key in keys:
             # Project-scope guard: the dialog may only expose settings the
-            # project file can persist (PROJECT_SETTABLE_KEYS). A user-scoped
-            # key would save to the user ~/.{app}/settings.json and leak the
-            # change across all projects of the app. model_endpoints is one:
-            # it holds the addresses a key is sent to.
-            if _ui_key_target_field(key) not in PROJECT_SETTABLE_KEYS:
+            # project file can persist (PROJECT_SETTABLE_KEYS), and the user's
+            # preferences (USER_PREFERENCE_KEYS), which are meant to apply in
+            # every project. Any other user-scoped key would save to the user
+            # ~/.{app}/settings.json and leak the change across all projects
+            # of the app. model_endpoints is one: it holds the addresses a key
+            # is sent to.
+            if _ui_key_target_field(key) not in shown:
                 logger.warning("user_scoped_setting_excluded_from_ui", key=key)
                 continue
 
@@ -613,7 +635,9 @@ class BaseCLIApp:
 
         A reinitialization keeps the sessions, as a model switch does. A
         switch to the deprecated LangGraph orchestrator ends with its
-        deprecation warning.
+        deprecation warning. A change of ``ui_theme`` switches the session to
+        ``get_theme(ui_theme)`` last, repainting the transcript; one rolled
+        back leaves the theme as it was.
 
         Args:
             changes: Dictionary of changed settings (key -> new_value)
@@ -629,6 +653,7 @@ class BaseCLIApp:
         new_model = changes.get("model")
         snapshot = _snapshot_settings(self._settings)
         was_langgraph = _runs_langgraph(self._settings)
+        theme_before = self._settings.ui_theme
 
         # `orchestrator` triggers a reinit too: the controller swaps the backend
         # when it changes (otherwise the change only took effect on restart).
@@ -643,7 +668,8 @@ class BaseCLIApp:
                     needs_reinit = True
             except ValueError as e:
                 _restore_settings(self._settings, snapshot)
-                self.session.add_error(f"Failed to set {_setting_label(key)}: {e}")
+                label = _setting_label(key, self._settings)
+                self.session.add_error(f"Failed to set {label}: {e}")
                 return False
 
         # Reinitialize workflow if needed
@@ -680,11 +706,16 @@ class BaseCLIApp:
 
         # Report changes
         for key, value in changes.items():
-            self.session.add_success(f"{_setting_label(key)}: {value}")
+            self.session.add_success(f"{_setting_label(key, self._settings)}: {value}")
         for notice in switched:
             self.session.add_message("system", notice)
         if not was_langgraph:  # a switch to it, not a change made while on it
             _warn_if_langgraph(self._settings, self.session)
+        if self._settings.ui_theme != theme_before:
+            # Repaint: text printed before would keep the old theme's colors.
+            # The transcript is printed again, the lines above included.
+            theme = self.get_theme(self._settings.ui_theme)
+            self.session.set_theme(theme, repaint=True)
         return True
 
     def _register_builtin_commands(self) -> None:
@@ -970,7 +1001,7 @@ def _model_picker(key: str, choices: _ModelChoices) -> Field:
         description = "Agents without a model of their own run on it"
     else:
         role = key.removeprefix(MODEL_ROLE_KEY_PREFIX)
-        title = _setting_label(key)
+        title = _role_picker_label(key)
         description = f"Agents whose model is {role!r} run on it"
     field = FieldInfo(default=None, title=title, description=description)
     return field_to_ui_item(

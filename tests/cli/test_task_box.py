@@ -18,6 +18,7 @@ argument 0.4 does not take fails the test.
 
 from __future__ import annotations
 
+import re
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call
 
@@ -202,3 +203,26 @@ async def test_done_tasks_end_the_box_and_the_next_turn_has_none(ui):
     await _turn(processor, ui)
 
     assert len(_task_box_calls(ui)) == 1  # the first turn's only
+
+
+# --- the task list's colors -----------------------------------------------------------
+
+
+def _sgr_codes(text: str) -> set[str]:
+    """Every SGR parameter the text's escape sequences set."""
+    return {code for seq in re.findall(r"\x1b\[([0-9;]*)m", text) for code in seq.split(";")}
+
+
+@pytest.mark.parametrize(
+    "line", ["[▸] Write the summary", "[ ] Read the paper", "Phase 1"], ids=["active", "pending", "header"]
+)
+def test_the_task_list_draws_its_text_in_the_terminal_s_own_color(line):
+    """The box's content is baked ANSI, which no theme restyles: a fixed white
+    (SGR 37, 97) is a light grey on a light terminal, near invisible under the
+    light theme. Text takes the terminal's own foreground."""
+    assert not _sgr_codes(_richify_task_display(line)) & {"37", "97"}
+
+
+@pytest.mark.parametrize("line", ["[▸] Write the summary", "Phase 1"], ids=["active", "header"])
+def test_the_active_task_and_the_headers_stay_prominent(line):
+    assert "1" in _sgr_codes(_richify_task_display(line))  # bold

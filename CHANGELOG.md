@@ -268,6 +268,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unchanged. ADK and Deep Agents both build the payload with
   `agentic_cli.tools.jobs.resume.job_result_payload(record, result)`; what
   ADK sends is unchanged.
+- **Two user settings choose how the CLI looks: `ui_theme` and
+  `dialog_placement`.** `ui_theme` is `dark` (the default, agentic-cli's
+  colors), `light`, `mono`, `terminal` (the terminal's own palette) or `auto`
+  (thinking-prompt picks: `mono` under `NO_COLOR`, `light` or `dark` from
+  `COLORFGBG`, else `terminal`), and the session is built in
+  `get_theme(ui_theme)`. `dialog_placement` draws dialogs in a framed `box`
+  (the default) or `inline`, as rows under the prompt. Both are the user's:
+  `~/.<app>/settings.json` and the environment (`AGENTIC_UI_THEME`,
+  `AGENTIC_DIALOG_PLACEMENT`, or the app's prefix) set them, a project file or
+  a cwd `.env` that does is ignored with a warning, and a bad value fails when
+  settings load. The new `settings_persistence.USER_PREFERENCE_KEYS` names
+  them; they are the only user-scoped keys `/settings` may show, and it shows
+  them only when an app lists them in `get_ui_setting_keys()`
+  (`return [*super().get_ui_setting_keys(), "ui_theme", "dialog_placement"]`;
+  `research_demo` does). A Save writes them to the user file, and one set back
+  to its default leaves it. Both switch while the app runs:
+  - A new theme applies at once: `apply_settings` calls
+    `session.set_theme(get_theme(ui_theme), repaint=True)` after its report
+    lines, and not for a change it rolls back. The repaint clears the screen
+    and the terminal's scrollback, shell output from before the session
+    included, and prints the conversation again; messages and markdown take
+    the new colors, while Rich panels and tables keep the colors they were
+    printed in.
+  - A new placement applies from the next dialog agentic-cli opens:
+    `/settings` and the tools' questions (permission prompts included) pass
+    `placement=` from the settings each time, since thinking-prompt's session
+    placement is fixed when it starts. An app's own dialogs keep that startup
+    placement unless they pass `placement=` themselves.
 
 ### Changed
 

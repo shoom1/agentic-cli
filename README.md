@@ -178,12 +178,13 @@ class MyApp(BaseCLIApp):
         return super().get_theme(name)
 ```
 
-The session draws in `get_theme("dark")`: thinking-prompt's dark theme in
-agentic-cli's colors. Any other theme name comes back as it is, for
-thinking-prompt's own theme, since colors tuned for a dark background would be
-unreadable on a light one. To change one color and keep agentic-cli's others,
-start from `super().get_theme("dark")` instead of
-`ThinkingPromptStyles.dark()`.
+The session draws in `get_theme(name)` for the user's `ui_theme` (see
+[Theme and dialog placement](#theme-and-dialog-placement)): `dark` unless they
+chose another, which is thinking-prompt's dark theme in agentic-cli's colors.
+Any other theme name comes back as it is, for thinking-prompt's own theme,
+since colors tuned for a dark background would be unreadable on a light one.
+To change one color and keep agentic-cli's others, start from
+`super().get_theme("dark")` instead of `ThinkingPromptStyles.dark()`.
 
 An app written for 0.6 makes two edits: it drops `echo_thinking=` from
 `AppInfo`, which thinking-prompt 0.4 refuses, and turns `get_styles()` into
@@ -430,6 +431,8 @@ absolute/user-level file. A key placed in a cwd `.env` is deliberately ignored.
 | `session_store` | `AGENTIC_SESSION_STORE` | "sqlite" | Where conversations are kept: `sqlite`, `postgres`, or `memory` |
 | `workspace_dir` | `AGENTIC_WORKSPACE_DIR` | ~/.agentic | Storage directory |
 | `log_level` | `AGENTIC_LOG_LEVEL` | "warning" | Logging level |
+| `ui_theme` | `AGENTIC_UI_THEME` | "dark" | The CLI's theme: `dark`, `light`, `mono`, `terminal` or `auto` (user settings only) |
+| `dialog_placement` | `AGENTIC_DIALOG_PLACEMENT` | "box" | Dialogs in a framed `box`, or `inline` under the prompt (user settings only) |
 | `tavily_api_key` | `TAVILY_API_KEY` | None | Tavily API key for web search |
 | `brave_api_key` | `BRAVE_API_KEY` | None | Brave Search API key |
 | `search_backend` | `AGENTIC_SEARCH_BACKEND` | Auto | Web search provider (tavily/brave) |
@@ -440,6 +443,42 @@ absolute/user-level file. A key placed in a cwd `.env` is deliberately ignored.
 | `retry_initial_delay` | `AGENTIC_RETRY_INITIAL_DELAY` | 2.0 | Initial retry backoff (seconds) |
 
 Settings are persisted by `SettingsPersistence` (atomic writes) and editable at runtime via the `/settings` command.
+
+### Theme and dialog placement
+
+`ui_theme` and `dialog_placement` are the user's: how the CLI looks applies in
+every project. They come from `~/.{app_name}/settings.json` or the environment
+(`AGENTIC_UI_THEME` and `AGENTIC_DIALOG_PLACEMENT`, or your app's prefix); a
+project file or a cwd `.env` that sets them is ignored with a warning, like
+any other user-scoped key. `settings_persistence.USER_PREFERENCE_KEYS` names
+them.
+
+`/settings` does not show them unless the app lists them, and they are the
+only user-scoped keys it may list (any other is left out, with a warning):
+
+```python
+class MyApp(BaseCLIApp):
+    def get_ui_setting_keys(self) -> list[str]:
+        return [*super().get_ui_setting_keys(), "ui_theme", "dialog_placement"]
+```
+
+A Save writes them to the user file, and one set back to its default leaves
+it, so the next start follows the default again. `examples/research_demo`
+lists both.
+
+- **The theme** switches at once, through `get_theme(name)`. thinking-prompt
+  repaints: it clears the screen and the terminal's scrollback, shell output
+  from before the session included, and prints the conversation again in the
+  new theme. Messages and markdown take the new colors; Rich panels and tables
+  (`/help`'s, for one) keep the colors they were printed in. Under `auto`,
+  thinking-prompt picks the theme: `mono` when `NO_COLOR` is set, `light` or
+  `dark` from `COLORFGBG` when the terminal sets it, and `terminal` (the
+  terminal's own palette) otherwise; agentic-cli's dark colors do not apply
+  there. `NO_COLOR` draws in mono whatever the theme.
+- **The placement** applies from the next dialog agentic-cli opens: `/settings`
+  and the tools' questions, permission prompts included. An app's own dialogs
+  keep the placement the session started with, unless they pass
+  `placement=self.settings.dialog_placement`.
 
 ### Settings Context
 

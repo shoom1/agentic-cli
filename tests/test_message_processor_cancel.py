@@ -35,7 +35,7 @@ from agentic_cli.workflow.events import InputType, UserInputRequest, WorkflowEve
 from tests.cli.dialog_fakes import autospec_session, opening_boxes
 from tests.event_replay import ReplayController
 
-SETTINGS = SimpleNamespace(default_user="u", verbose_thinking=False)
+SETTINGS = SimpleNamespace(default_user="u", verbose_thinking=False, dialog_placement="box")
 OUT_OF_THE_TRANSCRIPT = call(add_to_history=False, echo_to_console=False)
 
 

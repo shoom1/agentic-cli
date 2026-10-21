@@ -211,13 +211,27 @@ class TestCommandsBeforeReadiness:
 
 class TestSettingsDialog:
     def test_the_demo_keeps_every_framework_picker(self, demo_app):
-        """The demo adds verbose_thinking; it must not drop the role pickers."""
+        """The demo adds verbose_thinking and the user's two preferences; it
+        must not drop the role pickers."""
         from agentic_cli import BaseCLIApp
 
         framework = BaseCLIApp.get_ui_setting_keys(demo_app)
 
         assert {"model", "model_role:fast", "model_role:strong"} <= set(framework)
-        assert demo_app.get_ui_setting_keys() == [*framework, "verbose_thinking"]
+        assert demo_app.get_ui_setting_keys() == [
+            *framework, "verbose_thinking", "ui_theme", "dialog_placement",
+        ]
+
+    def test_its_dialog_shows_the_theme_and_the_placement(self, demo_app):
+        """The user's preferences pass the dialog's scope guard, last."""
+        from thinking_prompt import SelectField
+
+        fields = demo_app._build_ui_items()
+
+        assert [field.key for field in fields][-3:] == [
+            "verbose_thinking", "ui_theme", "dialog_placement",
+        ]
+        assert all(isinstance(field, SelectField) for field in fields[-2:])
 
 
 class TestMessageRouting:
@@ -590,3 +604,28 @@ class TestKbBackfillCommand:
         assert call_count[0] == 1, f"backfill_sidecars should be called once, was called {call_count[0]} times"
         successes = app.session.of("success")
         assert len(successes) == 1, "Should report success once"
+
+
+class TestMemoryCommandColors:
+    async def test_memory_content_draws_in_the_terminal_s_own_color(self):
+        """A fixed white is a light grey on a light terminal: the demo offers
+        the light theme, so /memory's content takes the terminal's color."""
+        from types import SimpleNamespace
+
+        from rich.table import Table
+
+        from examples.research_demo.commands import MemoryCommand
+        from tests.cli.dialog_fakes import autospec_session
+
+        item = SimpleNamespace(id="m1234567", content="likes teal", tags=["colour"])
+        store = SimpleNamespace(search=lambda query, limit: [item])
+        app = SimpleNamespace(
+            workflow=SimpleNamespace(memory_store=store), session=autospec_session()
+        )
+
+        await MemoryCommand().execute("", app)
+
+        (table,) = app.session.add_rich.call_args.args
+        assert isinstance(table, Table)
+        content = next(column for column in table.columns if column.header == "Content")
+        assert "white" not in str(content.style)

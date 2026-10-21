@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from agentic_cli.cli.workflow_controller import WorkflowController
     from agentic_cli.workflow import WorkflowEvent
     from agentic_cli.workflow.events import UserInputRequest
-    from thinking_prompt import ThinkingBox, ThinkingPromptSession
+    from thinking_prompt import Placement, ThinkingBox, ThinkingPromptSession
 
 
 logger = Loggers.cli()
@@ -63,10 +63,14 @@ def _richify_task_display(plain: str) -> str:
 
     Task box uses full-color styling (not dim grey like thinking/tool boxes):
     - Completed: green ✓, dim text (done = de-emphasised)
-    - In-progress: yellow ▸, white text (active = prominent)
-    - Pending: white ○, white text (upcoming = visible)
+    - In-progress: yellow ▸, bold text (active = prominent)
+    - Pending: ○, plain text (upcoming = visible)
     - Cancelled: red ✗, dim text (irrelevant = de-emphasised)
-    - Section headers: bold white
+    - Section headers: bold
+
+    Text keeps the terminal's own foreground, never a fixed white: the box
+    shows these colors as they are, under every theme, and white is a light
+    grey on a light terminal.
     """
     from thinking_prompt import rich_to_ansi
 
@@ -82,18 +86,16 @@ def _richify_task_display(plain: str) -> str:
             lines.append(f"{indent}[green]✓[/green] [dim]{_esc(stripped[4:])}[/dim]")
         elif stripped.startswith("[▸]"):
             lines.append(
-                f"{indent}[yellow]▸[/yellow] [white]{_esc(stripped[4:])}[/white]"
+                f"{indent}[yellow]▸[/yellow] [bold]{_esc(stripped[4:])}[/bold]"
             )
         elif stripped.startswith("[ ]"):
-            lines.append(
-                f"{indent}[white]○[/white] [white]{_esc(stripped[4:])}[/white]"
-            )
+            lines.append(f"{indent}○ {_esc(stripped[4:])}")
         elif stripped.startswith("[-]"):
             lines.append(
                 f"{indent}[red]✗[/red] [dim]{_esc(stripped[4:])}[/dim]"
             )
         else:
-            lines.append(f"[bold white]{_esc(line)}[/bold white]")
+            lines.append(f"[bold]{_esc(line)}[/bold]")
     return rich_to_ansi("\n".join(lines))
 
 
@@ -447,8 +449,12 @@ class MessageProcessor:
             _finish_events_box()
             # If the dialog raises, the turn is unwinding (cancelled, or the
             # dialog failed): reopening the events box then would leave a
-            # panel on screen that nothing downstream will ever finish.
-            response = await self._prompt_user_input(request, ui)
+            # panel on screen that nothing downstream will ever finish. The
+            # placement is read now: /settings may have changed it since the
+            # session started with its own.
+            response = await self._prompt_user_input(
+                request, ui, settings.dialog_placement
+            )
             _open_events_box()
             return response
 
@@ -590,6 +596,7 @@ class MessageProcessor:
         self,
         request: "UserInputRequest",
         ui: "ThinkingPromptSession",
+        placement: "Placement",
     ) -> str:
         """Prompt user for input requested by a tool.
 
@@ -600,6 +607,8 @@ class MessageProcessor:
         Args:
             request: The user input request from the tool.
             ui: UI session for prompting.
+            placement: Where the dialog is drawn, ``"box"`` or ``"inline"``
+                (the ``dialog_placement`` setting).
 
         Returns:
             User's response string ("" for a cancelled free-text question).
@@ -614,6 +623,7 @@ class MessageProcessor:
                 text=request.prompt,
                 options=request.choices,
                 default=request.default,
+                placement=placement,
             )
             return result or (request.default or "")
 
@@ -621,6 +631,7 @@ class MessageProcessor:
             result = await ui.yes_no_dialog(
                 title=f"{tool_name} - Confirmation",
                 text=request.prompt,
+                placement=placement,
             )
             return "yes" if result else "no"
 
@@ -638,6 +649,7 @@ class MessageProcessor:
                         edit_width=60,
                     )
                 ],
+                placement=placement,
             )
             # OK returns True; Cancel and Escape return None.
             if not await ui.show_dialog(dialog):
