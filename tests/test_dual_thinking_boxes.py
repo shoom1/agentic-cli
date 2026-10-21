@@ -328,7 +328,7 @@ class TestProcessDualBoxes:
 
         await processor.process("hi", wf_ctrl, ui, settings)
 
-        events_ctx.finish.assert_called_once_with(add_to_history=False)
+        events_ctx.finish.assert_called_once_with(add_to_history=False, echo_to_console=False)
         task_ctx.finish.assert_called_once_with(add_to_history=False, echo_to_console=False)
         assert processor._task_box is None
 

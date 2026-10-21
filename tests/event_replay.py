@@ -63,11 +63,8 @@ class RecordingSession:
     few convenience query helpers.
     """
 
-    def __init__(self, is_thinking: bool = True) -> None:
+    def __init__(self) -> None:
         self.calls: list[tuple] = []
-        # MessageProcessor's Ctrl+C watcher reads this; keep it True so a fast
-        # replay is never mistaken for the user cancelling.
-        self.is_thinking = is_thinking
 
     # --- thinking boxes -----------------------------------------------------
     def start_thinking(
