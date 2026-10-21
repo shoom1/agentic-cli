@@ -16,12 +16,16 @@ from typing import Any
 class SkillStore:
     """Resolve skill references (paths or names) to loaded Skill objects.
 
-    A skill reference is either a path to a skill directory, or a bare name
-    looked up as a subdirectory of one of ``skill_dirs``.
+    A skill reference is either an absolute path to a skill directory, or a
+    bare name (no path separator) looked up as a subdirectory of one of
+    ``skill_dirs``, which must be absolute too (``~`` is expanded). Nothing is
+    looked up in the working directory: in a cloned repository, a folder named
+    after a configured skill would stand in for it, and its instructions would
+    reach the model.
     """
 
     def __init__(self, skill_dirs: list[str | Path] | None = None) -> None:
-        self._search_dirs = [Path(d) for d in (skill_dirs or [])]
+        self._search_dirs = [Path(d).expanduser() for d in (skill_dirs or [])]
 
     def _load_dir(self, path: Path) -> Any:
         from google.adk.skills import load_skill_from_dir
@@ -30,17 +34,27 @@ class SkillStore:
 
     def _resolve_ref(self, ref: str) -> Path:
         path = Path(ref)
-        if path.is_dir():
-            return path
+        if path.parts != (ref,) or ref == "..":
+            if not path.is_absolute():
+                raise ValueError(
+                    f"Skill {ref!r} is a relative path: give a skill folder's "
+                    f"absolute path, or a name under skills_dirs."
+                )
+            if path.is_dir():
+                return path
+            raise ValueError(f"Skill {ref!r} not found: not a directory.")
+        relative = [str(d) for d in self._search_dirs if not d.is_absolute()]
+        if relative:
+            raise ValueError(
+                f"skills_dirs entry {relative[0]!r} is relative: skills_dirs "
+                f"takes absolute paths."
+            )
         for base in self._search_dirs:
             candidate = base / ref
             if candidate.is_dir():
                 return candidate
         searched = [str(d) for d in self._search_dirs]
-        raise ValueError(
-            f"Skill {ref!r} not found: not a directory and not under "
-            f"skills_dirs {searched}."
-        )
+        raise ValueError(f"Skill {ref!r} not found under skills_dirs {searched}.")
 
     def resolve(self, refs: list[str]) -> list[Any]:
         """Load the given skill refs, de-duplicated by skill name (last wins)."""

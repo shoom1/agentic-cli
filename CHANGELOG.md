@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **A skill name is looked up only under `skills_dirs`, never in the working
+  directory.** `SkillStore` (ADK and Deep Agents) tried a bare name such as
+  `report-writer` as a folder in the working directory first, so in a cloned
+  repository a folder of that name stood in for the configured skill, and its
+  instructions reached the model. **Breaking:** a skill given by path must be
+  an absolute path (build it from `__file__`), and a `skills_dirs` entry must
+  be absolute too (`~` is expanded); a relative one is refused with an error
+  naming it.
+
 ### Added
 
 - **`agentic_cli.models`** (provisional: its names and signatures may change
@@ -218,7 +229,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the stream's `LLM_USAGE` alone, and a log that cannot be written is
   skipped.
 - **Agent Skills on Deep Agents** (`AgentConfig.skills`, resolved as on ADK:
-  a path to a skill folder, or a name under `skills_dirs`). An agent with
+  an absolute path to a skill folder, or a name under `skills_dirs`). An agent with
   skills gets the tools ADK offers, `list_skills`, `load_skill` and
   `load_skill_resource`, with ADK's arguments, results and error texts, and
   ADK's skills instruction at the end of its system prompt; as on ADK there

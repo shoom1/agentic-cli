@@ -264,8 +264,8 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
     ) -> tuple[list[BaseTool], str]:
         """``config``'s skills as skill tools, and the instruction its prompt gets.
 
-        The skills resolve as on ADK: a path to a skill folder, or a name under
-        ``skills_dirs``.
+        The skills resolve as on ADK: an absolute path to a skill folder, or a
+        name under ``skills_dirs``.
 
         Raises:
             ValueError: A skill cannot be found or loaded (``SkillStore``).
