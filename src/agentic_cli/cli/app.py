@@ -626,7 +626,9 @@ class BaseCLIApp:
         All or nothing: if any value is invalid, or the workflow cannot be
         reinitialized with the new values, every field is restored and the
         workflow is brought back on the model it was running, so nothing
-        unusable stays in memory to be saved by ``/settings``.
+        unusable stays in memory to be saved by ``/settings``. A restart
+        interrupted by Ctrl+C is undone the same way, without a word, and the
+        cancel is re-raised.
 
         Settings are applied in two ways:
         1. Special settings (model, a role's model, thinking_effort) use
@@ -681,6 +683,19 @@ class BaseCLIApp:
             previous_models = dict(getattr(previous, "agent_models", {}))
             try:
                 await controller.reinitialize(model=new_model)
+            except asyncio.CancelledError:
+                # Ctrl+C stopped /settings mid-restart. Nothing of the Save
+                # stays, as on a failure, and nothing is said: the session's
+                # interruption is not a cancel of the dialog.
+                _restore_settings(self._settings, snapshot)
+                if not controller.is_ready:
+                    try:
+                        await controller.reinitialize(model=previous_model)
+                    except Exception as restore_error:
+                        # Down, on the old model: the next request retries,
+                        # and reports a failure then.
+                        logger.warning("settings_restore_failed", error=str(restore_error))
+                raise
             except Exception as e:
                 _restore_settings(self._settings, snapshot)
                 self.session.add_error(

@@ -14,6 +14,7 @@ the manager uninitialized, holding the model it was given).
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -139,6 +140,128 @@ class TestOrchestratorSwapFails:
         assert applied is False
         assert settings.orchestrator.value == "adk"
         # The old manager kept running; it is neither replaced nor reinitialized.
+        assert app._workflow_controller._workflow is manager
+        assert manager.reinits == []
+        assert app._workflow_controller.is_ready
+
+
+class InterruptedManager(FakeManager):
+    """The Save's restart waits until it is cancelled (Ctrl+C), then the
+    manager is down, holding the new model, as the real ones roll back."""
+
+    def __init__(self, model: str) -> None:
+        super().__init__(model)
+        self.restarting = asyncio.Event()
+
+    async def reinitialize(self, model=None, preserve_sessions=True):
+        if not self.reinits:
+            self.reinits.append(model)
+            if model is not None:
+                self.model = model
+            self.is_initialized = False
+            self.restarting.set()
+            await asyncio.Event().wait()
+        await super().reinitialize(model, preserve_sessions)
+
+
+async def _interrupt(task: asyncio.Task, restarting: asyncio.Event) -> None:
+    """Ctrl+C while the workflow restarts: thinking-prompt cancels the command."""
+    await asyncio.wait_for(restarting.wait(), timeout=2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+class TestTheRestartIsInterrupted:
+    """Ctrl+C stops ``/settings`` while the workflow restarts on the Save's
+    values. Nothing of the Save stays, as when the restart fails, and nothing
+    is said: Ctrl+C there is the session's interruption, not a cancel."""
+
+    async def test_settings_are_restored(self, settings):
+        manager = InterruptedManager(OLD_MODEL)
+        app = _app(settings, manager)
+        changes = {"model": BAD_MODEL, "thinking_effort": "high", "ui_theme": "light"}
+
+        await _interrupt(asyncio.create_task(app.apply_settings(changes)), manager.restarting)
+
+        assert settings.default_model == OLD_MODEL
+        assert settings.thinking_effort != "high"
+        assert settings.ui_theme == "dark"
+
+    async def test_the_workflow_is_brought_back_on_the_old_model(self, settings):
+        manager = InterruptedManager(OLD_MODEL)
+        app = _app(settings, manager)
+
+        await _interrupt(
+            asyncio.create_task(app.apply_settings({"model": BAD_MODEL})), manager.restarting
+        )
+
+        assert manager.reinits == [BAD_MODEL, OLD_MODEL]
+        assert manager.model == OLD_MODEL
+        assert app._workflow_controller.is_ready
+
+    async def test_a_failed_restore_still_lets_the_interruption_through(self, settings):
+        """The cancel is what propagates, not the restore's error, and nothing
+        is said; the workflow stays down on the old model, so the next request
+        retries it (and reports a failure then)."""
+        manager = InterruptedManager(OLD_MODEL)
+        manager.broken = {OLD_MODEL}
+        app = _app(settings, manager)
+
+        await _interrupt(
+            asyncio.create_task(app.apply_settings({"model": BAD_MODEL})), manager.restarting
+        )
+
+        assert settings.default_model == OLD_MODEL
+        assert manager.model == OLD_MODEL
+        assert not app._workflow_controller.is_ready
+        assert app.session.method_calls == []
+
+    async def test_nothing_is_said_or_repainted(self, settings):
+        manager = InterruptedManager(OLD_MODEL)
+        app = _app(settings, manager)
+
+        await _interrupt(
+            asyncio.create_task(app.apply_settings({"model": BAD_MODEL, "ui_theme": "light"})),
+            manager.restarting,
+        )
+
+        assert app.session.method_calls == []
+
+    async def test_nothing_is_saved(self, settings):
+        from agentic_cli.cli.settings_command import SettingsCommand
+
+        manager = InterruptedManager(OLD_MODEL)
+        app = _app(settings, manager, {"model": BAD_MODEL})
+        with patch("agentic_cli.cli.settings_command.Dialog", edited_dialog(app.edits)):
+            await _interrupt(
+                asyncio.create_task(SettingsCommand().execute("", app)), manager.restarting
+            )
+
+        app.save_settings.assert_not_awaited()
+        assert settings.default_model == OLD_MODEL
+
+    async def test_an_interrupted_orchestrator_switch_keeps_the_old_backend(self, settings):
+        manager = FakeManager(OLD_MODEL, backend="adk")
+        app = _app(settings, manager)
+        replacement = FakeManager(OLD_MODEL, backend="langgraph")
+        starting = asyncio.Event()
+
+        async def initialize_services():
+            starting.set()
+            await asyncio.Event().wait()
+
+        replacement.initialize_services = initialize_services
+        with patch(
+            "agentic_cli.cli.workflow_controller.create_workflow_manager_from_settings",
+            return_value=replacement,
+        ):
+            await _interrupt(
+                asyncio.create_task(app.apply_settings({"orchestrator": "langgraph"})), starting
+            )
+
+        assert settings.orchestrator.value == "adk"
+        # The swap never published: the old manager runs on, untouched.
         assert app._workflow_controller._workflow is manager
         assert manager.reinits == []
         assert app._workflow_controller.is_ready
