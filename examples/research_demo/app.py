@@ -80,6 +80,12 @@ class ResearchDemoApp(BaseCLIApp):
         """Get field names to display in the settings dialog.
 
         The framework's (the model pickers and the thinking effort), then
-        verbose_thinking.
+        verbose_thinking, and the user's preferences: the theme and where
+        dialogs are drawn, saved to the user settings file.
         """
-        return [*super().get_ui_setting_keys(), "verbose_thinking"]
+        return [
+            *super().get_ui_setting_keys(),
+            "verbose_thinking",
+            "ui_theme",
+            "dialog_placement",
+        ]
