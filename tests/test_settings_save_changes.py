@@ -104,24 +104,26 @@ class TestCredentialFieldsAreNeverWritten:
 class TestSettingsCommandSavesTheChanges:
     """The command persists the fields the dialog actually changed."""
 
-    @pytest.fixture(autouse=True)
-    def _no_real_dialog(self, monkeypatch):
-        monkeypatch.setattr(
-            "agentic_cli.cli.settings_command.SettingsDialog", lambda **kw: None
-        )
-
-    def _app(self, settings, dialog_result):
+    def _app(self, settings, monkeypatch, edits):
+        """An app whose ``/settings`` dialog shows ``thinking_effort`` and is
+        saved with ``edits``."""
         from agentic_cli.cli.app import BaseCLIApp
+        from agentic_cli.cli.settings_introspection import field_to_ui_item
+        from tests.cli.dialog_fakes import autospec_session, edited_dialog
 
+        monkeypatch.setattr("agentic_cli.cli.settings_command.Dialog", edited_dialog(edits))
         app = SimpleNamespace()
         app.settings = settings
         app._settings = settings
-        app._build_ui_items = lambda: ["item"]
-        app.session = SimpleNamespace(
-            show_dialog=AsyncMock(return_value=dialog_result),
-            add_message=lambda *a: None, add_error=lambda *a: None,
-            add_success=lambda *a: None, add_warning=lambda *a: None,
-        )
+        app._build_ui_items = lambda: [
+            field_to_ui_item(
+                "thinking_effort",
+                BaseSettings.model_fields["thinking_effort"],
+                settings.thinking_effort,
+            )
+        ]
+        app.session = autospec_session()
+        app.session.show_dialog.return_value = True  # Save
         app._workflow_controller = SimpleNamespace(is_ready=False)
         app.apply_settings = lambda changes: BaseCLIApp.apply_settings(app, changes)
         app.save_settings = AsyncMock(return_value=SimpleNamespace(
@@ -129,31 +131,31 @@ class TestSettingsCommandSavesTheChanges:
         return app
 
     @pytest.mark.asyncio
-    async def test_saves_only_the_changed_fields(self, fs):
+    async def test_saves_only_the_changed_fields(self, fs, monkeypatch):
         from agentic_cli.cli.settings_command import SettingsCommand
 
         settings = BaseSettings(os_sandbox_enabled=False)
-        app = self._app(settings, {"thinking_effort": "high"})
+        app = self._app(settings, monkeypatch, {"thinking_effort": "high"})
         await SettingsCommand().execute("", app)
         app.save_settings.assert_awaited_once_with(keys={"thinking_effort"})
 
     @pytest.mark.asyncio
-    async def test_nothing_changed_means_nothing_saved(self, fs):
+    async def test_nothing_changed_means_nothing_saved(self, fs, monkeypatch):
         from agentic_cli.cli.settings_command import SettingsCommand
 
         settings = BaseSettings()
-        app = self._app(settings, {"thinking_effort": settings.thinking_effort})
+        app = self._app(settings, monkeypatch, {"thinking_effort": settings.thinking_effort})
         await SettingsCommand().execute("", app)
         app.save_settings.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_an_override_without_keys_is_still_called(self, fs):
+    async def test_an_override_without_keys_is_still_called(self, fs, monkeypatch):
         """An app that overrode save_settings() before keys= existed keeps
         working (it gets its own full save)."""
         from agentic_cli.cli.settings_command import SettingsCommand
 
         settings = BaseSettings()
-        app = self._app(settings, {"thinking_effort": "high"})
+        app = self._app(settings, monkeypatch, {"thinking_effort": "high"})
         calls = []
 
         async def legacy_save_settings():

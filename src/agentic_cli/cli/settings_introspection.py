@@ -1,24 +1,25 @@
 """Introspect Pydantic settings and convert to UI controls.
 
-Provides utilities to automatically generate thinking_prompt UI items
+Provides utilities to automatically generate thinking_prompt form fields
 from Pydantic field definitions, using type annotations and metadata.
 
-Type → UI Control Mapping:
-    - bool → CheckboxItem
-    - str → TextItem (text input)
-    - int, float → TextItem (with validation)
-    - Literal["a", "b", "c"] → InlineSelectItem (options from literal)
-    - an Enum (e.g. OrchestratorType) → InlineSelectItem (its members' values)
-    - Field with json_schema_extra={"options": [...]} → InlineSelectItem/DropdownItem
+Type → form field mapping:
+    - bool → CheckboxField
+    - str → TextField (text input)
+    - int, float → TextField (the value comes back as a string)
+    - Literal["a", "b", "c"] → SelectField (options from literal)
+    - an Enum (e.g. OrchestratorType) → SelectField (its members' values)
+    - Field with json_schema_extra={"options": [...]} → SelectField/DropdownField
+
+thinking_prompt's fields are frozen: everything a field shows is passed when
+it is built.
 """
 
 from enum import Enum
-from typing import Any, get_args, get_origin, Literal, TYPE_CHECKING
+from typing import Any, get_args, get_origin, Literal
 
 from pydantic.fields import FieldInfo
-
-if TYPE_CHECKING:
-    from thinking_prompt import CheckboxItem, InlineSelectItem, TextItem, DropdownItem
+from thinking_prompt import CheckboxField, DropdownField, SelectField, TextField
 
 
 def field_to_ui_item(
@@ -26,49 +27,62 @@ def field_to_ui_item(
     field: FieldInfo,
     current_value: Any,
     dynamic_options: list[str] | None = None,
-) -> Any:
-    """Convert a Pydantic field to a thinking_prompt UI item.
+    *,
+    description: str | None = None,
+    max_width: int | None = None,
+) -> CheckboxField | SelectField | DropdownField | TextField:
+    """Convert a Pydantic field to a thinking_prompt form field.
 
-    Automatically selects the appropriate UI control based on the field's
+    Automatically selects the appropriate field based on the field's
     type annotation and metadata.
 
     Args:
-        key: Field name (used as UI item key)
+        key: Field name (used as the form field's key)
         field: Pydantic FieldInfo containing type and metadata
         current_value: Current value of the field
         dynamic_options: Optional list of options to use instead of type-derived options
                         (useful for fields like 'model' where options come from runtime)
+        description: Shown under the label instead of the field's own
+            description; None keeps the field's own.
+        max_width: The widest a dropdown's menu grows, sized to its longest
+            option; None keeps the menu's fixed width. A select ignores it.
 
     Returns:
-        UI item (CheckboxItem, TextItem, InlineSelectItem, or DropdownItem)
+        A CheckboxField, TextField, SelectField or DropdownField
     """
-    # Import here to avoid circular imports and allow optional dependency
-    from thinking_prompt import CheckboxItem, InlineSelectItem, TextItem, DropdownItem
-
     # Get metadata
     label = field.title or key.replace("_", " ").title()
-    description = field.description or ""
+    if description is None:
+        description = field.description or ""
     extra = field.json_schema_extra or {}
+
+    def one_of(options: list[str], default: str) -> SelectField | DropdownField:
+        """A select for a few options, a dropdown for more than five."""
+        if len(options) > 5:
+            size = {} if max_width is None else {"width": None, "max_width": max_width}
+            return DropdownField(
+                key=key,
+                label=label,
+                description=description,
+                options=options,
+                default=default,
+                **size,
+            )
+        return SelectField(
+            key=key,
+            label=label,
+            description=description,
+            options=options,
+            default=default,
+        )
 
     # Get the annotation type
     annotation = field.annotation
 
     # Handle dynamic options (e.g., for model selection)
     if dynamic_options is not None:
-        if len(dynamic_options) > 5:
-            return DropdownItem(
-                key=key,
-                label=label,
-                description=description,
-                options=dynamic_options,
-                default=str(current_value) if current_value is not None else "",
-            )
-        return InlineSelectItem(
-            key=key,
-            label=label,
-            description=description,
-            options=dynamic_options,
-            default=str(current_value) if current_value is not None else "",
+        return one_of(
+            dynamic_options, str(current_value) if current_value is not None else ""
         )
 
     # Check for Literal type (enum-like options)
@@ -77,7 +91,7 @@ def field_to_ui_item(
         options = list(get_args(annotation))
         # Convert options to strings for UI
         options = [str(opt) for opt in options]
-        return InlineSelectItem(
+        return SelectField(
             key=key,
             label=label,
             description=description,
@@ -90,7 +104,7 @@ def field_to_ui_item(
     if isinstance(annotation, type) and issubclass(annotation, Enum):
         options = [str(member.value) for member in annotation]
         current = current_value.value if isinstance(current_value, Enum) else current_value
-        return InlineSelectItem(
+        return SelectField(
             key=key,
             label=label,
             description=description,
@@ -100,26 +114,13 @@ def field_to_ui_item(
 
     # Check for explicit options in json_schema_extra
     if "options" in extra:
-        options = extra["options"]
-        if len(options) > 5:
-            return DropdownItem(
-                key=key,
-                label=label,
-                description=description,
-                options=options,
-                default=str(current_value) if current_value is not None else "",
-            )
-        return InlineSelectItem(
-            key=key,
-            label=label,
-            description=description,
-            options=options,
-            default=str(current_value) if current_value is not None else "",
+        return one_of(
+            extra["options"], str(current_value) if current_value is not None else ""
         )
 
     # Check for bool
     if annotation is bool:
-        return CheckboxItem(
+        return CheckboxField(
             key=key,
             label=label,
             description=description,
@@ -135,7 +136,7 @@ def field_to_ui_item(
             # Recurse with the non-None type
             inner_type = non_none_types[0]
             if inner_type is bool:
-                return CheckboxItem(
+                return CheckboxField(
                     key=key,
                     label=label,
                     description=description,
@@ -143,7 +144,7 @@ def field_to_ui_item(
                 )
 
     # Default to text input for str, int, float, and other types
-    return TextItem(
+    return TextField(
         key=key,
         label=label,
         description=description,

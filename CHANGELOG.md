@@ -542,6 +542,83 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on Deep Agents it picks the summarization thresholds, and
   `prompt_caching_enabled` says Claude is cached on every backend and
   Gemini's explicit caches only on ADK. Only the descriptions change.
+- **agentic-cli runs on thinking-prompt 0.4.** It requires
+  `thinking-prompt>=0.4,<0.5` (0.6.x required `>=0.3.0,<0.4`); 0.4 renamed or
+  removed most of the UI API the CLI was built on. **Breaking:**
+  - `AppInfo` is only the startup banner (`name`, `version`,
+    `welcome_message`), and `BaseCLIApp` sets the session's behavior,
+    `echo_thinking=False` included, as every app set it. 0.4's `AppInfo`
+    refuses `echo_thinking=` with a `TypeError`: drop it.
+  - `get_styles()` is replaced by `get_theme(name)`, and
+    `get_default_styles()` is removed. `get_theme("dark")` is thinking-prompt's
+    dark theme in agentic-cli's colors, and any other name is
+    thinking-prompt's own theme. An app still defining `get_styles()` fails
+    at construction with a `TypeError` that names `get_theme()`, rather than
+    starting with its colors silently gone. An app migrates in two edits:
+
+    ```python
+    # 0.6
+    AppInfo(name="App", version="1.0", welcome_message=banner, echo_thinking=False)
+
+    def get_styles(self) -> ThinkingPromptStyles:
+        return ThinkingPromptStyles(thinking_box="fg:#9b59b6", ...)
+
+    # 0.7
+    AppInfo(name="App", version="1.0", welcome_message=banner)
+
+    def get_theme(self, name: str) -> str | ThinkingPromptStyles:
+        if name == "dark":
+            return dataclasses.replace(ThinkingPromptStyles.dark(), thinking_box="fg:#9b59b6", ...)
+        return super().get_theme(name)
+    ```
+
+  - Ctrl+C stops the request the agent is processing:
+    `MessageProcessor.process()` and `process_resume()` raise
+    `asyncio.CancelledError` instead of returning `TurnStatus.CANCELLED` (the
+    value stays in the enum). The boxes the request's processing opened end
+    with it, and `process()` / `process_resume()` print thinking-prompt's
+    line, `Operation cancelled...`, once, in place of agentic-cli's
+    `Cancelled.` warning, wherever the request was stopped: also with a
+    question on screen, while it waited for the workflow to start, or while a
+    job's resume looked its conversation up. A stopped job-resume turn is
+    recorded as not delivered, as before. Code that drives turns itself
+    catches the cancel, and prints no line of its own:
+
+    ```python
+    # 0.6
+    result = await processor.process(...)
+    if result.status is TurnStatus.CANCELLED:
+        ...
+    # 0.7
+    try:
+        result = await processor.process(...)
+    except asyncio.CancelledError:
+        ...
+        raise
+    ```
+
+  - `settings_introspection.field_to_ui_item` returns 0.4's `CheckboxField`,
+    `SelectField`, `DropdownField` and `TextField` (0.3's `CheckboxItem`,
+    `InlineSelectItem`, `DropdownItem` and `TextItem`, with the same
+    attributes and type rules). They are frozen, so what a caller used to set
+    on an item afterwards is an argument now: `description=` (the description
+    shown instead of the field's own) and `max_width=` (how wide a dropdown's
+    menu may grow to fit its options):
+
+    ```python
+    # 0.6
+    item = field_to_ui_item(key, field, current)
+    item.description = text
+    # 0.7
+    item = field_to_ui_item(key, field, current, description=text)
+    ```
+
+  `/settings` is a `Dialog` with Save and Cancel buttons; 0.3's Ctrl+S save
+  went with 0.3's settings dialog. `apply_settings(changes)` still receives
+  only the keys the user changed, and a cancel (Cancel or Escape) or a Save
+  with nothing changed says "Settings unchanged.". The task box ends with
+  each turn, out of the transcript, and the next turn shows it again; 0.6
+  left it above the idle prompt.
 
 ### Deprecated
 
@@ -789,6 +866,19 @@ step; each entry says what to use instead.
 - **An Enum setting in the `/settings` dialog is a picker.** An app that
   showed `orchestrator` got a text field holding `OrchestratorType.ADK`; it
   now offers `adk`, `langgraph` and `deepagents`.
+- **A free-text question works.** `ask_clarification` without options, and
+  any tool's free-text question, called `ui.input_dialog()`, which no
+  thinking-prompt release has, so on a real session the question always
+  failed; the tests' hand-written session had the method. It is now a dialog
+  with one text field and OK and Cancel, and the line under the field says
+  how to answer: Enter edits the answer, Enter keeps it, then Tab and Enter
+  press OK. Cancel and Escape answer nothing. The CLI's tests now build their
+  session fakes from thinking-prompt's own classes, so a method it lacks
+  fails them.
+- **A line typed during a turn is no longer dropped.** thinking-prompt 0.4
+  refuses Enter while a turn runs, says `Busy — press Ctrl+C to cancel` in
+  the status bar, and keeps the line in the prompt, to send once the turn is
+  over.
 
 ## [0.6.4] - 2026-10-18
 

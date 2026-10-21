@@ -453,7 +453,10 @@ class WorkflowController:
                 raise
             finally:
                 if ui is not None:
-                    ctx.finish(add_to_history=False)
+                    # Out of the transcript, on every path: a Ctrl+C that
+                    # stops the waiting request ends the box with it, before
+                    # the session could end it into the transcript.
+                    ctx.finish(add_to_history=False, echo_to_console=False)
 
         # Readiness is the state, not the presence of a past error — the two
         # agreed only as long as every success remembered to clear the error.

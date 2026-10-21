@@ -100,13 +100,13 @@ class TestOrchestratorPicker:
     """An app that shows ``orchestrator`` gets a picker of every backend."""
 
     def test_it_offers_every_orchestrator(self, isolated_settings):
-        from thinking_prompt import InlineSelectItem
+        from thinking_prompt import SelectField
 
         app = _make_app(isolated_settings, ["orchestrator"])
 
         (item,) = app._build_ui_items()
 
-        assert isinstance(item, InlineSelectItem)
+        assert isinstance(item, SelectField)
         assert item.options == ["adk", "langgraph", "deepagents"]
         assert item.default == "adk"
 

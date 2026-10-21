@@ -22,7 +22,9 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 import structlog
+from thinking_prompt import DropdownField, TextField
 
+from agentic_cli.cli import settings_introspection
 from agentic_cli.cli.app import BaseCLIApp
 from agentic_cli.cli.settings_command import SettingsCommand
 from agentic_cli.cli.workflow_controller import WorkflowController
@@ -30,6 +32,7 @@ from agentic_cli.config import BaseSettings, validate_settings
 from agentic_cli.models import ModelCatalog, ModelRef, ProviderKind, load_table
 from agentic_cli.workflow import model_services
 from agentic_cli.workflow.config import AgentConfig
+from tests.cli.dialog_fakes import autospec_session, edited_dialog
 from tests.models.fakes import ProviderAPI
 
 PICKERS = ["model", "model_role:fast", "model_role:strong"]
@@ -127,9 +130,9 @@ async def test_once_the_workflow_is_ready_the_pickers_offer_its_catalog():
 
 async def test_a_picker_s_menu_shows_every_model_whole():
     """With listings in, a picker offers many references; its open menu must
-    show each one whole, or the models cannot be told apart."""
-    from thinking_prompt.settings_dialog import DropdownControl, DropdownItem
-
+    show each one whole, or the models cannot be told apart. A dropdown's
+    menu is 15 columns wide unless it is sized to its options (``width=None``),
+    which a picker's is, up to the room its dialog leaves it."""
     settings = BaseSettings(google_api_key="k-g", anthropic_api_key="k-a")
     catalog = ModelCatalog(
         endpoints=model_services.endpoints_from_settings(settings),
@@ -142,17 +145,40 @@ async def test_a_picker_s_menu_shows_every_model_whole():
 
     for key in PICKERS:
         item = items[key]
-        assert isinstance(item, DropdownItem), key
-        control = DropdownControl(item)
-        control._build_menu()
-        menu = control._menu_window
-        width = menu.width - len(menu.right_margins)  # the scrollbar takes a column
-        content = control._menu_control.create_content(width, len(item.options))
-        shown = [
-            "".join(text for _, text in content.get_line(i)).strip()
-            for i in range(content.line_count)
-        ]
-        assert shown == item.options, key
+        assert isinstance(item, DropdownField), key
+        assert (item.width, item.max_width) == (None, 48), key
+        assert len(item.options) > item.height, key  # the menu scrolls
+        # The scrollbar takes a column of the menu.
+        assert max(len(option) for option in item.options) < item.max_width, key
+
+
+def test_each_field_is_built_once_and_complete(monkeypatch):
+    """0.4's fields are frozen: a picker's width and the thinking effort's
+    description are given when the field is made, and the dialog shows that
+    very field."""
+    made: list[tuple[str, dict, object]] = []
+    real = settings_introspection.field_to_ui_item
+
+    def field_to_ui_item(key, field, current_value, dynamic_options=None, **kwargs):
+        item = real(key, field, current_value, dynamic_options, **kwargs)
+        made.append((key, kwargs, item))
+        return item
+
+    monkeypatch.setattr(settings_introspection, "field_to_ui_item", field_to_ui_item)
+    settings = BaseSettings(
+        google_api_key="k-g", default_model="gemini-2.5-flash", thinking_effort="high"
+    )
+
+    items = _app(settings)._build_ui_items()
+
+    assert [key for key, _, _ in made] == [*PICKERS, "thinking_effort"]
+    assert [kwargs for _, kwargs, _ in made] == [
+        {"max_width": 48},
+        {"max_width": 48},
+        {"max_width": 48},
+        {"description": "high → google:gemini-2.5-flash: budget 24576"},
+    ]
+    assert all(shown is item for shown, (_, _, item) in zip(items, made, strict=True))
 
 
 def test_a_mapped_role_shows_its_model():
@@ -314,22 +340,22 @@ class FakeManager:
         self.is_initialized = True
 
 
-def _dialog_app(settings: BaseSettings, workflow, configs=None, dialog_result=None) -> BaseCLIApp:
-    """A real app's settings path (apply, save) around a real controller."""
+def _dialog_app(settings: BaseSettings, workflow, configs=None, edits=None) -> BaseCLIApp:
+    """A real app's settings path (apply, save) around a real controller; its
+    ``/settings`` dialog shows a field for each key in ``edits``, and Save
+    sends them."""
     controller = WorkflowController(configs or [AgentConfig(name="a", prompt="p")], settings)
     controller._workflow = workflow
     app = BaseCLIApp.__new__(BaseCLIApp)
     app._settings = settings
     app._workflow_controller = controller
     app.errors, app.successes = [], []
-    app.session = SimpleNamespace(
-        show_dialog=AsyncMock(return_value=dialog_result),
-        add_message=lambda *a: None,
-        add_error=app.errors.append,
-        add_success=app.successes.append,
-        add_warning=lambda *a: None,
-    )
-    app._build_ui_items = lambda: ["item"]
+    app.session = autospec_session()
+    app.session.show_dialog.return_value = True  # Save
+    app.session.add_error.side_effect = app.errors.append
+    app.session.add_success.side_effect = app.successes.append
+    app.edits = edits or {}
+    app._build_ui_items = lambda: [TextField(key, key) for key in app.edits]
     return app
 
 
@@ -342,14 +368,14 @@ def _user_file(home: Path) -> Path:
 
 
 async def _run_dialog(app: BaseCLIApp) -> None:
-    with patch("agentic_cli.cli.settings_command.SettingsDialog", lambda **kw: None):
+    with patch("agentic_cli.cli.settings_command.Dialog", edited_dialog(app.edits)):
         await SettingsCommand().execute("", app)
 
 
 async def test_picking_a_role_saves_it_to_the_project_and_reinitializes_keeping_sessions(home):
     settings = BaseSettings(google_api_key="k-g")
     manager = FakeManager(settings)
-    app = _dialog_app(settings, manager, dialog_result={"model_role:fast": "google:gemini-2.5-pro"})
+    app = _dialog_app(settings, manager, edits={"model_role:fast": "google:gemini-2.5-pro"})
 
     await _run_dialog(app)
 
@@ -384,7 +410,7 @@ async def test_a_pick_saves_only_that_role_to_the_project_file(home, monkeypatch
         "strong": "local-vllm:Qwen/Qwen3-32B", "fast": "google:gemini-2.5-flash-lite",
     }
     app = _dialog_app(
-        settings, FakeManager(settings), dialog_result={"model_role:fast": "google:gemini-2.5-pro"}
+        settings, FakeManager(settings), edits={"model_role:fast": "google:gemini-2.5-pro"}
     )
 
     await _run_dialog(app)
@@ -404,7 +430,7 @@ async def test_a_role_from_the_environment_is_not_made_permanent(home, monkeypat
     monkeypatch.setenv("ANTHROPIC_API_KEY", "k-a")
     settings = BaseSettings()
     app = _dialog_app(
-        settings, FakeManager(settings), dialog_result={"model_role:fast": "google:gemini-2.5-pro"}
+        settings, FakeManager(settings), edits={"model_role:fast": "google:gemini-2.5-pro"}
     )
 
     await _run_dialog(app)
@@ -417,7 +443,7 @@ async def test_a_role_from_the_environment_is_not_made_permanent(home, monkeypat
 async def test_a_role_the_workflow_cannot_run_is_rolled_back(home):
     settings = BaseSettings(google_api_key="k-g", model_roles={"strong": "google:gemini-2.5-pro"})
     manager = FakeManager(settings, refuses="google:gemini-0-missing")
-    app = _dialog_app(settings, manager, dialog_result={"model_role:fast": "google:gemini-0-missing"})
+    app = _dialog_app(settings, manager, edits={"model_role:fast": "google:gemini-0-missing"})
 
     await _run_dialog(app)
 
@@ -432,7 +458,7 @@ async def test_a_role_the_workflow_cannot_run_is_rolled_back(home):
 async def test_a_malformed_role_never_reaches_the_workflow(home):
     settings = BaseSettings(google_api_key="k-g")
     manager = FakeManager(settings)
-    app = _dialog_app(settings, manager, dialog_result={"model_role:fast": "fast"})
+    app = _dialog_app(settings, manager, edits={"model_role:fast": "fast"})
 
     await _run_dialog(app)
 

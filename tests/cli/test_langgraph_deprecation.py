@@ -25,6 +25,7 @@ from agentic_cli.cli.app import BaseCLIApp
 from agentic_cli.config import BaseSettings
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.settings import OrchestratorType
+from tests.cli.dialog_fakes import edited_dialog
 from tests.examples.console_smoke import (
     assert_clean_session,
     child_env,
@@ -104,6 +105,16 @@ class FakeManager:
         self.is_initialized = False
 
 
+@pytest.fixture(autouse=True)
+def dialog_edits(monkeypatch) -> dict:
+    """The ``/settings`` dialog is a real ``Dialog`` whose fields hold the
+    answer the Session plays."""
+    edits: dict = {}
+    monkeypatch.setattr("agentic_cli.cli.settings_command.Dialog", edited_dialog(edits))
+    monkeypatch.setattr(Session, "edits", edits)
+    return edits
+
+
 @pytest.fixture
 def backends(monkeypatch) -> list[FakeManager]:
     """Every manager the controller builds, in order: a fake of the backend the
@@ -125,7 +136,13 @@ def backends(monkeypatch) -> list[FakeManager]:
 
 class Session:
     """The terminal session: records what the app shows, and plays the user's
-    inputs (and their ``/settings`` dialog answers) while it runs."""
+    inputs (and their ``/settings`` dialog answers) while it runs.
+
+    A ``/settings`` answer is the fields the user changes before pressing
+    Save; ``edits`` holds the one being played (``dialog_edits``).
+    """
+
+    edits: dict = {}
 
     def __init__(self, inputs=(), dialogs=()) -> None:
         self.shown: list[tuple[str, str]] = []
@@ -158,8 +175,10 @@ class Session:
         self._handler = handler
         return handler
 
-    async def show_dialog(self, dialog) -> dict:
-        return self._dialogs.pop(0)
+    async def show_dialog(self, dialog) -> bool:
+        self.edits.clear()
+        self.edits.update(self._dialogs.pop(0))
+        return True  # Save
 
     async def run_async(self) -> None:
         for text in self._inputs:

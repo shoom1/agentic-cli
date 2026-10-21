@@ -7,7 +7,7 @@ Agentic CLI is a shared library providing the core infrastructure for building d
 ## Tech Stack
 
 - **Language**: Python 3.12+
-- **CLI UI**: `thinking-prompt` - enhanced CLI with thinking boxes and markdown
+- **CLI UI**: `thinking-prompt` 0.4 (`>=0.4,<0.5`) - enhanced CLI with thinking boxes, markdown and dialogs
 - **Workflow**: Google ADK 2 (2.12+, the default) + Deep Agents (0.7.x, `deepagents` extra: LangChain's `create_agent` with selected Deep Agents middleware) - orchestration backends selectable via settings; LangGraph (`langgraph` extra) is deprecated, removed in 0.8.0
 - **Models**: `agentic_cli.models` (provisional) - references, roles, the shipped table and the catalog, with no provider SDK (listers over `httpx`); two adapters build the SDK objects: ADK's own model classes (`Gemini`, `AnthropicLlm`, `OpenAIResponsesLlm`, plus our `OpenAICompatibleLlm`, on the `openai` SDK) and the LangChain partner packages (`langchain-google-genai`, `langchain-anthropic`, `langchain-openai`, `langchain-openrouter`; the `deepagents` and `langgraph` extras), which Deep Agents and LangGraph share
 - **Config**: `pydantic-settings` - type-safe configuration
@@ -27,13 +27,13 @@ agentic-cli/
 │   ├── paths.py              # resolve_path: the one interpretation of a path argument
 │   ├── logging.py
 │   ├── cli/
-│   │   ├── app.py            # BaseCLIApp (/settings model pickers: _model_choices; the LangGraph deprecation notice)
+│   │   ├── app.py            # BaseCLIApp (the session it builds; get_theme(name); /settings model pickers: _model_choices; the LangGraph deprecation notice)
 │   │   ├── commands.py       # Command, CommandRegistry
 │   │   ├── builtin_commands.py # /help, /status, /models (ModelsCommand), /sessions, ...
 │   │   ├── workflow_controller.py  # WorkflowController (lazy/background init, orchestrator swap)
-│   │   ├── message_processor.py    # WorkflowEvent → ThinkingPromptSession rendering
-│   │   ├── settings_command.py     # /settings command
-│   │   ├── settings_introspection.py # Pydantic field → UI item introspection
+│   │   ├── message_processor.py    # WorkflowEvent → ThinkingPromptSession rendering; Ctrl+C stops the request being processed (its boxes end with it; "Operation cancelled..." once; CancelledError re-raised); tool questions as dialogs
+│   │   ├── settings_command.py     # /settings: a Dialog with Save and Cancel; the fields that changed → apply_settings
+│   │   ├── settings_introspection.py # Pydantic field → thinking-prompt form field (built complete: they are frozen)
 │   │   └── usage_tracker.py        # Token usage / status bar
 │   ├── workflow/
 │   │   ├── base_manager.py   # BaseWorkflowManager (abstract; service detection, tool assembly)
@@ -237,6 +237,7 @@ Available session methods:
 - **MockContext**: From `tests/conftest.py` — provides isolated settings and temp dirs for all tests
 - **Model listings**: `tests/conftest.py::_no_model_listings` keeps every manager's model catalog unloaded (no network, no `~/.<app>/model_cache.json`), so any well-formed model id is accepted; a test that wants listings patches `model_services.build_catalog` with `tests/models/fakes.py::ProviderAPI`
 - **Provider fakes**: model requests never reach a provider. `tests/workflow/adk/fakes.py::FakeAPI` serves an ADK-built model's client (`serve()`) and records the bodies it sends; `tests/workflow/langchain_fakes.py`'s `route*` helpers send a LangChain chat model's client to it, with the SSE replies a LangGraph or Deep Agents turn needs. A test-first run against the old code must fail offline too, so stub any client the old code would build
+- **Session fakes**: a session fake is `tests/cli/dialog_fakes.py::autospec_session()` (`create_autospec(ThinkingPromptSession)`), so a call to a method thinking-prompt lacks fails; `edited_dialog(edits)` is a real `Dialog` whose fields hold the user's edits (patch the module's `Dialog`). The render tests' `RecordingSession` and `RecordingThinkingBox` (`tests/event_replay.py`) are checked against the real classes by `tests/test_session_fakes_contract.py`. Turns on a real console run `tests/cli/console_app.py` over a pty (`tests/cli/test_console_turns.py`)
 - **Deep Agents fakes**: `tests/workflow/deepagents/fakes.py::ScriptedChat` answers each model call from a script and records the requests, so a test drives a whole agent tree offline; patch `agentic_cli.workflow.deepagents.manager.build_chat_model` with `ScriptedModels(agent=[...])`. Turns through the real provider adapters are in `tests/integration/test_deepagents_turns.py` (on `FakeAPI`), and MCP tests start the stdio server `tests/workflow/deepagents/mcp_server.py` through `test_mcp.py`'s `servers` fixture, which checks that no server outlives its test. The shared contract tests (`test_lifecycle_races.py`, `test_resource_ownership.py`, `test_model_switch_keeps_services.py`, `test_backend_isolation.py`) cover Deep Agents beside ADK, and a backend change runs them
 - **Deprecated LangGraph**: the suite tests it until 0.8.0, so `pyproject.toml`'s pytest `filterwarnings` ignores its `DeprecationWarning` (`pytest.warns` still records it). `tests/cli/test_langgraph_deprecation.py` checks the warning and, on a real console over a pty, that the CLI shows its own notice instead
 - **MockVectorStore** (`agentic_cli.memory.kb`) and **MockEmbeddingService** (`agentic_cli.memory`): for testing without ML dependencies

@@ -112,7 +112,6 @@ def _create_app_info() -> AppInfo:
         name="Hello LangGraph",
         version="0.1.0",
         welcome_message=lambda: Panel(text, border_style="magenta"),
-        echo_thinking=False,
     )
 
 

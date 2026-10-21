@@ -157,6 +157,55 @@ export GOOGLE_API_KEY="your-api-key"
 python my_app.py
 ```
 
+### Customizing the CLI
+
+`AppInfo` is the banner the CLI prints at startup: the app's name and
+version, or a `welcome_message` of your own (a string, or a callable that
+returns one or a Rich renderable). How the session behaves is `BaseCLIApp`'s.
+A subclass adds commands (`register_commands()`), chooses what `/settings`
+shows (`get_ui_setting_keys()`), and recolors a theme with
+`get_theme(name)`:
+
+```python
+import dataclasses
+
+from thinking_prompt import ThinkingPromptStyles
+
+class MyApp(BaseCLIApp):
+    def get_theme(self, name: str) -> str | ThinkingPromptStyles:
+        if name == "dark":
+            return dataclasses.replace(ThinkingPromptStyles.dark(), thinking_box="fg:#9b59b6")
+        return super().get_theme(name)
+```
+
+The session draws in `get_theme("dark")`: thinking-prompt's dark theme in
+agentic-cli's colors. Any other theme name comes back as it is, for
+thinking-prompt's own theme, since colors tuned for a dark background would be
+unreadable on a light one. To change one color and keep agentic-cli's others,
+start from `super().get_theme("dark")` instead of
+`ThinkingPromptStyles.dark()`.
+
+An app written for 0.6 makes two edits: it drops `echo_thinking=` from
+`AppInfo`, which thinking-prompt 0.4 refuses, and turns `get_styles()` into
+`get_theme(name)`. An app still defining `get_styles()` fails at
+construction with a `TypeError` that says so.
+
+```python
+# 0.6
+AppInfo(name="App", version="1.0", welcome_message=banner, echo_thinking=False)
+
+def get_styles(self) -> ThinkingPromptStyles:
+    return ThinkingPromptStyles(thinking_box="fg:#9b59b6", ...)
+
+# 0.7
+AppInfo(name="App", version="1.0", welcome_message=banner)
+
+def get_theme(self, name: str) -> str | ThinkingPromptStyles:
+    if name == "dark":
+        return dataclasses.replace(ThinkingPromptStyles.dark(), thinking_box="fg:#9b59b6", ...)
+    return super().get_theme(name)
+```
+
 ## Workflow Managers
 
 ### GoogleADKWorkflowManager (Default)
@@ -790,12 +839,16 @@ fails cleanly) instead of running against released resources. Run separate
 managers for genuine parallelism.
 
 `MessageProcessor.process()` returns a `TurnResult` (`TurnStatus.COMPLETED` /
-`CANCELLED` / `FAILED` / `UNAVAILABLE`); a turn is never replayed by the
-harness, so a surfaced rate limit fails it explicitly. An `EventType.ERROR`
-event is rendered as it arrives — `recoverable=True` is a warning and the
-stream still decides the outcome, anything else makes the turn `FAILED`
-(`delivered` False). Cancelling the caller cancels and awaits the event
-consumer before the turn is torn down.
+`FAILED` / `UNAVAILABLE`); a turn is never replayed by the harness, so a
+surfaced rate limit fails it explicitly. An `EventType.ERROR` event is
+rendered as it arrives — `recoverable=True` is a warning and the stream still
+decides the outcome, anything else makes the turn `FAILED` (`delivered`
+False). Ctrl+C stops the request the agent is processing: it cancels the CLI's
+input handler, which runs every turn, so a stopped turn raises
+`asyncio.CancelledError`. Cancelling the caller cancels and awaits the event
+consumer before the turn is torn down; the boxes the request's processing
+opened end with it, and `Operation cancelled...` says once that the request
+was stopped.
 
 The HITL input callback is **context-local**: `set_input_callback()` binds it
 for the calling context (and any task started from it), so two consumers of one

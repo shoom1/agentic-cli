@@ -11,31 +11,36 @@ Three defects:
    background-job resume recorded a failed delivery as delivered.
 3. (See ``tests/workflow/test_turn_serialization.py`` for the HITL callback
    being context-local rather than manager-global.)
+
+The session is specced from ``ThinkingPromptSession``: a hand-written one
+defined ``input_dialog``, which no thinking-prompt release has, so the
+free-text question these tests ask passed here and failed on every real
+session.
 """
 
 from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
 from agentic_cli.cli.message_processor import MessageProcessor, TurnStatus
 from agentic_cli.workflow.events import EventType, WorkflowEvent
 
-from tests.event_replay import RecordingSession, RecordingThinkingContext
+from tests.cli.dialog_fakes import autospec_session, edited_dialog, opening_boxes
 
 
-class _UI(RecordingSession):
-    """RecordingSession plus the dialog surface ``_run_turn`` may reach for."""
+def _ui() -> MagicMock:
+    """A session each of whose ``start_thinking`` calls opens a new box
+    (``ui.boxes``)."""
+    return opening_boxes(autospec_session())
 
-    def __init__(self) -> None:
-        super().__init__()
-        self.dialogs = 0
 
-    async def yes_no_dialog(self, title: str = "", text: str = "") -> bool:
-        self.dialogs += 1
-        return True
+def _shown(method: MagicMock) -> list[str]:
+    """What each call of a session method (``ui.add_error``, ...) showed."""
+    return [c.args[0] for c in method.call_args_list]
 
 
 class _Workflow:
@@ -91,7 +96,7 @@ class TestCallerCancellation:
             return _gen()
 
         turn = asyncio.create_task(
-            _run(MessageProcessor(), _UI(), _source, workflow)
+            _run(MessageProcessor(), _ui(), _source, workflow)
         )
         await asyncio.wait_for(started.wait(), timeout=2)
 
@@ -118,7 +123,7 @@ class TestCallerCancellation:
 
             return _gen()
 
-        turn = asyncio.create_task(_run(MessageProcessor(), _UI(), _source))
+        turn = asyncio.create_task(_run(MessageProcessor(), _ui(), _source))
         await asyncio.wait_for(started.wait(), timeout=2)
         turn.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -132,37 +137,19 @@ class TestCallerCancellation:
         assert others == [], f"orphaned tasks survived the cancelled turn: {others}"
 
 
-class _CountingContext(RecordingThinkingContext):
-    """A thinking context that counts how often it was finished."""
+def _hitl_ui() -> MagicMock:
+    """A session whose question stays open (``ui.dialog_open`` is set once it
+    is shown) until the turn is cancelled."""
+    ui = _ui()
+    ui.dialog_open = asyncio.Event()
 
-    def __init__(self, session, label: str) -> None:
-        super().__init__(session, label)
-        self.finish_count = 0
-
-    def finish(self, **kwargs) -> None:
-        self.finish_count += 1
-        super().finish(**kwargs)
-
-
-class _HitlUI(_UI):
-    """Tracks every thinking context and blocks inside the input dialog."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.contexts: list[_CountingContext] = []
-        self.dialog_open = asyncio.Event()
-
-    def start_thinking(self, *args, **kwargs) -> _CountingContext:
-        label = kwargs.get("title") or "events"
-        self.calls.append(("start_thinking", label, {}))
-        ctx = _CountingContext(self, label)
-        self.contexts.append(ctx)
-        return ctx
-
-    async def input_dialog(self, title: str = "", text: str = "", default: str = ""):
-        self.dialog_open.set()
+    async def show_dialog(dialog) -> bool:
+        ui.dialog_open.set()
         await asyncio.sleep(30)  # the user is still typing when we're cancelled
-        return "answer"  # pragma: no cover
+        return True  # pragma: no cover
+
+    ui.show_dialog.side_effect = show_dialog
+    return ui
 
 
 class _HitlWorkflow(_Workflow):
@@ -187,7 +174,7 @@ class TestCancellationDuringHitl:
 
     def _turn(self):
         trace: list[str] = []
-        ui = _HitlUI()
+        ui = _hitl_ui()
         workflow = _HitlWorkflow(trace)
 
         def _source(wf):
@@ -221,10 +208,10 @@ class TestCancellationDuringHitl:
         with pytest.raises(asyncio.CancelledError):
             await turn
 
-        assert ui.contexts, "no thinking context was ever opened"
-        counts = [ctx.finish_count for ctx in ui.contexts]
-        assert counts == [1] * len(ui.contexts), (
-            f"thinking contexts were not finished exactly once: {counts}"
+        assert ui.boxes, "no thinking box was ever opened"
+        counts = [box.finish.call_count for box in ui.boxes]
+        assert counts == [1] * len(ui.boxes), (
+            f"thinking boxes were not finished exactly once: {counts}"
         )
 
     async def test_consumer_settles_before_the_callback_is_cleared(self):
@@ -239,10 +226,13 @@ class TestCancellationDuringHitl:
 
         assert trace.index("consumer-done") < trace.index("callback-cleared")
 
-    async def test_normal_hitl_turn_still_reopens_the_events_box(self):
+    async def test_normal_hitl_turn_still_reopens_the_events_box(self, monkeypatch):
         """The replacement box is right on the *success* path — keep it."""
-        ui = _HitlUI()
-        ui.input_dialog = _answering_dialog
+        ui = _ui()
+        ui.show_dialog.return_value = True  # OK, with the answer typed
+        monkeypatch.setattr(
+            "agentic_cli.cli.message_processor.Dialog", edited_dialog({"answer": "answer"})
+        )
         workflow = _HitlWorkflow([])
 
         def _source(wf):
@@ -260,13 +250,13 @@ class TestCancellationDuringHitl:
         result = await _run(MessageProcessor(), ui, _source, workflow)
 
         assert result.status is TurnStatus.COMPLETED
-        assert "answer" in ui.responses()
-        assert len(ui.contexts) == 2, "the events box was not reopened after the dialog"
-        assert [ctx.finish_count for ctx in ui.contexts] == [1, 1]
+        assert "answer" in _shown(ui.add_response)
+        assert len(ui.boxes) == 2, "the events box was not reopened after the dialog"
+        assert [box.finish.call_count for box in ui.boxes] == [1, 1]
 
     async def test_cancel_outside_hitl_finishes_the_events_box(self):
         started = asyncio.Event()
-        ui = _HitlUI()
+        ui = _hitl_ui()
         workflow = _HitlWorkflow([])
 
         def _source(_wf):
@@ -283,11 +273,7 @@ class TestCancellationDuringHitl:
         with pytest.raises(asyncio.CancelledError):
             await turn
 
-        assert [ctx.finish_count for ctx in ui.contexts] == [1]
-
-
-async def _answering_dialog(title: str = "", text: str = "", default: str = ""):
-    return "answer"
+        assert [box.finish.call_count for box in ui.boxes] == [1]
 
 
 class _EventSource:
@@ -311,18 +297,18 @@ class TestErrorEvents:
     """An ERROR event is rendered, and a fatal one fails the turn."""
 
     async def test_non_recoverable_error_is_rendered(self):
-        ui = _UI()
+        ui = _ui()
         await _run(
             MessageProcessor(),
             ui,
             _EventSource(WorkflowEvent.error("model refused the request")),
         )
-        assert any("model refused the request" in e for e in ui.errors())
+        assert any("model refused the request" in e for e in _shown(ui.add_error))
 
     async def test_non_recoverable_error_fails_the_turn(self):
         result = await _run(
             MessageProcessor(),
-            _UI(),
+            _ui(),
             _EventSource(WorkflowEvent.error("backend exploded")),
         )
         assert result.status is TurnStatus.FAILED
@@ -332,7 +318,7 @@ class TestErrorEvents:
     async def test_error_after_output_is_reported_partial(self):
         result = await _run(
             MessageProcessor(),
-            _UI(),
+            _ui(),
             _EventSource(
                 WorkflowEvent(type=EventType.TEXT, content="half an answer"),
                 WorkflowEvent.error("then it died"),
@@ -343,7 +329,7 @@ class TestErrorEvents:
 
     async def test_recoverable_error_is_rendered_and_the_turn_completes(self):
         """A recoverable error is informational: the stream owns the outcome."""
-        ui = _UI()
+        ui = _ui()
         result = await _run(
             MessageProcessor(),
             ui,
@@ -352,14 +338,14 @@ class TestErrorEvents:
                 WorkflowEvent(type=EventType.TEXT, content="done anyway"),
             ),
         )
-        assert any("one tool retried" in w for w in ui.warnings())
+        assert any("one tool retried" in w for w in _shown(ui.add_warning))
         assert result.status is TurnStatus.COMPLETED
         assert result.delivered is True
 
     async def test_first_fatal_error_is_the_reported_one(self):
         result = await _run(
             MessageProcessor(),
-            _UI(),
+            _ui(),
             _EventSource(
                 WorkflowEvent.error("first failure"),
                 WorkflowEvent.error("cascade"),

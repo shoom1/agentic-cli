@@ -181,7 +181,6 @@ def _create_app_info() -> AppInfo:
         name="Hello Deep Agents",
         version="0.1.0",
         welcome_message=lambda: Panel(text, border_style="green"),
-        echo_thinking=False,
     )
 
 

@@ -268,7 +268,7 @@ async def test_full_resume_loop_via_coordinator(live_settings):
         _wait_terminal(jm, flagged[0].job_id)
 
         # Drive the real harness coordinator with a recording session.
-        session = RecordingSession()  # is_thinking=True → cancel watcher won't fire
+        session = RecordingSession()
         app = BaseCLIApp.__new__(BaseCLIApp)
         app._workflow_controller = SimpleNamespace(
             is_ready=True,

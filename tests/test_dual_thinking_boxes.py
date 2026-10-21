@@ -3,7 +3,10 @@
 Covers:
 - _EventProcessingState simplification (no task_progress_display fields)
 - MessageProcessor._task_box and _last_task_content attributes
-- _handle_task_progress rewrite (manages own ThinkingContext box)
+- _handle_task_progress rewrite (manages own ThinkingBox)
+
+The session and its boxes are specced from thinking-prompt's classes, so a
+call 0.4 does not have fails here.
 """
 
 from __future__ import annotations
@@ -17,6 +20,7 @@ from agentic_cli.cli.message_processor import (
     _EventProcessingState,
 )
 from agentic_cli.workflow.events import EventType, WorkflowEvent
+from tests.cli.dialog_fakes import autospec_box, autospec_session
 
 
 # ---------------------------------------------------------------------------
@@ -117,9 +121,8 @@ class TestHandleTaskProgress:
 
     @pytest.fixture
     def ui(self):
-        mock_ui = MagicMock()
-        mock_ctx = MagicMock()
-        mock_ui.start_thinking.return_value = mock_ctx
+        mock_ui = autospec_session()
+        mock_ui.start_thinking.return_value = autospec_box()
         return mock_ui
 
     @pytest.fixture
@@ -288,8 +291,8 @@ class TestProcessDualBoxes:
     @pytest.fixture
     def setup(self):
         processor = MessageProcessor()
-        ui = MagicMock()
-        events_ctx = MagicMock()
+        ui = autospec_session()
+        events_ctx = autospec_box()
         ui.start_thinking.return_value = events_ctx
         settings = MagicMock()
         settings.default_user = "test"
@@ -308,16 +311,18 @@ class TestProcessDualBoxes:
         return processor, ui, settings, workflow_ctrl, events_ctx
 
     @pytest.mark.asyncio
-    async def test_events_box_finished_task_box_untouched(self, setup):
-        """Events box is finished at end, task box is NOT."""
+    async def test_both_boxes_end_with_the_turn_out_of_the_transcript(self, setup):
+        """The session would end a box the turn leaves open, into the
+        transcript; the task box is rebuilt next turn instead."""
         processor, ui, settings, wf_ctrl, events_ctx = setup
-        task_ctx = MagicMock()
+        task_ctx = autospec_box()
         processor._task_box = task_ctx
 
         await processor.process("hi", wf_ctrl, ui, settings)
 
-        events_ctx.finish.assert_called()
-        task_ctx.finish.assert_not_called()
+        events_ctx.finish.assert_called_once_with(add_to_history=False, echo_to_console=False)
+        task_ctx.finish.assert_called_once_with(add_to_history=False, echo_to_console=False)
+        assert processor._task_box is None
 
     @pytest.mark.asyncio
     async def test_cold_start_recreates_task_box(self, setup):
@@ -333,23 +338,29 @@ class TestProcessDualBoxes:
         assert task_call.kwargs.get("order") == 100
 
     @pytest.mark.asyncio
-    async def test_cold_start_appends_cached_content_directly(self, setup):
-        """Cold start appends cached content without re-richifying."""
+    async def test_cold_start_shows_the_cached_tasks_richified(self, setup):
+        """The cache holds the plain checklist; the box shows it as the box
+        it replaces did."""
         processor, ui, settings, wf_ctrl, events_ctx = setup
-        task_box_mock = MagicMock()
+        task_box_mock = autospec_box()
         ui.start_thinking.return_value = task_box_mock
-        processor._last_task_progress = "[▸] Already richified"
+        processor._last_task_progress = "[▸] Cached"
 
-        await processor.process("hi", wf_ctrl, ui, settings)
+        with patch(
+            "agentic_cli.cli.message_processor._richify_task_display",
+            return_value="richified",
+        ) as mock_richify:
+            await processor.process("hi", wf_ctrl, ui, settings)
 
         # The first start_thinking is the task box cold start
-        task_box_mock.append.assert_called_once_with("[▸] Already richified")
+        mock_richify.assert_called_once_with("[▸] Cached")
+        task_box_mock.append.assert_called_once_with("richified")
 
     @pytest.mark.asyncio
     async def test_no_cold_start_when_task_box_active(self, setup):
         """No extra box created if task box already exists."""
         processor, ui, settings, wf_ctrl, events_ctx = setup
-        processor._task_box = MagicMock()
+        processor._task_box = autospec_box()
         processor._last_task_progress = "[▸] Cached"
 
         await processor.process("hi", wf_ctrl, ui, settings)
@@ -360,22 +371,13 @@ class TestProcessDualBoxes:
     async def test_task_progress_cached_on_exit(self, setup):
         """Plain-text _last_task_content cached to _last_task_progress on exit."""
         processor, ui, settings, wf_ctrl, events_ctx = setup
-        task_ctx = MagicMock()
+        task_ctx = autospec_box()
         processor._task_box = task_ctx
         processor._last_task_content = "[✓] Done task"
 
         await processor.process("hi", wf_ctrl, ui, settings)
 
         assert processor._last_task_progress == "[✓] Done task"
-
-    @pytest.mark.asyncio
-    async def test_no_session_finish_thinking(self, setup):
-        """Session-level finish_thinking() must NOT be called."""
-        processor, ui, settings, wf_ctrl, events_ctx = setup
-
-        await processor.process("hi", wf_ctrl, ui, settings)
-
-        ui.finish_thinking.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_last_task_progress_none_when_no_task_box(self, setup):

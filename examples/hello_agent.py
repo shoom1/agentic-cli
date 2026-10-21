@@ -92,7 +92,6 @@ def _create_app_info() -> AppInfo:
         name="Hello Agent",
         version="0.1.0",
         welcome_message=lambda: Panel(text, border_style="cyan"),
-        echo_thinking=False,
     )
 
 
