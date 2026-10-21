@@ -49,6 +49,12 @@ _ANSI = re.compile(
     r"|\r"
 )
 
+
+def strip_ansi(text: str) -> str:
+    """``text`` without the escape sequences that drew it: what a human reads."""
+    return _ANSI.sub("", text)
+
+
 #: The *only* parent variables allowed through to the child. Everything else —
 #: provider credentials, cloud authentication, ``RESEARCH_DEMO_*``/``AGENTIC_*``
 #: settings overrides, custom config paths, ``PYTHONPATH`` — is dropped, so the
@@ -229,7 +235,7 @@ def run_console_smoke(
         child.close()
 
     return SmokeResult(
-        transcript=_ANSI.sub("", log.getvalue()),
+        transcript=strip_ansi(log.getvalue()),
         exit_status=child.exitstatus,
         signal_status=child.signalstatus,
         argv=list(argv),
