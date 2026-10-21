@@ -173,7 +173,6 @@ def _create_app_info() -> AppInfo:
         name="Jobs Demo",
         version="0.1.0",
         welcome_message=lambda: Panel(text, border_style="cyan"),
-        echo_thinking=False,
     )
 
 

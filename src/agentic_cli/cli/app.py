@@ -9,6 +9,7 @@ This module provides the base CLI application that:
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 import re
 import warnings
@@ -20,8 +21,7 @@ from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.document import Document
 from prompt_toolkit.history import InMemoryHistory
 
-from thinking_prompt import ThinkingPromptSession, AppInfo
-from thinking_prompt.styles import ThinkingPromptStyles
+from thinking_prompt import AppInfo, ThinkingPromptSession, ThinkingPromptStyles
 
 from agentic_cli.cli.commands import Command, CommandRegistry
 from agentic_cli.cli.message_processor import MessageProcessor
@@ -34,6 +34,8 @@ from agentic_cli.workflow.settings import OrchestratorType
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
+
+    from thinking_prompt import Field
 
     from agentic_cli.models import CatalogView, Endpoint, ModelRef, ResolvedModel, RoleMap
     from agentic_cli.settings_persistence import SettingsSaveResult
@@ -241,22 +243,29 @@ class SlashCommandCompleter(Completer):
                 )
 
 
-# === Default Styles ===
+# === Theme ===
 
+# agentic-cli's colors, over thinking-prompt's dark theme (get_theme("dark")).
+# They are tuned for a dark background: every other theme is thinking-prompt's
+# own.
+_DARK_COLORS: dict[str, str] = {
+    "thinking_box": "fg:#6c757d",
+    "thinking_box_border": "fg:#495057",
+    "thinking_box_hint": "fg:#6c757d italic",
+    "user_message": "fg:#17a2b8",
+    "assistant_message": "fg:#e9ecef",
+    "system_message": "fg:#6c757d italic",
+    "error_message": "fg:#dc3545 bold",
+    "warning_message": "fg:#ffc107",
+    "success_message": "fg:#28a745",
+}
 
-def get_default_styles() -> ThinkingPromptStyles:
-    """Get default styles for ThinkingPromptSession."""
-    return ThinkingPromptStyles(
-        thinking_box="fg:#6c757d",
-        thinking_box_border="fg:#495057",
-        thinking_box_hint="fg:#6c757d italic",
-        user_message="fg:#17a2b8",
-        assistant_message="fg:#e9ecef",
-        system_message="fg:#6c757d italic",
-        error_message="fg:#dc3545 bold",
-        warning_message="fg:#ffc107",
-        success_message="fg:#28a745",
-    )
+# What an app still overriding get_styles(), removed in 0.7.0, is told: its
+# colors would otherwise be dropped without a word.
+_GET_STYLES_REMOVED = (
+    'get_styles() was replaced by get_theme(name) in agentic-cli 0.7.0: return '
+    'your colors for "dark" from get_theme() (see the CHANGELOG)'
+)
 
 
 # === Base CLI Application ===
@@ -267,13 +276,13 @@ class BaseCLIApp:
     Base CLI Application for agentic applications.
 
     Domain-specific applications extend this class and provide via constructor:
-    - app_info: Application name, version, welcome message
+    - app_info: The startup banner (name, version, welcome message)
     - agent_configs: List of agent configurations for the workflow
     - settings: Application settings instance
 
     Optional overrides:
     - register_commands(): Register domain-specific commands
-    - get_styles(): Customize UI colors
+    - get_theme(name): Customize a theme's colors
     - get_ui_setting_keys(): Customize settings dialog fields
     - apply_settings(): Handle additional custom settings
     """
@@ -288,12 +297,19 @@ class BaseCLIApp:
         """Initialize the CLI application.
 
         Args:
-            app_info: Application info (name, version, welcome message)
+            app_info: The startup banner (name, version, welcome message)
             agent_configs: List of agent configurations for the workflow
             settings: Application settings instance
             session_id: Optional session ID for save/resume. If provided,
                        the session will be loaded on startup and saved on exit.
+
+        Raises:
+            TypeError: The app still defines ``get_styles()``, which
+                ``get_theme(name)`` replaced.
         """
+        if any("get_styles" in vars(cls) for cls in type(self).__mro__ if cls is not object):
+            raise TypeError(_GET_STYLES_REMOVED)
+
         # Sessions are durable by default: a fresh id is generated when none is
         # given (resumable later via /sessions or --session); an explicit id
         # requests a resume.
@@ -333,7 +349,7 @@ class BaseCLIApp:
         self.session = ThinkingPromptSession(
             message=">>> ",
             app_info=self._app_info,
-            styles=self.get_styles(),
+            theme=self.get_theme("dark"),
             history=InMemoryHistory(),
             completer=completer,
             complete_while_typing=True,
@@ -341,6 +357,9 @@ class BaseCLIApp:
             enable_status_bar=True,
             status_text="Ctrl+C: cancel | Ctrl+D: exit | /help: commands",
             echo_input=False,  # We handle echoing manually based on command type
+            # A finished box's text is not printed: the status lines a box
+            # shows are not part of the conversation.
+            echo_thinking=False,
         )
 
         # === State ===
@@ -348,12 +367,23 @@ class BaseCLIApp:
 
         logger.debug("app_initialized_fast")
 
-    def get_styles(self) -> ThinkingPromptStyles:
-        """Get styles for ThinkingPromptSession.
+    def get_theme(self, name: str) -> str | ThinkingPromptStyles:
+        """The session's theme for the theme ``name``.
 
-        Override to customize styles.
+        ``"dark"`` is thinking-prompt's dark theme in agentic-cli's colors.
+        Any other name (``"light"``, ``"mono"``, ``"terminal"``, ``"auto"``)
+        is returned as it is, for thinking-prompt's own theme: colors tuned
+        for a dark background would be unreadable on a light one. ``"auto"``
+        picks dark or light from the terminal, so agentic-cli's colors do not
+        apply there.
+
+        Override to recolor a theme, e.g. for ``"dark"`` return
+        ``dataclasses.replace(ThinkingPromptStyles.dark(), thinking_box=...)``
+        and ``super().get_theme(name)`` for the others.
         """
-        return get_default_styles()
+        if name == "dark":
+            return dataclasses.replace(ThinkingPromptStyles.dark(), **_DARK_COLORS)
+        return name
 
     def register_commands(self) -> None:
         """Register domain-specific commands.
@@ -382,17 +412,18 @@ class BaseCLIApp:
         """
         return ["model", "model_role:fast", "model_role:strong", "thinking_effort"]
 
-    def _build_ui_items(self) -> list[Any]:
-        """Build UI items from settings fields using introspection.
+    def _build_ui_items(self) -> list[Field]:
+        """Build the settings dialog's fields using introspection.
 
         Uses get_ui_setting_keys() to determine which fields to show,
-        then converts each field to an appropriate UI control using
+        then converts each field to an appropriate form field using
         the field's type annotation and metadata. The model pickers come
         from the model catalog (``_model_choices``), and the thinking
         effort's description says what it means for the default model.
+        thinking_prompt's fields are frozen, so each is built complete.
 
         Returns:
-            List of thinking_prompt UI items sorted by ui_order
+            List of thinking_prompt form fields sorted by ui_order
         """
         from agentic_cli.cli.settings_introspection import field_to_ui_item, get_ui_order
 
@@ -403,7 +434,7 @@ class BaseCLIApp:
             if key.startswith(MODEL_ROLE_KEY_PREFIX)
         ]
         choices: _ModelChoices | None = None  # one catalog for every picker
-        items: list[tuple[int, Any]] = []
+        items: list[tuple[int, Field]] = []
 
         for key in keys:
             # Project-scope guard: the dialog may only expose settings the
@@ -429,10 +460,11 @@ class BaseCLIApp:
             if key in settings_cls.model_fields:
                 field = settings_cls.model_fields[key]
                 current = getattr(self._settings, key, None)
-                item = field_to_ui_item(key, field, current)
+                description = None  # the field's own
                 if key == "thinking_effort":
                     choices = choices or self._model_choices(roles)
-                    item.description = choices.thinking or item.description
+                    description = choices.thinking or None
+                item = field_to_ui_item(key, field, current, description=description)
                 order = get_ui_order(field)
                 items.append((order, item))
 
@@ -927,10 +959,9 @@ class BaseCLIApp:
         self.session.add_message("system", "Goodbye!")
 
 
-def _model_picker(key: str, choices: _ModelChoices) -> Any:
-    """The dialog item of one model picker: ``model`` or ``model_role:<role>``."""
+def _model_picker(key: str, choices: _ModelChoices) -> Field:
+    """The dialog field of one model picker: ``model`` or ``model_role:<role>``."""
     from pydantic.fields import FieldInfo
-    from thinking_prompt.settings_dialog import DropdownItem
 
     from agentic_cli.cli.settings_introspection import field_to_ui_item
 
@@ -942,21 +973,19 @@ def _model_picker(key: str, choices: _ModelChoices) -> Any:
         title = _setting_label(key)
         description = f"Agents whose model is {role!r} run on it"
     field = FieldInfo(default=None, title=title, description=description)
-    item = field_to_ui_item(
+    return field_to_ui_item(
         key=key,
         field=field,
         current_value=choices.current.get(role),
         dynamic_options=choices.options,
+        max_width=_MODEL_PICKER_MAX_WIDTH,
     )
-    if isinstance(item, DropdownItem):
-        # A dropdown's default width cuts a reference to its first 14
-        # characters ("google:gemini-"), so the models cannot be told apart.
-        item.width, item.max_width = None, _MODEL_PICKER_MAX_WIDTH
-    return item
 
 
-# The widest a model picker's dropdown grows: a reference and its padding.
-# SettingsCommand's dialog leaves room for it beside the longest label.
+# The widest a model picker's dropdown grows: a reference and its padding. A
+# dropdown's default width cuts a reference to its first 14 characters
+# ("google:gemini-"), so the models could not be told apart. SettingsCommand's
+# dialog leaves room for it beside the longest label.
 _MODEL_PICKER_MAX_WIDTH = 48
 
 

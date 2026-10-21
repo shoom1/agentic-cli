@@ -19,10 +19,12 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from thinking_prompt import TextField
 
 from agentic_cli.cli.workflow_controller import WorkflowController
 from agentic_cli.config import BaseSettings
 from agentic_cli.workflow.config import AgentConfig
+from tests.cli.dialog_fakes import autospec_session, edited_dialog
 
 OLD_MODEL = "gemini-2.5-pro"
 BAD_MODEL = "gemini-2.5-flash"
@@ -59,21 +61,21 @@ def settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> BaseSettings:
     return s
 
 
-def _app(settings: BaseSettings, manager: FakeManager, dialog_result=None):
+def _app(settings: BaseSettings, manager: FakeManager, edits: dict | None = None):
+    """An app around a real controller; its ``/settings`` dialog shows a field
+    for each key in ``edits``, and Save sends them."""
     from agentic_cli.cli.app import BaseCLIApp
 
     controller = WorkflowController([AgentConfig(name="a", prompt="p")], settings)
     controller._workflow = manager
     app = SimpleNamespace(settings=settings, _settings=settings, _workflow_controller=controller)
     app.errors, app.successes = [], []
-    app.session = SimpleNamespace(
-        show_dialog=AsyncMock(return_value=dialog_result),
-        add_message=lambda *a: None,
-        add_error=app.errors.append,
-        add_success=app.successes.append,
-        add_warning=lambda *a: None,
-    )
-    app._build_ui_items = lambda: ["item"]
+    app.session = autospec_session()
+    app.session.show_dialog.return_value = True  # Save
+    app.session.add_error.side_effect = app.errors.append
+    app.session.add_success.side_effect = app.successes.append
+    app.edits = edits or {}
+    app._build_ui_items = lambda: [TextField(key, key) for key in app.edits]
     app.apply_settings = lambda changes: BaseCLIApp.apply_settings(app, changes)
     app.save_settings = AsyncMock(return_value=SimpleNamespace(
         project_path=Path("p"), user_path=None, user_scoped_keys=()))
@@ -115,7 +117,7 @@ class TestModelReinitializeFails:
         from agentic_cli.cli.settings_command import SettingsCommand
 
         app = _app(settings, FakeManager(OLD_MODEL, broken=(BAD_MODEL,)), {"model": BAD_MODEL})
-        with patch("agentic_cli.cli.settings_command.SettingsDialog", lambda **kw: None):
+        with patch("agentic_cli.cli.settings_command.Dialog", edited_dialog(app.edits)):
             await SettingsCommand().execute("", app)
 
         app.save_settings.assert_not_awaited()
@@ -159,7 +161,7 @@ class TestInvalidValue:
         app = _app(
             settings, FakeManager(OLD_MODEL), {"thinking_effort": "high", "log_level": "LOUD"},
         )
-        with patch("agentic_cli.cli.settings_command.SettingsDialog", lambda **kw: None):
+        with patch("agentic_cli.cli.settings_command.Dialog", edited_dialog(app.edits)):
             await SettingsCommand().execute("", app)
 
         app.save_settings.assert_not_awaited()
