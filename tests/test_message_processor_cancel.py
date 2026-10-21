@@ -263,6 +263,39 @@ async def test_a_cancelled_resume_turn_says_so_once_records_the_failure_and_re_r
     assert not app._turn_lock.locked()
 
 
+class CheckingWorkflow(Workflow):
+    """Its conversation lookup (``can_resume``) is slow: the resume waits."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.checking = asyncio.Event()
+
+    async def can_resume(self, record) -> bool:
+        self.checking.set()
+        await asyncio.Event().wait()  # a slow session lookup
+        return True  # pragma: no cover
+
+
+async def test_a_resume_cancelled_while_it_checks_its_conversation_says_so_once(ui, logged):
+    """Between the workflow's start and its turn, a resume looks its
+    conversation up, with no box open. Ctrl+C there stops the request too, and
+    the line says so once."""
+    workflow = CheckingWorkflow()
+    record = SimpleNamespace(job_id="j1", name="build", state=SimpleNamespace(value="succeeded"))
+    turn = asyncio.create_task(
+        MessageProcessor().process_resume(record, ReplayController(workflow), ui, SETTINGS)
+    )
+    await asyncio.wait_for(workflow.checking.wait(), timeout=2)
+
+    turn.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await turn
+
+    assert ui.boxes == []
+    assert _cancelled_lines(ui) == [call("system", CANCELLED_LINE)]
+    assert [e["event"] for e in logged].count("message_cancelled_by_user") == 1
+
+
 # --- the watcher is gone ----------------------------------------------------------------
 
 

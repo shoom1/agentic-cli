@@ -7,7 +7,7 @@ This module provides:
 from __future__ import annotations
 
 import asyncio
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, ClassVar
@@ -17,6 +17,8 @@ from thinking_prompt import ButtonConfig, Dialog, TextField
 from agentic_cli.logging import Loggers, bind_context
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from agentic_cli.cli.usage_tracker import UsageTracker
     from agentic_cli.config import BaseSettings
     from agentic_cli.cli.workflow_controller import WorkflowController
@@ -37,6 +39,23 @@ CANCELLED_LINE = "Operation cancelled..."
 # Under a free-text question's answer field. thinking-prompt opens a text
 # field for viewing: keys typed at it before Enter are dropped.
 ANSWER_HINT = "Press Enter to type your answer, Enter again to keep it"
+
+
+@contextmanager
+def _says_so_when_stopped(ui: "ThinkingPromptSession") -> "Iterator[None]":
+    """Say ``CANCELLED_LINE`` once when the request inside is stopped.
+
+    A request can be stopped at any stage: while it waits for the workflow to
+    start, while a job's resume looks its conversation up, or during its turn.
+    Whatever that stage opened ends with it, out of the transcript, and this
+    says once, wherever the cancel landed, that the request was stopped.
+    """
+    try:
+        yield
+    except asyncio.CancelledError:
+        ui.add_message("system", CANCELLED_LINE)
+        logger.info("message_cancelled_by_user")
+        raise
 
 
 def _richify_task_display(plain: str) -> str:
@@ -194,24 +213,6 @@ class MessageProcessor:
             return None
         return box
 
-    @staticmethod
-    async def _workflow_ready(
-        workflow_controller: "WorkflowController", ui: "ThinkingPromptSession"
-    ) -> bool:
-        """Wait for the workflow to be ready, as ``ensure_initialized`` does.
-
-        Ctrl+C here stops a request still waiting for the workflow to start.
-        The controller's "Waiting for initialization..." box ends with the
-        wait, out of the transcript, and ``CANCELLED_LINE`` says the request
-        was stopped.
-        """
-        try:
-            return await workflow_controller.ensure_initialized(ui)
-        except asyncio.CancelledError:
-            ui.add_message("system", CANCELLED_LINE)
-            logger.info("message_cancelled_by_user", waiting_for="initialization")
-            raise
-
     async def process(
         self,
         message: str,
@@ -240,30 +241,32 @@ class MessageProcessor:
         Raises:
             asyncio.CancelledError: The user pressed Ctrl+C, which stops the
                 request: thinking-prompt cancels the input handler running it.
+                ``CANCELLED_LINE`` has been said, once.
         """
-        # Wait for initialization if needed
-        if not await self._workflow_ready(workflow_controller, ui):
-            ui.add_error(
-                "Cannot process message - workflow not initialized. "
-                "Please check your API keys (GOOGLE_API_KEY or ANTHROPIC_API_KEY)."
-            )
-            return TurnResult(
-                TurnStatus.UNAVAILABLE, error="workflow not initialized"
-            )
+        with _says_so_when_stopped(ui):
+            # Wait for initialization if needed
+            if not await workflow_controller.ensure_initialized(ui):
+                ui.add_error(
+                    "Cannot process message - workflow not initialized. "
+                    "Please check your API keys (GOOGLE_API_KEY or ANTHROPIC_API_KEY)."
+                )
+                return TurnResult(
+                    TurnStatus.UNAVAILABLE, error="workflow not initialized"
+                )
 
-        bind_context(user_id=settings.default_user)
-        logger.info("handling_message", message_length=len(message))
+            bind_context(user_id=settings.default_user)
+            logger.info("handling_message", message_length=len(message))
 
-        def _source(workflow):
-            return workflow.process(
-                message=message,
-                user_id=settings.default_user,
-                session_id=session_id,
+            def _source(workflow):
+                return workflow.process(
+                    message=message,
+                    user_id=settings.default_user,
+                    session_id=session_id,
+                )
+
+            return await self._run_turn(
+                _source, workflow_controller, ui, settings, usage_tracker
             )
-
-        return await self._run_turn(
-            _source, workflow_controller, ui, settings, usage_tracker
-        )
 
     async def process_resume(
         self,
@@ -293,54 +296,57 @@ class MessageProcessor:
 
         Raises:
             asyncio.CancelledError: Ctrl+C stopped the request, as it stops a
-                user turn.
+                user turn, at any stage: the conversation's lookup included.
+                ``CANCELLED_LINE`` has been said, once.
         """
-        if not await self._workflow_ready(workflow_controller, ui):
-            return TurnResult(
-                TurnStatus.UNAVAILABLE, error="workflow not initialized"
-            )
+        with _says_so_when_stopped(ui):
+            if not await workflow_controller.ensure_initialized(ui):
+                return TurnResult(
+                    TurnStatus.UNAVAILABLE, error="workflow not initialized"
+                )
 
-        workflow = workflow_controller.workflow
-        bind_context(user_id=settings.default_user)
-        icon = "✓" if record.state.value == "succeeded" else "✗"
+            workflow = workflow_controller.workflow
+            bind_context(user_id=settings.default_user)
+            icon = "✓" if record.state.value == "succeeded" else "✗"
 
-        # Resume only if the backend supports it AND the originating conversation
-        # is still available (with session_store='memory' it is gone after a
-        # restart, on ADK and Deep Agents alike, and a deleted one is gone too).
-        # Otherwise surface a notice — the result stays reachable by job id.
-        resumable = hasattr(
-            workflow, "resume_with_job_result"
-        ) and await workflow.can_resume(record)
-        if not resumable:
-            logger.info(
-                "job_resume_not_resumable",
-                job_id=record.job_id,
-                backend=getattr(workflow, "backend_type", "?"),
-            )
+            # Resume only if the backend supports it AND the originating
+            # conversation is still available (with session_store='memory' it
+            # is gone after a restart, on ADK and Deep Agents alike, and a
+            # deleted one is gone too). Otherwise surface a notice — the result
+            # stays reachable by job id.
+            resumable = hasattr(
+                workflow, "resume_with_job_result"
+            ) and await workflow.can_resume(record)
+            if not resumable:
+                logger.info(
+                    "job_resume_not_resumable",
+                    job_id=record.job_id,
+                    backend=getattr(workflow, "backend_type", "?"),
+                )
+                ui.add_message(
+                    "system",
+                    f"{icon} Background job '{record.name}' finished "
+                    f"({record.state.value}) while its conversation was unavailable "
+                    f"— fetch the result with /jobs {record.job_id}.",
+                )
+                return TurnResult(
+                    TurnStatus.UNAVAILABLE,
+                    error="originating conversation is no longer available",
+                )
+
+            logger.info("resuming_job", job_id=record.job_id, state=record.state.value)
             ui.add_message(
                 "system",
-                f"{icon} Background job '{record.name}' finished "
-                f"({record.state.value}) while its conversation was unavailable "
-                f"— fetch the result with /jobs {record.job_id}.",
-            )
-            return TurnResult(
-                TurnStatus.UNAVAILABLE,
-                error="originating conversation is no longer available",
+                f"↻ Background job '{record.name}' finished ({icon} {record.state.value}) "
+                "— resuming.",
             )
 
-        logger.info("resuming_job", job_id=record.job_id, state=record.state.value)
-        ui.add_message(
-            "system",
-            f"↻ Background job '{record.name}' finished ({icon} {record.state.value}) "
-            "— resuming.",
-        )
+            def _source(wf):
+                return wf.resume_with_job_result(record)
 
-        def _source(wf):
-            return wf.resume_with_job_result(record)
-
-        return await self._run_turn(
-            _source, workflow_controller, ui, settings, usage_tracker
-        )
+            return await self._run_turn(
+                _source, workflow_controller, ui, settings, usage_tracker
+            )
 
     async def _run_turn(
         self,
@@ -372,16 +378,16 @@ class MessageProcessor:
         ``retry_max_attempts``.
         A rate limit that still surfaces here fails the turn explicitly.
 
-        A cancel of this coroutine is the user's Ctrl+C, which stops the
-        request the agent is processing: thinking-prompt cancels the input
-        handler's task, and every request runs inside the handler (user
-        turns, then job-resume turns). The cancel reaches the consumer task,
+        A cancel of this coroutine stops the request the agent is processing:
+        the user's Ctrl+C (thinking-prompt cancels the input handler's task,
+        and every request runs inside the handler: user turns, then job-resume
+        turns), or the session ending. The cancel reaches the consumer task,
         which is awaited to completion **before** the HITL callback and turn
         state are torn down — otherwise a tool could still be running, and
         asking for input, with nothing left to answer it. The boxes the
-        request's processing opened end with it, out of the transcript;
-        ``CANCELLED_LINE`` says once that the request was stopped; and the
-        cancel is re-raised.
+        request's processing opened end with it, out of the transcript, and
+        the cancel is re-raised; the request (``process`` /
+        ``process_resume``) says ``CANCELLED_LINE`` once.
 
         Errors reported as ``EventType.ERROR`` are rendered as they arrive. A
         recoverable one is a warning and the stream decides the outcome; a
@@ -490,11 +496,11 @@ class MessageProcessor:
                     result = TurnResult(TurnStatus.COMPLETED)
 
             except asyncio.CancelledError:
-                # Ctrl+C stopped the request. The boxes its processing
-                # opened end with it, out of the transcript (the session
-                # would end them into it, for a repaint to print), and the
-                # line says the request was stopped: also with a question on
-                # screen, when no box is open and the session says nothing.
+                # The request was stopped. The boxes its processing opened end
+                # with it, out of the transcript (the session would end them
+                # into it, for a repaint to print). The request says the line,
+                # also with a question on screen, when no box is open and the
+                # session would say nothing.
                 _finish_events_box()
                 task_box = self._live_task_box()
                 if task_box is not None:
@@ -502,9 +508,8 @@ class MessageProcessor:
                 # The next turn starts without a task box.
                 self._task_box = None
                 self._last_task_content = None
-                ui.add_message("system", CANCELLED_LINE)
                 workflow_controller.update_status_bar(ui)
-                logger.info("message_cancelled_by_user", partial=state.side_effects_seen)
+                logger.debug("turn_cancelled", partial=state.side_effects_seen)
                 raise
 
             except Exception as e:

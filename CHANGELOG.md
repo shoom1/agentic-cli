@@ -576,11 +576,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `MessageProcessor.process()` and `process_resume()` raise
     `asyncio.CancelledError` instead of returning `TurnStatus.CANCELLED` (the
     value stays in the enum). The boxes the request's processing opened end
-    with it, and thinking-prompt's own `Operation cancelled...` says once that
-    the request was stopped, in place of agentic-cli's `Cancelled.` warning,
-    also when a question was on screen or the request was still waiting for
-    the workflow to start; a stopped job-resume turn is recorded as not
-    delivered, as before. Code that drives turns itself catches the cancel:
+    with it, and `process()` / `process_resume()` print thinking-prompt's
+    line, `Operation cancelled...`, once, in place of agentic-cli's
+    `Cancelled.` warning, wherever the request was stopped: also with a
+    question on screen, while it waited for the workflow to start, or while a
+    job's resume looked its conversation up. A stopped job-resume turn is
+    recorded as not delivered, as before. Code that drives turns itself
+    catches the cancel, and prints no line of its own:
 
     ```python
     # 0.6
