@@ -6,7 +6,8 @@ every real session. These fakes are specced from the real classes instead:
 
 - ``autospec_session()`` is a ``ThinkingPromptSession`` whose methods record
   their calls, and a call to a method it lacks, or with an argument it does
-  not take, fails.
+  not take, fails. ``opening_boxes(session)`` makes each of its
+  ``start_thinking`` calls open a new ``autospec_box()``.
 - ``edited_dialog(edits)`` is a ``Dialog`` subclass: the real constructor
   runs, so a bad argument fails, and its ``values`` are what the fields would
   hold had the user changed the ``edits`` fields before pressing a button.
@@ -17,7 +18,7 @@ from __future__ import annotations
 from typing import Any, ClassVar
 from unittest.mock import MagicMock, create_autospec
 
-from thinking_prompt import Dialog, ThinkingPromptSession
+from thinking_prompt import Dialog, ThinkingBox, ThinkingPromptSession
 
 
 def autospec_session() -> MagicMock:
@@ -27,6 +28,34 @@ def autospec_session() -> MagicMock:
     ``True`` for Save (or OK) and leave it ``None`` for Cancel or Escape.
     """
     return create_autospec(ThinkingPromptSession, instance=True)
+
+
+def autospec_box(*, finished: bool = False) -> MagicMock:
+    """A ``ThinkingBox`` fake: ``finish()`` ends it (``is_finished``), as it
+    ends the real one."""
+    box = create_autospec(ThinkingBox, instance=True)
+    box.is_finished = finished
+
+    def finish(add_to_history: bool = True, echo_to_console: bool | None = None) -> str:
+        box.is_finished = True
+        return ""
+
+    box.finish.side_effect = finish
+    return box
+
+
+def opening_boxes(session: MagicMock) -> MagicMock:
+    """``session``, each of whose ``start_thinking`` calls opens a new box,
+    kept in order in ``session.boxes``."""
+    session.boxes = []
+
+    def start_thinking(*args: Any, **kwargs: Any) -> MagicMock:
+        box = autospec_box()
+        session.boxes.append(box)
+        return box
+
+    session.start_thinking.side_effect = start_thinking
+    return session
 
 
 def edited_dialog(edits: dict[str, Any]) -> type[Dialog]:

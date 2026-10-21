@@ -19,10 +19,9 @@ argument 0.4 does not take fails the test.
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock, call, create_autospec
+from unittest.mock import MagicMock, call
 
 import pytest
-from thinking_prompt import ThinkingBox
 
 from agentic_cli.cli.message_processor import (
     MessageProcessor,
@@ -30,32 +29,17 @@ from agentic_cli.cli.message_processor import (
     _richify_task_display,
 )
 from agentic_cli.workflow.events import WorkflowEvent
-from tests.cli.dialog_fakes import autospec_session
+from tests.cli.dialog_fakes import autospec_box, autospec_session, opening_boxes
 from tests.event_replay import ReplayController, ReplayWorkflow
 
 SETTINGS = SimpleNamespace(default_user="u", verbose_thinking=False)
 OUT_OF_THE_TRANSCRIPT = call(add_to_history=False, echo_to_console=False)
 
 
-def _box(finished: bool = False) -> MagicMock:
-    box = create_autospec(ThinkingBox, instance=True)
-    box.is_finished = finished
-    return box
-
-
 @pytest.fixture
 def ui() -> MagicMock:
     """A session whose every ``start_thinking`` opens a new box (``ui.boxes``)."""
-    ui = autospec_session()
-    ui.boxes = []
-
-    def start_thinking(*args, **kwargs):
-        box = _box()
-        ui.boxes.append(box)
-        return box
-
-    ui.start_thinking.side_effect = start_thinking
-    return ui
+    return opening_boxes(autospec_session())
 
 
 def _progress(content: str, completed: int, total: int) -> WorkflowEvent:
@@ -126,7 +110,7 @@ async def test_the_task_box_rebuilt_at_a_turn_s_start_does_too(ui):
 
 async def test_progress_after_the_box_ended_opens_a_new_one(ui):
     processor = MessageProcessor()
-    ended = _box(finished=True)
+    ended = autospec_box(finished=True)
     processor._task_box = ended
     processor._last_task_content = "[▸] A\n[ ] B"
 
@@ -141,7 +125,7 @@ async def test_progress_after_the_box_ended_opens_a_new_one(ui):
 
 async def test_finishing_the_tasks_leaves_an_ended_box_alone(ui):
     processor = MessageProcessor()
-    ended = _box(finished=True)
+    ended = autospec_box(finished=True)
     processor._task_box = ended
     processor._last_task_content = "[▸] A"
 
@@ -153,7 +137,7 @@ async def test_finishing_the_tasks_leaves_an_ended_box_alone(ui):
 
 async def test_a_turn_rebuilds_a_box_that_ended(ui):
     processor = MessageProcessor()
-    processor._task_box = _box(finished=True)
+    processor._task_box = autospec_box(finished=True)
     processor._last_task_progress = "[▸] A"
 
     await _turn(processor, ui)

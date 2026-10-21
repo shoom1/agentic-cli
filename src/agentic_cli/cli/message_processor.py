@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, ClassVar
 
+from thinking_prompt import ButtonConfig, Dialog, TextField
+
 from agentic_cli.logging import Loggers, bind_context
 
 if TYPE_CHECKING:
@@ -31,6 +33,10 @@ logger = Loggers.cli()
 # processing opened end with it, out of the transcript, so 0.4 has none left
 # to end and says nothing; the request says this line in its place, once.
 CANCELLED_LINE = "Operation cancelled..."
+
+# Under a free-text question's answer field. thinking-prompt opens a text
+# field for viewing: keys typed at it before Enter are dropped.
+ANSWER_HINT = "Press Enter to type your answer, Enter again to keep it"
 
 
 def _richify_task_display(plain: str) -> str:
@@ -582,12 +588,16 @@ class MessageProcessor:
     ) -> str:
         """Prompt user for input requested by a tool.
 
+        A choice is a dropdown and a confirmation a yes/no question; any
+        other request is free text, in a dialog with one text field and OK
+        and Cancel.
+
         Args:
             request: The user input request from the tool.
             ui: UI session for prompting.
 
         Returns:
-            User's response string.
+            User's response string ("" for a cancelled free-text question).
         """
         from agentic_cli.workflow.events import InputType
 
@@ -610,12 +620,24 @@ class MessageProcessor:
             return "yes" if result else "no"
 
         else:
-            result = await ui.input_dialog(
+            dialog = Dialog(
                 title=f"{tool_name} - Input Required",
-                text=request.prompt,
-                default=request.default or "",
+                body=request.prompt,
+                buttons=[ButtonConfig("OK", result=True), ButtonConfig("Cancel")],
+                fields=[
+                    TextField(
+                        "answer",
+                        "Answer",
+                        description=ANSWER_HINT,
+                        default=request.default or "",
+                        edit_width=60,
+                    )
+                ],
             )
-            return result or ""
+            # OK returns True; Cancel and Escape return None.
+            if not await ui.show_dialog(dialog):
+                return ""
+            return dialog.values["answer"]
 
     # === Event handler methods ===
 

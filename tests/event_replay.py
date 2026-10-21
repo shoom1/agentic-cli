@@ -24,11 +24,13 @@ from typing import Any
 from agentic_cli.workflow.events import EventType, WorkflowEvent
 
 
-class RecordingThinkingContext:
-    """Stand-in for thinking_prompt's ``ThinkingContext`` that records calls.
+class RecordingThinkingBox:
+    """Stand-in for thinking_prompt's ``ThinkingBox`` that records calls.
 
     Every method appends to the owning session's ``calls`` list so tests can
-    assert on box lifecycle (append/clear/set_title/finish) in order.
+    assert on box lifecycle (append/clear/set_title/finish) in order. Its
+    methods are ``ThinkingBox``'s, with its parameters
+    (``tests/test_session_fakes_contract.py``).
     """
 
     def __init__(self, session: "RecordingSession", label: str) -> None:
@@ -40,27 +42,36 @@ class RecordingThinkingContext:
     def is_finished(self) -> bool:
         return self.finished
 
-    def append(self, text: str) -> None:
-        self._session.calls.append(("ctx_append", self.label, text))
+    def append(self, chunk: str) -> None:
+        self._session.calls.append(("ctx_append", self.label, chunk))
 
     def clear(self) -> None:
         self._session.calls.append(("ctx_clear", self.label))
 
-    def set_title(self, title: str) -> None:
-        self.label = title
-        self._session.calls.append(("ctx_title", self.label, title))
+    def set_title(self, text: str) -> None:
+        self.label = text
+        self._session.calls.append(("ctx_title", self.label, text))
 
-    def finish(self, **kwargs: Any) -> None:
+    def finish(self, add_to_history: bool = True, echo_to_console: bool | None = None) -> str:
         self.finished = True
-        self._session.calls.append(("ctx_finish", self.label, kwargs))
+        self._session.calls.append(
+            (
+                "ctx_finish",
+                self.label,
+                {"add_to_history": add_to_history, "echo_to_console": echo_to_console},
+            )
+        )
+        return ""
 
 
 class RecordingSession:
     """Minimal ``ThinkingPromptSession`` stand-in that records render calls.
 
-    Implements only the surface ``MessageProcessor`` touches. ``calls`` is an
-    ordered list of tuples (``kind``, ...payload) you can assert against, plus a
-    few convenience query helpers.
+    Implements only the surface ``MessageProcessor`` touches, with
+    ``ThinkingPromptSession``'s parameters
+    (``tests/test_session_fakes_contract.py``). ``calls`` is an ordered list
+    of tuples (``kind``, ...payload) you can assert against, plus a few
+    convenience query helpers.
     """
 
     def __init__(self) -> None:
@@ -69,20 +80,25 @@ class RecordingSession:
     # --- thinking boxes -----------------------------------------------------
     def start_thinking(
         self,
-        status_or_title: Any = None,
+        content_callback: Any = None,
         *,
         title: str | None = None,
-        content_format: str = "plain",
         order: int = 0,
-        **kwargs: Any,
-    ) -> RecordingThinkingContext:
+        max_lines: int | None = None,
+        content_format: str = "plain",
+        overflow: str = "tail",
+    ) -> RecordingThinkingBox:
         # The events box passes the status callback positionally (no title);
         # the task box passes title= as a keyword.
         label = title if title is not None else "events"
         self.calls.append(
-            ("start_thinking", label, {"order": order, "content_format": content_format})
+            (
+                "start_thinking",
+                label,
+                {"order": order, "content_format": content_format, "overflow": overflow},
+            )
         )
-        return RecordingThinkingContext(self, label)
+        return RecordingThinkingBox(self, label)
 
     # --- output methods -----------------------------------------------------
     def add_response(self, content: str, *, markdown: bool = False) -> None:

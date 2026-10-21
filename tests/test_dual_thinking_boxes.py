@@ -11,24 +11,16 @@ call 0.4 does not have fails here.
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, create_autospec, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from thinking_prompt import ThinkingBox
 
 from agentic_cli.cli.message_processor import (
     MessageProcessor,
     _EventProcessingState,
 )
 from agentic_cli.workflow.events import EventType, WorkflowEvent
-from tests.cli.dialog_fakes import autospec_session
-
-
-def _box() -> MagicMock:
-    """A live thinking box."""
-    box = create_autospec(ThinkingBox, instance=True)
-    box.is_finished = False
-    return box
+from tests.cli.dialog_fakes import autospec_box, autospec_session
 
 
 # ---------------------------------------------------------------------------
@@ -130,7 +122,7 @@ class TestHandleTaskProgress:
     @pytest.fixture
     def ui(self):
         mock_ui = autospec_session()
-        mock_ui.start_thinking.return_value = _box()
+        mock_ui.start_thinking.return_value = autospec_box()
         return mock_ui
 
     @pytest.fixture
@@ -300,7 +292,7 @@ class TestProcessDualBoxes:
     def setup(self):
         processor = MessageProcessor()
         ui = autospec_session()
-        events_ctx = _box()
+        events_ctx = autospec_box()
         ui.start_thinking.return_value = events_ctx
         settings = MagicMock()
         settings.default_user = "test"
@@ -323,7 +315,7 @@ class TestProcessDualBoxes:
         """The session would end a box the turn leaves open, into the
         transcript; the task box is rebuilt next turn instead."""
         processor, ui, settings, wf_ctrl, events_ctx = setup
-        task_ctx = _box()
+        task_ctx = autospec_box()
         processor._task_box = task_ctx
 
         await processor.process("hi", wf_ctrl, ui, settings)
@@ -350,7 +342,7 @@ class TestProcessDualBoxes:
         """The cache holds the plain checklist; the box shows it as the box
         it replaces did."""
         processor, ui, settings, wf_ctrl, events_ctx = setup
-        task_box_mock = _box()
+        task_box_mock = autospec_box()
         ui.start_thinking.return_value = task_box_mock
         processor._last_task_progress = "[▸] Cached"
 
@@ -368,7 +360,7 @@ class TestProcessDualBoxes:
     async def test_no_cold_start_when_task_box_active(self, setup):
         """No extra box created if task box already exists."""
         processor, ui, settings, wf_ctrl, events_ctx = setup
-        processor._task_box = _box()
+        processor._task_box = autospec_box()
         processor._last_task_progress = "[▸] Cached"
 
         await processor.process("hi", wf_ctrl, ui, settings)
@@ -379,7 +371,7 @@ class TestProcessDualBoxes:
     async def test_task_progress_cached_on_exit(self, setup):
         """Plain-text _last_task_content cached to _last_task_progress on exit."""
         processor, ui, settings, wf_ctrl, events_ctx = setup
-        task_ctx = _box()
+        task_ctx = autospec_box()
         processor._task_box = task_ctx
         processor._last_task_content = "[✓] Done task"
 

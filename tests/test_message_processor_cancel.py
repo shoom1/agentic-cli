@@ -17,10 +17,9 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import MagicMock, call, create_autospec
+from unittest.mock import MagicMock, call
 
 import pytest
-from thinking_prompt import ThinkingBox
 
 from agentic_cli.cli import message_processor as message_processor_module
 from agentic_cli.cli.app import BaseCLIApp
@@ -33,7 +32,7 @@ from agentic_cli.cli.workflow_controller import WorkflowController
 from agentic_cli.config import BaseSettings
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.events import InputType, UserInputRequest, WorkflowEvent
-from tests.cli.dialog_fakes import autospec_session
+from tests.cli.dialog_fakes import autospec_session, opening_boxes
 from tests.event_replay import ReplayController
 
 SETTINGS = SimpleNamespace(default_user="u", verbose_thinking=False)
@@ -68,18 +67,7 @@ def logged(monkeypatch) -> list[dict]:
 @pytest.fixture
 def ui() -> MagicMock:
     """A session whose every ``start_thinking`` opens a new box (``ui.boxes``)."""
-    ui = autospec_session()
-    ui.boxes = []
-
-    def start_thinking(*args, **kwargs):
-        box = create_autospec(ThinkingBox, instance=True)
-        box.is_finished = False
-        box.finish.side_effect = lambda **kw: setattr(box, "is_finished", True)
-        ui.boxes.append(box)
-        return box
-
-    ui.start_thinking.side_effect = start_thinking
-    return ui
+    return opening_boxes(autospec_session())
 
 
 class Workflow:
