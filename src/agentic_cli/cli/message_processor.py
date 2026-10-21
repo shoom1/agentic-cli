@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from agentic_cli.cli.workflow_controller import WorkflowController
     from agentic_cli.workflow import WorkflowEvent
     from agentic_cli.workflow.events import UserInputRequest
-    from thinking_prompt import ThinkingBox, ThinkingPromptSession
+    from thinking_prompt import Placement, ThinkingBox, ThinkingPromptSession
 
 
 logger = Loggers.cli()
@@ -447,8 +447,12 @@ class MessageProcessor:
             _finish_events_box()
             # If the dialog raises, the turn is unwinding (cancelled, or the
             # dialog failed): reopening the events box then would leave a
-            # panel on screen that nothing downstream will ever finish.
-            response = await self._prompt_user_input(request, ui)
+            # panel on screen that nothing downstream will ever finish. The
+            # placement is read now: /settings may have changed it since the
+            # session started with its own.
+            response = await self._prompt_user_input(
+                request, ui, settings.dialog_placement
+            )
             _open_events_box()
             return response
 
@@ -590,6 +594,7 @@ class MessageProcessor:
         self,
         request: "UserInputRequest",
         ui: "ThinkingPromptSession",
+        placement: "Placement",
     ) -> str:
         """Prompt user for input requested by a tool.
 
@@ -600,6 +605,8 @@ class MessageProcessor:
         Args:
             request: The user input request from the tool.
             ui: UI session for prompting.
+            placement: Where the dialog is drawn, ``"box"`` or ``"inline"``
+                (the ``dialog_placement`` setting).
 
         Returns:
             User's response string ("" for a cancelled free-text question).
@@ -614,6 +621,7 @@ class MessageProcessor:
                 text=request.prompt,
                 options=request.choices,
                 default=request.default,
+                placement=placement,
             )
             return result or (request.default or "")
 
@@ -621,6 +629,7 @@ class MessageProcessor:
             result = await ui.yes_no_dialog(
                 title=f"{tool_name} - Confirmation",
                 text=request.prompt,
+                placement=placement,
             )
             return "yes" if result else "no"
 
@@ -638,6 +647,7 @@ class MessageProcessor:
                         edit_width=60,
                     )
                 ],
+                placement=placement,
             )
             # OK returns True; Cancel and Escape return None.
             if not await ui.show_dialog(dialog):

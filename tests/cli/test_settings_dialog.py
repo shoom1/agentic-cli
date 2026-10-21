@@ -6,7 +6,9 @@ command works out what changed against each field's starting value, so
 returns True; Cancel and Escape return None. A cancel and a Save with nothing
 changed both say "Settings unchanged." and apply nothing. Ctrl+C is not a
 cancel: it interrupts the command, as thinking-prompt 0.4 does by default,
-and agentic-cli adds nothing to that.
+and agentic-cli adds nothing to that. The dialog is drawn where
+``dialog_placement`` says now: the session's own placement is the one it
+started with.
 
 The dialogs here are real ``Dialog`` objects (``edited_dialog``) on an
 autospecced session, so a constructor argument or a session method 0.4 lacks
@@ -16,6 +18,8 @@ fails the test.
 from __future__ import annotations
 
 import asyncio
+import functools
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, call
 
@@ -43,7 +47,10 @@ KEYS = [
 def hermetic(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    for variable in ("GOOGLE_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY"):
+    for variable in (
+        "GOOGLE_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY",
+        "AGENTIC_DIALOG_PLACEMENT",
+    ):
         monkeypatch.delenv(variable, raising=False)
 
 
@@ -101,6 +108,29 @@ async def test_the_dialog_has_the_fields_and_save_and_cancel(app, monkeypatch):
     assert list(dialog.fields) == app._build_ui_items()
     assert list(dialog.buttons) == [ButtonConfig("Save", result=True), ButtonConfig("Cancel")]
     assert dialog.width == 80
+    assert dialog.placement == "box"
+
+
+async def test_the_dialog_is_drawn_where_the_user_chose(app, monkeypatch):
+    app._settings.update_setting("dialog_placement", "inline")
+
+    dialog = await _settings(app, monkeypatch, {})
+
+    assert dialog.placement == "inline"
+
+
+async def test_a_placement_switch_applies_to_the_next_dialog(app, monkeypatch):
+    """A Save that switches the placement: the very next /settings uses it."""
+    app.get_ui_setting_keys = lambda: ["dialog_placement"]
+    app.apply_settings = functools.partial(BaseCLIApp.apply_settings, app)
+    saved = SimpleNamespace(project_path=Path("p"), user_path=None, user_scoped_keys=())
+    app.save_settings = AsyncMock(return_value=saved)
+
+    first = await _settings(app, monkeypatch, {"dialog_placement": "inline"})
+    app.session.show_dialog.reset_mock()
+    second = await _settings(app, monkeypatch, {})
+
+    assert (first.placement, second.placement) == ("box", "inline")
 
 
 async def test_save_applies_only_the_changed_keys(app, monkeypatch):

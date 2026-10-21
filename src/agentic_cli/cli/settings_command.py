@@ -51,6 +51,8 @@ class SettingsCommand(Command):
             buttons=[ButtonConfig("Save", result=True), ButtonConfig("Cancel")],
             # Room for a model picker's row: its label and a whole reference.
             width=80,
+            # The session's own placement is the one it started with.
+            placement=app.settings.dialog_placement,
         )
         # Save returns True; Cancel and Escape return None.
         if not await app.session.show_dialog(dialog):

@@ -7,15 +7,18 @@ owns it, and an app recolors a theme through one hook, ``get_theme(name)``:
 is 0.4's own theme, since dark-tuned colors would be unreadable on a light
 background. The session draws in the theme the user chose (``ui_theme``,
 through ``get_theme``) and places dialogs where they chose
-(``dialog_placement``). ``get_styles()`` is gone, and an app still defining it
-fails at construction rather than starting with its colors silently dropped.
+(``dialog_placement``). A ``/settings`` change of theme switches the running
+session to it and repaints the transcript, unless the change is rolled back.
+``get_styles()`` is gone, and an app still defining it fails at construction
+rather than starting with its colors silently dropped.
 """
 
 from __future__ import annotations
 
 import dataclasses
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, call, patch
 
 import pytest
 from prompt_toolkit.history import InMemoryHistory
@@ -24,6 +27,7 @@ from thinking_prompt import ThinkingPromptStyles
 from agentic_cli.cli import app as app_module
 from agentic_cli.cli.app import BaseCLIApp, SlashCommandCompleter
 from agentic_cli.config import BaseSettings
+from tests.cli.dialog_fakes import autospec_session
 
 # The colors agentic-cli has always drawn with: its dark theme.
 AGENTIC_COLORS = {
@@ -167,6 +171,93 @@ def test_the_real_session_draws_in_agentic_cli_s_colors():
 
     for name, value in AGENTIC_COLORS.items():
         assert getattr(styles, name) == value, name
+
+
+# --- switching the theme -----------------------------------------------------------
+
+
+def _switching_app(**settings: str) -> BaseCLIApp:
+    """An app whose session records what is done to it, in order."""
+    app = _app(**settings)
+    app.session = autospec_session()
+    return app
+
+
+def _themes_set(app: BaseCLIApp) -> list:
+    return app.session.set_theme.call_args_list
+
+
+async def test_a_theme_change_repaints_in_the_new_theme_after_the_report():
+    app = _switching_app()
+
+    assert await app.apply_settings({"ui_theme": "light"}) is True
+
+    # The repaint prints the transcript again, the report line included.
+    assert [name for name, _, _ in app.session.mock_calls] == ["add_success", "set_theme"]
+    assert _themes_set(app) == [call("light", repaint=True)]
+
+
+async def test_back_to_dark_is_agentic_cli_s_dark_again():
+    app = _switching_app(ui_theme="light")
+
+    await app.apply_settings({"ui_theme": "dark"})
+
+    assert _themes_set(app) == [call(app.get_theme("dark"), repaint=True)]
+
+
+async def test_an_app_s_colors_apply_to_the_new_theme():
+    mine = dataclasses.replace(ThinkingPromptStyles.light(), thinking_box="fg:#9b59b6")
+
+    class App(BaseCLIApp):
+        def get_theme(self, name: str) -> str | ThinkingPromptStyles:
+            return mine if name == "light" else super().get_theme(name)
+
+    app = _app(App)
+    app.session = autospec_session()
+
+    await app.apply_settings({"ui_theme": "light"})
+
+    assert _themes_set(app) == [call(mine, repaint=True)]
+
+
+async def test_a_change_rolled_back_by_an_invalid_value_leaves_the_theme_alone():
+    """Review Focus 5: the theme is applied first, then another key fails."""
+    app = _switching_app()
+
+    applied = await app.apply_settings({"ui_theme": "light", "thinking_effort": "extreme"})
+
+    assert applied is False
+    assert app.settings.ui_theme == "dark"
+    app.session.set_theme.assert_not_called()
+
+
+async def test_a_change_rolled_back_by_a_failed_restart_leaves_the_theme_alone():
+    """Review Focus 5: the workflow cannot restart with the other change."""
+    app = _switching_app()
+    app._workflow_controller = SimpleNamespace(
+        is_ready=True,
+        workflow=SimpleNamespace(model="google:gemini-2.5-flash", agent_models={}),
+        reinitialize=AsyncMock(side_effect=RuntimeError("no such model")),
+    )
+
+    applied = await app.apply_settings({"ui_theme": "light", "thinking_effort": "high"})
+
+    assert applied is False
+    assert app.settings.ui_theme == "dark"
+    app.session.set_theme.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [{"verbose_thinking": False}, {"dialog_placement": "inline"}, {"ui_theme": "dark"}],
+    ids=["another key", "the placement", "the same theme"],
+)
+async def test_no_other_change_repaints(changes):
+    app = _switching_app()
+
+    assert await app.apply_settings(changes) is True
+
+    app.session.set_theme.assert_not_called()
 
 
 # --- the removed get_styles ----------------------------------------------------------

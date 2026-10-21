@@ -635,7 +635,9 @@ class BaseCLIApp:
 
         A reinitialization keeps the sessions, as a model switch does. A
         switch to the deprecated LangGraph orchestrator ends with its
-        deprecation warning.
+        deprecation warning. A change of ``ui_theme`` switches the session to
+        ``get_theme(ui_theme)`` last, repainting the transcript; one rolled
+        back leaves the theme as it was.
 
         Args:
             changes: Dictionary of changed settings (key -> new_value)
@@ -651,6 +653,7 @@ class BaseCLIApp:
         new_model = changes.get("model")
         snapshot = _snapshot_settings(self._settings)
         was_langgraph = _runs_langgraph(self._settings)
+        theme_before = self._settings.ui_theme
 
         # `orchestrator` triggers a reinit too: the controller swaps the backend
         # when it changes (otherwise the change only took effect on restart).
@@ -708,6 +711,11 @@ class BaseCLIApp:
             self.session.add_message("system", notice)
         if not was_langgraph:  # a switch to it, not a change made while on it
             _warn_if_langgraph(self._settings, self.session)
+        if self._settings.ui_theme != theme_before:
+            # Repaint: text printed before would keep the old theme's colors.
+            # The transcript is printed again, the lines above included.
+            theme = self.get_theme(self._settings.ui_theme)
+            self.session.set_theme(theme, repaint=True)
         return True
 
     def _register_builtin_commands(self) -> None:

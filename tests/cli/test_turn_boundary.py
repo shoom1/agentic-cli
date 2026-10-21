@@ -62,7 +62,7 @@ def _controller(workflow):
 
 
 def _settings():
-    return SimpleNamespace(verbose_thinking=False, default_user="u")
+    return SimpleNamespace(verbose_thinking=False, default_user="u", dialog_placement="box")
 
 
 async def _run(processor, ui, source_factory, workflow=None):
