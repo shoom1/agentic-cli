@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     from agentic_cli.cli.workflow_controller import WorkflowController
     from agentic_cli.workflow import WorkflowEvent
     from agentic_cli.workflow.events import UserInputRequest
-    from thinking_prompt import ThinkingContext, ThinkingPromptSession
+    from thinking_prompt import ThinkingBox, ThinkingPromptSession
 
 
 logger = Loggers.cli()
@@ -168,8 +168,20 @@ class MessageProcessor:
     def __init__(self) -> None:
         """Initialize the message processor."""
         self._last_task_progress: str | None = None
-        self._task_box: "ThinkingContext | None" = None
+        self._task_box: "ThinkingBox | None" = None
         self._last_task_content: str | None = None
+
+    def _live_task_box(self) -> "ThinkingBox | None":
+        """The task box, unless there is none or it has ended.
+
+        A box can end without us: the session ends the boxes a handler leaves
+        open, and Ctrl+C at an idle prompt clears every box. A write to an
+        ended box is dropped (with a logged warning), so it counts as none.
+        """
+        box = self._task_box
+        if box is None or box.is_finished:
+            return None
+        return box
 
     async def process(
         self,
@@ -346,20 +358,21 @@ class MessageProcessor:
         workflow = workflow_controller.workflow
         dispatch = self._get_event_dispatch()
 
-        # Cold start: recreate task box from cached content if it was alive
-        # last turn but got cleaned up between turns
-        if self._task_box is None and self._last_task_progress is not None:
+        # Cold start: recreate the task box from the tasks it showed when the
+        # last turn ended it (see the finally below), drawn as it drew them.
+        if self._live_task_box() is None and self._last_task_progress is not None:
             self._task_box = ui.start_thinking(
                 title="Tasks",
                 order=100,
                 content_format="ansi",
+                overflow="head",  # a long list keeps its first tasks in view
             )
-            self._task_box.append(self._last_task_progress)
+            self._task_box.append(_richify_task_display(self._last_task_progress))
 
         # Events thinking box context — tracks the per-invocation events box.
         # This is a callback-driven box (no append/clear), only the callback
         # (state.get_status) drives its display.
-        events_ctx: "ThinkingContext | None" = None
+        events_ctx: "ThinkingBox | None" = None
 
         def _finish_events_box() -> None:
             """Finish the events box if it is open. Idempotent by construction.
@@ -489,11 +502,18 @@ class MessageProcessor:
             # the paths above ran, and a box left open outlives the turn.
             _finish_events_box()
             workflow.clear_input_callback()
-            # Cache plain-text task content for cold start on next turn
-            # (not get_content() which returns already-richified ANSI)
+            # The task box ends with the turn, out of the transcript: the
+            # session would end a box the turn leaves open into it, unseen
+            # (with echo_thinking off), for a repaint to print. Cache its
+            # plain-text content (not the richified ANSI it shows) for the
+            # next turn's cold start.
+            task_box = self._live_task_box()
             self._last_task_progress = (
-                self._last_task_content if self._task_box else None
+                self._last_task_content if task_box is not None else None
             )
+            if task_box is not None:
+                task_box.finish(add_to_history=False, echo_to_console=False)
+            self._task_box = None
         return result
 
     @staticmethod
@@ -785,10 +805,13 @@ class MessageProcessor:
         total = progress.get("total", 0)
         completed = progress.get("completed", 0)
 
+        box = self._live_task_box()
+
         # Destroy box when tasks are cleared or all complete
         if total == 0 or completed >= total:
             if self._task_box is not None:
-                self._task_box.finish(add_to_history=False, echo_to_console=False)
+                if box is not None:
+                    box.finish(add_to_history=False, echo_to_console=False)
                 self._task_box = None
                 self._last_task_content = None
             # Update events box status line
@@ -797,22 +820,25 @@ class MessageProcessor:
                 state.status_line = f"Working on: {current_task}"
             return
 
-        # Create task box on first progress event with work remaining
-        if self._task_box is None:
-            self._task_box = ui.start_thinking(
+        # Create task box on first progress event with work remaining, or
+        # when the last one ended
+        new_box = box is None
+        if new_box:
+            box = self._task_box = ui.start_thinking(
                 title=f"Tasks: {completed}/{total}",
                 order=100,
                 content_format="ansi",
+                overflow="head",  # a long list keeps its first tasks in view
             )
         else:
             # Update title on existing box
-            self._task_box.set_title(f"Tasks: {completed}/{total}")
+            box.set_title(f"Tasks: {completed}/{total}")
 
-        # Deduplicate: skip content update if unchanged
-        if event.content and event.content != self._last_task_content:
+        # Deduplicate: skip content update if unchanged (a new box has none)
+        if event.content and (new_box or event.content != self._last_task_content):
             self._last_task_content = event.content
-            self._task_box.clear()
-            self._task_box.append(_richify_task_display(event.content))
+            box.clear()
+            box.append(_richify_task_display(event.content))
 
         # Update events box status line
         current_task = event.metadata.get("current_task_description")

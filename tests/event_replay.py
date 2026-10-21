@@ -36,6 +36,10 @@ class RecordingThinkingContext:
         self.label = label
         self.finished = False
 
+    @property
+    def is_finished(self) -> bool:
+        return self.finished
+
     def append(self, text: str) -> None:
         self._session.calls.append(("ctx_append", self.label, text))
 
