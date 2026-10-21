@@ -844,6 +844,15 @@ step; each entry says what to use instead.
 
 ### Fixed
 
+- **Ctrl+C while `/settings` restarts the workflow no longer leaves the new
+  values live and unsaved.** A Save that changes the model, a role's model,
+  the thinking effort or the orchestrator restarts the workflow on them, and
+  a Ctrl+C there stopped the command before its rollback: the new values
+  stayed in memory, unsaved, and the next request started the workflow on
+  them (a new theme stayed in the settings, too, while the screen kept the
+  old one). Interrupted, the restart is now undone as a failed one is: every
+  setting is restored and the workflow is brought back on the model it had.
+  Nothing is printed, as Ctrl+C there is the session's own interruption.
 - **On ADK, a `/settings` switch to another provider no longer breaks the
   session.** ADK sends an agent's earlier turns back with every request,
   thoughts included, and after the switch they were another provider's:
