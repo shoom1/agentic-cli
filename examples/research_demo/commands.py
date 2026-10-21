@@ -56,7 +56,7 @@ class MemoryCommand(Command):
 
         table = Table(title="Persistent Memory", show_header=True)
         table.add_column("ID", style="dim", width=8)
-        table.add_column("Content", style="white")
+        table.add_column("Content")  # the terminal's own color: readable on every theme
         table.add_column("Tags", style="dim")
 
         if memory_store:

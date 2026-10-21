@@ -277,7 +277,7 @@ class JobsCommand(Command):
 
         table = Table(title="Jobs", show_lines=False, padding=(0, 1))
         table.add_column("ID", style="bold cyan", no_wrap=True)
-        table.add_column("Name", style="white")
+        table.add_column("Name")  # the terminal's own color: readable on every theme
         table.add_column("Backend", style="dim", no_wrap=True)
         table.add_column("State", no_wrap=True)
         table.add_column("Elapsed", style="dim", no_wrap=True, justify="right")

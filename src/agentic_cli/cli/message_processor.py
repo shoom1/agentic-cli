@@ -63,10 +63,14 @@ def _richify_task_display(plain: str) -> str:
 
     Task box uses full-color styling (not dim grey like thinking/tool boxes):
     - Completed: green ✓, dim text (done = de-emphasised)
-    - In-progress: yellow ▸, white text (active = prominent)
-    - Pending: white ○, white text (upcoming = visible)
+    - In-progress: yellow ▸, bold text (active = prominent)
+    - Pending: ○, plain text (upcoming = visible)
     - Cancelled: red ✗, dim text (irrelevant = de-emphasised)
-    - Section headers: bold white
+    - Section headers: bold
+
+    Text keeps the terminal's own foreground, never a fixed white: the box
+    shows these colors as they are, under every theme, and white is a light
+    grey on a light terminal.
     """
     from thinking_prompt import rich_to_ansi
 
@@ -82,18 +86,16 @@ def _richify_task_display(plain: str) -> str:
             lines.append(f"{indent}[green]✓[/green] [dim]{_esc(stripped[4:])}[/dim]")
         elif stripped.startswith("[▸]"):
             lines.append(
-                f"{indent}[yellow]▸[/yellow] [white]{_esc(stripped[4:])}[/white]"
+                f"{indent}[yellow]▸[/yellow] [bold]{_esc(stripped[4:])}[/bold]"
             )
         elif stripped.startswith("[ ]"):
-            lines.append(
-                f"{indent}[white]○[/white] [white]{_esc(stripped[4:])}[/white]"
-            )
+            lines.append(f"{indent}○ {_esc(stripped[4:])}")
         elif stripped.startswith("[-]"):
             lines.append(
                 f"{indent}[red]✗[/red] [dim]{_esc(stripped[4:])}[/dim]"
             )
         else:
-            lines.append(f"[bold white]{_esc(line)}[/bold white]")
+            lines.append(f"[bold]{_esc(line)}[/bold]")
     return rich_to_ansi("\n".join(lines))
 
 
