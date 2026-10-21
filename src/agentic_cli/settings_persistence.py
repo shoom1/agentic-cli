@@ -71,6 +71,13 @@ PROJECT_SETTABLE_KEYS = frozenset({
     "log_level", "log_format", "verbose_thinking",
 })
 
+# The user's preferences: how the CLI looks, which is the user's choice in
+# every project. They are user-scoped like every key not in
+# PROJECT_SETTABLE_KEYS (a project file or a cwd .env cannot set them, and a
+# save writes them to the user file), and shown in /settings only when an app
+# lists them (BaseCLIApp._build_ui_items), unlike any other user-scoped key.
+USER_PREFERENCE_KEYS = frozenset({"ui_theme", "dialog_placement"})
+
 # Identity fields set by the application, not the user
 IDENTITY_FIELDS = frozenset({
     "app_name",

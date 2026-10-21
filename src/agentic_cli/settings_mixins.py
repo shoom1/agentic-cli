@@ -1,7 +1,7 @@
 """Settings mixins for application identity and CLI/UI configuration.
 
 AppSettingsMixin: Application identity and disk layout (app_name, workspace, paths).
-CLISettingsMixin: CLI/UI-specific display settings (logging, thinking output).
+CLISettingsMixin: CLI/UI display settings (logging, thinking output, theme, dialogs).
 
 These modules live outside cli/ so that config.py can compose BaseSettings
 without importing the cli package.
@@ -90,4 +90,20 @@ class CLISettingsMixin:
         title="Verbose Thinking",
         description="Show detailed thinking/reasoning output in the UI",
         json_schema_extra={"ui_order": 35},
+    )
+
+    # Look and feel: the user's preferences (USER_PREFERENCE_KEYS). A project
+    # file or a cwd .env cannot set them, and /settings shows them only when
+    # an app lists them.
+    ui_theme: Literal["dark", "light", "mono", "terminal", "auto"] = Field(
+        default="dark",
+        title="UI Theme",
+        description="Color theme (auto: chosen from the terminal)",
+        json_schema_extra={"ui_order": 36},
+    )
+    dialog_placement: Literal["box", "inline"] = Field(
+        default="box",
+        title="Dialog Placement",
+        description="Dialogs in a box, or inline under the prompt",
+        json_schema_extra={"ui_order": 37},
     )

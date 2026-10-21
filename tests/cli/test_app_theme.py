@@ -5,8 +5,10 @@ In 0.4 ``AppInfo`` is only the startup banner, and the session's behavior
 owns it, and an app recolors a theme through one hook, ``get_theme(name)``:
 ``"dark"`` is 0.4's dark theme with agentic-cli's colors, and any other name
 is 0.4's own theme, since dark-tuned colors would be unreadable on a light
-background. ``get_styles()`` is gone, and an app still defining it fails at
-construction rather than starting with its colors silently dropped.
+background. The session draws in the theme the user chose (``ui_theme``,
+through ``get_theme``) and places dialogs where they chose
+(``dialog_placement``). ``get_styles()`` is gone, and an app still defining it
+fails at construction rather than starting with its colors silently dropped.
 """
 
 from __future__ import annotations
@@ -44,17 +46,19 @@ def hermetic(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     (tmp_path / "home").mkdir()
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    for variable in ("AGENTIC_UI_THEME", "AGENTIC_DIALOG_PLACEMENT"):
+        monkeypatch.delenv(variable, raising=False)
     monkeypatch.setattr(app_module, "configure_logging", lambda *a, **k: None)
     monkeypatch.setattr(app_module, "_install_adk_notice_hook", lambda: None)
 
 
-def _app(cls: type[BaseCLIApp] = BaseCLIApp) -> BaseCLIApp:
+def _app(cls: type[BaseCLIApp] = BaseCLIApp, **settings: str) -> BaseCLIApp:
     from agentic_cli.cli import AppInfo
 
     return cls(
         app_info=AppInfo(name="Theme test", version="0"),
         agent_configs=[],
-        settings=BaseSettings(session_store="memory"),
+        settings=BaseSettings(session_store="memory", **settings),
     )
 
 
@@ -114,8 +118,38 @@ def test_the_session_gets_the_dark_theme_and_today_s_behavior():
         "status_text": "Ctrl+C: cancel | Ctrl+D: exit | /help: commands",
         "echo_input": False,
         "echo_thinking": False,
+        "dialog_placement": "box",
     }
     assert app.session is session_cls.return_value
+
+
+@pytest.mark.parametrize("theme", ["light", "mono", "terminal", "auto"])
+def test_the_session_takes_the_user_s_theme_and_placement(theme):
+    with patch.object(app_module, "ThinkingPromptSession") as session_cls:
+        _app(ui_theme=theme, dialog_placement="inline")
+
+    kwargs = session_cls.call_args.kwargs
+    assert (kwargs["theme"], kwargs["dialog_placement"]) == (theme, "inline")
+
+
+def test_the_user_s_theme_goes_through_get_theme():
+    """An app's colors for a theme apply to the one the user chose."""
+    asked: list[str] = []
+
+    class App(BaseCLIApp):
+        def get_theme(self, name: str) -> str | ThinkingPromptStyles:
+            asked.append(name)
+            return super().get_theme(name)
+
+    app = _app(App, ui_theme="mono")
+
+    assert asked == ["mono"]
+    assert app.session.styles == ThinkingPromptStyles.mono()
+
+
+def test_the_real_session_places_dialogs_where_the_user_chose():
+    assert _app().session.dialog_placement == "box"
+    assert _app(dialog_placement="inline").session.dialog_placement == "inline"
 
 
 def test_an_app_s_own_theme_reaches_the_session():

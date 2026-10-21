@@ -1,8 +1,9 @@
 """Turns on a real console, over a pty: Ctrl+C, a question, typing ahead.
 
 thinking-prompt 0.4's Ctrl+C cancels the turn's task, its dialogs are
-``Dialog`` objects, and it refuses Enter while a turn runs. What the user
-sees of each only shows on a real terminal, so these run
+``Dialog`` objects, drawn in a box or inline, and it refuses Enter while a
+turn runs. What the user sees of each only shows on a real terminal, so these
+run
 ``tests/cli/console_app.py`` (``BaseCLIApp`` over a scripted workflow, no
 provider, no key) in a child process and type at it. Every wait is an
 ``expect`` on output, never a sleep.
@@ -32,9 +33,13 @@ CONSOLE_APP = Path(__file__).with_name("console_app.py")
 
 
 class Console:
-    """The child app on a pty, and what it printed."""
+    """The child app on a pty, and what it printed.
 
-    def __init__(self, cwd: Path, home: Path) -> None:
+    ``env`` is the child's whole environment, ``child_env(home)`` when
+    omitted; a test that needs one more variable starts from ``child_env``.
+    """
+
+    def __init__(self, cwd: Path, home: Path, env: dict[str, str] | None = None) -> None:
         import pexpect
 
         self.cwd = cwd
@@ -43,7 +48,7 @@ class Console:
             sys.executable,
             [str(CONSOLE_APP)],
             cwd=str(cwd),
-            env=child_env(home),
+            env=child_env(home) if env is None else env,
             encoding="utf-8",
             codec_errors="replace",
             timeout=STEP_TIMEOUT,
@@ -145,6 +150,34 @@ def test_a_free_text_question_is_answered(console):
     console.send("\r")  # press it
     console.expect("You said: teal")
     console.exit()
+
+
+def test_a_free_text_question_is_answered_inline(tmp_path):
+    """With ``dialog_placement`` inline (the user's environment says so), the
+    question is rows under the prompt, and the same keys answer it."""
+    home, cwd = tmp_path / "home", tmp_path / "cwd"
+    home.mkdir()
+    cwd.mkdir()
+    env = {**child_env(home), "AGENTIC_DIALOG_PLACEMENT": "inline"}
+    console = Console(cwd, home, env=env)
+    try:
+        console.type_line("ask")
+        console.expect("ask_clarification - Input Required")
+        console.expect("What colour?")
+        console.expect("1. OK")  # an inline dialog's buttons are numbered rows
+
+        console.send("\r")  # edit the answer
+        console.send("teal")
+        console.expect("teal")
+        console.send("\r")  # keep it
+        console.send("\t")  # on to OK
+        console.send("\r")  # press it
+        console.expect("You said: teal")
+        console.exit()
+    finally:
+        console.child.close(force=True)
+
+    assert "<    OK    >" not in console.transcript  # a box's button
 
 
 def test_a_line_typed_during_a_turn_waits_in_the_prompt(console):

@@ -167,6 +167,38 @@ class TestInvalidValue:
         app.save_settings.assert_not_awaited()
 
 
+class TestTheLinesNameASettingAsTheDialogDoes:
+    """A report or error line labels a setting as the dialog does: by its
+    field's title, where it has one, rather than its key title-cased."""
+
+    async def test_a_report_line_uses_the_field_s_title(self, settings):
+        app = _app(settings, FakeManager(OLD_MODEL))
+
+        await app.apply_settings({"retry_max_attempts": "5", "verbose_thinking": False})
+
+        assert app.successes == ["Max Retry Attempts: 5", "Verbose Thinking: False"]
+
+    async def test_an_error_line_does_too(self, settings):
+        app = _app(settings, FakeManager(OLD_MODEL))
+
+        assert await app.apply_settings({"retry_max_attempts": "many"}) is False
+
+        (error,) = app.errors
+        assert error.startswith("Failed to set Max Retry Attempts: ")
+
+    async def test_the_model_pickers_keep_their_labels(self, settings):
+        """``model`` is not a field; a role's picker is named after the role."""
+        app = _app(settings, FakeManager(OLD_MODEL))
+
+        await app.apply_settings(
+            {"model": "gemini-2.5-flash-lite", "model_role:fast": "gemini-2.5-flash"}
+        )
+
+        assert app.successes == [
+            "Model: gemini-2.5-flash-lite", "Fast Model: gemini-2.5-flash",
+        ]
+
+
 class TestSuccess:
     async def test_applies_reinitializes_and_reports(self, settings):
         manager = FakeManager(OLD_MODEL)
