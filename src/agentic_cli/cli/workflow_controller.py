@@ -32,6 +32,20 @@ if TYPE_CHECKING:
 logger = Loggers.cli()
 
 
+def _main_model(workflow: "BaseWorkflowManager") -> str:
+    """The model the status bar names: the main agent's, whose context ``ctx`` shows.
+
+    The root agent's own resolved model when the manager has one (the root may
+    run on a model of its own, through ``AgentConfig.model`` or a role), else
+    the default model: before initialization, on LangGraph or a native ADK
+    YAML app, or for an application's manager without ``root_agent_name``.
+    """
+    root = getattr(workflow, "root_agent_name", None)
+    models = getattr(workflow, "agent_models", None) or {}
+    model = models.get(root) if isinstance(root, str) else None
+    return str(model.ref) if model is not None else workflow.model
+
+
 class WorkflowState(str, Enum):
     """Lifecycle state of a :class:`WorkflowController`.
 
@@ -635,13 +649,16 @@ class WorkflowController:
     def update_status_bar(self, ui: "ThinkingPromptSession") -> None:
         """Update UI status bar with current workflow status.
 
+        It names the model of the main agent, whose context the ``ctx``
+        segment shows (``_main_model``).
+
         Args:
             ui: UI session to update
         """
         if self._init_error:
             ui.set_status("Init failed - check API keys")
         elif self._workflow is not None:
-            parts = [self._workflow.model]
+            parts = [_main_model(self._workflow)]
             if self.usage_tracker:
                 token_summary = self.usage_tracker.format_status_bar()
                 if token_summary:

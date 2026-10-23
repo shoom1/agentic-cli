@@ -33,7 +33,7 @@ Agentic CLI provides the core infrastructure for building interactive CLI applic
 ┌─────────────────────────────────────────────────────────────────────┐
 │                    BaseWorkflowManager                              │
 │  - Agent orchestration, event streaming                             │
-│  - Session save/resume, usage tracking, context-trim detection      │
+│  - Session save/resume, usage per agent, context budgets            │
 │  - Service registry: shared state for tools (KB, memory, sandbox…)  │
 ├─────────────────────────────────────────────────────────────────────┤
 │  GoogleADKWorkflowManager (default)                                 │
@@ -1418,6 +1418,49 @@ there as well. On Deep Agents it is the `ToolResultCapMiddleware`, between
 the permission gate and the tool-error middleware, so an error result is
 capped too. A `/settings` change of the limit rebuilds the agents and keeps
 the conversation.
+
+### Settings
+
+Three settings, the same on ADK and Deep Agents (LangGraph, deprecated,
+manages no context). A project may set them, and a `/settings` change of
+any of them rebuilds the agents and keeps the conversation.
+
+| Setting | Default | What it does |
+|---------|---------|--------------|
+| `context_summarize_at` | 0.85 | The share of the input budget (95% of the window, less `max_tokens`) at which the conversation is summarized, from 0.5 to 0.95 |
+| `context_max_tokens` | 200,000 | A ceiling on that point, in tokens: on a 1M-token model the summary comes at 200,000. 0 for none; otherwise at least 16,000 |
+| `tool_result_max_chars` | 50,000 | A tool result longer than this is cut and its full output saved (see Tool results); at least 2,000 |
+
+A model whose input budget is under 16,000 tokens (a `max_tokens` close to
+its window) fails to start with `ContextBudgetError`, naming the agent, its
+model and its `max_tokens`.
+
+### Seeing it
+
+- **The status bar** shows the main agent's last prompt against the size
+  at which its conversation is summarized: `ctx 45k/170k (26%)`. That is
+  the point that matters, not the raw window: on a 1M-token model "/1M"
+  would hide that the summary comes at 200,000. The bar names the main
+  agent's own model, which may not be the default model. A sub-agent's
+  calls and a summary's never move it; an inheriting sub-agent's prompt
+  holds the conversation, but it is not the main agent's context. On a
+  model whose window is unknown (the 128k floor in use) it shows the prompt
+  alone, `ctx 45k`, as on LangGraph and in a native ADK YAML app, which
+  manage no context. A `/settings` change that rebuilds the agents (a
+  model, `context_summarize_at`, `context_max_tokens`) shows the new
+  trigger at once; an orchestrator swap starts another conversation, and
+  the segment waits for its first call, as a resumed session's does.
+- **`/status`** adds the main agent's rows after Services: Main Agent (its
+  name and model), Context Window (or "unknown, 128k floor in use"), Input
+  Budget, Summarize At and Last Prompt. A manager's
+  `context_budget(agent_name=None)` gives the same numbers for any agent,
+  the root agent's by default.
+- **Warnings** say what happened to the context: "Context summarized: 48
+  messages, 152k → 9k tokens", or, when the fit guard trims a request (ADK,
+  at most once a turn), "Context: 3 earlier turns left out of this request
+  to fit the window". A sub-agent's own context is named first:
+  "researcher: context summarized: …" (on Deep Agents each agent summarizes
+  its own). A prompt smaller than the last is not taken for a trim.
 
 ## CLI Commands
 

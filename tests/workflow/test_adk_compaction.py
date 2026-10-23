@@ -37,6 +37,7 @@ from google.adk.apps import compaction as adk_compaction  # noqa: E402
 from agentic_cli.cli.message_processor import CANCELLED_LINE, MessageProcessor  # noqa: E402
 from agentic_cli.config import BaseSettings  # noqa: E402
 from agentic_cli.tools.jobs import JobState  # noqa: E402
+from agentic_cli.cli.usage_tracker import UsageTracker  # noqa: E402
 from agentic_cli.tools.registry import ToolCategory, register_tool  # noqa: E402
 from agentic_cli.workflow import live_events  # noqa: E402
 from agentic_cli.workflow.adk import compaction  # noqa: E402
@@ -273,6 +274,29 @@ class TestSummarizing:
             assert (event.metadata["agent"], event.metadata["context_trigger"],
                     event.metadata["window_known"]) == ("solo", 16_000, True)
         assert "purpose" not in answer_usage.metadata
+
+    async def test_the_status_bar_never_shows_the_summarys_prompt(self, project, monkeypatch):
+        """The summary call's prompt (7,000 tokens here) is the history it
+        condenses: the main agent's context goes from the second turn's prompt
+        to the third's, past the trigger and back under it."""
+        serve(monkeypatch, four_turns())
+        manager = solo()
+        tracker, shown = UsageTracker(), []
+        try:
+            for text in TURNS[:3]:
+                for event in await turn(manager, text):
+                    if event.type is EventType.LLM_USAGE:
+                        tracker.record(event.metadata)
+                        shown.append(tracker.format_context())
+        finally:
+            await manager.cleanup()
+
+        assert shown == [
+            "ctx 4k/16k (25%)",
+            "ctx 17k/16k (106%)",
+            "ctx 17k/16k (106%)",  # the summary's call
+            "ctx 4k/16k (25%)",
+        ]
 
     async def test_a_second_summary_replaces_the_first(self, project, monkeypatch):
         """The main path of a long conversation: the second summary starts where

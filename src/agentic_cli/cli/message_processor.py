@@ -144,6 +144,45 @@ class TurnResult:
         return self.status is TurnStatus.COMPLETED
 
 
+# === Context warnings ===
+
+
+def _counted(count: int, noun: str) -> str:
+    """``"1 message"``, ``"48 messages"``."""
+    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
+
+
+def _trimmed_warning(metadata: dict) -> str:
+    """What a CONTEXT_TRIMMED event tells the user.
+
+    A summary: ``"Context summarized: 48 messages, 152k → 9k tokens"`` (the
+    token counts when it gave them). Turns left out of one request:
+    ``"Context: 3 earlier turns left out of this request to fit the
+    window"``. Anything else, or a summary or trim without its counts:
+    ``"Context trimmed: N messages removed (<source>)"``.
+    """
+    from agentic_cli.cli.usage_tracker import format_tokens
+
+    source = metadata.get("source", "unknown")
+    summarized = metadata.get("messages_summarized")
+    dropped = metadata.get("turns_dropped")
+    if source in ("summarization", "compact") and summarized is not None:
+        warning = f"Context summarized: {_counted(summarized, 'message')}"
+        before, after = metadata.get("tokens_before"), metadata.get("tokens_after")
+        if before is not None and after is not None:
+            warning += f", {format_tokens(before)} → {format_tokens(after)} tokens"
+        return warning
+    if source == "fit_guard" and dropped is not None:
+        return (
+            f"Context: {_counted(dropped, 'earlier turn')} left out of this request "
+            "to fit the window"
+        )
+    removed = metadata.get("messages_removed")
+    if removed is not None:
+        return f"Context trimmed: {removed} messages removed ({source})"
+    return f"Context window trimmed ({source})"
+
+
 # === Event Processing State ===
 
 
@@ -165,8 +204,6 @@ class _EventProcessingState:
     # First non-recoverable ERROR event seen. The stream may keep going (the
     # backend decides), but the turn's outcome is FAILED, never delivered.
     fatal_error: str | None = None
-    # Prevents double-counting when LangGraph emits both CONTEXT_TRIMMED and LLM_USAGE
-    _context_trimmed_this_invocation: bool = False
 
     def get_status(self) -> str:
         """Return the current status line for the events thinking box."""
@@ -903,19 +940,23 @@ class MessageProcessor:
         settings: "BaseSettings",
         workflow: object,
     ) -> None:
-        """Handle CONTEXT_TRIMMED events — increment counter and warn user."""
+        """Handle CONTEXT_TRIMMED events — count them and say what happened.
+
+        A summary (in a turn, or ``/compact``) says how many messages it stands
+        for and the conversation's size before and after; a request trimmed to
+        fit the window says how many earlier turns it left out. Any other
+        source reads as before. A sub-agent's own context (an agent other than
+        the manager's ``root_agent_name``) is named first, the text lowercased
+        after it: "researcher: context summarized: …".
+        """
         if state.usage_tracker is not None:
             state.usage_tracker.context_trimmed_count += 1
-        state._context_trimmed_this_invocation = True
-
-        removed = event.metadata.get("messages_removed")
-        source = event.metadata.get("source", "unknown")
-        if removed is not None:
-            ui.add_warning(
-                f"Context trimmed: {removed} messages removed ({source})"
-            )
-        else:
-            ui.add_warning(f"Context window trimmed ({source})")
+        warning = _trimmed_warning(event.metadata)
+        agent = event.metadata.get("agent")
+        root = getattr(workflow, "root_agent_name", None)
+        if agent is not None and root is not None and agent != root:
+            warning = f"{agent}: {warning[0].lower()}{warning[1:]}"
+        ui.add_warning(warning)
 
     async def _handle_context_summarizing(
         self,
@@ -943,29 +984,14 @@ class MessageProcessor:
         """Handle LLM_USAGE events — accumulate token counts and refresh status bar.
 
         A summary's own usage ends its "Summarizing…" line: the answer's
-        model call runs next and reports nothing until it is done.
+        model call runs next and reports nothing until it is done. A smaller
+        prompt than the last is no trim: a summary or a trimmed request
+        reports itself (CONTEXT_TRIMMED).
         """
         if event.metadata.get("purpose") == "summarization":
             state.status_line = "Processing..."
         if state.usage_tracker is not None:
-            tracker = state.usage_tracker
-            prev_prompt = tracker.last_prompt_tokens
-            heuristic_trimmed = tracker.record(
-                event.metadata,
-                context_trimmed_already=state._context_trimmed_this_invocation,
-            )
-
-            if heuristic_trimmed:
-                from agentic_cli.cli.usage_tracker import format_tokens
-
-                ui.add_warning(
-                    f"Context window trimmed: {format_tokens(prev_prompt)}"
-                    f" → {format_tokens(tracker.last_prompt_tokens)} tokens"
-                    " (token_drop_heuristic)"
-                )
-
-            # Reset per-invocation flag for next LLM call
-            state._context_trimmed_this_invocation = False
+            state.usage_tracker.record(event.metadata)
 
         if state.workflow_controller is not None:
             state.workflow_controller.update_status_bar(ui)

@@ -57,7 +57,7 @@ from google.adk.tools.agent_tool import AgentTool, _SingleTurnAgentTool  # noqa:
 from google.adk.tools.skill_toolset import SkillToolset  # noqa: E402
 from google.genai import types  # noqa: E402
 
-from agentic_cli.cli.usage_tracker import UsageTracker  # noqa: E402
+from agentic_cli.cli.usage_tracker import UsageTracker, format_tokens  # noqa: E402
 from agentic_cli.config import BaseSettings  # noqa: E402
 from agentic_cli.tools._core.delegation import TASK_TOOL  # noqa: E402
 from agentic_cli.tools.jobs import JobState  # noqa: E402
@@ -616,6 +616,36 @@ class TestUsagePerAgent:
         ]
 
     @pytest.mark.parametrize("context", ["fresh", "inherit"])
+    async def test_the_status_bar_shows_only_the_main_agents_context(
+        self, project, monkeypatch, context
+    ):
+        route(monkeypatch, anthropic, "AsyncAnthropic", FakeAPI(Team(
+            coordinator=[sized(calls("researcher", "toolu_c1", request=BRIEF), 4_000),
+                         sized(says("The researcher says X is 42."), 4_200)],
+            # A prompt far larger than the coordinator's, as an inheriting
+            # sub-agent's may be: it is still not the main agent's context.
+            researcher=[sized(says("X is 42."), 150_000)],
+        )))
+        manager = manager_for(team(context))
+        try:
+            events = await turn(manager, "Have the researcher find X.")
+            trigger = manager.context_budget().trigger
+        finally:
+            await manager.cleanup()
+
+        tracker, shown = UsageTracker(), []
+        for event in events:
+            if event.type is EventType.LLM_USAGE:
+                tracker.record(event.metadata)
+                shown.append(tracker.format_context())
+        of = f"/{format_tokens(trigger)}"
+        assert shown == [
+            f"ctx 4k{of} ({round(400_000 / trigger)}%)",
+            f"ctx 4k{of} ({round(400_000 / trigger)}%)",  # the researcher's call
+            f"ctx 4.2k{of} ({round(420_000 / trigger)}%)",
+        ]
+
+    @pytest.mark.parametrize("context", ["fresh", "inherit"])
     async def test_with_the_raw_llm_log_a_sub_agent_never_moves_ctx(
         self, project, monkeypatch, context
     ):
@@ -635,6 +665,7 @@ class TestUsagePerAgent:
         )
         try:
             events = await turn(manager, "Have the researcher find X.")
+            trigger = manager.context_budget().trigger
         finally:
             await manager.cleanup()
 
@@ -647,8 +678,13 @@ class TestUsagePerAgent:
         tracker, shown = UsageTracker(), []
         for metadata in usage:
             tracker.record(metadata)
-            shown.append(tracker.last_prompt_tokens)
-        assert shown == [4_000, 4_000, 4_200]
+            shown.append(tracker.format_context())
+        of = f"/{format_tokens(trigger)}"
+        assert shown == [
+            f"ctx 4k{of} ({round(400_000 / trigger)}%)",
+            f"ctx 4k{of} ({round(400_000 / trigger)}%)",
+            f"ctx 4.2k{of} ({round(420_000 / trigger)}%)",
+        ]
         assert tracker.prompt_tokens == 158_200  # each call once
 
     async def test_the_raw_log_names_each_calls_own_model(self, project, monkeypatch):

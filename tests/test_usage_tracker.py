@@ -33,6 +33,17 @@ class TestFormatTokens:
         assert format_tokens(1200000) == "1.2M"
         assert format_tokens(1500000) == "1.5M"
 
+    @pytest.mark.parametrize("count, shown", [
+        (146_036, "146k"),  # Claude 4.5's trigger
+        (45_020, "45k"),
+        (103_360, "103.4k"),
+        (1_000_400, "1M"),
+        (999_999, "1M"),  # rounds up into the next unit
+        (999, "999"),
+    ])
+    def test_rounded_to_a_whole_number_it_shows_no_decimal(self, count, shown):
+        assert format_tokens(count) == shown
+
 
 # === UsageTracker tests ===
 
@@ -119,12 +130,12 @@ class TestUsageTracker:
     def test_format_status_bar_populated(self):
         tracker = UsageTracker()
         tracker.record({"prompt_tokens": 12500, "completion_tokens": 3200})
-        assert tracker.format_status_bar() == "Tokens: 12.5k in / 3.2k out | ctx: 12.5k"
+        assert tracker.format_status_bar() == "Tokens: 12.5k in / 3.2k out | ctx 12.5k"
 
     def test_format_status_bar_small_values(self):
         tracker = UsageTracker()
         tracker.record({"prompt_tokens": 42, "completion_tokens": 10})
-        assert tracker.format_status_bar() == "Tokens: 42 in / 10 out | ctx: 42"
+        assert tracker.format_status_bar() == "Tokens: 42 in / 10 out | ctx 42"
 
     def test_reset(self):
         tracker = UsageTracker()
@@ -149,7 +160,11 @@ class TestUsageTracker:
         assert tracker.format_status_bar() == ""
 
 
-# === Context window tracking tests ===
+# === The main agent's context ===
+
+#: The usage of a main agent's call whose trigger is 170k on a known window.
+MAIN = {"prompt_tokens": 45_000, "completion_tokens": 100,
+        "context_trigger": 170_000, "window_known": True}
 
 
 class TestContextWindowTracking:
@@ -164,33 +179,6 @@ class TestContextWindowTracking:
         tracker.record({"prompt_tokens": 6000, "completion_tokens": 300})
         assert tracker.last_prompt_tokens == 6000
 
-    def test_record_detects_trim_via_token_drop(self):
-        """record() auto-detects trims when prompt_tokens drop."""
-        tracker = UsageTracker()
-        tracker.record({"prompt_tokens": 10000})
-        result = tracker.record({"prompt_tokens": 5000})  # Drop triggers heuristic
-        assert result is True
-        assert tracker.context_trimmed_count == 1
-
-    def test_record_skips_heuristic_when_already_trimmed(self):
-        """record() skips heuristic when context_trimmed_already is True."""
-        tracker = UsageTracker()
-        tracker.record({"prompt_tokens": 10000})
-        result = tracker.record({"prompt_tokens": 5000}, context_trimmed_already=True)
-        assert result is False
-        assert tracker.context_trimmed_count == 0
-
-    def test_no_trim_on_increase(self):
-        tracker = UsageTracker()
-        tracker.record({"prompt_tokens": 5000})
-        tracker.record({"prompt_tokens": 8000})
-        assert tracker.context_trimmed_count == 0
-
-    def test_no_trim_on_first_invocation(self):
-        tracker = UsageTracker()
-        tracker.record({"prompt_tokens": 5000})
-        assert tracker.context_trimmed_count == 0
-
     def test_external_increment_works(self):
         """context_trimmed_count can be incremented by external event handlers."""
         tracker = UsageTracker()
@@ -198,65 +186,87 @@ class TestContextWindowTracking:
         tracker.context_trimmed_count += 1
         assert tracker.context_trimmed_count == 2
 
-    def test_status_bar_includes_context(self):
+    def test_the_main_agents_prompt_against_its_trigger(self):
         tracker = UsageTracker()
-        tracker.record({"prompt_tokens": 5000, "completion_tokens": 200})
-        bar = tracker.format_status_bar()
-        assert "ctx: 5k" in bar
+        tracker.record(MAIN)
 
-    def test_status_bar_shows_trimmed_when_set_externally(self):
-        """Status bar shows (trimmed) regardless of how count was set."""
-        tracker = UsageTracker()
-        tracker.record({"prompt_tokens": 5000, "completion_tokens": 200})
-        tracker.context_trimmed_count = 1
-        bar = tracker.format_status_bar()
-        assert "ctx: 5k" in bar
-        assert "(trimmed)" in bar
+        assert tracker.format_status_bar() == "Tokens: 45k in / 100 out | ctx 45k/170k (26%)"
+        assert (tracker.last_prompt_tokens, tracker.context_trigger, tracker.window_known) == (
+            45_000, 170_000, True
+        )
 
-    def test_status_bar_no_trimmed_without_trim(self):
+    @pytest.mark.parametrize("prompt, shown", [
+        (85_000, "ctx 85k/170k (50%)"),
+        (1_000, "ctx 1k/170k (1%)"),
+        (180_000, "ctx 180k/170k (106%)"),  # the trigger lags a call
+    ])
+    def test_the_share_is_a_whole_percent(self, prompt, shown):
         tracker = UsageTracker()
-        tracker.record({"prompt_tokens": 5000, "completion_tokens": 200})
-        tracker.record({"prompt_tokens": 8000, "completion_tokens": 300})
-        bar = tracker.format_status_bar()
-        assert "(trimmed)" not in bar
+        tracker.record({**MAIN, "prompt_tokens": prompt})
+
+        assert tracker.format_status_bar().endswith(f" | {shown}")
+
+    def test_on_an_unknown_window_the_prompt_alone(self):
+        # The trigger then rests on the 128k floor, not on the model.
+        tracker = UsageTracker()
+        tracker.record({**MAIN, "context_trigger": 92_000, "window_known": False})
+
+        assert tracker.format_status_bar() == "Tokens: 45k in / 100 out | ctx 45k"
+
+    def test_without_a_trigger_the_prompt_alone(self):
+        # A backend that manages no context (LangGraph) reports none.
+        tracker = UsageTracker()
+        tracker.record({"prompt_tokens": 45_000, "completion_tokens": 100})
+
+        assert tracker.format_status_bar() == "Tokens: 45k in / 100 out | ctx 45k"
+
+    @pytest.mark.parametrize("purpose", ["subagent", "summarization"])
+    def test_a_sub_agent_or_summary_call_never_moves_it(self, purpose):
+        """A summary's prompt is the history it condenses; a sub-agent's is its
+        brief, or the whole conversation when it inherits it, and still not
+        the main agent's context. Each adds to the totals only."""
+        tracker = UsageTracker()
+        tracker.record(MAIN)
+
+        result = tracker.record({
+            "prompt_tokens": 150_000, "completion_tokens": 30, "purpose": purpose,
+            "context_trigger": 100_000, "window_known": False,
+        })
+
+        assert result is None
+        assert tracker.format_status_bar() == (
+            "Tokens: 195k in / 130 out | ctx 45k/170k (26%)"
+        )
+        assert tracker.invocation_count == 2
+
+    def test_a_smaller_prompt_is_no_trim(self):
+        # The token-drop heuristic is gone: a summary or a trim says so itself.
+        tracker = UsageTracker()
+        tracker.record({**MAIN, "prompt_tokens": 100_000})
+
+        assert tracker.record({**MAIN, "prompt_tokens": 9_000}) is None
+        assert tracker.context_trimmed_count == 0
+        assert tracker.format_status_bar().endswith(" | ctx 9k/170k (5%)")
+
+    def test_counted_trims_do_not_mark_the_segment(self):
+        tracker = UsageTracker()
+        tracker.record(MAIN)
+        tracker.context_trimmed_count = 2
+
+        assert "(trimmed)" not in tracker.format_status_bar()
 
     def test_reset_clears_context_fields(self):
         tracker = UsageTracker()
-        tracker.record({"prompt_tokens": 10000})
+        tracker.record({**MAIN, "prompt_tokens": 10000})
         tracker.context_trimmed_count = 3
         tracker.reset()
         assert tracker.last_prompt_tokens == 0
+        assert (tracker.context_trigger, tracker.window_known) == (None, None)
         assert tracker.context_trimmed_count == 0
 
-    def test_a_summary_call_counts_but_is_not_the_context(self):
-        """A summarization call's prompt is the history it condenses, not the
-        conversation's context: it adds to the totals only."""
+    def test_the_detail_rows_leave_the_context_to_status(self):
+        # /status shows the last prompt beside the model's window and trigger.
         tracker = UsageTracker()
-        tracker.record({"prompt_tokens": 10000, "completion_tokens": 100})
+        tracker.record(MAIN)
 
-        result = tracker.record(
-            {"prompt_tokens": 7000, "completion_tokens": 400, "purpose": "summarization"}
-        )
-
-        assert result is False
-        assert tracker.context_trimmed_count == 0
-        assert tracker.last_prompt_tokens == 10000
-        assert (tracker.prompt_tokens, tracker.completion_tokens) == (17000, 500)
-        assert tracker.invocation_count == 2
-
-    def test_a_sub_agent_call_counts_but_is_not_the_context(self):
-        """A sub-agent's prompt is its brief, not the conversation's context:
-        it adds to the totals only, and the coordinator's next call is no drop."""
-        tracker = UsageTracker()
-        tracker.record({"prompt_tokens": 5000, "completion_tokens": 20})
-
-        result = tracker.record(
-            {"prompt_tokens": 400, "completion_tokens": 30, "purpose": "subagent"}
-        )
-
-        assert result is False
-        assert tracker.last_prompt_tokens == 5000
-        assert tracker.record({"prompt_tokens": 5100, "completion_tokens": 10}) is False
-        assert tracker.context_trimmed_count == 0
-        assert tracker.last_prompt_tokens == 5100
-        assert (tracker.prompt_tokens, tracker.completion_tokens) == (10500, 60)
+        assert "Context Window" not in dict(tracker.format_detail_rows())

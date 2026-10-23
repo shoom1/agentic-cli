@@ -425,6 +425,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   those of the agent it summarized. A sub-agent's call stays
   `purpose="subagent"`, an inheriting one's too: its prompt holds the
   conversation, but it is not the main agent's context.
+- **The status bar shows how close the main agent is to its next summary**:
+  `ctx 45k/170k (26%)`, its last prompt against the prompt size at which
+  its conversation is summarized (the `context_trigger` its usage carries)
+  rather than the raw window, since on a 1M-token model "/1M" would hide
+  that the summary comes at 200,000. The bar names the main agent's own
+  model (it named the default model, beside the main agent's trigger). A
+  sub-agent's call and a summary's never move it, an inheriting sub-agent's
+  neither. On a model whose window is unknown, on LangGraph and in a native
+  ADK YAML app, it is the prompt alone, `ctx 45k`. A `/settings` change
+  that rebuilds the agents shows the new trigger at once, not after the
+  next call; an orchestrator swap forgets the context (another backend's
+  conversation is another one). Token counts read "146k", not "146.0k".
+  `/status` adds the main agent's rows after Services: Main Agent (its name
+  and model), Context Window (or "unknown, 128k floor in use"), Input
+  Budget, Summarize At and Last Prompt; a manager that manages no context
+  shows only the last prompt. A summary or a trimmed request is one warning
+  that says what happened: "Context summarized: 48 messages, 152k → 9k
+  tokens" (`source` `summarization` or `compact`), or "Context: 3 earlier
+  turns left out of this request to fit the window" (`fit_guard`); another
+  source's trim reads as before. A sub-agent's own is named first,
+  "researcher: context summarized: …". `UsageTracker` keeps `context_trigger` and
+  `window_known` beside `last_prompt_tokens`, and `format_context()` gives
+  the segment.
 
 ### Changed
 
@@ -906,6 +929,14 @@ further deprecation step. So are the 0.6 model registry and the backends'
 model code, which the model layer replaces (see Added) without a deprecation
 step; each entry says what to use instead.
 
+- **The token-drop warning.** A prompt smaller than the last was taken for
+  a trimmed context: "Context window trimmed: 10k → 5k tokens
+  (token_drop_heuristic)", and the status bar's `ctx:` segment was marked
+  "(trimmed)", so a summary's or a fresh session's smaller prompt set it
+  off. A summary and a request trimmed to fit now report themselves (see
+  Added). `UsageTracker.record()` returns None and takes no
+  `context_trimmed_already`, and the tracker's "Context Window" row, which
+  was the last prompt, is `/status`'s "Last Prompt".
 - **The `context_window_enabled`, `context_window_trigger_tokens` and
   `context_window_target_tokens` settings.** Use `context_summarize_at` and
   `context_max_tokens` (see Changed). The three meant something different on

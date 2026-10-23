@@ -77,6 +77,43 @@ class ExitCommand(Command):
         app.stop()
 
 
+def _context_rows(workflow: Any, tracker: Any) -> list[tuple[str, str]]:
+    """The main agent's context, as ``/status`` rows.
+
+    The agent and its model, the model's window (or the 128k floor in use),
+    the input budget, the prompt size its conversation is summarized at, and
+    its last prompt. A manager with no budget for its root agent (not
+    initialized yet; LangGraph or a native ADK YAML app, which manage no
+    context; one without ``context_budget``) gives only the last prompt, once
+    there is one. Any other error is the manager's, and is not hidden here.
+    """
+    from agentic_cli.cli.usage_tracker import format_tokens
+    from agentic_cli.workflow.context import UNKNOWN_WINDOW
+
+    last = getattr(tracker, "last_prompt_tokens", 0) or 0
+    last_prompt = ("Last Prompt", format_tokens(last) if last else "—")
+    context_budget = getattr(workflow, "context_budget", None)
+    if context_budget is None:
+        return [last_prompt] if last else []
+    try:
+        budget = context_budget()
+    except (KeyError, RuntimeError):
+        return [last_prompt] if last else []
+    root = workflow.root_agent_name
+    model = workflow.agent_models[root]
+    window = (
+        format_tokens(budget.window) if budget.window_known
+        else f"unknown, {format_tokens(UNKNOWN_WINDOW)} floor in use"
+    )
+    return [
+        ("Main Agent", f"{root} ({model.ref})"),
+        ("Context Window", window),
+        ("Input Budget", format_tokens(budget.budget)),
+        ("Summarize At", format_tokens(budget.trigger)),
+        last_prompt,
+    ]
+
+
 class StatusCommand(Command):
     """Show current session status."""
 
@@ -104,6 +141,8 @@ class StatusCommand(Command):
             table.add_row("Session ID", workflow.session_id)
             services = "Initialized" if workflow.is_initialized else "Not initialized"
             table.add_row("Services", services)
+            for label, value in _context_rows(workflow, getattr(app, "usage_tracker", None)):
+                table.add_row(label, value)
         except (RuntimeError, AttributeError):
             table.add_row("Workflow", "[yellow]Not available (initializing...)[/yellow]")
             init_error = getattr(app, "_init_error", None) or getattr(app, "workflow_error", None)
