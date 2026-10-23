@@ -1325,9 +1325,12 @@ class TestRequiresAreConstructible:
 
         assert "requires='knowledge_base'" in str(exc.value)
 
-    def test_knowledge_base_creates_both_scopes(self):
+    def test_knowledge_base_creates_both_scopes(self, tmp_path, monkeypatch):
         """The documented replacement really provides the user-scoped KB too."""
         from agentic_cli.workflow.service_registry import KNOWLEDGE_BASE
+
+        # The project scope is ./.agentic_cli/knowledge_base: not the checkout's.
+        monkeypatch.chdir(tmp_path)
 
         from tests.conftest import MockContext
 
