@@ -268,9 +268,14 @@ async def test_concurrent_streamed_and_unstreamed_requests_keep_their_own_mode()
 
 # --- the copied loop is still ADK's ---------------------------------------------------
 
-# The hash of ADK's OpenAILlm._generate_content_streaming (google-adk 2.12.0),
-# which openai_compatible.py copies.
-ADK_LOOP_SHA256 = "46bdee101bd7155a34772afbb239045d29729e3dda6964f46e779cc24d88fdd3"
+# The hashes of ADK's OpenAILlm._generate_content_streaming, which
+# openai_compatible.py copies, in each supported google-adk: 2.12.0, and 2.13.0,
+# which builds a call's part in one expression (the copy follows it; both build
+# the same part).
+ADK_LOOP_SHA256 = {
+    "46bdee101bd7155a34772afbb239045d29729e3dda6964f46e779cc24d88fdd3",
+    "a229e0eb02e4e84d00b0bde40939c834f422b6fdf75edbaaf5e7e71badb27436",
+}
 
 PLAIN_STREAMS = {
     "text": dict(deltas=[{"role": "assistant", "content": "Hel"}, {"content": "lo."}]),
@@ -308,10 +313,10 @@ async def test_without_reasoning_the_responses_are_adk_s_own(case, stream):
 def test_adk_s_streaming_loop_is_the_one_copied():
     source = inspect.getsource(OpenAILlm._generate_content_streaming)
 
-    assert hashlib.sha256(source.encode()).hexdigest() == ADK_LOOP_SHA256, (
+    assert hashlib.sha256(source.encode()).hexdigest() in ADK_LOOP_SHA256, (
         "ADK's OpenAILlm._generate_content_streaming changed. Copy the new loop into "
         "OpenAICompatibleLlm._stream (agentic_cli/workflow/adk/openai_compatible.py), "
-        "keeping its reasoning lines, then update ADK_LOOP_SHA256."
+        "keeping its reasoning lines, then add its hash to ADK_LOOP_SHA256."
     )
 
 
