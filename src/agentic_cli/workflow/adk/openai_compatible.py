@@ -202,9 +202,13 @@ class OpenAICompatibleLlm(OpenAILlm):
                 except json.JSONDecodeError:
                     logger.warning("tool_call_arguments_not_json", tool=acc["name"])
 
-            part = types.Part.from_function_call(name=acc["name"], args=args)
-            part.function_call.id = acc["id"]
-            parts.append(part)
+            parts.append(
+                types.Part(
+                    function_call=types.FunctionCall(
+                        name=acc["name"], args=args, id=acc["id"]
+                    )
+                )
+            )
 
         mapped_finish_reason = _map_finish_reason(finish_reason)
 
