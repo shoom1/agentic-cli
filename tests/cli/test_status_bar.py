@@ -158,7 +158,7 @@ class TestAfterASave:
 
         assert await app.apply_settings({"context_max_tokens": 100_000})
 
-        assert app.statuses[-1] == f"{SONNET} | Tokens: 45k in / 0 out | ctx 45k | " \
+        assert app.statuses[-1] == f"{SONNET} | ctx 45k | Tokens: 45k in / 0 out | " \
             "Ctrl+C: cancel | /help: commands"
 
 
@@ -187,3 +187,24 @@ class TestTheModelItNames:
         app._workflow_controller.update_status_bar(app.session)
 
         assert app.statuses[-1].startswith(f"{SONNET} | ")
+
+
+class TestANarrowTerminal:
+    @pytest.mark.parametrize("model", [SONNET, "openrouter:anthropic/claude-sonnet-4.5"])
+    def test_the_share_survives_80_columns_late_in_a_long_session(self, model):
+        # The bar is one line, clipped at the terminal's width (80 columns by
+        # default in many terminals). Late in a long session the totals are
+        # long; what they push past the edge must not be the main agent's
+        # context, which is then near its trigger.
+        settings = BaseSettings(session_store="memory", default_model=SONNET)
+        manager = SimpleNamespace(model=model, backend_type="adk", is_initialized=True)
+        app = app_for(solo(), settings, manager)
+        tracker = app._usage_tracker
+        for _ in range(100):
+            tracker.record({"prompt_tokens": 123_000, "completion_tokens": 4_500})
+        tracker.record({"prompt_tokens": 140_500, "context_trigger": 146_000,
+                        "window_known": True})
+
+        app._workflow_controller.update_status_bar(app.session)
+
+        assert "ctx 140.5k/146k (96%)" in app.statuses[-1][:80], app.statuses[-1]

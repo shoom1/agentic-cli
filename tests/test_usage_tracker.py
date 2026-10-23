@@ -130,12 +130,12 @@ class TestUsageTracker:
     def test_format_status_bar_populated(self):
         tracker = UsageTracker()
         tracker.record({"prompt_tokens": 12500, "completion_tokens": 3200})
-        assert tracker.format_status_bar() == "Tokens: 12.5k in / 3.2k out | ctx 12.5k"
+        assert tracker.format_status_bar() == "ctx 12.5k | Tokens: 12.5k in / 3.2k out"
 
     def test_format_status_bar_small_values(self):
         tracker = UsageTracker()
         tracker.record({"prompt_tokens": 42, "completion_tokens": 10})
-        assert tracker.format_status_bar() == "Tokens: 42 in / 10 out | ctx 42"
+        assert tracker.format_status_bar() == "ctx 42 | Tokens: 42 in / 10 out"
 
     def test_reset(self):
         tracker = UsageTracker()
@@ -190,7 +190,7 @@ class TestContextWindowTracking:
         tracker = UsageTracker()
         tracker.record(MAIN)
 
-        assert tracker.format_status_bar() == "Tokens: 45k in / 100 out | ctx 45k/170k (26%)"
+        assert tracker.format_status_bar() == "ctx 45k/170k (26%) | Tokens: 45k in / 100 out"
         assert (tracker.last_prompt_tokens, tracker.context_trigger, tracker.window_known) == (
             45_000, 170_000, True
         )
@@ -204,21 +204,21 @@ class TestContextWindowTracking:
         tracker = UsageTracker()
         tracker.record({**MAIN, "prompt_tokens": prompt})
 
-        assert tracker.format_status_bar().endswith(f" | {shown}")
+        assert tracker.format_status_bar().startswith(f"{shown} | ")
 
     def test_on_an_unknown_window_the_prompt_alone(self):
         # The trigger then rests on the 128k floor, not on the model.
         tracker = UsageTracker()
         tracker.record({**MAIN, "context_trigger": 92_000, "window_known": False})
 
-        assert tracker.format_status_bar() == "Tokens: 45k in / 100 out | ctx 45k"
+        assert tracker.format_status_bar() == "ctx 45k | Tokens: 45k in / 100 out"
 
     def test_without_a_trigger_the_prompt_alone(self):
         # A backend that manages no context (LangGraph) reports none.
         tracker = UsageTracker()
         tracker.record({"prompt_tokens": 45_000, "completion_tokens": 100})
 
-        assert tracker.format_status_bar() == "Tokens: 45k in / 100 out | ctx 45k"
+        assert tracker.format_status_bar() == "ctx 45k | Tokens: 45k in / 100 out"
 
     @pytest.mark.parametrize("purpose", ["subagent", "summarization"])
     def test_a_sub_agent_or_summary_call_never_moves_it(self, purpose):
@@ -235,7 +235,7 @@ class TestContextWindowTracking:
 
         assert result is None
         assert tracker.format_status_bar() == (
-            "Tokens: 195k in / 130 out | ctx 45k/170k (26%)"
+            "ctx 45k/170k (26%) | Tokens: 195k in / 130 out"
         )
         assert tracker.invocation_count == 2
 
@@ -246,7 +246,7 @@ class TestContextWindowTracking:
 
         assert tracker.record({**MAIN, "prompt_tokens": 9_000}) is None
         assert tracker.context_trimmed_count == 0
-        assert tracker.format_status_bar().endswith(" | ctx 9k/170k (5%)")
+        assert tracker.format_status_bar().startswith("ctx 9k/170k (5%) | ")
 
     def test_counted_trims_do_not_mark_the_segment(self):
         tracker = UsageTracker()

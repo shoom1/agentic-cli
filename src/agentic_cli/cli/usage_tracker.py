@@ -121,8 +121,13 @@ class UsageTracker:
     def format_status_bar(self) -> str:
         """Format token counts for status bar display.
 
+        The context comes first: the bar is one line, clipped at the
+        terminal's width, and late in a long session the totals are long.
+        What the edge cuts is then the totals, which ``/status`` shows in
+        full, never how close the next summary is.
+
         Returns:
-            ``"Tokens: 12.5k in / 3.2k out | ctx 45k/170k (26%)"``, or ``""``
+            ``"ctx 45k/170k (26%) | Tokens: 12.5k in / 3.2k out"``, or ``""``
             if no usage yet (see ``format_context``).
         """
         if self.invocation_count == 0:
@@ -133,7 +138,7 @@ class UsageTracker:
         ]
         context = self.format_context()
         if context:
-            parts.append(context)
+            parts.insert(0, context)
         return " | ".join(parts)
 
     def format_detail_rows(self) -> list[tuple[str, str]]:
