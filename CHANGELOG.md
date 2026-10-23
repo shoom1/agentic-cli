@@ -299,6 +299,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `placement=` from the settings each time, since thinking-prompt's session
     placement is fixed when it starts. An app's own dialogs keep that startup
     placement unless they pass `placement=` themselves.
+- **ADK summarizes the main agent's conversation before it outgrows the
+  model, as Deep Agents does.** ADK sent the whole session with every model
+  call, so a conversation that outgrew the window failed every later turn
+  (`context_window_*` only ever reached ADK's Live API). A manager built from
+  agent configs now gives its App ADK's `EventsCompactionConfig` with the
+  framework's summarizer (`workflow/adk/compaction.py`), at the main agent's
+  trigger, the point both backends share (see Changed). Before each of the
+  main agent's model calls ADK reads its last prompt's size; past the
+  trigger, the earlier turns are summarized on the main agent's own model
+  (thinking off, at most 8,000 tokens, with Deep Agents' summary prompt, now
+  copied with LangChain's MIT notice into `workflow/summary_prompt.py`) and
+  the summary is sent in their place from then on: user-role text starting
+  "Here is a summary of the conversation to date:", as the first part of the
+  first kept user message, so no provider sees two user messages in a row.
+  The newest 12% of the trigger, and the current turn, are kept word for
+  word; a cut never parts a tool call from its result; the session keeps
+  every original event for `/sessions` and fact extraction. Nothing is
+  summarized with no clean cut, or for a saving under a fifth of the trigger
+  (the summary so far left out of it). The summary call is sized to the
+  model that writes it: after a switch to a smaller model, the middle of a
+  range too long for it is left out ("[... middle of the conversation
+  omitted ...]", the summary so far kept whole), as LangChain does on an
+  overflow but before the call, so a summary is still written. While the summary is
+  written the CLI shows "Summarizing the earlier conversation…", and the
+  summary's usage and a `CONTEXT_TRIMMED` (`source="summarization"`) follow.
+  Only the main agent's conversation is summarized: a sub-agent past its own
+  trigger leaves the shared session alone. ADK's own pass after each turn is
+  switched off (`NoAfterTurnCompactionRunner`), so the prompt never waits
+  for a summary after the answer. A summary that fails is one warning a
+  turn, "Could not summarize the earlier conversation; older turns are left
+  out instead.", and the next call tries again; Ctrl+C during one writes
+  nothing. A request still over its agent's input budget (the summary
+  lags a call, a sub-agent may run on a smaller model, an unknown window
+  counts as 128,000 tokens) has its oldest whole turns left out of that
+  request only, by the fit guard (`workflow/adk/fit_guard_plugin.py`), which
+  folds "[Earlier turns were left out to fit the context window.]" into the
+  first kept message and reports `CONTEXT_TRIMMED` (`source="fit_guard"`,
+  `turns_dropped`) once a turn. The raw LLM log (`raw_llm_logging`) records a
+  request as it is sent, after that trim; the summary call and an overflow's
+  retry are not in it. A native ADK YAML app gets none of it.
 - **`EventType.CONTEXT_SUMMARIZING`**, from
   `WorkflowEvent.context_summarizing(agent=None)`: a summary of the earlier
   conversation is starting. It is reported as the summary call starts, while
@@ -371,6 +411,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A context overflow on ADK is recovered once, or ends in one clear
+  error.** A model call the provider refused as too long raised its raw
+  error ("Workflow error: prompt is too long: …"), and the next turn failed
+  the same way. Now (`workflow/adk/overflow_plugin.py`) every provider's way
+  of saying it is recognized (Claude's 400 and 413, OpenAI's
+  `context_length_exceeded`, OpenRouter's and vLLM's "maximum context
+  length", Gemini's token count, and an OpenAI Responses answer whose
+  `status` is `failed`): the main agent's conversation is summarized at
+  once, and the call is retried once as every later call will be sent, the
+  summary and the turns it kept; a sub-agent's call (or one the summary
+  cannot help) is retried with its oldest turns left out, which is reported
+  once a turn as the fit guard reports its own. The retry is built from the
+  request as it was before the model's adapter rewrote it (Gemini's context
+  cache), and sent uncached. If that fails too, the main agent's turn ends with one
+  `ERROR`, `error_code` `CONTEXT_OVERFLOW`: "This conversation no longer fits
+  <model>'s context window. Use /compact or /new.", as on Deep Agents, and
+  no reply is stored; a sub-agent tells its coordinator it could not do the
+  task, and the user gets one warning, "<agent>: the request no longer fits
+  <model>'s context window.". Any other model error is ADK's as before,
+  and one that fails the retry is the turn's error, the provider's own. The
+  tracebacks ADK logs for a failed summary, model call or retry are logged
+  at debug by the CLI, since the user is told otherwise: on ADK's
+  compaction (`adk_compaction_failed`), node (`adk_node_failed`), runner
+  (`adk_root_node_failed`, "Root node … failed.") and plugin-manager
+  (`adk_overflow_plugin_failed`) loggers. Until now every failed model call
+  printed one over the terminal.
 - **ADK sub-agents are delegated to and return, as on Deep Agents.**
   **Breaking:** an agent built from a config that is not the root runs in
   ADK's `single_turn` mode, with transfers to its parent and peers off. Its
@@ -774,7 +840,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   B = 0.95 W - M, and a conversation is summarized once a prompt reaches the
   smaller of `context_summarize_at` (0.85, from 0.5 to 0.95) of B and
   `context_max_tokens` (200,000; 0 for no ceiling, otherwise at least
-  16,000), keeping the newest 12% of that word for word. On Deep Agents a
+  16,000), keeping the newest 12% of that word for word. On ADK this is
+  new (see Added). On Deep Agents a
   1M-token model now summarizes at 200,000 tokens instead of about 800,000,
   and a model whose window is unknown (a user's endpoint model without a
   declared window, an OpenRouter id before a listing) counts as 128,000

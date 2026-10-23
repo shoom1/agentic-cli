@@ -19,7 +19,8 @@ agents are built, naming the model and its ``max_tokens``.
 
 **Overflow errors.** Each provider says "too long" its own way:
 ``is_context_overflow`` reads the error's attributes (status, code, text) and
-never imports a provider SDK. LangChain's own ``ContextOverflowError`` is
+never imports a provider SDK, and ``is_overflow_text`` the text alone, for an
+overflow reported in an answer. LangChain's own ``ContextOverflowError`` is
 recognized when LangChain is installed.
 
 Imports nothing from ``cli/``, no provider SDK and no LangChain at import.
@@ -219,9 +220,20 @@ def is_context_overflow(error: BaseException) -> bool:
         return True
     if status not in _OVERFLOW_STATUSES:
         return False
-    text = str(error).lower()
-    return any(marker in text for marker in _OVERFLOW_MARKERS) or any(
-        all(part in text for part in pair) for pair in _OVERFLOW_MARKER_PAIRS
+    return is_overflow_text(str(error))
+
+
+def is_overflow_text(text: str) -> bool:
+    """Whether ``text`` says what a provider says of a request too long for its model.
+
+    The text half of ``is_context_overflow``: an overflow code
+    (``context_length_exceeded``) or one of the providers' phrases, in any
+    case. For an error a provider reports in its answer instead of raising
+    (OpenAI Responses' ``status: failed``), where no status is there to read.
+    """
+    lowered = text.lower()
+    return any(marker in lowered for marker in _OVERFLOW_MARKERS) or any(
+        all(part in lowered for part in pair) for pair in _OVERFLOW_MARKER_PAIRS
     )
 
 

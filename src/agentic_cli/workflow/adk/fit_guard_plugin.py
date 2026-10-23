@@ -30,13 +30,20 @@ plugins, after ADK has built the request (the summary included):
 It keeps each request as it came in, until the call ends
 (``request_as_seen``): the overflow handler retries from that copy, since a
 model's adapter may rewrite the request in place (Gemini's context cache moves
-the system instruction, the tools and the cached contents out of it).
+the system instruction, the tools and the cached contents out of it). A copy
+belongs to one model call: it is kept under the identity of the call's
+``EventActions`` (``callback_context.actions``), which ADK makes for each
+call and hands to all three of its callbacks, while two parallel calls of one
+sub-agent share their invocation and agent name. It is released when the
+call ends (``after_model_callback``, ``on_model_error_callback``); a call
+cancelled mid-request fires neither, so each run first drops the copies any
+other invocation left (turns run one at a time).
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from google.adk.plugins.base_plugin import BasePlugin
 from google.genai import types
@@ -50,6 +57,7 @@ from agentic_cli.workflow.summary_prompt import SUMMARY_PREFIX
 if TYPE_CHECKING:
     from google.adk.agents.callback_context import CallbackContext
     from google.adk.agents.invocation_context import InvocationContext
+    from google.adk.events.event_actions import EventActions
     from google.adk.models.llm_request import LlmRequest
     from google.adk.models.llm_response import LlmResponse
 
@@ -67,6 +75,15 @@ _NOTE_CHARS = len(types.Part.from_text(text=FIT_NOTE).model_dump_json(exclude_no
 Seen = tuple[list[types.Content], "types.GenerateContentConfig | None"]
 
 
+class _Held(NamedTuple):
+    """One model call's copy, under the id of the call's ``EventActions``:
+    holding the object keeps that id from going to another while it is here."""
+
+    actions: "EventActions"
+    invocation: str
+    seen: Seen
+
+
 class FitGuardPlugin(BasePlugin):
     """Keeps each request within its agent's budget (see the module docstring).
 
@@ -82,8 +99,8 @@ class FitGuardPlugin(BasePlugin):
         super().__init__(name="fit_guard")
         self._budgets = dict(budgets)
         self._kinds = dict(kinds)
-        # (invocation, agent) → its model call's request as it came in.
-        self._seen: dict[tuple[str, str], Seen] = {}
+        # id(a model call's EventActions) → its request as it came in.
+        self._seen: dict[int, _Held] = {}
 
     async def before_model_callback(
         self, *, callback_context: "CallbackContext", llm_request: "LlmRequest"
@@ -93,9 +110,10 @@ class FitGuardPlugin(BasePlugin):
         if budget is None or kind is None:
             return None
         config = llm_request.config
-        self._seen[_key(callback_context)] = (
+        actions = callback_context.actions
+        self._seen[id(actions)] = _Held(actions, callback_context.invocation_id, (
             list(llm_request.contents), config.model_copy() if config is not None else None
-        )
+        ))
         self._fit(llm_request, agent, budget, kind)
         llm_request.contents = fold_summary(llm_request.contents)
         return None
@@ -104,25 +122,34 @@ class FitGuardPlugin(BasePlugin):
         self, *, callback_context: "CallbackContext", llm_response: "LlmResponse"
     ) -> None:
         if not llm_response.partial:
-            self._seen.pop(_key(callback_context), None)
+            self._release(callback_context)
         return None
 
     async def on_model_error_callback(
         self, *, callback_context: "CallbackContext", llm_request: "LlmRequest",
         error: Exception,
     ) -> None:
-        self._seen.pop(_key(callback_context), None)
+        self._release(callback_context)
         return None
 
-    async def after_run_callback(self, *, invocation_context: "InvocationContext") -> None:
+    async def before_run_callback(self, *, invocation_context: "InvocationContext") -> None:
+        # What a cancelled call left: it fired neither release.
         invocation = invocation_context.invocation_id
-        self._seen = {key: seen for key, seen in self._seen.items() if key[0] != invocation}
+        self._seen = {
+            key: held for key, held in self._seen.items() if held.invocation == invocation
+        }
+        return None
 
     def request_as_seen(self, callback_context: "CallbackContext") -> Seen | None:
-        """The request of the model call in flight as it came in, before any
-        plugin after this one, or the model's adapter, changed it; None when
-        this agent has no budget or no call is in flight."""
-        return self._seen.get(_key(callback_context))
+        """The request of this model call as it came in, before any plugin
+        after this one, or the model's adapter, changed it; None when this
+        agent has no budget or the call has ended. Never another call's: a
+        parallel call of the same agent has its own."""
+        held = self._seen.get(id(callback_context.actions))
+        return held.seen if held is not None else None
+
+    def _release(self, callback_context: "CallbackContext") -> None:
+        self._seen.pop(id(callback_context.actions), None)
 
     def _fit(
         self, llm_request: "LlmRequest", agent: str, budget: "ContextBudget",
@@ -181,7 +208,7 @@ def fold_summary(contents: list[types.Content]) -> list[types.Content]:
     model's turn, nothing) ``contents`` as they are; they are never changed
     in place.
     """
-    if len(contents) < 2 or not _is_summary(contents[0]) or not _users_text(contents[1]):
+    if len(contents) < 2 or not is_summary(contents[0]) or not _users_text(contents[1]):
         return contents
     summary, first = contents[0], contents[1]
     merged = first.model_copy(update={"parts": [*(summary.parts or []), *(first.parts or [])]})
@@ -195,8 +222,9 @@ def drop_turns(
 
     A turn starts at a user content with a text and no tool result, after a
     content that made no call: so a call and its result stay together. Turns
-    go oldest first until the rest, with the note, is under the target; the
-    newest turn always stays, and so does a summary that opens the
+    go oldest first, the oldest whatever the target (the caller knows the
+    request is too big), until the rest, with the note, is under the target;
+    the newest turn always stays, and so does a summary that opens the
     conversation. The first kept user content gets ``FIT_NOTE`` as a part
     before its own; ``contents`` themselves are left as they are.
 
@@ -207,7 +235,7 @@ def drop_turns(
         The contents to send, and how many turns were left out (0, with
         ``contents`` themselves, when there is only one turn).
     """
-    head = contents[:1] if contents and _is_summary(contents[0]) else []
+    head = contents[:1] if contents and is_summary(contents[0]) else []
     body = contents[len(head):]
     starts = [i for i in range(len(body)) if _starts_turn(body, i)]
     if not starts or starts[-1] == 0:
@@ -224,6 +252,28 @@ def drop_turns(
         if _tokens(remaining, kind) < target_tokens:
             break
     return [*head, _noted(body[cut]), *body[cut + 1:]], dropped
+
+
+def keep_newest_turns(
+    contents: list[types.Content], turns: int
+) -> tuple[list[types.Content], int]:
+    """``contents`` from their ``turns``-th newest turn on, cut as ``drop_turns`` cuts.
+
+    A summary that opens them stays, and the first kept user content gets
+    ``FIT_NOTE``. For a retry after a summary: the turns the summary kept,
+    what every later call sends besides it.
+
+    Returns:
+        The contents, and how many turns were left out (0, with ``contents``
+        themselves, when they hold no more than ``turns``).
+    """
+    head = contents[:1] if contents and is_summary(contents[0]) else []
+    body = contents[len(head):]
+    starts = [i for i in range(len(body)) if _starts_turn(body, i)]
+    if turns <= 0 or len(starts) <= turns:
+        return contents, 0
+    cut = starts[-turns]
+    return [*head, _noted(body[cut]), *body[cut + 1:]], len(starts) - turns
 
 
 def _noted(content: types.Content) -> types.Content:
@@ -248,9 +298,10 @@ def _users_text(content: types.Content) -> bool:
     return any(part.text and not part.thought for part in content.parts)
 
 
-def _is_summary(content: types.Content) -> bool:
-    """A user content whose first part is the summary ADK sends first once the
-    conversation was summarized (folded or not)."""
+def is_summary(content: types.Content) -> bool:
+    """Whether ``content`` opens with the summary ADK sends once the
+    conversation was summarized: a user content whose first part it is
+    (folded into a user's text or not)."""
     first = content.parts[0] if content.parts else None
     return content.role == "user" and bool(first and first.text) and first.text.startswith(
         SUMMARY_PREFIX
@@ -281,7 +332,3 @@ def _contents_chars(contents: list[types.Content]) -> int:
 
 def _tokens(chars: int, kind: "ProviderKind") -> int:
     return round(chars / chars_per_token(kind) * ESTIMATE_MARGIN)
-
-
-def _key(callback_context: "CallbackContext") -> tuple[str, str]:
-    return callback_context.invocation_id, callback_context.agent_name

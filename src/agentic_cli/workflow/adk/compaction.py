@@ -56,6 +56,7 @@ from __future__ import annotations
 
 import json
 from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from google.adk import Runner
@@ -146,6 +147,20 @@ class NoAfterTurnCompactionRunner(Runner):
         return None
 
 
+@dataclass(frozen=True)
+class WrittenSummary:
+    """A summary just written, for the call it was asked for (an overflow).
+
+    Attributes:
+        text: The summary as the model reads it (its prefix included).
+        kept_turns: How many of the main agent's user turns it kept word for
+            word: the turns a request after it holds besides the summary.
+    """
+
+    text: str
+    kept_turns: int
+
+
 class AgentCliSummarizer(BaseEventsSummarizer):
     """Summarizes the main agent's earlier conversation (see the module docstring).
 
@@ -161,6 +176,9 @@ class AgentCliSummarizer(BaseEventsSummarizer):
             runs, whatever the saving. A failure is the caller's to report
             (``last_error``): no warning of its own.
         focus: What the summary should keep above all (``/compact <focus>``).
+        source: What ``CONTEXT_TRIMMED`` names as the summary's cause:
+            ``"compact"`` when ``manual``, else ``"summarization"``, unless given
+            (a summary an overflow asked for is ``"summarization"``).
 
     Attributes:
         last_result: What the last summary written did; None until one is.
@@ -168,6 +186,8 @@ class AgentCliSummarizer(BaseEventsSummarizer):
             summary written kept word for word.
         last_error: Why the last call wrote no summary, if it failed; None
             otherwise (cleared at each call).
+        last_summary: The last summary written, as the model reads it (its
+            prefix included); None until one is.
     """
 
     def __init__(
@@ -180,15 +200,18 @@ class AgentCliSummarizer(BaseEventsSummarizer):
         app_name: str,
         manual: bool = False,
         focus: str | None = None,
+        source: str | None = None,
     ) -> None:
         self.root = root
         self.model = model
         self.budget = budget
         self.manual = manual
         self.focus = focus
+        self.source = source or ("compact" if manual else "summarization")
         self.last_result: CompactResult | None = None
         self.last_kept_turns = 0
         self.last_error: Exception | None = None
+        self.last_summary: str | None = None
         self._settings = settings
         self._app_name = app_name
 
@@ -223,6 +246,7 @@ class AgentCliSummarizer(BaseEventsSummarizer):
         if not summary.strip():
             raise ValueError(f"{self.model.ref} wrote an empty summary")
 
+        text = f"{SUMMARY_PREFIX}\n\n{summary.strip()}"
         event = Event(
             author="user",
             invocation_id=Event.new_id(),
@@ -230,8 +254,7 @@ class AgentCliSummarizer(BaseEventsSummarizer):
                 start_timestamp=min(e.timestamp for e in summarized),
                 end_timestamp=max(e.timestamp for e in summarized),
                 compacted_content=types.Content(
-                    role="user",
-                    parts=[types.Part.from_text(text=f"{SUMMARY_PREFIX}\n\n{summary.strip()}")],
+                    role="user", parts=[types.Part.from_text(text=text)]
                 ),
             )),
         )
@@ -242,11 +265,11 @@ class AgentCliSummarizer(BaseEventsSummarizer):
         )
         live_events.report(self._usage(usage))
         live_events.report(WorkflowEvent.context_trimmed(
-            len(events), len(kept) + 1, "compact" if self.manual else "summarization",
+            len(events), len(kept) + 1, self.source,
             self.root, messages_summarized=result.messages_summarized,
             tokens_before=result.tokens_before, tokens_after=result.tokens_after,
         ))
-        self.last_result = result
+        self.last_result, self.last_summary = result, text
         self.last_kept_turns = sum(
             1 for e in kept if _is_user_text(e) and _in_conversation(e)
         )

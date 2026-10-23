@@ -29,6 +29,9 @@ from tests.demo_isolation import suppress_global_logging_config
 NOTICE = "[EXPERIMENTAL] feature FeatureName.JSON_SCHEMA_FOR_FUNC_DECL is enabled."
 ADK_RUNNER_LOGGER = "google_adk.google.adk.runners"
 ADK_CACHE_LOGGER = "google_adk.google.adk.models.gemini_context_cache_manager"
+ADK_COMPACTION_LOGGER = "google_adk.google.adk.apps.compaction"
+ADK_NODE_LOGGER = "google_adk.google.adk.workflow._node_runner"
+ADK_PLUGIN_LOGGER = "google_adk.google.adk.plugins.plugin_manager"
 
 
 class _LogRecorder:
@@ -60,7 +63,8 @@ def logged(monkeypatch) -> list[dict]:
 @pytest.fixture(autouse=True)
 def _restore_adk_runner_filters(monkeypatch):
     """The hook adds filters to ADK's loggers; take them off after each test."""
-    for name in (ADK_RUNNER_LOGGER, ADK_CACHE_LOGGER):
+    for name in (ADK_RUNNER_LOGGER, ADK_CACHE_LOGGER, ADK_COMPACTION_LOGGER, ADK_NODE_LOGGER,
+                 ADK_PLUGIN_LOGGER):
         adk_logger = logging.getLogger(name)
         monkeypatch.setattr(adk_logger, "filters", list(adk_logger.filters))
 
@@ -245,3 +249,54 @@ def test_other_cache_warnings_still_reach_their_handlers(logged, caplog):
     assert [r.getMessage() for r in caplog.records if r.name == ADK_CACHE_LOGGER] == [
         "Something else went wrong"
     ]
+
+
+# ADK logs a failure's traceback through stdlib logging, over the UI, where
+# the user is told otherwise: a summary that failed is one warning a turn
+# from the summarizer itself (and ADK goes on with the whole history); a
+# model call that failed reaches the user as an ERROR event or as the turn's
+# error.
+@pytest.mark.parametrize("name, level, message, args, event", [
+    (ADK_COMPACTION_LOGGER, logging.WARNING,
+     "Event compaction failed; continuing with the uncompacted history.", (),
+     "adk_compaction_failed"),
+    (ADK_NODE_LOGGER, logging.ERROR, "Node execution failed with exception", (),
+     "adk_node_failed"),
+    (ADK_RUNNER_LOGGER, logging.ERROR, "Root node %s failed.", ("solo",),
+     "adk_root_node_failed"),
+    (ADK_PLUGIN_LOGGER, logging.ERROR,
+     "Error in plugin 'context_overflow' during 'on_model_error_callback' callback: %s",
+     ("the provider said no",), "adk_overflow_plugin_failed"),
+], ids=["compaction", "node", "root-node", "overflow-plugin"])
+def test_adks_failure_tracebacks_are_logged_not_printed(logged, caplog, name, level, message,
+                                                        args, event):
+    _install_adk_notice_hook()
+
+    with caplog.at_level(logging.DEBUG, logger=name):
+        try:
+            raise ValueError("the provider said no")
+        except ValueError:
+            logging.getLogger(name).log(level, message, *args, exc_info=True)
+
+    assert [r for r in caplog.records if r.name == name] == []
+    (entry,) = [e for e in logged if e["event"] == event]
+    assert entry["log_level"] == "debug"
+    assert (entry["error_type"], entry["error"]) == ("ValueError", "the provider said no")
+
+
+@pytest.mark.parametrize("name, message", [
+    (ADK_COMPACTION_LOGGER, "Token-threshold event compactor finished."),
+    (ADK_NODE_LOGGER, "Node %s failed and is being retried locally."),
+    (ADK_RUNNER_LOGGER, "Root node %s was cancelled by an external cancellation."),
+    (ADK_PLUGIN_LOGGER, "Error in plugin 'llm_logging' during 'after_model_callback' callback: %s"),
+], ids=["compaction", "node", "root-node-cancelled", "another-plugin"])
+def test_their_other_records_pass(logged, caplog, name, message):
+    _install_adk_notice_hook()
+
+    with caplog.at_level(logging.DEBUG, logger=name):
+        logging.getLogger(name).warning(message, "solo") if "%s" in message else (
+            logging.getLogger(name).warning(message)
+        )
+
+    assert [r.name for r in caplog.records] == [name]
+    assert logged == []

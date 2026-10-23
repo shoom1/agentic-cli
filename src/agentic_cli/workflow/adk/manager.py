@@ -34,10 +34,13 @@ from agentic_cli.workflow.adk.compaction import (
     AgentCliSummarizer,
     MainAgentPlugin,
     NoAfterTurnCompactionRunner,
+    WrittenSummary,
+    compact_session,
 )
 from agentic_cli.workflow.adk.event_processor import ADKEventProcessor
 from agentic_cli.workflow.adk.fit_guard_plugin import FitGuardPlugin
 from agentic_cli.workflow.adk.model_factory import build_adk_model, generate_text
+from agentic_cli.workflow.adk.overflow_plugin import OverflowPlugin
 from agentic_cli.workflow.adk.permission_plugin import PermissionPlugin
 from agentic_cli.workflow.adk.plugins import LLMLoggingPlugin, SentRequestLoggingPlugin
 from agentic_cli.workflow.adk.tool_result_cap_plugin import ToolResultCapPlugin
@@ -85,6 +88,24 @@ def _check_app_name(app_name: str) -> None:
         raise ValueError(
             f"app_name {app_name!r} cannot be used with the ADK backend: {exc}"
         ) from exc
+
+
+#: How ADK's plugin manager words what the overflow handler raised.
+_OVERFLOW_PLUGIN_FAILED = "Error in plugin 'context_overflow'"
+
+
+def _plugin_cause(error: RuntimeError) -> BaseException:
+    """The provider's error behind ADK's wrapper of what the overflow handler raised.
+
+    A retry that fails for another reason propagates, and ADK's plugin manager
+    wraps it ("Error in plugin 'context_overflow' during …"); the turn fails
+    with the provider's own error instead, as any failed call does. Any other
+    error is ``error`` itself, re-raised as it is.
+    """
+    cause = error.__cause__
+    if str(error).startswith(_OVERFLOW_PLUGIN_FAILED) and cause is not None:
+        return cause
+    return error
 
 
 def _author_of_call(session: Any, call_id: str) -> str | None:
@@ -645,11 +666,21 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             plugins.append(ToolResultCapPlugin(
                 self._settings.tool_result_max_chars, tool_output_dir(self._settings.app_name)
             ))
+            kinds = {name: model.record.kind for name, model in self._resolved_models.items()}
+            fit_guard = FitGuardPlugin(self._budgets, kinds)
+            # A call refused as too long: summarize (the root) or trim, retry
+            # once from the request the fit guard saw, then one clear answer.
+            plugins.append(OverflowPlugin(
+                root=self._root_agent.name,
+                budgets=self._budgets,
+                kinds=kinds,
+                models={name: str(model.ref) for name, model in self._resolved_models.items()},
+                summarize_now=self._summarize_now,
+                fit_guard=fit_guard,
+            ))
             # Last but the raw log: it measures the request every other plugin
             # has edited, and drops the oldest turns of one over its budget.
-            plugins.append(FitGuardPlugin(self._budgets, {
-                name: model.record.kind for name, model in self._resolved_models.items()
-            }))
+            plugins.append(fit_guard)
             if self._llm_logging_plugin is not None:
                 plugins.append(SentRequestLoggingPlugin(self._llm_logging_plugin))
         app = App(
@@ -685,19 +716,51 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         ``event_retention_size`` 0: the summarizer picks the range itself.
         ADK marks the config experimental; the CLI logs that notice at debug.
         """
-        root = self._root_agent.name
-        budget = self._budgets[root]
         return EventsCompactionConfig(
-            summarizer=AgentCliSummarizer(
-                root=root,
-                model=self._simple_model(SUMMARY_MAX_TOKENS, agent=root),
-                budget=budget,
-                settings=self._settings,
-                app_name=self.app_name,
-            ),
-            token_threshold=budget.trigger,
+            summarizer=self._summarizer(),
+            token_threshold=self._budgets[self._root_agent.name].trigger,
             event_retention_size=0,
         )
+
+    def _summarizer(self, **options: Any) -> AgentCliSummarizer:
+        """A summarizer of the main agent's conversation, on its own model."""
+        root = self._root_agent.name
+        return AgentCliSummarizer(
+            root=root,
+            model=self._simple_model(SUMMARY_MAX_TOKENS, agent=root),
+            budget=self._budgets[root],
+            settings=self._settings,
+            app_name=self.app_name,
+            **options,
+        )
+
+    async def _summarize_now(self, callback_context: Any) -> WrittenSummary | None:
+        """Summarize the main agent's conversation now, for a call refused as too long.
+
+        Within that call's turn, on its session and session service, as ADK
+        compacts before a model call, but whatever the last prompt's size and
+        whatever the saving (``OverflowPlugin``).
+
+        Returns:
+            The summary written and how many turns it kept, or None when
+            nothing was summarized.
+
+        Raises:
+            Exception: Why the summary failed (the summarizer's
+                ``last_error``), for the plugin to report.
+        """
+        context = callback_context.get_invocation_context()
+        summarizer = self._summarizer(manual=True, source="summarization")
+        if await compact_session(
+            session=context.session,
+            session_service=context.session_service,
+            root_agent=self._root_agent,
+            summarizer=summarizer,
+        ):
+            return WrittenSummary(summarizer.last_summary, summarizer.last_kept_turns)
+        if summarizer.last_error is not None:
+            raise summarizer.last_error
+        return None
 
     def _context_cache_config(self) -> ContextCacheConfig | None:
         """The app's context cache, or None for no caching.
@@ -883,16 +946,22 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             # aclosing: a cancelled turn closes the merge, which closes the
             # runner, and its tasks, now, in the task that iterates it.
             async with contextlib.aclosing(live_events.merged(stream, live)) as items:
-                async for item in items:
-                    if isinstance(item, WorkflowEvent):
-                        reported = self._apply_event_hook(item)
-                        if reported:
+                try:
+                    async for item in items:
+                        if isinstance(item, WorkflowEvent):
+                            reported = self._apply_event_hook(item)
+                            if reported:
+                                event_count += 1
+                                yield reported
+                            continue
+                        async for workflow_event in self._workflow_events(item, session_id):
                             event_count += 1
-                            yield reported
-                        continue
-                    async for workflow_event in self._workflow_events(item, session_id):
-                        event_count += 1
-                        yield workflow_event
+                            yield workflow_event
+                except RuntimeError as error:
+                    cause = _plugin_cause(error)
+                    if cause is error:
+                        raise
+                    raise cause from None
 
         # Final drain — catches progress from the last tool call
         if self._task_progress_plugin:

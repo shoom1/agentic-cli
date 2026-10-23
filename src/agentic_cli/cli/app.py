@@ -155,6 +155,58 @@ class _AdkCacheFailureFilter(logging.Filter):
         return True
 
 
+# ADK logs a failure's traceback through stdlib logging where the user is
+# told otherwise. A summary that failed: ADK goes on with the whole history,
+# and the summarizer itself warns the user once a turn (it never lets its own
+# failure reach ADK, so this is a backstop). A model call that failed: the
+# user reads its error as an ERROR event or as the turn's error. ADK logs one
+# twice for the main agent, from the node and from the runner ("Root node %s
+# failed.", matched exactly: "Root node %s was cancelled …" passes), and a
+# failed overflow retry once more, from the plugin manager. Each entry: the
+# logger, what a record's message starts with or (``msg=``) its exact format,
+# and the debug event it becomes.
+_ADK_FAILURES = (
+    ("google_adk.google.adk.apps.compaction", {"prefix": "Event compaction failed"},
+     "adk_compaction_failed"),
+    ("google_adk.google.adk.workflow._node_runner", {"prefix": "Node execution failed"},
+     "adk_node_failed"),
+    ("google_adk.google.adk.runners", {"msg": "Root node %s failed."}, "adk_root_node_failed"),
+    ("google_adk.google.adk.plugins.plugin_manager",
+     {"prefix": "Error in plugin 'context_overflow'"}, "adk_overflow_plugin_failed"),
+)
+
+
+class _AdkFailureFilter(logging.Filter):
+    """Turns ADK's failure tracebacks on one logger into a debug log entry.
+
+    A record is matched by the start of its message (``prefix``) or by its
+    format string itself (``msg``).
+    """
+
+    def __init__(self, event: str, *, prefix: str | None = None, msg: str | None = None) -> None:
+        super().__init__()
+        self._event = event
+        self._prefix = prefix
+        self._msg = msg
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        if self._msg is not None:
+            matched = record.msg == self._msg
+        else:
+            matched = self._prefix is not None and message.startswith(self._prefix)
+        if not matched:
+            return True
+        error = record.exc_info[1] if record.exc_info else None
+        logger.debug(
+            self._event,
+            message=message,
+            error_type=type(error).__name__ if error is not None else None,
+            error=str(error) if error is not None else None,
+        )
+        return False
+
+
 def _install_adk_notice_hook() -> None:
     """Log ADK's notices instead of printing them.
 
@@ -162,10 +214,12 @@ def _install_adk_notice_hook() -> None:
     up, to stderr, which in the CLI lands over the terminal UI. The hook logs
     ADK's experimental-feature notices at debug and passes every other warning
     to the hook it replaced; a filter on ADK's runner logger does the same for
-    its context-cache advice, and one on its context-cache logger for a cache
-    it could not create or delete. Only the CLI installs them, so library users
-    and the test suite keep Python's own handling. Installing twice changes
-    nothing.
+    its context-cache advice, one on its context-cache logger for a cache it
+    could not create or delete, and one each on its compaction, node, runner
+    and plugin-manager loggers for the traceback of a summary, a model call or
+    an overflow retry that failed. Only
+    the CLI installs them, so library users and the test suite keep Python's
+    own handling. Installing twice changes nothing.
     """
     for name, kind in (
         (_ADK_RUNNER_LOGGER, _AdkUncachedTransferFilter),
@@ -174,6 +228,10 @@ def _install_adk_notice_hook() -> None:
         adk_logger = logging.getLogger(name)
         if not any(isinstance(f, kind) for f in adk_logger.filters):
             adk_logger.addFilter(kind())
+    for name, match, event in _ADK_FAILURES:
+        adk_logger = logging.getLogger(name)
+        if not any(isinstance(f, _AdkFailureFilter) for f in adk_logger.filters):
+            adk_logger.addFilter(_AdkFailureFilter(event, **match))
 
     previous = warnings.showwarning
     if getattr(previous, "_logs_adk_notices", False):

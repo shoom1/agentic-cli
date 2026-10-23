@@ -22,6 +22,7 @@ import pytest
 
 pytest.importorskip("google.adk")
 
+from google.adk.events.event_actions import EventActions  # noqa: E402
 from google.adk.models.llm_request import LlmRequest  # noqa: E402
 from google.adk.models.llm_response import LlmResponse  # noqa: E402
 from google.genai import types  # noqa: E402
@@ -231,11 +232,16 @@ def budget_for(contents: list[types.Content]) -> ContextBudget:
                          trigger=tokens(contents[2:]) + NOTE_ROOM, keep=0)
 
 
+def call_context(agent: str = "solo", invocation: str = "i1") -> SimpleNamespace:
+    """One model call's callback context: ADK gives each call its own ``EventActions``."""
+    return SimpleNamespace(agent_name=agent, invocation_id=invocation, actions=EventActions())
+
+
 async def guarded(plugin: FitGuardPlugin, request: LlmRequest, live: LiveEvents,
                   agent: str = "solo") -> None:
     with reporting(live):
         answer = await plugin.before_model_callback(
-            callback_context=SimpleNamespace(agent_name=agent, invocation_id="i1"),
+            callback_context=call_context(agent),
             llm_request=request,
         )
     assert answer is None  # the request still goes to the model
@@ -314,7 +320,7 @@ class TestThePlugin:
         instruction, the tools and the cached contents out of it)."""
         contents = [user(LONG), model("A1."), user(LONG), model("A2."), user("Three?")]
         plugin = FitGuardPlugin({"solo": budget_for(contents)}, {"solo": CLAUDE})
-        context = SimpleNamespace(agent_name="solo", invocation_id="i1")
+        context = call_context()
         config = types.GenerateContentConfig(system_instruction="You help.")
         request = LlmRequest(contents=list(contents), config=config)
 
@@ -327,6 +333,42 @@ class TestThePlugin:
         assert seen_config.system_instruction == "You help."
         await plugin.after_model_callback(callback_context=context, llm_response=LlmResponse())
         assert plugin.request_as_seen(context) is None
+
+    async def test_two_calls_of_one_agent_in_one_invocation_keep_their_own(self):
+        """Two parallel delegations to one sub-agent share the invocation and
+        the agent name; each model call has its own ``EventActions``."""
+        plugin = FitGuardPlugin({"solo": budget_for([user(LONG), model("A1."), user("A?")])},
+                                {"solo": CLAUDE})
+        first, second = call_context(), call_context()
+        await plugin.before_model_callback(callback_context=first,
+                                           llm_request=LlmRequest(contents=[user("Task A.")]))
+        await plugin.before_model_callback(callback_context=second,
+                                           llm_request=LlmRequest(contents=[user("Task B.")]))
+
+        assert plugin.request_as_seen(first)[0] == [user("Task A.")]
+        await plugin.after_model_callback(callback_context=second, llm_response=LlmResponse())
+        assert plugin.request_as_seen(second) is None
+        assert plugin.request_as_seen(first)[0] == [user("Task A.")]
+        await plugin.on_model_error_callback(callback_context=first,
+                                             llm_request=LlmRequest(), error=ValueError())
+        assert plugin.request_as_seen(first) is None
+
+    async def test_a_run_drops_what_another_invocation_left(self):
+        """A call cancelled mid-request fires neither release."""
+        plugin = FitGuardPlugin({"solo": budget_for([user(LONG), model("A1."), user("A?")])},
+                                {"solo": CLAUDE})
+        cancelled, current = call_context(invocation="i1"), call_context(invocation="i2")
+        for context in (cancelled, current):
+            await plugin.before_model_callback(callback_context=context,
+                                               llm_request=LlmRequest(contents=[user("Hi.")]))
+
+        answer = await plugin.before_run_callback(
+            invocation_context=SimpleNamespace(invocation_id="i2")
+        )
+
+        assert answer is None  # the run goes on
+        assert plugin.request_as_seen(cancelled) is None
+        assert plugin.request_as_seen(current) is not None
 
     async def test_an_agent_it_has_no_budget_for_is_left_alone(self):
         contents = [user(LONG), model("A1."), user(LONG), model("A2."), user("Three?")]
