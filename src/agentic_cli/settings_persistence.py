@@ -57,6 +57,8 @@ PROJECT_SETTABLE_KEYS = frozenset({
     "default_model", "model_roles", "pinned_models", "thinking_effort", "orchestrator",
     # when a conversation is summarized (workflow/context.py)
     "context_summarize_at", "context_max_tokens",
+    # when a tool result is cut (workflow/tool_output.py; the folder is fixed)
+    "tool_result_max_chars",
     # retry / request timeouts (not code paths)
     "retry_max_attempts", "retry_initial_delay", "retry_backoff_factor",
     "anthropic_request_timeout", "python_executor_timeout", "sandbox_timeout",
