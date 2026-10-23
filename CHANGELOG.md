@@ -675,9 +675,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   declared window, an OpenRouter id before a listing) counts as 128,000
   tokens instead of getting Deep Agents' fixed 170,000 tokens or 6
   messages, which never fired on a 32k model. A model whose budget is under
-  16,000 tokens (a `max_tokens` close to its window) fails to start with a
-  `ContextBudgetError`, an `AgentGraphError` naming the agent, its model and
-  its `max_tokens`. Both settings are project-settable, and a `/settings`
+  16,000 tokens fails to start with a `ContextBudgetError`, an
+  `AgentGraphError` naming the agent, its model and its `max_tokens`. That is
+  a `max_tokens` close to the window, or **a window of 16,842 tokens or
+  less, whatever its `max_tokens` (breaking): an 8k or 16k local endpoint
+  model that ran on 0.6 no longer starts**; 16,843 tokens is the smallest
+  window that works. Both settings are project-settable, and a `/settings`
   change of either rebuilds the agents, keeping the conversation.
 
 ### Deprecated

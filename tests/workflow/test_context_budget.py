@@ -185,6 +185,28 @@ class TestContextBudget:
 
         assert "model_endpoints" not in str(caught.value)
 
+    def test_a_window_too_small_for_any_max_tokens_says_so(self):
+        # A local 16k model with no max_tokens: B = 15,564. No max_tokens can
+        # help, so the advice is the window: at least 16,843 tokens.
+        model = dataclasses.replace(
+            windowed(resolved("openai:gpt-4o-mini"), 16_384), max_tokens=None
+        )
+
+        with pytest.raises(ContextBudgetError) as caught:
+            context_budget(model, settings())
+
+        message = str(caught.value)
+        assert "16,384" in message and "16,843" in message
+        assert "lower its max_tokens" not in message.lower()
+        assert "max_tokens 0" not in message
+
+    def test_the_smallest_window_it_names_is_enough(self):
+        model = dataclasses.replace(
+            windowed(resolved("openai:gpt-4o-mini"), 16_843), max_tokens=None
+        )
+
+        assert context_budget(model, settings()).budget == MIN_BUDGET
+
 
 class TestSettings:
     def test_the_defaults(self):

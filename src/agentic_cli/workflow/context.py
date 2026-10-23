@@ -116,7 +116,9 @@ def context_budget(resolved: "ResolvedModel", settings: "BaseSettings") -> Conte
 
     Raises:
         ContextBudgetError: The budget is under ``MIN_BUDGET``. The message
-            names the agent, its model, the window and ``max_tokens``.
+            names the agent, its model, the window and ``max_tokens``; for a
+            window too small whatever ``max_tokens`` is, the smallest window
+            that works.
     """
     known = resolved.record.context_window
     window = known if known is not None else UNKNOWN_WINDOW
@@ -124,6 +126,14 @@ def context_budget(resolved: "ResolvedModel", settings: "BaseSettings") -> Conte
     budget = window * _WINDOW_SHARE // 100 - max_tokens
     if budget < MIN_BUDGET:
         who = f"Agent {resolved.agent!r}" if resolved.agent else "The default model"
+        if window * _WINDOW_SHARE // 100 < MIN_BUDGET:
+            # No max_tokens can help: the window itself is too small.
+            smallest = -(-MIN_BUDGET * 100 // _WINDOW_SHARE)
+            raise ContextBudgetError(
+                f"{who} cannot work on {resolved.ref}: its window ({window:,} tokens) "
+                f"is under the {smallest:,} an agent needs for an input budget of "
+                f"{MIN_BUDGET:,} tokens. Choose a model with a larger window."
+            )
         if known is not None:
             size = f"{window:,} tokens"
             advice = "Lower its max_tokens, or choose a model with a larger window."
