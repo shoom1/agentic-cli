@@ -53,6 +53,8 @@ _WINDOW_SHARE = 95  # percent
 #: gives fewer characters per token than the others.
 _CHARS_PER_TOKEN = {ProviderKind.ANTHROPIC: 3.3}
 _DEFAULT_CHARS_PER_TOKEN = 4.0
+#: What an estimate from characters adds for what it misses (10%).
+ESTIMATE_MARGIN = 1.1
 
 #: The code OpenAI (and servers copying it) give an overflow.
 _OVERFLOW_CODE = "context_length_exceeded"
@@ -105,6 +107,22 @@ class ContextBudget:
     budget: int
     trigger: int
     keep: int
+
+
+@dataclass(frozen=True)
+class CompactResult:
+    """What one summary did to a conversation.
+
+    Attributes:
+        messages_summarized: How many messages the summary stands for (a
+            summary it replaced counts as one).
+        tokens_before: The conversation's estimated size before, in tokens.
+        tokens_after: Its estimated size after: the summary and what it kept.
+    """
+
+    messages_summarized: int
+    tokens_before: int
+    tokens_after: int
 
 
 def context_budget(resolved: "ResolvedModel", settings: "BaseSettings") -> ContextBudget:

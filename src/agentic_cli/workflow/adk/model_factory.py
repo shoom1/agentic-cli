@@ -115,6 +115,38 @@ def build_adk_model(
     raise ValueError(f"The ADK backend cannot build {resolved.ref} ({kind.value} models).")
 
 
+async def generate_text(
+    resolved: ResolvedModel, prompt: str, *, settings: "BaseSettings", app_name: str
+) -> tuple[str, types.GenerateContentResponseUsageMetadata | None]:
+    """One unstreamed call outside the agents: ``prompt`` in, the answer's text out.
+
+    The model is built here, as an agent's is (``build_adk_model``), and sent
+    one user message; its planner's thinking config applies.
+
+    Returns:
+        The answer's text without the model's thoughts (empty when it wrote
+        none, an error response included), and the call's usage, if reported.
+    """
+    from google.adk.models.llm_request import LlmRequest
+
+    built = build_adk_model(resolved, settings=settings, app_name=app_name)
+    request = LlmRequest(
+        model=built.model.model,
+        contents=[types.Content(role="user", parts=[types.Part.from_text(text=prompt)])],
+        config=built.generate_content_config,
+    )
+    if built.planner is not None:
+        built.planner.apply_thinking_config(request)
+
+    text: list[str] = []
+    usage = None
+    async for response in built.model.generate_content_async(request, stream=False):
+        parts = response.content.parts if response.content is not None else None
+        text.extend(part.text for part in parts or [] if part.text and not part.thought)
+        usage = response.usage_metadata or usage
+    return "".join(text), usage
+
+
 def _gemini(resolved: ResolvedModel, settings: "BaseSettings") -> AdkModel:
     from google.adk.models import Gemini
 

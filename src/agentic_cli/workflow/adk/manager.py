@@ -19,7 +19,6 @@ from google.adk.apps import App
 from google.adk.apps.app import validate_app_name
 from google.adk.agents import LlmAgent, Agent
 from google.adk.agents.context_cache_config import ContextCacheConfig
-from google.adk.models.llm_request import LlmRequest
 from google.adk.sessions import InMemorySessionService, BaseSessionService, Session
 from google.adk.tools import LongRunningFunctionTool
 
@@ -28,7 +27,7 @@ from agentic_cli.workflow.events import WorkflowEvent, EventType
 from agentic_cli.workflow.config import AgentConfig, validate_agent_graph
 from agentic_cli.workflow.adk import delegation
 from agentic_cli.workflow.adk.event_processor import ADKEventProcessor
-from agentic_cli.workflow.adk.model_factory import build_adk_model
+from agentic_cli.workflow.adk.model_factory import build_adk_model, generate_text
 from agentic_cli.workflow.adk.permission_plugin import PermissionPlugin
 from agentic_cli.workflow.adk.plugins import LLMLoggingPlugin
 from agentic_cli.workflow.adk.tool_result_cap_plugin import ToolResultCapPlugin
@@ -205,22 +204,11 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             The answer's text, without the model's thoughts.
         """
         await self._ensure_initialized()
-        built = build_adk_model(
-            self._simple_model(max_tokens), settings=self._settings, app_name=self.app_name
+        text, _ = await generate_text(
+            self._simple_model(max_tokens), prompt, settings=self._settings,
+            app_name=self.app_name,
         )
-        request = LlmRequest(
-            model=built.model.model,
-            contents=[types.Content(role="user", parts=[types.Part.from_text(text=prompt)])],
-            config=built.generate_content_config,
-        )
-        if built.planner is not None:
-            built.planner.apply_thinking_config(request)
-
-        text: list[str] = []
-        async for response in built.model.generate_content_async(request, stream=False):
-            parts = response.content.parts if response.content is not None else None
-            text.extend(part.text for part in parts or [] if part.text and not part.thought)
-        return "".join(text)
+        return text
 
     async def cleanup(self) -> None:
         """Clean up workflow manager resources.

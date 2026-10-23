@@ -22,8 +22,9 @@ model could never read it. Its backend here stores nothing: Deep Agents treats
 a failed offload as non-fatal and writes a summary without a path. Its warning
 that older messages "will not be recoverable" is wrong for us (the checkpoint
 has them), so ``install_history_filters`` turns it into one debug log. The
-summary prompt is LangChain's: Deep Agents' adds a note on media it archived,
-which here never happens.
+summary prompt is LangChain's, as ADK's summaries use it
+(``workflow/summary_prompt.py``): Deep Agents' adds a note on media it
+archived, which here never happens.
 
 **Reporting.** The summary call runs on the agent's own model, tagged
 ``lc_source="summarization"``; the run callback reports its start
@@ -51,11 +52,11 @@ from deepagents.middleware.summarization import (
     SUMMARIZATION_EVENT_KEY,
     SummarizationMiddleware,
 )
-from langchain.agents.middleware.summarization import DEFAULT_SUMMARY_PROMPT
 from langchain_core.callbacks import adispatch_custom_event, dispatch_custom_event
 
 from agentic_cli.logging import Loggers
 from agentic_cli.workflow.context import context_budget
+from agentic_cli.workflow.summary_prompt import SUMMARY_PROMPT
 
 if TYPE_CHECKING:
     from langchain.agents.middleware import ModelRequest, ModelResponse
@@ -316,7 +317,7 @@ def build_summarization(
         trigger=trigger,
         keep=keep,
         # Deep Agents' prompt adds how to read media it archived: none here.
-        summary_prompt=DEFAULT_SUMMARY_PROMPT,
+        summary_prompt=SUMMARY_PROMPT,
         # The older history is summarized whole, as create_deep_agent does;
         # the constructor's default would summarize only its last 4,000 tokens.
         trim_tokens_to_summarize=None,
