@@ -34,10 +34,12 @@ pytest.importorskip("langchain_mcp_adapters")
 from langchain_core.messages import ToolMessage  # noqa: E402
 from langchain_core.tools import BaseTool, StructuredTool  # noqa: E402
 
+from agentic_cli.config import BaseSettings  # noqa: E402
 from agentic_cli.settings_persistence import get_user_config_path  # noqa: E402
 from agentic_cli.tools import read_file  # noqa: E402
 from agentic_cli.tools.registry import identify_tool  # noqa: E402
 from agentic_cli.workflow.config import AgentConfig  # noqa: E402
+from agentic_cli.workflow.context import ContextBudgetError  # noqa: E402
 from agentic_cli.workflow.deepagents import manager as manager_module  # noqa: E402
 from agentic_cli.workflow.deepagents import mcp_tools  # noqa: E402
 from agentic_cli.workflow.deepagents.manager import DeepAgentsWorkflowManager  # noqa: E402
@@ -636,6 +638,51 @@ class TestLifecycle:
         assert [_alive(pid) for pid in servers.pids()] == [False, False]
         # The notice was about sessions that no longer exist.
         assert manager._pending_notices == []
+
+    async def test_a_model_too_small_for_its_budget_starts_nothing(
+        self, ctx, servers, monkeypatch
+    ):
+        """Each agent's budget is computed before any MCP server starts: a
+        model whose window leaves no room to work in fails initialization
+        with no server started and the checkpointer's connection closed."""
+        opened: list = []
+        real_open = manager_module.open_checkpointer
+
+        async def open_checkpointer(*args, **kwargs):
+            saver, connection = await real_open(*args, **kwargs)
+            opened.append(connection)
+            return saver, connection
+
+        monkeypatch.setattr(manager_module, "open_checkpointer", open_checkpointer)
+        settings = BaseSettings(
+            session_store="sqlite", default_model="local:small",
+            model_endpoints={"local": {"base_url": "http://localhost:8000/v1",
+                                       "models": {"small": {"context_window": 4_000}}}},
+        )
+        manager = DeepAgentsWorkflowManager(agent_configs=[_researcher(servers())],
+                                            settings=settings)
+        closed: list = []
+        real_close = manager._close_connection
+
+        async def close_connection(connection):
+            closed.append(connection)
+            await real_close(connection)
+
+        monkeypatch.setattr(manager, "_close_connection", close_connection)
+
+        with pytest.raises(ContextBudgetError, match="local:small"):
+            await manager.initialize_services()
+        try:
+            assert servers.pids() == []  # no MCP server was ever started
+            assert len(opened) == 1 and opened[0] is not None
+            assert closed == opened  # the sqlite connection, closed by the rollback
+            assert (manager._checkpointer, manager._sessions, manager._budgets) == (
+                None, None, {}
+            )
+            with pytest.raises(RuntimeError, match="not initialized"):
+                manager.context_budget()
+        finally:
+            await manager.cleanup()
 
     async def test_a_model_switch_reopens_the_sessions(self, ctx, servers, monkeypatch):
         scripted(monkeypatch, researcher=[

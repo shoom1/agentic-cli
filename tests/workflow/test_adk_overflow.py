@@ -358,6 +358,11 @@ class TestTheMainAgentsOverflow:
         assert [e.type for e in third][:3] == [
             EventType.CONTEXT_SUMMARIZING, EventType.LLM_USAGE, EventType.CONTEXT_TRIMMED
         ]
+        # The summary the overflow asked for is the main agent's, as any summary.
+        summary_usage = third[1]
+        assert (summary_usage.metadata["purpose"], summary_usage.metadata["agent"],
+                summary_usage.metadata["context_trigger"],
+                summary_usage.metadata["window_known"]) == ("summarization", "solo", 16_000, True)
         assert texts(third) == ["A3."]
         # From then on the stored summary stands for the first turn, in the
         # first kept user message.

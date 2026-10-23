@@ -16,6 +16,7 @@ Every model is scripted (``fakes.ScriptedModels``); nothing reaches a provider.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from pathlib import Path
 
@@ -29,9 +30,11 @@ from langchain.agents.middleware import ModelRequest  # noqa: E402
 from langchain_core._api import LangChainBetaWarning  # noqa: E402
 from langchain_core.messages import AIMessage, HumanMessage  # noqa: E402
 
+from agentic_cli.cli.usage_tracker import UsageTracker, format_tokens  # noqa: E402
 from agentic_cli.config import BaseSettings  # noqa: E402
 from agentic_cli.models import ProviderKind  # noqa: E402
 from agentic_cli.workflow.config import AgentConfig  # noqa: E402
+from agentic_cli.workflow.context import context_budget  # noqa: E402
 from agentic_cli.workflow.deepagents import agent_builder  # noqa: E402
 from agentic_cli.workflow.deepagents import manager as manager_module  # noqa: E402
 from agentic_cli.workflow.deepagents.manager import DeepAgentsWorkflowManager  # noqa: E402
@@ -146,6 +149,80 @@ class TestWhatTheSubAgentSees:
         models, _ = await two_turns(monkeypatch, team(context), delegating())
 
         assert shape(models.chats["researcher"].conversation(0)) == [("human", BRIEF)]
+
+
+class TestUsagePerAgent:
+    """Each call's usage names its agent, that agent's own model and its
+    context trigger. A sub-agent's is ``purpose="subagent"`` whether it is
+    fresh or inherits: a fork's prompt holds the conversation, but it is not
+    the main agent's context."""
+
+    @pytest.mark.parametrize("context", ["fresh", "inherit"])
+    async def test_a_delegating_turns_usage_is_each_agents_own(
+        self, hermetic, monkeypatch, context
+    ):
+        coordinator, researcher = team(context)
+        configs = [coordinator, dataclasses.replace(researcher, model="anthropic:claude-opus-4-7")]
+        scripted(monkeypatch, **delegating())
+        manager = manager_for(configs)
+        try:
+            await turn(manager, TURNS[0])
+            delegated = await turn(manager, TURNS[1])
+            triggers = {
+                name: context_budget(model, manager.settings).trigger
+                for name, model in manager.agent_models.items()
+            }
+        finally:
+            await manager.cleanup()
+
+        assert triggers["coordinator"] != triggers["researcher"]
+        usage = [
+            tuple(e.metadata.get(key) for key in (
+                "agent", "model", "purpose", "context_trigger", "window_known"
+            ))
+            for e in delegated if e.type is EventType.LLM_USAGE
+        ]
+        assert usage == [
+            ("coordinator", "anthropic:claude-sonnet-4-5", None, triggers["coordinator"], True),
+            ("researcher", "anthropic:claude-opus-4-7", "subagent", triggers["researcher"], True),
+            ("coordinator", "anthropic:claude-sonnet-4-5", None, triggers["coordinator"], True),
+        ]
+
+    @pytest.mark.parametrize("context", ["fresh", "inherit"])
+    async def test_the_status_bar_shows_only_the_main_agents_context(
+        self, hermetic, monkeypatch, context
+    ):
+        def sized(prompt_tokens: int) -> dict:
+            return {"input_tokens": prompt_tokens, "output_tokens": 5,
+                    "total_tokens": prompt_tokens + 5}
+
+        scripted(monkeypatch, **{
+            "coordinator": [
+                ai("Delegating.", calls=[task("researcher", BRIEF, "c1")], usage=sized(4_000)),
+                ai("The researcher says X is 42.", usage=sized(4_200)),
+            ],
+            # A prompt far larger than the coordinator's, as a fork's may be:
+            # it is still not the main agent's context.
+            "researcher": [ai("X is 42.", usage=sized(150_000))],
+        })
+        manager = manager_for(team(context))
+        try:
+            events = await turn(manager, TURNS[1])
+            trigger = manager.context_budget().trigger
+        finally:
+            await manager.cleanup()
+
+        tracker, shown = UsageTracker(), []
+        for event in events:
+            if event.type is EventType.LLM_USAGE:
+                tracker.record(event.metadata)
+                shown.append(tracker.format_context())
+        of = f"/{format_tokens(trigger)}"
+        assert shown == [
+            f"ctx 4k{of} ({round(400_000 / trigger)}%)",
+            f"ctx 4k{of} ({round(400_000 / trigger)}%)",  # the researcher's call
+            f"ctx 4.2k{of} ({round(420_000 / trigger)}%)",
+        ]
 
 
 class TestTheBetaWarning:

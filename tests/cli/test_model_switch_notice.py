@@ -65,6 +65,7 @@ def _app(settings: BaseSettings, workflow) -> BaseCLIApp:
         add_error=app.errors.append,
         add_success=lambda *a: None,
         add_warning=lambda *a: None,
+        set_status=lambda text: None,
     )
     return app
 

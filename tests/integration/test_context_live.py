@@ -32,6 +32,10 @@ What only a real provider can answer:
   dense CJK text the character estimate counts low: the main agent's ends
   in the clear overflow message, and a sub-agent's in one warning while the
   coordinator answers.
+- The context display: with a cache hit (Claude on both backends, Gemini on
+  ADK, OpenAI), the prompt count the status bar shows is the whole prompt;
+  and with the raw LLM log on, an ADK delegation keeps the main agent's
+  ``ctx`` while the log names each call's own model.
 
 Override the models with LIVE_CONTEXT_CLAUDE_MODEL (default
 ``anthropic:claude-sonnet-4-5``), LIVE_CONTEXT_GEMINI_MODEL (default
@@ -44,13 +48,18 @@ window).
 
 from __future__ import annotations
 
+import json
 import os
+import shutil
+import uuid
+from pathlib import Path
 
 import httpx
 import pytest
 
 pytest.importorskip("deepagents")
 
+from agentic_cli.cli.usage_tracker import UsageTracker  # noqa: E402
 from agentic_cli.config import BaseSettings  # noqa: E402
 from agentic_cli.tools.registry import register_tool  # noqa: E402
 from agentic_cli.models import ModelCatalog  # noqa: E402
@@ -669,3 +678,92 @@ async def test_a_job_resumed_after_its_call_was_summarized(listed, tmp_path, mon
     assert any(_summaries(turn) for turn in notes), "no summary while the call was pending"
     assert_no_errors(started + [event for turn in notes for event in turn] + resumed)
     assert _reply(resumed).strip(), "the resumed turn got no answer"
+
+
+
+#: A system prompt long enough to be cached by every provider (Claude's
+#: minimum is 1,024 tokens, Gemini's explicit cache's a few thousand).
+_HANDBOOK = " ".join(
+    f"Rule {n}: answer briefly, state facts plainly, and never invent a source."
+    for n in range(1, 700)
+)
+
+
+@pytest.mark.parametrize("backend, model", [
+    pytest.param("adk", CLAUDE, marks=_needs(_key_for(CLAUDE)), id="adk-claude"),
+    pytest.param("deepagents", CLAUDE, marks=_needs(_key_for(CLAUDE)), id="deepagents-claude"),
+    pytest.param("adk", GEMINI, marks=_needs(_key_for(GEMINI)), id="adk-gemini"),
+    pytest.param("adk", OPENAI, marks=_needs(_key_for(OPENAI)), id="adk-openai"),
+])
+async def test_with_a_cache_hit_the_prompt_count_is_the_whole_prompt(
+    listed, tmp_path, backend, model
+):
+    manager = _manager_for(
+        backend, [AgentConfig(name="assistant", prompt=f"You are concise. {_HANDBOOK}",
+                              include_state_tools=False)],
+        _settings(tmp_path, thinking_effort="none"), model,
+    )
+    try:
+        first = await collect_events(manager, "Say hello.", session_id="cache")
+        second = await collect_events(manager, "Say goodbye.", session_id="cache")
+    finally:
+        await manager.cleanup()
+
+    assert_no_errors(first + second)
+    (written,) = find_events(first, EventType.LLM_USAGE)
+    (read,) = find_events(second, EventType.LLM_USAGE)
+    assert (read.metadata.get("cached_tokens") or 0) > 0, read.metadata
+    tracker = UsageTracker()
+    tracker.record(read.metadata)
+    # The whole prompt, cached part included: about the first call's.
+    assert tracker.last_prompt_tokens >= read.metadata["cached_tokens"]
+    assert tracker.last_prompt_tokens >= 0.9 * written.metadata["prompt_tokens"], (
+        written.metadata, read.metadata)
+
+
+@_needs(_key_for(CLAUDE), _key_for(HAIKU))
+async def test_with_the_raw_log_on_a_delegation_keeps_the_main_agents_ctx(listed, tmp_path):
+    app_name = f"ctx-live-{uuid.uuid4().hex[:8]}"
+    log = Path.home() / f".{app_name}" / "logs" / "llm_events.jsonl"
+    configs = [
+        AgentConfig(name="coordinator", prompt=(
+            "You coordinate the calculator sub-agent: hand it every calculation, then "
+            "give the user its result."), sub_agents=["calculator"], include_state_tools=False),
+        AgentConfig(name="calculator", prompt="You multiply numbers. Reply with the product.",
+                    description="Multiplies numbers.", model=HAIKU, include_state_tools=False),
+    ]
+    manager = GoogleADKWorkflowManager(
+        agent_configs=configs,
+        settings=_settings(tmp_path, app_name=app_name, raw_llm_logging=True,
+                           thinking_effort="none"),
+        model=CLAUDE,
+    )
+    try:
+        events = await collect_events(manager, "What is 6 times 7?", session_id="logged")
+        records = [json.loads(line) for line in log.read_text().splitlines()]
+    finally:
+        await manager.cleanup()
+        shutil.rmtree(Path.home() / f".{app_name}", ignore_errors=True)
+
+    assert_no_errors(events)
+    usage = find_events(events, EventType.LLM_USAGE)
+    tracker = UsageTracker()
+    for event in usage:
+        tracker.record(event.metadata)
+    coordinator = [e for e in usage if e.metadata.get("agent") == "coordinator"]
+    calculator = [e for e in usage if e.metadata.get("agent") == "calculator"]
+    assert calculator and all(e.metadata.get("purpose") == "subagent" for e in calculator)
+    assert {e.metadata["model"] for e in calculator} == {HAIKU}
+    # ctx is the coordinator's last prompt, never the sub-agent's.
+    assert tracker.last_prompt_tokens == coordinator[-1].metadata["prompt_tokens"]
+    # One usage per call: the raw log adds none to the stream.
+    assert len(usage) == len([r for r in records if r.get("type") == "llm_response"]), records
+    # The log names each call's own model.
+    by_agent = {}
+    for record in records:
+        meta = record.get("metadata") or {}
+        if record.get("type") == "llm_response":
+            by_agent.setdefault(meta.get("author") or meta.get("agent"), set()).add(
+                str(meta.get("model") or record.get("model")))
+    assert any("haiku" in model for model in by_agent.get("calculator", set())), by_agent
+    assert all("haiku" not in model for model in by_agent.get("coordinator", set())), by_agent

@@ -6,6 +6,7 @@ from google.adk.events import Event
 from google.genai import types
 
 from agentic_cli.workflow.adk.event_processor import ADKEventProcessor
+from agentic_cli.workflow.context import ContextBudget
 from agentic_cli.workflow.events import EventType
 
 
@@ -135,6 +136,65 @@ class TestSubAgentActivity:
         assert "purpose" not in events[EventType.LLM_USAGE].metadata
         failed = Event(author="helper", invocation_id="i1", error_code="E", error_message="x")
         assert [e async for e in ADKEventProcessor(model="m").process_event(failed, "s1")] == []
+
+
+#: Each agent's model and context numbers, as the manager hands them over:
+#: the coordinator's window is known, the researcher's (an endpoint model
+#: declared without one) is the 128k floor.
+MODELS = {"coordinator": "anthropic:claude-sonnet-4-6", "researcher": "local:small"}
+BUDGETS = {
+    "coordinator": ContextBudget(window=1_000_000, window_known=True, budget=941_808,
+                                 trigger=200_000, keep=24_000),
+    "researcher": ContextBudget(window=128_000, window_known=False, budget=121_600,
+                                trigger=103_360, keep=12_403),
+}
+USAGE_KEYS = ("model", "agent", "purpose", "context_trigger", "window_known")
+
+
+def _usage_of(events: dict) -> dict:
+    usage = events[EventType.LLM_USAGE].metadata
+    return {key: usage.get(key) for key in USAGE_KEYS}
+
+
+class TestUsagePerAgent:
+    """A call's usage is credited to the agent that made it: its name, its own
+    model (not the default one) and its context trigger, which the CLI shows
+    the main agent's prompt against."""
+
+    @staticmethod
+    def _processor() -> ADKEventProcessor:
+        return ADKEventProcessor(
+            model="anthropic:the-default", root="coordinator", models=MODELS, budgets=BUDGETS
+        )
+
+    async def test_the_roots_is_on_its_own_model_and_trigger(self):
+        assert _usage_of(await _events(self._processor(), "coordinator")) == {
+            "model": "anthropic:claude-sonnet-4-6", "agent": "coordinator", "purpose": None,
+            "context_trigger": 200_000, "window_known": True,
+        }
+
+    async def test_a_sub_agents_is_on_its_own_model_and_trigger(self):
+        assert _usage_of(await _events(self._processor(), "researcher")) == {
+            "model": "local:small", "agent": "researcher", "purpose": "subagent",
+            "context_trigger": 103_360, "window_known": False,
+        }
+
+    async def test_the_numbers_can_be_handed_over_after_construction(self):
+        # The manager builds the processor before the agents, and gives it
+        # each initialization's numbers.
+        processor = ADKEventProcessor(model="anthropic:the-default", root="coordinator")
+        processor.models, processor.budgets = MODELS, BUDGETS
+
+        assert _usage_of(await _events(processor, "researcher"))["context_trigger"] == 103_360
+
+    async def test_an_agent_without_numbers_is_on_the_default_model(self):
+        # A native ADK YAML app's agents: ADK builds them, the framework has
+        # no model or budget for them.
+        assert _usage_of(await _events(ADKEventProcessor(model="anthropic:the-default"),
+                                       "helper")) == {
+            "model": "anthropic:the-default", "agent": "helper", "purpose": None,
+            "context_trigger": None, "window_known": None,
+        }
 
 
 class TestAContextOverflow:

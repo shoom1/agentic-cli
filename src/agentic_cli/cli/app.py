@@ -783,6 +783,9 @@ class BaseCLIApp:
                 switched = _provider_switches(
                     previous_models, getattr(previous, "agent_models", {})
                 )
+            _show_new_context(
+                controller, self.session, swapped=controller.workflow is not previous
+            )
 
         # Report changes
         for key, value in changes.items():
@@ -1110,6 +1113,39 @@ def _resolved_role(
         return str(roles.resolve(role, catalog=catalog, endpoints=endpoints))
     except ModelResolutionError:
         return None
+
+
+def _show_new_context(
+    controller: WorkflowController, session: Any, *, swapped: bool
+) -> None:
+    """Show ``ctx`` against the rebuilt agents' trigger now, not after the next call.
+
+    A reinitialize may move the main agent's trigger (a model of another
+    window, ``context_summarize_at``, ``context_max_tokens``), and the last
+    prompt may already be past the new one. The usage tracker takes the
+    trigger and the window flag from ``workflow.context_budget()``: none when
+    the manager manages no context (``KeyError``) or has no such method. An
+    orchestrator swap starts another manager, whose conversation is another
+    one: the tracker forgets the context (the session's totals stay). The
+    status bar is then drawn again.
+
+    Args:
+        controller: The app's workflow controller, after the reinitialize.
+        session: The UI session whose status bar is drawn.
+        swapped: The reinitialize replaced the manager.
+    """
+    tracker = controller.usage_tracker
+    if tracker is not None and swapped:
+        tracker.reset_context()
+    elif tracker is not None:
+        context_budget = getattr(controller.workflow, "context_budget", None)
+        try:
+            budget = context_budget() if context_budget is not None else None
+        except (KeyError, RuntimeError):
+            budget = None
+        tracker.context_trigger = budget.trigger if budget is not None else None
+        tracker.window_known = budget.window_known if budget is not None else None
+    controller.update_status_bar(session)
 
 
 def _provider_switches(

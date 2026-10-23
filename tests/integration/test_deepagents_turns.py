@@ -28,7 +28,7 @@ import pytest
 
 pytest.importorskip("deepagents")
 
-from agentic_cli.cli.usage_tracker import UsageTracker  # noqa: E402
+from agentic_cli.cli.usage_tracker import UsageTracker, format_tokens  # noqa: E402
 from agentic_cli.config import BaseSettings  # noqa: E402
 from agentic_cli.tools import compile_document, execute_python, kb_search  # noqa: E402
 from agentic_cli.tools.registry import Capability, register_tool  # noqa: E402
@@ -316,11 +316,11 @@ def _record(events) -> UsageTracker:
 
 
 class TestUsageAndCache:
-    async def test_a_delegation_is_not_taken_for_a_trimmed_context(
+    async def test_a_delegation_leaves_the_main_agents_context(
         self, hermetic, monkeypatch
     ):
         """The worker's prompt is its brief: the status bar keeps the
-        coordinator's context and reports no trim."""
+        coordinator's context, against the coordinator's trigger."""
 
         def reply(input_tokens: int, block: dict) -> dict:
             stop = "tool_use" if block["type"] == "tool_use" else "end_turn"
@@ -339,15 +339,17 @@ class TestUsageAndCache:
         manager = manager_for([LEAD, AgentConfig(name="worker", prompt="Work.", description="Works.")])
         try:
             events = await turn(manager, "Go.")
+            trigger = manager.context_budget().trigger
         finally:
             await manager.cleanup()
 
-        tracker = UsageTracker()
-        trims = [tracker.record(e.metadata) for e in of(events, EventType.LLM_USAGE)]
-        assert trims == [False, False, False]
+        tracker = _record(events)
         assert tracker.context_trimmed_count == 0
         assert tracker.last_prompt_tokens == 5100
         assert tracker.prompt_tokens == 10500
+        assert tracker.format_context() == (
+            f"ctx 5.1k/{format_tokens(trigger)} ({round(510_000 / trigger)}%)"
+        )
 
     async def test_claude_cache_reads_and_writes_reach_the_status_bar(
         self, hermetic, monkeypatch
@@ -372,6 +374,9 @@ class TestUsageAndCache:
         tracker = _record(events)
         assert (tracker.cached_tokens, tracker.cache_creation_tokens) == (1200, 300)
         assert (tracker.prompt_tokens, tracker.completion_tokens) == (1550, 7)
+        # The whole prompt is the context: langchain-anthropic adds the cache
+        # reads and writes back into input_tokens, which Anthropic leaves out.
+        assert tracker.last_prompt_tokens == 1550
         assert api.bodies[0]["cache_control"] == {"type": "ephemeral", "ttl": "5m"}
 
     async def test_gemini_cache_reads_and_thinking_reach_the_status_bar(
@@ -398,6 +403,7 @@ class TestUsageAndCache:
         tracker = _record(events)
         assert (tracker.cached_tokens, tracker.thinking_tokens) == (800, 25)
         assert tracker.prompt_tokens == 900
+        assert tracker.last_prompt_tokens == 900  # Gemini's count holds the cache
 
 
 # --- a cancelled turn -------------------------------------------------------------------

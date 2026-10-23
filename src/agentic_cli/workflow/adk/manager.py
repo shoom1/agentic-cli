@@ -25,9 +25,9 @@ from google.adk.tools import LongRunningFunctionTool
 
 from agentic_cli.workflow import live_events
 from agentic_cli.workflow.base_manager import BaseWorkflowManager
-from agentic_cli.workflow.context import ContextBudget, context_budget
+from agentic_cli.workflow.context import context_budget
 from agentic_cli.workflow.events import WorkflowEvent, EventType
-from agentic_cli.workflow.config import AgentConfig, validate_agent_graph
+from agentic_cli.workflow.config import AgentConfig, AgentGraph, validate_agent_graph
 from agentic_cli.workflow.adk import delegation
 from agentic_cli.workflow.adk.compaction import (
     SUMMARY_MAX_TOKENS,
@@ -190,8 +190,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         self._session_service_pinned = False
         self._root_agent: Agent | None = None
         self._runner: Runner | None = None
-        # Each agent's context numbers, by name (agents built from configs).
-        self._budgets: dict[str, ContextBudget] = {}
 
         self._event_processor = ADKEventProcessor(
             model=model or "",
@@ -572,6 +570,8 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                 # An app built from configs records a request as sent, after
                 # the fit guard (SentRequestLoggingPlugin, last).
                 log_requests=bool(self._adk_config_path),
+                # Each call's records name its agent's own model.
+                models=self._agent_model_refs(),
             )
             plugins.append(self._llm_logging_plugin)
             logger.info("llm_logging_plugin_enabled")
@@ -579,6 +579,17 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             self._llm_logging_plugin = None
 
         return plugins
+
+    def _agent_model_refs(self) -> dict[str, str]:
+        """Each agent's model reference, by name; none for a native ADK app.
+
+        A native app's agents are built by ADK from its YAML, not from the
+        models resolved for the configs: usage and the raw log name the
+        default model for them.
+        """
+        if self._adk_config_path:
+            return {}
+        return {name: str(model.ref) for name, model in self._resolved_models.items()}
 
     def _make_session_service(self) -> BaseSessionService:
         """Build the ADK session service from ``session_store`` settings.
@@ -617,6 +628,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         """
         logger.info("initializing_services", app_name=self.app_name)
         native = bool(self._adk_config_path)
+        # Each agent's context numbers, by name (agents built from configs).
         self._budgets = {} if native else {
             name: context_budget(model, self._settings)
             for name, model in self._resolved_models.items()
@@ -692,8 +704,12 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         )
         runner = Runner if native else NoAfterTurnCompactionRunner
         self._runner = runner(app=app, session_service=self._session_service)
-        # Usage events name the default model, resolved for this initialization.
+        # A call's usage names its agent's own model and context numbers. The
+        # default model, resolved for this initialization, stands in for an
+        # agent the framework did not build (a native ADK app's).
         self._event_processor.model = self.model
+        self._event_processor.models = self._agent_model_refs()
+        self._event_processor.budgets = self._budgets
         # Only the root replies to the user; another agent's text is a
         # sub-agent's work. A native ADK app's agents transfer, and each one
         # it transfers to replies.
@@ -791,16 +807,19 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             create_http_options=types.HttpOptions(timeout=_CACHE_CREATE_TIMEOUT_MS)
         )
 
-    def _validate_agent_graph(self) -> None:
+    def _validate_agent_graph(self) -> AgentGraph | None:
         """Reject an unbuildable agent graph before anything is allocated.
 
         Runs at the top of initialization — ahead of model listings, service
         construction and the session service — so a static configuration error
         costs no network call and leaves nothing to roll back.
+
+        Returns:
+            The graph; None for a native ADK config, whose topology ADK owns.
         """
         if self._adk_config_path:
-            return  # native ADK config: ADK owns the topology
-        validate_agent_graph(self._agent_configs, backend=self.backend_type)
+            return None  # native ADK config: ADK owns the topology
+        return validate_agent_graph(self._agent_configs, backend=self.backend_type)
 
     async def _ensure_initialized(self) -> None:
         """Ensure services are initialized before processing.

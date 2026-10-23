@@ -43,9 +43,11 @@ from agentic_cli.workflow.base_manager import BaseWorkflowManager
 from agentic_cli.workflow.checkpointers import deepagents_sqlite_path, open_checkpointer
 from agentic_cli.workflow.config import (
     AgentConfig,
+    AgentGraph,
     AgentGraphError,
     validate_agent_graph,
 )
+from agentic_cli.workflow.context import context_budget
 from agentic_cli.workflow.deepagents.agent_builder import build_agent_tree
 from agentic_cli.workflow.deepagents.event_processor import (
     DeepAgentsEventProcessor,
@@ -182,9 +184,9 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
     # Lifecycle
     # -------------------------------------------------------------------------
 
-    def _validate_agent_graph(self) -> None:
+    def _validate_agent_graph(self) -> AgentGraph:
         """Reject an unbuildable agent graph before anything is allocated."""
-        validate_agent_graph(self._agent_configs, backend=self.backend_type)
+        return validate_agent_graph(self._agent_configs, backend=self.backend_type)
 
     def _backend_ready(self) -> bool:
         """True when the root agent and the session store are live."""
@@ -210,6 +212,12 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             self._sessions = CheckpointSessions(self._checkpointer)
 
         graph = validate_agent_graph(self._agent_configs, backend=self.backend_type)
+        # Each agent's context numbers, as its summarization uses them; a
+        # budget too small to work in fails here (ContextBudgetError).
+        self._budgets = {
+            name: context_budget(model, self._settings)
+            for name, model in self._resolved_models.items()
+        }
         service_map = self._get_service_tool_map()
 
         from agentic_cli.config import SettingsContext
@@ -352,6 +360,7 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             self._sessions = None
         self._root = None
         self._root_name = None
+        self._budgets = {}
         self._initialized = False
         self._pending_notices = []
 
@@ -580,6 +589,7 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             root=self._root_name,
             agent_models=self._resolved_models,
             session_id=ref.session_id,
+            budgets=self._budgets,
         )
         live = LiveEvents()
         callback = RunCallback(
@@ -587,6 +597,7 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             agent_models=self._resolved_models,
             llm_log=self._raw_llm_log(),
             live=live,
+            budgets=self._budgets,
         )
         stream = self._root.astream(
             graph_input,

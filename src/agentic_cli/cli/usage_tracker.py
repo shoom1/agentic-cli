@@ -2,11 +2,21 @@
 
 Accumulates token usage from LLM_USAGE events and provides
 compact formatting for status bar display and /status breakdown.
+
+The status bar's ``ctx`` segment is the main agent's last prompt against the
+size at which its conversation is summarized (the ``context_trigger`` its
+calls' usage carries): ``ctx 45k/170k (26%)``. A sub-agent's call and a
+summary's add to the totals only, so they never move it.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+
+#: Calls whose prompt is not the main agent's context: a summary's prompt is
+#: the history it condenses, a sub-agent's its brief (or, inheriting, the
+#: conversation, which is still not the main agent's context).
+_NOT_THE_CONTEXT = ("summarization", "subagent")
 
 
 def format_tokens(count: int) -> str:
@@ -16,22 +26,33 @@ def format_tokens(count: int) -> str:
         count: Token count to format
 
     Returns:
-        Compact string: "42", "1.5k", "12.5k", "1.2M"
+        Compact string: "42", "1.5k", "12.5k", "146k", "1.2M". The value is
+        rounded to one decimal first, so a whole result shows none (146,036
+        is "146k"), and one that rounds up to 1,000k is "1M".
     """
-    if count >= 1_000_000:
-        value = count / 1_000_000
-        return f"{value:.1f}M" if value != int(value) else f"{int(value)}M"
-    if count >= 1_000:
-        value = count / 1_000
-        return f"{value:.1f}k" if value != int(value) else f"{int(value)}k"
-    return str(count)
+    if count < 1_000:
+        return str(count)
+    value, unit = round(count / 1_000, 1), "k"
+    if value >= 1_000:
+        value, unit = round(count / 1_000_000, 1), "M"
+    return f"{value:.1f}".removesuffix(".0") + unit
 
 
 @dataclass
 class UsageTracker:
     """Accumulates token usage from LLM_USAGE events.
 
-    Fields are cumulative across all LLM invocations in a session.
+    Fields are cumulative across all LLM invocations in a session, but for
+    the main agent's context, which is its last call's.
+
+    Attributes:
+        last_prompt_tokens: The main agent's last prompt, in tokens.
+        context_trigger: The prompt size its conversation is summarized at,
+            from that call's usage; None when the backend gave none.
+        window_known: Whether that trigger comes from the model's own window
+            rather than the 128k floor; None when the backend gave none.
+        context_trimmed_count: The ``CONTEXT_TRIMMED`` events seen: summaries
+            and requests trimmed to fit (counted by the message processor).
     """
 
     prompt_tokens: int = 0
@@ -42,38 +63,32 @@ class UsageTracker:
     invocation_count: int = 0
     total_latency_ms: float = 0.0
 
-    # Context window tracking
+    # The main agent's context
     last_prompt_tokens: int = 0
+    context_trigger: int | None = None
+    window_known: bool | None = None
     context_trimmed_count: int = 0
 
-    def record(self, metadata: dict, context_trimmed_already: bool = False) -> bool:
+    def record(self, metadata: dict) -> None:
         """Accumulate values from an LLM_USAGE event's metadata dict.
 
         Handles None values and missing keys gracefully.
-        Detects context trimming via token-drop heuristic when the
-        caller has not already reported a CONTEXT_TRIMMED event.
 
         A summarization call (``purpose="summarization"``) or a sub-agent's call
         (``purpose="subagent"``) adds to the totals only: its prompt is the
-        history it condenses or the brief it was given, not the conversation's
-        context, so it neither sets the context size nor counts as a drop.
+        history it condenses or the sub-agent's own, not the main agent's
+        context. Any other call sets the context: its prompt, and the
+        ``context_trigger`` and ``window_known`` its usage carries.
 
         Args:
             metadata: Metadata dict from a WorkflowEvent (LLM_USAGE type).
-            context_trimmed_already: Set True if a CONTEXT_TRIMMED event
-                was already received for this invocation (suppresses the
-                token-drop heuristic).
-
-        Returns:
-            True if a token-drop heuristic trim was detected, False otherwise.
         """
-        prev_prompt = self.last_prompt_tokens
-        current_prompt = metadata.get("prompt_tokens") or 0
-        context_call = metadata.get("purpose") not in ("summarization", "subagent")
-        if context_call:
-            self.last_prompt_tokens = current_prompt
+        if metadata.get("purpose") not in _NOT_THE_CONTEXT:
+            self.last_prompt_tokens = metadata.get("prompt_tokens") or 0
+            self.context_trigger = metadata.get("context_trigger")
+            self.window_known = metadata.get("window_known")
 
-        self.prompt_tokens += current_prompt
+        self.prompt_tokens += metadata.get("prompt_tokens") or 0
         self.completion_tokens += metadata.get("completion_tokens") or 0
         self.thinking_tokens += metadata.get("thinking_tokens") or 0
         self.cached_tokens += metadata.get("cached_tokens") or 0
@@ -81,29 +96,39 @@ class UsageTracker:
         self.total_latency_ms += metadata.get("latency_ms") or 0.0
         self.invocation_count += 1
 
-        # Token-drop heuristic: if prompt_tokens dropped and no explicit
-        # trim event was already received, infer context was trimmed.
-        if (
-            context_call
-            and not context_trimmed_already
-            and prev_prompt > 0
-            and current_prompt < prev_prompt
-        ):
-            self.context_trimmed_count += 1
-            return True
-        return False
-
     @property
     def total_tokens(self) -> int:
         """Total tokens (prompt + completion)."""
         return self.prompt_tokens + self.completion_tokens
 
+    def format_context(self) -> str:
+        """The ``ctx`` segment: the main agent's last prompt against its trigger.
+
+        Returns:
+            ``"ctx 45k/170k (26%)"`` when the trigger is known and comes from
+            the model's own window; ``"ctx 45k"`` when the window is unknown
+            (the trigger then rests on the 128k floor) or the backend gives no
+            trigger; ``""`` before the main agent's first call.
+        """
+        if self.last_prompt_tokens <= 0:
+            return ""
+        context = f"ctx {format_tokens(self.last_prompt_tokens)}"
+        if self.context_trigger and self.window_known:
+            share = round(100 * self.last_prompt_tokens / self.context_trigger)
+            context += f"/{format_tokens(self.context_trigger)} ({share}%)"
+        return context
+
     def format_status_bar(self) -> str:
         """Format token counts for status bar display.
 
+        The context comes first: the bar is one line, clipped at the
+        terminal's width, and late in a long session the totals are long.
+        What the edge cuts is then the totals, which ``/status`` shows in
+        full, never how close the next summary is.
+
         Returns:
-            "Tokens: 12.5k in / 3.2k out | ctx: 5k" or "" if no usage yet.
-            Appends "(trimmed)" if context trimming was detected.
+            ``"ctx 45k/170k (26%) | Tokens: 12.5k in / 3.2k out"``, or ``""``
+            if no usage yet (see ``format_context``).
         """
         if self.invocation_count == 0:
             return ""
@@ -111,15 +136,16 @@ class UsageTracker:
             f"Tokens: {format_tokens(self.prompt_tokens)} in"
             f" / {format_tokens(self.completion_tokens)} out"
         ]
-        if self.last_prompt_tokens > 0:
-            ctx = f"ctx: {format_tokens(self.last_prompt_tokens)}"
-            if self.context_trimmed_count > 0:
-                ctx += " (trimmed)"
-            parts.append(ctx)
+        context = self.format_context()
+        if context:
+            parts.insert(0, context)
         return " | ".join(parts)
 
     def format_detail_rows(self) -> list[tuple[str, str]]:
         """Format token usage as (label, value) rows for detailed display.
+
+        The main agent's context (its last prompt) is ``/status``'s own row,
+        beside the model's window and trigger.
 
         Returns:
             List of (label, formatted_value) tuples suitable for a table.
@@ -143,11 +169,19 @@ class UsageTracker:
         if self.total_latency_ms > 0:
             avg_ms = self.total_latency_ms / self.invocation_count
             rows.append(("Avg Latency", f"{avg_ms:.0f}ms"))
-        if self.last_prompt_tokens > 0:
-            rows.append(("Context Window", format_tokens(self.last_prompt_tokens)))
         if self.context_trimmed_count > 0:
             rows.append(("Context Trimmed", f"{self.context_trimmed_count} time(s)"))
         return rows
+
+    def reset_context(self) -> None:
+        """Forget the main agent's context; the totals stay.
+
+        For a conversation the tracker has not seen (another backend's, after
+        an orchestrator swap): the segment shows nothing until its first call.
+        """
+        self.last_prompt_tokens = 0
+        self.context_trigger = None
+        self.window_known = None
 
     def reset(self) -> None:
         """Zero all counters."""
@@ -158,5 +192,5 @@ class UsageTracker:
         self.cache_creation_tokens = 0
         self.invocation_count = 0
         self.total_latency_ms = 0.0
-        self.last_prompt_tokens = 0
+        self.reset_context()
         self.context_trimmed_count = 0

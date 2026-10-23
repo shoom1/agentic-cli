@@ -31,6 +31,7 @@ from langchain_core.messages import (  # noqa: E402
     RemoveMessage,
     ToolMessage,
 )
+from langchain_core.outputs import ChatGeneration, LLMResult  # noqa: E402
 from langgraph.checkpoint.memory import InMemorySaver  # noqa: E402
 from langgraph.graph.message import REMOVE_ALL_MESSAGES  # noqa: E402
 
@@ -38,7 +39,11 @@ from agentic_cli.models import ModelCatalog, RoleMap, resolve_model  # noqa: E40
 from agentic_cli.tools._core.tasks import task_progress_data  # noqa: E402
 from agentic_cli.tools.langgraph.state_tools import save_plan, save_tasks  # noqa: E402
 from agentic_cli.workflow.config import AgentConfig  # noqa: E402
-from agentic_cli.workflow.context import OVERFLOW_ERROR_CODE, overflow_message  # noqa: E402
+from agentic_cli.workflow.context import (  # noqa: E402
+    OVERFLOW_ERROR_CODE,
+    ContextBudget,
+    overflow_message,
+)
 from agentic_cli.workflow.deepagents.agent_builder import build_agent_tree  # noqa: E402
 from agentic_cli.workflow.deepagents.event_processor import (  # noqa: E402
     DeepAgentsEventProcessor,
@@ -71,6 +76,16 @@ MODELS = {
     "researcher": _model("researcher", "google:gemini-2.5-flash"),
     "worker": _model("worker", "openai:gpt-5"),
 }
+
+#: Each agent's context numbers, as the manager computes them when it builds
+#: the agents: two distinct triggers, one of them on an unknown window.
+BUDGETS = {
+    "coordinator": ContextBudget(window=200_000, window_known=True, budget=181_808,
+                                 trigger=154_536, keep=18_544),
+    "researcher": ContextBudget(window=128_000, window_known=False, budget=121_600,
+                                trigger=103_360, keep=12_403),
+}
+CONTEXT_KEYS = ("agent", "context_trigger", "window_known")
 
 SUB = "tools:4f2c"  # a sub-agent's namespace segment: its task's id
 NESTED = "tools:9a1e"
@@ -455,6 +470,25 @@ class TestUsage:
 
         assert EventType.LLM_USAGE not in _types(events)
 
+    def test_each_agents_usage_carries_its_own_context_trigger(self):
+        processor = _processor(budgets=BUDGETS)
+        _delegated(processor, (), SUB, "researcher")
+        message = AIMessage(
+            "Found.", usage_metadata={"input_tokens": 5, "output_tokens": 2, "total_tokens": 7}
+        )
+
+        (sub,) = [e for e in processor.process((SUB,), "updates", _model_update(message))
+                  if e.type is EventType.LLM_USAGE]
+        (root,) = [e for e in processor.process((), "updates", _model_update(message))
+                   if e.type is EventType.LLM_USAGE]
+
+        assert {key: root.metadata.get(key) for key in CONTEXT_KEYS} == {
+            "agent": "coordinator", "context_trigger": 154_536, "window_known": True,
+        }
+        assert {key: sub.metadata.get(key) for key in CONTEXT_KEYS} == {
+            "agent": "researcher", "context_trigger": 103_360, "window_known": False,
+        }
+
 
 class TestError:
     def test_a_failed_turn_is_one_error_from_the_agent_that_failed(self):
@@ -617,6 +651,28 @@ class TestRunCallback:
             EventType.CONTEXT_SUMMARIZING, "the stream's next item"
         ]
         assert callback.drain() == []
+
+    async def test_a_summarys_usage_is_the_summarized_agents(self):
+        callback = RunCallback(root="coordinator", agent_models=MODELS, budgets=BUDGETS)
+        run = uuid.uuid4()
+        answer = AIMessage("A summary.", usage_metadata={
+            "input_tokens": 900, "output_tokens": 40, "total_tokens": 940,
+        })
+
+        await callback.on_chat_model_start(
+            {}, [[HumanMessage("Summarize.")]], run_id=run,
+            metadata={"lc_source": "summarization", "lc_agent_name": "researcher"},
+        )
+        await callback.on_llm_end(
+            LLMResult(generations=[[ChatGeneration(message=answer)]]), run_id=run
+        )
+
+        _, usage = callback.drain()
+        assert usage.type is EventType.LLM_USAGE
+        assert {key: usage.metadata.get(key) for key in ("purpose", "model", *CONTEXT_KEYS)} == {
+            "purpose": "summarization", "model": "google:gemini-2.5-flash",
+            "agent": "researcher", "context_trigger": 103_360, "window_known": False,
+        }
 
     async def test_a_summary_reports_its_tokens(self):
         callback = RunCallback(root="coordinator", agent_models=MODELS)

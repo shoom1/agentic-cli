@@ -6,9 +6,10 @@ logic that runs on every message in the hot path.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import AsyncGenerator, Any, Callable
 
-from agentic_cli.workflow.context import OVERFLOW_ERROR_CODE
+from agentic_cli.workflow.context import OVERFLOW_ERROR_CODE, ContextBudget, usage_fields
 from agentic_cli.workflow.events import WorkflowEvent, EventType
 from agentic_cli.logging import Loggers
 
@@ -33,6 +34,12 @@ class ADKEventProcessor:
     native ADK YAML app, whose agents transfer and do own the reply) nothing
     is marked.
 
+    A call's ``LLM_USAGE`` is credited to the agent that made it, the event's
+    author: ``metadata["agent"]``, that agent's own model (``models``; the
+    default model for an agent the framework did not build) and its context
+    numbers (``context_trigger``, ``window_known``, from ``budgets``), which
+    the CLI shows the main agent's prompt against.
+
     A conversation the main agent's model no longer takes ends its turn with
     an error response from the overflow handler
     (``workflow/adk/overflow_plugin.py``), ``error_code="CONTEXT_OVERFLOW"``:
@@ -41,9 +48,15 @@ class ADKEventProcessor:
     that then leaves the run, which reports it.
 
     Args:
-        model: Model name used for usage metadata.
+        model: The default model, which usage names for an agent ``models``
+            does not hold.
         on_event: Optional hook to transform/filter events before yielding.
         root: The root agent's name, or None to mark nothing.
+        models: Each agent's model reference, by name.
+        budgets: Each agent's context numbers, by name.
+
+    ``root``, ``models`` and ``budgets`` are attributes the manager sets at
+    each initialization, when the agents are built.
     """
 
     def __init__(
@@ -51,10 +64,14 @@ class ADKEventProcessor:
         model: str,
         on_event: Callable[[WorkflowEvent], WorkflowEvent | None] | None = None,
         root: str | None = None,
+        models: Mapping[str, str] | None = None,
+        budgets: Mapping[str, ContextBudget] | None = None,
     ) -> None:
         self._model = model
         self._on_event = on_event
         self.root = root
+        self.models: Mapping[str, str] = models or {}
+        self.budgets: Mapping[str, ContextBudget] = budgets or {}
 
     @property
     def model(self) -> str:
@@ -112,9 +129,10 @@ class ADKEventProcessor:
         if hasattr(adk_event, "usage_metadata") and adk_event.usage_metadata:
             usage = adk_event.usage_metadata
             invocation_id = getattr(adk_event, "invocation_id", None)
+            agent = self._agent(adk_event)
 
             usage_event = WorkflowEvent.llm_usage(
-                model=self._model,
+                model=self.models.get(agent, self._model),
                 prompt_tokens=getattr(usage, "prompt_token_count", None),
                 completion_tokens=getattr(usage, "candidates_token_count", None),
                 total_tokens=getattr(usage, "total_token_count", None),
@@ -122,6 +140,9 @@ class ADKEventProcessor:
                 cached_tokens=getattr(usage, "cached_content_token_count", None),
                 invocation_id=invocation_id,
             )
+            if agent is not None:
+                usage_event.metadata["agent"] = agent
+            usage_event.metadata.update(usage_fields(self.budgets.get(agent)))
             if subagent is not None:
                 usage_event.metadata["purpose"] = "subagent"
             usage_event = self._apply_hook(usage_event)
@@ -142,10 +163,16 @@ class ADKEventProcessor:
 
     def _subagent(self, adk_event: Any) -> str | None:
         """The sub-agent that wrote ``adk_event``, or None (the root, the user)."""
-        author = getattr(adk_event, "author", None)
-        if self.root is None or not author or author in (self.root, "user"):
+        agent = self._agent(adk_event)
+        if self.root is None or agent in (None, self.root):
             return None
-        return author
+        return agent
+
+    @staticmethod
+    def _agent(adk_event: Any) -> str | None:
+        """The agent that wrote ``adk_event``, or None (the user's own)."""
+        author = getattr(adk_event, "author", None)
+        return author if author and author != "user" else None
 
     def process_part(self, part: Any, session_id: str) -> WorkflowEvent | None:
         """Process a single part from the agent response.

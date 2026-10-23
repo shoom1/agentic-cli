@@ -35,7 +35,8 @@ of the events the summary's range covers; the session keeps them all, for
 - **Reporting** goes through the turn's live events
   (``workflow/live_events.py``), while the turn's stream waits on the call:
   ``CONTEXT_SUMMARIZING`` as it starts, its ``LLM_USAGE``
-  (``purpose="summarization"``), then ``CONTEXT_TRIMMED``.
+  (``purpose="summarization"``, the main agent's: its name and context
+  trigger), then ``CONTEXT_TRIMMED``.
 - **A failure** of any kind is one recoverable ``ERROR`` a turn; nothing is
   written, ADK goes on with the whole history, and its next model call tries
   again. A summary asked for (``manual``) reports none of its own: its
@@ -71,7 +72,12 @@ from google.genai import types
 from agentic_cli.logging import Loggers
 from agentic_cli.workflow import live_events
 from agentic_cli.workflow.adk.model_factory import generate_text
-from agentic_cli.workflow.context import ESTIMATE_MARGIN, CompactResult, chars_per_token
+from agentic_cli.workflow.context import (
+    ESTIMATE_MARGIN,
+    CompactResult,
+    chars_per_token,
+    usage_fields,
+)
 from agentic_cli.workflow.events import WorkflowEvent
 from agentic_cli.workflow.summary_prompt import SUMMARY_PREFIX, summary_prompt
 
@@ -328,7 +334,11 @@ class AgentCliSummarizer(BaseEventsSummarizer):
         return _cut_middle(whole, room)
 
     def _usage(self, usage: types.GenerateContentResponseUsageMetadata | None) -> WorkflowEvent:
-        """The summary call's usage, credited to the agent it summarized."""
+        """The summary call's usage, credited to the agent it summarized.
+
+        It carries that agent's context numbers (an overflow's summary too),
+        as its own calls' usage does.
+        """
         event = WorkflowEvent.llm_usage(
             model=str(self.model.ref),
             prompt_tokens=getattr(usage, "prompt_token_count", None),
@@ -337,7 +347,9 @@ class AgentCliSummarizer(BaseEventsSummarizer):
             thinking_tokens=getattr(usage, "thoughts_token_count", None),
             cached_tokens=getattr(usage, "cached_content_token_count", None),
         )
-        event.metadata.update(purpose="summarization", agent=self.root)
+        event.metadata.update(
+            purpose="summarization", agent=self.root, **usage_fields(self.budget)
+        )
         return event
 
     def _failed(self, error: Exception) -> None:
