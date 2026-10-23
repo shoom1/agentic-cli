@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
-from typing import AsyncGenerator, Any, Callable
+from typing import TYPE_CHECKING, AsyncGenerator, Any, Callable
 
 from google.genai import types
 from google.adk import Runner
@@ -25,7 +25,7 @@ from google.adk.tools import LongRunningFunctionTool
 
 from agentic_cli.workflow import live_events
 from agentic_cli.workflow.base_manager import BaseWorkflowManager
-from agentic_cli.workflow.context import context_budget
+from agentic_cli.workflow.context import CompactResult, context_budget
 from agentic_cli.workflow.events import WorkflowEvent, EventType
 from agentic_cli.workflow.config import AgentConfig, AgentGraph, validate_agent_graph
 from agentic_cli.workflow.adk import delegation
@@ -54,6 +54,9 @@ from agentic_cli.config import (
 from agentic_cli.logging import Loggers, bind_context
 from agentic_cli.models import CacheMechanism
 from agentic_cli.tools.jobs.resume import JOB_NOTICE_HEADER, job_notice, job_result_payload
+
+if TYPE_CHECKING:
+    from agentic_cli.workflow.sessions import SessionRef
 
 
 logger = Loggers.workflow()
@@ -773,6 +776,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             root_agent=self._root_agent,
             summarizer=summarizer,
         ):
+            summarizer.report_stored()
             return WrittenSummary(summarizer.last_summary, summarizer.last_kept_turns)
         if summarizer.last_error is not None:
             raise summarizer.last_error
@@ -1129,6 +1133,83 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     new_message=new_message,
                 ):
                     yield event
+
+    @property
+    def supports_compact(self) -> bool:
+        """True for an app built from agent configs; a native ADK YAML app has none.
+
+        Its agents are ADK's own, and their context too (``compact`` raises
+        ``NotImplementedError`` there), so a caller can tell before it asks.
+        """
+        return not self._adk_config_path
+
+    async def compact(
+        self, session: SessionRef, focus: str | None = None
+    ) -> CompactResult | None:
+        """Summarize the main agent's conversation now (``/compact``).
+
+        ADK's compaction runs once on a fresh read of the session
+        (``compact_session``), with the main agent's summarizer asked for now
+        (``manual``): written whatever the last prompt's size and the saving,
+        ``focus`` spliced into its prompt. The range, the call, the event and
+        what is reported are a summary's in a turn, but ``CONTEXT_TRIMMED``
+        names ``"compact"`` and comes once ADK has stored the summary. It
+        runs under turn admission, so a turn or a job's resume never writes
+        to the session between its read and the summary's append (ADK's
+        ``StaleSessionError``), and nothing is written until the summary is:
+        a cancel leaves the session as it was, and says nothing was made.
+
+        Args:
+            session: The conversation.
+            focus: What the summary should keep above all, if anything.
+
+        Returns:
+            What the summary did; None with no conversation yet, or nothing
+            before the kept tail.
+
+        Raises:
+            NotImplementedError: A native ADK YAML app, whose agents ADK
+                builds: the framework manages none of their context.
+            Exception: Why the summary failed (the summarizer's
+                ``last_error``, the provider's error).
+        """
+        if self._adk_config_path:
+            raise NotImplementedError(
+                "A native ADK YAML app (adk_config_path) cannot be summarized on "
+                "demand: its agents' context is ADK's own."
+            )
+        bind_context(session_id=session.session_id, user_id=session.user_id)
+        async with self._turn_admission():
+            with self._workflow_context(
+                session_id=session.session_id, user_id=session.user_id
+            ):
+                stored = await self._session_service.get_session(
+                    app_name=session.app_name,
+                    user_id=session.user_id,
+                    session_id=session.session_id,
+                )
+                if stored is None:
+                    return None
+                summarizer = self._summarizer(manual=True, focus=focus)
+                if await compact_session(
+                    session=stored,
+                    session_service=self._session_service,
+                    root_agent=self._root_agent,
+                    summarizer=summarizer,
+                ):
+                    summarizer.report_stored()
+                    result = summarizer.last_result
+                    logger.info(
+                        "conversation_compacted",
+                        messages=result.messages_summarized,
+                        tokens_before=result.tokens_before,
+                        tokens_after=result.tokens_after,
+                        focus=focus is not None,
+                    )
+                    return result
+                if summarizer.last_error is not None:
+                    raise summarizer.last_error
+                return None
 
     # -------------------------------------------------------------------------
     # Sessions (native — DatabaseSessionService persists events continuously)

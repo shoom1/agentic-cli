@@ -448,6 +448,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "researcher: context summarized: …". `UsageTracker` keeps `context_trigger` and
   `window_known` beside `last_prompt_tokens`, and `format_context()` gives
   the segment.
+- **`BaseWorkflowManager.compact(session, focus=None)` summarizes a
+  conversation now**, whatever its size: the hook `/compact` runs.
+  `supports_compact` says whether a backend has it, derived as
+  `supports_sessions` is (the base raises `NotImplementedError`; LangGraph
+  has none). On ADK it runs ADK's own compaction once, on a fresh read of
+  the session, with the main agent's summarizer asked for now: written
+  whatever the last prompt's size and the saving, `focus` spliced into the
+  summary prompt ("Focus the summary on: …"), and the same tail kept word
+  for word as a summary in a turn keeps (the newest 12% of the trigger, and
+  the newest turn). It returns a frozen `CompactResult(messages_summarized,
+  tokens_before, tokens_after)` (`workflow/context.py`), or None when there
+  is nothing to summarize (no conversation yet, or nothing before the kept
+  tail), and reports what a summary in a turn reports
+  (`CONTEXT_SUMMARIZING`, the summary's usage, then `CONTEXT_TRIMMED` with
+  `source="compact"`, once the summary is stored) to the caller's live
+  events (`live_events.reporting`). It runs under turn admission, so it
+  never interleaves with a turn or a job's resume; a cancel writes nothing
+  and never says a summary was made; a summary that fails raises the
+  provider's error, with no warning of its own. A native ADK YAML app has
+  none: `supports_compact` is False there, and `compact` raises
+  `NotImplementedError`.
 
 ### Changed
 

@@ -503,11 +503,20 @@ class TestTheSummary:
         events = [user("One.", 0), said("A1.", 1), user(LONG, 2), said("A2.", 3),
                   user("Three?", 4)]
 
-        event = await as_agent(None, lambda: summarizer(manager, manual=True)
-                               .maybe_summarize_events(events=events), live)
+        made = summarizer(manager, manual=True)
+        event = await as_agent(None, lambda: made.maybe_summarize_events(events=events), live)
+        reported = [e.type for e in live.events]
+        with reporting(live):
+            made.report_stored()
+            made.report_stored()  # once
 
         assert event is not None
         assert len(api.requests) == 1
+        # What it did waits for its caller to store it (``report_stored``).
+        assert reported == [EventType.CONTEXT_SUMMARIZING, EventType.LLM_USAGE]
+        assert [e.type for e in live.events] == [
+            EventType.CONTEXT_SUMMARIZING, EventType.LLM_USAGE, EventType.CONTEXT_TRIMMED
+        ]
         assert live.events[-1].metadata["source"] == "compact"
 
 

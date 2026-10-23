@@ -63,7 +63,7 @@ from agentic_cli.logging import Loggers
 if TYPE_CHECKING:
     from agentic_cli.config import BaseSettings
     from agentic_cli.workflow.config import AgentGraph
-    from agentic_cli.workflow.context import ContextBudget
+    from agentic_cli.workflow.context import CompactResult, ContextBudget
     from agentic_cli.memory import MemoryStore
     from agentic_cli.memory.kb import KnowledgeBase
     from agentic_cli.tools.sandbox.manager import SandboxManager
@@ -933,6 +933,49 @@ class BaseWorkflowManager(ABC):
             who = "the root agent" if name is None else f"agent {name!r}"
             raise KeyError(f"No context budget for {who}: this manager does not manage it.")
         return self._budgets[name]
+
+    @property
+    def supports_compact(self) -> bool:
+        """Whether this backend can summarize a conversation on demand (``compact``).
+
+        Derived from the subclass overriding ``compact``, as
+        ``supports_sessions`` is, so it cannot drift from the code.
+        """
+        return type(self).compact is not BaseWorkflowManager.compact
+
+    async def compact(
+        self, session: SessionRef, focus: str | None = None
+    ) -> "CompactResult | None":
+        """Summarize the main agent's conversation in ``session`` now (``/compact``).
+
+        A backend that implements it runs it as a turn runs: under turn
+        admission, so it never interleaves with a turn or a job's resume, and
+        inside the workflow context of ``session``. It summarizes as its
+        conversations are summarized when they grow, but whatever the prompt's
+        size, keeping the same tail word for word; ``focus`` tells the summary
+        what to keep above all. What it reports goes to the caller's live
+        events (``workflow/live_events.py``), when there are any:
+        ``CONTEXT_SUMMARIZING``, the summary's ``LLM_USAGE``
+        (``purpose="summarization"``) and ``CONTEXT_TRIMMED``
+        (``source="compact"``). A cancel writes nothing.
+
+        Args:
+            session: The conversation.
+            focus: What the summary should keep above all, if anything.
+
+        Returns:
+            What the summary did; None when there is nothing to summarize (no
+            conversation yet, or none before the tail kept word for word).
+
+        Raises:
+            NotImplementedError: The backend cannot (``supports_compact``).
+            Exception: Why the summary could not be written (the provider's
+                error).
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} cannot summarize a conversation on demand "
+            "(compact). Check ``supports_compact`` before calling."
+        )
 
     async def initialize_services(self, validate: bool = True) -> None:
         """Initialize backend services asynchronously.
