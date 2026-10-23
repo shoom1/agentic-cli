@@ -152,6 +152,23 @@ class TestCompactNow:
         # The checkpoint keeps every message.
         assert len(recent) == 8
 
+    async def test_the_event_records_how_many_messages_it_was_written_on(
+        self, small, monkeypatch
+    ):
+        # Deep Agents 0.7.30's created_at_index: the messages a summary kept
+        # from before it lose their reasoning, which Claude binds to the
+        # conversation before them. An older Deep Agents ignores the key.
+        manager, _ = solo(monkeypatch, small, [*answers(3), ai("A summary.")])
+        try:
+            for text in THREE:
+                await turn(manager, text)
+            await compact_now(manager)
+            state = await state_of(manager)
+        finally:
+            await manager.cleanup()
+
+        assert state[SUMMARIZATION_EVENT_KEY]["created_at_index"] == len(state["messages"]) == 6
+
     async def test_the_focus_reaches_the_summary_prompt(self, small, monkeypatch):
         """Braces in the focus reach the model as written (the helper fills
         its prompt with ``str.format``)."""
@@ -778,9 +795,11 @@ class TestTheDeepAgentsItRestsOn:
 
     def test_the_event_lives_in_state_under_its_key(self):
         assert SUMMARIZATION_EVENT_KEY == "_summarization_event"
-        assert set(SummarizationEvent.__annotations__) == {
-            "cutoff_index", "summary_message", "file_path"
-        }
+        # Deep Agents 0.7.30 added created_at_index, which an event may lack.
+        assert set(SummarizationEvent.__annotations__) in (
+            {"cutoff_index", "summary_message", "file_path"},
+            {"cutoff_index", "summary_message", "file_path", "created_at_index"},
+        )
 
     def test_an_event_is_applied_as_the_summary_and_the_messages_after_its_cut(self):
         apply = SummarizationMiddleware._apply_event_to_messages

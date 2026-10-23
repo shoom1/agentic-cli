@@ -658,6 +658,7 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
                 event = summary_event(
                     middleware, previous, cut, summary,
                     after=newest.id if newest is not None else None,
+                    written_on=len(values.get("messages") or []),
                 )
                 await self._root.aupdate_state(
                     config, {SUMMARIZATION_EVENT_KEY: event}, as_node="model"

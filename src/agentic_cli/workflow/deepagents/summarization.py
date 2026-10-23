@@ -541,6 +541,7 @@ def summary_event(
     summary: str,
     *,
     after: str | None = None,
+    written_on: int | None = None,
 ) -> SummarizationEvent:
     """The event Deep Agents stores for ``summary``, of the sent messages before ``cut``.
 
@@ -550,15 +551,22 @@ def summary_event(
     and the summary. With ``after`` (the id of the newest answer in the
     messages sent), the message is marked ``{"kind": "compact", "after":
     after}`` in its ``response_metadata``, which ``_should_summarize`` reads.
+    With ``written_on`` (how many messages the state holds), the event says
+    so as Deep Agents' own do since 0.7.30 (``created_at_index``): the
+    messages it kept from before it then lose their reasoning, which Claude
+    binds to the conversation before them. An older Deep Agents ignores it.
     """
     (message,) = middleware._build_new_messages_with_path(summary, None)
     if after is not None:
         message.response_metadata[_MARK] = {"kind": COMPACTED, "after": after}
-    return {
+    event: SummarizationEvent = {
         "cutoff_index": middleware._compute_state_cutoff(previous, cut),
         "summary_message": message,
         "file_path": None,
     }
+    if written_on is not None:
+        event["created_at_index"] = written_on  # type: ignore[typeddict-unknown-key]
+    return event
 
 
 def newest_answer(messages: Sequence["AnyMessage"]) -> AIMessage | None:
