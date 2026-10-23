@@ -339,7 +339,8 @@ class TestTheStack:
             30_000, tmp_path / ".agentic_cli" / "tool-output"
         )
         assert issubclass(ReportingSummarizationMiddleware, SummarizationMiddleware)
-        assert lead[2].kind is ProviderKind.ANTHROPIC
+        # Each agent leaves other providers' and other agents' reasoning out.
+        assert (lead[2].kind, lead[2].agent) == (ProviderKind.ANTHROPIC, "lead")
         assert lead[3].agent == "lead"
         assert (lead[5].ttl, lead[5].unsupported_model_behavior) == ("5m", "ignore")
         assert [type(m) for m in created["helper"]["middleware"]] == [
@@ -348,7 +349,8 @@ class TestTheStack:
             PermissionMiddleware, ToolResultCapMiddleware, ToolCallErrorMiddleware,
             ActiveToolCallMiddleware,
         ]
-        assert created["helper"]["middleware"][1].kind is ProviderKind.GOOGLE
+        assert (created["helper"]["middleware"][1].kind,
+                created["helper"]["middleware"][1].agent) == (ProviderKind.GOOGLE, "helper")
         assert created["helper"]["middleware"][2].agent == "helper"
 
     def test_every_agent_summarizes_on_its_own_models_budget(self, created):
