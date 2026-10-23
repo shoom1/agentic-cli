@@ -21,7 +21,6 @@ the trigger from the provider's count.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -64,6 +63,7 @@ from agentic_cli.workflow.summary_prompt import SUMMARY_PREFIX  # noqa: E402
 from tests.cli.dialog_fakes import autospec_session, opening_boxes  # noqa: E402
 from tests.event_replay import ReplayController  # noqa: E402
 from tests.workflow.adk.fakes import FakeAPI, anthropic_message, openai_response  # noqa: E402
+from tests.workflow.compacting import compact_now  # noqa: E402
 from tests.workflow.test_adk_context_cache import _native_yaml  # noqa: E402
 from tests.workflow.test_manager_models import route  # noqa: E402
 
@@ -826,31 +826,6 @@ THREE = [f"One: {LONG}", f"Two: {LONG}", "Three?"]
 
 def three_turns(**more) -> Claude:
     return Claude(solo=[says("A1."), says("A2."), says("A3."), says("A4.")], **more)
-
-
-async def compact_now(manager, focus=None, *, events: list | None = None,
-                      session_id: str = "s"):
-    """``manager.compact`` as ``/compact`` runs it: what it reports merged in.
-
-    Every event reported goes to ``events`` (a new list unless given), so a
-    test still reads them when ``compact`` raises.
-    """
-    events = [] if events is None else events
-    outcome: dict = {}
-
-    async def source():
-        outcome["result"] = await manager.compact(
-            manager.session_ref(session_id, "u"), focus
-        )
-        if False:  # pragma: no cover - an async generator that yields nothing
-            yield
-
-    live = live_events.LiveEvents()
-    with live_events.reporting(live):
-        async with contextlib.aclosing(live_events.merged(source(), live)) as items:
-            async for event in items:
-                events.append(event)
-    return outcome["result"], events
 
 
 class TestCompactNow:

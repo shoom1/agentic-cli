@@ -76,7 +76,10 @@ from agentic_cli.workflow.deepagents.middleware import (
     ToolResultCapMiddleware,
 )
 from agentic_cli.workflow.deepagents.state import AgentCliState
-from agentic_cli.workflow.deepagents.summarization import build_summarization
+from agentic_cli.workflow.deepagents.summarization import (
+    ReportingSummarizationMiddleware,
+    build_summarization,
+)
 from agentic_cli.workflow.tool_output import tool_output_dir
 
 if TYPE_CHECKING:
@@ -105,6 +108,7 @@ def build_agent_tree(
     settings: "BaseSettings | None",
     checkpointer: "BaseCheckpointSaver | None",
     bound: Callable[[object], ToolDefinition | None] = identify_tool,
+    summarizers: dict[str, ReportingSummarizationMiddleware] | None = None,
 ) -> "CompiledStateGraph":
     """Build every agent, bottom-up, and return the root.
 
@@ -129,6 +133,10 @@ def build_agent_tree(
             object the framework built and bound. Defaults to the framework
             registry's identity map; a manager with tool objects of its own
             (its MCP tools) passes its map chained before it.
+        summarizers: Filled, when given, with each agent's summarization
+            middleware, by name (none for an agent built without settings):
+            the manager keeps the root's to summarize on demand
+            (``compact``).
 
     Raises:
         AgentGraphError: A coordinator's own tools include one named
@@ -144,13 +152,19 @@ def build_agent_tree(
             _subagent(config_map[sub], build(sub)) for sub in config.sub_agents
         ]
         model = chat_models[name]
+        model_side = _model_side(model, resolved.get(name), settings)
+        if summarizers is not None:
+            summarizers.update(
+                (name, middleware) for middleware in model_side
+                if isinstance(middleware, ReportingSummarizationMiddleware)
+            )
         return create_agent(
             model=model,
             tools=_own_tools(config, tools.get(name, []), delegates=bool(subagents)),
             system_prompt=prompts[name],
             middleware=_middleware(
                 subagents,
-                model_side=_model_side(model, resolved.get(name), settings),
+                model_side=model_side,
                 tool_side=_tool_side(config, settings, bound=bound),
             ),
             state_schema=AgentCliState,

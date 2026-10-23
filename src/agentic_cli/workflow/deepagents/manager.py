@@ -14,7 +14,9 @@ prompt. With ``raw_llm_logging`` on, a turn's every model call is logged
 (``LLM_REQUEST``/``LLM_RESPONSE``, in the stream and in
 ``~/.{app_name}/logs/llm_events.jsonl``). A long-running job that finishes
 resumes its conversation with a turn of its own, opened by a notification to
-the root agent (``resume_with_job_result``).
+the root agent (``resume_with_job_result``). The root agent's conversation is
+summarized on demand by ``compact`` (``/compact``), with its own summarization
+middleware, kept when the agents are built.
 
 Lifecycle follows ADK's contract (``workflow/adk/manager.py``): initialization,
 ``reinitialize`` and ``cleanup`` hold the lifecycle lock and then the turn
@@ -31,6 +33,7 @@ import asyncio
 import contextlib
 from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable
 
+from deepagents.middleware.summarization import SUMMARIZATION_EVENT_KEY
 from langchain_core.messages import HumanMessage
 
 from agentic_cli.config import BaseSettings
@@ -47,7 +50,8 @@ from agentic_cli.workflow.config import (
     AgentGraphError,
     validate_agent_graph,
 )
-from agentic_cli.workflow.context import context_budget
+from agentic_cli.workflow import live_events
+from agentic_cli.workflow.context import CompactResult, context_budget
 from agentic_cli.workflow.deepagents.agent_builder import build_agent_tree
 from agentic_cli.workflow.deepagents.event_processor import (
     DeepAgentsEventProcessor,
@@ -58,6 +62,13 @@ from agentic_cli.workflow.deepagents.sessions import (
     CheckpointSessions,
     job_notification,
     run_config,
+)
+from agentic_cli.workflow.deepagents.summarization import (
+    ReportingSummarizationMiddleware,
+    compact_cutoff,
+    newest_answer,
+    summary_event,
+    write_summary,
 )
 from agentic_cli.workflow.deepagents.tools import to_langchain_tools
 from agentic_cli.workflow.events import WorkflowEvent
@@ -146,6 +157,8 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
 
         self._root: CompiledStateGraph | None = None
         self._root_name: str | None = None
+        # The root agent's summarization middleware, which compact() uses.
+        self._root_summarization: ReportingSummarizationMiddleware | None = None
 
         # The agents' MCP sessions, and which tool objects are theirs.
         self._mcp = MCPSessions()
@@ -241,6 +254,7 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             if config.mcp_servers:
                 own = await self._with_mcp_tools(config, own)
             tools[config.name] = own
+        summarizers: dict[str, ReportingSummarizationMiddleware] = {}
         self._root = build_agent_tree(
             self._agent_configs,
             chat_models={
@@ -257,8 +271,10 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             settings=self._settings,
             checkpointer=self._checkpointer,
             bound=self._identify_tool,
+            summarizers=summarizers,
         )
         self._root_name = graph.root_name
+        self._root_summarization = summarizers.get(graph.root_name)
 
         logger.info(
             "services_initialized",
@@ -360,6 +376,7 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             self._sessions = None
         self._root = None
         self._root_name = None
+        self._root_summarization = None
         self._budgets = {}
         self._initialized = False
         self._pending_notices = []
@@ -567,6 +584,103 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
                     ref, {"messages": [job_notification(record, result)]}
                 ):
                     yield event
+
+    async def compact(
+        self, session: "SessionRef", focus: str | None = None
+    ) -> CompactResult | None:
+        """Summarize the root agent's conversation now (``/compact``).
+
+        With the root's own summarization middleware, as Deep Agents
+        summarizes when the conversation grows: the thread's messages with
+        its summary so far applied (``_apply_event_to_messages``) are cut as
+        ADK's ``/compact`` cuts (``compact_cutoff``: about the agent's
+        ``keep`` tokens kept, the cut where a user's message starts); the
+        middleware's helper writes the summary, ``focus`` in its prompt
+        (``write_summary``), under a run callback, so its start
+        (``CONTEXT_SUMMARIZING``) and usage are reported to the caller's live
+        events; and the summary is stored as the model node stores its own
+        (``aupdate_state(..., as_node="model")``), a ``_summarization_event``
+        the next request applies, replacing the summary so far. It is marked
+        with the newest answer it was written after, whose reported count
+        then no longer triggers a summary (``_should_summarize``).
+        ``CONTEXT_TRIMMED`` (``source="compact"``) follows. The checkpoint
+        keeps every message.
+
+        Under turn admission, so a turn or a job's resume never runs on the
+        thread meanwhile. Nothing is written until the summary is: a cancel
+        leaves the thread as it was.
+
+        Args:
+            session: The conversation.
+            focus: What the summary should keep above all, if anything.
+
+        Returns:
+            What the summary did; None with no conversation yet, or nothing
+            before the kept tail.
+
+        Raises:
+            ValueError: The model wrote an empty summary.
+            Exception: The summary call failed (the provider's error).
+        """
+        bind_context(session_id=session.session_id, user_id=session.user_id)
+        async with self._turn_admission():
+            with self._workflow_context(
+                session_id=session.session_id, user_id=session.user_id
+            ):
+                config = run_config(session)
+                values = (await self._root.aget_state(config)).values
+                middleware = self._root_summarization
+                previous = values.get(SUMMARIZATION_EVENT_KEY)
+                sent = middleware._apply_event_to_messages(
+                    values.get("messages") or [], previous
+                )
+                root = self._root_name
+                model = self._resolved_models[root]
+                cut = compact_cutoff(
+                    sent, keep_tokens=self._budgets[root].keep, kind=model.record.kind
+                )
+                if cut is None:
+                    return None
+                kept = sent[cut:]
+                callback = RunCallback(
+                    root=root,
+                    agent_models=self._resolved_models,
+                    llm_log=self._raw_llm_log(),
+                    live=live_events.current(),
+                    budgets=self._budgets,
+                )
+                summary = await write_summary(
+                    middleware, sent[:cut], focus=focus, callbacks=[callback]
+                )
+                if not summary:
+                    raise ValueError(f"{model.ref} wrote an empty summary")
+                newest = newest_answer(sent)
+                event = summary_event(
+                    middleware, previous, cut, summary,
+                    after=newest.id if newest is not None else None,
+                )
+                await self._root.aupdate_state(
+                    config, {SUMMARIZATION_EVENT_KEY: event}, as_node="model"
+                )
+                result = CompactResult(
+                    messages_summarized=cut,
+                    tokens_before=middleware.token_counter(sent),
+                    tokens_after=middleware.token_counter([event["summary_message"], *kept]),
+                )
+                live_events.report(WorkflowEvent.context_trimmed(
+                    len(sent), len(kept) + 1, "compact", root,
+                    messages_summarized=result.messages_summarized,
+                    tokens_before=result.tokens_before,
+                    tokens_after=result.tokens_after,
+                ))
+                logger.info(
+                    "conversation_compacted",
+                    messages=result.messages_summarized,
+                    tokens_before=result.tokens_before,
+                    tokens_after=result.tokens_after,
+                    focus=focus is not None,
+                )
+                return result
 
     def _take_notices(self) -> list[WorkflowEvent]:
         """The pending notices, through ``on_event``; they open one turn only."""

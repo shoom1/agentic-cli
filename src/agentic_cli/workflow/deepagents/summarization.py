@@ -26,19 +26,42 @@ summary prompt is LangChain's, as ADK's summaries use it
 (``workflow/summary_prompt.py``): Deep Agents' adds a note on media it
 archived, which here never happens.
 
+**A summary the model refuses as too long** is retried with the middle of
+the conversation cut out, as LangChain's helper does on its
+``ContextOverflowError``. The helper's summary model is ``OverflowMapped``:
+every refusal ``workflow/context.py`` recognizes (OpenRouter's, an
+OpenAI-compatible server's, older Claude's) is raised as that error, inside
+the helper's retry, so it is not sent again as it was.
+
 **Reporting.** The summary call runs on the agent's own model, tagged
 ``lc_source="summarization"``; the run callback reports its start
 (``CONTEXT_SUMMARIZING``) and its usage. Each summary applied is reported as
 a custom run event (``CONTEXT_SUMMARIZED``), which the run callback turns
 into ``CONTEXT_TRIMMED``, with the conversation's tokens before and after as
 the middleware's own counter has them.
+
+**On demand.** ``/compact`` (the manager's ``compact``) summarizes the main
+agent's conversation now with the same middleware's pieces: the cut
+(``compact_cutoff``, ADK's rule: the newest ``keep`` tokens kept, cut where a
+user's message starts), a summary written by a copy of its LangChain helper
+with the focus in its prompt (``write_summary``), and the event Deep Agents
+would store for it (``summary_event``), marked with the newest answer it
+was written after. While that answer is still the newest, its reported
+count is the prompt the summary replaced, no evidence: the middleware's
+``_should_summarize`` then decides on its own estimate of the request
+alone, as ADK's engine stops at a summary. They rest on private Deep Agents
+methods (``_apply_event_to_messages``, ``_compute_state_cutoff``,
+``_build_new_messages_with_path``, ``_should_summarize``, ``_lc_helper``
+and its summary model); contract tests pin them.
 """
 
 from __future__ import annotations
 
+import asyncio
+import copy
 import logging
 import warnings
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from typing import TYPE_CHECKING, Any
 
 from deepagents.backends.protocol import (
@@ -50,21 +73,31 @@ from deepagents.backends.protocol import (
 )
 from deepagents.middleware.summarization import (
     SUMMARIZATION_EVENT_KEY,
+    SummarizationEvent,
     SummarizationMiddleware,
 )
+from langchain.agents.middleware._retry import default_retry_on
 from langchain_core.callbacks import adispatch_custom_event, dispatch_custom_event
+from langchain_core.exceptions import ContextOverflowError
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages.utils import count_tokens_approximately
+from langchain_core.runnables import Runnable
+from langchain_core.runnables.config import set_config_context
 
 from agentic_cli.logging import Loggers
-from agentic_cli.workflow.context import context_budget
-from agentic_cli.workflow.summary_prompt import SUMMARY_PROMPT
+from agentic_cli.workflow.context import chars_per_token, context_budget, is_context_overflow
+from agentic_cli.workflow.summary_prompt import SUMMARY_PROMPT, with_focus
 
 if TYPE_CHECKING:
     from langchain.agents.middleware import ModelRequest, ModelResponse
     from langchain.agents.middleware.summarization import ContextSize
+    from langchain_core.callbacks import BaseCallbackHandler
     from langchain_core.language_models import BaseChatModel
+    from langchain_core.messages import AnyMessage
+    from langchain_core.runnables import RunnableConfig
 
     from agentic_cli.config import BaseSettings
-    from agentic_cli.models import ResolvedModel
+    from agentic_cli.models import ProviderKind, ResolvedModel
 
 logger = Loggers.workflow()
 
@@ -75,6 +108,12 @@ CONTEXT_SUMMARIZED = "agentic_cli.context_summarized"
 
 #: Why the archive refuses every write.
 _NO_ARCHIVE = "archive disabled"
+
+#: Where a message the framework wrote is marked (``response_metadata``, which
+#: no provider adapter sends), as job notifications are (``sessions.py``), and
+#: the mark's ``kind`` on a summary ``/compact`` wrote.
+_MARK = "agentic_cli"
+COMPACTED = "compact"
 
 #: Deep Agents' texts for a history it could not offload (an error log and a
 #: warning), and the per-write warning before them. Matched at the start.
@@ -136,6 +175,49 @@ class NoArchiveBackend(BackendProtocol):
         return self.upload_files(files)
 
 
+class OverflowMapped(Runnable):
+    """A summary model whose context overflows are LangChain's ``ContextOverflowError``.
+
+    The summary call goes to the agent's model directly, around the agent's
+    middleware, so ``ContextOverflowMiddleware`` never sees it. LangChain's
+    summary helper cuts the middle out of a summary request and sends it
+    again only on ``ContextOverflowError``, which a partner package raises
+    for its own provider's words but not for OpenRouter's, an
+    OpenAI-compatible server's (vLLM, llama.cpp), older Claude's "exceed
+    context limit" or Anthropic's 413. Every overflow ``workflow/context.py``
+    recognizes is re-raised as that error, from the original; anything
+    else, a ``ContextOverflowError`` included, passes unchanged.
+
+    Args:
+        model: The chat model that writes the summaries.
+    """
+
+    def __init__(self, model: Runnable) -> None:
+        self.model = model
+
+    def invoke(self, input: Any, config: "RunnableConfig | None" = None, **kwargs: Any) -> Any:  # noqa: A002 - Runnable's signature
+        try:
+            return self.model.invoke(input, config, **kwargs)
+        except ContextOverflowError:
+            raise
+        except Exception as error:
+            if is_context_overflow(error):
+                raise ContextOverflowError(str(error)) from error
+            raise
+
+    async def ainvoke(
+        self, input: Any, config: "RunnableConfig | None" = None, **kwargs: Any  # noqa: A002
+    ) -> Any:
+        try:
+            return await self.model.ainvoke(input, config, **kwargs)
+        except ContextOverflowError:
+            raise
+        except Exception as error:
+            if is_context_overflow(error):
+                raise ContextOverflowError(str(error)) from error
+            raise
+
+
 class ReportingSummarizationMiddleware(SummarizationMiddleware):
     """Deep Agents' summarization, reporting each summary it applies.
 
@@ -145,6 +227,11 @@ class ReportingSummarizationMiddleware(SummarizationMiddleware):
     summary event (``SummarizationEvent.cutoff_index``) in the update it
     returns.
 
+    Its helper's summary model is ``OverflowMapped``, inside LangChain's
+    retry, so a summary refused as too long is cut and sent again, whatever
+    the provider calls it. And a summary ``/compact`` wrote is not written
+    again on the strength of a count reported before it (``_should_summarize``).
+
     Args:
         agent: The agent whose stack this is.
         **kwargs: ``SummarizationMiddleware``'s arguments.
@@ -153,6 +240,27 @@ class ReportingSummarizationMiddleware(SummarizationMiddleware):
     def __init__(self, *, agent: str | None, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self.agent = agent
+        helper = self._lc_helper
+        # Inside the retry: a mapped overflow is never retried as it was sent.
+        helper._summary_model = OverflowMapped(helper._summary_chat_model).with_retry(
+            retry_if_exception_type=default_retry_on
+        )
+        kind, value = kwargs.get("trigger") or (None, None)
+        self._trigger_tokens: int | None = int(value) if kind == "tokens" else None
+
+    def _should_summarize(self, messages: list["AnyMessage"], total_tokens: int) -> bool:
+        """Whether to summarize the request, which holds ``messages``.
+
+        Deep Agents summarizes when its estimate of the request
+        (``total_tokens``) or the count the newest answer reported passes
+        the trigger. Right after a summary ``/compact`` wrote, the newest
+        answer is the one it was written after (its mark's ``after``), and
+        its count is the prompt the summary replaced: then the estimate
+        alone decides. Otherwise Deep Agents decides.
+        """
+        if self._trigger_tokens is not None and _counted_before_the_summary(messages):
+            return total_tokens >= self._trigger_tokens
+        return super()._should_summarize(messages, total_tokens)
 
     async def awrap_model_call(
         self,
@@ -323,6 +431,154 @@ def build_summarization(
         trim_tokens_to_summarize=None,
         truncate_args_settings=None,
     )
+
+
+# --- on demand (/compact) -------------------------------------------------------------------
+
+
+def compact_cutoff(
+    messages: Sequence["AnyMessage"], *, keep_tokens: int, kind: "ProviderKind"
+) -> int | None:
+    """Where ``/compact`` cuts the conversation the model is sent: ``messages[:i]``
+    is summarized, the rest kept.
+
+    ADK's rule (``workflow/adk/compaction.py::summary_range``), on messages:
+    walking back from the newest message until about ``keep_tokens`` are kept
+    (each counted as LangChain's approximate counter counts it, at the
+    provider's characters per token), the cut goes back to where that user
+    turn started (a ``HumanMessage``; the summary so far is none), and further
+    back while a tool call before the cut has no result before it. The newest
+    turn is never summarized.
+
+    Args:
+        messages: The conversation as the model is sent it: the summary so
+            far first, if there is one (``_apply_event_to_messages``).
+        keep_tokens: About how much to keep word for word (the agent's
+            ``ContextBudget.keep``).
+        kind: The agent's provider, whose characters per token count.
+
+    Returns:
+        The cut; None when nothing would be summarized but the summary so
+        far, or nothing at all.
+    """
+    ratio = chars_per_token(kind)
+    cut, kept = len(messages), 0
+    while cut > 0 and kept < keep_tokens:
+        cut -= 1
+        kept += count_tokens_approximately([messages[cut]], chars_per_token=ratio)
+    starts = [
+        index for index, message in enumerate(messages)
+        if isinstance(message, HumanMessage) and not _is_summary(message)
+    ]
+    for start in reversed(starts):
+        if start <= cut and _closed(messages[:start]):
+            break
+    else:
+        return None
+    if start == 0 or (start == 1 and _is_summary(messages[0])):
+        return None
+    return start
+
+
+def _is_summary(message: "AnyMessage") -> bool:
+    """A summary message, as Deep Agents marks it (``lc_source``)."""
+    return (
+        isinstance(message, HumanMessage)
+        and message.additional_kwargs.get("lc_source") == "summarization"
+    )
+
+
+def _closed(messages: Sequence["AnyMessage"]) -> bool:
+    """Whether every tool call in ``messages`` has its result among them.
+
+    A call a cancelled turn left open is answered before the next run, right
+    after it (``PatchToolCallsMiddleware``): summarized, its answer would
+    open the next request.
+    """
+    called = {
+        call["id"]
+        for message in messages if isinstance(message, AIMessage)
+        for call in message.tool_calls if call.get("id")
+    }
+    answered = {message.tool_call_id for message in messages if isinstance(message, ToolMessage)}
+    return called <= answered
+
+
+async def write_summary(
+    middleware: SummarizationMiddleware,
+    messages: list["AnyMessage"],
+    *,
+    focus: str | None = None,
+    callbacks: Sequence["BaseCallbackHandler"] = (),
+) -> str:
+    """A summary of ``messages``, as ``middleware`` writes one, on ``focus``.
+
+    A copy of the middleware's LangChain helper, with ``focus`` spliced into
+    its prompt (``with_focus``), writes it on the agent's model, tagged
+    ``lc_source="summarization"``, as a summary in a turn is written. It runs
+    in a context whose run config holds ``callbacks`` (the turn's run
+    callback), so they see the call as a summary in a turn.
+
+    Returns:
+        The summary, stripped (empty when the model wrote none).
+
+    Raises:
+        Exception: The model call failed, after LangChain's retries.
+    """
+    helper = copy.copy(middleware._lc_helper)
+    helper.summary_prompt = with_focus(helper.summary_prompt, focus)
+    with set_config_context({"callbacks": list(callbacks)}) as context:
+        summary = await asyncio.create_task(
+            helper._acreate_summary(messages), context=context
+        )
+    return summary.strip()
+
+
+def summary_event(
+    middleware: SummarizationMiddleware,
+    previous: SummarizationEvent | None,
+    cut: int,
+    summary: str,
+    *,
+    after: str | None = None,
+) -> SummarizationEvent:
+    """The event Deep Agents stores for ``summary``, of the sent messages before ``cut``.
+
+    Its cut is moved from the messages the model is sent (the summary so far
+    at 0) to the state's, and its message is the one Deep Agents writes when
+    there is no archive: "Here is a summary of the conversation to date:"
+    and the summary. With ``after`` (the id of the newest answer in the
+    messages sent), the message is marked ``{"kind": "compact", "after":
+    after}`` in its ``response_metadata``, which ``_should_summarize`` reads.
+    """
+    (message,) = middleware._build_new_messages_with_path(summary, None)
+    if after is not None:
+        message.response_metadata[_MARK] = {"kind": COMPACTED, "after": after}
+    return {
+        "cutoff_index": middleware._compute_state_cutoff(previous, cut),
+        "summary_message": message,
+        "file_path": None,
+    }
+
+
+def newest_answer(messages: Sequence["AnyMessage"]) -> AIMessage | None:
+    """The newest ``AIMessage`` in ``messages``, if any."""
+    return next((m for m in reversed(messages) if isinstance(m, AIMessage)), None)
+
+
+def _counted_before_the_summary(messages: Sequence["AnyMessage"]) -> bool:
+    """Whether the newest answer is the one a ``/compact`` summary was written after.
+
+    ``messages`` are the request's, the summary first; the summary's mark
+    names that answer (``summary_event``).
+    """
+    if not messages:
+        return False
+    mark = messages[0].response_metadata.get(_MARK)
+    if not isinstance(mark, dict) or mark.get("kind") != COMPACTED:
+        return False
+    newest = newest_answer(messages)
+    return newest is not None and newest.id is not None and newest.id == mark.get("after")
 
 
 class _HistoryNotArchived(logging.Filter):

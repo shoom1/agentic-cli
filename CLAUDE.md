@@ -80,13 +80,13 @@ agentic-cli/
 │   │   │   ├── foreign_reasoning_plugin.py # No model is sent another provider's thoughts
 │   │   │   └── plugins.py    # LLM traffic logging (raw_llm_logging): requests as sent (SentRequestLoggingPlugin, after the fit guard); each record names its agent's model; usage records go to the file only (the stream's LLM_USAGE is the event processor's); the summary call and the overflow retry are not logged on ADK (a follow-up)
 │   │   ├── deepagents/       # Deep Agents orchestrator (deepagents extra); imports neither adk/ nor langgraph/
-│   │   │   ├── manager.py    # DeepAgentsWorkflowManager (turns, sessions, lifecycle, MCP, skills, job resume)
+│   │   │   ├── manager.py    # DeepAgentsWorkflowManager (turns, sessions, lifecycle, MCP, skills, job resume, compact)
 │   │   │   ├── agent_builder.py # build_agent_tree: one create_agent per AgentConfig, bottom-up; task via SubAgentMiddleware (inherit = a fork)
 │   │   │   ├── middleware.py # PermissionMiddleware, ToolResultCapMiddleware, ToolCallErrorMiddleware, ActiveToolCallMiddleware, ForeignReasoningMiddleware, ContextOverflowMiddleware
 │   │   │   ├── tools.py      # to_langchain_tools: a callable → StructuredTool whose .func/.coroutine is it
 │   │   │   ├── event_processor.py # DeepAgentsEventProcessor (stream → WorkflowEvent, by agent); RunCallback
 │   │   │   ├── sessions.py   # thread_id(SessionRef), CheckpointSessions, job notifications
-│   │   │   ├── summarization.py # Each agent's thresholds from context_budget; NoArchiveBackend; history filters
+│   │   │   ├── summarization.py # Each agent's thresholds from context_budget; NoArchiveBackend; history filters; compact()'s cut, summary and event (marked: the count reported before it is no trigger, _should_summarize); OverflowMapped: the summary model's overflows as ContextOverflowError, inside its retry
 │   │   │   ├── mcp_tools.py  # MCPSessions: one owner task per (agent, server); the mcp identity map
 │   │   │   └── state.py      # AgentCliState: plan, tasks (last write wins)
 │   │   └── langgraph/        # LangGraph orchestrator (deprecated, removed in 0.8.0)

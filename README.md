@@ -1374,7 +1374,10 @@ refuses as too long is summarized (the main agent: the retry is the summary
 and the turns it kept) or trimmed (a sub-agent), and retried once; if it
 still does not fit, the turn ends with "This conversation no longer fits
 <model>'s context window. Use /compact or /new." A summary that fails is one
-warning a turn, and the next call tries again. With `raw_llm_logging` on,
+warning a turn, and the next call tries again. On Deep Agents a summary
+request the model refuses as too long is sent once more with the middle of
+the conversation left out, whatever the provider calls the refusal
+(OpenRouter and OpenAI-compatible servers included). With `raw_llm_logging` on,
 the log records a request as it was sent, after any trim.
 
 ### Tool results
