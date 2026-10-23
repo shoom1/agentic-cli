@@ -2,6 +2,8 @@
 
 Provides framework-level cross-cutting concerns as ADK Plugins:
 - LLMLoggingPlugin: Raw LLM traffic logging for debugging
+- SentRequestLoggingPlugin: records a request as it is sent, after every
+  plugin that edits it (the fit guard), for ``LLMLoggingPlugin``
 """
 
 from __future__ import annotations
@@ -41,6 +43,8 @@ class LLMLoggingPlugin(BasePlugin):
         max_events: Maximum events to buffer in memory (oldest are dropped)
         include_messages: Whether to include full message history
         include_raw_parts: Whether to include raw response parts
+        log_requests: Whether this plugin records requests itself; False when
+            a ``SentRequestLoggingPlugin`` records them as sent
     """
 
     def __init__(
@@ -50,6 +54,7 @@ class LLMLoggingPlugin(BasePlugin):
         max_events: int = 1000,
         include_messages: bool = True,
         include_raw_parts: bool = True,
+        log_requests: bool = True,
     ) -> None:
         super().__init__(name="llm_logging")
         self.model_name = model_name
@@ -57,6 +62,7 @@ class LLMLoggingPlugin(BasePlugin):
         self.max_events = max_events
         self.include_messages = include_messages
         self.include_raw_parts = include_raw_parts
+        self.log_requests = log_requests
 
         self._events: deque[WorkflowEvent] = deque(maxlen=max_events)
         self._request_timestamps: dict[str, float] = {}
@@ -80,6 +86,14 @@ class LLMLoggingPlugin(BasePlugin):
 
         Returns None to allow the request to proceed unchanged.
         """
+        if self.log_requests:
+            self.record_request(callback_context, llm_request)
+        return None
+
+    def record_request(
+        self, callback_context: "CallbackContext", llm_request: "LlmRequest"
+    ) -> None:
+        """Record ``llm_request`` (and start its latency clock)."""
         invocation_id = getattr(callback_context, "invocation_id", None)
 
         # Record timestamp for latency calculation
@@ -124,8 +138,6 @@ class LLMLoggingPlugin(BasePlugin):
 
         self._events.append(event)
         self._write_to_log(event)
-
-        return None
 
     async def after_model_callback(
         self,
@@ -306,3 +318,23 @@ class LLMLoggingPlugin(BasePlugin):
             result["stop_sequences"] = config.stop_sequences
 
         return result
+
+
+class SentRequestLoggingPlugin(BasePlugin):
+    """Records each request to an ``LLMLoggingPlugin`` as it is sent.
+
+    Registered after every plugin that edits a request (the fit guard leaves
+    turns out of one over its budget), so the log holds what went out. The
+    ``LLMLoggingPlugin`` itself stays ahead, so its ``after_model_callback``
+    sees a response before a plugin could replace it.
+    """
+
+    def __init__(self, log: LLMLoggingPlugin) -> None:
+        super().__init__(name="llm_logging_sent")
+        self._log = log
+
+    async def before_model_callback(
+        self, *, callback_context: "CallbackContext", llm_request: "LlmRequest"
+    ) -> None:
+        self._log.record_request(callback_context, llm_request)
+        return None

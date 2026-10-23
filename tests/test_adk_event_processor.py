@@ -135,3 +135,44 @@ class TestSubAgentActivity:
         assert "purpose" not in events[EventType.LLM_USAGE].metadata
         failed = Event(author="helper", invocation_id="i1", error_code="E", error_message="x")
         assert [e async for e in ADKEventProcessor(model="m").process_event(failed, "s1")] == []
+
+
+class TestAContextOverflow:
+    """The overflow handler answers a main agent's call the conversation no
+    longer fits with an error response (``CONTEXT_OVERFLOW``): it becomes the
+    turn's one ``ERROR``, with the clear text, and the turn ends there."""
+
+    @staticmethod
+    def _overflowed(author: str) -> Event:
+        return Event(
+            author=author, invocation_id="i1", error_code="CONTEXT_OVERFLOW",
+            error_message="This conversation no longer fits anthropic:claude-sonnet-4-6's "
+                          "context window. Use /compact or /new.",
+        )
+
+    async def test_the_main_agents_is_the_error_the_user_reads(self):
+        (event,) = [e async for e in ADKEventProcessor(model="m", root="coordinator")
+                    .process_event(self._overflowed("coordinator"), "s1")]
+
+        assert event.type is EventType.ERROR
+        assert event.content == (
+            "This conversation no longer fits anthropic:claude-sonnet-4-6's context window. "
+            "Use /compact or /new."
+        )
+        assert event.metadata == {"recoverable": False, "error_code": "CONTEXT_OVERFLOW"}
+
+    async def test_no_other_error_code_of_the_main_agent(self):
+        # ADK records those for an exception that then leaves the run, which
+        # reports it: mapping them would report it twice.
+        failed = Event(author="coordinator", invocation_id="i1",
+                       error_code="MODEL_RETURNED_NO_CONTENT", error_message="empty")
+
+        assert [e async for e in ADKEventProcessor(model="m", root="coordinator")
+                .process_event(failed, "s1")] == []
+
+    async def test_a_sub_agents_is_still_a_warning_naming_it(self):
+        (event,) = [e async for e in ADKEventProcessor(model="m", root="coordinator")
+                    .process_event(self._overflowed("researcher"), "s1")]
+
+        assert (event.metadata["recoverable"], event.metadata["agent"]) == (True, "researcher")
+        assert event.content.startswith("researcher failed: ")

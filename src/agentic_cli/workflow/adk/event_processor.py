@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import AsyncGenerator, Any, Callable
 
+from agentic_cli.workflow.context import OVERFLOW_ERROR_CODE
 from agentic_cli.workflow.events import WorkflowEvent, EventType
 from agentic_cli.logging import Loggers
 
@@ -31,6 +32,13 @@ class ADKEventProcessor:
     "<agent> failed: <reason>", so the user is told why. With no root (a
     native ADK YAML app, whose agents transfer and do own the reply) nothing
     is marked.
+
+    A conversation the main agent's model no longer takes ends its turn with
+    an error response from the overflow handler
+    (``workflow/adk/overflow_plugin.py``), ``error_code="CONTEXT_OVERFLOW"``:
+    it becomes the turn's ``ERROR``, with the handler's clear text. No other
+    error code of the main agent is mapped: ADK records one for an exception
+    that then leaves the run, which reports it.
 
     Args:
         model: Model name used for usage metadata.
@@ -91,6 +99,12 @@ class ADKEventProcessor:
             )
             error.metadata["agent"] = subagent
             error = self._apply_hook(error)
+            if error:
+                yield error
+        elif error_code == OVERFLOW_ERROR_CODE:
+            error = self._apply_hook(WorkflowEvent.error(
+                adk_event.error_message or error_code, error_code=OVERFLOW_ERROR_CODE
+            ))
             if error:
                 yield error
 

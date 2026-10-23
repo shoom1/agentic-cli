@@ -15,7 +15,7 @@ Agentic CLI provides the core infrastructure for building interactive CLI applic
 - **Knowledge Base**: Semantic + BM25 hybrid search with RRF fusion, per-document markdown sidecars, and agent-authored concept pages
 - **Semantic Memory**: Embedding-backed memory with lifecycle management, contradiction detection, and forgetting policy
 - **Durable Sessions**: Conversations persist continuously by default (SQLite; PostgreSQL or ephemeral memory optional) and resume across CLI restarts with `--session <id>`
-- **Context Window Management**: Native trim detection, summarization near the model's input budget on Deep Agents, and token-usage visibility
+- **Context Window Management**: Summarization near the model's input budget on ADK and Deep Agents, requests trimmed to fit, a provider's overflow recovered or explained, and token-usage visibility
 - **Model Catalog**: Live model listings from each provider, cached for a day, shown by `/models`
 - **Type-safe Configuration**: Composable settings mixins (`pydantic-settings`)
 
@@ -234,6 +234,17 @@ ADK integrations:
 - **Delegation** — a sub-agent runs in ADK's `single_turn` mode: its parent
   calls it as a tool named after it and gets its answer back in the same turn
   (see [Sub-agent context](#sub-agent-context))
+- **Summarizing** — ADK's `EventsCompactionConfig` with the framework's
+  summarizer: the main agent's conversation is summarized on its own model
+  once a prompt reaches the trigger Deep Agents uses (the smaller of
+  `context_summarize_at` of the input budget and `context_max_tokens`),
+  keeping the current turn and the newest 12% of that word for word; a
+  sub-agent never summarizes the shared session. The fit guard leaves the
+  oldest turns out of a request still over its agent's budget, and a
+  request the provider refuses as too long is summarized or trimmed and
+  retried once, then ends in one clear error (see
+  [Context management](#context-management)). A native ADK YAML app gets
+  none of it
 - **PermissionPlugin** — evaluates each tool's declared capabilities against the permission engine and prompts the user when no rule matches
 - **LLMLoggingPlugin** — structured logging of LLM requests/responses
 - **TaskProgressPlugin** — streams the task checklist into its own thinking box
@@ -359,7 +370,7 @@ Requires: `pip install agentic-cli[langgraph]`
 | State persistence | SQLite (default), PostgreSQL, or memory | The same, as a LangGraph checkpointer | Memory, PostgreSQL, or SQLite |
 | Thinking support | Every model with a thinking knob, one set of levels | The same | The same |
 | Prompt caching | Claude (three breakpoints) and Gemini (server-side caches) | Claude (three breakpoints) | Claude on Anthropic's API (one breakpoint) |
-| Context | None on normal turns | Summarization at `context_summarize_at` of the input budget, or `context_max_tokens` | None |
+| Context | The main agent's conversation summarized at `context_summarize_at` of the input budget, or `context_max_tokens`; requests over the budget trimmed; one retry on an overflow | Every agent summarized at the same point; one retry on an overflow | None |
 | Tool result cap | `tool_result_max_chars` | `tool_result_max_chars` | None |
 | MCP tools, Agent Skills | Yes | Yes | Ignored, with a warning |
 | Raw LLM logging, job resume | Yes | Yes | No |
@@ -1337,6 +1348,35 @@ is never loaded.
 
 ## Context management
 
+### Summarizing
+
+A conversation that outgrows the model is summarized and goes on, on ADK and
+Deep Agents, once a prompt reaches the smaller of `context_summarize_at`
+(85%) of the model's input budget (95% of its context window, less its
+`max_tokens`) and `context_max_tokens` (200,000 tokens). The newest 12% of
+that, and the current turn, are kept word for word; the summary, user-role
+text starting "Here is a summary of the conversation to date:", stands for
+the rest, and the stored session keeps every message. A model whose window
+is unknown counts as 128,000 tokens. While a summary is written the CLI
+shows "Summarizing the earlier conversation…".
+
+On ADK only the main agent's conversation is summarized: a sub-agent leaves
+the shared session alone (on Deep Agents each agent summarizes its own). A
+request still over its agent's budget (the summary follows the previous
+call's size, a sub-agent may run on a smaller model) has its oldest whole
+turns left out of that request, never a tool call without its result, with
+"[Earlier turns were left out to fit the context window.]" folded into the
+first kept message; the summary rides in that message too, so no provider
+sees two user messages in a row. The summary call is sized to the model that
+writes it: after a switch to a smaller model, the middle of a range too long
+for it is left out, the summary so far kept whole. A request the provider
+refuses as too long is summarized (the main agent: the retry is the summary
+and the turns it kept) or trimmed (a sub-agent), and retried once; if it
+still does not fit, the turn ends with "This conversation no longer fits
+<model>'s context window. Use /compact or /new." A summary that fails is one
+warning a turn, and the next call tries again. With `raw_llm_logging` on,
+the log records a request as it was sent, after any trim.
+
 ### Tool results
 
 One tool result cannot fill the context. On ADK and Deep Agents, a result
@@ -1438,7 +1478,7 @@ class MyApp(BaseCLIApp):
 | `ERROR` | Error message (`recoverable`, `error_code` metadata) |
 | `TASK_PROGRESS` | Task checklist update (drives the task box) |
 | `CONTEXT_SUMMARIZING` | A summary of the earlier conversation is starting (reported while the stream waits on it) |
-| `CONTEXT_TRIMMED` | The context was made smaller: a summary (`source="summarization"`, with `messages_summarized`, `tokens_before`, `tokens_after`) |
+| `CONTEXT_TRIMMED` | The context was made smaller: a summary (`source="summarization"`, with `messages_summarized`, `tokens_before`, `tokens_after`), or older turns left out of one request on ADK (`source="fit_guard"`, with `turns_dropped`) |
 | `LLM_REQUEST` / `LLM_RESPONSE` / `LLM_USAGE` | LLM traffic + token accounting |
 
 On Deep Agents every event carries `metadata["agent"]`, the agent that
@@ -1584,11 +1624,15 @@ agentic-cli/
 │   │   ├── llm_log.py            # LLMLogWriter: the raw_llm_logging JSONL file, redact_secrets
 │   │   ├── tool_errors.py        # A raising tool's error result (ADK and Deep Agents)
 │   │   ├── tool_output.py        # The tool result cap; full outputs in ./.{app_name}/tool-output/
+│   │   ├── summary_prompt.py     # The summary prompt both backends use (LangChain's, MIT)
 │   │   ├── sessions.py           # SessionRef, the active turn, the active tool call
 │   │   ├── mcp.py                # MCPServerConfig → ADK toolset / langchain-mcp-adapters connection
 │   │   ├── adk/
 │   │   │   ├── manager.py                # GoogleADKWorkflowManager
 │   │   │   ├── delegation.py             # Sub-agents as single_turn tools; their permission binding
+│   │   │   ├── compaction.py             # AgentCliSummarizer: the main agent's conversation summarized
+│   │   │   ├── fit_guard_plugin.py       # FitGuardPlugin: a request over its budget trimmed to fit
+│   │   │   ├── overflow_plugin.py        # OverflowPlugin: a provider's overflow retried once, or one clear error
 │   │   │   ├── model_factory.py          # build_adk_model: a resolved model → ADK model + config
 │   │   │   ├── openai_compatible.py      # OpenAICompatibleLlm (OpenRouter, endpoints)
 │   │   │   ├── anthropic_llm.py          # DirectAnthropicLlm (bare claude-* in ADK YAML)

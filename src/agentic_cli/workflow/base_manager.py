@@ -1044,25 +1044,30 @@ class BaseWorkflowManager(ABC):
             endpoints=endpoints,
         )
 
-    def _simple_model(self, max_tokens: int) -> ResolvedModel:
-        """The default model as ``generate_simple`` runs it.
+    def _simple_model(self, max_tokens: int, agent: str | None = None) -> ResolvedModel:
+        """The default model, or ``agent``'s, as a short side call runs it.
 
-        Resolved again from the default model's reference, which carries the
-        global thinking effort: here thinking is ``none`` (off wherever the
+        ``generate_simple`` runs on the default model; a summary of an
+        agent's conversation runs on that agent's own model. Resolved again
+        from the model's reference, without the agent's generation settings
+        or the global thinking effort: thinking is ``none`` (off wherever the
         model allows it) and ``max_tokens`` is the caller's. Only after
         initialization.
+
+        Raises:
+            KeyError: ``agent`` is not one of this manager's agents.
         """
-        default = self._default_model
+        base = self._default_model if agent is None else self._resolved_models[agent]
         return resolve_model(
-            agent=None,
-            spec=str(default.ref),
+            agent=agent,
+            spec=str(base.ref),
             generation=ModelSettings(
                 max_tokens=max_tokens, thinking=ThinkingSettings(mode="none")
             ),
             thinking_effort="none",
             roles=RoleMap(default_model=None, model_roles={}),  # a reference needs none
             catalog=self._catalog,
-            endpoints={default.endpoint.name: default.endpoint},
+            endpoints={base.endpoint.name: base.endpoint},
         )
 
     def _default_ref_without_listings(self) -> ModelRef:

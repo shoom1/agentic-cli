@@ -24,6 +24,14 @@ What only a real provider can answer:
   one that inherits sees the conversation, one that starts fresh sees only its
   brief, and each is delegated to and returns. A sub-agent that inherits a
   history holding tool calls for tools it lacks is still accepted.
+- ADK summarizes the main agent: Claude, Gemini, OpenAI Responses and
+  OpenRouter accept a conversation that starts with the user-role summary
+  and goes on, and models that always think (Claude Opus 4.7, Gemini 3)
+  accept the summary call with thinking off.
+- A provider's real overflow on ADK (Claude Haiku), provoked with
+  dense CJK text the character estimate counts low: the main agent's ends
+  in the clear overflow message, and a sub-agent's in one warning while the
+  coordinator answers.
 
 Override the models with LIVE_CONTEXT_CLAUDE_MODEL (default
 ``anthropic:claude-sonnet-4-5``), LIVE_CONTEXT_GEMINI_MODEL (default
@@ -67,6 +75,9 @@ CLAUDE = os.getenv("LIVE_CONTEXT_CLAUDE_MODEL", "anthropic:claude-sonnet-4-5")
 GEMINI = os.getenv("LIVE_CONTEXT_GEMINI_MODEL", "google:gemini-2.5-flash")
 OPENAI = os.getenv("LIVE_CONTEXT_OPENAI_MODEL", "openai:gpt-5-mini")
 HAIKU = os.getenv("LIVE_CONTEXT_HAIKU_MODEL", "anthropic:claude-haiku-4-5")
+OPUS = os.getenv("LIVE_CONTEXT_OPUS_MODEL", "anthropic:claude-opus-4-7")
+GEMINI_3 = os.getenv("LIVE_CONTEXT_GEMINI_3_MODEL", "google:gemini-3-flash-preview")
+OPENROUTER = os.getenv("LIVE_CONTEXT_OPENROUTER_MODEL", "openrouter:qwen/qwen3-235b-a22b")
 
 _KEYS = {"google": "GOOGLE_API_KEY", "anthropic": "ANTHROPIC_API_KEY",
          "openai": "OPENAI_API_KEY", "openrouter": "OPENROUTER_API_KEY"}
@@ -476,3 +487,185 @@ async def test_a_fork_after_a_tool_call_in_the_same_turn_with_thinking_on(
     assert find_tool_results(events, "lookup_codename")
     (archivist,) = _answers_of(events, "archivist", backend)
     assert "marigold" in archivist.lower(), archivist
+
+
+
+@pytest.mark.parametrize("model", [
+    pytest.param(CLAUDE, marks=_needs(_key_for(CLAUDE)), id="claude"),
+    pytest.param(GEMINI, marks=_needs(_key_for(GEMINI)), id="gemini"),
+    pytest.param(OPENAI, marks=_needs(_key_for(OPENAI)), id="openai"),
+    pytest.param(OPENROUTER, marks=_needs(_key_for(OPENROUTER)), id="openrouter"),
+    # Models that always think: the summary call runs with thinking off.
+    pytest.param(OPUS, marks=_needs(_key_for(OPUS)), id="claude-opus-4-7"),
+    pytest.param(GEMINI_3, marks=_needs(_key_for(GEMINI_3)), id="gemini-3"),
+])
+async def test_adk_summarizes_and_the_provider_accepts_the_summarized_conversation(
+    listed, tmp_path, model
+):
+    manager = GoogleADKWorkflowManager(
+        agent_configs=_assistant(include_state_tools=False),
+        settings=_settings(tmp_path, context_max_tokens=16_000, thinking_effort="low"),
+        model=model,
+    )
+    turns = []
+    try:
+        turns.append(await collect_events(
+            manager,
+            "The project we are discussing is named Quillfeather. Here are its garden "
+            f"notes; reply OK.\n\n{_filler(6_000, 1)}",
+            session_id="adk-summarized",
+        ))
+        for seed in (2, 3):
+            turns.append(await collect_events(
+                manager, f"More notes; reply OK.\n\n{_filler(6_000, seed)}",
+                session_id="adk-summarized",
+            ))
+        for question in ("What is the project's name? Reply with the name only.",
+                         "Thank you. Reply OK."):
+            turns.append(await collect_events(manager, question, session_id="adk-summarized"))
+    finally:
+        await manager.cleanup()
+
+    events = [event for turn in turns for event in turn]
+    assert_no_errors(events)
+    summaries = _summaries(events)
+    assert summaries, "no summary was written"
+    types = [e.type for e in events]
+    assert types.index(EventType.CONTEXT_SUMMARIZING) < types.index(EventType.CONTEXT_TRIMMED)
+    assert any(e.metadata.get("purpose") == "summarization"
+               for e in find_events(events, EventType.LLM_USAGE))
+    after = next(i for i, turn in enumerate(turns) if _summaries(turn))
+    for turn in turns[after:]:
+        assert _reply(turn).strip(), "a turn after the summary got no answer"
+
+
+#: Dense text the character estimate counts low: CJK is about a token a
+#: character, the estimate's 3.3 to 4 characters a token.
+def _cjk(chars: int) -> str:
+    base = "春夏秋冬山川河海日月星辰风雨雷电花草树木"
+    return "".join(base[(i * 7) % len(base)] for i in range(chars))
+
+
+#: How many CJK characters ``dense_notes`` returns: set per test.
+_DENSE = {"chars": 0}
+
+
+@register_tool(capabilities=EXEMPT)
+def dense_notes() -> dict:
+    """Return the archive's notes."""
+    return {"success": True, "notes": _cjk(_DENSE["chars"])}
+
+
+@pytest.mark.parametrize("model, chars", [
+    # Claude Haiku: a 200,000-token window. 400,000 CJK characters are well
+    # over it, yet estimated at about 133,000 tokens, under its budget.
+    # (Gemini's 1M window cannot be passed this way: a request that large is
+    # over a usual account's input tokens per minute, a 429 before any overflow.)
+    pytest.param(HAIKU, 400_000, marks=_needs(_key_for(HAIKU)), id="claude-haiku"),
+])
+async def test_a_real_overflow_of_the_main_agent_ends_in_the_clear_message(
+    listed, tmp_path, monkeypatch, model, chars
+):
+    monkeypatch.setitem(_DENSE, "chars", chars)
+    manager = GoogleADKWorkflowManager(
+        agent_configs=_assistant(tools=[dense_notes], include_state_tools=False),
+        settings=_settings(tmp_path, tool_result_max_chars=5_000_000, thinking_effort="none"),
+        model=model,
+    )
+    try:
+        events = await collect_events(
+            manager, "Call dense_notes, then tell me how many characters the notes have.",
+            session_id="overflow",
+        )
+    finally:
+        await manager.cleanup()
+
+    assert find_tool_results(events, "dense_notes")
+    errors = find_events(events, EventType.ERROR)
+    assert len(errors) == 1, [e.content for e in errors]
+    (error,) = errors
+    assert error.metadata.get("error_code") == OVERFLOW_ERROR_CODE, error.content
+    assert error.content.startswith("This conversation no longer fits "), error.content
+
+
+@_needs(_key_for(CLAUDE), _key_for(HAIKU))
+async def test_a_sub_agents_real_overflow_is_one_warning_and_the_coordinator_answers(
+    listed, tmp_path, monkeypatch
+):
+    monkeypatch.setitem(_DENSE, "chars", 400_000)
+    configs = [
+        AgentConfig(name="coordinator", prompt=(
+            "You coordinate the reader sub-agent. Ask it to read the archive's notes and "
+            "summarize them, then tell the user what it said, even if it failed."),
+            sub_agents=["reader"], include_state_tools=False),
+        AgentConfig(name="reader", prompt="Call dense_notes, then summarize the notes.",
+                    description="Reads the archive's notes.", tools=[dense_notes],
+                    model=HAIKU, include_state_tools=False),
+    ]
+    manager = GoogleADKWorkflowManager(
+        agent_configs=configs,
+        settings=_settings(tmp_path, tool_result_max_chars=5_000_000, thinking_effort="none"),
+        model=CLAUDE,
+    )
+    try:
+        events = await collect_events(
+            manager, "Have the reader summarize the archive's notes.", session_id="sub-overflow"
+        )
+    finally:
+        await manager.cleanup()
+
+    errors = find_events(events, EventType.ERROR)
+    assert [(e.metadata.get("recoverable"), e.content.split(":")[0]) for e in errors] == [
+        (True, "reader")
+    ], [e.content for e in errors]
+    assert "no longer fits" in errors[0].content
+    assert "I could not do this task" in " ".join(_answers_of(events, "reader", "adk"))
+    assert _reply(events).strip(), "the coordinator did not answer"
+
+
+@_needs(_key_for(CLAUDE))
+async def test_a_job_resumed_after_its_call_was_summarized(listed, tmp_path, monkeypatch):
+    """A long-running call stays pending while ADK summarizes, then its result resumes."""
+    from tests.integration.test_live_job_resume import (
+        _SHAPE,
+        _TOKEN,
+        _wait_terminal,
+        live_resume_probe,
+    )
+
+    monkeypatch.setitem(_SHAPE, "return_none", False)
+    monkeypatch.chdir(tmp_path)
+    agent = AgentConfig(
+        name="job_runner",
+        prompt=(
+            "You run background jobs. When asked, call live_resume_probe with a shell "
+            f"command that prints {_TOKEN} (e.g. 'echo {_TOKEN}'), then tell the user you "
+            "started it. When you are given notes, reply OK. Never ask for confirmation."
+        ),
+        tools=[live_resume_probe],
+        include_state_tools=False,
+    )
+    manager = GoogleADKWorkflowManager(
+        agent_configs=[agent],
+        settings=_settings(tmp_path, context_max_tokens=16_000, thinking_effort="none",
+                           permissions_enabled=False),
+        model=CLAUDE,
+    )
+    try:
+        started = await collect_events(manager, "Start a background job now.", session_id="job")
+        (record,) = [r for r in manager.job_manager.list() if r.resume_on_complete]
+        notes = [
+            await collect_events(
+                manager, f"Garden notes; reply OK.\n\n{_filler(6_000, seed)}", session_id="job"
+            )
+            for seed in (1, 2, 3, 4)
+        ]
+        record = _wait_terminal(manager.job_manager, record.job_id)
+        resumed = [event async for event in manager.resume_with_job_result(record)]
+    finally:
+        await manager.cleanup()
+
+    assert find_tool_calls(started, "live_resume_probe")
+    assert any(_summaries(turn) for turn in notes), "no summary while the call was pending"
+    assert_no_errors(started + [event for turn in notes for event in turn] + resumed)
+    assert _reply(resumed).strip(), "the resumed turn got no answer"

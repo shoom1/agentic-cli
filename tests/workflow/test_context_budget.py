@@ -34,6 +34,7 @@ from pydantic import ValidationError
 from agentic_cli.config import BaseSettings
 from agentic_cli.models import ModelCatalog, ProviderKind, RoleMap, resolve_model
 from agentic_cli.settings_persistence import PROJECT_SETTABLE_KEYS
+from agentic_cli.workflow import context
 from agentic_cli.workflow.config import AgentConfig, AgentGraphError
 from agentic_cli.workflow.context import (
     KEEP_FRACTION,
@@ -525,6 +526,29 @@ class TestIsContextOverflow:
     def test_an_error_without_a_status_is_not(self):
         assert not is_context_overflow(ValueError("prompt is too long"))
         assert not is_context_overflow(_StatusError("prompt is too long", 500))
+
+
+class TestIsOverflowText:
+    """An overflow a provider reports in its answer rather than raises (OpenAI
+    Responses' ``status: failed``): only its text is there to read."""
+
+    @pytest.mark.parametrize("text", [
+        '{"code": "context_length_exceeded", "message": "Your input exceeds the context '
+        'window of this model."}',
+        "This model's maximum context length is 32768 tokens.",
+        "The input token count (1200000) exceeds the maximum number of tokens allowed.",
+        "PROMPT IS TOO LONG: 208310 tokens > 200000 maximum",
+    ])
+    def test_each_providers_wording(self, text):
+        assert context.is_overflow_text(text)
+
+    @pytest.mark.parametrize("text", [
+        '{"code": "server_error", "message": "The server had an error."}',
+        "The input token count is 12.",
+        "",
+    ])
+    def test_anything_else(self, text):
+        assert not context.is_overflow_text(text)
 
 
 def test_the_overflow_message():
