@@ -5,7 +5,9 @@ gets these; sub-agents are gated as strictly as the root.
 
 - :class:`PermissionMiddleware` gates every tool call through the permission
   engine, identifying the tool by the object the registry issued.
-- :class:`ToolCallErrorMiddleware`, inside the gate, gives a tool that raised
+- :class:`ToolResultCapMiddleware`, inside the gate, cuts a tool result too
+  big for the context, as ADK's ``ToolResultCapPlugin`` does.
+- :class:`ToolCallErrorMiddleware`, inside the cap, gives a tool that raised
   the error result ADK's ``ToolErrorPlugin`` gives, so the turn goes on.
 - :class:`ActiveToolCallMiddleware`, innermost, runs each tool as the active
   tool call, which links a job the tool starts to its call.
@@ -21,8 +23,10 @@ and the result dict as JSON content: the model reads it and carries on.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import Any
 
 from langchain.agents.middleware import (
@@ -39,6 +43,7 @@ from langgraph.types import Command
 
 from agentic_cli.logging import Loggers
 from agentic_cli.models import ProviderKind
+from agentic_cli.paths import resolve_path
 from agentic_cli.tools._core.delegation import TASK_TOOL
 from agentic_cli.tools.registry import ToolDefinition, get_registry, identify_tool
 from agentic_cli.workflow.context import is_context_overflow
@@ -51,6 +56,7 @@ from agentic_cli.workflow.sessions import (
     set_active_tool_call,
 )
 from agentic_cli.workflow.tool_errors import tool_error_result, unknown_tool_result
+from agentic_cli.workflow.tool_output import cap_tool_result, is_saved_output
 
 logger = Loggers.workflow()
 
@@ -143,13 +149,7 @@ class PermissionMiddleware(AgentMiddleware):
 
     def _resolve(self, tool: BaseTool) -> ToolDefinition | None:
         """What this exact tool object is, or None (steps 1 and 2)."""
-        definition = self._bound(tool)
-        if definition is not None:
-            return definition
-        if type(tool) is StructuredTool:
-            runs = tool.coroutine if tool.coroutine is not None else tool.func
-            return self._bound(runs) if runs is not None else None
-        return None
+        return _resolve_tool(tool, self._bound)
 
     async def _check(self, tool: BaseTool, call: ToolCall) -> ToolMessage | None:
         """None when the call may run, else its denial (steps 3 to 6)."""
@@ -190,6 +190,185 @@ class PermissionMiddleware(AgentMiddleware):
         if result.allowed:
             return None
         return _denied(result.reason, call)
+
+
+def _resolve_tool(
+    tool: BaseTool | None, bound: Callable[[object], ToolDefinition | None]
+) -> ToolDefinition | None:
+    """What this exact tool object is, by identity, or None.
+
+    ``bound(tool)`` first: the objects the framework built and bound. Then,
+    for a tool whose type is exactly ``StructuredTool``, the callable it will
+    run (``.coroutine`` if it has one, else ``.func``).
+    """
+    if tool is None:
+        return None
+    definition = bound(tool)
+    if definition is not None:
+        return definition
+    if type(tool) is StructuredTool:
+        runs = tool.coroutine if tool.coroutine is not None else tool.func
+        return bound(runs) if runs is not None else None
+    return None
+
+
+class ToolResultCapMiddleware(AgentMiddleware):
+    """A tool result too big for the context is cut.
+
+    Every result passes ``workflow/tool_output.py::cap_tool_result``: one over
+    ``max_chars`` reaches the model cut, with a note pointing at its full
+    output in ``folder``. The middleware sits inside the permission gate,
+    whose denials are short, and outside the tool-error middleware, so an
+    error result is capped too.
+
+    What it reads of a result:
+
+    - A ``ToolMessage`` whose content is a string: a JSON object (a framework
+      tool's dict) is cut as a dict and serialized again; other text is cut
+      as a string.
+    - Content that is a list: its text blocks are joined into one, cut as a
+      string, which stands where the first was, with its other keys; other
+      blocks (images) are kept in their order, so one that sat between two
+      text blocks now follows the text.
+    - A ``Command`` (the state tools, ``task``): each ``ToolMessage`` in its
+      ``update["messages"]``.
+
+    A call of the framework's ``read_file`` (by identity, as the gate
+    resolves it) on a saved output is cut without saving it again.
+
+    Args:
+        max_chars: ``tool_result_max_chars``.
+        folder: Where full outputs are saved (``tool_output_dir``).
+    """
+
+    def __init__(self, max_chars: int, folder: Path) -> None:
+        super().__init__()
+        self.max_chars = max_chars
+        self.folder = folder
+
+    async def awrap_tool_call(
+        self,
+        request: ToolCallRequest,
+        handler: Callable[[ToolCallRequest], Awaitable[_ToolResult]],
+    ) -> _ToolResult:
+        return self._capped(request, await handler(request))
+
+    def wrap_tool_call(
+        self,
+        request: ToolCallRequest,
+        handler: Callable[[ToolCallRequest], _ToolResult],
+    ) -> _ToolResult:
+        return self._capped(request, handler(request))
+
+    def _capped(self, request: ToolCallRequest, result: _ToolResult) -> _ToolResult:
+        name = request.tool_call["name"]
+        try:
+            source = self._saved_output_read(request)
+            if isinstance(result, ToolMessage):
+                return self._message(result, name, source)
+            if isinstance(result, Command):
+                return self._command(result, name, source)
+        except Exception as e:
+            # The cap never raises by design; a bug in it must not end the
+            # turn. The result goes uncut, and the traceback goes to the
+            # debug log, not over the UI.
+            logger.warning(
+                "tool_result_cap_failed", tool=name, error_type=type(e).__name__, error=str(e)
+            )
+            logger.debug("tool_result_cap_failed", tool=name, exc_info=e)
+        return result
+
+    def _saved_output_read(self, request: ToolCallRequest) -> Path | None:
+        """The saved output this call reads, when it is the framework's ``read_file``."""
+        read_file = get_registry().get("read_file")
+        if read_file is None or _resolve_tool(request.tool, identify_tool) is not read_file:
+            return None
+        try:
+            path = resolve_path(request.tool_call["args"]["path"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        return path if is_saved_output(path, self.folder) else None
+
+    def _command(self, command: Command, name: str, source: Path | None) -> Command:
+        update = command.update
+        if not isinstance(update, dict) or not isinstance(update.get("messages"), list):
+            return command
+        messages = [
+            self._message(m, name, source) if isinstance(m, ToolMessage) else m
+            for m in update["messages"]
+        ]
+        if all(new is old for new, old in zip(messages, update["messages"])):
+            return command
+        return dataclasses.replace(command, update={**update, "messages": messages})
+
+    def _message(self, message: ToolMessage, name: str, source: Path | None) -> ToolMessage:
+        content = message.content
+        if isinstance(content, str):
+            capped: Any = self._text(content, name, source)
+        elif isinstance(content, list):
+            capped = self._blocks(content, name, source)
+        else:
+            return message
+        if capped is content:
+            return message
+        return message.model_copy(update={"content": capped})
+
+    def _text(self, text: str, name: str, source: Path | None) -> str:
+        if len(text) <= self.max_chars:
+            return text
+        result = _json_object(text)
+        if result is None:
+            return self._cap(text, name, source)
+        # Sent as the cap measured it, cut or not: the tool's own JSON may be
+        # several times longer (\uXXXX escapes, indentation).
+        return json.dumps(self._cap(result, name, source), ensure_ascii=False)
+
+    def _blocks(self, blocks: list, name: str, source: Path | None) -> list:
+        texts = [text for text in map(_block_text, blocks) if text is not None]
+        if not texts:
+            return blocks
+        joined = "\n".join(texts)
+        capped = self._cap(joined, name, source)
+        if capped is joined:
+            return blocks
+        # One text block, where the first was and with its other keys (an id,
+        # cache_control); the other blocks as they were.
+        kept: list = []
+        placed = False
+        for block in blocks:
+            if _block_text(block) is None:
+                kept.append(block)
+            elif not placed:
+                first = block if isinstance(block, dict) else {"type": "text"}
+                kept.append({**first, "text": capped})
+                placed = True
+        return kept
+
+    def _cap(self, result: Any, name: str, source: Path | None) -> Any:
+        return cap_tool_result(
+            result, tool_name=name, max_chars=self.max_chars, folder=self.folder, source=source
+        )
+
+
+def _json_object(text: str) -> dict | None:
+    """The dict ``text`` holds as JSON, or None."""
+    if not text.lstrip().startswith("{"):
+        return None
+    try:
+        value = json.loads(text)
+    except ValueError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _block_text(block: Any) -> str | None:
+    """A content block's text, or None when it is not a text block."""
+    if isinstance(block, str):
+        return block
+    if isinstance(block, dict) and block.get("type") == "text":
+        text = block.get("text")
+        return text if isinstance(text, str) else None
+    return None
 
 
 def _error_message(call: ToolCall, error: Exception) -> ToolMessage:

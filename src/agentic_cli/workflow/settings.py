@@ -140,6 +140,19 @@ class WorkflowSettingsMixin:
         ),
         json_schema_extra={"ui_order": 26},
     )
+    # The net beneath every tool's own limits, on every backend
+    # (workflow/tool_output.py).
+    tool_result_max_chars: int = Field(
+        default=50_000,
+        ge=2_000,
+        title="Tool Result Limit",
+        description=(
+            "A tool result longer than this many characters reaches the model cut to "
+            "its beginning and end; the full text is saved in ./.{app_name}/tool-output "
+            "for the agent to read in parts (at least 2000)"
+        ),
+        json_schema_extra={"ui_order": 27},
+    )
 
     # API Keys (common across all domains, never saved to JSON).
     #

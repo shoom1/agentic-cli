@@ -313,6 +313,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   happens rather than with the node's output: `workflow/live_events.py`
   merges events reported during a turn into its stream (`LiveEvents`,
   `merged`, and the context-local `reporting`/`report`).
+- **A tool result too big for the context is cut, and its full output
+  saved**, on ADK and Deep Agents (`workflow/tool_output.py`). No tool result
+  was capped before: `read_file` returned a whole file, `execute_python` its
+  whole output, and MCP tools and a sub-agent's answer anything, so one large
+  result could fill the context. Now any result longer than
+  `tool_result_max_chars` (50,000 characters, at least 2,000;
+  project-settable, and a `/settings` change rebuilds the agents) reaches the
+  model with its shape and as much of its beginning and end as the limit
+  holds: in a dict the longest strings are cut, so `success`, `error` and
+  the other keys stay, each cut string keeping its head and tail around
+  "…[N characters cut]…". A note under `truncated` (replacing a tool's own
+  flag), or appended to a string, says how much was cut and where the full
+  output is: `./.<app_name>/tool-output/<tool>-<12 hex>.txt`, which the
+  agent pages through with `read_file` (offset and limit), with no
+  permission prompt inside the project. That file is private (0600, in a
+  0700 folder git ignores) and written to be read in pages: a cut string is
+  written whole on its own lines after the result's other values, since a
+  JSON string is a single line, and lines over 2,000 characters are split,
+  so a one-line output (minified JSON, base64) pages too. As for
+  `web_fetch`'s saved pages, the location is fixed, a symlinked folder is
+  refused, and cleanup after each save (outputs older than 7 days, then the
+  oldest past 100 MB, sparing those saved in the last minute) deletes only
+  the folder's own files. A save that fails never fails the call: the
+  result is still cut, its note says the full output could not be saved,
+  and the log warns once per folder. Reading a saved output back cuts it
+  again without a second file. Every result is covered: registered, MCP and
+  skill tools, `job_result`, and on Deep Agents a sub-agent's answer
+  (`task`). ADK's `ToolResultCapPlugin` caps apps built from agent configs
+  (a native ADK YAML app's own `after_tool_callback`s would be skipped);
+  Deep Agents' `ToolResultCapMiddleware` sits between the permission gate
+  and the tool-error middleware, so an error result is capped too. Each
+  tool's own limits stay; this is the net beneath them. ADK's Claude and
+  OpenAI Responses adapters send a model only a result's `content`, or else
+  its `result`, so on ADK the note is put there as well.
 
 ### Changed
 

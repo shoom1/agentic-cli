@@ -346,3 +346,13 @@ class TestSuccess:
 
         assert manager.reinits == [None]  # same model, sessions kept
         assert str(getattr(settings, key)) == value
+
+    async def test_the_tool_result_limit_rebuilds_the_agents(self, settings):
+        # Each backend reads it when it builds the agents.
+        manager = FakeManager(OLD_MODEL)
+        app = _app(settings, manager)
+
+        assert await app.apply_settings({"tool_result_max_chars": "20000"}) is True
+
+        assert manager.reinits == [None]  # same model, sessions kept
+        assert settings.tool_result_max_chars == 20_000

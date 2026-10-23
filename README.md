@@ -351,6 +351,7 @@ Requires: `pip install agentic-cli[langgraph]`
 | Thinking support | Every model with a thinking knob, one set of levels | The same | The same |
 | Prompt caching | Claude (three breakpoints) and Gemini (server-side caches) | Claude (three breakpoints) | Claude on Anthropic's API (one breakpoint) |
 | Context | None on normal turns | Summarization at `context_summarize_at` of the input budget, or `context_max_tokens` | None |
+| Tool result cap | `tool_result_max_chars` | `tool_result_max_chars` | None |
 | MCP tools, Agent Skills | Yes | Yes | Ignored, with a warning |
 | Raw LLM logging, job resume | Yes | Yes | No |
 | Code-execution events | Gemini's | None | None |
@@ -434,6 +435,7 @@ absolute/user-level file. A key placed in a cwd `.env` is deliberately ignored.
 | `session_store` | `AGENTIC_SESSION_STORE` | "sqlite" | Where conversations are kept: `sqlite`, `postgres`, or `memory` |
 | `context_summarize_at` | `AGENTIC_CONTEXT_SUMMARIZE_AT` | 0.85 | Summarize the earlier conversation at this fraction of the model's input budget (0.5 to 0.95) |
 | `context_max_tokens` | `AGENTIC_CONTEXT_MAX_TOKENS` | 200000 | Or once a prompt reaches this many tokens, if that comes first (0: no ceiling; otherwise at least 16000) |
+| `tool_result_max_chars` | `AGENTIC_TOOL_RESULT_MAX_CHARS` | 50000 | A longer tool result is cut, its full output saved in `./.{app_name}/tool-output/` (at least 2000; see [Context management](#context-management)) |
 | `workspace_dir` | `AGENTIC_WORKSPACE_DIR` | ~/.agentic | Storage directory |
 | `log_level` | `AGENTIC_LOG_LEVEL` | "warning" | Logging level |
 | `ui_theme` | `AGENTIC_UI_THEME` | "dark" | The CLI's theme: `dark`, `light`, `mono`, `terminal` or `auto` (user settings only) |
@@ -1248,6 +1250,50 @@ pre-approved allow-rules that a clone would silently honour. A clone at a
 different path therefore starts with no grants, and a repo-committed grant file
 is never loaded.
 
+## Context management
+
+### Tool results
+
+One tool result cannot fill the context. On ADK and Deep Agents, a result
+longer than `tool_result_max_chars` (50,000 characters) reaches the model
+cut, with its shape and as much of its beginning and end as the limit holds:
+
+- In a dict, the longest strings are cut first (nested ones included), so
+  `success`, `error` and the other keys stay. A cut string keeps its first
+  70% and last 30% around `…[N characters cut]…`.
+- A note says how much was cut and where the full output is. A dict gets it
+  under `truncated`, which replaces a tool's own flag; a string gets it at
+  its end: `Cut: 182,344 characters. Full output:
+  ./.myapp/tool-output/read_file-3f9a1c2b7d4e.txt; read it with read_file
+  using offset and limit.`
+- The agent reads the full output in parts with `read_file` (offset and
+  limit, in lines), with no permission prompt inside the project. A cut
+  string is saved whole, on its own lines, after the result's other values,
+  and lines over 2,000 characters are split, so a one-line output (minified
+  JSON, base64) pages too. Reading a saved output back cuts it again
+  without saving a second copy.
+
+`./.{app_name}/tool-output/` is created private (0700, files 0600) with a
+`.gitignore` of `*`. As with `web_fetch`'s saved pages, the location is
+fixed, a symlinked folder is refused, and after each save outputs older than
+7 days are deleted, then the oldest until the folder holds 100 MB (outputs
+saved in the last minute are spared); only the folder's own files are
+touched. If an output cannot be saved (a read-only project, a symlinked
+folder), the call still succeeds: the result is cut, its note says the full
+output could not be saved, and the log warns once per folder.
+
+Every result passes the cap: registered tools, MCP and skill tools,
+`job_result`, and on Deep Agents a sub-agent's answer. Each tool's own limits
+stay (`web_fetch` returns a summary, `grep` a number of matches); the cap is
+the net beneath them. On ADK it is the `ToolResultCapPlugin`, for apps built
+from agent configs (a native ADK YAML app keeps its own `after_tool_callback`s
+and gets no cap). ADK's Claude and OpenAI Responses adapters send a model
+only a result's `content`, or else its `result`, so the plugin puts the note
+there as well. On Deep Agents it is the `ToolResultCapMiddleware`, between
+the permission gate and the tool-error middleware, so an error result is
+capped too. A `/settings` change of the limit rebuilds the agents and keeps
+the conversation.
+
 ## CLI Commands
 
 Built-in slash commands available in all apps:
@@ -1452,6 +1498,7 @@ agentic-cli/
 │   │   ├── checkpointers.py      # open_checkpointer: memory / sqlite / Postgres (Deep Agents, LangGraph)
 │   │   ├── llm_log.py            # LLMLogWriter: the raw_llm_logging JSONL file, redact_secrets
 │   │   ├── tool_errors.py        # A raising tool's error result (ADK and Deep Agents)
+│   │   ├── tool_output.py        # The tool result cap; full outputs in ./.{app_name}/tool-output/
 │   │   ├── sessions.py           # SessionRef, the active turn, the active tool call
 │   │   ├── mcp.py                # MCPServerConfig → ADK toolset / langchain-mcp-adapters connection
 │   │   ├── adk/
@@ -1462,11 +1509,12 @@ agentic-cli/
 │   │   │   ├── event_processor.py
 │   │   │   ├── plugins.py                # LLMLoggingPlugin
 │   │   │   ├── permission_plugin.py      # PermissionPlugin (capability gating)
-│   │   │   └── task_progress_plugin.py
+│   │   │   ├── task_progress_plugin.py
+│   │   │   └── tool_result_cap_plugin.py # ToolResultCapPlugin (the tool result cap)
 │   │   ├── deepagents/                   # The Deep Agents backend (deepagents extra)
 │   │   │   ├── manager.py                # DeepAgentsWorkflowManager
 │   │   │   ├── agent_builder.py          # One create_agent graph per AgentConfig; task delegation
-│   │   │   ├── middleware.py             # Permission gate, tool errors, active tool call, foreign reasoning
+│   │   │   ├── middleware.py             # Permission gate, result cap, tool errors, active tool call, foreign reasoning
 │   │   │   ├── tools.py                  # Framework tools → LangChain tools
 │   │   │   ├── event_processor.py        # The stream → WorkflowEvents; the run callback
 │   │   │   ├── sessions.py               # Threads keyed by SessionRef; the session hooks
