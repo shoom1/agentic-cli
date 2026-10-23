@@ -36,9 +36,10 @@ from agentic_cli.workflow.adk.compaction import (
     NoAfterTurnCompactionRunner,
 )
 from agentic_cli.workflow.adk.event_processor import ADKEventProcessor
+from agentic_cli.workflow.adk.fit_guard_plugin import FitGuardPlugin
 from agentic_cli.workflow.adk.model_factory import build_adk_model, generate_text
 from agentic_cli.workflow.adk.permission_plugin import PermissionPlugin
-from agentic_cli.workflow.adk.plugins import LLMLoggingPlugin
+from agentic_cli.workflow.adk.plugins import LLMLoggingPlugin, SentRequestLoggingPlugin
 from agentic_cli.workflow.adk.tool_result_cap_plugin import ToolResultCapPlugin
 from agentic_cli.workflow.service_registry import JOB_MANAGER
 from agentic_cli.workflow.tool_output import tool_output_dir
@@ -547,6 +548,9 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                 app_name=self._settings.app_name,
                 include_messages=True,
                 include_raw_parts=True,
+                # An app built from configs records a request as sent, after
+                # the fit guard (SentRequestLoggingPlugin, last).
+                log_requests=bool(self._adk_config_path),
             )
             plugins.append(self._llm_logging_plugin)
             logger.info("llm_logging_plugin_enabled")
@@ -641,6 +645,13 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             plugins.append(ToolResultCapPlugin(
                 self._settings.tool_result_max_chars, tool_output_dir(self._settings.app_name)
             ))
+            # Last but the raw log: it measures the request every other plugin
+            # has edited, and drops the oldest turns of one over its budget.
+            plugins.append(FitGuardPlugin(self._budgets, {
+                name: model.record.kind for name, model in self._resolved_models.items()
+            }))
+            if self._llm_logging_plugin is not None:
+                plugins.append(SentRequestLoggingPlugin(self._llm_logging_plugin))
         app = App(
             name=self.app_name,
             root_agent=self._root_agent,
