@@ -7,7 +7,7 @@ This module provides:
 from __future__ import annotations
 
 import asyncio
-from contextlib import contextmanager, suppress
+from contextlib import aclosing, contextmanager, suppress
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, ClassVar
@@ -20,11 +20,15 @@ from agentic_cli.logging import Loggers, bind_context
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
+    from collections.abc import AsyncIterator
+
     from agentic_cli.cli.usage_tracker import UsageTracker
     from agentic_cli.config import BaseSettings
     from agentic_cli.cli.workflow_controller import WorkflowController
     from agentic_cli.workflow import WorkflowEvent
+    from agentic_cli.workflow.context import CompactResult
     from agentic_cli.workflow.events import UserInputRequest
+    from agentic_cli.workflow.sessions import SessionRef
     from thinking_prompt import Placement, ThinkingBox, ThinkingPromptSession
 
 
@@ -43,6 +47,11 @@ ANSWER_HINT = "Press Enter to type your answer, Enter again to keep it"
 
 # How much of a sub-agent's text its status line shows.
 _SUBAGENT_LINE = 80
+
+# What /compact says when there is nothing to summarize, and on a backend
+# without it.
+NOTHING_TO_SUMMARIZE = "Nothing to summarize yet."
+COMPACT_NOT_SUPPORTED = "/compact is not supported on this backend"
 
 
 @contextmanager
@@ -183,6 +192,42 @@ def _trimmed_warning(metadata: dict) -> str:
     return f"Context window trimmed ({source})"
 
 
+async def _compacting(
+    workflow: object,
+    session: "SessionRef",
+    focus: str | None,
+    outcome: dict,
+) -> "AsyncIterator[WorkflowEvent]":
+    """``workflow.compact(session, focus)`` as a turn's event source.
+
+    What it reports while it runs (a summary starting, its usage, what it
+    did) is yielded as it comes (``live_events.merged``): it runs inside the
+    reporter, in the merge's pump task, so the reporter is set and reset
+    there and nothing context-local is held across a yield. What it returns,
+    or raises, goes to ``outcome`` (``"result"``, ``"error"``; ``"reported"``
+    once a ``CONTEXT_TRIMMED`` passed), for ``/compact`` to say as itself
+    rather than as a failed turn.
+    """
+    from agentic_cli.workflow import EventType, live_events
+
+    live = live_events.LiveEvents()
+
+    async def run() -> "AsyncIterator[WorkflowEvent]":
+        with live_events.reporting(live):
+            try:
+                outcome["result"] = await workflow.compact(session, focus)
+            except Exception as error:  # noqa: BLE001 - /compact says it
+                outcome["error"] = error
+        if False:  # pragma: no cover - an event source that yields nothing itself
+            yield
+
+    async with aclosing(live_events.merged(run(), live)) as events:
+        async for event in events:
+            if event.type is EventType.CONTEXT_TRIMMED:
+                outcome["reported"] = True
+            yield event
+
+
 # === Event Processing State ===
 
 
@@ -243,6 +288,19 @@ class MessageProcessor:
         self._last_task_progress: str | None = None
         self._task_box: "ThinkingBox | None" = None
         self._last_task_content: str | None = None
+
+    def reset(self) -> None:
+        """Forget the conversation's task list: a new one starts without it (``/new``).
+
+        A task box still on screen ends, out of the transcript, and the tasks
+        the next turn would draw one again from are dropped.
+        """
+        box = self._live_task_box()
+        if box is not None:
+            box.finish(add_to_history=False, echo_to_console=False)
+        self._task_box = None
+        self._last_task_progress = None
+        self._last_task_content = None
 
     def _live_task_box(self) -> "ThinkingBox | None":
         """The task box, unless there is none or it has ended.
@@ -318,6 +376,7 @@ class MessageProcessor:
         ui: "ThinkingPromptSession",
         settings: "BaseSettings",
         usage_tracker: "UsageTracker | None" = None,
+        current_session_id: str | None = None,
     ) -> TurnResult:
         """Resume the agent with a finished long-running job's result.
 
@@ -325,12 +384,18 @@ class MessageProcessor:
         same rendering path as a user turn (events box, tool results, token
         accounting, Ctrl+C).
 
+        A job from a conversation other than ``current_session_id`` (one
+        ``/new`` left) resumes in its own conversation, and its line names
+        it. Its usage counts in the totals, but the context ``ctx`` shows and
+        the task list a next turn draws stay the current conversation's.
+
         Args:
             record: The terminal JobRecord to resume from.
             workflow_controller: Controller managing workflow lifecycle.
             ui: UI session for output.
             settings: Application settings.
             usage_tracker: Optional tracker for accumulating LLM token usage.
+            current_session_id: The conversation the user is in, if known.
 
         Returns:
             The turn's outcome. ``UNAVAILABLE`` when the workflow is not ready
@@ -377,19 +442,151 @@ class MessageProcessor:
                     error="originating conversation is no longer available",
                 )
 
-            logger.info("resuming_job", job_id=record.job_id, state=record.state.value)
+            # A record without its session is no other conversation's.
+            owner = getattr(record, "session_id", None)
+            elsewhere = (
+                current_session_id is not None and owner is not None
+                and owner != current_session_id
+            )
+            logger.info("resuming_job", job_id=record.job_id, state=record.state.value,
+                        other_conversation=elsewhere)
+            whose = f"its conversation {owner}" if elsewhere else ""
             ui.add_message(
                 "system",
                 f"↻ Background job '{record.name}' finished ({icon} {record.state.value}) "
-                "— resuming.",
+                f"— resuming{' ' + whose if whose else ''}.",
             )
 
             def _source(wf):
                 return wf.resume_with_job_result(record)
 
-            return await self._run_turn(
+            if not elsewhere:
+                return await self._run_turn(
+                    _source, workflow_controller, ui, settings, usage_tracker
+                )
+            with self._keeping_the_current_conversation(usage_tracker):
+                result = await self._run_turn(
+                    _source, workflow_controller, ui, settings, usage_tracker
+                )
+            workflow_controller.update_status_bar(ui)
+            return result
+
+    @contextmanager
+    def _keeping_the_current_conversation(
+        self, usage_tracker: "UsageTracker | None"
+    ) -> "Iterator[None]":
+        """Run another conversation's turn without its context or tasks becoming the current one's.
+
+        The tracker's context fields (``ctx``) and the task list a next turn
+        draws are set aside and put back once the turn is over, however it
+        ends; the totals keep its usage. The task list is empty meanwhile, so
+        the turn draws none of the current conversation's.
+        """
+        tracker = usage_tracker
+        context = (
+            (tracker.last_prompt_tokens, tracker.context_trigger, tracker.window_known)
+            if tracker is not None else None
+        )
+        tasks = (self._last_task_progress, self._last_task_content)
+        self._last_task_progress = self._last_task_content = None
+        try:
+            yield
+        finally:
+            if tracker is not None and context is not None:
+                (tracker.last_prompt_tokens, tracker.context_trigger,
+                 tracker.window_known) = context
+            self._last_task_progress, self._last_task_content = tasks
+
+    async def process_compact(
+        self,
+        focus: str | None,
+        workflow_controller: "WorkflowController",
+        ui: "ThinkingPromptSession",
+        settings: "BaseSettings",
+        usage_tracker: "UsageTracker | None" = None,
+        session_id: str | None = None,
+    ) -> "CompactResult | None":
+        """Summarize the conversation now (``/compact [focus]``), as a turn runs.
+
+        The workflow's ``compact`` is the turn's event source
+        (``_compacting``), so the events box, its status line ("Summarizing
+        the earlier conversation…" while the summary is written), the token
+        counts, the status bar and Ctrl+C are a turn's. What the summary did
+        is its ``CONTEXT_TRIMMED`` warning ("Context summarized: …"), said
+        here when the backend reported none. The summary's usage adds to the
+        totals but never moves ``ctx``: its prompt is the history it
+        condenses, and the next turn's call shows the smaller context.
+
+        The caller holds the app's turn lock; the manager takes its own turn
+        admission too, so it never runs beside a turn or a job's resume.
+
+        Args:
+            focus: What the summary should keep above all, if anything.
+            workflow_controller: Controller managing workflow lifecycle.
+            ui: UI session for output.
+            settings: Application settings (``default_user``).
+            usage_tracker: Optional tracker for accumulating LLM token usage.
+            session_id: The conversation, the app's durable session.
+
+        Returns:
+            What the summary did; None when nothing was summarized. Then it
+            says why: ``NOTHING_TO_SUMMARIZE``, ``COMPACT_NOT_SUPPORTED``, or
+            ``"Could not summarize: <error>"`` once when the summary failed
+            (the error's type when it has no words).
+
+        Raises:
+            asyncio.CancelledError: Ctrl+C stopped it, as it stops a turn:
+                ``CANCELLED_LINE`` has been said, once, and nothing was
+                written.
+        """
+        with _says_so_when_stopped(ui):
+            if not await workflow_controller.ensure_initialized(ui):
+                ui.add_error(
+                    "Cannot summarize - workflow not initialized. "
+                    "Please check your API keys (GOOGLE_API_KEY or ANTHROPIC_API_KEY)."
+                )
+                return None
+            workflow = workflow_controller.workflow
+            if not getattr(workflow, "supports_compact", False):
+                ui.add_warning(COMPACT_NOT_SUPPORTED)
+                return None
+
+            bind_context(user_id=settings.default_user)
+            logger.info("handling_compact", focus=focus is not None)
+            session = workflow.session_ref(session_id, settings.default_user)
+            outcome: dict = {}
+
+            def _source(wf):
+                return _compacting(wf, session, focus, outcome)
+
+            turn = await self._run_turn(
                 _source, workflow_controller, ui, settings, usage_tracker
             )
+
+            error = outcome.get("error")
+            if isinstance(error, NotImplementedError):
+                ui.add_warning(COMPACT_NOT_SUPPORTED)
+                return None
+            if error is not None:
+                logger.info(
+                    "compact_failed", error_type=type(error).__name__,
+                    error=truncate(str(error), 500),
+                )
+                ui.add_error(f"Could not summarize: {str(error) or type(error).__name__}")
+                return None
+            result = outcome.get("result")
+            if result is None:
+                if turn.delivered:
+                    ui.add_message("system", NOTHING_TO_SUMMARIZE)
+                return None
+            if not outcome.get("reported"):
+                ui.add_warning(_trimmed_warning({
+                    "source": "compact",
+                    "messages_summarized": result.messages_summarized,
+                    "tokens_before": result.tokens_before,
+                    "tokens_after": result.tokens_after,
+                }))
+            return result
 
     async def _run_turn(
         self,

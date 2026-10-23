@@ -491,6 +491,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   has none: `supports_compact` is False there, and `compact` raises
   `NotImplementedError`. Both rest on private ADK and Deep Agents methods,
   each pinned by a contract test (`deepagents` stays on 0.7.x).
+- **`/compact [focus]` and `/new`**, the two commands the overflow message
+  names, and their public twins `BaseCLIApp.compact(focus=None) ->
+  CompactResult | None` and `BaseCLIApp.start_new_session() -> str`, which
+  an app can call too. `/compact` summarizes the main agent's conversation
+  now (the manager's `compact()`), on what the rest of the line asks for if
+  anything (`/compact keep the API decisions and open questions`). It runs
+  as a turn runs (`MessageProcessor.process_compact`, under the app's turn
+  lock): the events box says "Summarizing the earlier conversation…" while
+  the summary is written, its tokens count in the totals, Ctrl+C stops it
+  ("Operation cancelled...", once) with nothing written, and "Context
+  summarized: N messages, X → Y tokens" says what it did. A second one
+  replaces the first summary, on both backends. `ctx` stays the main
+  agent's last prompt until its next call, which shows the smaller
+  context. It says "Nothing to summarize yet." with nothing before the kept
+  tail (or no conversation yet), "Could not summarize: <error>" once when
+  the summary fails (the error's type when it has no words), and "/compact
+  is not supported on this backend" on LangGraph and in a native ADK YAML
+  app, with no events box. `/new` starts a new conversation without a
+  restart, under the turn lock: the facts of the conversation being left
+  are extracted first when `auto_extract_session_facts` is on, as at exit,
+  under the status line "Saving facts from the conversation…" (a failure
+  never stops it); a new 12-hex session id is adopted once the workflow has
+  taken it; the task box and the usage counters start over
+  (`MessageProcessor.reset()`), and the status bar is drawn again. It says
+  "New conversation <new>. Previous: <old>, listed in /sessions.", or
+  "New conversation <new>." when the conversation left is in no store (no
+  turn ran in it, or the workflow failed to start, which no longer stops
+  `/new`). Ctrl+C stops it like any request, "Operation cancelled...",
+  once, with nothing changed. The model and the settings, "Allow for this
+  session" grants, sandbox kernels and background jobs stay. A job started
+  in the old conversation still reports to it: its line names that
+  conversation ("… — resuming its conversation <id>."), its usage counts
+  in the totals, and `ctx` and the task list stay the current
+  conversation's (`process_resume(..., current_session_id=...)`). `/clear`
+  is still a screen clear.
 
 ### Changed
 

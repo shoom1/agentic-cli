@@ -14,7 +14,14 @@ What the workflow answers:
 - ``hold``: ``Holding.``, then it waits until a file named ``release``
   appears in the working directory, and says ``Released.``; the test creates
   the file, so the turn ends on its own while the test watches the prompt.
-- anything else: ``Echo: <message>``, at once.
+- ``which``: ``Session: <the turn's session id>``.
+- anything else: ``Echo: <message>``, at once, and the call's usage: a
+  4,000-token prompt against a 16,000-token trigger (``ctx 4k/16k (25%)``).
+
+``/compact`` reports that a summary is being written, waits until a file
+named ``summarized`` appears, then reports its usage and what it did: 2
+messages, 7,400 tokens before and 1,200 after. A session is stored once a
+turn ran in it (``session_exists``), as ``/new``'s line asks.
 
 With a file named ``init-fails`` in the working directory at startup, the
 first initialization fails, and the next one (a turn retries it) waits until
@@ -30,8 +37,11 @@ from typing import Any
 import agentic_cli.cli.workflow_controller as workflow_controller
 from agentic_cli.cli import AppInfo, BaseCLIApp
 from agentic_cli.config import BaseSettings
+from agentic_cli.workflow import live_events
 from agentic_cli.workflow.config import AgentConfig
+from agentic_cli.workflow.context import CompactResult
 from agentic_cli.workflow.events import InputType, UserInputRequest, WorkflowEvent
+from agentic_cli.workflow.sessions import SessionRef
 
 
 class ScriptedManager:
@@ -42,12 +52,15 @@ class ScriptedManager:
     catalog = None
     agent_models: dict = {}
     job_manager = None
+    supports_compact = True
+    supports_sessions = True
     # Initializations so far, of every manager the controller built.
     initializations = 0
 
     def __init__(self) -> None:
         self.is_initialized = False
         self._input_callback: Any = None
+        self._sessions: set[str | None] = set()
 
     async def initialize_services(self) -> None:
         ScriptedManager.initializations += 1
@@ -64,6 +77,9 @@ class ScriptedManager:
     async def load_session(self, session_id, user_id=None) -> bool:
         return False
 
+    async def session_exists(self, session_id, *, user_id=None) -> bool:
+        return session_id in self._sessions
+
     async def cleanup(self) -> None:
         self.is_initialized = False
 
@@ -73,7 +89,25 @@ class ScriptedManager:
     def clear_input_callback(self) -> None:
         self._input_callback = None
 
+    def session_ref(self, session_id=None, user_id=None) -> SessionRef:
+        return SessionRef("console", user_id or "user", session_id or "default_session")
+
+    async def compact(self, session, focus=None) -> CompactResult:
+        live_events.report(WorkflowEvent.context_summarizing("assistant"))
+        while not Path("summarized").exists():
+            await asyncio.sleep(0.05)
+        usage = WorkflowEvent.llm_usage(model=self.model, prompt_tokens=7_400,
+                                        completion_tokens=300)
+        usage.metadata.update(purpose="summarization", agent="assistant")
+        live_events.report(usage)
+        live_events.report(WorkflowEvent.context_trimmed(
+            3, 2, "compact", "assistant", messages_summarized=2,
+            tokens_before=7_400, tokens_after=1_200,
+        ))
+        return CompactResult(messages_summarized=2, tokens_before=7_400, tokens_after=1_200)
+
     async def process(self, message: str, user_id: str, session_id: str | None = None):
+        self._sessions.add(session_id)
         if message == "slow":
             yield WorkflowEvent.thinking("Working on it")
             await asyncio.Event().wait()  # until Ctrl+C cancels the turn
@@ -92,8 +126,14 @@ class ScriptedManager:
             while not Path("release").exists():
                 await asyncio.sleep(0.05)
             yield WorkflowEvent.text("Released.")
+        elif message == "which":
+            yield WorkflowEvent.text(f"Session: {session_id}")
         else:
             yield WorkflowEvent.text(f"Echo: {message}")
+            usage = WorkflowEvent.llm_usage(model=self.model, prompt_tokens=4_000,
+                                            completion_tokens=5)
+            usage.metadata.update(agent="assistant", context_trigger=16_000, window_known=True)
+            yield usage
 
 
 def main() -> None:

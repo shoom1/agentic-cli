@@ -27,11 +27,11 @@ agentic-cli/
 │   ├── paths.py              # resolve_path: the one interpretation of a path argument
 │   ├── logging.py
 │   ├── cli/
-│   │   ├── app.py            # BaseCLIApp (the session it builds; get_theme(name); /settings model pickers: _model_choices; the LangGraph deprecation notice)
+│   │   ├── app.py            # BaseCLIApp (the session it builds; get_theme(name); /settings model pickers: _model_choices; the LangGraph deprecation notice; compact() and start_new_session(): /compact and /new, under the turn lock; another conversation's job resume keeps ctx and the task list)
 │   │   ├── commands.py       # Command, CommandRegistry
-│   │   ├── builtin_commands.py # /help, /status (the main agent's context rows: context_budget), /models (ModelsCommand), /sessions, ...
+│   │   ├── builtin_commands.py # /help, /status (the main agent's context rows: context_budget), /models (ModelsCommand), /sessions, /compact [focus], /new, ...
 │   │   ├── workflow_controller.py  # WorkflowController (lazy/background init, orchestrator swap; the status bar names the main agent's model)
-│   │   ├── message_processor.py    # WorkflowEvent → ThinkingPromptSession rendering; Ctrl+C stops the request being processed (its boxes end with it; "Operation cancelled..." once; CancelledError re-raised); tool questions as dialogs
+│   │   ├── message_processor.py    # WorkflowEvent → ThinkingPromptSession rendering; Ctrl+C stops the request being processed (its boxes end with it; "Operation cancelled..." once; CancelledError re-raised); tool questions as dialogs; process_compact: /compact run as a turn (compact() as its event source, live events merged in)
 │   │   ├── settings_command.py     # /settings: a Dialog with Save and Cancel; the fields that changed → apply_settings
 │   │   ├── settings_introspection.py # Pydantic field → thinking-prompt form field (built complete: they are frozen)
 │   │   └── usage_tracker.py        # Token usage / status bar: ctx = the main agent's last prompt over its context_trigger (sub-agent and summary calls never move it)

@@ -1445,7 +1445,8 @@ model and its `max_tokens`.
   the point that matters, not the raw window: on a 1M-token model "/1M"
   would hide that the summary comes at 200,000. The bar names the main
   agent's own model, which may not be the default model. A sub-agent's
-  calls and a summary's never move it; an inheriting sub-agent's prompt
+  calls and a summary's never move it, nor does a job resuming a
+  conversation `/new` left; an inheriting sub-agent's prompt
   holds the conversation, but it is not the main agent's context. On a
   model whose window is unknown (the 128k floor in use) it shows the prompt
   alone, `ctx 45k`, as on LangGraph and in a native ADK YAML app, which
@@ -1465,6 +1466,33 @@ model and its `max_tokens`.
   "researcher: context summarized: …" (on Deep Agents each agent summarizes
   its own). A prompt smaller than the last is not taken for a trim.
 
+### `/compact` and `/new`
+
+- **`/compact [focus]`** summarizes the main agent's conversation now, as
+  it is summarized when it grows: the newest 12% of the trigger and the
+  newest turn stay word for word, and the rest becomes the summary the next
+  requests start with; a second one replaces the first summary. The rest of
+  the line tells the summary what to keep above all: `/compact keep the API
+  decisions and open questions`. It runs as a turn does: "Summarizing the
+  earlier conversation…" while it writes, then "Context summarized: …";
+  Ctrl+C stops it, and nothing is written. `ctx` shows the smaller context
+  from the next call on. With nothing before the kept tail it says "Nothing
+  to summarize yet."; a summary that fails says "Could not summarize:
+  <error>". LangGraph and a native ADK YAML app have none ("/compact is not
+  supported on this backend"). An app runs the same with
+  `BaseCLIApp.compact(focus=None)`, or calls the manager's
+  `compact(session, focus=None)` itself (`supports_compact`).
+- **`/new`** starts a new conversation without a restart, through
+  `BaseCLIApp.start_new_session()`, which an app can call too: a new
+  session id, the task box and the usage counters reset, and, with
+  `auto_extract_session_facts` on, the facts of the conversation being left
+  saved first, as at exit ("Saving facts from the conversation…" while it
+  runs). Its line names the conversation left when `/sessions` lists it
+  (a turn ran in it). Ctrl+C stops it, and nothing changes. The model, the
+  settings, "Allow for this session" grants, sandbox kernels and background
+  jobs carry on, and a job reports to the conversation that started it,
+  which its line names. `/clear` only clears the screen.
+
 ## CLI Commands
 
 Built-in slash commands available in all apps:
@@ -1482,6 +1510,8 @@ Built-in slash commands available in all apps:
 | `/resume` | | Resume the agent with results from finished background jobs |
 | `/papers` | `/docs` | List knowledge-base documents (filter by source, query, --global) |
 | `/sessions` | `/sess` | List saved sessions (and delete with `--delete=<id>`) |
+| `/compact` | | Summarize the conversation now, keeping the newest turns word for word (`/compact <focus>`: what the summary should keep above all) |
+| `/new` | | Start a new conversation; the current one stays in `/sessions` |
 
 Apps can add more of their own. `research_demo`, for instance, registers
 `/memory`, `/files` and `/kb-backfill` on top of the built-ins above.

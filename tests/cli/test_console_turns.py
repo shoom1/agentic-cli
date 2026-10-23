@@ -1,4 +1,5 @@
-"""Turns on a real console, over a pty: Ctrl+C, a question, typing ahead.
+"""Turns on a real console, over a pty: Ctrl+C, a question, typing ahead,
+``/new``, ``/compact`` and the status bar's ``ctx``.
 
 thinking-prompt 0.4's Ctrl+C cancels the turn's task, its dialogs are
 ``Dialog`` objects, drawn in a box or inline, and it refuses Enter while a
@@ -12,6 +13,7 @@ provider, no key) in a child process and type at it. Every wait is an
 from __future__ import annotations
 
 import io
+import re
 import sys
 from pathlib import Path
 
@@ -197,3 +199,59 @@ def test_a_line_typed_during_a_turn_waits_in_the_prompt(console):
 
     transcript = console.transcript
     assert transcript.index("Released.") < transcript.index("Echo: draft")
+
+
+def test_new_starts_a_conversation_and_the_next_turn_runs_in_it(console):
+    console.type_line("which")
+    console.expect("Session: ")
+    console.type_line("/new")
+    console.expect("listed in /sessions.")
+    (new, previous), = re.findall(
+        r"New conversation ([0-9a-f]{12})\. Previous: ([0-9a-f]{12}), listed in /sessions\.",
+        console.transcript,
+    )
+    console.type_line("which")
+    console.expect(f"Session: {new}")
+    console.exit()
+
+    sessions = re.findall(r"Session: ([0-9a-f]{12})", console.transcript)
+    assert sessions[0] == previous != new
+    assert sessions[-1] == new
+
+
+def test_compact_shows_the_summarizing_line_then_what_it_did(console):
+    console.type_line("/compact")
+    console.expect("Summarizing the earlier conversation…")
+    (console.cwd / "summarized").touch()
+    console.expect("Context summarized: 2 messages, 7.4k → 1.2k tokens")
+    console.exit()
+
+    transcript = console.transcript
+    assert transcript.index("Summarizing the earlier conversation…") < transcript.index(
+        "Context summarized:"
+    )
+    assert "Nothing to summarize yet." not in transcript
+
+
+def test_ctrl_c_during_compact_says_so_once_and_the_next_turn_runs(console):
+    console.type_line("/compact")
+    console.expect("Summarizing the earlier conversation…")
+
+    console.child.sendcontrol("c")
+    console.expect("Operation cancelled...")
+    console.type_line("hello")
+    console.expect("Echo: hello")
+    console.exit()
+
+    transcript = console.transcript
+    assert transcript.count("Operation cancelled...") == 1
+    for never in ("Context summarized", "Could not summarize", "Nothing to summarize yet.",
+                  "Handler error"):
+        assert never not in transcript
+
+
+def test_the_status_bar_shows_how_full_the_context_is(console):
+    console.type_line("hello")
+    console.expect("Echo: hello")
+    console.expect("ctx 4k/16k (25%)")
+    console.exit()

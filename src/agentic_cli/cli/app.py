@@ -24,7 +24,7 @@ from prompt_toolkit.history import InMemoryHistory
 from thinking_prompt import AppInfo, ThinkingPromptSession, ThinkingPromptStyles
 
 from agentic_cli.cli.commands import Command, CommandRegistry
-from agentic_cli.cli.message_processor import MessageProcessor
+from agentic_cli.cli.message_processor import MessageProcessor, _says_so_when_stopped
 from agentic_cli.cli.usage_tracker import UsageTracker
 from agentic_cli.cli.workflow_controller import WorkflowController
 from agentic_cli.config import MODEL_ROLE_KEY_PREFIX, BaseSettings
@@ -41,6 +41,7 @@ if TYPE_CHECKING:
     from agentic_cli.settings_persistence import SettingsSaveResult
     from agentic_cli.workflow import GoogleADKWorkflowManager, EventType, WorkflowEvent
     from agentic_cli.workflow.base_manager import BaseWorkflowManager
+    from agentic_cli.workflow.context import CompactResult
     from agentic_cli.workflow.config import AgentConfig
 
 logger = Loggers.cli()
@@ -339,6 +340,10 @@ _GET_STYLES_REMOVED = (
 
 
 # === Base CLI Application ===
+
+
+#: What ``/new`` shows while it saves the facts of the conversation it leaves.
+SAVING_FACTS = "Saving facts from the conversation…"
 
 
 class BaseCLIApp:
@@ -813,6 +818,8 @@ class BaseCLIApp:
             ResumeCommand,
             PapersCommand,
             SessionsCommand,
+            CompactCommand,
+            NewCommand,
             ModelsCommand,
         )
         from agentic_cli.cli.settings_command import SettingsCommand
@@ -827,6 +834,8 @@ class BaseCLIApp:
         self.command_registry.register(SettingsCommand())
         self.command_registry.register(PapersCommand())
         self.command_registry.register(SessionsCommand())
+        self.command_registry.register(CompactCommand())
+        self.command_registry.register(NewCommand())
         self.command_registry.register(ModelsCommand())
 
     async def process_input(self, user_input: str) -> None:
@@ -958,6 +967,7 @@ class BaseCLIApp:
                     ui=self.session,
                     settings=self._settings,
                     usage_tracker=self._usage_tracker,
+                    current_session_id=self._session_id,
                 )
         except asyncio.CancelledError:
             jm.complete_resume(
@@ -987,6 +997,132 @@ class BaseCLIApp:
             )
         return result.delivered
 
+    async def compact(self, focus: str | None = None) -> "CompactResult | None":
+        """Summarize the conversation now (``/compact [focus]``), as a turn runs.
+
+        The public twin of ``start_new_session()``: under the turn lock, the
+        workflow's ``compact`` runs with the turn's events box, status line,
+        token counts and Ctrl+C (``MessageProcessor.process_compact``), and
+        what it did, or why nothing was, is said as ``/compact`` says it.
+
+        Args:
+            focus: What the summary should keep above all, if anything.
+
+        Returns:
+            What the summary did; None when nothing was summarized.
+        """
+        async with self._turn_lock:
+            return await self._message_processor.process_compact(
+                focus,
+                workflow_controller=self._workflow_controller,
+                ui=self.session,
+                settings=self._settings,
+                usage_tracker=self._usage_tracker,
+                session_id=self._session_id,
+            )
+
+    async def start_new_session(self) -> str:
+        """Start a new conversation in this process (``/new``), and return its id.
+
+        Waits for a running turn or job resume (the turn lock), then:
+
+        - with ``auto_extract_session_facts`` on, extracts the facts of the
+          conversation being left, as at exit, under a status line ("Saving
+          facts from the conversation…"; a failure never stops it);
+        - adopts a new session id once the workflow has taken it
+          (``workflow.load_session``), and every later turn targets it;
+        - ends the task box and forgets its tasks, zeroes the usage counters,
+          and draws the status bar again: ``ctx`` waits for the new
+          conversation's first call.
+
+        It says ``"New conversation <new>. Previous: <old>, listed in
+        /sessions."``, or ``"New conversation <new>."`` when the conversation
+        left is in no store (no turn ran in it, or the workflow is not
+        ready). Ctrl+C stops it like any request: "Operation cancelled...",
+        once, and nothing has changed. What belongs to the process stays: the
+        model and the settings, "Allow for this session" grants, sandbox
+        kernels, and background jobs, each of which still reports to the
+        conversation that started it (a job's resume runs in its record's
+        session, and leaves the current conversation's ``ctx`` and tasks
+        alone).
+
+        Returns:
+            The new session id (12 hex characters).
+        """
+        import uuid
+
+        with _says_so_when_stopped(self.session):
+            async with self._turn_lock:
+                old = self._session_id
+                controller = self._workflow_controller
+                ready = controller.is_ready
+                await self._saving_facts(old)
+                stored = ready and await self._is_stored(controller.workflow, old)
+                new = uuid.uuid4().hex[:12]
+                if ready:
+                    await controller.workflow.load_session(new)
+                self._session_id = new
+                self._message_processor.reset()
+                self._usage_tracker.reset()
+                # The trigger as a /settings rebuild shows it; no prompt yet.
+                _show_new_context(controller, self.session, swapped=False)
+                logger.info("new_session_started", session_id=new, previous=old)
+                line = f"New conversation {new}."
+                if stored:
+                    line += f" Previous: {old}, listed in /sessions."
+                self.session.add_message("system", line)
+                return new
+
+    async def _saving_facts(self, session_id: str) -> None:
+        """Extract ``session_id``'s facts (if enabled) under a status line saying so."""
+        if not (
+            getattr(self._settings, "auto_extract_session_facts", False)
+            and self._workflow_controller.is_ready
+        ):
+            return
+        box = self.session.start_thinking(lambda: SAVING_FACTS, content_format="ansi")
+        try:
+            await self._extract_session_facts(session_id)
+        finally:
+            # Out of the transcript, like a turn's events box, a cancel included.
+            box.finish(add_to_history=False, echo_to_console=False)
+
+    @staticmethod
+    async def _is_stored(workflow: Any, session_id: str) -> bool:
+        """Whether ``session_id``'s conversation is in the workflow's store (``/sessions``)."""
+        if not getattr(workflow, "supports_sessions", False):
+            return False
+        try:
+            return bool(await workflow.session_exists(session_id))
+        except Exception:
+            logger.debug("session_lookup_failed", session_id=session_id, exc_info=True)
+            return False
+
+    async def _extract_session_facts(self, session_id: str | None = None) -> None:
+        """Extract the facts of ``session_id``'s conversation into memory (if enabled).
+
+        ``session_id`` defaults to the current conversation (at exit).
+        Gated by ``auto_extract_session_facts``; a no-op when the workflow is
+        not ready. Never raises: a conversation must be left whatever its
+        facts. Runs outside any turn, so its model call reaches no usage
+        counter.
+        """
+        if not getattr(self._settings, "auto_extract_session_facts", False):
+            return
+        if not self._workflow_controller.is_ready:
+            return
+        workflow = self._workflow_controller.workflow
+        session_id = session_id or self._session_id
+        try:
+            facts = await workflow.on_session_end(
+                session=workflow.session_ref(session_id, self._settings.default_user)
+            )
+        except Exception:
+            logger.debug("session_fact_extraction_failed", exc_info=True)
+            return
+        if facts:
+            logger.info("session_facts_extracted", count=len(facts), session_id=session_id)
+
     async def _adopt_session_on_startup(self) -> None:
         """Adopt this run's session id so the manager targets it from turn one.
 
@@ -1011,23 +1147,10 @@ class BaseCLIApp:
 
         Gated by the ``auto_extract_session_facts`` setting; a no-op when the
         workflow isn't ready or has no memory store. Never raises — fact
-        extraction must not block a clean shutdown.
+        extraction must not block a clean shutdown. The conversation is the
+        current one, which the manager also holds (``load_session``).
         """
-        if not getattr(self._settings, "auto_extract_session_facts", False):
-            return
-
-        if not self._workflow_controller.is_ready:
-            return
-
-        workflow = self._workflow_controller.workflow
-        try:
-            facts = await workflow.on_session_end()
-        except Exception:
-            logger.debug("session_fact_extraction_on_exit_failed", exc_info=True)
-            return
-
-        if facts:
-            logger.info("session_facts_extracted", count=len(facts))
+        await self._extract_session_facts()
 
     async def run(self) -> None:
         """Run the main application loop."""
@@ -1124,7 +1247,8 @@ def _show_new_context(
     window, ``context_summarize_at``, ``context_max_tokens``), and the last
     prompt may already be past the new one. The usage tracker takes the
     trigger and the window flag from ``workflow.context_budget()``: none when
-    the manager manages no context (``KeyError``) or has no such method. An
+    the manager manages no context (``KeyError``), has no such method, or
+    is not ready (it failed to start; the status bar then says so). An
     orchestrator swap starts another manager, whose conversation is another
     one: the tracker forgets the context (the session's totals stay). The
     status bar is then drawn again.
@@ -1138,11 +1262,15 @@ def _show_new_context(
     if tracker is not None and swapped:
         tracker.reset_context()
     elif tracker is not None:
-        context_budget = getattr(controller.workflow, "context_budget", None)
-        try:
-            budget = context_budget() if context_budget is not None else None
-        except (KeyError, RuntimeError):
-            budget = None
+        budget = None
+        # A workflow that is not ready (it failed to start) has no budget,
+        # and the controller hands out none: the status bar says why.
+        if controller.is_ready:
+            context_budget = getattr(controller.workflow, "context_budget", None)
+            try:
+                budget = context_budget() if context_budget is not None else None
+            except (KeyError, RuntimeError):
+                budget = None
         tracker.context_trigger = budget.trigger if budget is not None else None
         tracker.window_known = budget.window_known if budget is not None else None
     controller.update_status_bar(session)
