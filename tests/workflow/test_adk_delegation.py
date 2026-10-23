@@ -358,7 +358,7 @@ class TestDelegation:
             AgentConfig(name="middle", prompt=PROMPTS["middle"], sub_agents=["leaf"],
                         description="Plans.", include_state_tools=False),
             AgentConfig(name="leaf", prompt=PROMPTS["leaf"], description="Looks up.",
-                        include_state_tools=False, context="inherit"),
+                        include_state_tools=False),
         ])
         try:
             events = await turn(manager, "What is X?")
@@ -367,6 +367,9 @@ class TestDelegation:
 
         assert answers.agents == ["coordinator", "middle", "leaf", "middle", "coordinator"]
         assert tool_names(answers.bodies("middle")[0]) == ["leaf"]
+        # Two levels down, each sub-agent is sent its own request alone.
+        assert lines(answers.bodies("middle")[0]) == ["user: Plan X."]
+        assert lines(answers.bodies("leaf")[0]) == ["user: Look X up."]
         assert lines(answers.bodies("middle")[1])[-1] == 'user: result "42."'
         assert lines(answers.bodies("coordinator")[1])[-1] == (
             'user: result "X is 42, says the leaf."'
@@ -608,7 +611,7 @@ class TestTheAgents:
         configs = [
             AgentConfig(name="coordinator", prompt="p", sub_agents=["middle"]),
             AgentConfig(name="middle", prompt="p", sub_agents=["leaf"], description="Mid."),
-            AgentConfig(name="leaf", prompt="p", description="Leaf.", context="inherit"),
+            AgentConfig(name="leaf", prompt="p", description="Leaf."),
         ]
         root = await built(configs)
         (middle,) = root.sub_agents

@@ -939,8 +939,11 @@ reviewer = AgentConfig(name="reviewer", prompt="Check what was said.",
 - **The limits in 0.7.0.** `context` is for sub-agents only, and `"inherit"`
   only for an agent without sub-agents of its own: Deep Agents tells a forked
   sub-agent that delegating "will be refused", which a coordinator would
-  believe. A sub-agent on ADK cannot share its name with one of its parent's
-  tools. Each raises `AgentGraphError` at startup.
+  believe. And `"inherit"` only for the main agent's own sub-agents: below
+  another sub-agent, ADK would show it the main agent's whole conversation,
+  what its fresh parent was kept from. A sub-agent on ADK cannot share its
+  name with one of its parent's tools. Each raises `AgentGraphError` at
+  startup.
 - **A sub-agent's failure.** On Deep Agents, a sub-agent whose model call
   fails ends the turn with one error naming it. On ADK the turn goes on:
   ADK hands the parent "Error running sub-agent: …", and the user sees a

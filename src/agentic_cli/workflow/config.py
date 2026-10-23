@@ -309,6 +309,23 @@ def _check_contexts(config_map: dict[str, AgentConfig], root: str) -> None:
             "for agents without sub-agents. Use 'fresh' for a coordinator."
         )
 
+    # ADK shows an inheriting agent the main agent's conversation, whatever its
+    # depth, so below a fresh coordinator it would see what its parent was kept
+    # from; Deep Agents' fork sees its parent's. 0.7.0 offers neither.
+    nested = sorted({
+        sub
+        for name, config in config_map.items()
+        if name != root
+        for sub in config.sub_agents
+        if config_map[sub].context == "inherit"
+    })
+    if nested:
+        raise AgentGraphError(
+            f"Agent(s) {', '.join(repr(n) for n in nested)} set context 'inherit' "
+            f"below another sub-agent: in 0.7.0, 'inherit' is for the main agent's "
+            f"({root!r}) own sub-agents. Use 'fresh', or make it a sub-agent of {root!r}."
+        )
+
 
 def _topological_order(config_map: dict[str, AgentConfig]) -> tuple[str, ...]:
     """Order agent names so each follows its sub-agents.

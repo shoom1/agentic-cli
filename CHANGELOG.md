@@ -380,7 +380,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   root. No agent built from a config is offered `transfer_to_agent` any
   more, so a sub-agent no longer takes over the conversation on later
   turns. Sub-agents start `"fresh"`: they see only the request, where they
-  saw the whole conversation (set `context="inherit"` for that). A prompt
+  saw the whole conversation (set `context="inherit"` for that).
+  `"inherit"` is for the main agent's own sub-agents in 0.7.0:
+  `validate_agent_graph` refuses it below another sub-agent, on every
+  backend, since ADK would show such an agent the main agent's whole
+  conversation rather than its parent's. A prompt
   that names `transfer_to_agent` should say to delegate to the agent
   instead, as the research demo's coordinator now does; an app that relied
   on a specialist keeping the conversation routes follow-ups through the

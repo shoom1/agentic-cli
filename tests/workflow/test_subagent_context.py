@@ -3,7 +3,8 @@
 A sub-agent starts ``fresh`` (the brief alone, the default) or ``inherit``s
 its parent's conversation. ``validate_agent_graph`` checks the field where
 it sits in the tree, for every backend: the root has no parent to inherit
-from, and in 0.7.0 ``inherit`` is for agents without sub-agents of their own.
+from, and in 0.7.0 ``inherit`` is for the main agent's own sub-agents, and
+only those without sub-agents of their own.
 
 What each mode sends a model is pinned per backend: ADK in
 ``tests/workflow/test_adk_delegation.py``, Deep Agents in
@@ -48,8 +49,23 @@ class TestTheField:
 
 class TestTheGraphChecks:
     @pytest.mark.parametrize("context", [None, "fresh", "inherit"])
-    def test_a_leaf_takes_each_value(self, context):
-        assert validate_agent_graph(tree(leaf=context, deep=context)).root_name == "lead"
+    def test_a_leaf_of_the_main_agent_takes_each_value(self, context):
+        assert validate_agent_graph(tree(leaf=context)).root_name == "lead"
+
+    @pytest.mark.parametrize("context", [None, "fresh"])
+    def test_a_leaf_below_another_sub_agent_starts_fresh(self, context):
+        assert validate_agent_graph(tree(deep=context)).root_name == "lead"
+
+    def test_inherit_is_for_the_main_agents_own_sub_agents(self):
+        # On ADK an inheriting agent is shown the main agent's conversation,
+        # whatever its depth: below a fresh coordinator it would see what its
+        # parent was kept from. Deep Agents' fork sees its parent's. Neither
+        # is offered in 0.7.0.
+        with pytest.raises(AgentGraphError) as exc:
+            validate_agent_graph(tree(deep="inherit"))
+        message = str(exc.value)
+        assert "'deep'" in message and "'lead'" in message
+        assert "inherit" in message and "0.7.0" in message
 
     @pytest.mark.parametrize("context", [None, "fresh"])
     def test_a_middle_coordinator_starts_fresh(self, context):
