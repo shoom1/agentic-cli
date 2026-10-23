@@ -22,8 +22,12 @@ if TYPE_CHECKING:
 
 
 #: A settings field whose name matches this is a credential. It is never saved,
-#: whichever application defines it (see ``is_secret_field``).
-CREDENTIAL_KEY_RE = re.compile(r"(?i)(api_?key|secret|token|password|credential)")
+#: whichever application defines it (see ``is_secret_field``). ``token`` counts
+#: only as a whole word of the name (``github_token``, ``hf_token``): a token
+#: count (``context_max_tokens``) or a tokenizer is not a credential.
+CREDENTIAL_KEY_RE = re.compile(
+    r"(?i)(api_?key|secret|password|credential|(?:^|_)token(?:_|$))"
+)
 
 # Fields that should never be saved to JSON (secrets). Any field whose name
 # matches CREDENTIAL_KEY_RE or whose type is SecretStr is excluded as well.
