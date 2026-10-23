@@ -239,7 +239,7 @@ async def test_fetch_then_ingest_then_search(kb):
             return "A page about volcanoes."
 
     class _Fetcher:
-        async def fetch(self, url, timeout=30):
+        async def fetch(self, url, timeout=30, *, authorize=None):
             return FetchResult(
                 success=True, content=ARTICLE, content_type="text/html; charset=utf-8",
                 raw=ARTICLE.encode(), charset="utf-8", final_url=url,

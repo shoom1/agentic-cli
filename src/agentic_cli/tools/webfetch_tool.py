@@ -34,7 +34,13 @@ from agentic_cli.tools.webfetch.saved import (
     saved_pages_dir,
 )
 from agentic_cli.tools.webfetch.transport import PinnedTransport
-from agentic_cli.workflow.service_registry import require_service, LLM_SUMMARIZER
+from agentic_cli.tools.webfetch.fetcher import RedirectCheck
+from agentic_cli.workflow.service_registry import (
+    LLM_SUMMARIZER,
+    PERMISSION_ENGINE,
+    get_service,
+    require_service,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -144,10 +150,32 @@ def save_fetched_page(url: str, result: FetchResult) -> dict[str, Any]:
     return {"saved_path": saved_path}
 
 
+def _redirect_check(prompt: str) -> RedirectCheck | None:
+    """Put each redirect target to the permission engine, as a fetch of it.
+
+    The engine judged only the URL the call named; a redirect on the same host
+    can lead anywhere on it (a denied path, plain HTTP), so each target is
+    checked as a ``web_fetch`` of that URL would be: denied, allowed, or asked
+    about. Outside a workflow there is no engine and no rule to apply.
+    """
+    engine = get_service(PERMISSION_ENGINE)
+    if engine is None:
+        return None
+    from agentic_cli.tools.registry import get_registry
+
+    capabilities = get_registry().get("web_fetch").capabilities
+
+    async def authorize(next_url: str) -> str | None:
+        result = await engine.check("web_fetch", capabilities, {"url": next_url, "prompt": prompt})
+        return None if result.allowed else result.reason
+
+    return authorize
+
+
 async def fetch_and_summarize(url: str, prompt: str, timeout: int, summarizer) -> dict[str, Any]:
     """Fetch ``url``, save the page, and summarize it with ``summarizer``."""
     fetcher = get_or_create_fetcher()
-    fetch_result = await fetcher.fetch(url, timeout=timeout)
+    fetch_result = await fetcher.fetch(url, timeout=timeout, authorize=_redirect_check(prompt))
 
     if not fetch_result.success:
         if fetch_result.redirect is not None:

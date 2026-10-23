@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from urllib.parse import urljoin, urlparse
 
@@ -13,6 +14,10 @@ from agentic_cli.tools.webfetch.saved import saved_page_extension
 from agentic_cli.tools.webfetch.validator import URLValidator, BlockedAddressError
 from agentic_cli.tools.webfetch.robots import RobotsTxtChecker
 from agentic_cli.tools.webfetch.transport import PinnedTransport
+
+#: Asked about each URL a redirect leads to, before it is requested: None
+#: lets the fetch follow it, a reason refuses it (see ``ContentFetcher.fetch``).
+RedirectCheck = Callable[[str], Awaitable[str | None]]
 
 
 @dataclass
@@ -82,15 +87,26 @@ class ContentFetcher:
         self._max_download_bytes = max(max_download_bytes, max_content_bytes)
         self._cache: dict[str, CachedResponse] = {}
 
-    async def fetch(self, url: str, timeout: int = 30) -> FetchResult:
+    async def fetch(
+        self, url: str, timeout: int = 30, *, authorize: RedirectCheck | None = None,
+    ) -> FetchResult:
         """Fetch content from a URL.
 
         Redirects are followed manually so each Location is revalidated before
         the next request; the PinnedTransport resolves+validates+pins every hop
         (and the robots fetch), connecting only to globally-routable IPs.
+
+        ``authorize``, when given, is asked about each same-host redirect
+        target before it is requested, and about the URL a cached page was
+        finally read from, since the caller vouched only for ``url``: a
+        reason it returns ends the fetch with that reason.
         """
         cached = self._get_cached(url)
         if cached is not None:
+            if authorize is not None and cached.final_url != url:
+                refused = await authorize(cached.final_url)
+                if refused is not None:
+                    return _redirect_refused(cached.final_url, refused)
             return self._result(cached, from_cache=True)
 
         validation = self._validator.validate(url)
@@ -153,6 +169,10 @@ class ContentFetcher:
                                 )
                             if not await self._robots.can_fetch(next_url):
                                 return FetchResult(success=False, error=f"Blocked by robots.txt for {next_url}")
+                            if authorize is not None:
+                                refused = await authorize(next_url)
+                                if refused is not None:
+                                    return _redirect_refused(next_url, refused)
                             current_url = next_url
                             continue
 
@@ -223,3 +243,7 @@ class ContentFetcher:
         expired = [u for u, c in self._cache.items() if now - c.timestamp > self._cache_ttl]
         for u in expired:
             del self._cache[u]
+
+
+def _redirect_refused(url: str, reason: str) -> FetchResult:
+    return FetchResult(success=False, error=f"Redirect to {url} not permitted: {reason}")
