@@ -525,6 +525,45 @@ class SessionsCommand(Command):
         app.session.add_rich(table)
 
 
+class CompactCommand(Command):
+    """Summarize the conversation now, to free the context window."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            name="compact",
+            description="Summarize the conversation now, keeping the newest turns word for word",
+            usage="/compact [focus]",
+            examples=["/compact", "/compact keep the API decisions and open questions"],
+            category=CommandCategory.SESSION,
+        )
+
+    async def execute(self, args: str, app: Any) -> None:
+        """Summarize the main agent's conversation, as a turn runs (``app.compact``).
+
+        One request at a time (the app's turn lock), with the turn's events
+        box and status line; Ctrl+C stops it and nothing is written. The rest
+        of the line, if any, is what the summary should keep above all.
+        """
+        await app.compact(args.strip() or None)
+
+
+class NewCommand(Command):
+    """Start a new conversation; the one left stays in /sessions."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            name="new",
+            description="Start a new conversation (the current one stays in /sessions)",
+            usage="/new",
+            examples=["/new"],
+            category=CommandCategory.SESSION,
+        )
+
+    async def execute(self, args: str, app: Any) -> None:
+        """Start a new conversation in this process (``start_new_session``)."""
+        await app.start_new_session()
+
+
 class ModelsCommand(Command):
     """Show what the model catalog knows: each provider's listing, and its models."""
 

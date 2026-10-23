@@ -36,6 +36,10 @@ What only a real provider can answer:
   ADK, OpenAI), the prompt count the status bar shows is the whole prompt;
   and with the raw LLM log on, an ADK delegation keeps the main agent's
   ``ctx`` while the log names each call's own model.
+- ``/compact``: on both backends, against Claude, Gemini and OpenAI, a summary
+  is written now and the next request is accepted; a focus with braces and
+  quotes reaches the prompt; and on Deep Agents a ``/compact`` near the
+  trigger is not followed by a second summary on the next call.
 
 Override the models with LIVE_CONTEXT_CLAUDE_MODEL (default
 ``anthropic:claude-sonnet-4-5``), LIVE_CONTEXT_GEMINI_MODEL (default
@@ -71,6 +75,7 @@ from agentic_cli.workflow.deepagents import DeepAgentsWorkflowManager  # noqa: E
 from agentic_cli.workflow.events import EventType  # noqa: E402
 from agentic_cli.workflow.permissions import EXEMPT  # noqa: E402
 from tests.integration.conftest import collect_events  # noqa: E402
+from tests.workflow.compacting import compact_now  # noqa: E402
 from tests.integration.helpers import (  # noqa: E402
     assert_no_errors,
     find_events,
@@ -644,6 +649,9 @@ async def test_a_job_resumed_after_its_call_was_summarized(listed, tmp_path, mon
 
     monkeypatch.setitem(_SHAPE, "return_none", False)
     monkeypatch.chdir(tmp_path)
+    # Its own app: job records persist under ~/.<app>/jobs, and every manager
+    # loads them, so a shared app would see another run's jobs.
+    app_name = f"ctx-live-jobs-{uuid.uuid4().hex[:8]}"
     agent = AgentConfig(
         name="job_runner",
         prompt=(
@@ -656,8 +664,8 @@ async def test_a_job_resumed_after_its_call_was_summarized(listed, tmp_path, mon
     )
     manager = GoogleADKWorkflowManager(
         agent_configs=[agent],
-        settings=_settings(tmp_path, context_max_tokens=16_000, thinking_effort="none",
-                           permissions_enabled=False),
+        settings=_settings(tmp_path, app_name=app_name, context_max_tokens=16_000,
+                           thinking_effort="none", permissions_enabled=False),
         model=CLAUDE,
     )
     try:
@@ -673,6 +681,7 @@ async def test_a_job_resumed_after_its_call_was_summarized(listed, tmp_path, mon
         resumed = [event async for event in manager.resume_with_job_result(record)]
     finally:
         await manager.cleanup()
+        shutil.rmtree(Path.home() / f".{app_name}", ignore_errors=True)
 
     assert find_tool_calls(started, "live_resume_probe")
     assert any(_summaries(turn) for turn in notes), "no summary while the call was pending"
@@ -767,3 +776,72 @@ async def test_with_the_raw_log_on_a_delegation_keeps_the_main_agents_ctx(listed
                 str(meta.get("model") or record.get("model")))
     assert any("haiku" in model for model in by_agent.get("calculator", set())), by_agent
     assert all("haiku" not in model for model in by_agent.get("coordinator", set())), by_agent
+
+
+
+@pytest.mark.parametrize("backend, model", [
+    pytest.param("adk", CLAUDE, marks=_needs(_key_for(CLAUDE)), id="adk-claude"),
+    pytest.param("deepagents", CLAUDE, marks=_needs(_key_for(CLAUDE)), id="deepagents-claude"),
+    pytest.param("adk", GEMINI, marks=_needs(_key_for(GEMINI)), id="adk-gemini"),
+    pytest.param("deepagents", GEMINI, marks=_needs(_key_for(GEMINI)), id="deepagents-gemini"),
+    pytest.param("adk", OPENAI, marks=_needs(_key_for(OPENAI)), id="adk-openai"),
+    pytest.param("deepagents", OPENAI, marks=_needs(_key_for(OPENAI)), id="deepagents-openai"),
+])
+async def test_compact_writes_a_summary_now_and_the_next_request_is_accepted(
+    listed, tmp_path, backend, model
+):
+    manager = _manager_for(
+        backend, _assistant(include_state_tools=False),
+        _settings(tmp_path, context_max_tokens=16_000, thinking_effort="none"), model,
+    )
+    try:
+        for seed in (1, 2):
+            await collect_events(
+                manager, f"Garden notes; reply OK.\n\n{_filler(2_000, seed)}",
+                session_id="compact", user_id="u",
+            )
+        # Braces and quotes in the focus: it is spliced into a str.format prompt.
+        result, reported = await compact_now(
+            manager, 'keep the {garden} names and "week" numbers',
+            session_id="compact", user_id="u",
+        )
+        after = await collect_events(
+            manager, "Which streets had gardens? Name two.", session_id="compact", user_id="u"
+        )
+    finally:
+        await manager.cleanup()
+
+    assert result is not None and result.messages_summarized > 0, reported
+    trimmed = [e for e in reported if e.type is EventType.CONTEXT_TRIMMED]
+    assert [e.metadata["source"] for e in trimmed] == ["compact"]
+    assert any(e.metadata.get("purpose") == "summarization"
+               for e in find_events(reported, EventType.LLM_USAGE))
+    assert_no_errors(after)
+    assert _reply(after).strip(), "the request after /compact got no answer"
+
+
+@_needs(_key_for(CLAUDE))
+async def test_a_deep_agents_compact_near_the_trigger_is_not_followed_by_a_second_summary(
+    listed, tmp_path
+):
+    manager = _manager_for(
+        "deepagents", _assistant(include_state_tools=False),
+        _settings(tmp_path, context_max_tokens=16_000, thinking_effort="none"), CLAUDE,
+    )
+    try:
+        # About 13,000 tokens: under the 16,000-token trigger, but the reported
+        # count of the last answer is near it.
+        for seed in (1, 2):
+            await collect_events(
+                manager, f"Garden notes; reply OK.\n\n{_filler(6_000, seed)}",
+                session_id="near", user_id="u",
+            )
+        result, _ = await compact_now(manager, session_id="near", user_id="u")
+        after = await collect_events(manager, "Reply OK.", session_id="near", user_id="u")
+    finally:
+        await manager.cleanup()
+
+    assert result is not None
+    assert_no_errors(after)
+    assert not _summaries(after), "the next call summarized again"
+    assert _reply(after).strip()

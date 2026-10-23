@@ -36,7 +36,10 @@ of the events the summary's range covers; the session keeps them all, for
   (``workflow/live_events.py``), while the turn's stream waits on the call:
   ``CONTEXT_SUMMARIZING`` as it starts, its ``LLM_USAGE``
   (``purpose="summarization"``, the main agent's: its name and context
-  trigger), then ``CONTEXT_TRIMMED``.
+  trigger), then ``CONTEXT_TRIMMED``. A summary asked for (``manual``) keeps
+  that last report until its caller has stored the summary
+  (``report_stored``), so a cancel while it is stored never says it was
+  made.
 - **A failure** of any kind is one recoverable ``ERROR`` a turn; nothing is
   written, ADK goes on with the whole history, and its next model call tries
   again. A summary asked for (``manual``) reports none of its own: its
@@ -181,7 +184,8 @@ class AgentCliSummarizer(BaseEventsSummarizer):
         app_name: The application's name, which some providers are told.
         manual: Asked for now (``/compact``, an overflow): written whoever
             runs, whatever the saving. A failure is the caller's to report
-            (``last_error``): no warning of its own.
+            (``last_error``): no warning of its own. What it did, too: its
+            ``CONTEXT_TRIMMED`` waits for ``report_stored``.
         focus: What the summary should keep above all (``/compact <focus>``).
         source: What ``CONTEXT_TRIMMED`` names as the summary's cause:
             ``"compact"`` when ``manual``, else ``"summarization"``, unless given
@@ -225,9 +229,12 @@ class AgentCliSummarizer(BaseEventsSummarizer):
         self.last_summary: str | None = None
         self._settings = settings
         self._app_name = app_name
+        # A manual summary's CONTEXT_TRIMMED, until its caller stores it.
+        self._unreported: WorkflowEvent | None = None
 
     async def maybe_summarize_events(self, *, events: list[Event]) -> Event | None:
         self.last_error = None
+        self._unreported = None
         if not self.manual and running_agent() != self.root:
             return None
         try:
@@ -290,11 +297,17 @@ class AgentCliSummarizer(BaseEventsSummarizer):
             tokens_after=estimate_event_tokens([event, *kept], kind),
         )
         live_events.report(self._usage(usage))
-        live_events.report(WorkflowEvent.context_trimmed(
+        trimmed = WorkflowEvent.context_trimmed(
             len(events), len(kept) + 1, self.source,
             self.root, messages_summarized=result.messages_summarized,
             tokens_before=result.tokens_before, tokens_after=result.tokens_after,
-        ))
+        )
+        if self.manual:
+            # Said once the caller has stored the summary (report_stored).
+            self._unreported = trimmed
+        else:
+            # ADK appends the summary as soon as this returns.
+            live_events.report(trimmed)
         self.last_result, self.last_summary = result, text
         self.last_kept_turns = sum(
             1 for e in kept if _is_user_text(e) and _in_conversation(e)
@@ -305,6 +318,18 @@ class AgentCliSummarizer(BaseEventsSummarizer):
             tokens_after=result.tokens_after,
         )
         return event
+
+    def report_stored(self) -> None:
+        """Report what the last summary written did, now that it is stored.
+
+        For a summary asked for (``manual``), whose ``CONTEXT_TRIMMED`` waits
+        for this: its caller runs ADK's compaction, which appends the summary
+        after the summarizer returns. Once; nothing for an automatic summary,
+        which reports as it is written.
+        """
+        trimmed, self._unreported = self._unreported, None
+        if trimmed is not None:
+            live_events.report(trimmed)
 
     def _rendered(self, summarized: list[Event]) -> str:
         """``summarized`` as text, as much of it as the summarizing model takes.

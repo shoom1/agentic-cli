@@ -10,7 +10,8 @@ summary is reported live while the turn waits on it (``CONTEXT_SUMMARIZING``,
 its usage, ``CONTEXT_TRIMMED``). A sub-agent past its trigger never compacts
 the shared session; ADK's pass after each turn does not run; a model whose
 budget is too small fails initialization. A native ADK YAML app gets none of
-this.
+this. ``compact()`` (``/compact``) summarizes the same way now, whatever the
+last prompt's size.
 
 Turns run the real manager on ``FakeAPI`` (Claude, ``context_max_tokens`` at
 16,000 so the trigger is small); usage is scripted per call, since ADK reads
@@ -26,6 +27,7 @@ from types import SimpleNamespace
 from unittest.mock import call
 
 import anthropic
+import httpx
 import openai
 import pytest
 
@@ -50,13 +52,18 @@ from agentic_cli.workflow.adk.compaction import (  # noqa: E402
 )
 from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager  # noqa: E402
 from agentic_cli.workflow.config import AgentConfig  # noqa: E402
-from agentic_cli.workflow.context import ContextBudgetError, context_budget  # noqa: E402
+from agentic_cli.workflow.context import (  # noqa: E402
+    CompactResult,
+    ContextBudgetError,
+    context_budget,
+)
 from agentic_cli.workflow.events import EventType  # noqa: E402
 from agentic_cli.workflow.permissions import EXEMPT  # noqa: E402
 from agentic_cli.workflow.summary_prompt import SUMMARY_PREFIX  # noqa: E402
 from tests.cli.dialog_fakes import autospec_session, opening_boxes  # noqa: E402
 from tests.event_replay import ReplayController  # noqa: E402
 from tests.workflow.adk.fakes import FakeAPI, anthropic_message, openai_response  # noqa: E402
+from tests.workflow.compacting import compact_now  # noqa: E402
 from tests.workflow.test_adk_context_cache import _native_yaml  # noqa: E402
 from tests.workflow.test_manager_models import route  # noqa: E402
 
@@ -809,3 +816,330 @@ class TestAModelSwitchAfterASummary:
         assert first["role"] == "user"
         assert first["content"][0]["text"] == f"{SUMMARY_PREFIX}\n\n{SUMMARY}"
         assert texts(answer) == ["From GPT."]
+
+
+# --- summarizing now: compact() (/compact) --------------------------------------------------
+
+#: Three turns, each under the trigger: nothing is summarized on its own.
+THREE = [f"One: {LONG}", f"Two: {LONG}", "Three?"]
+
+
+def three_turns(**more) -> Claude:
+    return Claude(solo=[says("A1."), says("A2."), says("A3."), says("A4.")], **more)
+
+
+class TestCompactNow:
+    async def test_the_earlier_turns_are_summarized_now_and_sent_from_then_on(
+        self, project, monkeypatch
+    ):
+        """ADK's own compaction runs once, now: one summary appended, and the
+        next request starts with it in place of the turns it covers."""
+        answers = serve(monkeypatch, three_turns())
+        manager = solo()
+        try:
+            for text in THREE:
+                await turn(manager, text)
+            result, _ = await compact_now(manager)
+            events = await stored(manager)
+            await turn(manager, "Four?")
+        finally:
+            await manager.cleanup()
+
+        assert answers.asked == ["solo"] * 3 + ["summary", "solo"]
+        (summary,) = summaries_in(events)
+        span = summary.actions.compaction
+        assert (span.start_timestamp, span.end_timestamp) == (
+            events[0].timestamp, events[1].timestamp
+        )
+        assert (summary.author, span.compacted_content.role) == ("user", "user")
+        prompt = lines(answers.bodies("summary")[0])[0]
+        assert f"user: {THREE[0]}\nsolo: A1." in prompt and "Two:" not in prompt
+        assert isinstance(result, CompactResult)
+        assert result.messages_summarized == 2
+        assert 0 < result.tokens_after < result.tokens_before
+        fourth = answers.bodies("solo")[3]
+        assert lines(fourth) == [
+            f"user: {SUMMARY_PREFIX}\n\n{SUMMARY}", f"user: {THREE[1]}", "assistant: A2.",
+            "user: Three?", "assistant: A3.", "user: Four?",
+        ]
+        # The summary once, folded into the first kept message (the fit
+        # guard's last step): no two user messages in a row.
+        assert json.dumps(fourth).count(SUMMARY_PREFIX) == 1
+        assert [m["role"] for m in fourth["messages"]] == [
+            "user", "assistant", "user", "assistant", "user"
+        ]
+
+    async def test_the_focus_reaches_the_summary_prompt(self, project, monkeypatch):
+        answers = serve(monkeypatch, three_turns())
+        manager = solo()
+        try:
+            for text in THREE:
+                await turn(manager, text)
+            await compact_now(manager, "keep the API decisions")
+        finally:
+            await manager.cleanup()
+
+        prompt = lines(answers.bodies("summary")[0])[0]
+        assert "Focus the summary on: keep the API decisions" in prompt
+        assert prompt.index("Focus the summary on:") < prompt.index(f"user: {THREE[0]}")
+
+    async def test_it_reports_as_a_summary_in_a_turn_does(self, project, monkeypatch):
+        serve(monkeypatch, three_turns())
+        manager = solo()
+        try:
+            for text in THREE:
+                await turn(manager, text)
+            result, events = await compact_now(manager)
+        finally:
+            await manager.cleanup()
+
+        assert [event.type for event in events] == [
+            EventType.CONTEXT_SUMMARIZING, EventType.LLM_USAGE, EventType.CONTEXT_TRIMMED
+        ]
+        summarizing, usage, trimmed = events
+        assert summarizing.metadata["agent"] == "solo"
+        assert (usage.metadata["purpose"], usage.metadata["agent"],
+                usage.metadata["context_trigger"], usage.metadata["window_known"]) == (
+            "summarization", "solo", 16_000, True
+        )
+        assert (trimmed.metadata["source"], trimmed.metadata["agent"]) == ("compact", "solo")
+        assert (trimmed.metadata["messages_summarized"], trimmed.metadata["tokens_before"],
+                trimmed.metadata["tokens_after"]) == (
+            result.messages_summarized, result.tokens_before, result.tokens_after
+        )
+
+    async def test_a_short_conversation_has_nothing_to_summarize(self, project, monkeypatch):
+        """Everything fits in the kept tail: no call, nothing appended."""
+        answers = serve(monkeypatch, three_turns())
+        manager = solo()
+        try:
+            for text in ["Hello.", "And again?"]:
+                await turn(manager, text)
+            result, events = await compact_now(manager)
+            session = await stored(manager)
+        finally:
+            await manager.cleanup()
+
+        assert (result, events) == (None, [])
+        assert answers.asked == ["solo", "solo"]
+        assert summaries_in(session) == []
+
+    async def test_before_the_first_turn_there_is_nothing_to_summarize(
+        self, project, monkeypatch
+    ):
+        answers = serve(monkeypatch, three_turns())
+        manager = solo()
+        try:
+            result, events = await compact_now(manager)
+            session = await manager._session_service.get_session(
+                app_name=manager.app_name, user_id="u", session_id="s"
+            )
+        finally:
+            await manager.cleanup()
+
+        assert (result, events) == (None, [])
+        assert session is None  # none is created
+        assert answers.sent == []
+
+    async def test_ctrl_c_during_the_summary_writes_nothing(self, project, monkeypatch):
+        answers = serve(monkeypatch, three_turns())
+        manager = solo()
+        try:
+            for text in THREE:
+                await turn(manager, text)
+            answers.hold = True
+            seen: list = []
+            compacting = asyncio.create_task(compact_now(manager, events=seen))
+            await asyncio.wait_for(answers.held.wait(), 5)
+            await asyncio.sleep(0.05)
+            while_summarizing = [event.type for event in seen]
+            compacting.cancel()
+            with pytest.raises(asyncio.CancelledError):  # not a TimeoutError: no hang
+                await asyncio.wait_for(compacting, 5)
+            left = pumps()
+            after_cancel = summaries_in(await stored(manager))
+            answers.release.set()
+            # The turn is free: a /compact again summarizes.
+            again, _ = await asyncio.wait_for(compact_now(manager), 5)
+        finally:
+            answers.release.set()
+            await manager.cleanup()
+
+        assert while_summarizing == [EventType.CONTEXT_SUMMARIZING]
+        assert left == []
+        assert after_cancel == []
+        assert again.messages_summarized == 2
+
+    async def test_a_cancel_while_the_summary_is_stored_says_none_was_made(
+        self, project, monkeypatch
+    ):
+        """What the summary did is reported once ADK has stored it: a cancel
+        during the append (a durable store's write) shows the call and its
+        usage, and no "Context summarized" for a summary never stored."""
+        serve(monkeypatch, three_turns())
+        manager = solo()
+        appending, seen = asyncio.Event(), []
+        try:
+            for text in THREE:
+                await turn(manager, text)
+            service = manager._session_service
+            append = service.append_event
+
+            async def held(*, session, event):
+                if event.actions and event.actions.compaction:
+                    appending.set()
+                    await asyncio.Event().wait()
+                return await append(session=session, event=event)
+
+            monkeypatch.setattr(service, "append_event", held)
+            compacting = asyncio.create_task(compact_now(manager, events=seen))
+            await asyncio.wait_for(appending.wait(), 5)
+            await asyncio.sleep(0.05)
+            compacting.cancel()
+            with pytest.raises(asyncio.CancelledError):  # not a TimeoutError: no hang
+                await asyncio.wait_for(compacting, 5)
+            monkeypatch.setattr(service, "append_event", append)
+            after = summaries_in(await stored(manager))
+        finally:
+            await manager.cleanup()
+
+        assert [event.type for event in seen] == [
+            EventType.CONTEXT_SUMMARIZING, EventType.LLM_USAGE
+        ]
+        assert after == []
+
+    async def test_right_after_ctrl_c_mid_tool_the_cancelled_turn_is_kept(
+        self, project, monkeypatch
+    ):
+        """A /compact right after a turn cancelled while its tool ran: ADK
+        hands over the events before the open call (the newest invocation's),
+        the cancelled turn is the kept tail, and the next turn answers."""
+        WAITING.append(asyncio.Event())
+        answers = serve(monkeypatch, Claude(solo=[
+            says("A1."), says("A2."), calls("compaction_probe_wait", "toolu_w1", seconds=1),
+            says("A4."),
+        ]))
+        manager = GoogleADKWorkflowManager(
+            agent_configs=[AgentConfig(name="solo", prompt=PROMPTS["solo"],
+                                       tools=[compaction_probe_wait], include_state_tools=False)],
+            settings=settings(),
+        )
+        try:
+            for text in THREE[:2]:
+                await turn(manager, text)
+            waiting = asyncio.create_task(turn(manager, "Wait, please."))
+            await asyncio.wait_for(WAITING[-1].wait(), 5)
+            waiting.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(waiting, 5)
+            result, _ = await compact_now(manager)
+            answer = await turn(manager, "Four?")
+        finally:
+            await manager.cleanup()
+
+        assert result.messages_summarized == 2  # One and A1; the cancelled turn is kept
+        assert "Wait, please." not in lines(answers.bodies("summary")[0])[0]
+        last = answers.bodies("solo")[-1]
+        assert json.dumps(last).count(SUMMARY_PREFIX) == 1
+        assert texts(answer) == ["A4."]
+
+    async def test_it_waits_for_a_running_turn(self, project, monkeypatch):
+        """Turn admission: a /compact never interleaves with a turn (or a job's
+        resume), so it summarizes the turn that ran before it, all of it."""
+        started, release = asyncio.Event(), asyncio.Event()
+
+        async def slow(answer):
+            started.set()
+            await release.wait()
+            return answer
+
+        answers = serve(monkeypatch, Claude(solo=[says("A1."), says("A2."), slow(says("A3."))]))
+        manager = solo()
+        try:
+            for text in THREE[:2]:
+                await turn(manager, text)
+            third = asyncio.create_task(turn(manager, THREE[2]))
+            await asyncio.wait_for(started.wait(), 5)
+            compacting = asyncio.create_task(compact_now(manager))
+            await asyncio.sleep(0.1)
+            waited = not compacting.done() and "summary" not in answers.asked
+            release.set()
+            answered = texts(await asyncio.wait_for(third, 5))
+            result, _ = await asyncio.wait_for(compacting, 5)
+        finally:
+            release.set()
+            await manager.cleanup()
+
+        assert waited
+        assert answered == ["A3."]
+        assert answers.asked == ["solo"] * 3 + ["summary"]
+        assert result.messages_summarized == 2
+
+    async def test_a_summary_that_fails_is_raised_and_nothing_is_written(
+        self, project, monkeypatch
+    ):
+        """Asked for, a summary that fails is the caller's to report: it is
+        raised, with no warning of its own."""
+        refused = httpx.Response(400, json={"type": "error", "error": {
+            "type": "invalid_request_error", "message": "max_tokens: 8000 > 4096",
+        }})
+        answers = serve(monkeypatch, three_turns(summaries=[refused]))
+        manager = solo()
+        seen: list = []
+        try:
+            for text in THREE:
+                await turn(manager, text)
+            with pytest.raises(anthropic.BadRequestError, match="max_tokens: 8000 > 4096"):
+                await compact_now(manager, events=seen)
+            session = await stored(manager)
+        finally:
+            await manager.cleanup()
+
+        assert answers.asked == ["solo"] * 3 + ["summary"]
+        assert [event.type for event in seen] == [EventType.CONTEXT_SUMMARIZING]
+        assert summaries_in(session) == []
+
+    async def test_a_second_compact_replaces_the_first(self, project, monkeypatch):
+        answers = serve(monkeypatch, Claude(
+            solo=[says(f"A{n}.") for n in range(1, 7)],
+            summaries=[says("First summary.", 100), says("Second summary.", 100)],
+        ))
+        manager = solo()
+        try:
+            for text in THREE:
+                await turn(manager, text)
+            await compact_now(manager)
+            for text in [f"Four: {LONG}", "Five?"]:
+                await turn(manager, text)
+            second, _ = await compact_now(manager)
+            events = await stored(manager)
+            await turn(manager, "Six?")
+        finally:
+            await manager.cleanup()
+
+        first_span, second_span = (e.actions.compaction for e in summaries_in(events))
+        assert second_span.start_timestamp == first_span.start_timestamp
+        assert second_span.end_timestamp > first_span.end_timestamp
+        prompt = lines(answers.bodies("summary")[1])[0]
+        assert "Summary of the conversation before this point:\nFirst summary." in prompt
+        # The first summary and the four messages it was followed by.
+        assert second.messages_summarized == 5
+        last = answers.bodies("solo")[-1]
+        assert lines(last)[0] == f"user: {SUMMARY_PREFIX}\n\nSecond summary."
+        assert "First summary." not in json.dumps(last)
+        assert json.dumps(last).count(SUMMARY_PREFIX) == 1
+
+    async def test_a_native_adk_app_has_none(self, project, monkeypatch, tmp_path):
+        serve(monkeypatch, Claude())
+        manager = GoogleADKWorkflowManager(
+            agent_configs=[], settings=settings(),
+            adk_config_path=_native_yaml(tmp_path, "claude-sonnet-4-6"),
+        )
+        try:
+            supports = manager.supports_compact
+            with pytest.raises(NotImplementedError, match="native ADK"):
+                await manager.compact(manager.session_ref("s", "u"))
+        finally:
+            await manager.cleanup()
+
+        assert supports is False

@@ -47,7 +47,8 @@ class _FakeMessageProcessor:
         self._result = result or TurnResult(TurnStatus.COMPLETED)
 
     async def process_resume(
-        self, *, record, workflow_controller, ui, settings, usage_tracker
+        self, *, record, workflow_controller, ui, settings, usage_tracker,
+        current_session_id=None,
     ):
         self.resumed.append(record.job_id)
         return self._result
@@ -64,6 +65,7 @@ def _app(records: list, *, ready: bool = True, has_jm: bool = True, result=None)
     app.session = object()
     app._settings = SimpleNamespace(job_auto_resume=True)
     app._usage_tracker = None
+    app._session_id = "s"
     return app, jm
 
 
@@ -240,6 +242,7 @@ def _strict_app(records: list, processor=None):
     app.session = SimpleNamespace(add_error=lambda msg: None)
     app._settings = SimpleNamespace(job_auto_resume=True)
     app._usage_tracker = None
+    app._session_id = "s"
     return app, jm
 
 
@@ -305,6 +308,7 @@ class TestClaimIsAlwaysClosed:
         second_app.session = app.session
         second_app._settings = app._settings
         second_app._usage_tracker = None
+        second_app._session_id = "s"
 
         counts = await asyncio.gather(
             app.resume_finished_jobs(), second_app.resume_finished_jobs()

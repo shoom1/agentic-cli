@@ -182,7 +182,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `max_tokens`) and 200,000 tokens, keeping the newest 12% of that word
     for word. A request the provider refuses as too long is summarized and
     retried once, whichever way the provider says it (Gemini's wording and
-    Claude's 413 included, which Deep Agents alone does not recognize); a
+    Claude's 413 included, which Deep Agents alone does not recognize), and
+    so is a summary request refused as too long: it is sent once more with
+    the middle of the conversation left out (LangChain's retry), on
+    OpenRouter and an OpenAI-compatible server too, whose refusals no
+    LangChain package recognizes (`OverflowMapped` maps the summary model's
+    errors through the same table, inside its retry, so OpenRouter's is no
+    longer sent three times first); a
     conversation that still does not fit ends the turn with one `ERROR`,
     `error_code` `CONTEXT_OVERFLOW`: "This conversation no longer fits
     <model>'s context window. Use /compact or /new.". The checkpoint
@@ -448,6 +454,78 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "researcher: context summarized: …". `UsageTracker` keeps `context_trigger` and
   `window_known` beside `last_prompt_tokens`, and `format_context()` gives
   the segment.
+- **`BaseWorkflowManager.compact(session, focus=None)` summarizes a
+  conversation now**, whatever its size: the hook `/compact` runs.
+  `supports_compact` says whether a backend has it, derived as
+  `supports_sessions` is (the base raises `NotImplementedError`; LangGraph
+  has none). ADK and Deep Agents summarize the main agent's conversation as
+  they do when it grows, but whatever the last prompt's size and the
+  saving: `focus` is spliced into the summary prompt ("Focus the summary
+  on: …"), and the same tail is kept word for word (the newest 12% of the
+  trigger, cut where a user's message starts, never between a tool call and
+  its result, never inside the newest turn). On ADK it runs ADK's own
+  compaction once, on a fresh read of the session, with the main agent's
+  summarizer asked for now. On Deep Agents it uses the root agent's own
+  summarization middleware, kept when the agents are built
+  (`build_agent_tree(..., summarizers=...)`): the thread's messages, with
+  the summary so far applied, are cut by that rule, a copy of the
+  middleware's LangChain helper writes the summary, and it is stored as
+  Deep Agents stores its own, a `_summarization_event` written as the model
+  node (`aupdate_state(..., as_node="model")`) that replaces the summary so
+  far; the next request sends one summary, and the checkpoint keeps every
+  message. That summary is marked with the newest answer it was written
+  after: until a newer one, the count that answer reported (the prompt the
+  summary replaced) no longer makes the next call summarize again, which
+  would have lost the focus, as ADK's engine ignores a count from before a
+  summary. It returns a frozen `CompactResult(messages_summarized,
+  tokens_before, tokens_after)` (`workflow/context.py`), or None when there
+  is nothing to summarize (no conversation yet, or nothing before the kept
+  tail), and reports what a summary in a turn reports
+  (`CONTEXT_SUMMARIZING`, the summary's usage, then `CONTEXT_TRIMMED` with
+  `source="compact"`, once the summary is stored) to the caller's live
+  events (`live_events.reporting`). It runs under turn admission, so it
+  never interleaves with a turn or a job's resume; a cancel writes nothing
+  and never says a summary was made; a summary that fails raises the
+  provider's error, and one that comes back empty `ValueError` ("… wrote
+  an empty summary"), with no warning of its own. A native ADK YAML app
+  has none: `supports_compact` is False there, and `compact` raises
+  `NotImplementedError`. Both rest on private ADK and Deep Agents methods,
+  each pinned by a contract test (`deepagents` stays on 0.7.x).
+- **`/compact [focus]` and `/new`**, the two commands the overflow message
+  names, and their public twins `BaseCLIApp.compact(focus=None) ->
+  CompactResult | None` and `BaseCLIApp.start_new_session() -> str`, which
+  an app can call too. `/compact` summarizes the main agent's conversation
+  now (the manager's `compact()`), on what the rest of the line asks for if
+  anything (`/compact keep the API decisions and open questions`). It runs
+  as a turn runs (`MessageProcessor.process_compact`, under the app's turn
+  lock): the events box says "Summarizing the earlier conversation…" while
+  the summary is written, its tokens count in the totals, Ctrl+C stops it
+  ("Operation cancelled...", once) with nothing written, and "Context
+  summarized: N messages, X → Y tokens" says what it did. A second one
+  replaces the first summary, on both backends. `ctx` stays the main
+  agent's last prompt until its next call, which shows the smaller
+  context. It says "Nothing to summarize yet." with nothing before the kept
+  tail (or no conversation yet), "Could not summarize: <error>" once when
+  the summary fails (the error's type when it has no words), and "/compact
+  is not supported on this backend" on LangGraph and in a native ADK YAML
+  app, with no events box. `/new` starts a new conversation without a
+  restart, under the turn lock: the facts of the conversation being left
+  are extracted first when `auto_extract_session_facts` is on, as at exit,
+  under the status line "Saving facts from the conversation…" (a failure
+  never stops it); a new 12-hex session id is adopted once the workflow has
+  taken it; the task box and the usage counters start over
+  (`MessageProcessor.reset()`), and the status bar is drawn again. It says
+  "New conversation <new>. Previous: <old>, listed in /sessions.", or
+  "New conversation <new>." when the conversation left is in no store (no
+  turn ran in it, or the workflow failed to start, which no longer stops
+  `/new`). Ctrl+C stops it like any request, "Operation cancelled...",
+  once, with nothing changed. The model and the settings, "Allow for this
+  session" grants, sandbox kernels and background jobs stay. A job started
+  in the old conversation still reports to it: its line names that
+  conversation ("… — resuming its conversation <id>."), its usage counts
+  in the totals, and `ctx` and the task list stay the current
+  conversation's (`process_resume(..., current_session_id=...)`). `/clear`
+  is still a screen clear.
 
 ### Changed
 

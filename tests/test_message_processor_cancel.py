@@ -252,6 +252,7 @@ async def test_a_cancelled_resume_turn_says_so_once_records_the_failure_and_re_r
     app.session = ui
     app._settings = SETTINGS
     app._usage_tracker = None
+    app._session_id = "s"
     jm = JobManager()
     record = SimpleNamespace(job_id="j1", name="build", state=SimpleNamespace(value="succeeded"))
 

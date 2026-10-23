@@ -358,6 +358,10 @@ class TestTheMainAgentsOverflow:
         assert [e.type for e in third][:3] == [
             EventType.CONTEXT_SUMMARIZING, EventType.LLM_USAGE, EventType.CONTEXT_TRIMMED
         ]
+        # What the summary did, reported once ADK stored it, before the retry.
+        assert (third[2].metadata["source"], third[2].metadata["messages_summarized"]) == (
+            "summarization", 2
+        )
         # The summary the overflow asked for is the main agent's, as any summary.
         summary_usage = third[1]
         assert (summary_usage.metadata["purpose"], summary_usage.metadata["agent"],
