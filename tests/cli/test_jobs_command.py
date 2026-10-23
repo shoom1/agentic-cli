@@ -31,3 +31,28 @@ async def test_the_job_list_names_jobs_in_the_terminal_s_own_color():
     assert isinstance(table, Table)
     name = next(column for column in table.columns if column.header == "Name")
     assert "white" not in str(name.style)
+
+
+async def test_cancelling_a_job_that_keeps_running_says_so():
+    """A running in-process job cannot be stopped: it is not reported cancelled."""
+    record = SimpleNamespace(state=SimpleNamespace(value="running"), cancel_requested=True)
+    manager = MagicMock()
+    manager.cancel.return_value = record
+    app = SimpleNamespace(workflow=SimpleNamespace(job_manager=manager), session=autospec_session())
+
+    await JobsCommand().execute("cancel j1", app)
+
+    app.session.add_success.assert_not_called()
+    (text,) = app.session.add_warning.call_args.args
+    assert "still running" in text and "j1" in text
+
+
+async def test_a_cancelled_job_is_reported_cancelled():
+    record = SimpleNamespace(state=SimpleNamespace(value="cancelled"), cancel_requested=False)
+    manager = MagicMock()
+    manager.cancel.return_value = record
+    app = SimpleNamespace(workflow=SimpleNamespace(job_manager=manager), session=autospec_session())
+
+    await JobsCommand().execute("cancel j1", app)
+
+    app.session.add_success.assert_called_once_with("Job 'j1' → cancelled.")

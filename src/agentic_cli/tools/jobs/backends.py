@@ -22,6 +22,7 @@ import os
 import shlex
 import signal
 import subprocess
+import time
 from abc import ABC, abstractmethod
 from concurrent.futures import Future, ThreadPoolExecutor
 from enum import Enum
@@ -46,6 +47,21 @@ class JobState(str, Enum):
 TERMINAL_STATES = frozenset(
     {JobState.SUCCEEDED, JobState.FAILED, JobState.CANCELLED, JobState.UNKNOWN}
 )
+
+# How long a subprocess job's cancel waits for its processes to exit after
+# SIGTERM before it reports the job still running.
+_CANCEL_WAIT_S = 2.0
+
+
+def _group_alive(pgid: int) -> bool:
+    """True if any process is left in process group ``pgid`` (signal 0 probe)."""
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 def _pid_alive(pid: int) -> bool:
@@ -104,8 +120,16 @@ class JobBackend(ABC):
         """Return the job's current state (reads sentinel / liveness / remote)."""
 
     @abstractmethod
-    def cancel(self, record: "JobRecord", job_dir: Path) -> None:
-        """Best-effort cancellation of a running job."""
+    def cancel(self, record: "JobRecord", job_dir: Path) -> bool | None:
+        """Stop a job.
+
+        Returns:
+            True once it has stopped (or will never start); False when it is
+            still running, and will stop on its own (it cannot be
+            interrupted, or has not exited yet): the manager keeps it
+            RUNNING, holding its slot, until ``poll`` says it ended. None,
+            from a backend written before this was asked, counts as stopped.
+        """
 
     def logs(
         self, record: "JobRecord", job_dir: Path, last_n: int, stream: str
@@ -177,6 +201,12 @@ class SubprocessBackend(JobBackend):
         record.backend_handle = str(proc.pid)
 
     def poll(self, record: "JobRecord", job_dir: Path) -> JobState:
+        if record.cancel_requested and record.pid:
+            # SIGTERM ended the leader (no sentinel), but a process that
+            # outlived it keeps the job running.
+            self._reap(record)
+            if _group_alive(record.pid):
+                return JobState.RUNNING
         exit_file = job_dir / "exit_code"
         code = _read_exit_code(exit_file)
         if code is not None:
@@ -204,15 +234,34 @@ class SubprocessBackend(JobBackend):
             return JobState.RUNNING
         return JobState.UNKNOWN
 
-    def cancel(self, record: "JobRecord", job_dir: Path) -> None:
+    def cancel(self, record: "JobRecord", job_dir: Path) -> bool:
+        """SIGTERM the job's process group; True once every process in it exited.
+
+        Waits up to ``_CANCEL_WAIT_S`` for that. A process that outlives it
+        (it handles or ignores SIGTERM) leaves the job running.
+        """
         pid = record.pid
         if not pid:
-            return
+            return True
         try:
             os.killpg(os.getpgid(pid), signal.SIGTERM)
         except (ProcessLookupError, PermissionError):
             pass
-        self._procs.pop(record.job_id, None)
+        deadline = time.monotonic() + _CANCEL_WAIT_S
+        while True:
+            self._reap(record)
+            if not _group_alive(pid):
+                self._procs.pop(record.job_id, None)
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.05)
+
+    def _reap(self, record: "JobRecord") -> None:
+        """Collect the leader's exit status, if we started it, so it is no zombie."""
+        proc = self._procs.get(record.job_id)
+        if proc is not None:
+            proc.poll()
 
 
 class InProcessBackend(JobBackend):
@@ -266,10 +315,13 @@ class InProcessBackend(JobBackend):
             return JobState.UNKNOWN  # lost across restart
         return JobState.RUNNING  # done-but-no-sentinel race resolves next poll
 
-    def cancel(self, record: "JobRecord", job_dir: Path) -> None:
+    def cancel(self, record: "JobRecord", job_dir: Path) -> bool:
+        """True unless the job's thread is running: a thread cannot be stopped."""
         fut = self._futures.get(record.job_id)
-        if fut is not None:
-            fut.cancel()  # only succeeds if not yet started; running threads continue
+        if fut is None:
+            return True
+        # Future.cancel() succeeds only if the job has not started.
+        return fut.cancel() or fut.done()
 
     def close(self) -> None:
         """Stop accepting new work; let everything already submitted finish.

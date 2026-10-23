@@ -1262,6 +1262,18 @@ step; each entry says what to use instead.
   release carry no tag and are left out too, so a session from before the
   upgrade no longer sends its earlier turns' reasoning; no request needs it
   (Claude needs its thinking only within a turn's tool calls).
+- **A cancelled job keeps its slot until it has stopped.** `JobManager.cancel`
+  recorded a job CANCELLED whatever its backend managed and started the next
+  queued job. A running in-process job cannot be stopped (Python cannot
+  interrupt a thread), so with `max_concurrent=1` cancelling one ran the
+  next beside it; a subprocess that outlived SIGTERM did the same. A
+  backend's `cancel` now returns whether the job stopped (None, from a
+  backend written before, counts as stopped): the subprocess backend waits
+  up to 2 seconds for the job's process group to exit, and the in-process
+  one stops only a job that has not started. A job still running stays
+  RUNNING with `cancel_requested`, holding its slot, and is recorded
+  CANCELLED when it ends, as any cancelled job is; the next one starts then.
+  `job_cancel` and `/jobs cancel` say the job is still running.
 - **Budget-thinking Claude with a per-agent `max_tokens` failed on ADK with
   HTTP 400.** ADK 2.12's `AnthropicLlm` sends the agent config's
   `max_output_tokens` in preference to the model's `max_tokens`, and 0.6 put

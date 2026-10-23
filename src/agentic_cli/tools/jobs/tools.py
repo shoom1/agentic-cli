@@ -122,7 +122,14 @@ def job_cancel(job_id: str) -> dict:
     rec = jm.cancel(job_id)
     if rec is None:
         return {"success": False, "error": f"no such job: {job_id}"}
-    return {"success": True, "state": rec.state.value}
+    out = {"success": True, "state": rec.state.value}
+    if rec.cancel_requested and rec.state.value == "running":
+        out["cancel_requested"] = True
+        out["message"] = (
+            "Cancellation requested, but the job is still running: it cannot be "
+            "interrupted now. It is recorded as cancelled when it ends."
+        )
+    return out
 
 
 @register_tool(
