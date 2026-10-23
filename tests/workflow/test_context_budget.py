@@ -12,23 +12,29 @@ A model whose window is unknown counts as 128,000 tokens, and a budget under
 16,000 tokens is a build error. ``is_context_overflow`` recognizes each
 provider's "too long" error from its attributes, without importing a
 provider SDK; the tests build the errors from the real SDK classes.
+
+The three ``context_window_*`` settings these replace are gone, with what
+read them: ADK's ``RunConfig`` compression (only Gemini's Live API read it)
+and LangGraph's opt-in trim. A settings file that still holds one loads.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import json
 
 import anthropic
 import httpx
 import openai
 import pytest
+import structlog
 from google.genai import errors as genai_errors
 from pydantic import ValidationError
 
 from agentic_cli.config import BaseSettings
 from agentic_cli.models import ModelCatalog, ProviderKind, RoleMap, resolve_model
 from agentic_cli.settings_persistence import PROJECT_SETTABLE_KEYS
-from agentic_cli.workflow.config import AgentGraphError
+from agentic_cli.workflow.config import AgentConfig, AgentGraphError
 from agentic_cli.workflow.context import (
     KEEP_FRACTION,
     MIN_BUDGET,
@@ -41,7 +47,21 @@ from agentic_cli.workflow.context import (
     is_context_overflow,
     overflow_message,
 )
+from agentic_cli.workflow.events import EventType
 from tests.models.fakes import endpoints as fake_endpoints
+from tests.workflow.adk.fakes import FakeAPI, anthropic_message
+
+#: The settings 0.7.0 removed.
+OLD_KEYS = (
+    "context_window_enabled",
+    "context_window_trigger_tokens",
+    "context_window_target_tokens",
+)
+OLD_VALUES = {
+    "context_window_enabled": True,
+    "context_window_trigger_tokens": 50_000,
+    "context_window_target_tokens": 20_000,
+}
 
 #: Claude Sonnet 4.5: a 200,000-token window, max_tokens 8,192 (Anthropic's default).
 SONNET = "anthropic:claude-sonnet-4-5"
@@ -201,6 +221,147 @@ class TestSettings:
         assert fields["context_max_tokens"].title == "Context Ceiling"
         assert fields["context_summarize_at"].description
         assert "0" in fields["context_max_tokens"].description
+
+
+@pytest.fixture
+def hermetic(tmp_path, monkeypatch):
+    """A temp home and project, and no provider key."""
+    (tmp_path / "home").mkdir()
+    (tmp_path / "project").mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.chdir(tmp_path / "project")
+    for variable in ("GOOGLE_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY",
+                     "OPENROUTER_API_KEY"):
+        monkeypatch.delenv(variable, raising=False)
+    return tmp_path
+
+
+def user_settings_file(root, values: dict) -> None:
+    """``values`` as the user's ``~/.agentic_cli/settings.json``."""
+    path = root / "home" / ".agentic_cli" / "settings.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(values))
+
+
+class TestTheOldSettingsAreGone:
+    def test_they_are_no_settings(self):
+        for key in OLD_KEYS:
+            assert key not in BaseSettings.model_fields
+            assert key not in PROJECT_SETTABLE_KEYS
+
+    def test_a_user_settings_file_holding_them_still_loads(self, hermetic):
+        user_settings_file(hermetic, {**OLD_VALUES, "context_max_tokens": 50_000})
+
+        loaded = BaseSettings()
+
+        assert loaded.context_max_tokens == 50_000
+        for key in OLD_KEYS:
+            assert not hasattr(loaded, key)
+
+    def test_a_project_settings_file_holding_them_still_loads(self, hermetic):
+        project = hermetic / "project" / ".agentic_cli" / "settings.json"
+        project.parent.mkdir()
+        project.write_text(json.dumps({**OLD_VALUES, "context_summarize_at": 0.7}))
+
+        assert BaseSettings().context_summarize_at == 0.7
+
+    def test_a_project_file_warns_only_of_real_settings(self, hermetic, monkeypatch):
+        # 0.6.0 and 0.6.1's /settings saved every project-settable field, the
+        # two context_window_* counts included, into the project file. A key
+        # that is no setting can set nothing: no "untrusted" warning for it.
+        from agentic_cli import config
+
+        # A logger that filters no level: an earlier test's configure_logging
+        # leaves the module's own logger dropping debug records before
+        # capture_logs could see them.
+        monkeypatch.setattr(config, "logger", structlog.wrap_logger(
+            None, wrapper_class=structlog.make_filtering_bound_logger(0)
+        ))
+        project = hermetic / "project" / ".agentic_cli" / "settings.json"
+        project.parent.mkdir()
+        project.write_text(json.dumps({
+            "context_window_trigger_tokens": 100_000,
+            "context_window_target_tokens": 80_000,
+            "raw_llm_logging": True,  # a real setting a project may not set
+            "ANTHROPIC_API_KEY": "a-project-key",  # a real setting's alias
+        }))
+
+        with structlog.testing.capture_logs() as logs:
+            loaded = BaseSettings()
+
+        def logged(event: str) -> list[tuple[str, str]]:
+            return sorted((e["key"], e["log_level"]) for e in logs if e["event"] == event)
+
+        assert logged("untrusted_project_setting_ignored") == [
+            ("ANTHROPIC_API_KEY", "warning"), ("raw_llm_logging", "warning"),
+        ]
+        assert logged("unknown_project_setting_ignored") == [
+            ("context_window_target_tokens", "debug"),
+            ("context_window_trigger_tokens", "debug"),
+        ]
+        assert loaded.raw_llm_logging is False
+        assert loaded.anthropic_api_key != "a-project-key"
+
+    def test_they_cannot_be_set(self, hermetic):
+        with pytest.raises(ValueError):
+            BaseSettings().update_setting("context_window_enabled", True)
+
+    async def test_an_adk_turn_runs_without_a_run_config(self, hermetic, monkeypatch):
+        # 0.6 built a RunConfig compressing the context for Gemini's Live API
+        # alone; the old keys in a settings file now build nothing.
+        from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager
+        from tests.workflow.test_manager_models import route
+
+        user_settings_file(hermetic, OLD_VALUES)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "a-test-key")
+        api = FakeAPI(anthropic_message({"type": "text", "text": "Hi."}))
+        route(monkeypatch, anthropic, "AsyncAnthropic", api)
+        manager = GoogleADKWorkflowManager(
+            agent_configs=[AgentConfig(name="solo", prompt="Answer.")],
+            settings=BaseSettings(session_store="memory", default_model="claude-sonnet-4-6"),
+        )
+        run_configs = []
+        try:
+            await manager.initialize_services()
+            run_async = manager._runner.run_async
+
+            def spy(**kwargs):
+                run_configs.append(kwargs.get("run_config", "not passed"))
+                return run_async(**kwargs)
+
+            monkeypatch.setattr(manager._runner, "run_async", spy)
+            events = [e async for e in manager.process("Hello.", "u", session_id="s")]
+        finally:
+            await manager.cleanup()
+
+        assert run_configs == ["not passed"]
+        assert [e.content for e in events if e.type is EventType.TEXT] == ["Hi."]
+
+    async def test_a_langgraph_turn_sends_the_whole_conversation(self, hermetic, monkeypatch):
+        # 0.6 trimmed LangGraph's history to context_window_target_tokens.
+        pytest.importorskip("langgraph")
+        from agentic_cli.workflow.langgraph import LangGraphWorkflowManager
+        from tests.workflow.langchain_fakes import anthropic_reply, route
+
+        user_settings_file(hermetic, {**OLD_VALUES, "context_window_target_tokens": 10})
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "a-test-key")
+        api = FakeAPI(anthropic_reply({"type": "text", "text": "Hi."}))
+        route(monkeypatch, anthropic, "AsyncClient", api)
+        manager = LangGraphWorkflowManager(
+            agent_configs=[AgentConfig(name="solo", prompt="Answer.")],
+            settings=BaseSettings(session_store="memory", default_model="claude-sonnet-4-6"),
+            checkpointer="memory",
+        )
+        events = []
+        try:
+            for text in ("First question.", "Second question."):
+                events += [e async for e in manager.process(text, "u", session_id="s")]
+        finally:
+            await manager.cleanup()
+
+        assert [m["role"] for m in api.bodies[1]["messages"]] == ["user", "assistant", "user"]
+        assert EventType.CONTEXT_TRIMMED not in [e.type for e in events]
+        assert [e.content for e in events if e.type is EventType.TEXT] == ["Hi.", "Hi."]
 
 
 class TestCharsPerToken:

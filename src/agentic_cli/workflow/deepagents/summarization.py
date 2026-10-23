@@ -8,11 +8,13 @@ it per request, so the checkpoint keeps the whole conversation for
 **When.** Deep Agents checks each request against an input budget,
 ``B = 0.95 * window - max_tokens``. Its default trigger is 85% of the *whole*
 window, which with a large output allowance sits above B, so the budget check
-would end the turn before anything was summarized. Here the thresholds come
-from B: summarize at 85% of it and keep the newest 10% word for word. With
-``context_window_enabled`` the settings choose instead, the trigger capped at
-the automatic one (for a model whose window is unknown, as they are). Without
-them, a model whose window is unknown gets Deep Agents' own fixed defaults.
+would end the turn before anything was summarized. Here each agent's
+thresholds are its model's ``ContextBudget`` (``workflow/context.py``), as on
+ADK: summarize at the smaller of ``context_summarize_at`` of B and the
+``context_max_tokens`` ceiling, and keep the newest 12% of that word for
+word. A model whose window is unknown counts as 128,000 tokens, not Deep
+Agents' fixed 170,000 tokens or 6 messages, which never fire on a small
+model.
 
 **No archive.** Deep Agents writes the summarized messages to its virtual
 filesystem and gives the model the file's path; with its file tools off the
@@ -46,12 +48,12 @@ from deepagents.backends.protocol import (
 from deepagents.middleware.summarization import (
     SUMMARIZATION_EVENT_KEY,
     SummarizationMiddleware,
-    compute_summarization_defaults,
 )
 from langchain.agents.middleware.summarization import DEFAULT_SUMMARY_PROMPT
 from langchain_core.callbacks import adispatch_custom_event, dispatch_custom_event
 
 from agentic_cli.logging import Loggers
+from agentic_cli.workflow.context import context_budget
 
 if TYPE_CHECKING:
     from langchain.agents.middleware import ModelRequest, ModelResponse
@@ -79,32 +81,18 @@ _SUMMARIZATION_LOGGER = "deepagents.middleware.summarization"
 
 def summarization_thresholds(
     resolved: "ResolvedModel", settings: "BaseSettings"
-) -> tuple["ContextSize", "ContextSize"] | None:
-    """The ``(trigger, keep)`` an agent's summarization runs on.
+) -> tuple["ContextSize", "ContextSize"]:
+    """The ``(trigger, keep)`` an agent's summarization runs on, in tokens.
 
     Args:
         resolved: The agent's model: its window and its ``max_tokens``.
-        settings: ``context_window_enabled`` and its two token counts.
+        settings: ``context_summarize_at`` and ``context_max_tokens``.
 
-    Returns:
-        Token counts, or None when the model's window is unknown and the
-        settings give none (Deep Agents' fixed defaults then apply).
+    Raises:
+        ContextBudgetError: The model's input budget is too small to work in.
     """
-    window = resolved.record.context_window
-    automatic = None
-    if window is not None:
-        budget = int(0.95 * window) - (resolved.max_tokens or 0)
-        automatic = ("tokens", int(0.85 * budget)), ("tokens", int(0.10 * budget))
-    if settings.context_window_enabled:
-        trigger = settings.context_window_trigger_tokens
-        keep = settings.context_window_target_tokens
-        if automatic is not None and trigger > automatic[0][1]:
-            # The trigger must fit the budget, and the kept tail shrinks with
-            # it: a tail as large as the budget leaves nothing to summarize.
-            keep = int(keep * automatic[0][1] / trigger)
-            trigger = automatic[0][1]
-        return ("tokens", trigger), ("tokens", keep)
-    return automatic
+    budget = context_budget(resolved, settings)
+    return ("tokens", budget.trigger), ("tokens", budget.keep)
 
 
 class NoArchiveBackend(BackendProtocol):
@@ -221,14 +209,14 @@ def build_summarization(
     Args:
         model: The agent's chat model, which also writes the summaries.
         resolved: The agent's resolved model (thresholds; ``agent`` names it).
-        settings: The manager's settings (``context_window_*``).
+        settings: The manager's settings (``context_summarize_at``,
+            ``context_max_tokens``).
+
+    Raises:
+        ContextBudgetError: The model's input budget is too small to work in.
     """
     install_history_filters()
-    thresholds = summarization_thresholds(resolved, settings)
-    if thresholds is None:
-        defaults = compute_summarization_defaults(model)
-        thresholds = defaults["trigger"], defaults["keep"]
-    trigger, keep = thresholds
+    trigger, keep = summarization_thresholds(resolved, settings)
     return ReportingSummarizationMiddleware(
         agent=resolved.agent,
         model=model,

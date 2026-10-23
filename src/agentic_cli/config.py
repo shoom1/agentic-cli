@@ -82,6 +82,11 @@ class _AllowlistFilterSource(PydanticBaseSettingsSource):
     key, so a repo cannot flip a boundary by *adding* keys. (Malformed JSON or a
     bad-typed allowlisted value is still rejected upstream, as before P0-1 —
     this narrows, not removes, that pre-existing surface.)
+
+    A key that names no setting at all (neither a field nor an alias) could
+    set nothing anyway, so it is dropped with a debug log, not the warning: a
+    project file saved by an older version still holds settings since
+    removed (0.6's ``context_window_*``), and every start would warn of them.
     """
 
     def __init__(
@@ -100,9 +105,14 @@ class _AllowlistFilterSource(PydanticBaseSettingsSource):
 
     def __call__(self) -> dict[str, Any]:
         kept: dict[str, Any] = {}
+        settings = _accepted_input_names(self.settings_cls)
         for key, value in self._inner().items():
             if key in _PROJECT_SETTABLE_KEYS:
                 kept[key] = value
+            elif key not in settings:
+                logger.debug(
+                    "unknown_project_setting_ignored", key=key, source=self._label
+                )
             else:
                 logger.warning(
                     "untrusted_project_setting_ignored", key=key, source=self._label

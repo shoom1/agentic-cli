@@ -333,3 +333,16 @@ class TestSuccess:
         assert settings.default_model == "gemini-2.5-flash-lite"
         assert manager.reinits == ["gemini-2.5-flash-lite"]
         assert app.successes and not app.errors
+
+    @pytest.mark.parametrize("key, value", [
+        ("context_summarize_at", "0.7"), ("context_max_tokens", "50000"),
+    ])
+    async def test_when_to_summarize_rebuilds_the_agents(self, settings, key, value):
+        # Each agent's thresholds are fixed when it is built.
+        manager = FakeManager(OLD_MODEL)
+        app = _app(settings, manager)
+
+        assert await app.apply_settings({key: value}) is True
+
+        assert manager.reinits == [None]  # same model, sessions kept
+        assert str(getattr(settings, key)) == value

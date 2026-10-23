@@ -273,12 +273,12 @@ What it supports:
   default) in `{workspace}/sessions/checkpoints.db`, next to ADK's
   `sessions.db`, Postgres at `postgres_uri`, or memory. Each conversation is
   the thread of its whole `SessionRef`, so two users never share one.
-- **Context**: Deep Agents' summarization runs in every agent, at 85% of the
-  model's input budget (95% of its context window, less its `max_tokens`),
-  keeping the newest 10% of that budget word for word. The checkpoint keeps
-  every message. With `context_window_enabled`,
-  `context_window_trigger_tokens` and `context_window_target_tokens` set the
-  thresholds instead.
+- **Context**: Deep Agents' summarization runs in every agent, on its own
+  model, once a prompt reaches the smaller of `context_summarize_at` (85%) of
+  the model's input budget (95% of its context window, less its
+  `max_tokens`) and `context_max_tokens` (200,000 tokens), keeping the newest
+  12% of that word for word. A model whose window is unknown counts as
+  128,000 tokens. The checkpoint keeps every message.
 - **Prompt caching** on Claude, as on ADK (see [Prompt caching](#prompt-caching)).
 - **MCP tools, Agent Skills, raw LLM logging and job resume**, from the same
   `AgentConfig.mcp_servers`, `AgentConfig.skills`, `raw_llm_logging` and
@@ -348,7 +348,7 @@ Requires: `pip install agentic-cli[langgraph]`
 | State persistence | SQLite (default), PostgreSQL, or memory | The same, as a LangGraph checkpointer | Memory, PostgreSQL, or SQLite |
 | Thinking support | Every model with a thinking knob, one set of levels | The same | The same |
 | Prompt caching | Claude (three breakpoints) and Gemini (server-side caches) | Claude (three breakpoints) | Claude on Anthropic's API (one breakpoint) |
-| Context | None on normal turns (`context_window_enabled` applies only to Gemini's Live API) | Summarization near the input budget | Trimming, with `context_window_enabled` |
+| Context | None on normal turns | Summarization at `context_summarize_at` of the input budget, or `context_max_tokens` | None |
 | MCP tools, Agent Skills | Yes | Yes | Ignored, with a warning |
 | Raw LLM logging, job resume | Yes | Yes | No |
 | Code-execution events | Gemini's | None | None |
@@ -408,7 +408,8 @@ Security-relevant keys set from an untrusted source — executor backend, sandbo
 image/mounts/user, OS-sandbox policy, `skills_dirs`, shell sandbox settings,
 `workspace_dir`, `raw_llm_logging`, permission rules, `model_endpoints` (the
 addresses a key is sent to), and any credential — are dropped with a logged
-warning rather than applied.
+warning rather than applied. A key that names no setting at all (one an
+older version had, say) is dropped with a debug log only.
 
 **Consequence:** put API keys in real environment variables or an
 absolute/user-level file. A key placed in a cwd `.env` is deliberately ignored.
@@ -429,6 +430,8 @@ absolute/user-level file. A key placed in a cwd `.env` is deliberately ignored.
 | `prompt_caching_enabled` | `AGENTIC_PROMPT_CACHING_ENABLED` | true | Prompt caching: Claude, and Gemini on ADK |
 | `orchestrator` | `AGENTIC_ORCHESTRATOR` | "adk" | Orchestrator: `adk`, `deepagents`, or `langgraph` (deprecated) |
 | `session_store` | `AGENTIC_SESSION_STORE` | "sqlite" | Where conversations are kept: `sqlite`, `postgres`, or `memory` |
+| `context_summarize_at` | `AGENTIC_CONTEXT_SUMMARIZE_AT` | 0.85 | Summarize the earlier conversation at this fraction of the model's input budget (0.5 to 0.95) |
+| `context_max_tokens` | `AGENTIC_CONTEXT_MAX_TOKENS` | 200000 | Or once a prompt reaches this many tokens, if that comes first (0: no ceiling; otherwise at least 16000) |
 | `workspace_dir` | `AGENTIC_WORKSPACE_DIR` | ~/.agentic | Storage directory |
 | `log_level` | `AGENTIC_LOG_LEVEL` | "warning" | Logging level |
 | `ui_theme` | `AGENTIC_UI_THEME` | "dark" | The CLI's theme: `dark`, `light`, `mono`, `terminal` or `auto` (user settings only) |

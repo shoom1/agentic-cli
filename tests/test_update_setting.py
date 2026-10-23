@@ -23,11 +23,11 @@ class TestUpdateSetting:
     def test_rejects_invalid_type(self, mock_context):
         """An out-of-type value must be rejected, not written to the instance."""
         settings = mock_context.settings
-        original = settings.context_window_trigger_tokens
+        original = settings.context_max_tokens
         with pytest.raises(ValueError):
-            settings.update_setting("context_window_trigger_tokens", "not-an-int")
+            settings.update_setting("context_max_tokens", "not-an-int")
         # The garbage value must not have landed on the instance.
-        assert settings.context_window_trigger_tokens == original
+        assert settings.context_max_tokens == original
 
     def test_rejects_unknown_key(self, mock_context):
         """Unknown setting keys must raise rather than silently attach."""

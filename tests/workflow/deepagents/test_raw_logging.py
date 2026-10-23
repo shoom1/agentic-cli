@@ -34,12 +34,12 @@ from agentic_cli.workflow.service_registry import WORKFLOW, get_service  # noqa:
 from tests.workflow.adk.fakes import FakeAPI, chat_completion  # noqa: E402
 from tests.workflow.langchain_fakes import anthropic_reply, route  # noqa: E402
 
-#: A user's server whose model declares a 4,000-token window (as in
+#: A user's server whose model declares a 20,000-token window (as in
 #: ``test_context.py``): a sub-agent's second bulky report makes it summarize.
 SMALL = {
     "local": {
         "base_url": "http://localhost:8000/v1",
-        "models": {"small": {"context_window": 4000}},
+        "models": {"small": {"context_window": 20_000}},
     }
 }
 KEYS = {"ANTHROPIC_API_KEY": "a-test-key", "OPENAI_API_KEY": "o-test-key"}
@@ -49,8 +49,8 @@ LOGGED = (EventType.LLM_REQUEST, EventType.LLM_RESPONSE)
 
 @register_tool(capabilities=EXEMPT)
 def rl_report() -> str:
-    """Returns about 2,800 tokens of text (an exempt test tool)."""
-    return "y " * 5_600
+    """Returns about 14,000 tokens of text (an exempt test tool)."""
+    return "y " * 28_000
 
 
 @register_tool(capabilities=EXEMPT)

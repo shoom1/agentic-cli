@@ -741,25 +741,8 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     session_id=current_session_id,
                     user_id=user_id,
                     new_message=new_message,
-                    run_config=self._build_run_config(),
                 ):
                     yield event
-
-    def _build_run_config(self):
-        """Build a RunConfig with context-window compression if enabled."""
-        if not self._settings.context_window_enabled:
-            return None
-        from google.genai.types import ContextWindowCompressionConfig, SlidingWindow
-        from google.adk.agents import RunConfig
-
-        return RunConfig(
-            context_window_compression=ContextWindowCompressionConfig(
-                trigger_tokens=self._settings.context_window_trigger_tokens,
-                sliding_window=SlidingWindow(
-                    target_tokens=self._settings.context_window_target_tokens,
-                ),
-            )
-        )
 
     async def _run_and_stream(
         self,
@@ -767,7 +750,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         session_id: str,
         user_id: str,
         new_message: "types.Content",
-        run_config,
     ) -> AsyncGenerator[WorkflowEvent, None]:
         """Run the ADK runner for one invocation and stream WorkflowEvents.
 
@@ -782,7 +764,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             session_id=session_id,
             user_id=user_id,
             new_message=new_message,
-            run_config=run_config,
         ):
             # Yield LLM events from plugin first (raw capture)
             if self._llm_logging_plugin:
@@ -912,7 +893,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     session_id=session_id,
                     user_id=user_id,
                     new_message=new_message,
-                    run_config=self._build_run_config(),
                 ):
                     yield event
 

@@ -115,34 +115,10 @@ class WorkflowSettingsMixin:
         json_schema_extra={"ui_order": 12},
     )
 
-    # Context window management
-    context_window_enabled: bool = Field(
-        default=False,
-        title="Context Window Management",
-        description=(
-            "Manage the context window with the two token counts below. On Deep "
-            "Agents, summarization is always on and this picks its thresholds: "
-            "off, automatic ones from the model's input budget; on, the trigger "
-            "and the tail kept (if the model's window is known and the trigger is "
-            "above the automatic one, both are lowered in proportion)"
-        ),
-        json_schema_extra={"ui_order": 25},
-    )
-    context_window_trigger_tokens: int = Field(
-        default=100_000,
-        title="Context Trigger Tokens",
-        description="Start trimming when context exceeds this token count",
-        json_schema_extra={"ui_order": 26},
-    )
-    context_window_target_tokens: int = Field(
-        default=80_000,
-        title="Context Target Tokens",
-        description="Target token count after trimming",
-        json_schema_extra={"ui_order": 27},
-    )
-    # When a conversation is summarized (workflow/context.py): at
-    # context_summarize_at of the model's input budget, or at
-    # context_max_tokens if that comes first.
+    # When a conversation is summarized, on every backend (workflow/context.py):
+    # at context_summarize_at of the model's input budget, or at
+    # context_max_tokens if that comes first. They replace 0.6's
+    # context_window_* settings; a settings file still holding one loads.
     context_summarize_at: float = Field(
         default=0.85,
         ge=0.5,

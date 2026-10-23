@@ -2,7 +2,6 @@
 
 Covers:
 - WorkflowEvent.context_trimmed() factory
-- LangGraphBuilder._trim_events side-channel
 - MessageProcessor dispatch for CONTEXT_TRIMMED
 - ADK heuristic fallback in _handle_llm_usage
 """
@@ -54,49 +53,6 @@ class TestContextTrimmedEvent:
             messages_before=10, messages_after=10, source="langgraph"
         )
         assert event.metadata["messages_removed"] == 0
-
-
-# === LangGraphBuilder._trim_events ===
-
-
-class TestBuilderTrimEvents:
-    def test_trim_events_initialized_empty(self):
-        from agentic_cli.workflow.langgraph.graph_builder import LangGraphBuilder
-
-        settings = MagicMock()
-        builder = LangGraphBuilder(settings)
-        assert len(builder._trim_events) == 0
-
-    def test_trim_events_appendable(self):
-        from agentic_cli.workflow.langgraph.graph_builder import LangGraphBuilder
-
-        settings = MagicMock()
-        builder = LangGraphBuilder(settings)
-        builder._trim_events.append({
-            "messages_before": 20,
-            "messages_after": 10,
-            "agent": "test_agent",
-        })
-        assert len(builder._trim_events) == 1
-        assert builder._trim_events[0]["messages_before"] == 20
-
-    def test_drain_pattern(self):
-        """Verify the drain pattern used by the manager works correctly."""
-        from agentic_cli.workflow.langgraph.graph_builder import LangGraphBuilder
-
-        settings = MagicMock()
-        builder = LangGraphBuilder(settings)
-        builder._trim_events.append({"messages_before": 20, "messages_after": 10, "agent": "a"})
-        builder._trim_events.append({"messages_before": 15, "messages_after": 8, "agent": "b"})
-
-        drained = []
-        while builder._trim_events:
-            drained.append(builder._trim_events.popleft())
-
-        assert len(drained) == 2
-        assert len(builder._trim_events) == 0
-        assert drained[0]["agent"] == "a"
-        assert drained[1]["agent"] == "b"
 
 
 # === Dispatch table includes CONTEXT_TRIMMED ===

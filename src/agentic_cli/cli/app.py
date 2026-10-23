@@ -660,8 +660,12 @@ class BaseCLIApp:
         # `orchestrator` triggers a reinit too: the controller swaps the backend
         # when it changes (otherwise the change only took effect on restart).
         # So does a role's model ("model_role:<role>"): agents resolve their
-        # roles when the workflow initializes.
-        reinit_settings = {"model", "thinking_effort", "orchestrator"}
+        # roles when the workflow initializes. And so do the settings of when
+        # to summarize: each agent's thresholds are fixed when it is built.
+        reinit_settings = {
+            "model", "thinking_effort", "orchestrator",
+            "context_summarize_at", "context_max_tokens",
+        }
 
         for key, value in changes.items():
             try:
