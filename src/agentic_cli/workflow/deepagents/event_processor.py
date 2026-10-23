@@ -364,6 +364,8 @@ class RunCallback(AsyncCallbackHandler):
         # The calls in flight that are reported when they end, by run id:
         # summary calls, and every call when logging.
         self._calls: dict[UUID, _ModelCall] = {}
+        # The notices given once a turn (this callback is the turn's).
+        self._notified: set[str] = set()
 
     async def on_chat_model_start(
         self,
@@ -422,9 +424,26 @@ class RunCallback(AsyncCallbackHandler):
     async def on_custom_event(
         self, name: str, data: Any, *, run_id: UUID, **kwargs: Any
     ) -> None:
-        if name != CONTEXT_SUMMARIZED or not isinstance(data, dict):
+        from agentic_cli.workflow.deepagents.summarization import (
+            SUMMARY_FAILED,
+            SUMMARY_FAILED_CODE,
+            SUMMARY_NOT_WRITTEN,
+        )
+
+        if not isinstance(data, dict):
             return
         agent = data.get("agent") or self._root
+        if name == SUMMARY_NOT_WRITTEN:
+            # Once a turn: every call past the trigger tries again.
+            if SUMMARY_FAILED_CODE not in self._notified:
+                self._notified.add(SUMMARY_FAILED_CODE)
+                text = SUMMARY_FAILED if agent == self._root else f"{agent}: {SUMMARY_FAILED}"
+                self._emit(WorkflowEvent.error(
+                    text, error_code=SUMMARY_FAILED_CODE, recoverable=True
+                ))
+            return
+        if name != CONTEXT_SUMMARIZED:
+            return
         self._emit(WorkflowEvent.context_trimmed(
             messages_before=data["messages_before"],
             messages_after=data["messages_after"],

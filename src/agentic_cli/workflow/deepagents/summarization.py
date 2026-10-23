@@ -158,7 +158,20 @@ class ReportingSummarizationMiddleware(SummarizationMiddleware):
         request: "ModelRequest",
         handler: Callable[["ModelRequest"], Awaitable["ModelResponse"]],
     ) -> Any:
-        response = await super().awrap_model_call(request, handler)
+        sent = False
+
+        async def call(request: "ModelRequest") -> "ModelResponse":
+            nonlocal sent
+            sent = True
+            return await handler(request)
+
+        try:
+            response = await super().awrap_model_call(request, call)
+        except NoSummaryWritten as error:
+            if sent:
+                raise _refused_unsummarized(error) from error
+            await self._anot_summarized()
+            return await handler(request.override(messages=self._get_effective_messages(request)))
         report = self._report(request, response)
         if report is not None:
             try:
@@ -172,7 +185,20 @@ class ReportingSummarizationMiddleware(SummarizationMiddleware):
         request: "ModelRequest",
         handler: Callable[["ModelRequest"], "ModelResponse"],
     ) -> Any:
-        response = super().wrap_model_call(request, handler)
+        sent = False
+
+        def call(request: "ModelRequest") -> "ModelResponse":
+            nonlocal sent
+            sent = True
+            return handler(request)
+
+        try:
+            response = super().wrap_model_call(request, call)
+        except NoSummaryWritten as error:
+            if sent:
+                raise _refused_unsummarized(error) from error
+            self._not_summarized()
+            return handler(request.override(messages=self._get_effective_messages(request)))
         report = self._report(request, response)
         if report is not None:
             try:
@@ -209,6 +235,62 @@ class ReportingSummarizationMiddleware(SummarizationMiddleware):
             "tokens_before": self.token_counter(before),
             "tokens_after": self.token_counter(after),
         }
+
+    def _create_summary(self, messages_to_summarize: list[Any]) -> str:
+        """Deep Agents' summary, refused when the model wrote no text.
+
+        A summary call can end with no text: Claude ends one with
+        ``stop_reason: "refusal"``. Deep Agents would store that empty
+        summary in place of the messages it stands for, so the model would
+        never see them again. Raising ``NoSummaryWritten`` instead stores
+        nothing: the model call goes on with the conversation in full, the
+        user is told once a turn (``SUMMARY_NOT_WRITTEN``), and the next call
+        tries again. After the provider refused the request as too long,
+        that is a context overflow.
+        """
+        return _written(super()._create_summary(messages_to_summarize))
+
+    async def _acreate_summary(self, messages_to_summarize: list[Any]) -> str:
+        """``_create_summary``, async."""
+        return _written(await super()._acreate_summary(messages_to_summarize))
+
+    async def _anot_summarized(self) -> None:
+        logger.debug("deepagents_summary_not_written", agent=self.agent)
+        try:
+            await adispatch_custom_event(SUMMARY_NOT_WRITTEN, {"agent": self.agent})
+        except RuntimeError:  # no run to report to (called outside a graph)
+            pass
+
+    def _not_summarized(self) -> None:
+        logger.debug("deepagents_summary_not_written", agent=self.agent)
+        try:
+            dispatch_custom_event(SUMMARY_NOT_WRITTEN, {"agent": self.agent})
+        except RuntimeError:  # no run to report to (called outside a graph)
+            pass
+
+
+#: The custom run event a summary that could not be written reports: ``{"agent"}``.
+SUMMARY_NOT_WRITTEN = "agentic_cli.summary_not_written"
+#: What the user is told, once a turn, when a summary could not be written.
+SUMMARY_FAILED = "Could not summarize the earlier conversation; it is sent in full instead."
+SUMMARY_FAILED_CODE = "summary_failed"
+
+
+class NoSummaryWritten(Exception):
+    """A summary call came back with no text, so no summary is stored."""
+
+
+def _written(summary: str) -> str:
+    if not summary.strip():
+        raise NoSummaryWritten("the model wrote no summary")
+    return summary
+
+
+def _refused_unsummarized(error: NoSummaryWritten) -> Exception:
+    """The overflow a request is left with when no summary could shrink it."""
+    from langchain_core.exceptions import ContextOverflowError
+
+    return ContextOverflowError(f"The request is too long, and {error}.")
 
 
 def build_summarization(

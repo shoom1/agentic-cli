@@ -680,8 +680,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a `max_tokens` close to the window, or **a window of 16,842 tokens or
   less, whatever its `max_tokens` (breaking): an 8k or 16k local endpoint
   model that ran on 0.6 no longer starts**; 16,843 tokens is the smallest
-  window that works. Both settings are project-settable, and a `/settings`
-  change of either rebuilds the agents, keeping the conversation.
+  window that works. A summary the model writes no text for (Claude can
+  refuse one) is not stored: the request goes on in full, the user is told
+  "Could not summarize the earlier conversation; it is sent in full
+  instead." once a turn, and the next call tries again. Both settings are
+  project-settable, and a `/settings` change of either rebuilds the agents,
+  keeping the conversation.
 
 ### Deprecated
 
