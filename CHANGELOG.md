@@ -1205,6 +1205,14 @@ step; each entry says what to use instead.
 
 ### Fixed
 
+- **`context_max_tokens` is saved.** A field is never saved when its name
+  looks like a credential, and `token` anywhere in a name counted, so the
+  context ceiling (and any application's `*_max_tokens` or tokenizer
+  setting) was left out of every save: changed in `/settings`, it applied
+  until the next start. `token` now counts only as a whole word of the name
+  (`github_token`, `hf_token`); `api_key`, `secret`, `password` and
+  `credential` still count anywhere, and a `SecretStr` field is still never
+  saved.
 - **On ADK, a model call's usage names the model of the agent that made
   it.** `LLM_USAGE` named the default model for every agent's call, so a
   sub-agent on a model of its own, or a root agent with its own `model`,

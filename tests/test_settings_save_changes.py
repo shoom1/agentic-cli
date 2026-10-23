@@ -5,6 +5,10 @@ from the environment (``os_sandbox_enabled=False`` for one run) or was derived
 at startup was written into the user config and kept applying on every later
 run, and an application's own API-key fields (not in ``SECRET_FIELDS``) were
 written in plaintext.
+
+Telling a credential by its name matched ``token`` anywhere in it, so a token
+count such as ``context_max_tokens`` was never saved: changed in ``/settings``,
+it was back to its default on the next start.
 """
 
 from __future__ import annotations
@@ -18,7 +22,11 @@ import pytest
 from pydantic import Field, SecretStr
 
 from agentic_cli.config import BaseSettings
-from agentic_cli.settings_persistence import SettingsPersistence
+from agentic_cli.settings_persistence import (
+    SECRET_FIELDS,
+    SettingsPersistence,
+    is_secret_field,
+)
 
 APP = "agentic_cli"
 
@@ -81,24 +89,61 @@ class TestSaveOnlyGivenKeys:
 class AppSettings(BaseSettings):
     mistral_api_key: str | None = Field(default=None)
     service_token: SecretStr | None = Field(default=None)
+    github_token: str | None = Field(default=None)
     report_style: str = Field(default="plain")
+    summary_max_tokens: int = Field(default=1000)
 
 
 class TestCredentialFieldsAreNeverWritten:
     def test_full_save_skips_domain_credentials(self, fs):
         settings = AppSettings(
-            mistral_api_key="value-1", service_token="value-2", report_style="fancy",
+            mistral_api_key="value-1", service_token="value-2", github_token="value-3",
+            report_style="fancy",
         )
         SettingsPersistence(APP).save(settings)
         written = {**_read(fs["project"]), **_read(fs["user"])}
         assert written.get("report_style") == "fancy"
         assert "mistral_api_key" not in written
         assert "service_token" not in written
+        assert "github_token" not in written
 
     def test_keyed_save_skips_domain_credentials(self, fs):
         settings = AppSettings(mistral_api_key="value-1")
         SettingsPersistence(APP).save(settings, keys={"mistral_api_key"})
         assert "mistral_api_key" not in {**_read(fs["project"]), **_read(fs["user"])}
+
+
+class TestTokenCountsAreSaved:
+    def test_a_keyed_save_writes_the_context_ceiling(self, fs):
+        settings = BaseSettings()
+        settings.update_setting("context_max_tokens", 50000)
+        SettingsPersistence(APP).save(settings, keys={"context_max_tokens"})
+        assert _read(fs["project"]) == {"context_max_tokens": 50000}
+
+    def test_a_full_save_writes_token_counts(self, fs):
+        settings = AppSettings(context_max_tokens=50000, summary_max_tokens=2000)
+        SettingsPersistence(APP).save(settings)
+        written = {**_read(fs["project"]), **_read(fs["user"])}
+        assert written["context_max_tokens"] == 50000
+        assert written["summary_max_tokens"] == 2000
+
+    def test_the_framework_s_only_secret_fields_are_its_credentials(self):
+        fields = BaseSettings.model_fields
+        assert {n for n, f in fields.items() if is_secret_field(n, f)} == SECRET_FIELDS
+
+    @pytest.mark.parametrize("name", [
+        "github_token", "hf_token", "token", "access_token_file", "mistral_api_key",
+        "apikey", "client_secret", "db_password", "credentials_path",
+    ])
+    def test_a_credential_name_is_secret(self, name):
+        assert is_secret_field(name)
+
+    @pytest.mark.parametrize("name", [
+        "context_max_tokens", "max_tokens", "summary_max_tokens", "tokens_per_minute",
+        "tokenizer", "embedding_tokenizer_name",
+    ])
+    def test_a_token_count_or_tokenizer_is_not(self, name):
+        assert not is_secret_field(name)
 
 
 class TestSettingsCommandSavesTheChanges:
