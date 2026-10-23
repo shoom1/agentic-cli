@@ -649,6 +649,9 @@ async def test_a_job_resumed_after_its_call_was_summarized(listed, tmp_path, mon
 
     monkeypatch.setitem(_SHAPE, "return_none", False)
     monkeypatch.chdir(tmp_path)
+    # Its own app: job records persist under ~/.<app>/jobs, and every manager
+    # loads them, so a shared app would see another run's jobs.
+    app_name = f"ctx-live-jobs-{uuid.uuid4().hex[:8]}"
     agent = AgentConfig(
         name="job_runner",
         prompt=(
@@ -661,8 +664,8 @@ async def test_a_job_resumed_after_its_call_was_summarized(listed, tmp_path, mon
     )
     manager = GoogleADKWorkflowManager(
         agent_configs=[agent],
-        settings=_settings(tmp_path, context_max_tokens=16_000, thinking_effort="none",
-                           permissions_enabled=False),
+        settings=_settings(tmp_path, app_name=app_name, context_max_tokens=16_000,
+                           thinking_effort="none", permissions_enabled=False),
         model=CLAUDE,
     )
     try:
@@ -678,6 +681,7 @@ async def test_a_job_resumed_after_its_call_was_summarized(listed, tmp_path, mon
         resumed = [event async for event in manager.resume_with_job_result(record)]
     finally:
         await manager.cleanup()
+        shutil.rmtree(Path.home() / f".{app_name}", ignore_errors=True)
 
     assert find_tool_calls(started, "live_resume_probe")
     assert any(_summaries(turn) for turn in notes), "no summary while the call was pending"
