@@ -60,6 +60,7 @@ from agentic_cli.workflow.deepagents.sessions import (
 from agentic_cli.workflow.deepagents.tools import to_langchain_tools
 from agentic_cli.workflow.events import WorkflowEvent
 from agentic_cli.workflow.langchain_models import build_chat_model
+from agentic_cli.workflow.live_events import LiveEvents, merged
 from agentic_cli.workflow.llm_log import LLMLogWriter
 from agentic_cli.workflow.service_registry import JOB_MANAGER
 
@@ -569,17 +570,23 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
     ) -> AsyncGenerator[WorkflowEvent, None]:
         """Stream the root agent on ``ref``'s thread and yield its events.
 
-        The caller holds the turn and is inside ``_workflow_context``.
+        The caller holds the turn and is inside ``_workflow_context``. What
+        the run callback reports from inside a node (a summary that starts,
+        its usage, the summary it made) is merged into the stream as it
+        happens, so it shows while the node still runs, before the node's
+        own output.
         """
         processor = DeepAgentsEventProcessor(
             root=self._root_name,
             agent_models=self._resolved_models,
             session_id=ref.session_id,
         )
+        live = LiveEvents()
         callback = RunCallback(
             root=self._root_name,
             agent_models=self._resolved_models,
             llm_log=self._raw_llm_log(),
+            live=live,
         )
         stream = self._root.astream(
             graph_input,
@@ -589,12 +596,15 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         )
         count = 0
         try:
-            # aclosing: a cancelled turn closes the stream, and its tasks, now.
-            async with contextlib.aclosing(stream):
-                async for namespace, mode, payload in stream:
-                    # What the callback collected happened inside the node this
-                    # item reports (a summary before the answer it made room for).
-                    events = callback.drain() + processor.process(namespace, mode, payload)
+            # aclosing: a cancelled turn closes the merge, which closes the
+            # stream, and its tasks, now, in the task that iterates it.
+            async with contextlib.aclosing(merged(stream, live)) as items:
+                async for item in items:
+                    if isinstance(item, WorkflowEvent):
+                        events = [item]
+                    else:
+                        namespace, mode, payload = item
+                        events = processor.process(namespace, mode, payload)
                     for event in events:
                         event = self._apply_event_hook(event)
                         if event is not None:
@@ -609,16 +619,10 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
                 error=truncate(str(error), _MAX_LOGGED_ERROR),
                 exc_info=error,
             )
-            for event in [*callback.drain(), processor.turn_failed(error)]:
-                event = self._apply_event_hook(event)
-                if event is not None:
-                    yield event
-            return
-        for event in callback.drain():
-            event = self._apply_event_hook(event)
+            event = self._apply_event_hook(processor.turn_failed(error))
             if event is not None:
-                count += 1
                 yield event
+            return
         logger.info("message_processed", event_count=count)
 
     def _raw_llm_log(self) -> LLMLogWriter | None:

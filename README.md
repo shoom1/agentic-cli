@@ -1306,7 +1306,8 @@ class MyApp(BaseCLIApp):
 | `FILE_DATA` | Binary/file payload from a tool (ADK) |
 | `ERROR` | Error message (`recoverable`, `error_code` metadata) |
 | `TASK_PROGRESS` | Task checklist update (drives the task box) |
-| `CONTEXT_TRIMMED` | Context trimming event (drop count, remaining tokens), or a summary on Deep Agents (`source="summarization"`) |
+| `CONTEXT_SUMMARIZING` | A summary of the earlier conversation is starting (reported while the stream waits on it) |
+| `CONTEXT_TRIMMED` | The context was made smaller: a summary (`source="summarization"`, with `messages_summarized`, `tokens_before`, `tokens_after`) |
 | `LLM_REQUEST` / `LLM_RESPONSE` / `LLM_USAGE` | LLM traffic + token accounting |
 
 On Deep Agents every event carries `metadata["agent"]`, the agent that

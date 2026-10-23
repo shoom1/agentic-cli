@@ -25,7 +25,9 @@ Every event carries ``metadata["agent"]``.
 
 What happens inside a node and is no node output (a summary call and the
 summary it made, and with ``raw_llm_logging`` every model call) reaches
-``RunCallback`` instead, the turn's LangChain callback handler.
+``RunCallback`` instead, the turn's LangChain callback handler, which hands
+it to the turn's ``LiveEvents`` as it happens: a summary that starts is
+reported while the model node still waits on it.
 """
 
 from __future__ import annotations
@@ -56,6 +58,7 @@ if TYPE_CHECKING:
     from langchain_core.outputs import LLMResult
 
     from agentic_cli.models import ResolvedModel
+    from agentic_cli.workflow.live_events import LiveEvents
     from agentic_cli.workflow.llm_log import LLMLogWriter
 
 #: The tag LangChain's summarization puts on its summary call's run metadata.
@@ -312,18 +315,22 @@ class _ModelCall:
 
 
 class RunCallback(AsyncCallbackHandler):
-    """Collects one turn's events that the stream cannot carry.
+    """Reports one turn's events that the stream cannot carry.
 
     Attached to the turn's run config, LangChain hands it to every model call
-    in the run, sub-agents' and tools' included. The manager drains it at each
-    stream item, before that item's own events: what it collected happened
-    inside the node whose output the item is.
+    in the run, sub-agents' and tools' included. With ``live``, each event
+    goes out through it as it happens (the manager merges it into the turn's
+    stream); without, it is collected for ``drain``, which a caller runs at
+    each stream item, before that item's own events: what it collected
+    happened inside the node whose output the item is.
 
-    - A summary call (run metadata ``lc_source="summarization"``) reports its
-      ``LLM_USAGE``, with ``purpose="summarization"``, on the model of the
-      agent it summarized for.
+    - A summary call (run metadata ``lc_source="summarization"``) reports
+      ``CONTEXT_SUMMARIZING`` as it starts, then its ``LLM_USAGE``, with
+      ``purpose="summarization"``, on the model of the agent it summarized
+      for.
     - A summary applied (``CONTEXT_SUMMARIZED``) is ``CONTEXT_TRIMMED``, with
-      ``source="summarization"``.
+      ``source="summarization"``, the messages it stands for and the
+      conversation's tokens before and after.
     - With ``llm_log`` (``raw_llm_logging``), every model call is an
       ``LLM_REQUEST`` and an ``LLM_RESPONSE``, also written to the log. Each
       names its ``agent`` (``lc_agent_name``: for a call a tool made, the
@@ -335,6 +342,8 @@ class RunCallback(AsyncCallbackHandler):
         root: The root agent, for a call no agent is named on.
         agent_models: Each agent's resolved model, by name.
         llm_log: Where raw LLM traffic is written; None logs none.
+        live: The turn's live events, which every event goes out through;
+            None collects them for ``drain``.
     """
 
     def __init__(
@@ -343,11 +352,13 @@ class RunCallback(AsyncCallbackHandler):
         root: str,
         agent_models: Mapping[str, "ResolvedModel"],
         llm_log: "LLMLogWriter | None" = None,
+        live: "LiveEvents | None" = None,
     ) -> None:
         super().__init__()
         self._root = root
         self._agent_models = agent_models
         self._llm_log = llm_log
+        self._live = live
         # A sync tool's model call reports from LangChain's executor thread.
         self._events: deque[WorkflowEvent] = deque()
         # The calls in flight that are reported when they end, by run id:
@@ -378,6 +389,8 @@ class RunCallback(AsyncCallbackHandler):
             started=time.perf_counter(),
         )
         self._calls[run_id] = call
+        if purpose == PURPOSE_SUMMARY:
+            self._emit(WorkflowEvent.context_summarizing(agent))
         if self._llm_log is not None:
             sent = messages[0] if messages else []
             self._log(_request_event(call, sent, params), run_id)
@@ -412,14 +425,15 @@ class RunCallback(AsyncCallbackHandler):
         if name != CONTEXT_SUMMARIZED or not isinstance(data, dict):
             return
         agent = data.get("agent") or self._root
-        event = WorkflowEvent.context_trimmed(
+        self._emit(WorkflowEvent.context_trimmed(
             messages_before=data["messages_before"],
             messages_after=data["messages_after"],
             source=_SUMMARY_SOURCE,
             agent=agent,
-        )
-        event.metadata["messages_summarized"] = data["messages_summarized"]
-        self._emit(event)
+            messages_summarized=data["messages_summarized"],
+            tokens_before=data.get("tokens_before"),
+            tokens_after=data.get("tokens_after"),
+        ))
 
     def _model_ref(self, agent: str) -> str:
         model = self._agent_models.get(agent)
@@ -432,10 +446,13 @@ class RunCallback(AsyncCallbackHandler):
         self._llm_log.write(event)
 
     def _emit(self, event: WorkflowEvent) -> None:
-        self._events.append(event)
+        if self._live is not None:
+            self._live.emit(event)
+        else:
+            self._events.append(event)
 
     def drain(self) -> list[WorkflowEvent]:
-        """The events collected since the last drain, oldest first."""
+        """The events collected since the last drain, oldest first (none with ``live``)."""
         events: list[WorkflowEvent] = []
         while self._events:
             events.append(self._events.popleft())

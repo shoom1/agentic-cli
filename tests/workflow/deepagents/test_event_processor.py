@@ -15,6 +15,7 @@ last runs a real agent tree on scripted models and feeds it the real stream.
 from __future__ import annotations
 
 import json
+import uuid
 
 import anthropic
 import httpx
@@ -45,6 +46,7 @@ from agentic_cli.workflow.deepagents.event_processor import (  # noqa: E402
 )
 from agentic_cli.workflow.deepagents.tools import to_langchain_tools  # noqa: E402
 from agentic_cli.workflow.events import EventType, WorkflowEvent  # noqa: E402
+from agentic_cli.workflow.live_events import LiveEvents, merged  # noqa: E402
 from tests.models.fakes import endpoints  # noqa: E402
 from tests.workflow.deepagents.fakes import ScriptedChat, ai, task  # noqa: E402
 
@@ -562,6 +564,59 @@ class TestRunCallback:
         assert isinstance(callback, AsyncCallbackHandler)
         assert callback.drain() == [first, second]
         assert callback.drain() == []
+
+    async def test_a_summary_call_reports_that_it_started(self):
+        callback = RunCallback(root="coordinator", agent_models=MODELS)
+
+        await callback.on_chat_model_start(
+            {}, [[HumanMessage("Summarize.")]], run_id=uuid.uuid4(),
+            metadata={"lc_source": "summarization", "lc_agent_name": "researcher"},
+        )
+        await callback.on_chat_model_start(  # an agent's own step reports nothing
+            {}, [[HumanMessage("Hi.")]], run_id=uuid.uuid4(),
+            metadata={"lc_agent_name": "researcher"},
+        )
+
+        (event,) = callback.drain()
+        assert event.type is EventType.CONTEXT_SUMMARIZING
+        assert event.content == "Summarizing the earlier conversation…"
+        assert event.metadata["agent"] == "researcher"
+
+    async def test_with_live_events_everything_goes_out_through_them(self):
+        live = LiveEvents()
+        callback = RunCallback(root="coordinator", agent_models=MODELS, live=live)
+        run = uuid.uuid4()
+
+        async def source():
+            await callback.on_chat_model_start(
+                {}, [[HumanMessage("Summarize.")]], run_id=run,
+                metadata={"lc_source": "summarization", "lc_agent_name": "coordinator"},
+            )
+            yield "the stream's next item"
+
+        items = [item async for item in merged(source(), live)]
+
+        assert [getattr(item, "type", item) for item in items] == [
+            EventType.CONTEXT_SUMMARIZING, "the stream's next item"
+        ]
+        assert callback.drain() == []
+
+    async def test_a_summary_reports_its_tokens(self):
+        callback = RunCallback(root="coordinator", agent_models=MODELS)
+
+        await callback.on_custom_event(
+            "agentic_cli.context_summarized",
+            {"agent": "researcher", "messages_before": 11, "messages_after": 2,
+             "messages_summarized": 10, "tokens_before": 18_000, "tokens_after": 3_100},
+            run_id=uuid.uuid4(),
+        )
+
+        (event,) = callback.drain()
+        assert event.type is EventType.CONTEXT_TRIMMED
+        assert {key: event.metadata[key] for key in (
+            "source", "agent", "messages_summarized", "tokens_before", "tokens_after"
+        )} == {"source": "summarization", "agent": "researcher", "messages_summarized": 10,
+               "tokens_before": 18_000, "tokens_after": 3_100}
 
 
 class TestARealStream:

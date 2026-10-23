@@ -298,6 +298,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `placement=` from the settings each time, since thinking-prompt's session
     placement is fixed when it starts. An app's own dialogs keep that startup
     placement unless they pass `placement=` themselves.
+- **`EventType.CONTEXT_SUMMARIZING`**, from
+  `WorkflowEvent.context_summarizing(agent=None)`: a summary of the earlier
+  conversation is starting. It is reported as the summary call starts, while
+  the turn's stream still waits on it (a summary can take a while at a
+  large size), and the CLI shows "Summarizing the earlier conversation…" as
+  the events box's status line until the summary's own usage arrives,
+  printing nothing. What the summary did
+  follows as `CONTEXT_TRIMMED`, whose factory takes keyword-only
+  `messages_summarized`, `tokens_before`, `tokens_after` and
+  `turns_dropped` (in `metadata` only when given); a Deep Agents summary
+  reports the conversation's tokens before and after. On Deep Agents, what
+  the run callback reports from inside a node now reaches the stream as it
+  happens rather than with the node's output: `workflow/live_events.py`
+  merges events reported during a turn into its stream (`LiveEvents`,
+  `merged`, and the context-local `reporting`/`report`).
 
 ### Changed
 

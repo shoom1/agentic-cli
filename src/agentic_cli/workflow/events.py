@@ -46,6 +46,7 @@ class EventType(Enum):
 
     # Context management events
     CONTEXT_TRIMMED = "context_trimmed"
+    CONTEXT_SUMMARIZING = "context_summarizing"
 
     # LLM debugging events (raw traffic logging)
     LLM_REQUEST = "llm_request"
@@ -293,17 +294,30 @@ class WorkflowEvent:
         messages_after: int,
         source: str,
         agent: str | None = None,
+        *,
+        messages_summarized: int | None = None,
+        tokens_before: int | None = None,
+        tokens_after: int | None = None,
+        turns_dropped: int | None = None,
     ) -> "WorkflowEvent":
         """Create a context trimmed event.
 
-        Signals that context window trimming occurred, either detected
-        directly (LangGraph) or via token heuristic (ADK).
+        Signals that an agent's context was made smaller: the earlier
+        conversation summarized, or older turns left out of a request.
 
         Args:
             messages_before: Message count before trimming
             messages_after: Message count after trimming
-            source: Detection source ("langgraph" or "adk_token_heuristic")
+            source: What made it smaller: ``"summarization"`` (a summary in
+                a turn), ``"compact"`` (``/compact``) or ``"fit_guard"``
+                (turns left out of one request)
             agent: Agent name where trimming occurred (if known)
+            messages_summarized: How many messages a summary stands for
+            tokens_before: The conversation's size before, in tokens
+            tokens_after: Its size after, in tokens
+            turns_dropped: How many whole turns were left out
+
+        The four counts reach ``metadata`` only when given.
         """
         messages_removed = messages_before - messages_after
         metadata: dict[str, Any] = {
@@ -314,10 +328,34 @@ class WorkflowEvent:
         }
         if agent is not None:
             metadata["agent"] = agent
+        counts = {
+            "messages_summarized": messages_summarized,
+            "tokens_before": tokens_before,
+            "tokens_after": tokens_after,
+            "turns_dropped": turns_dropped,
+        }
+        metadata.update({key: value for key, value in counts.items() if value is not None})
 
         return cls(
             type=EventType.CONTEXT_TRIMMED,
             content=f"Context trimmed: {messages_removed} messages removed ({source})",
+            metadata=metadata,
+        )
+
+    @classmethod
+    def context_summarizing(cls, agent: str | None = None) -> "WorkflowEvent":
+        """Create the event a summary of the earlier conversation starts with.
+
+        Reported as the summary call starts, while the turn's stream waits on
+        it, so the user sees why nothing else moves.
+
+        Args:
+            agent: The agent whose conversation is summarized (if known)
+        """
+        metadata: dict[str, Any] = {"agent": agent} if agent is not None else {}
+        return cls(
+            type=EventType.CONTEXT_SUMMARIZING,
+            content="Summarizing the earlier conversation…",
             metadata=metadata,
         )
 

@@ -26,9 +26,11 @@ summary prompt is LangChain's: Deep Agents' adds a note on media it archived,
 which here never happens.
 
 **Reporting.** The summary call runs on the agent's own model, tagged
-``lc_source="summarization"``; the run callback reports its usage. Each
-summary applied is reported as a custom run event (``CONTEXT_SUMMARIZED``),
-which the run callback turns into ``CONTEXT_TRIMMED``.
+``lc_source="summarization"``; the run callback reports its start
+(``CONTEXT_SUMMARIZING``) and its usage. Each summary applied is reported as
+a custom run event (``CONTEXT_SUMMARIZED``), which the run callback turns
+into ``CONTEXT_TRIMMED``, with the conversation's tokens before and after as
+the middleware's own counter has them.
 """
 
 from __future__ import annotations
@@ -66,7 +68,8 @@ if TYPE_CHECKING:
 logger = Loggers.workflow()
 
 #: The custom run event a summary reports itself with: ``{"agent",
-#: "messages_before", "messages_after", "messages_summarized"}``.
+#: "messages_before", "messages_after", "messages_summarized",
+#: "tokens_before", "tokens_after"}``.
 CONTEXT_SUMMARIZED = "agentic_cli.context_summarized"
 
 #: Why the archive refuses every write.
@@ -183,21 +186,28 @@ class ReportingSummarizationMiddleware(SummarizationMiddleware):
 
         Counts are of the conversation the model is sent: before, the state's
         messages (from the previous summary on, which stands for the rest);
-        after, the new summary and the messages it kept.
+        after, the new summary and the messages it kept. Tokens are the
+        middleware's own count of those two conversations.
         """
         update = getattr(getattr(response, "command", None), "update", None)
         event = update.get(SUMMARIZATION_EVENT_KEY) if isinstance(update, dict) else None
         if not isinstance(event, dict):
             return None
-        total = len(request.messages)
+        messages = list(request.messages)
         previous = (request.state or {}).get(SUMMARIZATION_EVENT_KEY)
+        before = messages
+        if isinstance(previous, dict):
+            before = [previous["summary_message"], *messages[previous["cutoff_index"]:]]
+        after = [event["summary_message"], *messages[event["cutoff_index"]:]]
         start = previous["cutoff_index"] if isinstance(previous, dict) else 0
         carried = 1 if isinstance(previous, dict) else 0  # the previous summary
         return {
             "agent": self.agent,
-            "messages_before": total - start + carried,
-            "messages_after": total - event["cutoff_index"] + 1,
+            "messages_before": len(before),
+            "messages_after": len(after),
             "messages_summarized": event["cutoff_index"] - start + carried,
+            "tokens_before": self.token_counter(before),
+            "tokens_after": self.token_counter(after),
         }
 
 

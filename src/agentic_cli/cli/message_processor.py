@@ -900,6 +900,21 @@ class MessageProcessor:
         else:
             ui.add_warning(f"Context window trimmed ({source})")
 
+    async def _handle_context_summarizing(
+        self,
+        event: "WorkflowEvent",
+        state: _EventProcessingState,
+        ui: "ThinkingPromptSession",
+        settings: "BaseSettings",
+        workflow: object,
+    ) -> None:
+        """Handle CONTEXT_SUMMARIZING events — the events box says so, nothing printed.
+
+        A summary call can take a while; the status line says why the turn
+        waits. What the summary did comes after it, as CONTEXT_TRIMMED.
+        """
+        state.status_line = event.content
+
     async def _handle_llm_usage(
         self,
         event: "WorkflowEvent",
@@ -908,7 +923,13 @@ class MessageProcessor:
         settings: "BaseSettings",
         workflow: object,
     ) -> None:
-        """Handle LLM_USAGE events — accumulate token counts and refresh status bar."""
+        """Handle LLM_USAGE events — accumulate token counts and refresh status bar.
+
+        A summary's own usage ends its "Summarizing…" line: the answer's
+        model call runs next and reports nothing until it is done.
+        """
+        if event.metadata.get("purpose") == "summarization":
+            state.status_line = "Processing..."
         if state.usage_tracker is not None:
             tracker = state.usage_tracker
             prev_prompt = tracker.last_prompt_tokens
@@ -953,6 +974,7 @@ class MessageProcessor:
                 EventType.FILE_DATA: cls._handle_file_data,
                 EventType.TASK_PROGRESS: cls._handle_task_progress,
                 EventType.CONTEXT_TRIMMED: cls._handle_context_trimmed,
+                EventType.CONTEXT_SUMMARIZING: cls._handle_context_summarizing,
                 EventType.LLM_USAGE: cls._handle_llm_usage,
             }
         return cls._EVENT_DISPATCH

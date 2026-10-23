@@ -24,6 +24,7 @@ that declares one. Nothing reaches a provider.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import json
 import logging
@@ -46,6 +47,7 @@ from langchain.agents.middleware import ModelRequest  # noqa: E402
 from langchain_anthropic.middleware import AnthropicPromptCachingMiddleware  # noqa: E402
 from langchain_core.exceptions import ContextOverflowError  # noqa: E402
 from langchain_core.messages import AIMessage, HumanMessage  # noqa: E402
+from pydantic import PrivateAttr  # noqa: E402
 
 from agentic_cli.config import BaseSettings  # noqa: E402
 from agentic_cli.models import ModelCatalog, ProviderKind, RoleMap, resolve_model  # noqa: E402
@@ -77,6 +79,7 @@ from agentic_cli.workflow.deepagents.summarization import (  # noqa: E402
     install_history_filters,
     summarization_thresholds,
 )
+from agentic_cli.workflow import live_events  # noqa: E402
 from agentic_cli.workflow.events import EventType  # noqa: E402
 from agentic_cli.workflow.permissions import EXEMPT  # noqa: E402
 from tests.models.fakes import endpoints as fake_endpoints  # noqa: E402
@@ -594,11 +597,15 @@ class TestSummarizationInATurn:
             "Here is", "Turn 6:", "Answer ", "Turn 7:"
         ]
 
-        # The summary call reports, before the answer it made room for.
+        # The summary call reports as it starts and when it is done, before
+        # the answer it made room for.
         assert [e.type for e in turns[5]] == [
-            EventType.LLM_USAGE, EventType.CONTEXT_TRIMMED, EventType.TEXT, EventType.LLM_USAGE
+            EventType.CONTEXT_SUMMARIZING, EventType.LLM_USAGE, EventType.CONTEXT_TRIMMED,
+            EventType.TEXT, EventType.LLM_USAGE,
         ]
-        summary_usage, trimmed, _, answer_usage = turns[5]
+        summarizing, summary_usage, trimmed, _, answer_usage = turns[5]
+        assert summarizing.content == "Summarizing the earlier conversation…"
+        assert summarizing.metadata["agent"] == "solo"
         assert summary_usage.metadata["purpose"] == "summarization"
         assert summary_usage.metadata["agent"] == "solo"
         assert summary_usage.metadata["model"] == "local:small"
@@ -606,8 +613,13 @@ class TestSummarizationInATurn:
         assert (trimmed.metadata["source"], trimmed.metadata["agent"]) == ("summarization", "solo")
         assert (trimmed.metadata["messages_before"], trimmed.metadata["messages_after"]) == (11, 2)
         assert trimmed.metadata["messages_summarized"] == 10
+        # Six questions of about 3,000 tokens passed the 16,150-token trigger;
+        # the summary and the sixth question are what is left.
+        assert trimmed.metadata["tokens_before"] > 16_150
+        assert 3_000 < trimmed.metadata["tokens_after"] < 3_200
         others = turns[:5] + turns[6:]
         assert all(EventType.CONTEXT_TRIMMED not in [e.type for e in t] for t in others)
+        assert all(EventType.CONTEXT_SUMMARIZING not in [e.type for e in t] for t in others)
 
         # The checkpoint keeps every message.
         assert len(recent) == 14
@@ -789,6 +801,105 @@ class TestOverflowInATurn:
             (str(error), "BadRequestError")
         ]
         assert len(chat.requests) == 3  # nothing summarized, nothing retried
+
+
+class GatedChat(ScriptedChat):
+    """Holds call ``gate_at`` (1-based) until released, as a slow model would.
+
+    A cancel while it is held records nothing, so the script is not used up.
+    """
+
+    gate_at: int = 0
+    _started: asyncio.Event = PrivateAttr(default_factory=asyncio.Event)
+    _release: asyncio.Event = PrivateAttr(default_factory=asyncio.Event)
+    _held: bool = PrivateAttr(default=False)
+
+    async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
+        if len(self.requests) + 1 == self.gate_at and not self._held:
+            self._held = True
+            self._started.set()
+            await self._release.wait()
+        return self._answer(messages)
+
+
+def pumps() -> list[asyncio.Task]:
+    """The live-events pump tasks still running."""
+    return [t for t in asyncio.all_tasks() if t.get_name() == live_events.PUMP_TASK]
+
+
+class TestCancelledTurns:
+    """Ctrl+C while a model call runs, the summary call included."""
+
+    @staticmethod
+    def _manager_on(chat: GatedChat, settings, monkeypatch) -> DeepAgentsWorkflowManager:
+        models = ScriptedModels()
+        models.chats["solo"] = chat
+        monkeypatch.setattr(manager_module, "build_chat_model", models)
+        return _manager(settings, [_agent("solo", "Answer.")])
+
+    async def test_ctrl_c_during_a_model_call_leaves_no_pump_and_frees_the_turn(
+        self, small, monkeypatch
+    ):
+        chat = GatedChat(label="solo", script=[ai("Answer 1.")], gate_at=1)
+        manager = self._manager_on(chat, small, monkeypatch)
+        try:
+            consumer = asyncio.create_task(turn(manager, "First."))
+            await asyncio.wait_for(chat._started.wait(), 5)
+            consumer.cancel()
+            with pytest.raises(asyncio.CancelledError):  # not a TimeoutError: no hang
+                await asyncio.wait_for(consumer, 5)
+            left = pumps()
+            # The turn lock is free: the next turn runs at once.
+            again = await asyncio.wait_for(turn(manager, "Again."), 5)
+        finally:
+            chat._release.set()
+            await manager.cleanup()
+
+        assert left == []
+        assert [e.content for e in again if e.type is EventType.TEXT] == ["Answer 1."]
+
+    async def test_ctrl_c_during_a_summary_writes_nothing_and_the_next_turn_summarizes_again(
+        self, small, monkeypatch
+    ):
+        # Five turns under the trigger; the sixth summarizes (call 6) first.
+        script = [ai(f"Answer {n}.") for n in range(1, 6)]
+        script += [ai("A summary."), ai("Answer 6.")]
+        chat = GatedChat(label="solo", script=script, gate_at=6)
+        manager = self._manager_on(chat, small, monkeypatch)
+        sixth: list = []
+
+        async def consume() -> None:
+            async for event in manager.process(f"Turn 6: {USER_TURN}", "u", session_id="s"):
+                sixth.append(event)
+
+        try:
+            for n in range(1, 6):
+                await turn(manager, f"Turn {n}: {USER_TURN}")
+            consumer = asyncio.create_task(consume())
+            await asyncio.wait_for(chat._started.wait(), 5)
+            await asyncio.sleep(0.05)
+            # The line is out while the summary call still runs.
+            while_summarizing = [e.type for e in sixth]
+            consumer.cancel()
+            with pytest.raises(asyncio.CancelledError):  # not a TimeoutError: no hang
+                await asyncio.wait_for(consumer, 5)
+            left = pumps()
+            state = (await manager._root.aget_state(
+                run_config(manager.session_ref("s", "u"))
+            )).values
+            chat._release.set()
+            again = await asyncio.wait_for(turn(manager, f"Turn 6: {USER_TURN}"), 5)
+        finally:
+            chat._release.set()
+            await manager.cleanup()
+
+        assert while_summarizing == [EventType.CONTEXT_SUMMARIZING]
+        assert left == []
+        assert state.get("_summarization_event") is None  # nothing written
+        assert [e.type for e in again][:3] == [
+            EventType.CONTEXT_SUMMARIZING, EventType.LLM_USAGE, EventType.CONTEXT_TRIMMED,
+        ]
+        assert [e.content for e in again if e.type is EventType.TEXT] == ["Answer 6."]
 
 
 class TestSettingsChange:
