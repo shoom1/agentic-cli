@@ -17,6 +17,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an absolute path (build it from `__file__`), and a `skills_dirs` entry must
   be absolute too (`~` is expanded); a relative one is refused with an error
   naming it.
+- **A URL rule without a port covers only its scheme's default port.** The
+  `http.*` matcher compared ports only when the rule named one, so approving
+  `https://example.com/page` "for this session" or "always" (a grant for
+  `https://example.com/**`) also allowed `https://example.com:8443/admin`,
+  another service; the built-in arXiv rules covered every port too. A rule's
+  port, or its scheme's default (443, 80), must now equal the URL's. A deny
+  rule without a port no longer covers other ports either: a request to one of
+  them is asked about, as any URL no rule covers.
 
 ### Added
 

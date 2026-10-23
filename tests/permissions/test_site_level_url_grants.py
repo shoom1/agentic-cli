@@ -10,6 +10,10 @@ being fetched and the site an approval would cover.
 
 The URL matcher also dropped an IPv6 host's brackets, so a grant for an IPv6
 URL could not be parsed again: re-checking that address raised.
+
+A grant on the default port covered every other port of the host too: the
+matcher compared ports only when the rule named one, and normalising a URL
+drops its default port, so ``https://host/**`` allowed ``https://host:8443/``.
 """
 
 from __future__ import annotations
@@ -126,6 +130,15 @@ async def test_a_non_default_port_is_part_of_the_site():
 
     assert not await _asks(engine, approver, "https://docs.example.org:8443/b")
     assert await _asks(engine, approver, "https://docs.example.org/b")
+
+
+async def test_a_grant_on_the_default_port_covers_no_other_port():
+    approver = _Approver(ALLOW_SESSION_CHOICE)
+    engine = _engine(approver)
+    await _asks(engine, approver, "https://docs.example.org/a")
+
+    assert not await _asks(engine, approver, "https://docs.example.org:443/b")
+    assert await _asks(engine, approver, "https://docs.example.org:8443/b")
 
 
 async def test_allow_once_still_approves_one_url():
