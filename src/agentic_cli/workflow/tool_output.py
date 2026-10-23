@@ -3,9 +3,10 @@
 A tool result whose serialized text is longer than ``tool_result_max_chars``
 reaches the model cut: its shape, its beginning and its end, and a note saying
 how much was cut and where the full output is, a file in
-``./.<app_name>/tool-output/`` that ``read_file`` pages through. Each tool's
-own limits stay; :func:`cap_tool_result` is the net beneath them, the same on
-every backend.
+``./.<app_name>/tool-output/`` that ``read_file`` pages through. Both backends
+call :func:`cap_tool_result` on every result (ADK's ``ToolResultCapPlugin``,
+Deep Agents' ``ToolResultCapMiddleware``). Each tool's own limits stay; this
+is the net beneath them.
 
 How a result is cut:
 

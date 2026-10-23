@@ -70,6 +70,7 @@ from agentic_cli.workflow.deepagents.middleware import (  # noqa: E402
     ForeignReasoningMiddleware,
     PermissionMiddleware,
     ToolCallErrorMiddleware,
+    ToolResultCapMiddleware,
 )
 from agentic_cli.workflow.deepagents.sessions import run_config  # noqa: E402
 from agentic_cli.workflow.deepagents.summarization import (  # noqa: E402
@@ -112,7 +113,8 @@ def huge_report() -> str:
 
 @register_tool(capabilities=EXEMPT)
 def bulky_report() -> str:
-    """Returns about 14,000 tokens of text (an exempt test tool)."""
+    """Returns 56,000 characters, about 14,000 tokens; the model reads the
+    50,000 the tool result cap keeps (an exempt test tool)."""
     return "y " * 28_000
 
 
@@ -168,11 +170,13 @@ def windowed(model, window: int | None):
 
 
 def context(**values) -> SimpleNamespace:
-    """The settings the model side reads, at their defaults unless given."""
+    """The settings the agents are built from, at their defaults unless given."""
     return SimpleNamespace(**{
+        "app_name": "agentic_cli",
         "context_summarize_at": 0.85,
         "context_max_tokens": 200_000,
         "prompt_caching_enabled": True,
+        "tool_result_max_chars": 50_000,
         **values,
     })
 
@@ -314,19 +318,26 @@ TEAM = [
 
 
 class TestTheStack:
-    def test_every_stack_in_order(self, created):
+    def test_every_stack_in_order(self, created, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
         claude = resolved(SONNET_THINKING, "lead")
         gemini = resolved("google:gemini-2.5-flash", "helper")
 
-        _build(TEAM, {"lead": claude, "helper": gemini}, context())
+        _build(TEAM, {"lead": claude, "helper": gemini}, context(tool_result_max_chars=30_000))
 
         lead = created["lead"]["middleware"]
         assert [type(m) for m in lead] == [
             PatchToolCallsMiddleware, SubAgentMiddleware, ForeignReasoningMiddleware,
             ReportingSummarizationMiddleware, ContextOverflowMiddleware,
             AnthropicPromptCachingMiddleware,
-            PermissionMiddleware, ToolCallErrorMiddleware, ActiveToolCallMiddleware,
+            PermissionMiddleware, ToolResultCapMiddleware, ToolCallErrorMiddleware,
+            ActiveToolCallMiddleware,
         ]
+        # The cap is inside the gate (a denial is short) and outside the error
+        # middleware (an error result is capped too), on the settings.
+        assert (lead[7].max_chars, lead[7].folder) == (
+            30_000, tmp_path / ".agentic_cli" / "tool-output"
+        )
         assert issubclass(ReportingSummarizationMiddleware, SummarizationMiddleware)
         assert lead[2].kind is ProviderKind.ANTHROPIC
         assert lead[3].agent == "lead"
@@ -334,7 +345,8 @@ class TestTheStack:
         assert [type(m) for m in created["helper"]["middleware"]] == [
             PatchToolCallsMiddleware, ForeignReasoningMiddleware,
             ReportingSummarizationMiddleware, ContextOverflowMiddleware,
-            PermissionMiddleware, ToolCallErrorMiddleware, ActiveToolCallMiddleware,
+            PermissionMiddleware, ToolResultCapMiddleware, ToolCallErrorMiddleware,
+            ActiveToolCallMiddleware,
         ]
         assert created["helper"]["middleware"][1].kind is ProviderKind.GOOGLE
         assert created["helper"]["middleware"][2].agent == "helper"
@@ -672,10 +684,15 @@ class TestSummarizationInATurn:
         assert not manager._initialized
         assert server.api.requests == []
 
-    async def test_a_tool_result_too_big_for_the_window_ends_the_turn(self, small, monkeypatch):
+    async def test_a_tool_result_too_big_for_the_window_ends_the_turn(self, hermetic, monkeypatch):
+        # With the tool result cap out of the way: at its default the result
+        # is cut and fits (the test after this one).
         server = EndpointAPI(**{"Answer.": [_call("huge_report", {}, "c1")]})
         route(monkeypatch, openai, "AsyncOpenAI", server.api)
-        manager = _manager(small, [AgentConfig(name="solo", prompt="Answer.", tools=[huge_report])])
+        uncut = _settings(
+            model_endpoints=SMALL, default_model="local:small", tool_result_max_chars=1_000_000
+        )
+        manager = _manager(uncut, [AgentConfig(name="solo", prompt="Answer.", tools=[huge_report])])
         try:
             events = await turn(manager, "Report.")
         finally:
@@ -689,6 +706,27 @@ class TestSummarizationInATurn:
         assert EventType.TEXT not in kinds
         assert events[-1].metadata["error_code"] == OVERFLOW_ERROR_CODE
         assert events[-1].content == overflow_message("local:small")
+
+    async def test_at_the_default_limit_that_result_is_cut_and_the_turn_answers(
+        self, small, monkeypatch
+    ):
+        # 100,000 characters cut to 50,000, about 12,500 tokens: the
+        # 19,000-token budget holds them.
+        server = EndpointAPI(**{"Answer.": [_call("huge_report", {}, "c1"),
+                                            chat_completion("Reported.")]})
+        route(monkeypatch, openai, "AsyncOpenAI", server.api)
+        manager = _manager(small, [AgentConfig(name="solo", prompt="Answer.", tools=[huge_report])])
+        try:
+            events = await turn(manager, "Report.")
+        finally:
+            await manager.cleanup()
+
+        assert [e.content for e in events if e.type is EventType.TEXT] == ["Reported."]
+        assert EventType.ERROR not in [e.type for e in events]
+        tool_message = server.requests("Answer.")[-1][-1]
+        assert tool_message["role"] == "tool"
+        assert "characters cut]" in tool_message["content"]
+        assert len(tool_message["content"]) <= 50_000
 
     async def test_a_summary_stays_with_the_agent_that_wrote_it(self, small, monkeypatch):
         """The coordinator's summary never reaches a sub-agent's brief, and

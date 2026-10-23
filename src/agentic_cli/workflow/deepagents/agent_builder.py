@@ -25,12 +25,15 @@ other), then the model side and the tool side.
   and on Claude with ``prompt_caching_enabled`` the cache marks land on the
   final request (``AnthropicPromptCachingMiddleware``: the system prompt, the
   last tool and the conversation, for 5 minutes, as on ADK).
-- Tool side, outermost first: the permission gate, the tool-error
+- Tool side, outermost first: the permission gate, the tool result cap
+  (``ToolResultCapMiddleware``: a result over ``tool_result_max_chars`` is
+  cut, its full output saved; an error result too), the tool-error
   middleware, and the active tool call (a job a tool starts is linked to its
   call), so only a call the gate let through runs as one.
 
-The model side is built from the agent's resolved model and the settings; a
-tree built without settings (a unit test's) has the tool side only.
+The model side is built from the agent's resolved model and the settings,
+and the cap from the settings; a tree built without settings (a unit test's)
+has neither.
 """
 
 from __future__ import annotations
@@ -59,9 +62,11 @@ from agentic_cli.workflow.deepagents.middleware import (
     ForeignReasoningMiddleware,
     PermissionMiddleware,
     ToolCallErrorMiddleware,
+    ToolResultCapMiddleware,
 )
 from agentic_cli.workflow.deepagents.state import AgentCliState
 from agentic_cli.workflow.deepagents.summarization import build_summarization
+from agentic_cli.workflow.tool_output import tool_output_dir
 
 if TYPE_CHECKING:
     from langchain.agents.middleware import AgentMiddleware
@@ -100,7 +105,8 @@ def build_agent_tree(
             summarization and prompt caching) is configured from.
         tools: Each agent's LangChain tools, by name (none if absent).
         prompts: Each agent's system prompt, already resolved.
-        settings: The manager's settings.
+        settings: The manager's settings: the model side and the tool result
+            cap are built from them.
         checkpointer: The root's checkpointer. Sub-agents get none: they
             inherit it through LangGraph's nested-graph rules, so their
             checkpoints sit in the root's thread under their task's
@@ -129,10 +135,9 @@ def build_agent_tree(
             tools=_own_tools(config, tools.get(name, []), delegates=bool(subagents)),
             system_prompt=prompts[name],
             middleware=_middleware(
-                config,
                 subagents,
                 model_side=_model_side(model, resolved.get(name), settings),
-                bound=bound,
+                tool_side=_tool_side(config, settings, bound=bound),
             ),
             state_schema=AgentCliState,
             name=name,
@@ -160,21 +165,34 @@ def _own_tools(
 
 
 def _middleware(
-    config: AgentConfig,
     subagents: list[CompiledSubAgent],
     *,
     model_side: list["AgentMiddleware"],
-    bound: Callable[[object], ToolDefinition | None],
+    tool_side: list["AgentMiddleware"],
 ) -> list["AgentMiddleware"]:
     stack: list[AgentMiddleware] = [PatchToolCallsMiddleware()]
     if subagents:
         stack.append(_delegation(subagents))
-    stack += model_side
-    stack += [
-        PermissionMiddleware(config.name, bound=bound),
-        ToolCallErrorMiddleware(),
-        ActiveToolCallMiddleware(),
-    ]
+    return stack + model_side + tool_side
+
+
+def _tool_side(
+    config: AgentConfig,
+    settings: "BaseSettings | None",
+    *,
+    bound: Callable[[object], ToolDefinition | None],
+) -> list["AgentMiddleware"]:
+    """What runs each of the agent's tool calls, outermost first."""
+    stack: list[AgentMiddleware] = [PermissionMiddleware(config.name, bound=bound)]
+    if settings is not None:
+        # Inside the gate, whose denials are short; outside the tool-error
+        # middleware, so an error result is capped too.
+        stack.append(
+            ToolResultCapMiddleware(
+                settings.tool_result_max_chars, tool_output_dir(settings.app_name)
+            )
+        )
+    stack += [ToolCallErrorMiddleware(), ActiveToolCallMiddleware()]
     return stack
 
 

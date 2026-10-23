@@ -661,10 +661,11 @@ class BaseCLIApp:
         # when it changes (otherwise the change only took effect on restart).
         # So does a role's model ("model_role:<role>"): agents resolve their
         # roles when the workflow initializes. And so do the settings of when
-        # to summarize: each agent's thresholds are fixed when it is built.
+        # to summarize and where a tool result is cut: each agent's
+        # thresholds and cap are fixed when it is built.
         reinit_settings = {
             "model", "thinking_effort", "orchestrator",
-            "context_summarize_at", "context_max_tokens",
+            "context_summarize_at", "context_max_tokens", "tool_result_max_chars",
         }
 
         for key, value in changes.items():

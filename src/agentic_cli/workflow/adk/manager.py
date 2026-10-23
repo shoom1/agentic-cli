@@ -30,7 +30,9 @@ from agentic_cli.workflow.adk.event_processor import ADKEventProcessor
 from agentic_cli.workflow.adk.model_factory import build_adk_model
 from agentic_cli.workflow.adk.permission_plugin import PermissionPlugin
 from agentic_cli.workflow.adk.plugins import LLMLoggingPlugin
+from agentic_cli.workflow.adk.tool_result_cap_plugin import ToolResultCapPlugin
 from agentic_cli.workflow.service_registry import JOB_MANAGER
+from agentic_cli.workflow.tool_output import tool_output_dir
 
 from agentic_cli.config import (
     BaseSettings,
@@ -572,6 +574,14 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
 
             # One Gemini cache attempt a turn, not one per tool step.
             plugins.append(ContextCachePlugin())
+        if not self._adk_config_path:
+            # Every tool result over the limit is cut. After the task progress
+            # plugin: ADK stops at the first plugin whose after_tool_callback
+            # returns a value, and this one returns the cut. Not for a native
+            # ADK app, whose agents' own after_tool_callbacks it would skip.
+            plugins.append(ToolResultCapPlugin(
+                self._settings.tool_result_max_chars, tool_output_dir(self._settings.app_name)
+            ))
         app = App(
             name=self.app_name,
             root_agent=self._root_agent,
