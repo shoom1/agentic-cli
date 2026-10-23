@@ -843,10 +843,15 @@ class TestTheADKItRestsOn:
         parameters = inspect.signature(function).parameters
 
         assert inspect.iscoroutinefunction(function)
-        assert list(parameters) == [
+        assert list(parameters)[:6] == [
             "config", "session", "session_service", "agent", "agent_name", "current_branch",
         ]
         assert {p.kind for p in parameters.values()} == {inspect.Parameter.KEYWORD_ONLY}
+        # google-adk 2.13 adds isolation_scope; compact_session leaves it at its
+        # default, None, a chat session's root agent's own scope.
+        assert all(
+            p.default is not inspect.Parameter.empty for p in list(parameters.values())[6:]
+        )
 
     def test_a_compaction_event_carries_its_range_and_content(self):
         from google.adk.events.event_actions import EventCompaction
