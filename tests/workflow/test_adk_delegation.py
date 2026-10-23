@@ -39,6 +39,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import anthropic
+import httpx
 import pytest
 
 pytest.importorskip("google.adk")
@@ -47,6 +48,7 @@ from anthropic import AsyncAnthropic  # noqa: E402
 from google.adk import Runner  # noqa: E402
 from google.adk.agents import LlmAgent  # noqa: E402
 from google.adk.apps import App  # noqa: E402
+from google.adk.events import Event  # noqa: E402
 from google.adk.models.anthropic_llm import AnthropicLlm  # noqa: E402
 from google.adk.sessions import InMemorySessionService  # noqa: E402
 from google.adk.tools import BaseTool, LongRunningFunctionTool  # noqa: E402
@@ -465,6 +467,110 @@ class TestDelegation:
             await manager.cleanup()
 
 
+class TestTheStream:
+    """Only the root replies: a sub-agent's text is activity, and its calls'
+    prompts are its brief, not the conversation's context."""
+
+    async def test_a_sub_agents_text_and_usage_are_marked(self, project, monkeypatch):
+        answers = delegating()
+        events = await three_turns(monkeypatch, team(), answers)
+
+        delegated = events[1]
+        assert [(e.content, e.metadata.get("agent"), e.metadata.get("subagent"))
+                for e in delegated if e.type is EventType.TEXT] == [
+            ("X is 42.", "researcher", True),
+            ("The researcher says X is 42.", None, None),
+        ]
+        assert [e.metadata.get("purpose") for e in delegated
+                if e.type is EventType.LLM_USAGE] == [None, "subagent", None]
+
+    async def test_a_sub_agents_failure_is_a_warning_and_the_turn_goes_on(
+        self, project, monkeypatch
+    ):
+        refused = httpx.Response(400, json={"type": "error", "error": {
+            "type": "invalid_request_error", "message": "max_tokens: 100000 > 64000"}})
+        answers = Team(
+            coordinator=[calls("researcher", "toolu_c1", request=BRIEF),
+                         says("The researcher could not do it.")],
+            researcher=[refused],
+        )
+        route(monkeypatch, anthropic, "AsyncAnthropic", FakeAPI(answers))
+        manager = manager_for(team())
+        try:
+            events = await turn(manager, "Find X.")
+        finally:
+            await manager.cleanup()
+
+        (error,) = [e for e in events if e.type is EventType.ERROR]
+        assert error.content.startswith("researcher failed: ")
+        assert "max_tokens: 100000 > 64000" in error.content
+        assert (error.metadata["recoverable"], error.metadata["agent"]) == (True, "researcher")
+        # The coordinator is asked again, and answers the user.
+        assert answers.agents == ["coordinator", "researcher", "coordinator"]
+        assert texts(events)[-1] == "The researcher could not do it."
+
+    async def test_fact_extraction_reads_only_the_user_and_the_main_agent(
+        self, project, monkeypatch
+    ):
+        answers = delegating()
+        route(monkeypatch, anthropic, "AsyncAnthropic", FakeAPI(answers))
+        manager = manager_for(team())
+        try:
+            for text in TURNS[:2]:
+                await turn(manager, text)
+            recent = await manager.recent_messages("s", user_id="u")
+        finally:
+            await manager.cleanup()
+
+        assert recent == [
+            {"role": "user", "content": TURNS[0]},
+            {"role": "assistant", "content": "Noted, Ada."},
+            {"role": "user", "content": TURNS[1]},
+            {"role": "assistant", "content": "The researcher says X is 42."},
+        ]
+
+    async def test_the_processor_knows_the_root(self, project):
+        manager = manager_for(team())
+        await manager.initialize_services()
+        try:
+            assert manager._event_processor.root == "coordinator"
+        finally:
+            await manager.cleanup()
+
+    async def test_a_native_app_has_none(self, project, tmp_path):
+        (tmp_path / "root_agent.yaml").write_text(textwrap.dedent("""
+            agent_class: LlmAgent
+            name: root
+            model: claude-sonnet-4-6
+            instruction: Route.
+        """))
+        manager = GoogleADKWorkflowManager(
+            agent_configs=[],
+            settings=BaseSettings(session_store="memory", default_model="claude-sonnet-4-6"),
+            adk_config_path=str(tmp_path / "root_agent.yaml"),
+        )
+        await manager.initialize_services()
+        try:
+            assert manager._event_processor.root is None
+            # Each agent a native app transfers to replies: fact extraction
+            # reads them all.
+            service = manager._session_service
+            session = await service.create_session(
+                app_name=manager.app_name, user_id="u", session_id="s"
+            )
+            for author, role, text in (("user", "user", "Hi."), ("helper", "model", "Helper here.")):
+                await service.append_event(session, Event(
+                    author=author, invocation_id="i1",
+                    content=types.Content(role=role, parts=[types.Part.from_text(text=text)]),
+                ))
+            recent = await manager.recent_messages("s", user_id="u")
+        finally:
+            await manager.cleanup()
+
+        assert recent == [{"role": "user", "content": "Hi."},
+                          {"role": "assistant", "content": "Helper here."}]
+
+
 # --- what the manager builds -----------------------------------------------------------
 
 
@@ -744,6 +850,27 @@ class TestJobs:
         )
         assert _last_user_text(answers.bodies("coordinator")[-1]) == notice
         assert texts(resumed) == ["The build finished: built ok."]
+
+    async def test_fact_extraction_leaves_the_notice_out(self, project, monkeypatch):
+        # The notice is a user-role message nobody typed, as on Deep Agents,
+        # where its mark keeps it out.
+        answers = self._sub_agents_job()
+        route(monkeypatch, anthropic, "AsyncAnthropic", FakeAPI(answers))
+        manager = manager_for(team(researcher_tools=[delegation_probe_start_job]))
+        try:
+            await turn(manager, "Build it.")
+            record = _record(STARTED[-1])
+            async for _ in manager.resume_with_job_result(record, result="built ok"):
+                pass
+            recent = await manager.recent_messages("s", user_id="u")
+        finally:
+            await manager.cleanup()
+
+        assert recent == [
+            {"role": "user", "content": "Build it."},
+            {"role": "assistant", "content": "The researcher started job j1."},
+            {"role": "assistant", "content": "The build finished: built ok."},
+        ]
 
     async def test_the_main_agents_own_job_answers_its_call(self, project, monkeypatch):
         answers = Team(coordinator=[

@@ -132,6 +132,23 @@ class TestText:
 
         assert EventType.TEXT not in _types(events)
 
+    def test_the_roots_text_is_the_reply(self):
+        events = _processor().process((), "updates", _model_update(AIMessage("Hello.")))
+
+        (event,) = [e for e in events if e.type is EventType.TEXT]
+        assert "subagent" not in event.metadata
+
+    def test_a_sub_agents_text_is_its_activity(self):
+        # Only the root replies to the user; a sub-agent's text is its work,
+        # and its answer reaches the coordinator as the task call's result.
+        processor = _processor()
+        _delegated(processor, (), SUB, "researcher")
+
+        events = processor.process((SUB,), "updates", _model_update(AIMessage("It is 42.")))
+
+        (event,) = [e for e in events if e.type is EventType.TEXT]
+        assert (event.metadata["agent"], event.metadata["subagent"]) == ("researcher", True)
+
 
 class TestThinking:
     def test_reasoning_comes_before_the_text_it_precedes(self):
@@ -682,6 +699,10 @@ class TestARealStream:
             ("text", "researcher", "It is 42."),
             ("tool_result", "coordinator", "task"),
             ("text", "coordinator", "X is 42."),
+        ]
+        assert [(e.metadata["agent"], e.metadata.get("subagent")) for e in events
+                if e.type is EventType.TEXT] == [
+            ("coordinator", None), ("researcher", True), ("coordinator", None),
         ]
         usage = [(e.metadata["agent"], e.metadata["model"]) for e in events
                  if e.type is EventType.LLM_USAGE]

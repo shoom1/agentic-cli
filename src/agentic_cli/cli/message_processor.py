@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, ClassVar
 
 from thinking_prompt import ButtonConfig, Dialog, TextField
 
+from agentic_cli.constants import truncate
 from agentic_cli.logging import Loggers, bind_context
 
 if TYPE_CHECKING:
@@ -39,6 +40,9 @@ CANCELLED_LINE = "Operation cancelled..."
 # Under a free-text question's answer field. thinking-prompt opens a text
 # field for viewing: keys typed at it before Enter are dropped.
 ANSWER_HINT = "Press Enter to type your answer, Enter again to keep it"
+
+# How much of a sub-agent's text its status line shows.
+_SUBAGENT_LINE = 80
 
 
 @contextmanager
@@ -666,12 +670,25 @@ class MessageProcessor:
         settings: "BaseSettings",
         workflow: object,
     ) -> None:
-        """Handle TEXT events — stream response to console."""
-        ui.add_response(event.content, markdown=True)
-        state.response_content.append(event.content)
-        # Text is already on screen and in the durable session: replaying the
+        """Handle TEXT events — stream response to console.
+
+        Only the main agent replies to the user. A sub-agent's text (marked
+        ``metadata["subagent"]`` by the backend) is its work, which its parent
+        reads as a tool result: it becomes the events box's status line,
+        under the sub-agent's name, and is no part of the reply.
+        """
+        # Text is already on screen, or in the durable session: replaying the
         # turn would emit it twice.
         state.side_effects_seen = True
+        if event.metadata.get("subagent"):
+            line = next(
+                (line.strip() for line in event.content.splitlines() if line.strip()), ""
+            )
+            agent = event.metadata.get("agent") or "sub-agent"
+            state.status_line = truncate(f"{agent}: {line}", _SUBAGENT_LINE)
+            return
+        ui.add_response(event.content, markdown=True)
+        state.response_content.append(event.content)
 
     async def _handle_error(
         self,

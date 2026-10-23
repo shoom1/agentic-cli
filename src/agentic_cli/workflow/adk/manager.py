@@ -41,7 +41,7 @@ from agentic_cli.config import (
 )
 from agentic_cli.logging import Loggers, bind_context
 from agentic_cli.models import CacheMechanism
-from agentic_cli.tools.jobs.resume import job_notice, job_result_payload
+from agentic_cli.tools.jobs.resume import JOB_NOTICE_HEADER, job_notice, job_result_payload
 
 
 logger = Loggers.workflow()
@@ -634,6 +634,10 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         self._runner = Runner(app=app, session_service=self._session_service)
         # Usage events name the default model, resolved for this initialization.
         self._event_processor.model = self.model
+        # Only the root replies to the user; another agent's text is a
+        # sub-agent's work. A native ADK app's agents transfer, and each one
+        # it transfers to replies.
+        self._event_processor.root = None if self._adk_config_path else self._root_agent.name
 
         logger.info(
             "services_initialized",
@@ -1036,6 +1040,13 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
     ) -> list[dict]:
         """Recent text messages from the stored session (for fact extraction).
 
+        The user's and the root agent's: a sub-agent's text is its work,
+        which its parent read as a tool result, not a reply. A native ADK
+        YAML app's agents transfer, and each one replies, so all are read. A
+        job notice (``job_notice``) is left out, as on Deep Agents: nobody
+        typed it. ADK keeps no mark on the message, so it is known by its
+        header.
+
         Args:
             session_id: Session to read.
             limit: Maximum number of messages returned (most recent last).
@@ -1051,8 +1062,13 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         )
         if session is None or not getattr(session, "events", None):
             return []
+        root = (
+            None if self._root_agent is None or self._adk_config_path else self._root_agent.name
+        )
         out: list[dict] = []
         for event in session.events:
+            if root is not None and getattr(event, "author", None) not in ("user", root):
+                continue
             content = getattr(event, "content", None)
             if content is None:
                 continue
@@ -1061,6 +1077,8 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                 p.text for p in (getattr(content, "parts", None) or [])
                 if getattr(p, "text", None)
             )
+            if role == "user" and text.startswith(JOB_NOTICE_HEADER):
+                continue
             if text:
                 out.append(
                     {"role": "user" if role == "user" else "assistant", "content": text}
