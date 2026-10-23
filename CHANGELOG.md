@@ -321,7 +321,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   model that writes it: after a switch to a smaller model, the middle of a
   range too long for it is left out ("[... middle of the conversation
   omitted ...]", the summary so far kept whole), as LangChain does on an
-  overflow but before the call, so a summary is still written. While the summary is
+  overflow but before the call, so a summary is still written. A summary
+  call refused as too long all the same (an endpoint model declared without
+  its window counts as 128,000 tokens) is sent once more, sized to the limit
+  the refusal states, else to half the window. While the summary is
   written the CLI shows "Summarizing the earlier conversation…", and the
   summary's usage and a `CONTEXT_TRIMMED` (`source="summarization"`) follow.
   Only the main agent's conversation is summarized: a sub-agent past its own

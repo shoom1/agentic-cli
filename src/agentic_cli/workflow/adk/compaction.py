@@ -55,6 +55,7 @@ and the summarizer interface.
 from __future__ import annotations
 
 import json
+import re
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -190,6 +191,10 @@ class AgentCliSummarizer(BaseEventsSummarizer):
             prefix included); None until one is.
     """
 
+    #: The window a summary call is sized to, when not the model's: the limit
+    #: a refusal stated (see ``_summarize``).
+    _sized_to: int | None = None
+
     def __init__(
         self,
         *,
@@ -239,10 +244,25 @@ class AgentCliSummarizer(BaseEventsSummarizer):
             return None
 
         live_events.report(WorkflowEvent.context_summarizing(self.root))
-        summary, usage = await generate_text(
-            self.model, summary_prompt(self._rendered(summarized), self.focus),
-            settings=self._settings, app_name=self._app_name,
-        )
+        try:
+            summary, usage = await generate_text(
+                self.model, summary_prompt(self._rendered(summarized), self.focus),
+                settings=self._settings, app_name=self._app_name,
+            )
+        except Exception as error:
+            # Refused as too long: the window was assumed (an endpoint model
+            # declared without one counts as 128,000) or is wrong. Once more,
+            # sized to the limit the provider stated, else to half the window.
+            if not _is_overflow(error):
+                raise
+            self._sized_to = _summary_window(str(error), self.budget.window)
+            try:
+                summary, usage = await generate_text(
+                    self.model, summary_prompt(self._rendered(summarized), self.focus),
+                    settings=self._settings, app_name=self._app_name,
+                )
+            finally:
+                self._sized_to = None
         if not summary.strip():
             raise ValueError(f"{self.model.ref} wrote an empty summary")
 
@@ -292,8 +312,9 @@ class AgentCliSummarizer(BaseEventsSummarizer):
         with the rest, the same way.
         """
         ratio = chars_per_token(self.model.record.kind)
+        window = self._sized_to or self.budget.window
         room = int(
-            (int(0.95 * self.budget.window) - SUMMARY_MAX_TOKENS) * ratio / ESTIMATE_MARGIN
+            (int(0.95 * window) - SUMMARY_MAX_TOKENS) * ratio / ESTIMATE_MARGIN
         ) - len(summary_prompt("", self.focus))
         seed = summarized[:1] if _is_seed(summarized[0]) else []
         head, rest = render_events(seed), render_events(summarized[len(seed):])
@@ -526,3 +547,32 @@ def _cut(line: str) -> str:
     if len(line) <= TOOL_PAYLOAD_CHARS:
         return line
     return f"{line[:TOOL_PAYLOAD_CHARS]}…[{len(line) - TOOL_PAYLOAD_CHARS:,} characters cut]"
+
+
+#: How providers state the limit a request went over: OpenAI-compatible
+#: servers (vLLM, OpenRouter) "maximum context length is N", Claude "> N
+#: maximum", Gemini "allowed (N)".
+_STATED_LIMIT = re.compile(
+    r"maximum context length is (\d[\d,]*)|> (\d[\d,]*) maximum|allowed \((\d[\d,]*)\)",
+    re.IGNORECASE,
+)
+
+
+def _is_overflow(error: Exception) -> bool:
+    from agentic_cli.workflow.context import is_context_overflow
+
+    return is_context_overflow(error)
+
+
+def _summary_window(message: str, window: int) -> int:
+    """The window a summary refused as too long is sized to next.
+
+    The limit the provider's ``message`` states, when it is under the
+    ``window`` the refused call was sized to; else half that window.
+    """
+    match = _STATED_LIMIT.search(message)
+    if match:
+        stated = int(next(group for group in match.groups() if group).replace(",", ""))
+        if stated < window:
+            return stated
+    return window // 2
