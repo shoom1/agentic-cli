@@ -447,3 +447,32 @@ async def test_an_inherited_history_with_tool_calls_the_sub_agent_lacks_is_accep
     assert find_tool_results(looked_up, "lookup_codename")
     (archivist,) = _answers_of(asked, "archivist", backend)
     assert "marigold" in archivist.lower(), archivist
+
+
+@pytest.mark.parametrize("backend", ["adk", "deepagents"])
+@_needs(_key_for(CLAUDE))
+async def test_a_fork_after_a_tool_call_in_the_same_turn_with_thinking_on(
+    listed, tmp_path, backend
+):
+    # The coordinator calls a tool, then delegates, in one turn, with thinking
+    # on: a fork inherits that tool exchange without the coordinator's
+    # thinking (another agent's reasoning is never passed on). Claude accepts
+    # the request.
+    manager = _manager_for(
+        backend, _team(tools=[lookup_codename]), _settings(tmp_path, thinking_effort="low"),
+        CLAUDE,
+    )
+    try:
+        events = await collect_events(
+            manager,
+            "First call lookup_codename. Then, in this same turn, ask the archivist: which "
+            "codename did the lookup return? Tell me its answer.",
+            session_id="same-turn",
+        )
+    finally:
+        await manager.cleanup()
+
+    assert_no_errors(events)
+    assert find_tool_results(events, "lookup_codename")
+    (archivist,) = _answers_of(events, "archivist", backend)
+    assert "marigold" in archivist.lower(), archivist
