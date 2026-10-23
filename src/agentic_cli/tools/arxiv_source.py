@@ -278,8 +278,13 @@ class ArxivSearchSource(SearchSource):
 
         await self._wait_for_rate_limit_async()
 
+        async def only_pdfs(next_url: str) -> str | None:
+            # A redirect is followed only to another PDF URL: what the tool
+            # declares it reads.
+            return None if _is_arxiv_pdf_url(next_url) else f"outside {ARXIV_PDF_URL}/"
+
         fetcher = get_or_create_fetcher()
-        result = await fetcher.fetch(pdf_url, timeout=int(timeout))
+        result = await fetcher.fetch(pdf_url, timeout=int(timeout), authorize=only_pdfs)
         if not result.success:
             raise RuntimeError(f"PDF fetch blocked or failed: {result.error}")
 

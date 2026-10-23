@@ -37,7 +37,7 @@ class _Fetcher:
     def __init__(self, result):
         self.result = result
 
-    async def fetch(self, url, timeout=30):
+    async def fetch(self, url, timeout=30, *, authorize=None):
         return self.result
 
 

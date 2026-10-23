@@ -25,6 +25,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   port, or its scheme's default (443, 80), must now equal the URL's. A deny
   rule without a port no longer covers other ports either: a request to one of
   them is asked about, as any URL no rule covers.
+- **`web_fetch` follows a redirect only where a fetch of its target is
+  allowed.** The permission engine judged only the URL the call named, and
+  the fetcher followed redirects on the same host after the SSRF and
+  robots.txt checks alone, so with `https://host/public/**` allowed and
+  `https://host/private/**` denied, a `/public` page that redirected to
+  `/private` returned the private page; "Allow once" (one exact URL) and an
+  HTTPS grant (which does not cover `http://` on the same host) were crossed
+  the same way. Each redirect target is now put to the engine before it is
+  requested: denied, the fetch fails naming it; allowed, it is followed;
+  otherwise the user is asked, as for a direct fetch. A page served from the
+  cache is checked again for the URL it was finally read from.
+  `ContentFetcher.fetch` takes the check as `authorize=`. The arXiv PDF
+  download follows a redirect only to another `https://arxiv.org/pdf/` URL.
 
 ### Added
 
