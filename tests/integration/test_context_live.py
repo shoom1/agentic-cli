@@ -16,6 +16,10 @@ What only a real provider can answer:
 - One message larger than the window (the small OpenRouter model, and Claude
   Haiku's 200k) ends in the clear overflow message, whether Deep Agents' own
   budget check or the provider's overflow text stops it.
+- A ``read_file`` result over ``tool_result_max_chars``, on Claude through ADK
+  and through Deep Agents: the model reads the note and pages the output with
+  ``read_file`` to find a line the cut left out. And a tool's result that no
+  file holds: the model follows the note to the saved output.
 
 Override the models with LIVE_CONTEXT_CLAUDE_MODEL (default
 ``anthropic:claude-sonnet-4-5``), LIVE_CONTEXT_GEMINI_MODEL (default
@@ -36,14 +40,22 @@ import pytest
 pytest.importorskip("deepagents")
 
 from agentic_cli.config import BaseSettings  # noqa: E402
+from agentic_cli.tools.registry import register_tool  # noqa: E402
 from agentic_cli.models import ModelCatalog  # noqa: E402
 from agentic_cli.workflow import model_services  # noqa: E402
 from agentic_cli.workflow.config import AgentConfig  # noqa: E402
 from agentic_cli.workflow.context import OVERFLOW_ERROR_CODE  # noqa: E402
+from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager  # noqa: E402
 from agentic_cli.workflow.deepagents import DeepAgentsWorkflowManager  # noqa: E402
 from agentic_cli.workflow.events import EventType  # noqa: E402
+from agentic_cli.workflow.permissions import EXEMPT  # noqa: E402
 from tests.integration.conftest import collect_events  # noqa: E402
-from tests.integration.helpers import assert_no_errors, find_events  # noqa: E402
+from tests.integration.helpers import (  # noqa: E402
+    assert_no_errors,
+    find_events,
+    find_tool_calls,
+    find_tool_results,
+)
 
 pytestmark = pytest.mark.llm
 
@@ -240,3 +252,90 @@ async def test_one_message_larger_than_the_window_ends_in_the_clear_message(
     assert error.metadata.get("error_code") == OVERFLOW_ERROR_CODE, error.content
     assert error.content.startswith("This conversation no longer fits "), error.content
     assert error.content.endswith("context window. Use /compact or /new."), error.content
+
+
+def _numbered_file(path, lines: int) -> dict[int, str]:
+    """A file of ``lines`` numbered lines, each naming its own word; the words by line."""
+    words = {n: f"w{(n * 7919) % 100_003:05d}" for n in range(lines)}
+    path.write_text("".join(f"Line {n:04d}: the word for this line is {w}.\n"
+                            for n, w in words.items()))
+    return words
+
+
+@pytest.mark.parametrize("backend", ["adk", "deepagents"])
+@_needs(_key_for(CLAUDE))
+async def test_the_model_pages_a_cut_read_file_result(listed, tmp_path, monkeypatch, backend):
+    monkeypatch.chdir(tmp_path)
+    # 1,500 lines of about 43 characters: about 65,000 characters, cut to
+    # 20,000. Line 900 is in the middle the cut leaves out.
+    words = _numbered_file(tmp_path / "notes.txt", 1_500)
+    manager_class = GoogleADKWorkflowManager if backend == "adk" else DeepAgentsWorkflowManager
+    manager = manager_class(
+        agent_configs=_assistant(tools=["read_file"], include_state_tools=False),
+        settings=_settings(tmp_path, tool_result_max_chars=20_000, thinking_effort="none"),
+        model=CLAUDE,
+    )
+    try:
+        events = await collect_events(
+            manager,
+            "Read notes.txt with read_file. Then tell me the word on the line that starts "
+            "with 'Line 0900:'. Reply with the word only.",
+            session_id="paging",
+        )
+    finally:
+        await manager.cleanup()
+
+    assert_no_errors(events)
+    first, *later = find_tool_results(events, "read_file")
+    assert "Cut: " in str(first.metadata.get("result")), first.metadata.get("result")
+    assert later, "the model never read the output again"
+    pages = [c.metadata["tool_args"] for c in find_tool_calls(events, "read_file")[1:]]
+    assert any(args.get("offset") or args.get("limit") for args in pages), pages
+    assert list((tmp_path / ".agentic_cli" / "tool-output").glob("read_file-*.txt"))
+    assert words[900] in _text(events), (_text(events), pages)
+
+
+#: ``long_report``'s text: what ``_numbered_file`` writes, held by no file.
+_REPORT_LINES = 1_500
+
+
+def _report_word(n: int) -> str:
+    return f"w{(n * 7919) % 100_003:05d}"
+
+
+@register_tool(capabilities=EXEMPT)
+def long_report() -> dict:
+    """Return today's long report, one numbered line per entry."""
+    text = "".join(f"Line {n:04d}: the word for this line is {_report_word(n)}.\n"
+                   for n in range(_REPORT_LINES))
+    return {"success": True, "report": text}
+
+
+@pytest.mark.parametrize("backend", ["adk", "deepagents"])
+@_needs(_key_for(CLAUDE))
+async def test_the_model_follows_the_note_to_the_saved_output(
+    listed, tmp_path, monkeypatch, backend
+):
+    monkeypatch.chdir(tmp_path)
+    manager_class = GoogleADKWorkflowManager if backend == "adk" else DeepAgentsWorkflowManager
+    manager = manager_class(
+        agent_configs=_assistant(tools=[long_report, "read_file"], include_state_tools=False),
+        settings=_settings(tmp_path, tool_result_max_chars=20_000, thinking_effort="none"),
+        model=CLAUDE,
+    )
+    try:
+        events = await collect_events(
+            manager,
+            "Call long_report. Then tell me the word on the line that starts with "
+            "'Line 0900:'. Reply with the word only.",
+            session_id="saved",
+        )
+    finally:
+        await manager.cleanup()
+
+    assert_no_errors(events)
+    (report,) = find_tool_results(events, "long_report")
+    assert "tool-output" in str(report.metadata.get("result"))
+    paths = [c.metadata["tool_args"].get("path", "") for c in find_tool_calls(events, "read_file")]
+    assert any("tool-output" in path for path in paths), paths
+    assert _report_word(900) in _text(events), (_text(events), paths)
