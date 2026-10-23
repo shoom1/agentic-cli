@@ -40,8 +40,10 @@ agentic-cli/
 │   │   ├── factory.py        # create_workflow_manager_from_settings (_BACKENDS: orchestrator → "module:Class" + extra, imported when chosen)
 │   │   ├── service_registry.py # get_service/require_service + ContextVar registry
 │   │   ├── events.py         # WorkflowEvent, EventType
+│   │   ├── live_events.py    # LiveEvents, merged: events reported inside a turn (reporting/report) reach its stream as they happen
 │   │   ├── config.py         # AgentConfig
 │   │   ├── settings.py       # Workflow/tool settings schema
+│   │   ├── context.py        # ContextBudget/context_budget: when to summarize (window or the 128k floor, budget, trigger, keep; both backends, the CLI); is_context_overflow, overflow_message
 │   │   ├── retry.py          # Rate-limit retry helpers
 │   │   ├── tool_summaries.py
 │   │   ├── memory_services.py # Settings → agentic_cli.memory arguments (KBs, memory store)
@@ -77,7 +79,7 @@ agentic-cli/
 │   │   │   ├── tools.py      # to_langchain_tools: a callable → StructuredTool whose .func/.coroutine is it
 │   │   │   ├── event_processor.py # DeepAgentsEventProcessor (stream → WorkflowEvent, by agent); RunCallback
 │   │   │   ├── sessions.py   # thread_id(SessionRef), CheckpointSessions, job notifications
-│   │   │   ├── summarization.py # Thresholds from the input budget; NoArchiveBackend; history filters
+│   │   │   ├── summarization.py # Each agent's thresholds from context_budget; NoArchiveBackend; history filters
 │   │   │   ├── mcp_tools.py  # MCPSessions: one owner task per (agent, server); the mcp identity map
 │   │   │   └── state.py      # AgentCliState: plan, tasks (last write wins)
 │   │   └── langgraph/        # LangGraph orchestrator (deprecated, removed in 0.8.0)

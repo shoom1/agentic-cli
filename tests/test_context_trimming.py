@@ -1,8 +1,8 @@
 """Tests for source-level context trimming detection.
 
 Covers:
-- WorkflowEvent.context_trimmed() factory
-- LangGraphBuilder._trim_events side-channel
+- WorkflowEvent.context_trimmed() factory, with what a summary or a trim did
+- WorkflowEvent.context_summarizing(), and the CLI's status line for it
 - MessageProcessor dispatch for CONTEXT_TRIMMED
 - ADK heuristic fallback in _handle_llm_usage
 """
@@ -55,48 +55,113 @@ class TestContextTrimmedEvent:
         )
         assert event.metadata["messages_removed"] == 0
 
+    def test_what_a_summary_did(self):
+        event = WorkflowEvent.context_trimmed(
+            messages_before=11, messages_after=2, source="summarization", agent="solo",
+            messages_summarized=10, tokens_before=152_000, tokens_after=9_000,
+        )
 
-# === LangGraphBuilder._trim_events ===
+        assert event.metadata["messages_summarized"] == 10
+        assert event.metadata["tokens_before"] == 152_000
+        assert event.metadata["tokens_after"] == 9_000
+        assert "turns_dropped" not in event.metadata
+
+    def test_what_a_trim_did(self):
+        event = WorkflowEvent.context_trimmed(
+            messages_before=12, messages_after=6, source="fit_guard", turns_dropped=3
+        )
+
+        assert event.metadata["turns_dropped"] == 3
+        for key in ("messages_summarized", "tokens_before", "tokens_after"):
+            assert key not in event.metadata
+
+    def test_the_counts_are_keyword_only(self):
+        with pytest.raises(TypeError):
+            WorkflowEvent.context_trimmed(11, 2, "summarization", "solo", 10)
 
 
-class TestBuilderTrimEvents:
-    def test_trim_events_initialized_empty(self):
-        from agentic_cli.workflow.langgraph.graph_builder import LangGraphBuilder
+# === WorkflowEvent.context_summarizing ===
 
-        settings = MagicMock()
-        builder = LangGraphBuilder(settings)
-        assert len(builder._trim_events) == 0
 
-    def test_trim_events_appendable(self):
-        from agentic_cli.workflow.langgraph.graph_builder import LangGraphBuilder
+class TestContextSummarizingEvent:
+    def test_the_line_the_user_reads(self):
+        event = WorkflowEvent.context_summarizing("solo")
 
-        settings = MagicMock()
-        builder = LangGraphBuilder(settings)
-        builder._trim_events.append({
-            "messages_before": 20,
-            "messages_after": 10,
-            "agent": "test_agent",
-        })
-        assert len(builder._trim_events) == 1
-        assert builder._trim_events[0]["messages_before"] == 20
+        assert event.type is EventType.CONTEXT_SUMMARIZING
+        assert EventType.CONTEXT_SUMMARIZING.value == "context_summarizing"
+        assert event.content == "Summarizing the earlier conversation…"
+        assert event.metadata == {"agent": "solo"}
 
-    def test_drain_pattern(self):
-        """Verify the drain pattern used by the manager works correctly."""
-        from agentic_cli.workflow.langgraph.graph_builder import LangGraphBuilder
+    def test_the_agent_is_optional(self):
+        assert WorkflowEvent.context_summarizing().metadata == {}
 
-        settings = MagicMock()
-        builder = LangGraphBuilder(settings)
-        builder._trim_events.append({"messages_before": 20, "messages_after": 10, "agent": "a"})
-        builder._trim_events.append({"messages_before": 15, "messages_after": 8, "agent": "b"})
 
-        drained = []
-        while builder._trim_events:
-            drained.append(builder._trim_events.popleft())
+class TestHandleContextSummarizing:
+    async def test_it_is_the_status_line_and_prints_nothing(self):
+        from agentic_cli.cli.message_processor import (
+            MessageProcessor,
+            _EventProcessingState,
+        )
+        from tests.cli.dialog_fakes import autospec_session
 
-        assert len(drained) == 2
-        assert len(builder._trim_events) == 0
-        assert drained[0]["agent"] == "a"
-        assert drained[1]["agent"] == "b"
+        MessageProcessor._EVENT_DISPATCH = None
+        handler = MessageProcessor._get_event_dispatch()[EventType.CONTEXT_SUMMARIZING]
+        state = _EventProcessingState()
+        ui = autospec_session()
+
+        await handler(MessageProcessor(), WorkflowEvent.context_summarizing("solo"),
+                      state, ui, MagicMock(), MagicMock())
+
+        assert state.status_line == "Summarizing the earlier conversation…"
+        assert ui.method_calls == []
+
+    async def test_the_line_ends_with_the_summary(self):
+        # The answer's model call runs next, and reports nothing until it ends.
+        from agentic_cli.cli.message_processor import (
+            MessageProcessor,
+            _EventProcessingState,
+        )
+        from tests.cli.dialog_fakes import autospec_session
+
+        MessageProcessor._EVENT_DISPATCH = None
+        dispatch = MessageProcessor._get_event_dispatch()
+        state = _EventProcessingState()
+        usage = WorkflowEvent.llm_usage(model="local:small", prompt_tokens=10, completion_tokens=5)
+        usage.metadata["purpose"] = "summarization"
+
+        for event in (WorkflowEvent.context_summarizing("solo"), usage):
+            await dispatch[event.type](MessageProcessor(), event, state, autospec_session(),
+                                       MagicMock(), MagicMock())
+
+        assert state.status_line == "Processing..."
+
+    async def test_other_usage_leaves_the_line_alone(self):
+        from agentic_cli.cli.message_processor import (
+            MessageProcessor,
+            _EventProcessingState,
+        )
+        from tests.cli.dialog_fakes import autospec_session
+
+        MessageProcessor._EVENT_DISPATCH = None
+        state = _EventProcessingState(status_line="Calling: web_fetch")
+        usage = WorkflowEvent.llm_usage(model="local:small", prompt_tokens=10, completion_tokens=5)
+
+        await MessageProcessor._get_event_dispatch()[EventType.LLM_USAGE](
+            MessageProcessor(), usage, state, autospec_session(), MagicMock(), MagicMock()
+        )
+
+        assert state.status_line == "Calling: web_fetch"
+
+    async def test_a_turn_that_summarizes_shows_only_its_answer(self):
+        from tests.test_message_processor_render import _render
+
+        ui, _, _ = await _render([
+            WorkflowEvent.context_summarizing("solo"),
+            WorkflowEvent.text("The answer."),
+        ])
+
+        assert ui.responses() == ["The answer."]
+        assert not ui.warnings() and not ui.of("message") and not ui.rich()
 
 
 # === Dispatch table includes CONTEXT_TRIMMED ===

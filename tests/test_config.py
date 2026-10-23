@@ -548,3 +548,30 @@ def test_package_exports_new_modules():
     assert MemoryStore is not None
     assert MemoryItem is not None
     assert shell_executor is not None
+
+
+def test_a_06_project_file_prints_nothing_at_startup(tmp_path):
+    """0.6.0 and 0.6.1's /settings saved the removed context_window_* counts.
+
+    Apps build their settings before ``BaseCLIApp`` configures logging, when
+    structlog still prints every level, a debug log included, above the UI.
+    So a key that names no setting is dropped without a log. A fresh
+    interpreter: other tests configure structlog for the whole process.
+    """
+    import json
+    import subprocess
+    import sys
+
+    project = tmp_path / "project"
+    (project / ".agentic_cli").mkdir(parents=True)
+    (project / ".agentic_cli" / "settings.json").write_text(json.dumps({
+        "context_window_trigger_tokens": 100_000, "context_window_target_tokens": 80_000,
+    }))
+    (tmp_path / "home").mkdir()
+    env = {**os.environ, "HOME": str(tmp_path / "home")}
+    done = subprocess.run(
+        [sys.executable, "-c", "from agentic_cli.config import BaseSettings; BaseSettings()"],
+        cwd=project, env=env, capture_output=True, text=True, check=True,
+    )
+    assert done.stdout == ""
+    assert done.stderr == ""

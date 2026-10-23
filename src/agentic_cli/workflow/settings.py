@@ -20,6 +20,7 @@ from agentic_cli.models import (
     parse_ref,
     validate_endpoint_name,
 )
+from agentic_cli.workflow.context import MIN_BUDGET
 
 logger = Loggers.config()
 
@@ -114,30 +115,30 @@ class WorkflowSettingsMixin:
         json_schema_extra={"ui_order": 12},
     )
 
-    # Context window management
-    context_window_enabled: bool = Field(
-        default=False,
-        title="Context Window Management",
+    # When a conversation is summarized, on every backend (workflow/context.py):
+    # at context_summarize_at of the model's input budget, or at
+    # context_max_tokens if that comes first. They replace 0.6's
+    # context_window_* settings; a settings file still holding one loads.
+    context_summarize_at: float = Field(
+        default=0.85,
+        ge=0.5,
+        le=0.95,
+        title="Summarize At",
         description=(
-            "Manage the context window with the two token counts below. On Deep "
-            "Agents, summarization is always on and this picks its thresholds: "
-            "off, automatic ones from the model's input budget; on, the trigger "
-            "and the tail kept (if the model's window is known and the trigger is "
-            "above the automatic one, both are lowered in proportion)"
+            "How full the model's input budget gets before the earlier conversation "
+            "is summarized, as a fraction (0.5 to 0.95)"
         ),
         json_schema_extra={"ui_order": 25},
     )
-    context_window_trigger_tokens: int = Field(
-        default=100_000,
-        title="Context Trigger Tokens",
-        description="Start trimming when context exceeds this token count",
+    context_max_tokens: int = Field(
+        default=200_000,
+        ge=0,
+        title="Context Ceiling",
+        description=(
+            "Summarize the earlier conversation once a prompt reaches this many tokens, "
+            "even on a model with a larger window (at least 16000; 0 means no ceiling)"
+        ),
         json_schema_extra={"ui_order": 26},
-    )
-    context_window_target_tokens: int = Field(
-        default=80_000,
-        title="Context Target Tokens",
-        description="Target token count after trimming",
-        json_schema_extra={"ui_order": 27},
     )
 
     # API Keys (common across all domains, never saved to JSON).
@@ -448,6 +449,17 @@ class WorkflowSettingsMixin:
                 parse_ref(v)
             except ModelSpecError as exc:
                 raise ValueError(f"default_model: {exc}") from None
+        return v
+
+    @field_validator("context_max_tokens")
+    @classmethod
+    def _validate_context_max_tokens(cls, v: int) -> int:
+        """0 (no ceiling), or a ceiling an agent can work under."""
+        if 0 < v < MIN_BUDGET:
+            raise ValueError(
+                f"context_max_tokens must be 0 (no ceiling) or at least {MIN_BUDGET:,} "
+                f"(got {v:,})"
+            )
         return v
 
     @field_validator("model_endpoints")

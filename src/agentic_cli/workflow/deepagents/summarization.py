@@ -8,11 +8,13 @@ it per request, so the checkpoint keeps the whole conversation for
 **When.** Deep Agents checks each request against an input budget,
 ``B = 0.95 * window - max_tokens``. Its default trigger is 85% of the *whole*
 window, which with a large output allowance sits above B, so the budget check
-would end the turn before anything was summarized. Here the thresholds come
-from B: summarize at 85% of it and keep the newest 10% word for word. With
-``context_window_enabled`` the settings choose instead, the trigger capped at
-the automatic one (for a model whose window is unknown, as they are). Without
-them, a model whose window is unknown gets Deep Agents' own fixed defaults.
+would end the turn before anything was summarized. Here each agent's
+thresholds are its model's ``ContextBudget`` (``workflow/context.py``), as on
+ADK: summarize at the smaller of ``context_summarize_at`` of B and the
+``context_max_tokens`` ceiling, and keep the newest 12% of that word for
+word. A model whose window is unknown counts as 128,000 tokens, not Deep
+Agents' fixed 170,000 tokens or 6 messages, which never fire on a small
+model.
 
 **No archive.** Deep Agents writes the summarized messages to its virtual
 filesystem and gives the model the file's path; with its file tools off the
@@ -24,9 +26,11 @@ summary prompt is LangChain's: Deep Agents' adds a note on media it archived,
 which here never happens.
 
 **Reporting.** The summary call runs on the agent's own model, tagged
-``lc_source="summarization"``; the run callback reports its usage. Each
-summary applied is reported as a custom run event (``CONTEXT_SUMMARIZED``),
-which the run callback turns into ``CONTEXT_TRIMMED``.
+``lc_source="summarization"``; the run callback reports its start
+(``CONTEXT_SUMMARIZING``) and its usage. Each summary applied is reported as
+a custom run event (``CONTEXT_SUMMARIZED``), which the run callback turns
+into ``CONTEXT_TRIMMED``, with the conversation's tokens before and after as
+the middleware's own counter has them.
 """
 
 from __future__ import annotations
@@ -46,12 +50,12 @@ from deepagents.backends.protocol import (
 from deepagents.middleware.summarization import (
     SUMMARIZATION_EVENT_KEY,
     SummarizationMiddleware,
-    compute_summarization_defaults,
 )
 from langchain.agents.middleware.summarization import DEFAULT_SUMMARY_PROMPT
 from langchain_core.callbacks import adispatch_custom_event, dispatch_custom_event
 
 from agentic_cli.logging import Loggers
+from agentic_cli.workflow.context import context_budget
 
 if TYPE_CHECKING:
     from langchain.agents.middleware import ModelRequest, ModelResponse
@@ -64,7 +68,8 @@ if TYPE_CHECKING:
 logger = Loggers.workflow()
 
 #: The custom run event a summary reports itself with: ``{"agent",
-#: "messages_before", "messages_after", "messages_summarized"}``.
+#: "messages_before", "messages_after", "messages_summarized",
+#: "tokens_before", "tokens_after"}``.
 CONTEXT_SUMMARIZED = "agentic_cli.context_summarized"
 
 #: Why the archive refuses every write.
@@ -79,32 +84,18 @@ _SUMMARIZATION_LOGGER = "deepagents.middleware.summarization"
 
 def summarization_thresholds(
     resolved: "ResolvedModel", settings: "BaseSettings"
-) -> tuple["ContextSize", "ContextSize"] | None:
-    """The ``(trigger, keep)`` an agent's summarization runs on.
+) -> tuple["ContextSize", "ContextSize"]:
+    """The ``(trigger, keep)`` an agent's summarization runs on, in tokens.
 
     Args:
         resolved: The agent's model: its window and its ``max_tokens``.
-        settings: ``context_window_enabled`` and its two token counts.
+        settings: ``context_summarize_at`` and ``context_max_tokens``.
 
-    Returns:
-        Token counts, or None when the model's window is unknown and the
-        settings give none (Deep Agents' fixed defaults then apply).
+    Raises:
+        ContextBudgetError: The model's input budget is too small to work in.
     """
-    window = resolved.record.context_window
-    automatic = None
-    if window is not None:
-        budget = int(0.95 * window) - (resolved.max_tokens or 0)
-        automatic = ("tokens", int(0.85 * budget)), ("tokens", int(0.10 * budget))
-    if settings.context_window_enabled:
-        trigger = settings.context_window_trigger_tokens
-        keep = settings.context_window_target_tokens
-        if automatic is not None and trigger > automatic[0][1]:
-            # The trigger must fit the budget, and the kept tail shrinks with
-            # it: a tail as large as the budget leaves nothing to summarize.
-            keep = int(keep * automatic[0][1] / trigger)
-            trigger = automatic[0][1]
-        return ("tokens", trigger), ("tokens", keep)
-    return automatic
+    budget = context_budget(resolved, settings)
+    return ("tokens", budget.trigger), ("tokens", budget.keep)
 
 
 class NoArchiveBackend(BackendProtocol):
@@ -167,7 +158,20 @@ class ReportingSummarizationMiddleware(SummarizationMiddleware):
         request: "ModelRequest",
         handler: Callable[["ModelRequest"], Awaitable["ModelResponse"]],
     ) -> Any:
-        response = await super().awrap_model_call(request, handler)
+        sent = False
+
+        async def call(request: "ModelRequest") -> "ModelResponse":
+            nonlocal sent
+            sent = True
+            return await handler(request)
+
+        try:
+            response = await super().awrap_model_call(request, call)
+        except NoSummaryWritten as error:
+            if sent:
+                raise _refused_unsummarized(error) from error
+            await self._anot_summarized()
+            return await handler(request.override(messages=self._get_effective_messages(request)))
         report = self._report(request, response)
         if report is not None:
             try:
@@ -181,7 +185,20 @@ class ReportingSummarizationMiddleware(SummarizationMiddleware):
         request: "ModelRequest",
         handler: Callable[["ModelRequest"], "ModelResponse"],
     ) -> Any:
-        response = super().wrap_model_call(request, handler)
+        sent = False
+
+        def call(request: "ModelRequest") -> "ModelResponse":
+            nonlocal sent
+            sent = True
+            return handler(request)
+
+        try:
+            response = super().wrap_model_call(request, call)
+        except NoSummaryWritten as error:
+            if sent:
+                raise _refused_unsummarized(error) from error
+            self._not_summarized()
+            return handler(request.override(messages=self._get_effective_messages(request)))
         report = self._report(request, response)
         if report is not None:
             try:
@@ -195,22 +212,85 @@ class ReportingSummarizationMiddleware(SummarizationMiddleware):
 
         Counts are of the conversation the model is sent: before, the state's
         messages (from the previous summary on, which stands for the rest);
-        after, the new summary and the messages it kept.
+        after, the new summary and the messages it kept. Tokens are the
+        middleware's own count of those two conversations.
         """
         update = getattr(getattr(response, "command", None), "update", None)
         event = update.get(SUMMARIZATION_EVENT_KEY) if isinstance(update, dict) else None
         if not isinstance(event, dict):
             return None
-        total = len(request.messages)
+        messages = list(request.messages)
         previous = (request.state or {}).get(SUMMARIZATION_EVENT_KEY)
+        before = messages
+        if isinstance(previous, dict):
+            before = [previous["summary_message"], *messages[previous["cutoff_index"]:]]
+        after = [event["summary_message"], *messages[event["cutoff_index"]:]]
         start = previous["cutoff_index"] if isinstance(previous, dict) else 0
         carried = 1 if isinstance(previous, dict) else 0  # the previous summary
         return {
             "agent": self.agent,
-            "messages_before": total - start + carried,
-            "messages_after": total - event["cutoff_index"] + 1,
+            "messages_before": len(before),
+            "messages_after": len(after),
             "messages_summarized": event["cutoff_index"] - start + carried,
+            "tokens_before": self.token_counter(before),
+            "tokens_after": self.token_counter(after),
         }
+
+    def _create_summary(self, messages_to_summarize: list[Any]) -> str:
+        """Deep Agents' summary, refused when the model wrote no text.
+
+        A summary call can end with no text: Claude ends one with
+        ``stop_reason: "refusal"``. Deep Agents would store that empty
+        summary in place of the messages it stands for, so the model would
+        never see them again. Raising ``NoSummaryWritten`` instead stores
+        nothing: the model call goes on with the conversation in full, the
+        user is told once a turn (``SUMMARY_NOT_WRITTEN``), and the next call
+        tries again. After the provider refused the request as too long,
+        that is a context overflow.
+        """
+        return _written(super()._create_summary(messages_to_summarize))
+
+    async def _acreate_summary(self, messages_to_summarize: list[Any]) -> str:
+        """``_create_summary``, async."""
+        return _written(await super()._acreate_summary(messages_to_summarize))
+
+    async def _anot_summarized(self) -> None:
+        logger.debug("deepagents_summary_not_written", agent=self.agent)
+        try:
+            await adispatch_custom_event(SUMMARY_NOT_WRITTEN, {"agent": self.agent})
+        except RuntimeError:  # no run to report to (called outside a graph)
+            pass
+
+    def _not_summarized(self) -> None:
+        logger.debug("deepagents_summary_not_written", agent=self.agent)
+        try:
+            dispatch_custom_event(SUMMARY_NOT_WRITTEN, {"agent": self.agent})
+        except RuntimeError:  # no run to report to (called outside a graph)
+            pass
+
+
+#: The custom run event a summary that could not be written reports: ``{"agent"}``.
+SUMMARY_NOT_WRITTEN = "agentic_cli.summary_not_written"
+#: What the user is told, once a turn, when a summary could not be written.
+SUMMARY_FAILED = "Could not summarize the earlier conversation; it is sent in full instead."
+SUMMARY_FAILED_CODE = "summary_failed"
+
+
+class NoSummaryWritten(Exception):
+    """A summary call came back with no text, so no summary is stored."""
+
+
+def _written(summary: str) -> str:
+    if not summary.strip():
+        raise NoSummaryWritten("the model wrote no summary")
+    return summary
+
+
+def _refused_unsummarized(error: NoSummaryWritten) -> Exception:
+    """The overflow a request is left with when no summary could shrink it."""
+    from langchain_core.exceptions import ContextOverflowError
+
+    return ContextOverflowError(f"The request is too long, and {error}.")
 
 
 def build_summarization(
@@ -221,14 +301,14 @@ def build_summarization(
     Args:
         model: The agent's chat model, which also writes the summaries.
         resolved: The agent's resolved model (thresholds; ``agent`` names it).
-        settings: The manager's settings (``context_window_*``).
+        settings: The manager's settings (``context_summarize_at``,
+            ``context_max_tokens``).
+
+    Raises:
+        ContextBudgetError: The model's input budget is too small to work in.
     """
     install_history_filters()
-    thresholds = summarization_thresholds(resolved, settings)
-    if thresholds is None:
-        defaults = compute_summarization_defaults(model)
-        thresholds = defaults["trigger"], defaults["keep"]
-    trigger, keep = thresholds
+    trigger, keep = summarization_thresholds(resolved, settings)
     return ReportingSummarizationMiddleware(
         agent=resolved.agent,
         model=model,

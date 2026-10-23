@@ -15,12 +15,16 @@ last runs a real agent tree on scripted models and feeds it the real stream.
 from __future__ import annotations
 
 import json
+import uuid
 
+import anthropic
+import httpx
 import pytest
 
 pytest.importorskip("deepagents")
 
 from langchain_core.callbacks import AsyncCallbackHandler  # noqa: E402
+from langchain_core.exceptions import ContextOverflowError  # noqa: E402
 from langchain_core.messages import (  # noqa: E402
     AIMessage,
     HumanMessage,
@@ -34,6 +38,7 @@ from agentic_cli.models import ModelCatalog, RoleMap, resolve_model  # noqa: E40
 from agentic_cli.tools._core.tasks import task_progress_data  # noqa: E402
 from agentic_cli.tools.langgraph.state_tools import save_plan, save_tasks  # noqa: E402
 from agentic_cli.workflow.config import AgentConfig  # noqa: E402
+from agentic_cli.workflow.context import OVERFLOW_ERROR_CODE, overflow_message  # noqa: E402
 from agentic_cli.workflow.deepagents.agent_builder import build_agent_tree  # noqa: E402
 from agentic_cli.workflow.deepagents.event_processor import (  # noqa: E402
     DeepAgentsEventProcessor,
@@ -41,6 +46,7 @@ from agentic_cli.workflow.deepagents.event_processor import (  # noqa: E402
 )
 from agentic_cli.workflow.deepagents.tools import to_langchain_tools  # noqa: E402
 from agentic_cli.workflow.events import EventType, WorkflowEvent  # noqa: E402
+from agentic_cli.workflow.live_events import LiveEvents, merged  # noqa: E402
 from tests.models.fakes import endpoints  # noqa: E402
 from tests.workflow.deepagents.fakes import ScriptedChat, ai, task  # noqa: E402
 
@@ -458,6 +464,40 @@ class TestError:
         assert event.content == "TimeoutError"
         assert event.metadata["agent"] == "coordinator"
 
+    def test_an_overflow_names_the_failing_agents_model(self):
+        # Deep Agents' own error when a summary still does not fit.
+        processor = _processor()
+        _delegated(processor, (), SUB, "researcher")
+        error = ContextOverflowError(
+            "Context remains above the input budget after compaction; reduce input, "
+            "tools, or configured output tokens."
+        )
+        processor.process((SUB,), "tasks", {"id": "m1", "name": "model", "error": error,
+                                            "interrupts": [], "result": None})
+
+        event = processor.turn_failed(error)
+
+        assert event.type is EventType.ERROR
+        assert event.content == overflow_message("google:gemini-2.5-flash")
+        assert event.metadata["error_code"] == OVERFLOW_ERROR_CODE
+        assert event.metadata["recoverable"] is False
+        assert event.metadata["agent"] == "researcher"
+
+    def test_a_providers_overflow_at_the_root(self):
+        request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+        error = anthropic.BadRequestError(
+            "prompt is too long: 210000 tokens > 200000 maximum",
+            response=httpx.Response(400, request=request),
+            body={"type": "error", "error": {"type": "invalid_request_error",
+                                             "message": "prompt is too long"}},
+        )
+
+        event = _processor().turn_failed(error)
+
+        assert event.content == overflow_message("anthropic:claude-sonnet-4-5")
+        assert event.metadata["error_code"] == OVERFLOW_ERROR_CODE
+        assert event.metadata["agent"] == "coordinator"
+
 
 class TestAttribution:
     def test_a_sub_agents_events_are_its_own(self):
@@ -524,6 +564,59 @@ class TestRunCallback:
         assert isinstance(callback, AsyncCallbackHandler)
         assert callback.drain() == [first, second]
         assert callback.drain() == []
+
+    async def test_a_summary_call_reports_that_it_started(self):
+        callback = RunCallback(root="coordinator", agent_models=MODELS)
+
+        await callback.on_chat_model_start(
+            {}, [[HumanMessage("Summarize.")]], run_id=uuid.uuid4(),
+            metadata={"lc_source": "summarization", "lc_agent_name": "researcher"},
+        )
+        await callback.on_chat_model_start(  # an agent's own step reports nothing
+            {}, [[HumanMessage("Hi.")]], run_id=uuid.uuid4(),
+            metadata={"lc_agent_name": "researcher"},
+        )
+
+        (event,) = callback.drain()
+        assert event.type is EventType.CONTEXT_SUMMARIZING
+        assert event.content == "Summarizing the earlier conversation…"
+        assert event.metadata["agent"] == "researcher"
+
+    async def test_with_live_events_everything_goes_out_through_them(self):
+        live = LiveEvents()
+        callback = RunCallback(root="coordinator", agent_models=MODELS, live=live)
+        run = uuid.uuid4()
+
+        async def source():
+            await callback.on_chat_model_start(
+                {}, [[HumanMessage("Summarize.")]], run_id=run,
+                metadata={"lc_source": "summarization", "lc_agent_name": "coordinator"},
+            )
+            yield "the stream's next item"
+
+        items = [item async for item in merged(source(), live)]
+
+        assert [getattr(item, "type", item) for item in items] == [
+            EventType.CONTEXT_SUMMARIZING, "the stream's next item"
+        ]
+        assert callback.drain() == []
+
+    async def test_a_summary_reports_its_tokens(self):
+        callback = RunCallback(root="coordinator", agent_models=MODELS)
+
+        await callback.on_custom_event(
+            "agentic_cli.context_summarized",
+            {"agent": "researcher", "messages_before": 11, "messages_after": 2,
+             "messages_summarized": 10, "tokens_before": 18_000, "tokens_after": 3_100},
+            run_id=uuid.uuid4(),
+        )
+
+        (event,) = callback.drain()
+        assert event.type is EventType.CONTEXT_TRIMMED
+        assert {key: event.metadata[key] for key in (
+            "source", "agent", "messages_summarized", "tokens_before", "tokens_after"
+        )} == {"source": "summarization", "agent": "researcher", "messages_summarized": 10,
+               "tokens_before": 18_000, "tokens_after": 3_100}
 
 
 class TestARealStream:

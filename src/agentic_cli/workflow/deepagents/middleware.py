@@ -11,6 +11,9 @@ gets these; sub-agents are gated as strictly as the root.
   tool call, which links a job the tool starts to its call.
 - :class:`ForeignReasoningMiddleware`, on the model side, sends no model
   another provider's reasoning.
+- :class:`ContextOverflowMiddleware`, on the model side inside the
+  summarization, gives it every provider's overflow as LangChain's
+  ``ContextOverflowError``, so it summarizes and retries.
 
 A gate or error result is the call's ``ToolMessage`` with ``status="error"``
 and the result dict as JSON content: the model reads it and carries on.
@@ -28,6 +31,7 @@ from langchain.agents.middleware import (
     ModelResponse,
     ToolCallRequest,
 )
+from langchain_core.exceptions import ContextOverflowError
 from langchain_core.messages import ToolCall, ToolMessage
 from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.errors import GraphBubbleUp
@@ -37,6 +41,7 @@ from agentic_cli.logging import Loggers
 from agentic_cli.models import ProviderKind
 from agentic_cli.tools._core.delegation import TASK_TOOL
 from agentic_cli.tools.registry import ToolDefinition, get_registry, identify_tool
+from agentic_cli.workflow.context import is_context_overflow
 from agentic_cli.workflow.langchain_models import without_foreign_reasoning
 from agentic_cli.workflow.permissions.capabilities import _CapabilityExempt
 from agentic_cli.workflow.service_registry import PERMISSION_ENGINE, get_service
@@ -278,6 +283,50 @@ class ActiveToolCallMiddleware(AgentMiddleware):
 
 def _call_ref(call: ToolCall) -> ToolCallRef:
     return ToolCallRef(call_id=call["id"], name=call["name"])
+
+
+class ContextOverflowMiddleware(AgentMiddleware):
+    """A provider's "too long" reaches Deep Agents' summarization as one.
+
+    Deep Agents' summarization falls back to summarizing and retrying once
+    when a model call raises a context overflow it recognizes: LangChain's
+    ``ContextOverflowError``, or a 400, 413 or 422 ``status_code`` with one of
+    its phrases. Some providers say it otherwise: Gemini's error carries its
+    status in ``code`` and words it its own way, and Claude's request-size
+    limit is a 413 that names no context. This middleware, between the
+    summarization and the model, re-raises every overflow
+    ``workflow/context.py`` recognizes as ``ContextOverflowError``, from the
+    original; anything else, a ``ContextOverflowError`` included, passes
+    unchanged.
+    """
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
+    ) -> Any:
+        try:
+            return await handler(request)
+        except ContextOverflowError:
+            raise
+        except Exception as error:
+            if is_context_overflow(error):
+                raise ContextOverflowError(str(error)) from error
+            raise
+
+    def wrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], ModelResponse],
+    ) -> Any:
+        try:
+            return handler(request)
+        except ContextOverflowError:
+            raise
+        except Exception as error:
+            if is_context_overflow(error):
+                raise ContextOverflowError(str(error)) from error
+            raise
 
 
 class ForeignReasoningMiddleware(AgentMiddleware):

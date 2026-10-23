@@ -175,14 +175,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     opened. A model switch (`reinitialize(preserve_sessions=True)`) keeps the
     same checkpointer and connection, also when it fails, so a retry
     continues the conversation.
-  - **Context.** Deep Agents' summarization runs in every agent: at 85% of
-    the model's input budget (0.95 of its context window, less its
-    `max_tokens`), keeping the newest 10% word for word. With
-    `context_window_enabled`, `context_window_trigger_tokens` (capped at
-    that, the kept tail lowered in proportion) and
-    `context_window_target_tokens` decide instead, also for a
-    model whose window is unknown, which otherwise gets Deep Agents' fixed
-    defaults. The checkpoint
+  - **Context.** Deep Agents' summarization runs in every agent, on its own
+    model, at the point both backends share (see Changed): the smaller of
+    85% of the model's input budget (0.95 of its context window, less its
+    `max_tokens`) and 200,000 tokens, keeping the newest 12% of that word
+    for word. A request the provider refuses as too long is summarized and
+    retried once, whichever way the provider says it (Gemini's wording and
+    Claude's 413 included, which Deep Agents alone does not recognize); a
+    conversation that still does not fit ends the turn with one `ERROR`,
+    `error_code` `CONTEXT_OVERFLOW`: "This conversation no longer fits
+    <model>'s context window. Use /compact or /new.". The checkpoint
     keeps every message. Each summary is a `CONTEXT_TRIMMED` event
     (`source="summarization"`) with the summary call's own `LLM_USAGE`
     (`purpose="summarization"`), which the status bar adds to the totals
@@ -296,6 +298,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `placement=` from the settings each time, since thinking-prompt's session
     placement is fixed when it starts. An app's own dialogs keep that startup
     placement unless they pass `placement=` themselves.
+- **`EventType.CONTEXT_SUMMARIZING`**, from
+  `WorkflowEvent.context_summarizing(agent=None)`: a summary of the earlier
+  conversation is starting. It is reported as the summary call starts, while
+  the turn's stream still waits on it (a summary can take a while at a
+  large size), and the CLI shows "Summarizing the earlier conversation…" as
+  the events box's status line until the summary's own usage arrives,
+  printing nothing. What the summary did
+  follows as `CONTEXT_TRIMMED`, whose factory takes keyword-only
+  `messages_summarized`, `tokens_before`, `tokens_after` and
+  `turns_dropped` (in `metadata` only when given); a Deep Agents summary
+  reports the conversation's tokens before and after. On Deep Agents, what
+  the run callback reports from inside a node now reaches the stream as it
+  happens rather than with the node's output: `workflow/live_events.py`
+  merges events reported during a turn into its stream (`LiveEvents`,
+  `merged`, and the context-local `reporting`/`report`).
 
 ### Changed
 
@@ -566,10 +583,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The session settings say where each backend keeps its sessions.**
   `session_store`, `sqlite_uri` and `postgres_uri` name ADK's and Deep
   Agents' locations and say that sessions do not move between backends.
-  `store_type` is marked LangGraph-only, `context_window_enabled` says that
-  on Deep Agents it picks the summarization thresholds, and
-  `prompt_caching_enabled` says Claude is cached on every backend and
-  Gemini's explicit caches only on ADK. Only the descriptions change.
+  `store_type` is marked LangGraph-only, and `prompt_caching_enabled` says
+  Claude is cached on every backend and Gemini's explicit caches only on
+  ADK. Only the descriptions change.
 - **agentic-cli runs on thinking-prompt 0.4.** It requires
   `thinking-prompt>=0.4,<0.5` (0.6.x required `>=0.3.0,<0.4`); 0.4 renamed or
   removed most of the UI API the CLI was built on. **Breaking:**
@@ -647,6 +663,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with nothing changed says "Settings unchanged.". The task box ends with
   each turn, out of the transcript, and the next turn shows it again; 0.6
   left it above the idle prompt.
+- **When a conversation is summarized is one point, set by two
+  backend-neutral settings** (`workflow/context.py`). For a model with
+  window W and output limit `max_tokens` M, the input budget is
+  B = 0.95 W - M, and a conversation is summarized once a prompt reaches the
+  smaller of `context_summarize_at` (0.85, from 0.5 to 0.95) of B and
+  `context_max_tokens` (200,000; 0 for no ceiling, otherwise at least
+  16,000), keeping the newest 12% of that word for word. On Deep Agents a
+  1M-token model now summarizes at 200,000 tokens instead of about 800,000,
+  and a model whose window is unknown (a user's endpoint model without a
+  declared window, an OpenRouter id before a listing) counts as 128,000
+  tokens instead of getting Deep Agents' fixed 170,000 tokens or 6
+  messages, which never fired on a 32k model. A model whose budget is under
+  16,000 tokens fails to start with a `ContextBudgetError`, an
+  `AgentGraphError` naming the agent, its model and its `max_tokens`. That is
+  a `max_tokens` close to the window, or **a window of 16,842 tokens or
+  less, whatever its `max_tokens` (breaking): an 8k or 16k local endpoint
+  model that ran on 0.6 no longer starts**; 16,843 tokens is the smallest
+  window that works. A summary the model writes no text for (Claude can
+  refuse one) is not stored: the request goes on in full, the user is told
+  "Could not summarize the earlier conversation; it is sent in full
+  instead." once a turn, and the next call tries again. Both settings are
+  project-settable, and a `/settings` change of either rebuilds the agents,
+  keeping the conversation.
 
 ### Deprecated
 
@@ -678,6 +717,17 @@ further deprecation step. So are the 0.6 model registry and the backends'
 model code, which the model layer replaces (see Added) without a deprecation
 step; each entry says what to use instead.
 
+- **The `context_window_enabled`, `context_window_trigger_tokens` and
+  `context_window_target_tokens` settings.** Use `context_summarize_at` and
+  `context_max_tokens` (see Changed). The three meant something different on
+  each backend: on ADK they built a `RunConfig` compression that only
+  Gemini's Live API read, so a normal turn was never managed; on Deep Agents
+  they picked the summarization thresholds; on LangGraph they turned on a
+  trim of each request to the target, which goes with them. A settings file
+  that still holds one loads as before, the key ignored. A project file
+  saved by 0.6.0 or 0.6.1's `/settings` holds the two token counts; like any
+  key that names no setting, they are dropped silently, not given the
+  "untrusted" warning a real setting a project may not set still gets.
 - **`agentic_cli.knowledge_base`** (all ten modules, with the
   `KnowledgeBaseManager(settings=...)` signature, `extract_text_from_pdf` and
   `embeddings.resolve_embedding_device`). Use `agentic_cli.memory.kb` and

@@ -4,13 +4,17 @@ Three middlewares shape each model request, outermost first:
 
 - ``ForeignReasoningMiddleware`` leaves other providers' reasoning out of the
   request (the checkpoint keeps it);
-- Deep Agents' ``SummarizationMiddleware``, with thresholds from the model's
-  input budget (``B = 0.95 * window - max_tokens``: summarize at 85% of B,
-  keep the newest 10%), or from ``context_window_*`` when that is on (the
-  trigger capped at the automatic one). Its archive stores nothing, so the
-  summary names no file and its "not recoverable" warning becomes a debug
-  log. The summary call reports ``CONTEXT_TRIMMED`` and its own
-  ``LLM_USAGE`` (``purpose="summarization"``);
+- Deep Agents' ``SummarizationMiddleware``, with each agent's thresholds
+  from ``workflow/context.py``: summarize at the smaller of 85% of the
+  model's input budget (``B = 0.95 * window - max_tokens``) and the 200,000
+  ceiling, keep the newest 12% of that; an unknown window counts as 128,000.
+  Its archive stores nothing, so the summary names no file and its "not
+  recoverable" warning becomes a debug log. The summary call reports
+  ``CONTEXT_TRIMMED`` and its own ``LLM_USAGE`` (``purpose="summarization"``);
+- ``ContextOverflowMiddleware`` raises a provider's overflow that
+  ``workflow/context.py`` recognizes as LangChain's ``ContextOverflowError``,
+  so Deep Agents summarizes and retries on Gemini's wording too; an overflow
+  that survives summarizing ends the turn with one clear ``ERROR``;
 - ``AnthropicPromptCachingMiddleware`` on Claude, with ``prompt_caching_enabled``:
   the system prompt, the last tool and the conversation, for 5 minutes.
 
@@ -20,6 +24,7 @@ that declares one. Nothing reaches a provider.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import json
 import logging
@@ -27,8 +32,10 @@ import warnings
 from types import SimpleNamespace
 
 import anthropic
+import httpx
 import openai
 import pytest
+from google.genai import errors as genai_errors
 
 pytest.importorskip("deepagents")
 
@@ -38,18 +45,28 @@ from deepagents.middleware.patch_tool_calls import PatchToolCallsMiddleware  # n
 from deepagents.middleware.summarization import SummarizationMiddleware  # noqa: E402
 from langchain.agents.middleware import ModelRequest  # noqa: E402
 from langchain_anthropic.middleware import AnthropicPromptCachingMiddleware  # noqa: E402
+from langchain_core.exceptions import ContextOverflowError  # noqa: E402
 from langchain_core.messages import AIMessage, HumanMessage  # noqa: E402
+from pydantic import PrivateAttr  # noqa: E402
 
 from agentic_cli.config import BaseSettings  # noqa: E402
 from agentic_cli.models import ModelCatalog, ProviderKind, RoleMap, resolve_model  # noqa: E402
 from agentic_cli.models.endpoints import EndpointSpec  # noqa: E402
 from agentic_cli.tools.registry import register_tool  # noqa: E402
 from agentic_cli.workflow.config import AgentConfig  # noqa: E402
+from agentic_cli.workflow.context import (  # noqa: E402
+    OVERFLOW_ERROR_CODE,
+    ContextBudgetError,
+    context_budget,
+    overflow_message,
+)
 from agentic_cli.workflow.deepagents import agent_builder, summarization  # noqa: E402
+from agentic_cli.workflow.deepagents import manager as manager_module  # noqa: E402
 from agentic_cli.workflow.deepagents.agent_builder import build_agent_tree  # noqa: E402
 from agentic_cli.workflow.deepagents.manager import DeepAgentsWorkflowManager  # noqa: E402
 from agentic_cli.workflow.deepagents.middleware import (  # noqa: E402
     ActiveToolCallMiddleware,
+    ContextOverflowMiddleware,
     ForeignReasoningMiddleware,
     PermissionMiddleware,
     ToolCallErrorMiddleware,
@@ -62,11 +79,12 @@ from agentic_cli.workflow.deepagents.summarization import (  # noqa: E402
     install_history_filters,
     summarization_thresholds,
 )
+from agentic_cli.workflow import live_events  # noqa: E402
 from agentic_cli.workflow.events import EventType  # noqa: E402
 from agentic_cli.workflow.permissions import EXEMPT  # noqa: E402
 from tests.models.fakes import endpoints as fake_endpoints  # noqa: E402
 from tests.workflow.adk.fakes import FakeAPI, chat_completion, openai_response  # noqa: E402
-from tests.workflow.deepagents.fakes import ScriptedChat  # noqa: E402
+from tests.workflow.deepagents.fakes import ScriptedChat, ScriptedModels, ai  # noqa: E402
 from tests.workflow.langchain_fakes import (  # noqa: E402
     anthropic_reply,
     gemini_reply,
@@ -74,28 +92,28 @@ from tests.workflow.langchain_fakes import (  # noqa: E402
     route_google,
 )
 
-#: A user's server whose model declares a 4,000-token window and no output
-#: limit: B = 3,800, summarize at 3,230 tokens, keep the newest 380.
+#: A user's server whose model declares a 20,000-token window and no output
+#: limit: B = 19,000, summarize at 16,150 tokens, keep the newest 1,938.
 SMALL = {
     "local": {
         "base_url": "http://localhost:8000/v1",
-        "models": {"small": {"context_window": 4000}},
+        "models": {"small": {"context_window": 20_000}},
     }
 }
 MARK = {"type": "ephemeral", "ttl": "5m"}
-USER_TURN = "word " * 480  # 2,400 characters, about 600 tokens
+USER_TURN = "word " * 2_400  # 12,000 characters, about 3,000 tokens
 
 
 @register_tool(capabilities=EXEMPT)
 def huge_report() -> str:
     """Returns far more text than the model's window holds (an exempt test tool)."""
-    return "x" * 20_000
+    return "x" * 100_000
 
 
 @register_tool(capabilities=EXEMPT)
 def bulky_report() -> str:
-    """Returns about 2,800 tokens of text (an exempt test tool)."""
-    return "y " * 5_600
+    """Returns about 14,000 tokens of text (an exempt test tool)."""
+    return "y " * 28_000
 
 
 @register_tool(capabilities=EXEMPT)
@@ -149,18 +167,27 @@ def windowed(model, window: int | None):
     return dataclasses.replace(model, record=record)
 
 
-def context(enabled: bool, trigger: int = 100_000, target: int = 80_000) -> SimpleNamespace:
-    return SimpleNamespace(
-        context_window_enabled=enabled,
-        context_window_trigger_tokens=trigger,
-        context_window_target_tokens=target,
-        prompt_caching_enabled=True,
-    )
+def context(**values) -> SimpleNamespace:
+    """The settings the model side reads, at their defaults unless given."""
+    return SimpleNamespace(**{
+        "context_summarize_at": 0.85,
+        "context_max_tokens": 200_000,
+        "prompt_caching_enabled": True,
+        **values,
+    })
+
+
+def thresholds_of(model, settings) -> tuple:
+    """``context_budget``'s trigger and keep, as Deep Agents takes them."""
+    budget = context_budget(model, settings)
+    return ("tokens", budget.trigger), ("tokens", budget.keep)
 
 
 #: The spec's example: Claude Sonnet 4.5 (200,000 tokens) with a 32,000-token
 #: thinking budget, so max_tokens is 40,192 and B is 149,808.
 SONNET_THINKING = "anthropic:claude-sonnet-4-5"
+#: Claude Opus 4.7: a 1,000,000-token window.
+OPUS = "anthropic:claude-opus-4-7"
 
 
 class TestThresholds:
@@ -168,63 +195,42 @@ class TestThresholds:
         sonnet = resolved(SONNET_THINKING, effort="high")
         assert (sonnet.record.context_window, sonnet.max_tokens) == (200_000, 40_192)
 
-        assert summarization_thresholds(sonnet, context(False)) == (
-            ("tokens", 127_336), ("tokens", 14_980)
+        # 85% of B, and 12% of that kept.
+        assert summarization_thresholds(sonnet, context()) == (
+            ("tokens", 127_336), ("tokens", 15_280)
         )
 
-    def test_without_an_output_allowance_the_budget_is_95_percent(self):
-        sonnet = dataclasses.replace(resolved(SONNET_THINKING), max_tokens=None)
+    def test_they_are_the_context_budgets(self):
+        for model in (resolved(SONNET_THINKING, effort="high"), resolved(OPUS),
+                      resolved("google:gemini-2.5-flash")):
+            for settings in (context(), context(context_summarize_at=0.5),
+                             context(context_max_tokens=0)):
+                assert summarization_thresholds(model, settings) == thresholds_of(
+                    model, settings
+                )
 
-        assert summarization_thresholds(sonnet, context(False)) == (
-            ("tokens", 161_500), ("tokens", 19_000)
+    def test_a_1m_model_summarizes_at_the_ceiling(self):
+        assert summarization_thresholds(resolved(OPUS), context()) == (
+            ("tokens", 200_000), ("tokens", 24_000)
         )
 
-    def test_an_unknown_window_leaves_deep_agents_defaults(self):
+    def test_an_unknown_window_counts_as_128k(self):
+        # Not Deep Agents' fixed 170,000 tokens / 6 messages, which never
+        # fire on a 32k model.
         unknown = windowed(resolved(SONNET_THINKING), None)
 
-        assert summarization_thresholds(unknown, context(False)) is None
-
-    def test_an_unknown_window_takes_the_settings_as_they_are(self):
-        # A user's endpoint model with no known window: the two counts are the
-        # only thresholds anyone gave, and there is no automatic one to cap at.
-        unknown = windowed(resolved(SONNET_THINKING), None)
-
-        assert summarization_thresholds(unknown, context(True, 24_000, 4_000)) == (
-            ("tokens", 24_000), ("tokens", 4_000)
+        assert summarization_thresholds(unknown, context()) == (
+            ("tokens", 96_396), ("tokens", 11_567)
+        )
+        assert summarization_thresholds(unknown, context()) == thresholds_of(
+            unknown, context()
         )
 
-    def test_context_window_settings_pick_the_thresholds(self):
-        sonnet = resolved(SONNET_THINKING, effort="high")
+    def test_a_budget_too_small_to_work_raises(self):
+        small_window = windowed(resolved(SONNET_THINKING), 4_000)
 
-        assert summarization_thresholds(sonnet, context(True, 100_000, 80_000)) == (
-            ("tokens", 100_000), ("tokens", 80_000)
-        )
-
-    def test_the_trigger_is_capped_at_the_automatic_one(self):
-        sonnet = resolved(SONNET_THINKING, effort="high")
-
-        # The kept tail shrinks with it: 20,000 · 127,336 / 500,000.
-        assert summarization_thresholds(sonnet, context(True, 500_000, 20_000)) == (
-            ("tokens", 127_336), ("tokens", 5_093)
-        )
-
-    def test_a_capped_trigger_keeps_the_tail_below_it(self):
-        # A 4,000-token window: B = 3,800, the automatic trigger 3,230. The
-        # default 100,000 / 80,000 would keep more than the whole budget.
-        small_window = dataclasses.replace(
-            windowed(resolved(SONNET_THINKING), 4_000), max_tokens=None
-        )
-
-        assert summarization_thresholds(small_window, context(True)) == (
-            ("tokens", 3_230), ("tokens", 2_584)
-        )
-
-    def test_off_the_settings_are_ignored(self):
-        sonnet = resolved(SONNET_THINKING, effort="high")
-
-        assert summarization_thresholds(sonnet, context(False, 1_000, 500)) == (
-            ("tokens", 127_336), ("tokens", 14_980)
-        )
+        with pytest.raises(ContextBudgetError, match="'a'"):
+            summarization_thresholds(small_window, context())
 
 
 class TestNoArchive:
@@ -249,13 +255,13 @@ class TestBuildSummarization:
     def test_deep_agents_middleware_on_the_agents_model_with_our_thresholds(self):
         model = ScriptedChat()
         middleware = build_summarization(model, resolved(SONNET_THINKING, effort="high"),
-                                         context(False))
+                                         context())
 
         assert isinstance(middleware, SummarizationMiddleware)
         assert middleware.model is model
         assert isinstance(middleware._backend, NoArchiveBackend)
         assert middleware._lc_helper.trigger == ("tokens", 127_336)
-        assert middleware._lc_helper.keep == ("tokens", 14_980)
+        assert middleware._lc_helper.keep == ("tokens", 15_280)
         # Older history is summarized whole, as create_deep_agent does, and no
         # tool arguments are cut.
         assert middleware._lc_helper.trim_tokens_to_summarize is None
@@ -263,13 +269,13 @@ class TestBuildSummarization:
         # Nothing is archived, so the prompt says nothing of archived media.
         assert "conversation_history" not in middleware._lc_helper.summary_prompt
 
-    def test_an_unknown_window_gets_deep_agents_fixed_defaults(self):
+    def test_an_unknown_window_gets_the_128k_floor(self):
         middleware = build_summarization(
-            ScriptedChat(), windowed(resolved(SONNET_THINKING), None), context(False)
+            ScriptedChat(), windowed(resolved(SONNET_THINKING), None), context()
         )
 
-        assert middleware._lc_helper.trigger == ("tokens", 170_000)
-        assert middleware._lc_helper.keep == ("messages", 6)
+        assert middleware._lc_helper.trigger == ("tokens", 96_396)
+        assert middleware._lc_helper.keep == ("tokens", 11_567)
 
 
 # --- the stack ----------------------------------------------------------------------------
@@ -312,29 +318,45 @@ class TestTheStack:
         claude = resolved(SONNET_THINKING, "lead")
         gemini = resolved("google:gemini-2.5-flash", "helper")
 
-        _build(TEAM, {"lead": claude, "helper": gemini}, context(False))
+        _build(TEAM, {"lead": claude, "helper": gemini}, context())
 
         lead = created["lead"]["middleware"]
         assert [type(m) for m in lead] == [
             PatchToolCallsMiddleware, SubAgentMiddleware, ForeignReasoningMiddleware,
-            ReportingSummarizationMiddleware, AnthropicPromptCachingMiddleware,
+            ReportingSummarizationMiddleware, ContextOverflowMiddleware,
+            AnthropicPromptCachingMiddleware,
             PermissionMiddleware, ToolCallErrorMiddleware, ActiveToolCallMiddleware,
         ]
         assert issubclass(ReportingSummarizationMiddleware, SummarizationMiddleware)
         assert lead[2].kind is ProviderKind.ANTHROPIC
         assert lead[3].agent == "lead"
-        assert (lead[4].ttl, lead[4].unsupported_model_behavior) == ("5m", "ignore")
+        assert (lead[5].ttl, lead[5].unsupported_model_behavior) == ("5m", "ignore")
         assert [type(m) for m in created["helper"]["middleware"]] == [
             PatchToolCallsMiddleware, ForeignReasoningMiddleware,
-            ReportingSummarizationMiddleware, PermissionMiddleware, ToolCallErrorMiddleware,
-            ActiveToolCallMiddleware,
+            ReportingSummarizationMiddleware, ContextOverflowMiddleware,
+            PermissionMiddleware, ToolCallErrorMiddleware, ActiveToolCallMiddleware,
         ]
         assert created["helper"]["middleware"][1].kind is ProviderKind.GOOGLE
         assert created["helper"]["middleware"][2].agent == "helper"
 
+    def test_every_agent_summarizes_on_its_own_models_budget(self, created):
+        # The coordinator on a 1M-token Claude (the ceiling), the helper on a
+        # model whose window is unknown (the 128,000-token floor).
+        claude = resolved(OPUS, "lead")
+        unknown = windowed(resolved("google:gemini-2.5-flash", "helper"), None)
+        settings = context(context_summarize_at=0.7)
+
+        _build(TEAM, {"lead": claude, "helper": unknown}, settings)
+
+        lead = created["lead"]["middleware"][3]._lc_helper
+        helper = created["helper"]["middleware"][2]._lc_helper
+        assert (lead.trigger, lead.keep) == thresholds_of(claude, settings)
+        assert (helper.trigger, helper.keep) == thresholds_of(unknown, settings)
+        assert lead.trigger == ("tokens", 200_000)
+        assert context_budget(unknown, settings).window_known is False
+
     def test_no_prompt_caching_when_it_is_off(self, created):
-        settings = context(False)
-        settings.prompt_caching_enabled = False
+        settings = context(prompt_caching_enabled=False)
         claude = resolved(SONNET_THINKING, "lead")
 
         _build([AgentConfig(name="lead", prompt="p")], {"lead": claude}, settings)
@@ -367,6 +389,100 @@ class TestForeignReasoning:
         assert middleware.wrap_model_call(request, lambda r: r.messages)[1].content == (
             [{"type": "text", "text": "Gemini answer."}]
         )
+
+
+def _gemini_overflow() -> genai_errors.ClientError:
+    """Gemini's overflow, as google-genai raises it: an int ``code``, no ``status_code``."""
+    return genai_errors.ClientError(400, {"error": {
+        "code": 400,
+        "message": "The input token count (1200000) exceeds the maximum number of "
+                   "tokens allowed (1048576).",
+        "status": "INVALID_ARGUMENT",
+    }})
+
+
+def _anthropic_error(error_class, status: int, kind: str, message: str):
+    request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    return error_class(
+        message,
+        response=httpx.Response(status, request=request),
+        body={"type": "error", "error": {"type": kind, "message": message}},
+    )
+
+
+def _claude_too_large() -> anthropic.RequestTooLargeError:
+    """Claude's request-size limit: a 413 whose text names no context."""
+    return _anthropic_error(
+        anthropic.RequestTooLargeError, 413, "request_too_large",
+        "Request exceeds the maximum size",
+    )
+
+
+def _claude_bad_request() -> anthropic.BadRequestError:
+    """A 400 that is not an overflow."""
+    return _anthropic_error(
+        anthropic.BadRequestError, 400, "invalid_request_error",
+        "temperature: must be at most 1",
+    )
+
+
+class TestContextOverflowMiddleware:
+    @staticmethod
+    def _request() -> ModelRequest:
+        history = [HumanMessage("hi")]
+        return ModelRequest(model=ScriptedChat(), messages=history, state={"messages": history})
+
+    @pytest.mark.parametrize("error", [_gemini_overflow(), _claude_too_large()])
+    async def test_a_recognized_overflow_is_raised_as_langchains(self, error):
+        async def handler(request):
+            raise error
+
+        def sync_handler(request):
+            raise error
+
+        middleware = ContextOverflowMiddleware()
+        with pytest.raises(ContextOverflowError) as caught:
+            await middleware.awrap_model_call(self._request(), handler)
+        with pytest.raises(ContextOverflowError) as caught_sync:
+            middleware.wrap_model_call(self._request(), sync_handler)
+
+        for raised in (caught.value, caught_sync.value):
+            assert raised.__cause__ is error
+            assert str(raised) == str(error)
+
+    @pytest.mark.parametrize("error", [
+        _claude_bad_request(), ValueError("prompt is too long"),
+        ContextOverflowError("already LangChain's"),
+    ])
+    async def test_anything_else_passes_unchanged(self, error):
+        async def handler(request):
+            raise error
+
+        with pytest.raises(type(error)) as caught:
+            await ContextOverflowMiddleware().awrap_model_call(self._request(), handler)
+
+        assert caught.value is error
+
+    @pytest.mark.parametrize("error", [
+        _claude_bad_request(), ValueError("prompt is too long"),
+        ContextOverflowError("already LangChain's"),
+    ])
+    def test_anything_else_passes_the_sync_path_unchanged(self, error):
+        def handler(request):
+            raise error
+
+        with pytest.raises(type(error)) as caught:
+            ContextOverflowMiddleware().wrap_model_call(self._request(), handler)
+
+        assert caught.value is error
+
+    async def test_an_answer_passes_through(self):
+        async def handler(request):
+            return "response"
+
+        middleware = ContextOverflowMiddleware()
+        assert await middleware.awrap_model_call(self._request(), handler) == "response"
+        assert middleware.wrap_model_call(self._request(), lambda r: "response") == "response"
 
 
 # --- whole turns ----------------------------------------------------------------------------
@@ -481,11 +597,15 @@ class TestSummarizationInATurn:
             "Here is", "Turn 6:", "Answer ", "Turn 7:"
         ]
 
-        # The summary call reports, before the answer it made room for.
+        # The summary call reports as it starts and when it is done, before
+        # the answer it made room for.
         assert [e.type for e in turns[5]] == [
-            EventType.LLM_USAGE, EventType.CONTEXT_TRIMMED, EventType.TEXT, EventType.LLM_USAGE
+            EventType.CONTEXT_SUMMARIZING, EventType.LLM_USAGE, EventType.CONTEXT_TRIMMED,
+            EventType.TEXT, EventType.LLM_USAGE,
         ]
-        summary_usage, trimmed, _, answer_usage = turns[5]
+        summarizing, summary_usage, trimmed, _, answer_usage = turns[5]
+        assert summarizing.content == "Summarizing the earlier conversation…"
+        assert summarizing.metadata["agent"] == "solo"
         assert summary_usage.metadata["purpose"] == "summarization"
         assert summary_usage.metadata["agent"] == "solo"
         assert summary_usage.metadata["model"] == "local:small"
@@ -493,8 +613,13 @@ class TestSummarizationInATurn:
         assert (trimmed.metadata["source"], trimmed.metadata["agent"]) == ("summarization", "solo")
         assert (trimmed.metadata["messages_before"], trimmed.metadata["messages_after"]) == (11, 2)
         assert trimmed.metadata["messages_summarized"] == 10
+        # Six questions of about 3,000 tokens passed the 16,150-token trigger;
+        # the summary and the sixth question are what is left.
+        assert trimmed.metadata["tokens_before"] > 16_150
+        assert 3_000 < trimmed.metadata["tokens_after"] < 3_200
         others = turns[:5] + turns[6:]
         assert all(EventType.CONTEXT_TRIMMED not in [e.type for e in t] for t in others)
+        assert all(EventType.CONTEXT_SUMMARIZING not in [e.type for e in t] for t in others)
 
         # The checkpoint keeps every message.
         assert len(recent) == 14
@@ -526,27 +651,26 @@ class TestSummarizationInATurn:
         assert "A summary of 10 messages." in second
         assert "Turn 6:" in second and "Turn 11:" not in second
 
-    async def test_with_context_window_settings_a_small_model_keeps_answering(
+    async def test_a_model_too_small_to_work_on_fails_initialization(
         self, hermetic, monkeypatch
     ):
-        # The default 100,000 / 80,000 on the 4,000-token model: the trigger is
-        # capped, and so must the tail be, or nothing can ever be summarized.
-        settings = _settings(
-            model_endpoints=SMALL, default_model="local:small", context_window_enabled=True
-        )
-        server = EndpointAPI(**{"Answer.": [chat_completion(f"Answer {n}.") for n in range(1, 12)]})
+        # A 4,000-token window leaves a 3,800-token budget, under 16,000.
+        tiny = {"local": {**SMALL["local"], "models": {"small": {"context_window": 4_000}}}}
+        server = EndpointAPI()
         route(monkeypatch, openai, "AsyncOpenAI", server.api)
-        manager = _manager(settings, [_agent("solo", "Answer.")])
+        manager = _manager(
+            _settings(model_endpoints=tiny, default_model="local:small"),
+            [_agent("solo", "Answer.")],
+        )
         try:
-            turns = [await turn(manager, f"Turn {n}: {USER_TURN}") for n in range(1, 12)]
+            with pytest.raises(ContextBudgetError, match="'solo'") as caught:
+                await manager.initialize_services()
         finally:
             await manager.cleanup()
 
-        assert [e.content for t in turns for e in t if e.type is EventType.ERROR] == []
-        assert [[e.content for e in t if e.type is EventType.TEXT] for t in turns] == [
-            [f"Answer {n}."] for n in range(1, 12)
-        ]
-        assert any(e.type is EventType.CONTEXT_TRIMMED for t in turns for e in t)
+        assert "local:small" in str(caught.value)
+        assert not manager._initialized
+        assert server.api.requests == []
 
     async def test_a_tool_result_too_big_for_the_window_ends_the_turn(self, small, monkeypatch):
         server = EndpointAPI(**{"Answer.": [_call("huge_report", {}, "c1")]})
@@ -557,12 +681,14 @@ class TestSummarizationInATurn:
         finally:
             await manager.cleanup()
 
+        # Deep Agents' "Context remains above the input budget" reaches the
+        # user as the one clear sentence ADK gives.
         kinds = [e.type for e in events]
         assert kinds[-1] is EventType.ERROR
         assert kinds.count(EventType.ERROR) == 1
         assert EventType.TEXT not in kinds
-        assert events[-1].metadata["error_code"] == "ContextOverflowError"
-        assert "input budget" in events[-1].content
+        assert events[-1].metadata["error_code"] == OVERFLOW_ERROR_CODE
+        assert events[-1].content == overflow_message("local:small")
 
     async def test_a_summary_stays_with_the_agent_that_wrote_it(self, small, monkeypatch):
         """The coordinator's summary never reaches a sub-agent's brief, and
@@ -605,6 +731,211 @@ class TestSummarizationInATurn:
         assert [e.metadata["agent"] for e in trimmed] == ["worker"]
         summaries = [e for e in delegating if e.metadata.get("purpose") == "summarization"]
         assert [e.metadata["agent"] for e in summaries] == ["worker"]
+
+
+class TestOverflowInATurn:
+    """A provider refuses a request as too long, on scripted models.
+
+    Two earlier turns of about 3,000 tokens each sit under the 16,150-token
+    trigger; the third request is refused, which Deep Agents answers by
+    summarizing the earlier turns and retrying once, on the agent's own model.
+    """
+
+    @staticmethod
+    async def _three_turns(settings, monkeypatch, script) -> tuple[list, ScriptedChat]:
+        models = ScriptedModels(solo=script)
+        monkeypatch.setattr(manager_module, "build_chat_model", models)
+        manager = _manager(settings, [_agent("solo", "Answer.")])
+        try:
+            turns = [await turn(manager, f"Turn {n}: {USER_TURN}") for n in (1, 2, 3)]
+        finally:
+            await manager.cleanup()
+        return turns, models.chats["solo"]
+
+    @pytest.mark.parametrize(
+        "overflow", [_gemini_overflow(), _claude_too_large()], ids=["gemini", "claude-413"]
+    )
+    async def test_an_overflow_is_summarized_and_retried(self, small, monkeypatch, overflow):
+        turns, chat = await self._three_turns(small, monkeypatch, [
+            ai("Answer 1."), ai("Answer 2."), overflow, ai("A summary."), ai("Answer 3."),
+        ])
+
+        third = turns[2]
+        assert [e.content for e in third if e.type is EventType.TEXT] == ["Answer 3."]
+        assert EventType.ERROR not in [e.type for e in third]
+        trimmed = [e for e in third if e.type is EventType.CONTEXT_TRIMMED]
+        assert [e.metadata["messages_summarized"] for e in trimmed] == [4]
+        # The refused request, the summary of the first two exchanges, then
+        # the retry: the summary and the third question.
+        assert len(chat.requests) == 5
+        assert "Turn 1:" in chat.conversation(3)[0].text
+        retry = chat.conversation(4)
+        assert [m.text[:14] for m in retry] == ["Here is a summ", "Turn 3: word w"]
+        assert retry[0].text.endswith("A summary.")
+
+    async def test_an_overflow_that_survives_summarizing_is_one_clear_error(
+        self, small, monkeypatch
+    ):
+        turns, chat = await self._three_turns(small, monkeypatch, [
+            ai("Answer 1."), ai("Answer 2."), _gemini_overflow(), ai("A summary."),
+            _gemini_overflow(),
+        ])
+
+        third = turns[2]
+        errors = [e for e in third if e.type is EventType.ERROR]
+        assert [(e.content, e.metadata["error_code"]) for e in errors] == [
+            (overflow_message("local:small"), OVERFLOW_ERROR_CODE)
+        ]
+        assert errors[0].metadata["agent"] == "solo"
+        assert EventType.TEXT not in [e.type for e in third]
+        assert len(chat.requests) == 5  # one retry, no more
+
+    async def test_any_other_error_is_unchanged(self, small, monkeypatch):
+        error = _claude_bad_request()
+        turns, chat = await self._three_turns(
+            small, monkeypatch, [ai("Answer 1."), ai("Answer 2."), error]
+        )
+
+        errors = [e for e in turns[2] if e.type is EventType.ERROR]
+        assert [(e.content, e.metadata["error_code"]) for e in errors] == [
+            (str(error), "BadRequestError")
+        ]
+        assert len(chat.requests) == 3  # nothing summarized, nothing retried
+
+
+class GatedChat(ScriptedChat):
+    """Holds call ``gate_at`` (1-based) until released, as a slow model would.
+
+    A cancel while it is held records nothing, so the script is not used up.
+    """
+
+    gate_at: int = 0
+    _started: asyncio.Event = PrivateAttr(default_factory=asyncio.Event)
+    _release: asyncio.Event = PrivateAttr(default_factory=asyncio.Event)
+    _held: bool = PrivateAttr(default=False)
+
+    async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
+        if len(self.requests) + 1 == self.gate_at and not self._held:
+            self._held = True
+            self._started.set()
+            await self._release.wait()
+        return self._answer(messages)
+
+
+def pumps() -> list[asyncio.Task]:
+    """The live-events pump tasks still running."""
+    return [t for t in asyncio.all_tasks() if t.get_name() == live_events.PUMP_TASK]
+
+
+class TestCancelledTurns:
+    """Ctrl+C while a model call runs, the summary call included."""
+
+    @staticmethod
+    def _manager_on(chat: GatedChat, settings, monkeypatch) -> DeepAgentsWorkflowManager:
+        models = ScriptedModels()
+        models.chats["solo"] = chat
+        monkeypatch.setattr(manager_module, "build_chat_model", models)
+        return _manager(settings, [_agent("solo", "Answer.")])
+
+    async def test_ctrl_c_during_a_model_call_leaves_no_pump_and_frees_the_turn(
+        self, small, monkeypatch
+    ):
+        chat = GatedChat(label="solo", script=[ai("Answer 1.")], gate_at=1)
+        manager = self._manager_on(chat, small, monkeypatch)
+        try:
+            consumer = asyncio.create_task(turn(manager, "First."))
+            await asyncio.wait_for(chat._started.wait(), 5)
+            consumer.cancel()
+            with pytest.raises(asyncio.CancelledError):  # not a TimeoutError: no hang
+                await asyncio.wait_for(consumer, 5)
+            left = pumps()
+            # The turn lock is free: the next turn runs at once.
+            again = await asyncio.wait_for(turn(manager, "Again."), 5)
+        finally:
+            chat._release.set()
+            await manager.cleanup()
+
+        assert left == []
+        assert [e.content for e in again if e.type is EventType.TEXT] == ["Answer 1."]
+
+    async def test_ctrl_c_during_a_summary_writes_nothing_and_the_next_turn_summarizes_again(
+        self, small, monkeypatch
+    ):
+        # Five turns under the trigger; the sixth summarizes (call 6) first.
+        script = [ai(f"Answer {n}.") for n in range(1, 6)]
+        script += [ai("A summary."), ai("Answer 6.")]
+        chat = GatedChat(label="solo", script=script, gate_at=6)
+        manager = self._manager_on(chat, small, monkeypatch)
+        sixth: list = []
+
+        async def consume() -> None:
+            async for event in manager.process(f"Turn 6: {USER_TURN}", "u", session_id="s"):
+                sixth.append(event)
+
+        try:
+            for n in range(1, 6):
+                await turn(manager, f"Turn {n}: {USER_TURN}")
+            consumer = asyncio.create_task(consume())
+            await asyncio.wait_for(chat._started.wait(), 5)
+            await asyncio.sleep(0.05)
+            # The line is out while the summary call still runs.
+            while_summarizing = [e.type for e in sixth]
+            consumer.cancel()
+            with pytest.raises(asyncio.CancelledError):  # not a TimeoutError: no hang
+                await asyncio.wait_for(consumer, 5)
+            left = pumps()
+            state = (await manager._root.aget_state(
+                run_config(manager.session_ref("s", "u"))
+            )).values
+            chat._release.set()
+            again = await asyncio.wait_for(turn(manager, f"Turn 6: {USER_TURN}"), 5)
+        finally:
+            chat._release.set()
+            await manager.cleanup()
+
+        assert while_summarizing == [EventType.CONTEXT_SUMMARIZING]
+        assert left == []
+        assert state.get("_summarization_event") is None  # nothing written
+        assert [e.type for e in again][:3] == [
+            EventType.CONTEXT_SUMMARIZING, EventType.LLM_USAGE, EventType.CONTEXT_TRIMMED,
+        ]
+        assert [e.content for e in again if e.type is EventType.TEXT] == ["Answer 6."]
+
+
+class TestSettingsChange:
+    async def test_a_new_trigger_rebuilds_the_agents_and_keeps_the_conversation(
+        self, hermetic, monkeypatch
+    ):
+        from tests.cli.test_settings_apply_rollback import _app
+
+        models = ScriptedModels(solo=[ai("Answer 1."), ai("Answer 2.")])
+        monkeypatch.setattr(manager_module, "build_chat_model", models)
+        triggers = []
+        build = agent_builder.build_summarization
+
+        def recorded(model, resolved, settings):
+            middleware = build(model, resolved, settings)
+            triggers.append(middleware._lc_helper.trigger)
+            return middleware
+
+        monkeypatch.setattr(agent_builder, "build_summarization", recorded)
+        settings = _settings(
+            model_endpoints=SMALL, default_model="local:small", orchestrator="deepagents"
+        )
+        manager = _manager(settings, [_agent("solo", "Answer.")])
+        try:
+            await turn(manager, "First.")
+            app = _app(settings, manager)
+            assert await app.apply_settings({"context_summarize_at": "0.5"}) is True
+            await turn(manager, "Second.")
+        finally:
+            await manager.cleanup()
+
+        # 85%, then 50%, of the 19,000-token budget.
+        assert triggers == [("tokens", 16_150), ("tokens", 9_500)]
+        assert [m.text for m in models.chats["solo"].conversation(1)] == [
+            "First.", "Answer 1.", "Second."
+        ]
 
 
 class TestHistoryFilters:

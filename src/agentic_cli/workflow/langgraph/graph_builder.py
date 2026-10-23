@@ -8,8 +8,7 @@ once, when the graph is built, from the agent's resolved model
 
 from __future__ import annotations
 
-from collections import deque
-from typing import Any, Callable, Mapping, TYPE_CHECKING
+from typing import Callable, Mapping, TYPE_CHECKING
 
 from agentic_cli.models import CacheMechanism, ResolvedModel
 from agentic_cli.workflow.config import AgentConfig
@@ -28,8 +27,8 @@ class LangGraphBuilder:
     """Builds a LangGraph StateGraph from AgentConfig declarations.
 
     Args:
-        settings: Application settings: the retry, timeout, caching and
-            context-window settings.
+        settings: Application settings: the retry, timeout and caching
+            settings.
         app_name: The application's name, which some providers are told
             (default: ``settings.app_name``).
     """
@@ -37,20 +36,8 @@ class LangGraphBuilder:
     def __init__(self, settings: "BaseSettings", app_name: str | None = None) -> None:
         self._settings = settings
         self._app_name = app_name or settings.app_name
-        # Side-channel for trim events: agent_node appends here, manager drains
-        self._trim_events: deque[dict[str, Any]] = deque()
         #: Each agent's chat model, by agent name, from the last ``build``.
         self.chat_models: dict[str, BaseChatModel] = {}
-
-    def drain_trim_events(self) -> list[dict[str, Any]]:
-        """Drain and return all pending context-trim events.
-
-        Returns:
-            List of trim event info dicts (empties the internal deque).
-        """
-        events = list(self._trim_events)
-        self._trim_events.clear()
-        return events
 
     def build(
         self,
@@ -261,34 +248,6 @@ class LangGraphBuilder:
                     messages.append(SystemMessage(content=system_prompt))
 
             conversation = state.get("messages", [])
-
-            # Apply context window trimming if enabled
-            if self._settings.context_window_enabled:
-                from langchain_core.messages import trim_messages
-
-                pre_trim_count = len(conversation)
-                conversation = trim_messages(
-                    conversation,
-                    max_tokens=self._settings.context_window_target_tokens,
-                    strategy="last",
-                    token_counter="approximate",
-                    start_on="human",
-                    include_system=False,  # System message added separately above
-                )
-                post_trim_count = len(conversation)
-                if post_trim_count < pre_trim_count:
-                    logger.debug(
-                        "context_window_trimmed",
-                        agent=config.name,
-                        messages_before=pre_trim_count,
-                        messages_after=post_trim_count,
-                        messages_removed=pre_trim_count - post_trim_count,
-                    )
-                    self._trim_events.append({
-                        "messages_before": pre_trim_count,
-                        "messages_after": post_trim_count,
-                        "agent": config.name,
-                    })
 
             # Another provider's reasoning (a model switch, a mixed tree) is
             # not this model's to read; the checkpoint keeps it.

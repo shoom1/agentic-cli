@@ -62,7 +62,7 @@ class _FakeRunner:
     def __init__(self) -> None:
         self.calls: list = []
 
-    async def run_async(self, *, session_id, user_id, new_message, run_config):
+    async def run_async(self, *, session_id, user_id, new_message):
         self.calls.append(
             SimpleNamespace(session_id=session_id, user_id=user_id, new_message=new_message)
         )
@@ -72,9 +72,7 @@ class _FakeRunner:
 
 def _resume_manager(runner: _FakeRunner, *, session_exists: bool = True) -> GoogleADKWorkflowManager:
     mgr = GoogleADKWorkflowManager.__new__(GoogleADKWorkflowManager)
-    mgr._settings = SimpleNamespace(
-        app_name="test", context_window_enabled=False, default_user="default_user"
-    )
+    mgr._settings = SimpleNamespace(app_name="test", default_user="default_user")
     mgr._app_name = "test"
     mgr._services = {}
     # Turns serialize on the manager's turn lock (see the concurrency contract).
