@@ -719,9 +719,8 @@ step; each entry says what to use instead.
   trim of each request to the target, which goes with them. A settings file
   that still holds one loads as before, the key ignored. A project file
   saved by 0.6.0 or 0.6.1's `/settings` holds the two token counts; like any
-  key that names no setting, they are dropped with a debug log
-  (`unknown_project_setting_ignored`), not the "untrusted" warning a real
-  setting a project may not set still gets.
+  key that names no setting, they are dropped silently, not given the
+  "untrusted" warning a real setting a project may not set still gets.
 - **`agentic_cli.knowledge_base`** (all ten modules, with the
   `KnowledgeBaseManager(settings=...)` signature, `extract_text_from_pdf` and
   `embeddings.resolve_embedding_device`). Use `agentic_cli.memory.kb` and

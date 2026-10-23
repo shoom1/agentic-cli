@@ -84,9 +84,10 @@ class _AllowlistFilterSource(PydanticBaseSettingsSource):
     this narrows, not removes, that pre-existing surface.)
 
     A key that names no setting at all (neither a field nor an alias) could
-    set nothing anyway, so it is dropped with a debug log, not the warning: a
-    project file saved by an older version still holds settings since
-    removed (0.6's ``context_window_*``), and every start would warn of them.
+    set nothing anyway, so it is dropped without a log: a project file saved
+    by an older version still holds settings since removed (0.6's
+    ``context_window_*``), and settings are built before logging is
+    configured, when structlog prints even a debug log above the UI.
     """
 
     def __init__(
@@ -109,11 +110,7 @@ class _AllowlistFilterSource(PydanticBaseSettingsSource):
         for key, value in self._inner().items():
             if key in _PROJECT_SETTABLE_KEYS:
                 kept[key] = value
-            elif key not in settings:
-                logger.debug(
-                    "unknown_project_setting_ignored", key=key, source=self._label
-                )
-            else:
+            elif key in settings:
                 logger.warning(
                     "untrusted_project_setting_ignored", key=key, source=self._label
                 )

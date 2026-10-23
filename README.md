@@ -411,7 +411,7 @@ image/mounts/user, OS-sandbox policy, `skills_dirs`, shell sandbox settings,
 `workspace_dir`, `raw_llm_logging`, permission rules, `model_endpoints` (the
 addresses a key is sent to), and any credential — are dropped with a logged
 warning rather than applied. A key that names no setting at all (one an
-older version had, say) is dropped with a debug log only.
+older version had, say) is dropped silently.
 
 **Consequence:** put API keys in real environment variables or an
 absolute/user-level file. A key placed in a cwd `.env` is deliberately ignored.

@@ -295,10 +295,9 @@ class TestTheOldSettingsAreGone:
         assert logged("untrusted_project_setting_ignored") == [
             ("ANTHROPIC_API_KEY", "warning"), ("raw_llm_logging", "warning"),
         ]
-        assert logged("unknown_project_setting_ignored") == [
-            ("context_window_target_tokens", "debug"),
-            ("context_window_trigger_tokens", "debug"),
-        ]
+        # A key that names no setting is dropped without a log: settings are
+        # built before logging is configured, when even a debug log prints.
+        assert logged("unknown_project_setting_ignored") == []
         assert loaded.raw_llm_logging is False
         assert loaded.anthropic_api_key != "a-project-key"
 
