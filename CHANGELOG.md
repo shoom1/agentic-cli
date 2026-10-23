@@ -984,6 +984,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead." once a turn, and the next call tries again. Both settings are
   project-settable, and a `/settings` change of either rebuilds the agents,
   keeping the conversation.
+- **google-adk 2.13 is supported, as is 2.12.** The OpenAI-compatible model
+  follows 2.13's copy of ADK's streaming loop (it builds a tool call's part
+  in one expression; the part is the same), and `/compact` and the overflow
+  summary leave 2.13's new `isolation_scope` argument of ADK's compaction at
+  its default, a chat session's root agent's own.
 
 ### Deprecated
 
