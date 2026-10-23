@@ -11,6 +11,10 @@ Three middlewares shape each model request, outermost first:
   Its archive stores nothing, so the summary names no file and its "not
   recoverable" warning becomes a debug log. The summary call reports
   ``CONTEXT_TRIMMED`` and its own ``LLM_USAGE`` (``purpose="summarization"``);
+- ``ContextOverflowMiddleware`` raises a provider's overflow that
+  ``workflow/context.py`` recognizes as LangChain's ``ContextOverflowError``,
+  so Deep Agents summarizes and retries on Gemini's wording too; an overflow
+  that survives summarizing ends the turn with one clear ``ERROR``;
 - ``AnthropicPromptCachingMiddleware`` on Claude, with ``prompt_caching_enabled``:
   the system prompt, the last tool and the conversation, for 5 minutes.
 
@@ -27,8 +31,10 @@ import warnings
 from types import SimpleNamespace
 
 import anthropic
+import httpx
 import openai
 import pytest
+from google.genai import errors as genai_errors
 
 pytest.importorskip("deepagents")
 
@@ -38,6 +44,7 @@ from deepagents.middleware.patch_tool_calls import PatchToolCallsMiddleware  # n
 from deepagents.middleware.summarization import SummarizationMiddleware  # noqa: E402
 from langchain.agents.middleware import ModelRequest  # noqa: E402
 from langchain_anthropic.middleware import AnthropicPromptCachingMiddleware  # noqa: E402
+from langchain_core.exceptions import ContextOverflowError  # noqa: E402
 from langchain_core.messages import AIMessage, HumanMessage  # noqa: E402
 
 from agentic_cli.config import BaseSettings  # noqa: E402
@@ -45,13 +52,19 @@ from agentic_cli.models import ModelCatalog, ProviderKind, RoleMap, resolve_mode
 from agentic_cli.models.endpoints import EndpointSpec  # noqa: E402
 from agentic_cli.tools.registry import register_tool  # noqa: E402
 from agentic_cli.workflow.config import AgentConfig  # noqa: E402
-from agentic_cli.workflow.context import ContextBudgetError, context_budget  # noqa: E402
+from agentic_cli.workflow.context import (  # noqa: E402
+    OVERFLOW_ERROR_CODE,
+    ContextBudgetError,
+    context_budget,
+    overflow_message,
+)
 from agentic_cli.workflow.deepagents import agent_builder, summarization  # noqa: E402
 from agentic_cli.workflow.deepagents import manager as manager_module  # noqa: E402
 from agentic_cli.workflow.deepagents.agent_builder import build_agent_tree  # noqa: E402
 from agentic_cli.workflow.deepagents.manager import DeepAgentsWorkflowManager  # noqa: E402
 from agentic_cli.workflow.deepagents.middleware import (  # noqa: E402
     ActiveToolCallMiddleware,
+    ContextOverflowMiddleware,
     ForeignReasoningMiddleware,
     PermissionMiddleware,
     ToolCallErrorMiddleware,
@@ -307,17 +320,18 @@ class TestTheStack:
         lead = created["lead"]["middleware"]
         assert [type(m) for m in lead] == [
             PatchToolCallsMiddleware, SubAgentMiddleware, ForeignReasoningMiddleware,
-            ReportingSummarizationMiddleware, AnthropicPromptCachingMiddleware,
+            ReportingSummarizationMiddleware, ContextOverflowMiddleware,
+            AnthropicPromptCachingMiddleware,
             PermissionMiddleware, ToolCallErrorMiddleware, ActiveToolCallMiddleware,
         ]
         assert issubclass(ReportingSummarizationMiddleware, SummarizationMiddleware)
         assert lead[2].kind is ProviderKind.ANTHROPIC
         assert lead[3].agent == "lead"
-        assert (lead[4].ttl, lead[4].unsupported_model_behavior) == ("5m", "ignore")
+        assert (lead[5].ttl, lead[5].unsupported_model_behavior) == ("5m", "ignore")
         assert [type(m) for m in created["helper"]["middleware"]] == [
             PatchToolCallsMiddleware, ForeignReasoningMiddleware,
-            ReportingSummarizationMiddleware, PermissionMiddleware, ToolCallErrorMiddleware,
-            ActiveToolCallMiddleware,
+            ReportingSummarizationMiddleware, ContextOverflowMiddleware,
+            PermissionMiddleware, ToolCallErrorMiddleware, ActiveToolCallMiddleware,
         ]
         assert created["helper"]["middleware"][1].kind is ProviderKind.GOOGLE
         assert created["helper"]["middleware"][2].agent == "helper"
@@ -372,6 +386,100 @@ class TestForeignReasoning:
         assert middleware.wrap_model_call(request, lambda r: r.messages)[1].content == (
             [{"type": "text", "text": "Gemini answer."}]
         )
+
+
+def _gemini_overflow() -> genai_errors.ClientError:
+    """Gemini's overflow, as google-genai raises it: an int ``code``, no ``status_code``."""
+    return genai_errors.ClientError(400, {"error": {
+        "code": 400,
+        "message": "The input token count (1200000) exceeds the maximum number of "
+                   "tokens allowed (1048576).",
+        "status": "INVALID_ARGUMENT",
+    }})
+
+
+def _anthropic_error(error_class, status: int, kind: str, message: str):
+    request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    return error_class(
+        message,
+        response=httpx.Response(status, request=request),
+        body={"type": "error", "error": {"type": kind, "message": message}},
+    )
+
+
+def _claude_too_large() -> anthropic.RequestTooLargeError:
+    """Claude's request-size limit: a 413 whose text names no context."""
+    return _anthropic_error(
+        anthropic.RequestTooLargeError, 413, "request_too_large",
+        "Request exceeds the maximum size",
+    )
+
+
+def _claude_bad_request() -> anthropic.BadRequestError:
+    """A 400 that is not an overflow."""
+    return _anthropic_error(
+        anthropic.BadRequestError, 400, "invalid_request_error",
+        "temperature: must be at most 1",
+    )
+
+
+class TestContextOverflowMiddleware:
+    @staticmethod
+    def _request() -> ModelRequest:
+        history = [HumanMessage("hi")]
+        return ModelRequest(model=ScriptedChat(), messages=history, state={"messages": history})
+
+    @pytest.mark.parametrize("error", [_gemini_overflow(), _claude_too_large()])
+    async def test_a_recognized_overflow_is_raised_as_langchains(self, error):
+        async def handler(request):
+            raise error
+
+        def sync_handler(request):
+            raise error
+
+        middleware = ContextOverflowMiddleware()
+        with pytest.raises(ContextOverflowError) as caught:
+            await middleware.awrap_model_call(self._request(), handler)
+        with pytest.raises(ContextOverflowError) as caught_sync:
+            middleware.wrap_model_call(self._request(), sync_handler)
+
+        for raised in (caught.value, caught_sync.value):
+            assert raised.__cause__ is error
+            assert str(raised) == str(error)
+
+    @pytest.mark.parametrize("error", [
+        _claude_bad_request(), ValueError("prompt is too long"),
+        ContextOverflowError("already LangChain's"),
+    ])
+    async def test_anything_else_passes_unchanged(self, error):
+        async def handler(request):
+            raise error
+
+        with pytest.raises(type(error)) as caught:
+            await ContextOverflowMiddleware().awrap_model_call(self._request(), handler)
+
+        assert caught.value is error
+
+    @pytest.mark.parametrize("error", [
+        _claude_bad_request(), ValueError("prompt is too long"),
+        ContextOverflowError("already LangChain's"),
+    ])
+    def test_anything_else_passes_the_sync_path_unchanged(self, error):
+        def handler(request):
+            raise error
+
+        with pytest.raises(type(error)) as caught:
+            ContextOverflowMiddleware().wrap_model_call(self._request(), handler)
+
+        assert caught.value is error
+
+    async def test_an_answer_passes_through(self):
+        async def handler(request):
+            return "response"
+
+        middleware = ContextOverflowMiddleware()
+        assert await middleware.awrap_model_call(self._request(), handler) == "response"
+        assert middleware.wrap_model_call(self._request(), lambda r: "response") == "response"
 
 
 # --- whole turns ----------------------------------------------------------------------------
@@ -561,12 +669,14 @@ class TestSummarizationInATurn:
         finally:
             await manager.cleanup()
 
+        # Deep Agents' "Context remains above the input budget" reaches the
+        # user as the one clear sentence ADK gives.
         kinds = [e.type for e in events]
         assert kinds[-1] is EventType.ERROR
         assert kinds.count(EventType.ERROR) == 1
         assert EventType.TEXT not in kinds
-        assert events[-1].metadata["error_code"] == "ContextOverflowError"
-        assert "input budget" in events[-1].content
+        assert events[-1].metadata["error_code"] == OVERFLOW_ERROR_CODE
+        assert events[-1].content == overflow_message("local:small")
 
     async def test_a_summary_stays_with_the_agent_that_wrote_it(self, small, monkeypatch):
         """The coordinator's summary never reaches a sub-agent's brief, and
@@ -609,6 +719,76 @@ class TestSummarizationInATurn:
         assert [e.metadata["agent"] for e in trimmed] == ["worker"]
         summaries = [e for e in delegating if e.metadata.get("purpose") == "summarization"]
         assert [e.metadata["agent"] for e in summaries] == ["worker"]
+
+
+class TestOverflowInATurn:
+    """A provider refuses a request as too long, on scripted models.
+
+    Two earlier turns of about 3,000 tokens each sit under the 16,150-token
+    trigger; the third request is refused, which Deep Agents answers by
+    summarizing the earlier turns and retrying once, on the agent's own model.
+    """
+
+    @staticmethod
+    async def _three_turns(settings, monkeypatch, script) -> tuple[list, ScriptedChat]:
+        models = ScriptedModels(solo=script)
+        monkeypatch.setattr(manager_module, "build_chat_model", models)
+        manager = _manager(settings, [_agent("solo", "Answer.")])
+        try:
+            turns = [await turn(manager, f"Turn {n}: {USER_TURN}") for n in (1, 2, 3)]
+        finally:
+            await manager.cleanup()
+        return turns, models.chats["solo"]
+
+    @pytest.mark.parametrize(
+        "overflow", [_gemini_overflow(), _claude_too_large()], ids=["gemini", "claude-413"]
+    )
+    async def test_an_overflow_is_summarized_and_retried(self, small, monkeypatch, overflow):
+        turns, chat = await self._three_turns(small, monkeypatch, [
+            ai("Answer 1."), ai("Answer 2."), overflow, ai("A summary."), ai("Answer 3."),
+        ])
+
+        third = turns[2]
+        assert [e.content for e in third if e.type is EventType.TEXT] == ["Answer 3."]
+        assert EventType.ERROR not in [e.type for e in third]
+        trimmed = [e for e in third if e.type is EventType.CONTEXT_TRIMMED]
+        assert [e.metadata["messages_summarized"] for e in trimmed] == [4]
+        # The refused request, the summary of the first two exchanges, then
+        # the retry: the summary and the third question.
+        assert len(chat.requests) == 5
+        assert "Turn 1:" in chat.conversation(3)[0].text
+        retry = chat.conversation(4)
+        assert [m.text[:14] for m in retry] == ["Here is a summ", "Turn 3: word w"]
+        assert retry[0].text.endswith("A summary.")
+
+    async def test_an_overflow_that_survives_summarizing_is_one_clear_error(
+        self, small, monkeypatch
+    ):
+        turns, chat = await self._three_turns(small, monkeypatch, [
+            ai("Answer 1."), ai("Answer 2."), _gemini_overflow(), ai("A summary."),
+            _gemini_overflow(),
+        ])
+
+        third = turns[2]
+        errors = [e for e in third if e.type is EventType.ERROR]
+        assert [(e.content, e.metadata["error_code"]) for e in errors] == [
+            (overflow_message("local:small"), OVERFLOW_ERROR_CODE)
+        ]
+        assert errors[0].metadata["agent"] == "solo"
+        assert EventType.TEXT not in [e.type for e in third]
+        assert len(chat.requests) == 5  # one retry, no more
+
+    async def test_any_other_error_is_unchanged(self, small, monkeypatch):
+        error = _claude_bad_request()
+        turns, chat = await self._three_turns(
+            small, monkeypatch, [ai("Answer 1."), ai("Answer 2."), error]
+        )
+
+        errors = [e for e in turns[2] if e.type is EventType.ERROR]
+        assert [(e.content, e.metadata["error_code"]) for e in errors] == [
+            (str(error), "BadRequestError")
+        ]
+        assert len(chat.requests) == 3  # nothing summarized, nothing retried
 
 
 class TestSettingsChange:

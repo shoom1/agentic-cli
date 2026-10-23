@@ -16,11 +16,14 @@ from __future__ import annotations
 
 import json
 
+import anthropic
+import httpx
 import pytest
 
 pytest.importorskip("deepagents")
 
 from langchain_core.callbacks import AsyncCallbackHandler  # noqa: E402
+from langchain_core.exceptions import ContextOverflowError  # noqa: E402
 from langchain_core.messages import (  # noqa: E402
     AIMessage,
     HumanMessage,
@@ -34,6 +37,7 @@ from agentic_cli.models import ModelCatalog, RoleMap, resolve_model  # noqa: E40
 from agentic_cli.tools._core.tasks import task_progress_data  # noqa: E402
 from agentic_cli.tools.langgraph.state_tools import save_plan, save_tasks  # noqa: E402
 from agentic_cli.workflow.config import AgentConfig  # noqa: E402
+from agentic_cli.workflow.context import OVERFLOW_ERROR_CODE, overflow_message  # noqa: E402
 from agentic_cli.workflow.deepagents.agent_builder import build_agent_tree  # noqa: E402
 from agentic_cli.workflow.deepagents.event_processor import (  # noqa: E402
     DeepAgentsEventProcessor,
@@ -456,6 +460,40 @@ class TestError:
         event = _processor().turn_failed(TimeoutError())
 
         assert event.content == "TimeoutError"
+        assert event.metadata["agent"] == "coordinator"
+
+    def test_an_overflow_names_the_failing_agents_model(self):
+        # Deep Agents' own error when a summary still does not fit.
+        processor = _processor()
+        _delegated(processor, (), SUB, "researcher")
+        error = ContextOverflowError(
+            "Context remains above the input budget after compaction; reduce input, "
+            "tools, or configured output tokens."
+        )
+        processor.process((SUB,), "tasks", {"id": "m1", "name": "model", "error": error,
+                                            "interrupts": [], "result": None})
+
+        event = processor.turn_failed(error)
+
+        assert event.type is EventType.ERROR
+        assert event.content == overflow_message("google:gemini-2.5-flash")
+        assert event.metadata["error_code"] == OVERFLOW_ERROR_CODE
+        assert event.metadata["recoverable"] is False
+        assert event.metadata["agent"] == "researcher"
+
+    def test_a_providers_overflow_at_the_root(self):
+        request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+        error = anthropic.BadRequestError(
+            "prompt is too long: 210000 tokens > 200000 maximum",
+            response=httpx.Response(400, request=request),
+            body={"type": "error", "error": {"type": "invalid_request_error",
+                                             "message": "prompt is too long"}},
+        )
+
+        event = _processor().turn_failed(error)
+
+        assert event.content == overflow_message("anthropic:claude-sonnet-4-5")
+        assert event.metadata["error_code"] == OVERFLOW_ERROR_CODE
         assert event.metadata["agent"] == "coordinator"
 
 

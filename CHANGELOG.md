@@ -179,7 +179,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     model, at the point both backends share (see Changed): the smaller of
     85% of the model's input budget (0.95 of its context window, less its
     `max_tokens`) and 200,000 tokens, keeping the newest 12% of that word
-    for word. The checkpoint
+    for word. A request the provider refuses as too long is summarized and
+    retried once, whichever way the provider says it (Gemini's wording and
+    Claude's 413 included, which Deep Agents alone does not recognize); a
+    conversation that still does not fit ends the turn with one `ERROR`,
+    `error_code` `CONTEXT_OVERFLOW`: "This conversation no longer fits
+    <model>'s context window. Use /compact or /new.". The checkpoint
     keeps every message. Each summary is a `CONTEXT_TRIMMED` event
     (`source="summarization"`) with the summary call's own `LLM_USAGE`
     (`purpose="summarization"`), which the status bar adds to the totals

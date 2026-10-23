@@ -278,7 +278,9 @@ What it supports:
   the model's input budget (95% of its context window, less its
   `max_tokens`) and `context_max_tokens` (200,000 tokens), keeping the newest
   12% of that word for word. A model whose window is unknown counts as
-  128,000 tokens. The checkpoint keeps every message.
+  128,000 tokens. A request the provider refuses as too long is summarized
+  and retried once; a conversation that still does not fit ends the turn
+  with one error naming the model. The checkpoint keeps every message.
 - **Prompt caching** on Claude, as on ADK (see [Prompt caching](#prompt-caching)).
 - **MCP tools, Agent Skills, raw LLM logging and job resume**, from the same
   `AgentConfig.mcp_servers`, `AgentConfig.skills`, `raw_llm_logging` and

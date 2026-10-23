@@ -20,10 +20,11 @@ other), then the model side and the tool side.
 
 - Model side, outermost first: other providers' reasoning is left out of the
   request (``ForeignReasoningMiddleware``), Deep Agents' summarization counts
-  exactly what will be sent (``summarization.py``), and on Claude with
-  ``prompt_caching_enabled`` the cache marks land on the final request
-  (``AnthropicPromptCachingMiddleware``: the system prompt, the last tool and
-  the conversation, for 5 minutes, as on ADK).
+  exactly what will be sent (``summarization.py``), every provider's context
+  overflow reaches it as one it summarizes on (``ContextOverflowMiddleware``),
+  and on Claude with ``prompt_caching_enabled`` the cache marks land on the
+  final request (``AnthropicPromptCachingMiddleware``: the system prompt, the
+  last tool and the conversation, for 5 minutes, as on ADK).
 - Tool side, outermost first: the permission gate, the tool-error
   middleware, and the active tool call (a job a tool starts is linked to its
   call), so only a call the gate let through runs as one.
@@ -54,6 +55,7 @@ from agentic_cli.tools.registry import (
 from agentic_cli.workflow.config import AgentConfig, AgentGraphError
 from agentic_cli.workflow.deepagents.middleware import (
     ActiveToolCallMiddleware,
+    ContextOverflowMiddleware,
     ForeignReasoningMiddleware,
     PermissionMiddleware,
     ToolCallErrorMiddleware,
@@ -187,6 +189,8 @@ def _model_side(
     stack: list[AgentMiddleware] = [
         ForeignReasoningMiddleware(resolved.record.kind),
         build_summarization(model, resolved, settings),
+        # Inside the summarization: it summarizes on the overflows it raises.
+        ContextOverflowMiddleware(),
     ]
     if resolved.record.cache is CacheMechanism.ANTHROPIC and settings.prompt_caching_enabled:
         # The system prompt is a plain string: the middleware marks it.

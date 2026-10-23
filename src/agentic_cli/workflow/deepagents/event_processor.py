@@ -44,6 +44,11 @@ from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, ToolM
 from agentic_cli.constants import truncate
 from agentic_cli.tools._core.delegation import TASK_TOOL
 from agentic_cli.tools._core.tasks import task_progress_data
+from agentic_cli.workflow.context import (
+    OVERFLOW_ERROR_CODE,
+    is_context_overflow,
+    overflow_message,
+)
 from agentic_cli.workflow.deepagents.summarization import CONTEXT_SUMMARIZED
 from agentic_cli.workflow.events import WorkflowEvent
 
@@ -131,11 +136,22 @@ class DeepAgentsEventProcessor:
 
         Attributed to the agent whose task failed first, the innermost: a
         sub-agent's failure fails its coordinator's ``task`` call after it.
+        A context overflow (a provider's, or Deep Agents' own when a summary
+        still does not fit) is told in one sentence naming that agent's
+        model, with ``error_code`` ``CONTEXT_OVERFLOW``, as on ADK.
         """
-        event = WorkflowEvent.error(
-            str(error) or type(error).__name__, error_code=type(error).__name__
-        )
-        return self._attributed(event, self._failed_agent or self._root)
+        agent = self._failed_agent or self._root
+        if is_context_overflow(error):
+            model = self._agent_models.get(agent) or self._agent_models.get(self._root)
+            event = WorkflowEvent.error(
+                overflow_message(str(model.ref) if model is not None else "the model"),
+                error_code=OVERFLOW_ERROR_CODE,
+            )
+        else:
+            event = WorkflowEvent.error(
+                str(error) or type(error).__name__, error_code=type(error).__name__
+            )
+        return self._attributed(event, agent)
 
     # -- the tasks mode --------------------------------------------------------
 
