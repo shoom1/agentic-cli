@@ -75,6 +75,12 @@ def _make_mock_llm_response(
     return resp
 
 
+def _logged(plugin: LLMLoggingPlugin) -> list[dict]:
+    """The records the plugin wrote to its log file, oldest first."""
+    with open(plugin._log_file) as f:
+        return [json.loads(line) for line in f]
+
+
 class TestLLMLoggingPlugin:
     """Tests for the LLMLoggingPlugin."""
 
@@ -163,8 +169,10 @@ class TestLLMLoggingPlugin:
         assert events[0].metadata["author"] == "coordinator"
         assert events[0].metadata["invocation_id"] == "inv-002"
 
-    async def test_after_model_captures_usage(self, plugin):
-        """Usage metadata should produce an LLM_USAGE event."""
+    async def test_after_model_logs_usage_but_streams_none(self, plugin):
+        """The usage record goes to the log file only: the event processor
+        reports each call's usage, credited to its agent, and a second copy
+        here (the default model, no agent) would count every call twice."""
         ctx = _make_mock_callback_context(invocation_id="inv-003")
 
         usage = MagicMock()
@@ -181,14 +189,14 @@ class TestLLMLoggingPlugin:
             llm_response=resp,
         )
 
-        events = plugin.drain_events()
-        assert len(events) == 2  # response + usage
-        usage_event = events[1]
-        assert usage_event.type == EventType.LLM_USAGE
-        assert usage_event.metadata["prompt_tokens"] == 100
-        assert usage_event.metadata["completion_tokens"] == 50
-        assert usage_event.metadata["total_tokens"] == 150
-        assert usage_event.metadata["cached_tokens"] == 10
+        assert [e.type for e in plugin.drain_events()] == [EventType.LLM_RESPONSE]
+        record = _logged(plugin)[-1]
+        assert record["type"] == "llm_usage"
+        metadata = record["metadata"]
+        assert metadata["prompt_tokens"] == 100
+        assert metadata["completion_tokens"] == 50
+        assert metadata["total_tokens"] == 150
+        assert metadata["cached_tokens"] == 10
 
     async def test_latency_tracking(self, plugin):
         """Latency should be calculated between before and after callbacks."""
@@ -214,12 +222,43 @@ class TestLLMLoggingPlugin:
         )
 
         events = plugin.drain_events()
-        # request + response + usage = 3 events
-        assert len(events) == 3
-        usage_event = events[2]
-        assert usage_event.type == EventType.LLM_USAGE
-        assert usage_event.metadata["latency_ms"] is not None
-        assert usage_event.metadata["latency_ms"] >= 0
+        # request + response; the usage record is in the log only
+        assert [e.type for e in events] == [EventType.LLM_REQUEST, EventType.LLM_RESPONSE]
+        record = _logged(plugin)[-1]
+        assert record["type"] == "llm_usage"
+        assert record["metadata"]["latency_ms"] is not None
+        assert record["metadata"]["latency_ms"] >= 0
+
+    async def test_each_call_names_its_own_agents_model(self, tmp_path, monkeypatch):
+        """With the manager's model per agent, a call's records name the model
+        of the agent that made it; an agent it does not know, the default."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        plugin = LLMLoggingPlugin(
+            model_name="anthropic:the-default", app_name="test_app",
+            models={"researcher": "local:small"},
+        )
+        usage = MagicMock(prompt_token_count=10, candidates_token_count=5,
+                          total_token_count=15, thoughts_token_count=None,
+                          cached_content_token_count=None)
+
+        for agent in ("researcher", "helper"):
+            ctx = _make_mock_callback_context(invocation_id=f"inv-{agent}", agent_name=agent)
+            await plugin.before_model_callback(
+                callback_context=ctx, llm_request=_make_mock_llm_request(model="small")
+            )
+            await plugin.after_model_callback(
+                callback_context=ctx, llm_response=_make_mock_llm_response(usage_metadata=usage)
+            )
+
+        assert [(r["type"], r["metadata"]["model"]) for r in _logged(plugin)] == [
+            ("llm_request", "local:small"),
+            ("llm_response", "local:small"),
+            ("llm_usage", "local:small"),
+            ("llm_request", "small"),  # what the request itself names
+            ("llm_response", "anthropic:the-default"),
+            ("llm_usage", "anthropic:the-default"),
+        ]
 
     async def test_drain_events_clears_buffer(self, plugin):
         """drain_events() should return events and clear the buffer."""

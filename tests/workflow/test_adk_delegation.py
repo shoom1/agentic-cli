@@ -33,6 +33,7 @@ this rests on have contract tests at the end.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import textwrap
 from pathlib import Path
@@ -56,6 +57,7 @@ from google.adk.tools.agent_tool import AgentTool, _SingleTurnAgentTool  # noqa:
 from google.adk.tools.skill_toolset import SkillToolset  # noqa: E402
 from google.genai import types  # noqa: E402
 
+from agentic_cli.cli.usage_tracker import UsageTracker  # noqa: E402
 from agentic_cli.config import BaseSettings  # noqa: E402
 from agentic_cli.tools._core.delegation import TASK_TOOL  # noqa: E402
 from agentic_cli.tools.jobs import JobState  # noqa: E402
@@ -71,6 +73,7 @@ from agentic_cli.workflow.adk import delegation  # noqa: E402
 from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager  # noqa: E402
 from agentic_cli.workflow.adk.permission_plugin import _UNVERIFIED, PermissionPlugin  # noqa: E402
 from agentic_cli.workflow.config import AgentConfig, AgentGraphError  # noqa: E402
+from agentic_cli.workflow.context import context_budget  # noqa: E402
 from agentic_cli.workflow.events import EventType  # noqa: E402
 from agentic_cli.workflow.permissions import EXEMPT  # noqa: E402
 from agentic_cli.workflow.permissions.prompt import DENY_CHOICE  # noqa: E402
@@ -572,6 +575,142 @@ class TestTheStream:
 
         assert recent == [{"role": "user", "content": "Hi."},
                           {"role": "assistant", "content": "Helper here."}]
+
+
+class TestUsagePerAgent:
+    """Each call's usage names the agent that made it, that agent's own model
+    and its context trigger: the CLI shows only the main agent's prompt as
+    the conversation's context, an inheriting sub-agent's included (its
+    prompt holds the conversation, but it is not the main agent's context)."""
+
+    @pytest.mark.parametrize("context", ["fresh", "inherit"])
+    async def test_a_delegating_turns_usage_is_each_agents_own(
+        self, project, monkeypatch, context
+    ):
+        coordinator, researcher = team(context)
+        configs = [coordinator, dataclasses.replace(researcher, model="claude-haiku-4-5")]
+        route(monkeypatch, anthropic, "AsyncAnthropic", FakeAPI(delegating()))
+        manager = manager_for(configs)
+        try:
+            await turn(manager, TURNS[0])
+            delegated = await turn(manager, TURNS[1])
+            triggers = {
+                name: context_budget(model, manager.settings).trigger
+                for name, model in manager.agent_models.items()
+            }
+        finally:
+            await manager.cleanup()
+
+        assert triggers["coordinator"] != triggers["researcher"]
+        usage = [
+            tuple(e.metadata.get(key) for key in (
+                "agent", "model", "purpose", "context_trigger", "window_known"
+            ))
+            for e in delegated if e.type is EventType.LLM_USAGE
+        ]
+        assert usage == [
+            ("coordinator", "anthropic:claude-sonnet-4-6", None, triggers["coordinator"], True),
+            ("researcher", "anthropic:claude-haiku-4-5", "subagent", triggers["researcher"],
+             True),
+            ("coordinator", "anthropic:claude-sonnet-4-6", None, triggers["coordinator"], True),
+        ]
+
+    @pytest.mark.parametrize("context", ["fresh", "inherit"])
+    async def test_with_the_raw_llm_log_a_sub_agent_never_moves_ctx(
+        self, project, monkeypatch, context
+    ):
+        """The raw LLM log keeps its usage records in its file: each call's
+        usage is streamed once, the event processor's, credited to its agent.
+        A second, unattributed copy made a sub-agent's prompt the context and
+        counted every call twice."""
+        route(monkeypatch, anthropic, "AsyncAnthropic", FakeAPI(Team(
+            coordinator=[sized(calls("researcher", "toolu_c1", request=BRIEF), 4_000),
+                         sized(says("The researcher says X is 42."), 4_200)],
+            researcher=[sized(says("X is 42."), 150_000)],
+        )))
+        manager = GoogleADKWorkflowManager(
+            agent_configs=team(context),
+            settings=BaseSettings(session_store="memory", default_model="claude-sonnet-4-6",
+                                  raw_llm_logging=True),
+        )
+        try:
+            events = await turn(manager, "Have the researcher find X.")
+        finally:
+            await manager.cleanup()
+
+        usage = [e.metadata for e in events if e.type is EventType.LLM_USAGE]
+        assert [(u.get("agent"), u.get("purpose"), u["prompt_tokens"]) for u in usage] == [
+            ("coordinator", None, 4_000),
+            ("researcher", "subagent", 150_000),
+            ("coordinator", None, 4_200),
+        ]
+        tracker, shown = UsageTracker(), []
+        for metadata in usage:
+            tracker.record(metadata)
+            shown.append(tracker.last_prompt_tokens)
+        assert shown == [4_000, 4_000, 4_200]
+        assert tracker.prompt_tokens == 158_200  # each call once
+
+    async def test_the_raw_log_names_each_calls_own_model(self, project, monkeypatch):
+        coordinator, researcher = team()
+        route(monkeypatch, anthropic, "AsyncAnthropic", FakeAPI(Team(
+            coordinator=[calls("researcher", "toolu_c1", request=BRIEF), says("X is 42.")],
+            researcher=[says("X is 42.")],
+        )))
+        manager = GoogleADKWorkflowManager(
+            agent_configs=[coordinator, dataclasses.replace(researcher, model="claude-haiku-4-5")],
+            settings=BaseSettings(session_store="memory", default_model="claude-sonnet-4-6",
+                                  raw_llm_logging=True),
+        )
+        try:
+            await turn(manager, TURNS[1])
+            log_file = manager._llm_logging_plugin._log_file
+        finally:
+            await manager.cleanup()
+
+        records = [json.loads(line) for line in log_file.read_text().splitlines()]
+        assert [(r["type"], r["metadata"]["model"]) for r in records
+                if r["type"] != "llm_request"] == [
+            ("llm_response", "anthropic:claude-sonnet-4-6"),
+            ("llm_usage", "anthropic:claude-sonnet-4-6"),
+            ("llm_response", "anthropic:claude-haiku-4-5"),
+            ("llm_usage", "anthropic:claude-haiku-4-5"),
+            ("llm_response", "anthropic:claude-sonnet-4-6"),
+            ("llm_usage", "anthropic:claude-sonnet-4-6"),
+        ]
+        assert [r["metadata"]["model"] for r in records if r["type"] == "llm_request"] == [
+            "anthropic:claude-sonnet-4-6", "anthropic:claude-haiku-4-5",
+            "anthropic:claude-sonnet-4-6",
+        ]
+
+    async def test_a_resumed_turns_usage_is_the_main_agents(self, project, monkeypatch):
+        """A finished job resumes the main agent: the resumed call's usage is
+        credited to it, with its trigger, as any turn's is."""
+        route(monkeypatch, anthropic, "AsyncAnthropic", FakeAPI(Team(coordinator=[
+            sized(calls("delegation_probe_start_job", "toolu_j1", command="make"), 3_000),
+            sized(says("Started job j1."), 3_100),
+            sized(says("The build finished."), 3_300),
+        ])))
+        manager = manager_for(team(tools=[delegation_probe_start_job]))
+        try:
+            await turn(manager, "Build it.")
+            resumed = [e async for e in manager.resume_with_job_result(
+                _record(STARTED[-1]), result="built ok")]
+            trigger = manager.context_budget().trigger
+        finally:
+            await manager.cleanup()
+
+        assert [
+            tuple(e.metadata.get(key) for key in (
+                "agent", "purpose", "prompt_tokens", "context_trigger", "window_known"
+            ))
+            for e in resumed if e.type is EventType.LLM_USAGE
+        ] == [("coordinator", None, 3_300, trigger, True)]
+
+
+def sized(message: dict, prompt_tokens: int) -> dict:
+    """``message`` reporting a prompt of ``prompt_tokens``."""
+    return {**message, "usage": {"input_tokens": prompt_tokens, "output_tokens": 5}}
 
 
 # --- what the manager builds -----------------------------------------------------------

@@ -266,6 +266,13 @@ class TestSummarizing:
             "summarization", 2
         )
         assert texts(third) == ["A3."]
+        # The summary's usage, like the answer's, is the main agent's: its
+        # trigger (the 16,000-token ceiling) and a known window.
+        answer_usage = [e for e in third if e.type is EventType.LLM_USAGE][-1]
+        for event in (usage, answer_usage):
+            assert (event.metadata["agent"], event.metadata["context_trigger"],
+                    event.metadata["window_known"]) == ("solo", 16_000, True)
+        assert "purpose" not in answer_usage.metadata
 
     async def test_a_second_summary_replaces_the_first(self, project, monkeypatch):
         """The main path of a long conversation: the second summary starts where

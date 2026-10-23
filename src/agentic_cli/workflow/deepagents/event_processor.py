@@ -13,9 +13,11 @@ finished message, no tokens. Only the agents' own nodes speak:
 
 - a ``model`` update's ``AIMessage``: ``THINKING`` (its reasoning blocks) and
   ``TEXT`` (its text blocks) in order, one ``TOOL_CALL`` per tool call, and
-  ``LLM_USAGE`` on that agent's own model. Only the root replies to the user:
+  ``LLM_USAGE`` on that agent's own model, with its context numbers
+  (``context_trigger``, ``window_known``). Only the root replies to the user:
   a sub-agent's ``TEXT`` is marked ``metadata["subagent"]`` (activity, not
-  the reply) and its usage ``purpose="subagent"``;
+  the reply) and its usage ``purpose="subagent"``, a fork's included (its
+  prompt holds the conversation, but it is not the main agent's context);
 - a ``tools`` update's ``ToolMessage``s, including those a ``Command`` carried
   (the state tools, ``task``): ``TOOL_RESULT``, a JSON dict parsed back; and
   its ``tasks``, when they changed: ``TASK_PROGRESS``, in the same step.
@@ -50,8 +52,10 @@ from agentic_cli.tools._core.delegation import TASK_TOOL
 from agentic_cli.tools._core.tasks import task_progress_data
 from agentic_cli.workflow.context import (
     OVERFLOW_ERROR_CODE,
+    ContextBudget,
     is_context_overflow,
     overflow_message,
+    usage_fields,
 )
 from agentic_cli.workflow.deepagents.summarization import CONTEXT_SUMMARIZED
 from agentic_cli.workflow.events import WorkflowEvent
@@ -90,6 +94,8 @@ class DeepAgentsEventProcessor:
         agent_models: Each agent's resolved model, by name; ``LLM_USAGE`` is
             reported against the agent's own.
         session_id: Put on ``TEXT`` and ``THINKING``, as the other backends do.
+        budgets: Each agent's context numbers, by name, which its
+            ``LLM_USAGE`` carries; none without.
     """
 
     def __init__(
@@ -98,10 +104,12 @@ class DeepAgentsEventProcessor:
         root: str,
         agent_models: Mapping[str, "ResolvedModel"],
         session_id: str | None = None,
+        budgets: Mapping[str, ContextBudget] | None = None,
     ) -> None:
         self._root = root
         self._agent_models = agent_models
         self._session_id = session_id
+        self._budgets: Mapping[str, ContextBudget] = budgets or {}
         # Namespace -> the agent whose graph runs there.
         self._agents: dict[Namespace, str] = {(): root}
         # Tool call id -> tool name: a ToolMessage a Command carried may have
@@ -257,6 +265,7 @@ class DeepAgentsEventProcessor:
     def _usage(self, agent: str, usage: Mapping[str, Any]) -> WorkflowEvent:
         model = self._agent_models.get(agent) or self._agent_models.get(self._root)
         event = usage_event(model, usage)
+        event.metadata.update(usage_fields(self._budgets.get(agent)))
         if agent != self._root:
             # A sub-agent's prompt is its brief, not the conversation's context.
             event.metadata["purpose"] = "subagent"
@@ -335,7 +344,7 @@ class RunCallback(AsyncCallbackHandler):
     - A summary call (run metadata ``lc_source="summarization"``) reports
       ``CONTEXT_SUMMARIZING`` as it starts, then its ``LLM_USAGE``, with
       ``purpose="summarization"``, on the model of the agent it summarized
-      for.
+      for, with that agent's context numbers.
     - A summary applied (``CONTEXT_SUMMARIZED``) is ``CONTEXT_TRIMMED``, with
       ``source="summarization"``, the messages it stands for and the
       conversation's tokens before and after.
@@ -352,6 +361,8 @@ class RunCallback(AsyncCallbackHandler):
         llm_log: Where raw LLM traffic is written; None logs none.
         live: The turn's live events, which every event goes out through;
             None collects them for ``drain``.
+        budgets: Each agent's context numbers, by name, which a summary's
+            ``LLM_USAGE`` carries; none without.
     """
 
     def __init__(
@@ -361,10 +372,12 @@ class RunCallback(AsyncCallbackHandler):
         agent_models: Mapping[str, "ResolvedModel"],
         llm_log: "LLMLogWriter | None" = None,
         live: "LiveEvents | None" = None,
+        budgets: Mapping[str, ContextBudget] | None = None,
     ) -> None:
         super().__init__()
         self._root = root
         self._agent_models = agent_models
+        self._budgets: Mapping[str, ContextBudget] = budgets or {}
         self._llm_log = llm_log
         self._live = live
         # A sync tool's model call reports from LangChain's executor thread.
@@ -413,7 +426,10 @@ class RunCallback(AsyncCallbackHandler):
             self._log(_response_event(call, response), run_id)
         if call.purpose == PURPOSE_SUMMARY:
             event = usage_event(self._agent_models.get(call.agent), _usage_of(response))
-            event.metadata.update(purpose=PURPOSE_SUMMARY, agent=call.agent)
+            event.metadata.update(
+                purpose=PURPOSE_SUMMARY, agent=call.agent,
+                **usage_fields(self._budgets.get(call.agent)),
+            )
             self._emit(event)
 
     async def on_llm_error(self, error: BaseException, *, run_id: UUID, **kwargs: Any) -> None:

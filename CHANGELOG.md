@@ -411,6 +411,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   root, `"inherit"` on an agent with sub-agents of its own (in 0.7.0: Deep
   Agents tells a fork that delegating "will be refused", which a
   coordinator would believe), and an unknown value.
+- **`BaseWorkflowManager.context_budget(agent_name=None)` and
+  `root_agent_name`**: an agent's context numbers as its backend summarizes
+  and trims by them, the root agent's by default. A frozen `ContextBudget`
+  (`workflow/context.py`): the model's `window` (128,000 with `window_known`
+  False when the model's is unknown), the input `budget`, the summary
+  `trigger` and the `keep` tail, computed when the agents are built. It
+  raises `RuntimeError` before the manager initializes and `KeyError` for an
+  agent whose context the manager does not manage: LangGraph and a native
+  ADK YAML app manage none, and their `root_agent_name` is None. On ADK and
+  Deep Agents every `LLM_USAGE` an agent's call reports now carries `agent`,
+  that agent's `context_trigger` and `window_known`; a summary's carries
+  those of the agent it summarized. A sub-agent's call stays
+  `purpose="subagent"`, an inheriting one's too: its prompt holds the
+  conversation, but it is not the main agent's context.
 
 ### Changed
 
@@ -1069,6 +1083,21 @@ step; each entry says what to use instead.
 
 ### Fixed
 
+- **On ADK, a model call's usage names the model of the agent that made
+  it.** `LLM_USAGE` named the default model for every agent's call, so a
+  sub-agent on a model of its own, or a root agent with its own `model`,
+  was reported against the wrong one. It now names the agent
+  (`metadata["agent"]`) and that agent's own model, as on Deep Agents; a
+  native ADK YAML app's agents, which ADK builds, still report the default
+  model.
+- **With `raw_llm_logging` on, ADK reported every model call's usage
+  twice.** The raw log's plugin put its own copy of each call's usage into
+  the turn's stream beside the event processor's, naming the default model
+  and no agent: the token totals doubled, and a sub-agent's prompt would
+  show as the main agent's context. The plugin now writes its usage record
+  to the log file only, as Deep Agents' logging does, and each of its
+  records names the model of the agent that made the call, not the default
+  model.
 - **Ctrl+C while `/settings` restarts the workflow no longer leaves the new
   values live and unsaved.** A Save that changes the model, a role's model,
   the thinking effort or the orchestrator restarts the workflow on them, and

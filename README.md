@@ -1482,7 +1482,12 @@ class MyApp(BaseCLIApp):
 | `LLM_REQUEST` / `LLM_RESPONSE` / `LLM_USAGE` | LLM traffic + token accounting |
 
 On Deep Agents every event carries `metadata["agent"]`, the agent that
-produced it, and `LLM_USAGE` names that agent's own model.
+produced it. On ADK and Deep Agents `LLM_USAGE` names the agent whose call it
+was (`agent`) and that agent's own model, with its `context_trigger` (the
+prompt size its conversation is summarized at) and `window_known`; a
+sub-agent's call is `purpose="subagent"` and a summary's
+`purpose="summarization"`. A manager's `context_budget(agent_name=None)`
+gives an agent's numbers, the root agent's (`root_agent_name`) by default.
 
 ### Processing Events
 

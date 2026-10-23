@@ -624,6 +624,10 @@ class TestSummarizationInATurn:
         assert summary_usage.metadata["agent"] == "solo"
         assert summary_usage.metadata["model"] == "local:small"
         assert "purpose" not in answer_usage.metadata
+        # Both are the agent's own: its 16,150-token trigger, on a declared window.
+        for usage in (summary_usage, answer_usage):
+            assert (usage.metadata["agent"], usage.metadata["context_trigger"],
+                    usage.metadata["window_known"]) == ("solo", 16_150, True)
         assert (trimmed.metadata["source"], trimmed.metadata["agent"]) == ("summarization", "solo")
         assert (trimmed.metadata["messages_before"], trimmed.metadata["messages_after"]) == (11, 2)
         assert trimmed.metadata["messages_summarized"] == 10

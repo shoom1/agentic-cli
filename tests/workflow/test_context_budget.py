@@ -386,6 +386,120 @@ class TestTheOldSettingsAreGone:
         assert [e.content for e in events if e.type is EventType.TEXT] == ["Hi.", "Hi."]
 
 
+def _team() -> list[AgentConfig]:
+    """A coordinator on the default model (Sonnet 4.5) and a researcher on Opus 4.7."""
+    return [
+        AgentConfig(name="coordinator", prompt="Coordinate.", sub_agents=["researcher"],
+                    description="Leads."),
+        AgentConfig(name="researcher", prompt="Research.", description="Finds facts.",
+                    model=OPUS),
+    ]
+
+
+def _manager(backend: str, configs: list[AgentConfig] | None = None, **kwargs):
+    """A manager of ``backend`` over ``configs`` (the team by default)."""
+    options = {"session_store": "memory", "default_model": SONNET}
+    if backend == "adk":
+        from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager
+
+        return GoogleADKWorkflowManager(
+            agent_configs=_team() if configs is None else configs,
+            settings=BaseSettings(**options), **kwargs,
+        )
+    if backend == "deepagents":
+        pytest.importorskip("deepagents")
+        from agentic_cli.workflow.deepagents.manager import DeepAgentsWorkflowManager
+
+        return DeepAgentsWorkflowManager(agent_configs=_team(), settings=BaseSettings(**options))
+    pytest.importorskip("langgraph")
+    from agentic_cli.workflow.langgraph import LangGraphWorkflowManager
+
+    return LangGraphWorkflowManager(
+        agent_configs=_team(), settings=BaseSettings(**options), checkpointer="memory"
+    )
+
+
+class TestTheManagersBudget:
+    """``context_budget(agent_name=None)``: an agent's numbers, as its backend
+    summarizes and trims by them, the root agent's (``root_agent_name``) by
+    default. ``/status`` reads them, and so may an app."""
+
+    @pytest.fixture(autouse=True)
+    def _claude(self, hermetic, monkeypatch):
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "a-test-key")
+
+    @pytest.mark.parametrize("backend", ["adk", "deepagents"])
+    async def test_before_initialization_there_are_none(self, backend):
+        manager = _manager(backend)
+
+        assert manager.root_agent_name is None
+        with pytest.raises(RuntimeError, match="not initialized"):
+            manager.context_budget()
+
+    @pytest.mark.parametrize("backend", ["adk", "deepagents"])
+    async def test_after_it_the_roots_and_a_sub_agents_by_name(self, backend):
+        manager = _manager(backend)
+        await manager.initialize_services()
+        try:
+            root = manager.root_agent_name
+            budget = manager.context_budget()
+            by_name = {name: manager.context_budget(name) for name in ("coordinator", "researcher")}
+            expected = {
+                name: context_budget(model, manager.settings)
+                for name, model in manager.agent_models.items()
+            }
+            with pytest.raises(KeyError, match="nobody"):
+                manager.context_budget("nobody")
+        finally:
+            await manager.cleanup()
+
+        assert root == "coordinator"
+        assert budget == by_name["coordinator"] == expected["coordinator"]
+        assert by_name["researcher"] == expected["researcher"] != budget
+        assert (budget.window, by_name["researcher"].window) == (200_000, 1_000_000)
+        # Released with the agents.
+        assert manager.root_agent_name is None
+        with pytest.raises(RuntimeError):
+            manager.context_budget()
+
+    async def test_on_adk_it_is_the_trigger_the_main_agent_is_summarized_at(self):
+        manager = _manager("adk")
+        await manager.initialize_services()
+        try:
+            threshold = manager._runner.app.events_compaction_config.token_threshold
+            trigger = manager.context_budget().trigger
+        finally:
+            await manager.cleanup()
+
+        assert threshold == trigger
+
+    async def test_a_native_adk_app_manages_no_context(self, hermetic):
+        (hermetic / "root_agent.yaml").write_text(
+            "agent_class: LlmAgent\nname: root\nmodel: claude-sonnet-4-6\ninstruction: Help.\n"
+        )
+        manager = _manager("adk", [], adk_config_path=str(hermetic / "root_agent.yaml"))
+        await manager.initialize_services()
+        try:
+            assert manager.root_agent_name is None
+            with pytest.raises(KeyError):
+                manager.context_budget()
+        finally:
+            await manager.cleanup()
+
+    async def test_langgraph_manages_no_context(self):
+        # Deprecated, and given nothing new: it never summarizes.
+        manager = _manager("langgraph")
+        await manager.initialize_services()
+        try:
+            assert manager.root_agent_name is None
+            with pytest.raises(KeyError):
+                manager.context_budget()
+            with pytest.raises(KeyError):
+                manager.context_budget("coordinator")
+        finally:
+            await manager.cleanup()
+
+
 class TestCharsPerToken:
     def test_claude_is_denser_than_the_others(self):
         assert chars_per_token(ProviderKind.ANTHROPIC) == 3.3

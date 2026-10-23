@@ -9,6 +9,7 @@ HITL) based on tool requirements, creating them lazily when needed.
 It also provides shared implementations for:
 - User input handling (callback-based)
 - Models: the model catalog, and every agent's model resolved at startup
+- Context: each agent's context numbers (``context_budget``), for a UI
 """
 
 from __future__ import annotations
@@ -61,6 +62,8 @@ from agentic_cli.logging import Loggers
 
 if TYPE_CHECKING:
     from agentic_cli.config import BaseSettings
+    from agentic_cli.workflow.config import AgentGraph
+    from agentic_cli.workflow.context import ContextBudget
     from agentic_cli.memory import MemoryStore
     from agentic_cli.memory.kb import KnowledgeBase
     from agentic_cli.tools.sandbox.manager import SandboxManager
@@ -154,6 +157,12 @@ class BaseWorkflowManager(ABC):
         self._catalog: ModelCatalog | None = None
         self._default_model: ResolvedModel | None = None
         self._resolved_models: dict[str, ResolvedModel] = {}
+
+        # Context. The root agent's name comes from the validated agent graph;
+        # each agent's numbers are computed by the backend when it builds the
+        # agents, and stay empty on a backend that manages no context.
+        self._root_agent_name: str | None = None
+        self._budgets: dict[str, "ContextBudget"] = {}
 
         # User input handling (callback-only), context-local — see
         # set_input_callback(). One ContextVar per manager; there are only ever
@@ -889,6 +898,42 @@ class BaseWorkflowManager(ABC):
         """Each agent's model, by agent name; empty before initialization."""
         return MappingProxyType(self._resolved_models)
 
+    @property
+    def root_agent_name(self) -> str | None:
+        """The root agent's name, from the validated agent graph.
+
+        None before initialization, and on a manager that validates no graph
+        of its own (LangGraph, a native ADK YAML app).
+        """
+        return self._root_agent_name if self._initialized else None
+
+    def context_budget(self, agent_name: str | None = None) -> "ContextBudget":
+        """An agent's context numbers, as its backend summarizes and trims by them.
+
+        Its window (or the 128k floor), input budget, summary trigger and the
+        tail a summary keeps (``workflow/context.py``), computed when the
+        agents were built: the numbers ``/status`` shows.
+
+        Args:
+            agent_name: The agent; None for the root agent (``root_agent_name``).
+
+        Raises:
+            RuntimeError: Before initialization, or after cleanup.
+            KeyError: ``agent_name`` names no agent whose context this manager
+                manages. LangGraph and a native ADK YAML app manage none: every
+                name is unknown there, the root's included.
+        """
+        if not self._initialized:
+            raise RuntimeError(
+                f"{type(self).__name__} is not initialized: its agents' context "
+                "budgets are computed when they are built."
+            )
+        name = self.root_agent_name if agent_name is None else agent_name
+        if name is None or name not in self._budgets:
+            who = "the root agent" if name is None else f"agent {name!r}"
+            raise KeyError(f"No context budget for {who}: this manager does not manage it.")
+        return self._budgets[name]
+
     async def initialize_services(self, validate: bool = True) -> None:
         """Initialize backend services asynchronously.
 
@@ -920,7 +965,8 @@ class BaseWorkflowManager(ABC):
         # anything is allocated or any network call is made: a static
         # configuration error should not cost a model listing or an
         # embedding model.
-        self._validate_agent_graph()
+        graph = self._validate_agent_graph()
+        self._root_agent_name = graph.root_name if graph is not None else None
         if validate:
             self._validate_model_settings()
 
@@ -1079,11 +1125,15 @@ class BaseWorkflowManager(ABC):
         catalog = ModelCatalog(endpoints=endpoints)  # never loaded: the shipped table
         return roles.resolve("default", catalog=catalog, endpoints=endpoints)
 
-    def _validate_agent_graph(self) -> None:
+    def _validate_agent_graph(self) -> "AgentGraph | None":
         """Validate the declared agent graph. Backends may narrow this.
 
         Runs before model listings and service creation so a static configuration
         error surfaces immediately and costs nothing.
+
+        Returns:
+            The validated graph, whose root is ``root_agent_name``; None when
+            the backend validates none of its own (the base, LangGraph).
         """
         return None
 

@@ -36,7 +36,7 @@ agentic-cli/
 │   │   ├── settings_introspection.py # Pydantic field → thinking-prompt form field (built complete: they are frozen)
 │   │   └── usage_tracker.py        # Token usage / status bar
 │   ├── workflow/
-│   │   ├── base_manager.py   # BaseWorkflowManager (abstract; service detection, tool assembly)
+│   │   ├── base_manager.py   # BaseWorkflowManager (abstract; service detection, tool assembly; context_budget/root_agent_name)
 │   │   ├── factory.py        # create_workflow_manager_from_settings (_BACKENDS: orchestrator → "module:Class" + extra, imported when chosen)
 │   │   ├── service_registry.py # get_service/require_service + ContextVar registry
 │   │   ├── events.py         # WorkflowEvent, EventType
@@ -78,7 +78,7 @@ agentic-cli/
 │   │   │   ├── tool_result_cap_plugin.py # ToolResultCapPlugin: every tool result through cap_tool_result (after TaskProgressPlugin)
 │   │   │   ├── context_cache_plugin.py # One Gemini cache attempt a turn
 │   │   │   ├── foreign_reasoning_plugin.py # No model is sent another provider's thoughts
-│   │   │   └── plugins.py    # LLM traffic logging (raw_llm_logging): requests as sent (SentRequestLoggingPlugin, after the fit guard); the summary call and the overflow retry are not logged on ADK (a follow-up)
+│   │   │   └── plugins.py    # LLM traffic logging (raw_llm_logging): requests as sent (SentRequestLoggingPlugin, after the fit guard); each record names its agent's model; usage records go to the file only (the stream's LLM_USAGE is the event processor's); the summary call and the overflow retry are not logged on ADK (a follow-up)
 │   │   ├── deepagents/       # Deep Agents orchestrator (deepagents extra); imports neither adk/ nor langgraph/
 │   │   │   ├── manager.py    # DeepAgentsWorkflowManager (turns, sessions, lifecycle, MCP, skills, job resume)
 │   │   │   ├── agent_builder.py # build_agent_tree: one create_agent per AgentConfig, bottom-up; task via SubAgentMiddleware (inherit = a fork)

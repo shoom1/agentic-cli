@@ -180,6 +180,20 @@ def context_budget(resolved: "ResolvedModel", settings: "BaseSettings") -> Conte
     )
 
 
+def usage_fields(budget: ContextBudget | None) -> dict[str, int | bool]:
+    """What an agent's ``LLM_USAGE`` says of its context, for its metadata.
+
+    ``context_trigger`` is the prompt size at which the agent's conversation
+    is summarized, and ``window_known`` whether its window is the model's own
+    or the ``UNKNOWN_WINDOW`` floor: the CLI shows the main agent's last
+    prompt against that trigger. Nothing for an agent with no budget, one
+    whose context nobody manages (a native ADK YAML app's, LangGraph's).
+    """
+    if budget is None:
+        return {}
+    return {"context_trigger": budget.trigger, "window_known": budget.window_known}
+
+
 def chars_per_token(kind: ProviderKind) -> float:
     """Characters per token for estimating a request to a ``kind`` provider."""
     return _CHARS_PER_TOKEN.get(kind, _DEFAULT_CHARS_PER_TOKEN)

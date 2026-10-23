@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import time
 from collections import deque
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
@@ -35,10 +36,17 @@ class LLMLoggingPlugin(BasePlugin):
     Replaces the old per-agent LLMEventLogger with a single global plugin
     that applies to all agents via the Runner. Events are written to a
     JSON Lines file (through the shared ``workflow.llm_log.LLMLogWriter``)
-    and buffered in memory for programmatic access.
+    and buffered in memory for programmatic access, but for each call's
+    usage record, which stays in the file: the event processor streams each
+    call's ``LLM_USAGE``, credited to its agent, and a second copy would count
+    every call twice (as on Deep Agents, where logging adds no usage).
+
+    Each record names the model of the agent that made the call (``models``),
+    else the request's own model or ``model_name``.
 
     Attributes:
-        model_name: Default model name (used if not in request)
+        model_name: Default model name, for an agent ``models`` does not hold
+        models: Each agent's model reference, by agent name
         app_name: Application name for log directory (~/.{app_name}/logs/)
         max_events: Maximum events to buffer in memory (oldest are dropped)
         include_messages: Whether to include full message history
@@ -55,9 +63,11 @@ class LLMLoggingPlugin(BasePlugin):
         include_messages: bool = True,
         include_raw_parts: bool = True,
         log_requests: bool = True,
+        models: Mapping[str, str] | None = None,
     ) -> None:
         super().__init__(name="llm_logging")
         self.model_name = model_name
+        self.models: Mapping[str, str] = models or {}
         self.app_name = app_name
         self.max_events = max_events
         self.include_messages = include_messages
@@ -100,8 +110,12 @@ class LLMLoggingPlugin(BasePlugin):
         if invocation_id:
             self._request_timestamps[invocation_id] = time.perf_counter()
 
-        # Extract model name
-        model = llm_request.model or self.model_name
+        # The calling agent's model, else the one the request names
+        model = (
+            self.models.get(getattr(callback_context, "agent_name", None))
+            or llm_request.model
+            or self.model_name
+        )
 
         # Extract messages if enabled
         messages = None
@@ -157,7 +171,9 @@ class LLMLoggingPlugin(BasePlugin):
             start_time = self._request_timestamps.pop(invocation_id)
             latency_ms = (time.perf_counter() - start_time) * 1000
 
-        model = self.model_name
+        # Get author from context if available
+        author = getattr(callback_context, "agent_name", None)
+        model = self.models.get(author) or self.model_name
 
         # Extract text content
         content = None
@@ -179,9 +195,6 @@ class LLMLoggingPlugin(BasePlugin):
         error_code = llm_response.error_code
         error_message = llm_response.error_message
 
-        # Get author from context if available
-        author = getattr(callback_context, "agent_name", None)
-
         # Create response event
         response_event = WorkflowEvent.llm_response(
             model=model,
@@ -197,7 +210,8 @@ class LLMLoggingPlugin(BasePlugin):
         self._events.append(response_event)
         self._write_to_log(response_event)
 
-        # Create usage event if usage_metadata is available
+        # The usage record, for the log only: the stream's usage is the event
+        # processor's, credited to the agent that made the call.
         if llm_response.usage_metadata:
             usage = llm_response.usage_metadata
             usage_event = WorkflowEvent.llm_usage(
@@ -210,7 +224,6 @@ class LLMLoggingPlugin(BasePlugin):
                 invocation_id=invocation_id,
                 latency_ms=latency_ms,
             )
-            self._events.append(usage_event)
             self._write_to_log(usage_event)
 
         return None
