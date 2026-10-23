@@ -30,7 +30,7 @@ import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Protocol, runtime_checkable
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import SplitResult, urlsplit, urlunsplit
 
 from agentic_cli.paths import resolve_path
 from agentic_cli.workflow.permissions.store import PermissionContext
@@ -194,7 +194,10 @@ class URLMatcher:
             return False
         if (pp.hostname or "").lower() != (tt.hostname or "").lower():
             return False
-        if pp.port and pp.port != tt.port:
+        # A URL without a port means its scheme's default one (normalising
+        # drops it), never any port: ``https://host/**`` is not
+        # ``https://host:8443/``, another service.
+        if self._port(pp) != self._port(tt):
             return False
         path_re = _glob_to_regex(pp.path or "/")
         path = tt.path or "/"
@@ -207,6 +210,9 @@ class URLMatcher:
         if pp.query and not fnmatch.fnmatchcase(tt.query, pp.query):
             return False
         return True
+
+    def _port(self, parts: SplitResult) -> int | None:
+        return parts.port or self._DEFAULT_PORTS.get(parts.scheme.lower())
 
 
 class ShellMatcher:

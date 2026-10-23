@@ -149,6 +149,17 @@ class TestURLMatcher:
         assert m.matches("https://api.github.com/repos/**", "https://api.github.com/repos/owner/repo")
         assert not m.matches("https://api.github.com/repos/**", "https://api.github.com/gists/1")
 
+    def test_matches_only_the_patterns_port(self, ctx):
+        """A pattern without a port means its scheme's default port, not any port."""
+        from agentic_cli.workflow.permissions.matchers import URLMatcher
+        m = URLMatcher()
+        https = m.canonicalize_pattern("https://example.com/**", ctx)
+        assert m.matches(https, m.canonicalize_target("https://example.com:443/x", ctx))
+        assert not m.matches(https, m.canonicalize_target("https://example.com:8443/x", ctx))
+        http = m.canonicalize_pattern("http://example.com:80/**", ctx)
+        assert m.matches(http, m.canonicalize_target("http://example.com/x", ctx))
+        assert not m.matches(http, m.canonicalize_target("http://example.com:8080/x", ctx))
+
 
 class TestShellMatcher:
     def test_canonicalize_trims_and_substitutes(self, ctx):
