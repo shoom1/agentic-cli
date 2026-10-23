@@ -42,3 +42,32 @@ def test_the_arxiv_specialist_ingests_web_pages_through_web_fetch():
 
     assert "kb_ingest_url" not in ARXIV_SPECIALIST_PROMPT
     assert "saved_path" in ARXIV_SPECIALIST_PROMPT
+
+
+def test_the_prompts_say_delegate_and_name_no_delegation_tool():
+    """ADK names a delegation tool after the sub-agent, Deep Agents calls it
+    ``task``, and neither offers ``transfer_to_agent`` any more: a prompt
+    says to delegate to the sub-agent, and that it reports back."""
+    from research_demo.agents import AGENT_CONFIGS
+
+    for agent in AGENT_CONFIGS:
+        assert "transfer_to_agent" not in agent.get_prompt(), agent.name
+    coord = next(a for a in AGENT_CONFIGS if a.name == "research_coordinator")
+    assert "reports back to you" in coord.get_prompt()
+
+
+def test_a_specialist_answers_its_coordinator_not_the_user():
+    """A sub-agent's answer goes to the coordinator, which replies to the user."""
+    from research_demo.agents import AGENT_CONFIGS
+
+    from pathlib import Path
+
+    from research_demo import agents
+
+    coord = next(a for a in AGENT_CONFIGS if a.name == "research_coordinator")
+    for agent in AGENT_CONFIGS:
+        if agent.name in coord.sub_agents:
+            assert "to the user" not in agent.get_prompt(), agent.name
+    # The report writer's skill is part of what it reads.
+    skill = Path(agents.__file__).parent / "skills" / "report-writer" / "SKILL.md"
+    assert "tell the user" not in skill.read_text()

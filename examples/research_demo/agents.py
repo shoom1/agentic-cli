@@ -104,7 +104,7 @@ Updating an existing concept: call `kb_write_concept` with the same explicit `sl
 - Report findings with paper titles, authors, and arXiv IDs
 - Provide substantive analysis with evidence, not just surface-level summaries
 - Note connections and contradictions between papers when relevant
-- When you write a concept page, mention it to the user with its slug
+- When you write a concept page, give its slug in your answer
 """
 
 
@@ -159,7 +159,7 @@ You have a `report-writer` skill — call `load_skill("report-writer")` for the 
 3. Compile with `compile_document(source_path="{reports_dir}/report.tex", output_pdf="{artifacts_dir}/report.pdf", assets_dir="{artifacts_dir}")`.
 4. If it fails, read the returned errors/log_tail, fix the .tex, and recompile (at most 3 tries).
 
-Report the final PDF path to the user. You only use these tools — you do not run arbitrary code.
+Report the final PDF path in your answer. You only use these tools — you do not run arbitrary code.
 """
 
 
@@ -208,8 +208,8 @@ Rule of thumb: concept pages > sidecars > chunks. Concept pages and sidecars are
 
 Call only the tools that appear in your tool declarations, and call each one by
 its exact declared name, exactly as written. If a task needs two tools, make two
-separate calls. To hand work to another agent, call
-`transfer_to_agent(agent_name="<one of your sub-agents>")`.
+separate calls. To hand work to a sub-agent, delegate to it with a complete
+request: it reports back to you, and you answer the user.
 
 ## When to plan, and when to just do it
 

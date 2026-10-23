@@ -56,7 +56,10 @@ if str(_REPO_ROOT) not in sys.path:
 from examples.research_demo.agents import AGENT_CONFIGS  # noqa: E402
 from examples.research_demo.settings import ResearchDemoSettings  # noqa: E402
 
-#: ADK's routing tool, which the coordinator calls to delegate.
+#: The tool the coordinator delegates arXiv work with: ADK names it after the
+#: sub-agent, which reports back to the coordinator in the same turn.
+DELEGATION_TOOL_NAME = "arxiv_specialist"
+#: ADK's routing tool, which no agent built from a config is offered any more.
 TRANSFER_TOOL_NAME = "transfer_to_agent"
 
 
@@ -268,24 +271,12 @@ BOUNDED_ARXIV_REQUEST = (
 )
 
 
-#: The class name ADK's own tool description used to recommend. Asserted
-#: against here (never put in the agent's prompt, where it would prime the
-#: model toward the very mistake being guarded).
-_TRANSFER_CLASS_NAME = "TransferToAgentTool"
-
-
-def _assert_no_class_name_transfer(events: list) -> None:
-    """Delegation must go through the function, never the class name."""
+def _assert_no_transfer(events: list) -> None:
+    """Delegation goes through the sub-agent's own tool: nothing transfers."""
     called = _tool_names(events)
-    assert _TRANSFER_CLASS_NAME not in called, (
-        f"the model called the transfer tool by its class name: {called}"
+    assert TRANSFER_TOOL_NAME not in called, (
+        f"the model called {TRANSFER_TOOL_NAME}, which it is not offered: {called}"
     )
-    offending = [
-        str(e.content)
-        for e in find_events(events, EventType.ERROR)
-        if _TRANSFER_CLASS_NAME in str(e.content)
-    ]
-    assert not offending, f"transfer-by-class-name error surfaced: {offending}"
 
 
 def _assert_no_unknown_tool_errors(events: list) -> None:
@@ -308,11 +299,12 @@ class TestArxivScenario:
     operation should just be done. No plan is required or asserted here — that
     is :class:`TestPlanningScenario`'s job.
 
-    This is also the delegation regression: the transfer defect is asserted
-    inside the behavioural run rather than as a separate paid diagnostic, so
-    the class-name check can never be satisfied vacuously by a run in which no
-    delegation was attempted — the same test requires the correct
-    ``transfer_to_agent`` call.
+    This is also the delegation regression: the coordinator delegates through
+    the tool ADK names after the sub-agent (``arxiv_specialist(request=...)``),
+    and the specialist reports back in the same turn, so the coordinator
+    answers. Asserted inside the behavioural run rather than as a separate
+    paid diagnostic, so the check can never be satisfied vacuously by a run
+    in which no delegation was attempted.
     """
 
     async def test_bounded_request_delegates_and_searches(self, research_settings):
@@ -320,11 +312,11 @@ class TestArxivScenario:
             events = await say(BOUNDED_ARXIV_REQUEST)
             _maybe_record(events, "arxiv_search")
 
-        # Delegation happened, by the correct function name.
-        assert find_tool_calls(events, TRANSFER_TOOL_NAME), (
+        # Delegation happened, through the sub-agent's own tool.
+        assert find_tool_calls(events, DELEGATION_TOOL_NAME), (
             f"the coordinator never delegated; tools called: {_tool_names(events)}"
         )
-        _assert_no_class_name_transfer(events)
+        _assert_no_transfer(events)
         _assert_no_unknown_tool_errors(events)
 
         # And the specialist actually did the work.
@@ -403,4 +395,4 @@ class TestKnowledgeBaseScenario:
         # one) shows up as an unknown-tool error on exactly this path.
         both_turns = ingest_turn + readback_turn
         _assert_no_unknown_tool_errors(both_turns)
-        _assert_no_class_name_transfer(both_turns)
+        _assert_no_transfer(both_turns)

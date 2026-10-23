@@ -46,7 +46,7 @@ Call the tool:
         assets_dir="<artifacts_dir>",
     )
 
-- On `success: true`, tell the user the report is at `pdf_path`. Done.
+- On `success: true`, report that the PDF is at `pdf_path`. Done.
 - On `success: false`, read `errors` and `log_tail`, fix the `.tex`, and recompile.
   **Retry at most 3 times**, then report the failure with the error if still failing.
 
@@ -58,5 +58,5 @@ Call the tool:
   the artifacts dir and use the exact filename.
 - `! Missing $ inserted` / `! You can't use ...` — an unescaped special
   character in prose; escape it.
-- `No LaTeX engine on PATH` — the host has no TeX install; tell the user to
-  install TeX Live or MacTeX. You cannot compile without it.
+- `No LaTeX engine on PATH` — the host has no TeX install; report that TeX
+  Live or MacTeX must be installed. You cannot compile without it.
