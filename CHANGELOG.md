@@ -1300,6 +1300,16 @@ step; each entry says what to use instead.
   refuses Enter while a turn runs, says `Busy — press Ctrl+C to cancel` in
   the status bar, and keeps the line in the prompt, to send once the turn is
   over.
+- **`grep` on ripgrep reports a failed search, and the lines around each
+  match.** It threw away ripgrep's exit status and error output, so an
+  invalid pattern (`grep("[")`) came back as a successful search with no
+  matches, which an agent can take as evidence that the text is not there.
+  It now fails with ripgrep's message (`ripgrep failed: regex parse error:
+  …`), as the Python search fails on an invalid pattern. A file ripgrep
+  could not read still leaves the other files' matches, as the Python
+  search skips it. It also ignored ripgrep's context lines, so
+  `context_lines` returned only the matching lines; each match now has
+  `context_before` and `context_after`, as the Python search gives.
 
 ## [0.6.4] - 2026-10-18
 

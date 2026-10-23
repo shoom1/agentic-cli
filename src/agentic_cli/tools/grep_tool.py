@@ -24,6 +24,7 @@ from agentic_cli.workflow.permissions import Capability
 _MAX_FILES = 10_000        # cap the number of files the Python fallback scans
 _MAX_FILE_BYTES = 5_000_000  # skip files larger than this (avoid reading whole huge files)
 _MAX_RG_OUTPUT_BYTES = 10_000_000  # cap ripgrep JSON we read into memory
+_MAX_RG_ERROR_BYTES = 2_000  # how much of ripgrep's error output a failure quotes
 
 
 @register_tool(
@@ -171,12 +172,14 @@ def _grep_with_ripgrep(
     # root). Containment below is the backstop; this removes the vector.
     rg_env = {k: v for k, v in os.environ.items() if k != "RIPGREP_CONFIG_PATH"}
     # Capture rg output to a temp file and read back at most _MAX_RG_OUTPUT_BYTES
-    # so a large tree can't allocate unbounded JSON in host memory.
+    # so a large tree can't allocate unbounded JSON in host memory; its error
+    # output likewise, up to _MAX_RG_ERROR_BYTES.
     rg_truncated = False
     try:
-        with tempfile.TemporaryFile(mode="w+b") as out_f:
+        with tempfile.TemporaryFile(mode="w+b") as out_f, \
+                tempfile.TemporaryFile(mode="w+b") as err_f:
             proc = subprocess.Popen(
-                cmd, stdout=out_f, stderr=subprocess.DEVNULL,
+                cmd, stdout=out_f, stderr=err_f,
                 env=rg_env, start_new_session=True,
             )
             try:
@@ -195,6 +198,8 @@ def _grep_with_ripgrep(
             out_f.seek(0)
             raw = out_f.read(_MAX_RG_OUTPUT_BYTES)
             rg_truncated = bool(out_f.read(1))  # more output than the cap remained
+            err_f.seek(0)
+            rg_error = err_f.read(_MAX_RG_ERROR_BYTES).decode("utf-8", errors="replace").strip()
     except FileNotFoundError:
         # Ripgrep not found, fall back to Python
         return _grep_python(
@@ -218,6 +223,12 @@ def _grep_with_ripgrep(
     files_searched: set[str] = set()
     file_counts: dict[str, int] = {}
     total_matches = 0
+    searched = False  # rg wrote at least one event: it ran the search
+    # Each file's matching and context lines, by line number, for each match's
+    # context_before / context_after (rg reports context lines as events of
+    # their own, once, however many matches they surround).
+    want_context = output_mode == "content" and context_lines > 0
+    file_lines: dict[str, dict[int, str]] = {}
 
     for line in stdout_text.strip().split("\n"):
         if not line:
@@ -226,8 +237,12 @@ def _grep_with_ripgrep(
             data = json.loads(line)
         except json.JSONDecodeError:
             continue
+        if not isinstance(data, dict):
+            continue
+        searched = True
 
-        if data.get("type") == "match":
+        kind = data.get("type")
+        if kind in ("match", "context"):
             match_data = data.get("data", {})
             file_path = match_data.get("path", {}).get("text", "")
             # Drop files resolving outside the authorized root (e.g. a symlink
@@ -238,6 +253,11 @@ def _grep_with_ripgrep(
                 abs_fp = fp if fp.is_absolute() else (path / fp)
                 if not path_is_within(abs_fp, path):
                     continue
+            if want_context:
+                text = match_data.get("lines", {}).get("text", "").rstrip("\n")
+                file_lines.setdefault(file_path, {})[match_data.get("line_number", 0)] = text
+            if kind == "context":
+                continue
             files_searched.add(file_path)
             file_counts[file_path] = file_counts.get(file_path, 0) + 1
             total_matches += 1
@@ -249,9 +269,37 @@ def _grep_with_ripgrep(
                     "content": match_data.get("lines", {}).get("text", "").rstrip("\n"),
                 })
 
-        elif data.get("type") == "summary":
+        elif kind == "summary":
             stats = data.get("data", {}).get("stats", {})
             total_matches = stats.get("matches", total_matches)
+
+    # rg exits 1 when nothing matched and 2 on an error. An error that stopped
+    # the search (an invalid pattern) leaves no events; one that skipped a file
+    # (permission denied) comes after the others were searched, and their
+    # results stand, as the Python fallback skips a file it cannot read.
+    if proc.returncode not in (0, 1) and not searched:
+        return {
+            "success": False,
+            "error": (
+                f"ripgrep failed: {rg_error}" if rg_error
+                else f"ripgrep exited with status {proc.returncode}"
+            ),
+            "matches": [],
+            "total_matches": 0,
+            "files_searched": 0,
+            "truncated": False,
+        }
+
+    if want_context:
+        for match in matches:
+            lines = file_lines.get(match["file"], {})
+            number = match["line_number"]
+            match["context_before"] = [
+                lines[n] for n in range(number - context_lines, number) if n in lines
+            ]
+            match["context_after"] = [
+                lines[n] for n in range(number + 1, number + context_lines + 1) if n in lines
+            ]
 
     if output_mode == "files":
         matches = [{"file": f, "match_count": file_counts.get(f, 0)} for f in sorted(files_searched)][:max_results]
