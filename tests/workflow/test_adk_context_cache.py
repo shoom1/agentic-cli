@@ -150,8 +150,11 @@ async def test_a_default_model_no_agent_runs_on_does_not_decide(monkeypatch):
         await manager.cleanup()
 
 
-def _native_yaml(tmp_path, model: str) -> str:
+def _native_yaml(tmp_path, model: str, *, helper: bool = False) -> str:
+    """A native ADK YAML app on ``model``; with ``helper``, a root and a
+    sub-agent it can transfer to."""
     path = tmp_path / "root_agent.yaml"
+    sub_agents = "sub_agents:\n  - config_path: helper.yaml\n" if helper else ""
     path.write_text(
         textwrap.dedent(
             f"""
@@ -160,9 +163,21 @@ def _native_yaml(tmp_path, model: str) -> str:
             model: {model}
             instruction: You are root.
             """
-        ),
+        ) + sub_agents,
         encoding="utf-8",
     )
+    if helper:
+        (tmp_path / "helper.yaml").write_text(
+            textwrap.dedent(
+                f"""
+                agent_class: LlmAgent
+                name: helper
+                model: {model}
+                instruction: You help.
+                """
+            ),
+            encoding="utf-8",
+        )
     return str(path)
 
 
@@ -216,23 +231,34 @@ async def test_a_model_switch_decides_again(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "caching, advice",
-    [pytest.param(True, [], id="caching"), pytest.param(False, ["WARNING"], id="not-caching")],
+    "native, caching, advice",
+    [
+        pytest.param(True, True, [], id="native-caching"),
+        pytest.param(True, False, ["WARNING"], id="native-not-caching"),
+        pytest.param(False, True, [], id="configs-caching"),
+        pytest.param(False, False, [], id="configs-not-caching"),
+    ],
 )
 async def test_adk_advises_a_context_cache_only_while_the_app_has_none(
-    monkeypatch, caplog, caching, advice
+    tmp_path, monkeypatch, caplog, native, caching, advice
 ):
     """ADK's runner advises a context cache for an app whose agents transfer
-    to each other and that has none. With caching on there is nothing to
-    advise; with it off the advice stays, and the CLI logs it at debug
+    to each other and that has none: a native ADK YAML app with sub-agents,
+    since the agents built from configs delegate instead, and never
+    transfer. With caching on there is nothing to advise; with it off the
+    advice stays, and the CLI logs it at debug
     (``tests/cli/test_adk_notice_hook.py``)."""
     monkeypatch.setattr(adk_runners, "_UNCACHED_TRANSFER_APPS", set())  # ADK advises once per app
     # Whatever another test's CLI left on ADK's runner logger, it is not this test's.
     monkeypatch.setattr(logging.getLogger(ADK_RUNNER_LOGGER), "filters", [])
     keys(monkeypatch, "anthropic")
-    manager = adk(
-        team(), settings(default_model="claude-sonnet-4-5", prompt_caching_enabled=caching)
-    )
+    s = settings(default_model="claude-sonnet-4-5", prompt_caching_enabled=caching)
+    if native:
+        manager = adk(
+            [], s, adk_config_path=_native_yaml(tmp_path, "claude-sonnet-4-5", helper=True)
+        )
+    else:
+        manager = adk(team(), s)
 
     with caplog.at_level(logging.DEBUG, logger=ADK_RUNNER_LOGGER):
         await manager.initialize_services()

@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING, Any
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
-from agentic_cli.tools.jobs.resume import JOB_NOTICE_HEADER, job_result_payload
+from agentic_cli.tools.jobs.resume import job_notice
 from agentic_cli.workflow.sessions import SessionRef
 
 if TYPE_CHECKING:
@@ -82,16 +82,15 @@ def run_config(ref: SessionRef, **extra: Any) -> dict[str, Any]:
 def job_notification(record: Any, result: Any) -> HumanMessage:
     """The message that tells the root agent ``record``'s job finished.
 
-    Its text is ``JOB_NOTICE_HEADER``, then the payload ADK sends as the
-    pending call's result (``job_result_payload``), as JSON.
+    Its text is ``job_notice``: ``JOB_NOTICE_HEADER``, then the payload ADK
+    sends as the pending call's result (``job_result_payload``), as JSON.
 
     Args:
         record: The finished ``JobRecord``.
         result: The job's result, or None.
     """
-    payload = job_result_payload(record, result)
     return HumanMessage(
-        content=f"{JOB_NOTICE_HEADER}\n{json.dumps(payload, ensure_ascii=False)}",
+        content=job_notice(record, result),
         response_metadata={_MARK: {"kind": JOB_RESULT, "job_id": record.job_id}},
     )
 

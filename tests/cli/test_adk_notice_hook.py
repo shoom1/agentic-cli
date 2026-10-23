@@ -169,12 +169,14 @@ def test_the_cli_app_installs_the_hook(previous_hook, tmp_path, monkeypatch):
 
 
 async def test_adks_context_cache_advice_is_logged_not_printed(logged, tmp_path, monkeypatch, caplog):
-    """An app with sub-agents and prompt caching off: ADK 2 advises a context
-    cache. (With caching on, the app has one, and ADK gives no advice.)"""
+    """An app whose agents transfer, with prompt caching off: ADK 2 advises a
+    context cache. Only a native ADK YAML app's agents transfer (agents built
+    from configs delegate), and with caching on the app has a cache and ADK
+    gives no advice."""
     import google.adk.runners as adk_runners
 
     from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager
-    from agentic_cli.workflow.config import AgentConfig
+    from tests.workflow.test_adk_context_cache import _native_yaml
 
     monkeypatch.setattr(adk_runners, "_UNCACHED_TRANSFER_APPS", set())  # ADK warns once per app
     (tmp_path / "home").mkdir()
@@ -186,12 +188,10 @@ async def test_adks_context_cache_advice_is_logged_not_printed(logged, tmp_path,
         google_api_key="test-key", session_store="memory", prompt_caching_enabled=False
     ) as ctx:
         manager = GoogleADKWorkflowManager(
-            agent_configs=[
-                AgentConfig(name="coordinator", prompt="Route.", sub_agents=["helper"]),
-                AgentConfig(name="helper", prompt="Help."),
-            ],
+            agent_configs=[],
             settings=ctx.settings,
             model="gemini-2.5-flash",
+            adk_config_path=_native_yaml(tmp_path, "gemini-2.5-flash", helper=True),
         )
         try:
             with caplog.at_level(logging.WARNING, logger=ADK_RUNNER_LOGGER):

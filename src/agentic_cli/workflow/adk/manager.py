@@ -26,6 +26,7 @@ from google.adk.tools import LongRunningFunctionTool
 from agentic_cli.workflow.base_manager import BaseWorkflowManager
 from agentic_cli.workflow.events import WorkflowEvent, EventType
 from agentic_cli.workflow.config import AgentConfig, validate_agent_graph
+from agentic_cli.workflow.adk import delegation
 from agentic_cli.workflow.adk.event_processor import ADKEventProcessor
 from agentic_cli.workflow.adk.model_factory import build_adk_model
 from agentic_cli.workflow.adk.permission_plugin import PermissionPlugin
@@ -40,7 +41,7 @@ from agentic_cli.config import (
 )
 from agentic_cli.logging import Loggers, bind_context
 from agentic_cli.models import CacheMechanism
-from agentic_cli.tools.jobs.resume import job_result_payload
+from agentic_cli.tools.jobs.resume import job_notice, job_result_payload
 
 
 logger = Loggers.workflow()
@@ -75,6 +76,15 @@ def _check_app_name(app_name: str) -> None:
         raise ValueError(
             f"app_name {app_name!r} cannot be used with the ADK backend: {exc}"
         ) from exc
+
+
+def _author_of_call(session: Any, call_id: str) -> str | None:
+    """The author of the session event that made the function call ``call_id``."""
+    for event in getattr(session, "events", None) or []:
+        for part in (event.content.parts if event.content else None) or []:
+            if part.function_call is not None and part.function_call.id == call_id:
+                return event.author
+    return None
 
 
 class GoogleADKWorkflowManager(BaseWorkflowManager):
@@ -389,6 +399,12 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         already-wrapped tools (including toolset objects) pass through
         unchanged. Permission gating is unaffected: ADK gates via
         ``PermissionPlugin``, which resolves the same identity.
+
+        Only the root agent's tools are wrapped (``_build_agent``): ADK pauses
+        the whole invocation on a pending long-running call, inside a
+        delegation too, so a sub-agent's starter stays an ordinary call that
+        returns the job's id, and its finished job is told to the root
+        (``resume_with_job_result``).
         """
         from agentic_cli.tools.registry import identify_tool
 
@@ -412,27 +428,52 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         config: "AgentConfig",
         service_map: dict,
         sub_agents: list[Agent] | None = None,
+        *,
+        root: bool,
     ) -> Agent:
         """Construct one ``LlmAgent`` from a config (with resolved sub-agents).
 
         Its model, generation settings and thinking come from the model
         initialization resolved for it, built by the model factory.
+
+        Every agent but the root is a sub-agent its parent delegates to and
+        gets back in the same turn (``single_turn``, no transfers; its
+        ``context`` decides what it sees; a placeholder description when it
+        has none), and ADK offers each of ``sub_agents`` to this agent as a
+        tool named after it; those tools are bound to the delegation
+        declaration as soon as this agent exists. Only the root's
+        long-running tools are wrapped: a pending one would pause a
+        delegation for good. See ``workflow/adk/delegation.py``. The root
+        stays in chat mode.
+
+        Raises:
+            AgentGraphError: A sub-agent is named like one of this agent's
+                own tools (its MCP tools, known only once they connect,
+                excepted).
         """
+        children = sub_agents or []
         built = build_adk_model(
             self._resolved_models[config.name], settings=self._settings, app_name=self.app_name
         )
-        return LlmAgent(
+        tools = self._assemble_agent_tools(config, service_map)
+        if root:
+            tools = self._wrap_long_running(tools)
+        delegation.check_delegation_names(config, tools)
+        fields = {"description": config.description}
+        if not root:
+            fields.update(delegation.subagent_fields(config))
+        agent = LlmAgent(
             name=config.name,
             model=built.model,
             instruction=config.get_prompt(self._settings),
-            tools=self._wrap_long_running(
-                self._assemble_agent_tools(config, service_map)
-            ),
-            description=config.description,
-            sub_agents=sub_agents or [],
+            tools=tools,
+            sub_agents=children,
             planner=built.planner,
             generate_content_config=built.generate_content_config,
+            **fields,
         )
+        delegation.bind_delegation_tools(agent, children)
+        return agent
 
     def _create_agents(self) -> Agent:
         """Create the agent hierarchy from configs, in dependency order.
@@ -452,7 +493,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         manager's instance rather than the global singleton.
 
         Returns:
-            Root agent (the first agent with sub_agents, or the first config).
+            The root agent: the one no agent delegates to.
 
         Raises:
             AgentGraphError: If the configured graph is invalid.
@@ -469,7 +510,9 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             for name in graph.build_order:
                 config = graph.config_map[name]
                 sub_agents = [agent_map[sub] for sub in config.sub_agents]
-                agent_map[name] = self._build_agent(config, service_map, sub_agents)
+                agent_map[name] = self._build_agent(
+                    config, service_map, sub_agents, root=name == graph.root_name
+                )
                 logger.debug(
                     "agent_created",
                     name=name,
@@ -849,6 +892,12 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         must still contain the pending call (it is persisted); if it's gone or
         the record lacks the ids needed to resume, this yields nothing.
 
+        A call a sub-agent made (in an app built from agent configs) already
+        has its result, the job's id: a sub-agent's starter is an ordinary
+        call. Its job is told to the root agent instead, which runs on one
+        user-role text, ``job_notice`` (``JOB_NOTICE_HEADER`` and the
+        payload), as on Deep Agents.
+
         Args:
             record: The terminal ``JobRecord`` to resume from.
             result: The job's result; fetched from the JobManager if omitted.
@@ -886,19 +935,33 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     if jm is not None:
                         result = jm.result(record.job_id)
 
-                function_response = types.FunctionResponse(
-                    id=record.call_id,
-                    name=record.call_name or record.tool,
-                    # A summary and a pointer, not the raw result.
-                    response=job_result_payload(record, result),
-                )
-                new_message = types.Content(
-                    role="user",
-                    parts=[types.Part(function_response=function_response)],
-                )
+                author = _author_of_call(session, record.call_id)
+                if (
+                    author is not None
+                    and author != self._root_agent.name
+                    and not self._adk_config_path
+                ):
+                    # A sub-agent's call, answered with the job's id: the
+                    # root is told, as on Deep Agents.
+                    new_message = types.Content(
+                        role="user",
+                        parts=[types.Part.from_text(text=job_notice(record, result))],
+                    )
+                else:
+                    function_response = types.FunctionResponse(
+                        id=record.call_id,
+                        name=record.call_name or record.tool,
+                        # A summary and a pointer, not the raw result.
+                        response=job_result_payload(record, result),
+                    )
+                    new_message = types.Content(
+                        role="user",
+                        parts=[types.Part(function_response=function_response)],
+                    )
 
                 logger.info("job_resume_started", job_id=record.job_id,
-                            call_id=record.call_id, state=record.state.value)
+                            call_id=record.call_id, state=record.state.value,
+                            caller=author)
                 async for event in self._run_and_stream(
                     session_id=session_id,
                     user_id=user_id,
