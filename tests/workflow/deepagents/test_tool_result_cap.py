@@ -279,6 +279,23 @@ class TestTheMiddleware:
         assert (capped.tool_call_id, capped.name, capped.status) == ("call-1", "probe", "success")
         assert len(capped.content) <= 20_000
 
+    @pytest.mark.parametrize("text", [
+        # 9,000 CJK characters: 9,000 as JSON measures them, 54,000 as json.dumps writes them.
+        json.dumps({"success": True, "text": "数据" * 4_500}),
+        # Rows whose compact JSON fits the limit, and whose pretty-printed JSON does not.
+        json.dumps({"rows": [{"id": i, "ok": True} for i in range(600)]}, indent=2),
+    ], ids=["ensure_ascii", "indent"])
+    async def test_a_json_object_is_sent_as_the_cap_measured_it(self, here, text):
+        # A tool's own json.dumps can be several times the JSON the cap
+        # measures: what the model is sent is that JSON, never the original.
+        assert len(text) > 20_000
+
+        capped = await run(cap(), request(), message(text))
+
+        assert len(capped.content) <= 20_000
+        assert json.loads(capped.content) == json.loads(text)  # nothing needed cutting
+        assert not here.exists()
+
     async def test_other_text_is_cut_as_a_string(self, here):
         capped = await run(cap(), request(), message(LOG))
 

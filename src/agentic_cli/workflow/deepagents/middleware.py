@@ -319,8 +319,9 @@ class ToolResultCapMiddleware(AgentMiddleware):
         result = _json_object(text)
         if result is None:
             return self._cap(text, name, source)
-        capped = self._cap(result, name, source)
-        return text if capped is result else json.dumps(capped, ensure_ascii=False)
+        # Sent as the cap measured it, cut or not: the tool's own JSON may be
+        # several times longer (\uXXXX escapes, indentation).
+        return json.dumps(self._cap(result, name, source), ensure_ascii=False)
 
     def _blocks(self, blocks: list, name: str, source: Path | None) -> list:
         texts = [text for text in map(_block_text, blocks) if text is not None]
