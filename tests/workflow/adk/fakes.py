@@ -8,6 +8,7 @@ tests read is the request ADK's own model class builds.
 from __future__ import annotations
 
 import importlib
+import inspect
 import json
 from collections.abc import Callable
 from types import ModuleType
@@ -28,7 +29,8 @@ class FakeAPI:
     """One provider's API: records every request and answers with ``answer``.
 
     ``answer`` is a JSON payload, a response, or a function of the request
-    returning either.
+    returning either, or a coroutine of either (to hold a request open, as a
+    slow provider would).
     """
 
     def __init__(self, answer: Answer) -> None:
@@ -48,9 +50,7 @@ class FakeAPI:
         return library.AsyncClient(transport=library.MockTransport(self._handler(library)))
 
     def _handler(self, library: ModuleType) -> Callable[[Any], Any]:
-        def handle(request: Any) -> Any:
-            self.requests.append(request)
-            answer = self.answer(request) if callable(self.answer) else self.answer
+        def respond(answer: Any) -> Any:
             if isinstance(answer, library.Response):
                 return answer
             if isinstance(answer, httpx.Response):  # a client of another library asked
@@ -60,6 +60,17 @@ class FakeAPI:
                     content=answer.content,
                 )
             return library.Response(200, json=answer)
+
+        def handle(request: Any) -> Any:
+            self.requests.append(request)
+            answer = self.answer(request) if callable(self.answer) else self.answer
+            if inspect.isawaitable(answer):
+                # The mock transport awaits what is not a response.
+                async def later() -> Any:
+                    return respond(await answer)
+
+                return later()
+            return respond(answer)
 
         return handle
 

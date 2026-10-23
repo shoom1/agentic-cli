@@ -10,22 +10,31 @@ For alternative orchestration backends (e.g., LangGraph), see the base_manager m
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from typing import AsyncGenerator, Any, Callable
 
 from google.genai import types
 from google.adk import Runner
 from google.adk.apps import App
-from google.adk.apps.app import validate_app_name
+from google.adk.apps.app import EventsCompactionConfig, validate_app_name
 from google.adk.agents import LlmAgent, Agent
 from google.adk.agents.context_cache_config import ContextCacheConfig
 from google.adk.sessions import InMemorySessionService, BaseSessionService, Session
 from google.adk.tools import LongRunningFunctionTool
 
+from agentic_cli.workflow import live_events
 from agentic_cli.workflow.base_manager import BaseWorkflowManager
+from agentic_cli.workflow.context import ContextBudget, context_budget
 from agentic_cli.workflow.events import WorkflowEvent, EventType
 from agentic_cli.workflow.config import AgentConfig, validate_agent_graph
 from agentic_cli.workflow.adk import delegation
+from agentic_cli.workflow.adk.compaction import (
+    SUMMARY_MAX_TOKENS,
+    AgentCliSummarizer,
+    MainAgentPlugin,
+    NoAfterTurnCompactionRunner,
+)
 from agentic_cli.workflow.adk.event_processor import ADKEventProcessor
 from agentic_cli.workflow.adk.model_factory import build_adk_model, generate_text
 from agentic_cli.workflow.adk.permission_plugin import PermissionPlugin
@@ -159,6 +168,8 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         self._session_service_pinned = False
         self._root_agent: Agent | None = None
         self._runner: Runner | None = None
+        # Each agent's context numbers, by name (agents built from configs).
+        self._budgets: dict[str, ContextBudget] = {}
 
         self._event_processor = ADKEventProcessor(
             model=model or "",
@@ -245,6 +256,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             session_service, self._session_service = self._session_service, None
         self._runner = None
         self._root_agent = None
+        self._budgets = {}
         self._initialized = False
 
         # Clear LLM logging plugin
@@ -569,8 +581,21 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         return DatabaseSessionService(db_url=db_url)
 
     async def _do_initialize(self) -> None:
-        """ADK-specific initialization: session service, agents, runner."""
+        """ADK-specific initialization: session service, agents, runner.
+
+        An app built from agent configs summarizes its main agent's
+        conversation (``_compaction_config``) with ADK's after-turn pass
+        switched off (``NoAfterTurnCompactionRunner``); each agent's context
+        numbers are computed first, so a model whose budget is too small to
+        work in fails here, before anything is built. A native ADK YAML app
+        gets neither.
+        """
         logger.info("initializing_services", app_name=self.app_name)
+        native = bool(self._adk_config_path)
+        self._budgets = {} if native else {
+            name: context_budget(model, self._settings)
+            for name, model in self._resolved_models.items()
+        }
 
         # Create the session service (durable DatabaseSessionService by
         # default; InMemory only when session_store='memory') — unless one is
@@ -592,6 +617,9 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         # The plugins belong to the App; ADK deprecates Runner(plugins=...).
         context_cache = self._context_cache_config()
         plugins = self._init_plugins()
+        if not native:
+            # First: it records the running agent, which the summarizer reads.
+            plugins.insert(0, MainAgentPlugin())
         if not self._adk_config_path:
             from agentic_cli.workflow.adk.foreign_reasoning_plugin import ForeignReasoningPlugin
 
@@ -618,8 +646,10 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             root_agent=self._root_agent,
             plugins=plugins,
             context_cache_config=context_cache,
+            events_compaction_config=None if native else self._compaction_config(),
         )
-        self._runner = Runner(app=app, session_service=self._session_service)
+        runner = Runner if native else NoAfterTurnCompactionRunner
+        self._runner = runner(app=app, session_service=self._session_service)
         # Usage events name the default model, resolved for this initialization.
         self._event_processor.model = self.model
         # Only the root replies to the user; another agent's text is a
@@ -633,6 +663,29 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             agent_name=self._root_agent.name if self._root_agent else None,
             required_managers=list(self._required_managers),
             context_cache=app.context_cache_config is not None,
+        )
+
+    def _compaction_config(self) -> EventsCompactionConfig:
+        """The main agent's conversation summarized at its trigger.
+
+        ADK checks before each model call of every agent; the summarizer
+        writes only for the main agent, on its own model (thinking off,
+        ``SUMMARY_MAX_TOKENS``), keeping its ``keep`` tokens word for word.
+        ``event_retention_size`` 0: the summarizer picks the range itself.
+        ADK marks the config experimental; the CLI logs that notice at debug.
+        """
+        root = self._root_agent.name
+        budget = self._budgets[root]
+        return EventsCompactionConfig(
+            summarizer=AgentCliSummarizer(
+                root=root,
+                model=self._simple_model(SUMMARY_MAX_TOKENS, agent=root),
+                budget=budget,
+                settings=self._settings,
+                app_name=self.app_name,
+            ),
+            token_threshold=budget.trigger,
+            event_retention_size=0,
         )
 
     def _context_cache_config(self) -> ContextCacheConfig | None:
@@ -801,38 +854,34 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         Shared by ``process()`` (user message) and ``resume_with_job_result()``
         (function response). The caller must already be inside
         ``_workflow_context`` with the session prepared.
+
+        What is reported from inside a model call (a summary that starts, its
+        usage, what it did) is merged into the stream as it happens
+        (``workflow/live_events.py``), so it shows while the runner still
+        waits on the call. Retries are the provider client's
+        (``HttpRetryOptions``).
         """
         event_count = 0
-
-        # Process ADK events directly - retry is handled by HttpRetryOptions
-        async for adk_event in self._runner.run_async(
-            session_id=session_id,
-            user_id=user_id,
-            new_message=new_message,
-        ):
-            # Yield LLM events from plugin first (raw capture)
-            if self._llm_logging_plugin:
-                for llm_event in self._llm_logging_plugin.drain_events():
-                    llm_event = self._apply_event_hook(llm_event)
-                    if llm_event:
-                        event_count += 1
-                        yield llm_event
-
-            # Process ADK event into workflow events
-            async for workflow_event in self._event_processor.process_event(
-                adk_event,
-                session_id,
-            ):
-                event_count += 1
-                yield workflow_event
-
-                # Drain task progress events buffered by the plugin
-                if workflow_event.type == EventType.TOOL_RESULT and self._task_progress_plugin:
-                    for progress_event in self._task_progress_plugin.drain_events():
-                        progress_event = self._apply_event_hook(progress_event)
-                        if progress_event:
+        live = live_events.LiveEvents()
+        with live_events.reporting(live):
+            stream = self._runner.run_async(
+                session_id=session_id,
+                user_id=user_id,
+                new_message=new_message,
+            )
+            # aclosing: a cancelled turn closes the merge, which closes the
+            # runner, and its tasks, now, in the task that iterates it.
+            async with contextlib.aclosing(live_events.merged(stream, live)) as items:
+                async for item in items:
+                    if isinstance(item, WorkflowEvent):
+                        reported = self._apply_event_hook(item)
+                        if reported:
                             event_count += 1
-                            yield progress_event
+                            yield reported
+                        continue
+                    async for workflow_event in self._workflow_events(item, session_id):
+                        event_count += 1
+                        yield workflow_event
 
         # Final drain — catches progress from the last tool call
         if self._task_progress_plugin:
@@ -851,6 +900,27 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     yield llm_event
 
         logger.info("message_processed", event_count=event_count)
+
+    async def _workflow_events(
+        self, adk_event: Any, session_id: str
+    ) -> AsyncGenerator[WorkflowEvent, None]:
+        """One ADK event's WorkflowEvents, after what the plugins buffered before it."""
+        # LLM events from the logging plugin first (raw capture).
+        if self._llm_logging_plugin:
+            for llm_event in self._llm_logging_plugin.drain_events():
+                llm_event = self._apply_event_hook(llm_event)
+                if llm_event:
+                    yield llm_event
+
+        async for workflow_event in self._event_processor.process_event(adk_event, session_id):
+            yield workflow_event
+
+            # Task progress the plugin buffered for this tool's result.
+            if workflow_event.type == EventType.TOOL_RESULT and self._task_progress_plugin:
+                for progress_event in self._task_progress_plugin.drain_events():
+                    progress_event = self._apply_event_hook(progress_event)
+                    if progress_event:
+                        yield progress_event
 
     async def can_resume(self, record) -> bool:
         """True iff the originating ADK session still exists to resume into.
