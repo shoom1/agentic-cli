@@ -347,3 +347,64 @@ class TestToolResultMarkup:
             WorkflowEvent.text("done"),
         ])
         assert result.delivered, result
+
+
+def _subagent_text(text: str, agent: str = "researcher") -> WorkflowEvent:
+    """A sub-agent's text, marked as the backends mark it."""
+    event = WorkflowEvent.text(text)
+    event.metadata.update(agent=agent, subagent=True)
+    return event
+
+
+class TestSubAgentText:
+    """Only the main agent replies to the user. A sub-agent's text is its work,
+    which its parent reads as a tool result: it shows in the events box under
+    the sub-agent's name, and is no part of the reply."""
+
+    @staticmethod
+    async def _handle(event: WorkflowEvent):
+        from unittest.mock import MagicMock
+
+        from agentic_cli.cli.message_processor import _EventProcessingState
+        from agentic_cli.workflow.events import EventType
+        from tests.cli.dialog_fakes import autospec_session
+
+        MessageProcessor._EVENT_DISPATCH = None
+        handler = MessageProcessor._get_event_dispatch()[EventType.TEXT]
+        state = _EventProcessingState()
+        ui = autospec_session()
+        await handler(MessageProcessor(), event, state, ui, MagicMock(), MagicMock())
+        return state, ui
+
+    async def test_it_is_the_status_line_and_not_the_reply(self):
+        state, ui = await self._handle(_subagent_text("\n  X is 42.\nThe rest of it."))
+
+        assert state.status_line == "researcher: X is 42."
+        assert ui.method_calls == []
+        assert state.response_content == []
+        assert state.side_effects_seen is True
+
+    async def test_a_long_line_is_cut(self):
+        from agentic_cli.constants import truncate
+
+        line = "word " * 40
+        state, _ = await self._handle(_subagent_text(line))
+
+        assert state.status_line == truncate(f"researcher: {line.strip()}", 80)
+        assert state.status_line.endswith("...") and len(state.status_line) == 83
+
+    async def test_the_main_agents_text_is_the_reply(self):
+        state, ui = await self._handle(WorkflowEvent.text("X is 42, says the researcher."))
+
+        ui.add_response.assert_called_once_with("X is 42, says the researcher.", markdown=True)
+        assert state.response_content == ["X is 42, says the researcher."]
+
+    async def test_a_turn_shows_only_the_main_agents_reply(self):
+        ui, _, _ = await _render([
+            WorkflowEvent.tool_call("researcher", {"request": "Find X."}),
+            _subagent_text("X is 42."),
+            WorkflowEvent.tool_result("researcher", {"result": "X is 42."}, success=True),
+            WorkflowEvent.text("The researcher says X is 42."),
+        ])
+
+        assert ui.responses() == ["The researcher says X is 42."]

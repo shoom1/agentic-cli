@@ -13,7 +13,9 @@ finished message, no tokens. Only the agents' own nodes speak:
 
 - a ``model`` update's ``AIMessage``: ``THINKING`` (its reasoning blocks) and
   ``TEXT`` (its text blocks) in order, one ``TOOL_CALL`` per tool call, and
-  ``LLM_USAGE`` on that agent's own model;
+  ``LLM_USAGE`` on that agent's own model. Only the root replies to the user:
+  a sub-agent's ``TEXT`` is marked ``metadata["subagent"]`` (activity, not
+  the reply) and its usage ``purpose="subagent"``;
 - a ``tools`` update's ``ToolMessage``s, including those a ``Command`` carried
   (the state tools, ``task``): ``TOOL_RESULT``, a JSON dict parsed back; and
   its ``tasks``, when they changed: ``TASK_PROGRESS``, in the same step.
@@ -183,7 +185,13 @@ class DeepAgentsEventProcessor:
                         WorkflowEvent.thinking(block["reasoning"], self._session_id)
                     )
                 elif block.get("type") == "text" and block.get("text"):
-                    events.append(WorkflowEvent.text(block["text"], self._session_id))
+                    text = WorkflowEvent.text(block["text"], self._session_id)
+                    if agent != self._root:
+                        # Only the root replies to the user: a sub-agent's
+                        # text is its work, read by its coordinator as the
+                        # task call's result.
+                        text.metadata["subagent"] = True
+                    events.append(text)
             for call in message.tool_calls:
                 self._call_names[call["id"]] = call["name"]
                 event = WorkflowEvent.tool_call(call["name"], call["args"])

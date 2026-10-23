@@ -111,10 +111,12 @@ _ADK_EXPERIMENTAL_NOTICE = re.compile(
     r"\[EXPERIMENTAL\] (?:feature (?P<feature>\S+) is enabled|(?P<name>\w+): )"
 )
 
-# ADK 2's runner warns, through stdlib logging, that an app with sub-agents has
-# no context_cache_config. The ADK manager sets one while prompt caching is on
-# and a model caches, so the advice comes only when the user turned caching
-# off or no model caches: it has nothing left to tell them.
+# ADK 2's runner warns, through stdlib logging, that an app whose agents can
+# transfer to each other has no context_cache_config: a native ADK YAML app
+# with sub-agents (agents built from configs delegate and never transfer). The
+# ADK manager sets one while prompt caching is on and a model caches, so the
+# advice comes only when the user turned caching off or no model caches: it
+# has nothing left to tell them.
 _ADK_RUNNER_LOGGER = "google_adk.google.adk.runners"
 _ADK_UNCACHED_TRANSFER = "can transfer between agents but has no context_cache_config"
 

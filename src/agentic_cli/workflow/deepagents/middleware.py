@@ -509,25 +509,33 @@ class ContextOverflowMiddleware(AgentMiddleware):
 
 
 class ForeignReasoningMiddleware(AgentMiddleware):
-    """No model is sent another provider's reasoning.
+    """No model is sent another provider's, or another agent's, reasoning.
 
     A model switch that keeps the session sends the new model AI messages
     another provider wrote, whose reasoning it would refuse (Claude rejects a
-    thinking block it did not sign) or warn about. Each request goes out
-    through ``without_foreign_reasoning``; the state, and so the checkpoint,
-    keeps every message as it was, and a model's own reasoning goes back to
-    it.
+    thinking block it did not sign) or warn about. A forked sub-agent
+    (``context="inherit"``) is sent its coordinator's messages, whose
+    reasoning another model may refuse too, and which ADK leaves out of a
+    sub-agent's view as well. Each request goes out through
+    ``without_foreign_reasoning``; the state, and so the checkpoint, keeps
+    every message as it was, and an agent's own reasoning goes back to it.
 
     Args:
         kind: The provider of the agent's model.
+        agent: The agent's name: AI messages named after another agent are
+            sent without their reasoning. None leaves only other providers'
+            reasoning out.
     """
 
-    def __init__(self, kind: ProviderKind) -> None:
+    def __init__(self, kind: ProviderKind, agent: str | None = None) -> None:
         super().__init__()
         self.kind = kind
+        self.agent = agent
 
     def _own(self, request: ModelRequest) -> ModelRequest:
-        return request.override(messages=without_foreign_reasoning(request.messages, self.kind))
+        return request.override(
+            messages=without_foreign_reasoning(request.messages, self.kind, agent=self.agent)
+        )
 
     async def awrap_model_call(
         self,

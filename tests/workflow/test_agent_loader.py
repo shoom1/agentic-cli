@@ -102,6 +102,35 @@ class TestLoadAgentsFromYaml:
         assert cfg.model is None
         assert cfg.model_settings is None
         assert cfg.include_state_tools is True
+        assert cfg.context is None
+
+    def test_a_sub_agents_context(self, tmp_path):
+        path = _write(
+            tmp_path,
+            """
+            agents:
+              - name: coordinator
+                instruction: Lead.
+                sub_agents: [reviewer, researcher]
+              - name: reviewer
+                instruction: Review what was said.
+                context: inherit
+              - name: researcher
+                instruction: Find facts.
+                context: fresh
+            """,
+        )
+        configs = {c.name: c for c in load_agents_from_yaml(path)}
+        assert configs["reviewer"].context == "inherit"
+        assert configs["researcher"].context == "fresh"
+        assert configs["coordinator"].context is None
+
+    def test_an_unknown_context_is_rejected(self, tmp_path):
+        path = _write(
+            tmp_path, "agents:\n  - name: a\n    instruction: hi\n    context: shared\n"
+        )
+        with pytest.raises(ValidationError, match="context"):
+            load_agents_from_yaml(path)
 
     def test_missing_prompt_raises(self, tmp_path):
         path = _write(tmp_path, "agents:\n  - name: a\n")

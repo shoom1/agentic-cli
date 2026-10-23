@@ -9,8 +9,9 @@ class name, and never equality.
 Adapter check order (mirrors LangGraph wrapper for consistency):
 1. Resolve the definition bound to this exact object. Framework-issued tools —
    registered callables, service-bound factory variants, and the native ADK
-   tool objects the framework constructs (skill tools) — are bound at their
-   construction site.
+   tool objects the framework constructs (skill tools, and the delegation tool
+   ADK builds for each sub-agent the framework built, ``adk/delegation.py``) —
+   are bound at their construction site.
 2. Failing that, unwrap ``.func`` only for ADK's own function-tool types
    (:data:`_TRUSTED_FUNCTION_TOOL_TYPES`), whose contract is to invoke exactly
    that callable, and resolve the callable by identity.
@@ -50,9 +51,11 @@ if TYPE_CHECKING:
 logger = Loggers.workflow()
 
 
-# ADK auto-injects ``transfer_to_agent`` into coordinator agents that declare
-# ``sub_agents``. It's an internal routing primitive, not an external side
-# effect, so register it with EXEMPT so the plugin lets it through.
+# ADK auto-injects ``transfer_to_agent`` into an agent that can transfer to
+# another: a native ADK YAML app's (agents built from configs delegate
+# instead, ``adk/delegation.py``). It's an internal routing primitive, not an
+# external side effect, so register it with EXEMPT so the plugin lets it
+# through.
 try:
     from google.adk.tools.transfer_to_agent_tool import transfer_to_agent
 
@@ -76,10 +79,11 @@ def _native_transfer_tool_type() -> type | None:
 # while still advertising a genuine ``func``.
 #
 # ``TransferToAgentTool`` is in the list for the same reason and on the same
-# terms. ADK auto-injects it into any agent with ``sub_agents``, and it is a
-# ``FunctionTool`` *subclass*, so an exact-type check on ``FunctionTool`` alone
-# denied the built-in routing tool as unregistered — delegation could not work
-# at all, even with permissions disabled. It is safe to add because ADK
+# terms. ADK auto-injects it into an agent that can transfer (a native ADK
+# YAML app's), and it is a ``FunctionTool`` *subclass*, so an exact-type check
+# on ``FunctionTool`` alone denied the built-in routing tool as unregistered —
+# delegation could not work at all, even with permissions disabled. It is
+# safe to add because ADK
 # constructs it as ``super().__init__(func=transfer_to_agent)`` and overrides
 # only ``_get_declaration`` (to add the agent-name enum), never ``run_async``:
 # what it invokes is still exactly ``self.func``. Listing the exact class keeps

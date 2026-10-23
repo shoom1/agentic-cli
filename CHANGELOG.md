@@ -138,9 +138,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     (`description`, the brief; `subagent_type`, the sub-agent's name), which
     lists each sub-agent as `- name: description`; one without a
     description is offered as "The <name> agent." with a warning. A
-    sub-agent sees only the brief and the coordinator's `plan` and `tasks`,
-    never the conversation, and its last text is the call's result. Two
-    sub-agents may run at once.
+    sub-agent sees the brief and the coordinator's `plan` and `tasks`, and
+    one whose `context` is `"inherit"` the conversation too (see
+    `AgentConfig.context`); its last text is the call's result, and its own
+    text shows as activity, not as the reply. Two sub-agents may run at once.
   - **Tools.** Every tool call, in every agent, passes the permission gate,
     which identifies the tool by the object the registry issued and asks
     through the input callback, sub-agents' calls included. A tool that
@@ -339,17 +340,87 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   result is still cut, its note says the full output could not be saved,
   and the log warns once per folder. Reading a saved output back cuts it
   again without a second file. Every result is covered: registered, MCP and
-  skill tools, `job_result`, and on Deep Agents a sub-agent's answer
-  (`task`). ADK's `ToolResultCapPlugin` caps apps built from agent configs
+  skill tools, `job_result`, and a sub-agent's answer (Deep Agents' `task`,
+  and on ADK the tool named after the sub-agent). ADK's
+  `ToolResultCapPlugin` caps apps built from agent configs
   (a native ADK YAML app's own `after_tool_callback`s would be skipped);
   Deep Agents' `ToolResultCapMiddleware` sits between the permission gate
   and the tool-error middleware, so an error result is capped too. Each
   tool's own limits stay; this is the net beneath them. ADK's Claude and
   OpenAI Responses adapters send a model only a result's `content`, or else
   its `result`, so on ADK the note is put there as well.
+- **`AgentConfig.context`: a sub-agent starts `"fresh"` or `"inherit"`s its
+  parent's conversation**, set per agent on ADK and Deep Agents (`context:`
+  in the framework's agent YAML too). `"fresh"`, what None means, sees only
+  the request its parent gives it; `"inherit"` also sees the parent's
+  conversation as it stands, after any summary and without the parent's
+  reasoning. On ADK an inheriting sub-agent is built with
+  `include_contents="default"`, which ADK keeps for a `single_turn` agent
+  only when it is set, and sees its parent's turns as quoted context. On
+  Deep Agents it is a fork (`mode="fork"`, beta in Deep Agents, whose
+  `LangChainBetaWarning` is logged at debug, `deepagents_fork_beta`, rather
+  than printed): the coordinator's conversation without the message that
+  called `task`, then Deep Agents' preamble and the brief; its own
+  summarization compacts an inherited conversation too large for its
+  model, and `ForeignReasoningMiddleware` leaves out the reasoning of AI
+  messages another agent wrote, so a fork is never sent its coordinator's.
+  `validate_agent_graph` raises `AgentGraphError` for a `context` on the
+  root, `"inherit"` on an agent with sub-agents of its own (in 0.7.0: Deep
+  Agents tells a fork that delegating "will be refused", which a
+  coordinator would believe), and an unknown value.
 
 ### Changed
 
+- **ADK sub-agents are delegated to and return, as on Deep Agents.**
+  **Breaking:** an agent built from a config that is not the root runs in
+  ADK's `single_turn` mode, with transfers to its parent and peers off. Its
+  parent calls it through a tool named after it, `<agent>(request=...)`,
+  and reads its last text as the call's result, `{"result": ...}`, in the
+  same turn; the root answers the user, and the next turn starts at the
+  root. No agent built from a config is offered `transfer_to_agent` any
+  more, so a sub-agent no longer takes over the conversation on later
+  turns. Sub-agents start `"fresh"`: they see only the request, where they
+  saw the whole conversation (set `context="inherit"` for that).
+  `"inherit"` is for the main agent's own sub-agents in 0.7.0:
+  `validate_agent_graph` refuses it below another sub-agent, on every
+  backend, since ADK would show such an agent the main agent's whole
+  conversation rather than its parent's. A prompt
+  that names `transfer_to_agent` should say to delegate to the agent
+  instead, as the research demo's coordinator now does; an app that relied
+  on a specialist keeping the conversation routes follow-ups through the
+  main agent. The tool is ADK's private `_SingleTurnAgentTool`, which calls
+  no function the permission plugin can verify, so the framework binds each
+  one ADK builds for a sub-agent the framework built to the exempt `task`
+  declaration; an application's `AgentTool`, a subclass or a look-alike of
+  the same name is denied, and the sub-agent's own tool calls are gated as
+  before. A sub-agent named like one of its parent's tools fails to start
+  with `AgentGraphError`, since ADK's tool would shadow the parent's, and
+  one without a description is offered as "The <name> agent.", with a
+  warning (`adk_subagent_without_description`), as on Deep Agents. A
+  sub-agent's long-running tools are not wrapped as ADK's
+  `LongRunningFunctionTool`: ADK pauses the whole invocation on a pending
+  long-running call, inside a delegation too, which left the turn without a
+  reply and the job's result inside the sub-agent. A sub-agent's job
+  starter now returns the job's id like any tool, and when the job
+  finishes the root agent is told in a message of its own, the one Deep
+  Agents sends (`JOB_NOTICE_HEADER` and the payload, `job_notice` in
+  `tools/jobs/resume.py`); the root's own job still answers its call. A
+  native ADK YAML app (`adk_config_path`) is unchanged: its agents
+  transfer, and only such an app now gets ADK's "no context_cache_config"
+  advice (logged at debug).
+- **A sub-agent's text is its activity, not the reply.** On both backends
+  a sub-agent's `TEXT` event carries `metadata["agent"]` and
+  `metadata["subagent"]`, and the CLI shows it as the events box's status
+  line, `<agent>: <its first line>`, instead of printing it as a response:
+  only the main agent replies to the user. On ADK a sub-agent's model call
+  reports `purpose="subagent"` usage, as on Deep Agents, so its brief-sized
+  prompt is not taken as the conversation's context, and fact extraction
+  (`recent_messages`) reads only the user's and the main agent's text, not
+  a job notice. A
+  sub-agent whose model call fails does not end an ADK turn (ADK hands the
+  coordinator "Error running sub-agent: …"), so the user gets a recoverable
+  `ERROR`, `<agent> failed: <the provider's reason>`, with its error code;
+  on Deep Agents it ends the turn with one `ERROR`.
 - **Models are named by reference or role, and resolved once, at startup.**
   `default_model`, `AgentConfig.model`, `Manager(model=...)` and
   `reinitialize(model=...)` take a `provider:model` reference or a bare model

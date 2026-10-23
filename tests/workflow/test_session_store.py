@@ -125,6 +125,7 @@ class TestAdkNativeSessions:
         mgr._settings = settings
         mgr._app_name = "test_app"
         mgr.session_id = "default_session"
+        mgr._root_agent = None  # no agents built: every author's text is read
         mgr._session_service = mgr._make_session_service()
         return mgr, settings
 
@@ -197,6 +198,7 @@ class TestAdkSessionUserScope:
         mgr._settings = settings
         mgr._app_name = "test_app"
         mgr.session_id = "default_session"
+        mgr._root_agent = None  # no agents built: every author's text is read
         mgr._session_service = mgr._make_session_service()
         return mgr, settings
 

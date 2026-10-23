@@ -7,19 +7,28 @@ one ``CompiledSubAgent`` per sub-agent, which gives it a ``task`` tool
 the configured sub-agents are offered: there is no automatic general-purpose
 sub-agent, and none of Deep Agents' file tools.
 
-What a sub-agent sees: one ``HumanMessage`` holding the brief, not the
-conversation, plus the coordinator's ``plan`` and ``tasks``. It runs its own
-tool loop on its own model and middleware, its last non-empty text comes back
-as the ``task`` call's result, and the ``plan``/``tasks`` it changed flow back
-with it.
+What a sub-agent sees follows its ``context``. A ``fresh`` one (the default)
+is Deep Agents' isolated sub-agent: one ``HumanMessage`` holding the brief,
+not the conversation. An ``inherit`` one is a fork (``mode="fork"``): the
+coordinator's effective conversation (after any summary), without the
+message that called ``task``, then Deep Agents' preamble and the brief; its
+own summarization compacts an inherited history too large for its window,
+and its stack sends none of the coordinator's reasoning on. Either way it
+gets the coordinator's ``plan`` and ``tasks``, keeps its own prompt, tools,
+model and middleware, runs its own tool loop, and its last non-empty text
+comes back as the ``task`` call's result, with the ``plan``/``tasks`` it
+changed. Deep Agents marks forks beta with a ``LangChainBetaWarning``
+LangChain would print over the UI; that one warning is filtered, and a
+debug log (``deepagents_fork_beta``) says which agents fork.
 
 Every stack, outermost first: ``PatchToolCallsMiddleware`` (answers a tool
 call a cancelled turn left without a result, before each run), the
 coordinator's ``SubAgentMiddleware`` (so its ``task`` tool is gated like any
 other), then the model side and the tool side.
 
-- Model side, outermost first: other providers' reasoning is left out of the
-  request (``ForeignReasoningMiddleware``), Deep Agents' summarization counts
+- Model side, outermost first: other providers' and other agents' reasoning
+  is left out of the request (``ForeignReasoningMiddleware``), Deep Agents'
+  summarization counts
   exactly what will be sent (``summarization.py``), every provider's context
   overflow reaches it as one it summarizes on (``ContextOverflowMiddleware``),
   and on Claude with ``prompt_caching_enabled`` the cache marks land on the
@@ -38,6 +47,7 @@ has neither.
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING
 
@@ -45,6 +55,7 @@ from deepagents import CompiledSubAgent, SubAgentMiddleware
 from deepagents.middleware.patch_tool_calls import PatchToolCallsMiddleware
 from langchain.agents import create_agent
 from langchain_anthropic.middleware import AnthropicPromptCachingMiddleware
+from langchain_core._api import LangChainBetaWarning
 
 from agentic_cli.logging import Loggers
 from agentic_cli.models import CacheMechanism
@@ -79,6 +90,9 @@ if TYPE_CHECKING:
     from agentic_cli.models import ResolvedModel
 
 logger = Loggers.workflow()
+
+#: What Deep Agents warns when a coordinator forks a sub-agent.
+_FORK_BETA = r"The feature `forked subagents` is in beta"
 
 
 def build_agent_tree(
@@ -205,7 +219,7 @@ def _model_side(
     if resolved is None or settings is None:
         return []
     stack: list[AgentMiddleware] = [
-        ForeignReasoningMiddleware(resolved.record.kind),
+        ForeignReasoningMiddleware(resolved.record.kind, agent=resolved.agent),
         build_summarization(model, resolved, settings),
         # Inside the summarization: it summarizes on the overflows it raises.
         ContextOverflowMiddleware(),
@@ -224,6 +238,12 @@ def _delegation(subagents: list[CompiledSubAgent]) -> SubAgentMiddleware:
     The framework built this object, so it binds it: the gate identifies it
     by identity, never by its name.
     """
+    forks = [spec["name"] for spec in subagents if spec.get("mode") == "fork"]
+    if forks:
+        # Deep Agents warns that forks are beta whenever a coordinator has
+        # one, and LangChain shows its beta warnings: over the UI, once.
+        warnings.filterwarnings("ignore", message=_FORK_BETA, category=LangChainBetaWarning)
+        logger.debug("deepagents_fork_beta", agents=forks)
     middleware = SubAgentMiddleware(
         # Only stored: compiled sub-agents never read it.
         backend=None,
@@ -239,12 +259,14 @@ def _subagent(config: AgentConfig, runnable: "CompiledStateGraph") -> CompiledSu
     """How the coordinator's ``task`` tool offers ``config``.
 
     The coordinator chooses by the description, so an agent without one is
-    still offered, under a placeholder, and the omission is logged.
+    still offered, under a placeholder, and the omission is logged. An
+    ``inherit`` agent is forked: it continues the coordinator's conversation.
     """
     description = config.description.strip()
     if not description:
         logger.warning("deepagents_subagent_without_description", agent=config.name)
         description = f"The {config.name} agent."
-    return CompiledSubAgent(
-        name=config.name, description=description, runnable=runnable
-    )
+    spec = CompiledSubAgent(name=config.name, description=description, runnable=runnable)
+    if config.context == "inherit":
+        spec["mode"] = "fork"
+    return spec

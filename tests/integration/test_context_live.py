@@ -20,6 +20,10 @@ What only a real provider can answer:
   and through Deep Agents: the model reads the note and pages the output with
   ``read_file`` to find a line the cut left out. And a tool's result that no
   file holds: the model follows the note to the saved output.
+- Sub-agents (ADK on Claude; Deep Agents on Claude and on OpenAI Responses):
+  one that inherits sees the conversation, one that starts fresh sees only its
+  brief, and each is delegated to and returns. A sub-agent that inherits a
+  history holding tool calls for tools it lacks is still accepted.
 
 Override the models with LIVE_CONTEXT_CLAUDE_MODEL (default
 ``anthropic:claude-sonnet-4-5``), LIVE_CONTEXT_GEMINI_MODEL (default
@@ -339,3 +343,136 @@ async def test_the_model_follows_the_note_to_the_saved_output(
     paths = [c.metadata["tool_args"].get("path", "") for c in find_tool_calls(events, "read_file")]
     assert any("tool-output" in path for path in paths), paths
     assert _report_word(900) in _text(events), (_text(events), paths)
+
+
+#: A coordinator that passes questions on word for word, so only an inheriting
+#: sub-agent can know what was said earlier.
+_COORDINATOR = (
+    "You coordinate two sub-agents, the archivist and the clerk. When the user asks you "
+    "to ask one of them something, delegate the user's question to that sub-agent word "
+    "for word, adding nothing, then tell the user its answer."
+)
+_HELPER = "Answer the question you are given in one short sentence. If you don't know, say so."
+
+
+def _team(**extra) -> list[AgentConfig]:
+    return [
+        AgentConfig(name="coordinator", prompt=_COORDINATOR, sub_agents=["archivist", "clerk"],
+                    include_state_tools=False, **extra),
+        AgentConfig(name="archivist", prompt=_HELPER, context="inherit", include_state_tools=False,
+                    description="Answers questions about the conversation so far."),
+        AgentConfig(name="clerk", prompt=_HELPER, context="fresh", include_state_tools=False,
+                    description="Answers general questions."),
+    ]
+
+
+def _answers_of(events, agent: str, backend: str) -> list[str]:
+    """What ``agent`` answered its coordinator (the delegation call's results)."""
+    tool = agent if backend == "adk" else "task"
+    return [str(e.metadata.get("result")) for e in find_tool_results(events, tool)]
+
+
+def _reply(events) -> str:
+    """The main agent's own text: a sub-agent's text is activity, not the reply."""
+    return "".join(e.content or "" for e in find_events(events, EventType.TEXT)
+                   if not e.metadata.get("subagent"))
+
+
+def _manager_for(backend: str, configs, settings, model):
+    manager_class = GoogleADKWorkflowManager if backend == "adk" else DeepAgentsWorkflowManager
+    return manager_class(agent_configs=configs, settings=settings, model=model)
+
+
+@pytest.mark.parametrize("backend, model", [
+    pytest.param("adk", CLAUDE, marks=_needs(_key_for(CLAUDE)), id="adk-claude"),
+    pytest.param("deepagents", CLAUDE, marks=_needs(_key_for(CLAUDE)), id="deepagents-claude"),
+    pytest.param("deepagents", OPENAI, marks=_needs(_key_for(OPENAI)), id="deepagents-openai"),
+])
+async def test_an_inheriting_sub_agent_sees_the_conversation_and_a_fresh_one_does_not(
+    listed, tmp_path, backend, model
+):
+    manager = _manager_for(backend, _team(), _settings(tmp_path, thinking_effort="none"), model)
+    try:
+        told = await collect_events(
+            manager, "The project we are discussing is named Quillfeather. Reply OK.",
+            session_id="team",
+        )
+        inherited = await collect_events(
+            manager, "Ask the archivist: what is the name of the project we are discussing?",
+            session_id="team",
+        )
+        fresh = await collect_events(
+            manager, "Ask the clerk: what is the name of the project we are discussing?",
+            session_id="team",
+        )
+    finally:
+        await manager.cleanup()
+
+    assert_no_errors(told + inherited + fresh)
+    (archivist,) = _answers_of(inherited, "archivist", backend)
+    assert "quillfeather" in archivist.lower(), archivist
+    assert "quillfeather" in _reply(inherited).lower()
+    (clerk,) = _answers_of(fresh, "clerk", backend)
+    assert "quillfeather" not in clerk.lower(), clerk
+
+
+@register_tool(capabilities=EXEMPT)
+def lookup_codename() -> dict:
+    """Look up the project's codename."""
+    return {"success": True, "codename": "Marigold-7"}
+
+
+@pytest.mark.parametrize("backend", ["adk", "deepagents"])
+@_needs(_key_for(CLAUDE))
+async def test_an_inherited_history_with_tool_calls_the_sub_agent_lacks_is_accepted(
+    listed, tmp_path, backend
+):
+    manager = _manager_for(
+        backend, _team(tools=[lookup_codename]), _settings(tmp_path, thinking_effort="none"),
+        CLAUDE,
+    )
+    try:
+        looked_up = await collect_events(
+            manager, "Call lookup_codename, then reply OK.", session_id="tools"
+        )
+        asked = await collect_events(
+            manager,
+            "Ask the archivist: which codename did the lookup earlier in this conversation return?",
+            session_id="tools",
+        )
+    finally:
+        await manager.cleanup()
+
+    assert_no_errors(looked_up + asked)
+    assert find_tool_results(looked_up, "lookup_codename")
+    (archivist,) = _answers_of(asked, "archivist", backend)
+    assert "marigold" in archivist.lower(), archivist
+
+
+@pytest.mark.parametrize("backend", ["adk", "deepagents"])
+@_needs(_key_for(CLAUDE))
+async def test_a_fork_after_a_tool_call_in_the_same_turn_with_thinking_on(
+    listed, tmp_path, backend
+):
+    # The coordinator calls a tool, then delegates, in one turn, with thinking
+    # on: a fork inherits that tool exchange without the coordinator's
+    # thinking (another agent's reasoning is never passed on). Claude accepts
+    # the request.
+    manager = _manager_for(
+        backend, _team(tools=[lookup_codename]), _settings(tmp_path, thinking_effort="low"),
+        CLAUDE,
+    )
+    try:
+        events = await collect_events(
+            manager,
+            "First call lookup_codename. Then, in this same turn, ask the archivist: which "
+            "codename did the lookup return? Tell me its answer.",
+            session_id="same-turn",
+        )
+    finally:
+        await manager.cleanup()
+
+    assert_no_errors(events)
+    assert find_tool_results(events, "lookup_codename")
+    (archivist,) = _answers_of(events, "archivist", backend)
+    assert "marigold" in archivist.lower(), archivist

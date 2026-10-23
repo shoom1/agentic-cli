@@ -5,18 +5,22 @@ the agent with this payload: a summary and a pointer, not the raw result, so
 the resumed turn's context stays lean. The agent pulls the whole result or
 the logs with ``job_result`` / ``job_logs`` by the job's id.
 
-ADK delivers the payload as the pending call's ``FunctionResponse``. Deep
-Agents cannot answer a call twice (Anthropic and OpenAI accept one result per
-call, and the call already has its "pending" one), so it sends the payload in
-a message of its own that opens with ``JOB_NOTICE_HEADER``.
+ADK delivers the payload as the pending call's ``FunctionResponse`` when the
+root agent made the call. A call that is already answered cannot be answered
+again (Anthropic and OpenAI accept one result per call): on Deep Agents every
+job's call has its "pending" result, and on ADK so does a sub-agent's, whose
+starter is an ordinary call (``workflow/adk/delegation.py``). Those jobs are
+told to the root agent in a message of its own, ``job_notice``, which opens
+with ``JOB_NOTICE_HEADER``.
 """
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
-#: Opens a job notification on Deep Agents, so the model can tell it from
-#: what the user wrote.
+#: Opens a job notification, so the model can tell it from what the user
+#: wrote.
 JOB_NOTICE_HEADER = "[Automatic job notification — not written by the user]"
 
 #: Longest result text the payload carries.
@@ -53,6 +57,20 @@ def job_result_payload(record: Any, result: Any) -> dict:
         f"logs via job_logs('{record.job_id}')."
     )
     return payload
+
+
+def job_notice(record: Any, result: Any) -> str:
+    """The text that tells the root agent ``record``'s job finished.
+
+    ``JOB_NOTICE_HEADER``, then ``job_result_payload`` as JSON: what both
+    backends send when the job's call cannot take the payload as its result.
+
+    Args:
+        record: The finished ``JobRecord``.
+        result: The job's result, or None.
+    """
+    payload = job_result_payload(record, result)
+    return f"{JOB_NOTICE_HEADER}\n{json.dumps(payload, ensure_ascii=False)}"
 
 
 def _summarize_result(result: Any) -> str | None:

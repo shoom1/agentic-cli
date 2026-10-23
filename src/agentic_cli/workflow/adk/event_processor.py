@@ -19,18 +19,34 @@ class ADKEventProcessor:
 
     Owns an optional on_event callback for event transformation/filtering.
 
+    Only the root agent replies to the user. An event another agent wrote (a
+    sub-agent its parent delegated to, ``workflow/adk/delegation.py``) is its
+    work: its text is marked ``metadata["agent"]``/``["subagent"]`` (the CLI
+    shows it as activity, not as the reply), and its call's usage is
+    ``purpose="subagent"``, since that prompt is the sub-agent's brief, not
+    the conversation's context. A sub-agent's failed model call does not end
+    the turn on ADK: ADK's delegation tool hands its parent "Error running
+    sub-agent: …" and the parent carries on. ADK records the provider's reason
+    on the sub-agent's error event, which becomes a recoverable ``ERROR``,
+    "<agent> failed: <reason>", so the user is told why. With no root (a
+    native ADK YAML app, whose agents transfer and do own the reply) nothing
+    is marked.
+
     Args:
         model: Model name used for usage metadata.
         on_event: Optional hook to transform/filter events before yielding.
+        root: The root agent's name, or None to mark nothing.
     """
 
     def __init__(
         self,
         model: str,
         on_event: Callable[[WorkflowEvent], WorkflowEvent | None] | None = None,
+        root: str | None = None,
     ) -> None:
         self._model = model
         self._on_event = on_event
+        self.root = root
 
     @property
     def model(self) -> str:
@@ -62,6 +78,22 @@ class ADKEventProcessor:
         Yields:
             WorkflowEvent objects for each processed part.
         """
+        subagent = self._subagent(adk_event)
+
+        error_code = getattr(adk_event, "error_code", None)
+        if subagent is not None and error_code:
+            # The root's own failure leaves the run, which reports it; this
+            # one never does.
+            error = WorkflowEvent.error(
+                f"{subagent} failed: {adk_event.error_message or error_code}",
+                error_code=error_code,
+                recoverable=True,
+            )
+            error.metadata["agent"] = subagent
+            error = self._apply_hook(error)
+            if error:
+                yield error
+
         # Extract usage_metadata if available
         if hasattr(adk_event, "usage_metadata") and adk_event.usage_metadata:
             usage = adk_event.usage_metadata
@@ -76,6 +108,8 @@ class ADKEventProcessor:
                 cached_tokens=getattr(usage, "cached_content_token_count", None),
                 invocation_id=invocation_id,
             )
+            if subagent is not None:
+                usage_event.metadata["purpose"] = "subagent"
             usage_event = self._apply_hook(usage_event)
             if usage_event:
                 yield usage_event
@@ -86,9 +120,18 @@ class ADKEventProcessor:
         for part in adk_event.content.parts:
             workflow_event = self.process_part(part, session_id)
             if workflow_event:
+                if subagent is not None and workflow_event.type is EventType.TEXT:
+                    workflow_event.metadata.update(agent=subagent, subagent=True)
                 workflow_event = self._apply_hook(workflow_event)
                 if workflow_event:
                     yield workflow_event
+
+    def _subagent(self, adk_event: Any) -> str | None:
+        """The sub-agent that wrote ``adk_event``, or None (the root, the user)."""
+        author = getattr(adk_event, "author", None)
+        if self.root is None or not author or author in (self.root, "user"):
+            return None
+        return author
 
     def process_part(self, part: Any, session_id: str) -> WorkflowEvent | None:
         """Process a single part from the agent response.

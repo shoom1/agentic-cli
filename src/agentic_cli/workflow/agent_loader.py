@@ -19,6 +19,7 @@ Example YAML::
       - name: researcher
         instruction_file: prompts/researcher.md
         tools: [web_search]
+        context: fresh          # or inherit: also see the coordinator's conversation
 
 A top-level bare list of agents (without the ``agents:`` key) is also accepted.
 Tool entries stay as strings here and are resolved to callables when the
@@ -33,7 +34,7 @@ from typing import Any
 import yaml
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
-from agentic_cli.workflow.config import AgentConfig
+from agentic_cli.workflow.config import AgentConfig, SubAgentContext
 from agentic_cli.workflow.mcp import MCPServerConfig
 from agentic_cli.workflow.model_settings import ModelSettings
 
@@ -58,6 +59,7 @@ class AgentSpec(BaseModel):
     skills: list[str] = Field(default_factory=list)
     sub_agents: list[str] = Field(default_factory=list)
     include_state_tools: bool = True
+    context: SubAgentContext | None = None
 
 
 class AgentsFile(BaseModel):
@@ -124,6 +126,7 @@ def load_agents_from_yaml(path: str | Path) -> list[AgentConfig]:
                 mcp_servers=list(spec.mcp_servers),
                 skills=list(spec.skills),
                 include_state_tools=spec.include_state_tools,
+                context=spec.context,
             )
         )
     return configs

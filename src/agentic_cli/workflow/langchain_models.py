@@ -356,7 +356,7 @@ _REASONING_FIELDS = frozenset({"reasoning_content", "reasoning", "reasoning_deta
 
 
 def without_foreign_reasoning(
-    messages: Sequence[BaseMessage], kind: ProviderKind
+    messages: Sequence[BaseMessage], kind: ProviderKind, *, agent: str | None = None
 ) -> list[BaseMessage]:
     """``messages`` for a model of ``kind``, without other providers' reasoning.
 
@@ -369,13 +369,20 @@ def without_foreign_reasoning(
     tool calls and the given messages themselves are left as they are, and a
     message of the model's own provider keeps its reasoning (Claude's signed
     thinking must go back within a tool loop).
+
+    With ``agent``, an AI message another agent wrote (its ``name`` set, and
+    not ``agent``) is foreign too, whatever its provider: a Deep Agents fork
+    inherits its coordinator's messages, and one model's signed reasoning may
+    be refused by another of the same provider. ``create_agent`` names each
+    AI message after its agent.
     """
     own = _PROVIDER_TAGS[kind]
     kept: list[BaseMessage] = []
     for message in messages:
-        if not isinstance(message, AIMessage) or message.response_metadata.get(
-            "model_provider"
-        ) == own:
+        if not isinstance(message, AIMessage) or (
+            message.response_metadata.get("model_provider") == own
+            and (agent is None or message.name in (None, agent))
+        ):
             kept.append(message)
             continue
         content = message.content
