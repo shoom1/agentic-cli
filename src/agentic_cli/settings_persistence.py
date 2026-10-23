@@ -56,6 +56,8 @@ PROJECT_SETTABLE_KEYS = frozenset({
     # to) is deliberately absent.
     "default_model", "model_roles", "pinned_models", "thinking_effort", "orchestrator",
     "context_window_trigger_tokens", "context_window_target_tokens",
+    # when a conversation is summarized (workflow/context.py)
+    "context_summarize_at", "context_max_tokens",
     # retry / request timeouts (not code paths)
     "retry_max_attempts", "retry_initial_delay", "retry_backoff_factor",
     "anthropic_request_timeout", "python_executor_timeout", "sandbox_timeout",
