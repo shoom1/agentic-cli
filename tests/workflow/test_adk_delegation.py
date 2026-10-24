@@ -322,6 +322,27 @@ class TestDelegation:
         assert sent[-1] == f"user: {BRIEF}"
         assert "assistant" not in {line.partition(":")[0] for line in sent}
 
+    async def test_an_inheriting_sub_agent_is_told_whose_conversation_it_reads(
+        self, project, monkeypatch
+    ):
+        # The user's turns reach it as plain user messages, so without the
+        # note it may take them as its own instructions and answer as the
+        # coordinator.
+        answers = delegating()
+        await three_turns(monkeypatch, team("inherit"), answers)
+
+        (body,) = answers.bodies("researcher")
+        assert system_text(body) == f"{PROMPTS['researcher']}\n\n{delegation.INHERITED_CONTEXT_NOTE}"
+        for body in answers.bodies("coordinator"):
+            assert delegation.INHERITED_CONTEXT_NOTE not in system_text(body)
+
+    async def test_a_fresh_sub_agent_is_given_no_note(self, project, monkeypatch):
+        answers = delegating()
+        await three_turns(monkeypatch, team("fresh"), answers)
+
+        (body,) = answers.bodies("researcher")
+        assert system_text(body) == PROMPTS["researcher"]
+
     async def test_the_sub_agents_own_tool_calls_are_gated(self, project, monkeypatch):
         answers = Team(
             coordinator=[calls("researcher", "toolu_c1", request="Write a note."),

@@ -27,7 +27,11 @@ only the request, ``inherit`` its parent's conversation too, other agents'
 turns quoted as context and without their thoughts. ADK gives a
 ``single_turn`` agent ``include_contents="none"`` unless the field was set
 explicitly, so ``inherit`` passes ``"default"`` explicitly and ``fresh``
-passes nothing.
+passes nothing. ADK sends an inheriting agent the user's turns as plain user
+messages, so its instruction ends with :data:`INHERITED_CONTEXT_NOTE`
+(:func:`subagent_instruction`), as Deep Agents frames a fork's task: without
+it the agent could take the user's request to its parent as its own and
+answer as the parent.
 
 The tool ADK builds is its private ``_SingleTurnAgentTool``, which calls no
 ``func`` the permission plugin could verify. The framework built the parent
@@ -62,6 +66,21 @@ if TYPE_CHECKING:
 
 logger = Loggers.workflow()
 
+#: The end of an inheriting sub-agent's instruction: whose conversation it
+#: reads, and which message is its task (Deep Agents' ``_FORK_TASK_PREAMBLE``,
+#: told the way ADK shows that conversation). No braces: ADK fills
+#: ``{name}`` in an instruction from the session state.
+INHERITED_CONTEXT_NOTE = (
+    "You are a sub-agent: another agent has handed you a task. The conversation "
+    "before the task is that agent's, shown so you know what has been established: "
+    "the user's messages in it were addressed to that agent, not to you, and what "
+    "that agent did is quoted, its call handing you this task included. Do not "
+    "carry out those messages yourself or answer as that agent. Your task is the "
+    "request that follows the conversation: complete it directly, and use the "
+    "specific facts, figures and identifiers already established in the "
+    "conversation rather than answering generically."
+)
+
 
 def subagent_fields(config: AgentConfig) -> dict[str, Any]:
     """The ``LlmAgent`` fields that make ``config``'s agent a delegated sub-agent.
@@ -84,6 +103,17 @@ def subagent_fields(config: AgentConfig) -> dict[str, Any]:
         # Explicitly: ADK keeps include_contents only when it was set.
         fields["include_contents"] = "default"
     return fields
+
+
+def subagent_instruction(config: AgentConfig, prompt: str) -> str:
+    """The instruction of ``config``'s sub-agent, whose own prompt is ``prompt``.
+
+    An inheriting one is told whose conversation it reads
+    (:data:`INHERITED_CONTEXT_NOTE`); a fresh one sees only its task.
+    """
+    if config.context != "inherit":
+        return prompt
+    return f"{prompt}\n\n{INHERITED_CONTEXT_NOTE}" if prompt.strip() else INHERITED_CONTEXT_NOTE
 
 
 def check_delegation_names(config: AgentConfig, tools: list[Any]) -> None:

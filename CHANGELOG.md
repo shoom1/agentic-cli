@@ -426,7 +426,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   conversation as it stands, after any summary and without the parent's
   reasoning. On ADK an inheriting sub-agent is built with
   `include_contents="default"`, which ADK keeps for a `single_turn` agent
-  only when it is set, and sees its parent's turns as quoted context. On
+  only when it is set, and sees its parent's turns as quoted context; ADK
+  sends it the user's turns as plain user messages, so its instruction ends
+  with a note (`delegation.INHERITED_CONTEXT_NOTE`) that the conversation is
+  its parent's and its task the request after it, as Deep Agents' preamble
+  frames a fork's: without it, Claude at times answered the user's request
+  to the coordinator instead of its own. On
   Deep Agents it is a fork (`mode="fork"`, beta in Deep Agents, whose
   `LangChainBetaWarning` is logged at debug, `deepagents_fork_beta`, rather
   than printed): the coordinator's conversation without the message that

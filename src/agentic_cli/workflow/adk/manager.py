@@ -483,12 +483,14 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             tools = self._wrap_long_running(tools)
         delegation.check_delegation_names(config, tools)
         fields = {"description": config.description}
+        instruction = config.get_prompt(self._settings)
         if not root:
             fields.update(delegation.subagent_fields(config))
+            instruction = delegation.subagent_instruction(config, instruction)
         agent = LlmAgent(
             name=config.name,
             model=built.model,
-            instruction=config.get_prompt(self._settings),
+            instruction=instruction,
             tools=tools,
             sub_agents=children,
             planner=built.planner,
