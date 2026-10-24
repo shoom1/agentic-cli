@@ -152,7 +152,9 @@ class TestAdkNativeSessions:
         assert await mgr.session_exists("missing") is False
 
         listed = await mgr.list_sessions()
-        assert any(s["session_id"] == "sess-x" for s in listed)
+        assert [(s.session_id, s.title, s.turns) for s in listed] == [
+            ("sess-x", "remember the alpha value", 1)
+        ]
 
         recent = await mgr.recent_messages("sess-x")
         assert recent and recent[-1]["content"] == "remember the alpha value"
@@ -232,7 +234,7 @@ class TestAdkSessionUserScope:
         assert await mgr.session_exists("sess-a", user_id="alice") is True
 
         listed = await mgr.list_sessions(user_id="alice")
-        assert [s["session_id"] for s in listed] == ["sess-a"]
+        assert [s.session_id for s in listed] == ["sess-a"]
 
         recent = await mgr.recent_messages("sess-a", user_id="alice")
         assert recent and recent[-1]["content"] == "alice message"
@@ -309,6 +311,8 @@ class TestSessionsUnsupportedFailExplicitly:
         for call in (
             mgr.session_exists("s"),
             mgr.list_sessions(),
+            mgr.list_sessions(limit=1),
+            mgr.session_info("s"),
             mgr.delete_session("s"),
             mgr.recent_messages("s"),
         ):

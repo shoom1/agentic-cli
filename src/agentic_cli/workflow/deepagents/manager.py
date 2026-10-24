@@ -84,7 +84,7 @@ if TYPE_CHECKING:
     from langgraph.checkpoint.base import BaseCheckpointSaver
     from langgraph.graph.state import CompiledStateGraph
 
-    from agentic_cli.workflow.sessions import SessionRef
+    from agentic_cli.workflow.sessions import SessionInfo, SessionRef
 
 logger = Loggers.workflow()
 
@@ -797,20 +797,32 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             return False
         return await self._sessions.exists(self.session_ref(session_id, user_id))
 
-    async def list_sessions(self, *, user_id: str | None = None) -> list[dict]:
+    async def list_sessions(
+        self, *, user_id: str | None = None, limit: int | None = None
+    ) -> list[SessionInfo]:
         """This app's conversations of one user, newest first.
 
         Args:
             user_id: The owner (defaults to ``settings.default_user``).
-
-        Returns:
-            ``{"session_id", "last_update", "message_count"}`` per
-            conversation, ``last_update`` in epoch seconds.
+            limit: Only the newest this many (None: all of them).
         """
         if self._sessions is None:
             return []
         ref = self.session_ref(user_id=user_id)
-        return await self._sessions.list(ref.app_name, ref.user_id)
+        return await self._sessions.list(ref.app_name, ref.user_id, limit=limit)
+
+    async def session_info(
+        self, session_id: str, *, user_id: str | None = None
+    ) -> SessionInfo | None:
+        """One conversation's row, or None when it holds no message.
+
+        Args:
+            session_id: The conversation.
+            user_id: Its owner (defaults to ``settings.default_user``).
+        """
+        if self._sessions is None:
+            return None
+        return await self._sessions.info(self.session_ref(session_id, user_id))
 
     async def delete_session(self, session_id: str, *, user_id: str | None = None) -> bool:
         """Delete a conversation, its sub-agents' checkpoints included.

@@ -69,9 +69,9 @@ class _AdmissionHarness:
             self.manager._runner = SimpleNamespace(name=f"backend-{self.inits}")
 
         async def _get_or_create(user_id, session_id):
-            return SimpleNamespace(id=session_id)
+            return SimpleNamespace(id=session_id, state={}, events=[])
 
-        async def _stream(*, session_id, user_id, new_message):
+        async def _stream(*, session_id, user_id, new_message, state_delta=None):
             self.streams.append(session_id)
             self.backend_at_stream.append(self.manager._runner)
             yield WorkflowEvent(type=EventType.TEXT, content=session_id)

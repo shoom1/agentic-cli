@@ -461,7 +461,13 @@ class PapersCommand(Command):
 
 
 class SessionsCommand(Command):
-    """List and manage saved sessions."""
+    """List and manage saved sessions.
+
+    One row per stored conversation (``SessionInfo``): its id (the current
+    one marked ``* ``) and its title (the first prompt), both shown as given,
+    never as markup, its turns and when it last changed. ``--delete=<id>``
+    deletes one, never the conversation the user is in.
+    """
 
     def __init__(self) -> None:
         super().__init__(
@@ -475,7 +481,7 @@ class SessionsCommand(Command):
 
     async def execute(self, args: str, app: Any) -> None:
         """Display persisted sessions (from the native store) or delete one."""
-        from datetime import datetime
+        from rich.markup import escape
 
         parsed = self.parse_args(args)
         delete_id = parsed.get_option("delete", "", str) or ""
@@ -498,6 +504,11 @@ class SessionsCommand(Command):
             return
 
         if delete_id:
+            if delete_id == app.session_id:
+                app.session.add_error(
+                    "You are in this conversation; start another with /new first."
+                )
+                return
             if await workflow.delete_session(delete_id):
                 app.session.add_success(f"Session '{delete_id}' deleted.")
             else:
@@ -510,22 +521,22 @@ class SessionsCommand(Command):
             return
 
         table = Table(title="Saved Sessions", show_lines=False, padding=(0, 1))
-        table.add_column("Session ID", style="bold cyan")
-        table.add_column("Messages", style="dim", justify="right")
-        table.add_column("Last Update", style="dim")
+        table.add_column("Session ID", style="bold cyan", no_wrap=True)
+        table.add_column("Title")  # the terminal's own color: readable on every theme
+        table.add_column("Turns", style="dim", justify="right")
+        table.add_column("Last Update", style="dim", no_wrap=True)
 
         current_sid = app.session_id
 
-        for s in sessions:
-            sid = s["session_id"]
-            label = f"* {sid}" if sid == current_sid else sid
-            last = s.get("last_update")
-            if isinstance(last, (int, float)):
-                last_str = datetime.fromtimestamp(last).strftime("%Y-%m-%d %H:%M")
-            else:
-                last_str = ""
-            mc = s.get("message_count")
-            table.add_row(label, "" if mc is None else str(mc), last_str)
+        for info in sessions:
+            sid = info.session_id
+            label = escape(f"* {sid}" if sid == current_sid else sid)  # an id is no markup
+            title = escape(info.title) if info.title else "[dim](no prompt yet)[/dim]"
+            turns = "" if info.turns is None else str(info.turns)
+            updated = (
+                info.updated.astimezone().strftime("%Y-%m-%d %H:%M") if info.updated else ""
+            )
+            table.add_row(label, title, turns, updated)
 
         app.session.add_rich(table)
 

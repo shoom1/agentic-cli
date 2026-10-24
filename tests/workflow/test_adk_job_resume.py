@@ -62,7 +62,7 @@ class _FakeRunner:
     def __init__(self) -> None:
         self.calls: list = []
 
-    async def run_async(self, *, session_id, user_id, new_message):
+    async def run_async(self, *, session_id, user_id, new_message, state_delta=None):
         self.calls.append(
             SimpleNamespace(session_id=session_id, user_id=user_id, new_message=new_message)
         )

@@ -385,8 +385,8 @@ class TestCompactNow:
         assert snapshot.next == ()
         assert (snapshot.metadata["app_name"], snapshot.metadata["user_id"],
                 snapshot.metadata["session_id"]) == (manager.app_name, "u", "s")
-        assert after["last_update"] > before["last_update"]
-        assert after["message_count"] == before["message_count"] == 6
+        assert after.updated > before.updated
+        assert after.turns == before.turns == 3
         assert [e.content for e in fourth if e.type is EventType.TEXT] == ["Answer 4."]
 
     async def test_after_ctrl_c_mid_tool_the_next_turn_still_runs_once(

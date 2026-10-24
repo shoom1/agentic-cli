@@ -6,6 +6,9 @@ replacement backend has to carry the same information. ``SessionRef`` makes
 that identity explicit so a session created for one user cannot be looked up,
 listed, or deleted as another user's by accident.
 
+A stored conversation is listed as a ``SessionInfo`` row, its title made by
+``session_title`` on every backend.
+
 Two context-local markers say what is running now: the turn (its
 ``SessionRef``) and, inside it, the tool call (``ToolCallRef``).
 """
@@ -14,6 +17,7 @@ from __future__ import annotations
 
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
+from datetime import datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,6 +36,42 @@ class SessionRef:
 
     def __str__(self) -> str:  # pragma: no cover - trivial
         return f"{self.app_name}/{self.user_id}/{self.session_id}"
+
+
+@dataclass(frozen=True, slots=True)
+class SessionInfo:
+    """One stored conversation, as a session list shows it.
+
+    Attributes:
+        session_id: The conversation's id.
+        title: Its first prompt on one line (``session_title``); ``""`` when
+            it has none.
+        turns: How many turns the user ran in it (a job's resume is none);
+            None when the backend cannot tell.
+        updated: When it last changed; None when the backend cannot tell.
+    """
+
+    session_id: str
+    title: str = ""
+    turns: int | None = None
+    updated: datetime | None = None
+
+
+#: The longest title, in characters.
+TITLE_MAX = 80
+
+
+def session_title(text: str) -> str:
+    """``text`` as a conversation's title: one line, at most ``TITLE_MAX`` characters.
+
+    Control and invisible format characters are removed (a soft hyphen
+    joins its word again), each run of whitespace becomes one space, and a
+    longer text is cut with "…".
+    """
+    line = " ".join("".join(ch for ch in text if ch.isprintable() or ch.isspace()).split())
+    if len(line) <= TITLE_MAX:
+        return line
+    return line[: TITLE_MAX - 1].rstrip() + "…"
 
 
 # The conversation whose turn is currently executing. A ContextVar, not a

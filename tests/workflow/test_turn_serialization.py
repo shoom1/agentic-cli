@@ -56,9 +56,9 @@ class _Harness:
             return None
 
         async def _get_or_create(user_id, session_id):
-            return SimpleNamespace(id=session_id)
+            return SimpleNamespace(id=session_id, state={}, events=[])
 
-        async def _stream(*, session_id, user_id, new_message):
+        async def _stream(*, session_id, user_id, new_message, state_delta=None):
             self.events.append(f"start:{session_id}")
             self.entered.set()
             await self.release.wait()

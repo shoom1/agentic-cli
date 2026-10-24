@@ -336,7 +336,7 @@ class TestSessionHooks:
         await turn(manager, "Hello.", user=ctx.settings.default_user, session="s")
 
         assert await manager.session_exists("s") is True
-        assert [e["session_id"] for e in await manager.list_sessions()] == ["s"]
+        assert [e.session_id for e in await manager.list_sessions()] == ["s"]
         assert await manager.recent_messages("s") == [
             {"role": "user", "content": "Hello."}, {"role": "assistant", "content": "Hi."}
         ]
@@ -354,7 +354,7 @@ class TestSessionHooks:
         assert await manager.list_sessions() == []
         assert await manager.recent_messages("s") == []
         assert await manager.session_exists("s", user_id="alice") is True
-        assert [e["session_id"] for e in await manager.list_sessions(user_id="alice")] == ["s"]
+        assert [e.session_id for e in await manager.list_sessions(user_id="alice")] == ["s"]
         assert len(await manager.recent_messages("s", user_id="alice")) == 2
 
     async def test_load_session_adopts_the_id_and_reports_a_resume(

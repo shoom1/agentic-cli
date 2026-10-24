@@ -6,9 +6,11 @@ go into every checkpoint's metadata. ``CheckpointSessions`` answers the
 session hooks from the checkpointer:
 
 - a session exists when its root thread holds a message;
-- listing keeps one app and one user, newest first, with each session's last
-  checkpoint time and message count, and leaves out sub-agent checkpoints
-  (namespace ``tools:<task-id>``) and threads that are not ours;
+- listing keeps one app and one user, newest first, one ``SessionInfo`` row
+  each: the first prompt as its title, the turns the user ran (a job's
+  notification is none), its last checkpoint's time; it leaves out sub-agent
+  checkpoints (namespace ``tools:<task-id>``) and threads that are not ours,
+  and ``limit`` keeps the newest; one conversation's row is ``info``;
 - deleting removes the whole thread, sub-agents included, and reports an
   unknown one;
 - recent messages are the user's and the assistant's text.
@@ -22,6 +24,7 @@ and Deep Agents sharing one sqlite file (Review Focus 3).
 from __future__ import annotations
 
 import sqlite3
+from types import SimpleNamespace
 
 import pytest
 
@@ -34,13 +37,15 @@ from agentic_cli.workflow.config import AgentConfig  # noqa: E402
 from agentic_cli.workflow.deepagents import manager as manager_module  # noqa: E402
 from agentic_cli.workflow.deepagents.agent_builder import build_agent_tree  # noqa: E402
 from agentic_cli.workflow.deepagents.manager import DeepAgentsWorkflowManager  # noqa: E402
+from agentic_cli.tools.jobs import JobState  # noqa: E402
 from agentic_cli.workflow.deepagents.sessions import (  # noqa: E402
     CheckpointSessions,
+    job_notification,
     ref_from_thread_id,
     run_config,
     thread_id,
 )
-from agentic_cli.workflow.sessions import SessionRef  # noqa: E402
+from agentic_cli.workflow.sessions import SessionInfo, SessionRef  # noqa: E402
 from tests.conftest import MockContext  # noqa: E402
 from tests.workflow.deepagents.fakes import ScriptedChat, ScriptedModels, ai, task  # noqa: E402
 
@@ -197,10 +202,10 @@ class TestList:
 
         listed = await CheckpointSessions(saver).list("app", "alice")
 
-        assert [entry["session_id"] for entry in listed] == ["s2", "s1"]
-        assert all(type(entry["last_update"]) is float for entry in listed)
-        assert listed[0]["last_update"] > listed[1]["last_update"]
-        assert [entry["message_count"] for entry in listed] == [2, 2]
+        assert [entry.session_id for entry in listed] == ["s2", "s1"]
+        assert all(entry.updated.tzinfo is not None for entry in listed)
+        assert listed[0].updated > listed[1].updated
+        assert [(entry.title, entry.turns) for entry in listed] == [("Hello.", 1)] * 2
 
     async def test_a_later_turn_moves_a_session_first(self, saver):
         await say(saver, ref(session="s1"))
@@ -209,7 +214,39 @@ class TestList:
 
         listed = await CheckpointSessions(saver).list("app", "alice")
 
-        assert [entry["session_id"] for entry in listed] == ["s1", "s2"]
+        assert [(entry.session_id, entry.turns) for entry in listed] == [("s1", 2), ("s2", 1)]
+
+    async def test_a_row_is_the_first_prompt_and_the_turns(self, saver):
+        await say(saver, ref(), "  Plan the\ntrip to   Lisbon ")
+        await say(saver, ref(), "And the budget?")
+
+        (row,) = await CheckpointSessions(saver).list("app", "alice")
+
+        assert row == SessionInfo("s1", "Plan the trip to Lisbon", 2, row.updated)
+
+    async def test_a_job_notification_is_no_turn(self, saver):
+        await say(saver, ref(), "Build it.")
+        record = SimpleNamespace(
+            job_id="j1", tool="build", name="build", call_id="c1", call_name="build",
+            session_id="s1", user_id="alice", state=JobState.SUCCEEDED, exit_code=0,
+            error=None,
+        )
+        root = _tree(saver, [SOLO], solo=[ai("Built.")])
+        await root.ainvoke(
+            {"messages": [job_notification(record, "ok")]}, run_config(ref())
+        )
+
+        (row,) = await CheckpointSessions(saver).list("app", "alice")
+
+        assert (row.title, row.turns) == ("Build it.", 1)
+
+    async def test_the_limit_keeps_the_newest(self, saver):
+        await say(saver, ref(session="s1"))
+        await say(saver, ref(session="s2"))
+
+        listed = await CheckpointSessions(saver).list("app", "alice", limit=1)
+
+        assert [entry.session_id for entry in listed] == ["s2"]
 
     async def test_sub_agent_checkpoints_are_not_sessions(self, saver):
         await delegate(saver, ref())
@@ -217,8 +254,8 @@ class TestList:
 
         listed = await CheckpointSessions(saver).list("app", "alice")
 
-        # The root conversation: the question, the task call, its result, the answer.
-        assert [(e["session_id"], e["message_count"]) for e in listed] == [("s1", 4)]
+        # The root conversation: one question; the worker's brief is no turn.
+        assert [(e.session_id, e.title, e.turns) for e in listed] == [("s1", "Delegate.", 1)]
 
     async def test_a_sub_agents_later_checkpoint_does_not_stand_for_the_session(
         self, saver
@@ -237,7 +274,7 @@ class TestList:
         listed = await CheckpointSessions(saver).list("app", "alice")
 
         # The question and the task call; the worker's brief is not the session's.
-        assert [(e["session_id"], e["message_count"]) for e in listed] == [("s1", 2)]
+        assert [(e.session_id, e.turns) for e in listed] == [("s1", 1)]
 
     async def test_a_thread_that_is_not_ours_is_left_out(self, saver):
         """Metadata alone does not make a session: the thread id must name it."""
@@ -257,6 +294,38 @@ class TestList:
 
     async def test_nothing_stored_lists_nothing(self, saver):
         assert await CheckpointSessions(saver).list("app", "alice") == []
+
+    async def test_a_thread_with_no_message_is_no_conversation(self, saver):
+        """A turn cancelled before its first step leaves only LangGraph's
+        input checkpoint: as ``info`` and ``exists`` say, no conversation."""
+        from langgraph.checkpoint.base import empty_checkpoint
+
+        config = {"configurable": {"thread_id": thread_id(ref()), "checkpoint_ns": ""}}
+        metadata = {"app_name": "app", "user_id": "alice", "session_id": "s1",
+                    "source": "input", "step": -1}
+        await saver.aput(config, empty_checkpoint(), metadata, {})
+        sessions = CheckpointSessions(saver)
+
+        assert await sessions.list("app", "alice") == []
+        assert await sessions.info(ref()) is None
+
+
+class TestInfo:
+    async def test_it_is_the_conversations_row(self, saver):
+        await say(saver, ref(), "Hello there.")
+        sessions = CheckpointSessions(saver)
+
+        (listed,) = await sessions.list("app", "alice")
+
+        assert await sessions.info(ref()) == listed
+        assert listed.title == "Hello there."
+
+    async def test_none_for_a_conversation_that_is_not_stored(self, saver):
+        await say(saver, ref())
+        sessions = CheckpointSessions(saver)
+
+        assert await sessions.info(ref(session="s2")) is None
+        assert await sessions.info(ref(user="bob")) is None
 
 
 class TestDelete:
@@ -353,8 +422,8 @@ async def converse(manager, text: str, *, user: str, session: str) -> list:
     return [event async for event in manager.process(text, user, session_id=session)]
 
 
-def _ids(listed: list[dict]) -> list[str]:
-    return [entry["session_id"] for entry in listed]
+def _ids(listed: list[SessionInfo]) -> list[str]:
+    return [entry.session_id for entry in listed]
 
 
 class TestOneFileManyApps:
@@ -461,7 +530,7 @@ class TestSharedFileWithAdk:
                     )}
                 assert {"sessions", "events", "checkpoints", "writes"} <= tables
 
-                assert _ids(await adk.list_sessions(user_id="u")) == ["s"]
+                assert [r.session_id for r in await adk.list_sessions(user_id="u")] == ["s"]
                 assert _ids(await deep.list_sessions(user_id="u")) == ["s"]
                 assert [m["content"] for m in await adk.recent_messages("s", user_id="u")] == [
                     "Hello, ADK."

@@ -14,7 +14,9 @@ deleting the thread removes them with it.
 A finished job reports to the conversation in a ``HumanMessage`` of its own
 (``job_notification``), marked in its ``response_metadata``, which no
 provider adapter sends. The model reads it as the rest of the conversation;
-``recent`` leaves it out, because the user did not write it.
+``recent`` leaves it out, because the user did not write it, and so does a
+conversation's row: its title is the first prompt the user typed, its turns
+how many they typed.
 """
 
 from __future__ import annotations
@@ -26,7 +28,7 @@ from typing import TYPE_CHECKING, Any
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
 from agentic_cli.tools.jobs.resume import job_notice
-from agentic_cli.workflow.sessions import SessionRef
+from agentic_cli.workflow.sessions import SessionInfo, SessionRef, session_title
 
 if TYPE_CHECKING:
     from langgraph.checkpoint.base import BaseCheckpointSaver, CheckpointTuple
@@ -118,14 +120,27 @@ class CheckpointSessions:
         """Whether ``ref``'s root thread holds at least one message."""
         return bool(_messages(await self._root(ref)))
 
-    async def list(self, app_name: str, user_id: str) -> list[dict]:
+    async def info(self, ref: SessionRef) -> SessionInfo | None:
+        """``ref``'s row, or None when its root thread holds no message."""
+        item = await self._root(ref)
+        return _row(ref.session_id, item) if _messages(item) else None
+
+    async def list(
+        self, app_name: str, user_id: str, *, limit: int | None = None
+    ) -> list[SessionInfo]:
         """The conversations of one app and one user, newest first.
 
-        Each is ``{"session_id", "last_update", "message_count"}``:
-        ``last_update`` is the latest root checkpoint's time in epoch seconds,
-        ``message_count`` the root conversation's length. Threads whose id
-        does not name this app and user are left out, whatever their metadata
-        says.
+        Each row comes from the conversation's latest root checkpoint: its
+        time, and the prompts the user typed (``_row``). Threads whose id
+        does not name this app and user are left out, whatever their
+        metadata says, and so is a thread whose latest root checkpoint
+        holds no message (``info`` and ``exists`` say it is not stored).
+
+        Args:
+            app_name: The app.
+            user_id: The user.
+            limit: Only the newest this many (None: all of them). It bounds
+                the rows returned; every checkpoint of the user is still read.
         """
         latest: dict[str, "CheckpointTuple"] = {}
         wanted = {"app_name": app_name, "user_id": user_id}
@@ -137,18 +152,14 @@ class CheckpointSessions:
             if ref is None or (ref.app_name, ref.user_id) != (app_name, user_id):
                 continue
             seen = latest.get(ref.session_id)
-            if seen is None or _epoch(item) > _epoch(seen):
+            if seen is None or _updated(item) > _updated(seen):
                 latest[ref.session_id] = item
-        sessions = [
-            {
-                "session_id": session_id,
-                "last_update": _epoch(item),
-                "message_count": len(_messages(item)),
-            }
-            for session_id, item in latest.items()
-        ]
-        sessions.sort(key=lambda entry: entry["last_update"], reverse=True)
-        return sessions
+        rows = sorted(
+            (_row(session_id, item) for session_id, item in latest.items() if _messages(item)),
+            key=lambda row: row.updated,
+            reverse=True,
+        )
+        return rows if limit is None else rows[:limit]
 
     async def delete(self, ref: SessionRef) -> bool:
         """Delete ``ref``'s thread, sub-agents included; False if there is none."""
@@ -192,8 +203,20 @@ def _messages(item: "CheckpointTuple | None") -> list[BaseMessage]:
     return list(item.checkpoint["channel_values"].get("messages") or ())
 
 
-def _epoch(item: "CheckpointTuple") -> float:
-    return datetime.fromisoformat(item.checkpoint["ts"]).timestamp()
+def _updated(item: "CheckpointTuple") -> datetime:
+    return datetime.fromisoformat(item.checkpoint["ts"])
+
+
+def _row(session_id: str, item: "CheckpointTuple") -> SessionInfo:
+    """A conversation's row from its latest root checkpoint."""
+    typed = [
+        text
+        for message in _messages(item)
+        if isinstance(message, HumanMessage) and not is_job_notification(message)
+        if (text := _text(message))
+    ]
+    title = session_title(typed[0]) if typed else ""
+    return SessionInfo(session_id, title, len(typed), _updated(item))
 
 
 def _text(message: BaseMessage) -> str:

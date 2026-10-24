@@ -633,9 +633,9 @@ class TestNoConversationNoTurn:
         assert await manager.session_exists(record.session_id, user_id=record.user_id) is False
         assert await manager.list_sessions(user_id="mallory") == []
         assert [
-            (entry["session_id"], entry["message_count"])
+            (entry.session_id, entry.turns)
             for entry in await manager.list_sessions(user_id="u")
-        ] == ([] if whose == "deleted" else [("s", 2)])
+        ] == ([] if whose == "deleted" else [("s", 1)])
 
     async def test_another_apps_conversation_is_not_this_ones(self, hermetic, monkeypatch):
         """Two apps on one sqlite file: a job of one never resumes in the other."""
