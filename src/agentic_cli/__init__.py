@@ -52,6 +52,7 @@ _lazy_imports = {
     "EventType": "agentic_cli.workflow.events",
     # Lifecycle / turn contracts
     "SessionRef": "agentic_cli.workflow.sessions",
+    "SessionInfo": "agentic_cli.workflow.sessions",
     "TurnResult": "agentic_cli.cli.message_processor",
     "TurnStatus": "agentic_cli.cli.message_processor",
     "WorkflowState": "agentic_cli.cli.workflow_controller",
@@ -99,7 +100,7 @@ if TYPE_CHECKING:
     from agentic_cli.workflow.factory import create_workflow_manager_from_settings
     from agentic_cli.workflow.langgraph.manager import LangGraphWorkflowManager
     from agentic_cli.workflow.model_settings import ModelSettings, ThinkingSettings
-    from agentic_cli.workflow.sessions import SessionRef
+    from agentic_cli.workflow.sessions import SessionInfo, SessionRef
     from agentic_cli.workflow.settings import WorkflowSettingsMixin
 
 
@@ -141,6 +142,7 @@ __all__ = [
     "EventType",
     # Lifecycle / turn contracts
     "SessionRef",
+    "SessionInfo",
     "TurnResult",
     "TurnStatus",
     "WorkflowState",

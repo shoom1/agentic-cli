@@ -309,6 +309,8 @@ class TestSessionsUnsupportedFailExplicitly:
         for call in (
             mgr.session_exists("s"),
             mgr.list_sessions(),
+            mgr.list_sessions(limit=1),
+            mgr.session_info("s"),
             mgr.delete_session("s"),
             mgr.recent_messages("s"),
         ):

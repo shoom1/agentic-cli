@@ -41,6 +41,7 @@ from agentic_cli.models import (
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.model_settings import ModelSettings, ThinkingSettings
 from agentic_cli.workflow.sessions import (
+    SessionInfo,
     SessionRef,
     get_active_turn,
     reset_active_turn,
@@ -1510,9 +1511,27 @@ class BaseWorkflowManager(ABC):
         """
         raise self._no_session_support("recent_messages")
 
-    async def list_sessions(self, *, user_id: str | None = None) -> list[dict]:
-        """List persisted sessions from the native store (most recent first)."""
+    async def list_sessions(
+        self, *, user_id: str | None = None, limit: int | None = None
+    ) -> list[SessionInfo]:
+        """The stored conversations of one user, newest first.
+
+        Args:
+            user_id: Their owner (defaults to ``settings.default_user``).
+            limit: Only the newest this many (None: all of them).
+        """
         raise self._no_session_support("list_sessions")
+
+    async def session_info(
+        self, session_id: str, *, user_id: str | None = None
+    ) -> SessionInfo | None:
+        """One stored conversation's row, or None when it is not stored.
+
+        Args:
+            session_id: The conversation.
+            user_id: Its owner (defaults to ``settings.default_user``).
+        """
+        raise self._no_session_support("session_info")
 
     async def delete_session(self, session_id: str, *, user_id: str | None = None) -> bool:
         """Delete a persisted session from the native store."""

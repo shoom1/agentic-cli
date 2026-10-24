@@ -61,7 +61,8 @@ class TestLazyPackageRoot:
 class TestTopLevelExports:
     @pytest.mark.parametrize(
         "name",
-        ["SessionRef", "AgentGraphError", "TurnResult", "TurnStatus", "WorkflowState"],
+        ["SessionRef", "SessionInfo", "AgentGraphError", "TurnResult", "TurnStatus",
+         "WorkflowState"],
     )
     def test_exported_from_package_root(self, name: str):
         import agentic_cli
@@ -75,9 +76,10 @@ class TestTopLevelExports:
         from agentic_cli.cli.message_processor import TurnResult, TurnStatus
         from agentic_cli.cli.workflow_controller import WorkflowState
         from agentic_cli.workflow.config import AgentGraphError
-        from agentic_cli.workflow.sessions import SessionRef
+        from agentic_cli.workflow.sessions import SessionInfo, SessionRef
 
         assert agentic_cli.SessionRef is SessionRef
+        assert agentic_cli.SessionInfo is SessionInfo
         assert agentic_cli.AgentGraphError is AgentGraphError
         assert agentic_cli.TurnResult is TurnResult
         assert agentic_cli.TurnStatus is TurnStatus
