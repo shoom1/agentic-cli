@@ -1,5 +1,8 @@
 """A CLI app for the console tests: ``BaseCLIApp`` over a scripted workflow.
 
+It runs through ``BaseCLIApp.main()``, so it takes the session flags
+(``--continue``, ``--resume [ID]``) as any app does.
+
 ``tests/cli/test_console_turns.py`` runs it in a child process over a pty;
 without a ``test_`` prefix, pytest does not collect it. Nothing reaches a
 provider and no key is needed: the controller builds this script's manager
@@ -27,13 +30,16 @@ each turn's prompt and the reply it echoed.
 
 With a file named ``init-fails`` in the working directory at startup, the
 first initialization fails, and the next one (a turn retries it) waits until
-a file named ``ready`` appears.
+a file named ``ready`` appears. A ``seed.json`` there holds conversations an
+earlier run stored: ``{"<id>": {"messages": [["user", "..."], ["assistant",
+"..."]], "hours": 2}}``, last active that many hours ago.
 """
 
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -67,6 +73,15 @@ class ScriptedManager:
         #: Each stored conversation's messages and when it last changed.
         self._messages: dict[str, list[dict]] = {}
         self._updated: dict[str, datetime] = {}
+        seed = Path("seed.json")
+        if seed.exists():
+            for session_id, stored in json.loads(seed.read_text()).items():
+                for role, content in stored["messages"]:
+                    self._said(session_id, role, content)
+                self._sessions.add(session_id)
+                self._updated[session_id] = (
+                    datetime.now(timezone.utc) - timedelta(hours=stored.get("hours", 0))
+                )
 
     async def initialize_services(self) -> None:
         ScriptedManager.initializations += 1
@@ -164,16 +179,22 @@ class ScriptedManager:
             yield usage
 
 
+class ConsoleApp(BaseCLIApp):
+    """The console tests' app: the scripted workflow, on the memory store."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            app_info=AppInfo(name="Console test", version="0"),
+            agent_configs=[AgentConfig(name="assistant", prompt="Help.")],
+            settings=BaseSettings(session_store="memory"),
+        )
+
+
 def main() -> None:
     workflow_controller.create_workflow_manager_from_settings = (
         lambda **kwargs: ScriptedManager()
     )
-    app = BaseCLIApp(
-        app_info=AppInfo(name="Console test", version="0"),
-        agent_configs=[AgentConfig(name="assistant", prompt="Help.")],
-        settings=BaseSettings(session_store="memory"),
-    )
-    asyncio.run(app.run())
+    ConsoleApp.main()  # the session flags: --continue, --resume [ID]
 
 
 if __name__ == "__main__":

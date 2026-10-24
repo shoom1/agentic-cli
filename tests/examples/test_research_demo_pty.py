@@ -26,6 +26,7 @@ import pytest
 from tests.examples.console_smoke import (
     ALLOWED_PARENT_VARS,
     EXPLICIT_CHILD_VARS,
+    STARTUP_TIMEOUT,
     assert_clean_session,
     child_env,
     platform_skip_reason,
@@ -158,6 +159,46 @@ class TestChildEnvironmentIsHermetic:
             workspace_dir=tmp_path / "ws", _env_file=None
         )
         assert settings.default_model == "gemini-sentinel-9"
+
+
+class TestSessionFlags:
+    """``--continue`` and ``--resume`` reach the demo through ``BaseCLIApp.main()``."""
+
+    def test_the_help_names_them(self, sandbox) -> None:
+        import subprocess
+
+        home, cwd = sandbox
+        done = subprocess.run(
+            [*_argv(), "--help"], cwd=cwd, env=child_env(home), capture_output=True,
+            text=True, timeout=60,
+        )
+
+        assert done.returncode == 0, done.stderr
+        assert done.stdout.startswith("usage: python -m research_demo")
+        assert "--continue" in done.stdout and "--resume [ID]" in done.stdout
+
+    def test_without_credentials_a_resume_keeps_the_prompt_and_says_how(self, sandbox) -> None:
+        """No key: the workflow cannot start, so the conversation cannot be
+        looked up; the prompt stays, so /settings can fix it."""
+        import pexpect
+
+        home, cwd = sandbox
+        child = pexpect.spawn(
+            _argv()[0], [*_argv()[1:], "--resume", "abc123"], cwd=str(cwd),
+            env=child_env(home), encoding="utf-8", codec_errors="replace",
+            timeout=STARTUP_TIMEOUT,
+        )
+        try:
+            child.expect_exact("Could not open 'abc123': the workflow did not start.")
+            child.expect_exact(">>>")
+            child.sendline("/exit")
+            child.expect_exact("Goodbye!")
+            child.expect(pexpect.EOF)
+            child.close()
+        finally:
+            child.close(force=True)
+
+        assert child.exitstatus == 0
 
 
 class TestConsoleSmoke:

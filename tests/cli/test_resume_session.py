@@ -386,7 +386,10 @@ class TestPickSession:
 
         assert await app.pick_session() is None
         assert app.session.show_dialog.call_count == 0
-        assert said(app.session, "add_message") == ["No other conversations to resume."]
+        assert said(app.session, "add_message") == [
+            "No other conversations to resume. "
+            "(session_store is memory: conversations end with the app)"
+        ]
 
     async def test_it_holds_the_newest_fifty(self, project):
         workflow = Workflow(*(

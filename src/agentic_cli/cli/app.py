@@ -11,13 +11,14 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import logging
+import os
 import re
 import sys
 import warnings
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 
 from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.document import Document
@@ -27,6 +28,7 @@ from thinking_prompt import AppInfo, ThinkingPromptSession, ThinkingPromptStyles
 
 from agentic_cli.cli.commands import Command, CommandRegistry
 from agentic_cli.cli.message_processor import MessageProcessor, _says_so_when_stopped
+from agentic_cli.cli.session_args import SessionStart, add_session_arguments, parse_session_start
 from agentic_cli.cli.session_resume import (
     PICK_LIMIT,
     picker,
@@ -42,6 +44,7 @@ from agentic_cli.settings_persistence import PROJECT_SETTABLE_KEYS, USER_PREFERE
 from agentic_cli.workflow.settings import OrchestratorType
 
 if TYPE_CHECKING:
+    import argparse
     from collections.abc import Iterable, Sequence
 
     from thinking_prompt import Field
@@ -272,6 +275,22 @@ _LANGGRAPH_DEPRECATION = (
 )
 
 
+#: Why nothing is stored on the memory store, after a startup line.
+_MEMORY_NOTE = " (session_store is memory: conversations end with the app)"
+
+
+def _command_name() -> str:
+    """The command this process was run as: ``python -m <package>``,
+    ``python <script>.py``, or a console script's name."""
+    spec = getattr(sys.modules.get("__main__"), "__spec__", None)
+    if spec is not None and spec.name:
+        return f"python -m {spec.name.removesuffix('.__main__')}"
+    script = sys.argv[0] if sys.argv and sys.argv[0] else "app"
+    if script.endswith(".py"):  # run as `python my_app.py`: name it so
+        return f"python {script}"
+    return os.path.basename(script)
+
+
 def _runs_langgraph(settings: BaseSettings) -> bool:
     """Whether ``settings`` choose the LangGraph backend.
 
@@ -384,8 +403,10 @@ class BaseCLIApp:
             app_info: The startup banner (name, version, welcome message)
             agent_configs: List of agent configurations for the workflow
             settings: Application settings instance
-            session_id: Optional session ID for save/resume. If provided,
-                       the session will be loaded on startup and saved on exit.
+            session_id: The conversation to start in, new or stored (for
+                library use and tests); without it a fresh id is generated.
+                ``main()`` takes ``--continue`` and ``--resume [ID]``
+                instead (``session_start``).
 
         Raises:
             TypeError: The app still defines ``get_styles()``, which
@@ -395,12 +416,20 @@ class BaseCLIApp:
             raise TypeError(_GET_STYLES_REMOVED)
 
         # Sessions are durable by default: a fresh id is generated when none is
-        # given (resumable later via /sessions or --session); an explicit id
+        # given (resumable later with /resume or --resume); an explicit id
         # requests a resume.
         import uuid
 
         self._resume_requested = session_id is not None
         self._session_id = session_id or uuid.uuid4().hex[:12]
+        # How run() starts (``session_start``), and what it opens once the prompt is up.
+        self._session_start = SessionStart()
+        self._pending_resume: str | None = None
+        self._pending_pick = False
+        # The command main() was run as, for the lines naming --resume.
+        self._command: str | None = None
+        #: The process's exit status after run(): 1 when the start was refused.
+        self.exit_status = 0
         # === Configuration ===
         self._app_info = app_info
         self._settings = settings
@@ -691,6 +720,79 @@ class BaseCLIApp:
     def session_id(self, value: str | None) -> None:
         """Set the persistent session ID."""
         self._session_id = value
+
+    @property
+    def session_start(self) -> SessionStart:
+        """How ``run()`` starts: a new conversation (the default), the newest
+        stored one, one by id, or a picker (``cli/session_args.py``).
+
+        ``main()`` sets it from the command line; set it before ``run()``.
+
+        Raises:
+            TypeError: On setting anything but a ``SessionStart``.
+            ValueError: On setting anything but a new conversation for an
+                app built with ``session_id=``, which already names the
+                conversation it starts in.
+        """
+        return self._session_start
+
+    @session_start.setter
+    def session_start(self, value: SessionStart) -> None:
+        if not isinstance(value, SessionStart):
+            raise TypeError(f"session_start takes a SessionStart, not {type(value).__name__}")
+        if self._resume_requested and value.mode != "new":
+            raise ValueError(
+                f"This app was built with session_id={self._session_id!r}; "
+                f"it cannot also start with {value.mode!r}."
+            )
+        self._session_start = value
+
+    @classmethod
+    def main(cls, argv: "Sequence[str] | None" = None) -> NoReturn:
+        """Run the app from the command line, then exit with its ``exit_status``.
+
+        Point an app's console script at it (``myapp =
+        "myapp.cli.app:MyApp.main"``). It parses ``argv`` (the process's
+        arguments by default) for ``-c``/``--continue`` and ``-r``/``--resume
+        [ID]`` (``cli/session_args.py``) and whatever ``add_arguments`` adds,
+        builds the app with ``from_args``, sets its ``session_start``, and runs it.
+        The status is 1 when ``--resume <id>`` cannot be opened (not stored,
+        or the store failed) or the backend keeps no sessions, 130 after a
+        Ctrl+C before the prompt, else 0.
+        """
+        import argparse
+
+        command = _command_name()
+        parser = argparse.ArgumentParser(prog=command)
+        add_session_arguments(parser)
+        cls.add_arguments(parser)
+        args = parser.parse_args(None if argv is None else list(argv))
+        app = cls.from_args(args)
+        app.session_start = parse_session_start(args)
+        app._command = command
+        try:
+            asyncio.run(app.run())
+        except KeyboardInterrupt:  # Ctrl+C before the prompt: the terminal is not raw yet
+            raise SystemExit(130) from None
+        raise SystemExit(app.exit_status)
+
+    @classmethod
+    def add_arguments(cls, parser: "argparse.ArgumentParser") -> None:
+        """Add the app's own command-line flags to ``parser`` (none by default).
+
+        ``main()`` calls it after adding the session flags; ``from_args``
+        reads what was given.
+        """
+
+    @classmethod
+    def from_args(cls, args: "argparse.Namespace") -> "BaseCLIApp":
+        """Build the app ``main()`` runs: ``cls()`` by default.
+
+        An app whose constructor takes arguments, or that reads flags of its
+        own (``add_arguments``), overrides it. ``main()`` sets ``session_start`` on
+        the app returned.
+        """
+        return cls()
 
     def stop(self) -> None:
         """Stop the application."""
@@ -1114,52 +1216,57 @@ class BaseCLIApp:
             found."), or could not be read ("Could not open '<id>': ...").
         """
         with _says_so_when_stopped(self.session):
-            async with self._turn_lock:
-                if session_id == self._session_id:
-                    self.session.add_message("system", "Already in this conversation.")
-                    return False
-                controller = self._workflow_controller
-                if not controller.is_ready:
-                    self.session.add_error(
-                        f"Could not open '{session_id}': the workflow is not ready."
-                    )
-                    return False
-                workflow = controller.workflow
-                try:
-                    info = await workflow.session_info(session_id)
-                    messages = (
-                        await workflow.recent_messages(session_id, sys.maxsize) if info else []
-                    )
-                except Exception as error:  # noqa: BLE001 - a store error changes nothing
-                    logger.debug("session_open_failed", session_id=session_id, exc_info=True)
-                    reason = str(error) or type(error).__name__
-                    self.session.add_error(f"Could not open '{session_id}': {reason}")
-                    return False
-                if info is None:
-                    self.session.add_error(f"No conversation '{session_id}' found.")
-                    return False
-                # Made before anything changes: a display error changes nothing.
-                line = resumed_line(info, datetime.now(timezone.utc))
-                replay = replay_lines(messages)
-                old = self._session_id
-                if self._turned:  # facts once per conversation used
-                    await self._saving_facts(old)
-                try:
-                    await workflow.load_session(session_id)
-                except Exception as error:  # noqa: BLE001 - the id is not adopted
-                    logger.debug("session_open_failed", session_id=session_id, exc_info=True)
-                    reason = str(error) or type(error).__name__
-                    self.session.add_error(f"Could not open '{session_id}': {reason}")
-                    return False
-                self._session_id = session_id
-                self._turned = False
-                self._message_processor.reset()
-                self._usage_tracker.reset()
-                _show_new_context(controller, self.session, swapped=False)
-                logger.info("session_resumed", session_id=session_id, previous=old)
-                self.session.add_message("system", line)
-                show_replay(self.session, replay)
-                return True
+            return await self._resume(session_id)
+
+    async def _resume(self, session_id: str) -> bool:
+        """``resume_session`` without its "Operation cancelled..." line: at
+        startup (``_open_on_startup``) a Ctrl+C ends the app, not the switch."""
+        async with self._turn_lock:
+            if session_id == self._session_id:
+                self.session.add_message("system", "Already in this conversation.")
+                return False
+            controller = self._workflow_controller
+            if not controller.is_ready:
+                self.session.add_error(
+                    f"Could not open '{session_id}': the workflow is not ready."
+                )
+                return False
+            workflow = controller.workflow
+            try:
+                info = await workflow.session_info(session_id)
+                messages = (
+                    await workflow.recent_messages(session_id, sys.maxsize) if info else []
+                )
+            except Exception as error:  # noqa: BLE001 - a store error changes nothing
+                logger.debug("session_open_failed", session_id=session_id, exc_info=True)
+                reason = str(error) or type(error).__name__
+                self.session.add_error(f"Could not open '{session_id}': {reason}")
+                return False
+            if info is None:
+                self.session.add_error(f"No conversation '{session_id}' found.")
+                return False
+            # Made before anything changes: a display error changes nothing.
+            line = resumed_line(info, datetime.now(timezone.utc))
+            replay = replay_lines(messages)
+            old = self._session_id
+            if self._turned:  # facts once per conversation used
+                await self._saving_facts(old)
+            try:
+                await workflow.load_session(session_id)
+            except Exception as error:  # noqa: BLE001 - the id is not adopted
+                logger.debug("session_open_failed", session_id=session_id, exc_info=True)
+                reason = str(error) or type(error).__name__
+                self.session.add_error(f"Could not open '{session_id}': {reason}")
+                return False
+            self._session_id = session_id
+            self._turned = False
+            self._message_processor.reset()
+            self._usage_tracker.reset()
+            _show_new_context(controller, self.session, swapped=False)
+            logger.info("session_resumed", session_id=session_id, previous=old)
+            self.session.add_message("system", line)
+            show_replay(self.session, replay)
+            return True
 
     async def pick_session(self) -> str | None:
         """Ask which stored conversation to open: the newest ``PICK_LIMIT`` but this one.
@@ -1181,7 +1288,8 @@ class BaseCLIApp:
             if info.session_id != self._session_id
         ][:PICK_LIMIT]
         if not rows:
-            self.session.add_message("system", "No other conversations to resume.")
+            note = _MEMORY_NOTE if self._settings.session_store == "memory" else ""
+            self.session.add_message("system", f"No other conversations to resume.{note}")
             return None
         dialog, ids = picker(rows, datetime.now(timezone.utc))
         picked = await self.session.show_dialog(dialog)
@@ -1237,24 +1345,124 @@ class BaseCLIApp:
         if facts:
             logger.info("session_facts_extracted", count=len(facts), session_id=session_id)
 
-    async def _adopt_session_on_startup(self) -> None:
-        """Adopt this run's session id so the manager targets it from turn one.
+    async def _adopt_session_on_startup(self) -> bool:
+        """Adopt this run's conversation before the prompt; False when the app must not start.
 
-        Runs for every startup, not just ``--session``: a fresh auto-generated
-        id must be adopted too, otherwise turns fall back to the manager's
-        ``default_session`` and unnamed runs silently share one conversation.
+        Runs for every startup: a fresh auto-generated id must be adopted too,
+        otherwise turns fall back to the manager's ``default_session`` and
+        unnamed runs silently share one conversation. By ``session_start``:
+
+        - ``"continue"`` finds the newest stored conversation, which
+          ``_open_on_startup`` resumes once the prompt is up, or says there is
+          none ("No conversation to continue; starting a new one.");
+        - ``"resume"`` checks its conversation is stored first: one that is
+          not is refused ("No conversation '<id>' found. Run <app> --resume
+          to pick one."), ``exit_status`` is 1, and False is returned;
+        - ``"pick"`` starts in the new conversation, and the picker opens
+          once the prompt is up; ``"new"`` starts in the new conversation.
+
+        A workflow that cannot start keeps the prompt, so ``/settings`` can
+        fix it, and says how to resume then; a backend without sessions
+        refuses every start but ``"new"`` (False, status 1). A store that
+        fails refuses ``"resume"`` too, and starts the others in a new
+        conversation, saying why. On the memory store a line says why
+        nothing is stored.
         """
+        mode, target = self._session_start.mode, self._session_start.session_id
         if not await self._workflow_controller.ensure_initialized(self.session):
-            self.session.add_warning("Cannot adopt session — workflow not initialized.")
-            return
+            self.session.add_warning({
+                "resume": f"Could not open '{target}': the workflow did not start. "
+                          f"Fix it with /settings, then /resume {target}.",
+                "continue": "Could not continue: the workflow did not start. "
+                            "Fix it with /settings, then /resume.",
+                "pick": "Could not open the picker: the workflow did not start. "
+                        "Fix it with /settings, then /resume.",
+            }.get(mode, "Cannot adopt session — workflow not initialized."))
+            return True
 
         workflow = self._workflow_controller.workflow
-        resumed = await workflow.load_session(self._session_id)
+        if mode != "new" and not getattr(workflow, "supports_sessions", False):
+            self.session.add_error("This app's backend keeps no sessions.")
+            self.exit_status = 1
+            return False
+        note = _MEMORY_NOTE if self._settings.session_store == "memory" else ""
+        try:
+            if mode == "resume":
+                if await workflow.session_info(target) is None:
+                    run = f" Run {self._command} --resume to pick one." if self._command else ""
+                    self.session.add_error(f"No conversation '{target}' found.{run}{note}")
+                    self.exit_status = 1
+                    return False
+                self._pending_resume = target
+            elif mode == "continue":
+                newest = await workflow.list_sessions(limit=1)
+                if newest:
+                    self._pending_resume = newest[0].session_id
+                else:
+                    self.session.add_message(
+                        "system", f"No conversation to continue; starting a new one.{note}"
+                    )
+            elif mode == "pick":
+                self._pending_pick = True
+        except Exception as error:  # noqa: BLE001 - the store failed, not the app
+            logger.debug("startup_session_lookup_failed", mode=mode, exc_info=True)
+            reason = str(error) or type(error).__name__
+            if mode == "resume":
+                self.session.add_error(f"Could not open '{target}': {reason}")
+                self.exit_status = 1
+                return False
+            self.session.add_warning(
+                f"Could not list the saved conversations: {reason}. Starting a new one."
+            )
+
+        try:
+            resumed = await workflow.load_session(self._session_id)
+        except Exception as error:  # noqa: BLE001 - turns name their conversation anyway
+            logger.debug("session_adopt_failed", exc_info=True)
+            self.session.add_warning(
+                f"Cannot adopt session — {str(error) or type(error).__name__}"
+            )
+            return True
         if resumed:
             self.session.add_success(f"Session '{self._session_id}' resumed.")
         elif self._resume_requested:
-            # An explicit --session that didn't exist yet: tell the user it's new.
+            # An explicit session_id that didn't exist yet: tell the user it's new.
             self.session.add_message("system", f"New session '{self._session_id}'.")
+        return True
+
+    async def _open_on_startup(self) -> None:
+        """Once the prompt is up: resume what ``--continue``/``--resume <id>``
+        chose, or open the picker for ``--resume`` alone.
+
+        A dialog needs the running session, and a replay reads best under the
+        welcome banner, so this waits until the session runs. It runs outside
+        the input handler, so a Ctrl+C here ends the app, as at an idle prompt
+        (its resume, cancelled on the way out, says nothing of a cancel). A
+        failure is said and logged: the new conversation goes on.
+        """
+        if self._pending_resume is None and not self._pending_pick:
+            return
+        while not self.session.app.is_running:
+            await asyncio.sleep(0.02)
+        target = self._pending_resume
+        try:
+            if target is None:
+                target = await self.pick_session()
+            if target is not None:
+                await self._resume(target)
+        except Exception as error:  # noqa: BLE001 - the new conversation goes on
+            logger.debug("startup_open_failed", session_id=target, exc_info=True)
+            reason = str(error) or type(error).__name__
+            if target is None:
+                self.session.add_error(f"Could not list the saved conversations: {reason}")
+            else:
+                self.session.add_error(f"Could not open '{target}': {reason}")
+
+    def _resume_hint(self) -> str:
+        """The exit line that names how to come back to the current conversation."""
+        if self._command:
+            return f"Resume this conversation with: {self._command} --resume {self._session_id}"
+        return f"Resume this conversation with /resume {self._session_id}"
 
     async def _extract_session_facts_on_exit(self) -> None:
         """Extract key facts from the session into memory on exit (if enabled).
@@ -1284,10 +1492,13 @@ class BaseCLIApp:
         _warn_if_langgraph(self._settings, self.session)
 
         async with self._workflow_controller.background_init(self.session):
-            # Adopt this run's session id (generated or --session) so every turn
-            # targets it; a fresh id starts a new durable session rather than
-            # falling back to the shared 'default_session'.
-            await self._adopt_session_on_startup()
+            # Adopt this run's session id (generated, or session_id=) so every
+            # turn targets it; a fresh id starts a new durable session rather
+            # than falling back to the shared 'default_session'. --resume <id>
+            # of a conversation that is not stored ends here, before the prompt.
+            if not await self._adopt_session_on_startup():
+                logger.info("app_start_refused", exit_status=self.exit_status)
+                return
 
             # Register input handler
             @self.session.on_input
@@ -1299,17 +1510,32 @@ class BaseCLIApp:
             # Keep long-running jobs visible in the status bar while the
             # session runs, independent of the agent loop.
             async with job_monitor.running():
-                # Run the session - user sees prompt immediately!
-                await self.session.run_async()
+                # What --continue / --resume open, once the prompt is up.
+                opening = asyncio.create_task(self._open_on_startup())
+                try:
+                    # Run the session - user sees prompt immediately!
+                    await self.session.run_async()
+                finally:
+                    opening.cancel()
+                    await asyncio.gather(opening, return_exceptions=True)
 
             # Extract session facts into memory (if enabled) while the workflow
             # is still alive: leaving this context closes the manager, and fact
             # extraction needs the live session store and an LLM call.
             await self._extract_session_facts_on_exit()
+            # Named at exit when a later run can resume it: stored, not in memory.
+            controller = self._workflow_controller
+            resumable = (
+                self._settings.session_store != "memory"
+                and controller.is_ready
+                and await self._is_stored(controller.workflow, self._session_id)
+            )
 
         # No save-on-exit: durable session stores persist continuously per turn.
 
         logger.info("app_ending")
+        if resumable:
+            self.session.add_message("system", self._resume_hint())
         self.session.add_message("system", "Goodbye!")
 
 

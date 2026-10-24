@@ -593,6 +593,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per conversation used: on leaving it (`/new`, `/resume`) or at exit, only
   when a turn ran in it since it was opened, so switching back and forth, or
   resuming one and leaving it as it was, stores no duplicates.
+- **`BaseCLIApp.main()`: every app takes `--continue` and `--resume
+  [ID]`.** Point an app's console script at it (`my-app =
+  "my_app.cli:MyApp.main"`): it parses the session flags
+  (`agentic_cli.cli.session_args`: `add_session_arguments`, `SessionStart`,
+  `parse_session_start`) and the app's own (`add_arguments(parser)`), builds
+  the app with `from_args(args)` (by default `cls()`), sets its
+  `session_start`, runs it and exits with its `exit_status`. `-c`/`--continue`
+  resumes the newest saved conversation once the prompt is up, or says "No
+  conversation to continue; starting a new one."; `-r`/`--resume <id>`
+  resumes that one, and refuses one that is not saved before the prompt is
+  drawn ("No conversation '<id>' found. Run <app> --resume to pick one.",
+  status 1); `--resume` alone opens the picker once the prompt is up, where
+  Ctrl+C ends the app, as at an idle prompt (a Ctrl+C before the prompt,
+  while the workflow starts, ends it with status 130). A workflow that cannot start
+  keeps the prompt and says how to resume after `/settings`; a backend
+  without sessions refuses all three (status 1); a store that fails refuses
+  `--resume <id>` (status 1) and starts the others in a new conversation,
+  saying why; on `session_store=memory` the lines say that conversations
+  end with the app. At exit, a saved conversation a turn ran in is named:
+  "Resume this conversation with: <app> --resume <id>" (`python -m <pkg>`,
+  `python <script>.py` or the console script, as it was run), or "… with
+  /resume <id>" for an app not run through `main()`. `BaseCLIApp` now
+  defines `main`, `add_arguments`, `from_args`, `session_start` (a
+  `SessionStart`; `ValueError` for an app built with `session_id=`) and
+  `exit_status`: an app's own attributes of those names move.
 
 ### Changed
 
@@ -601,6 +626,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   gains `resume`: it runs the resumes of finished, resume-flagged jobs, as
   `/resume` did ("No finished background jobs to resume." when there are
   none).
+- **The research demo runs through `BaseCLIApp.main()`**: `research-demo
+  --continue`, `--resume <id>` or `--resume`; its own `--session <id>`
+  is gone.
 - **A context overflow on ADK is recovered once, or ends in one clear
   error.** A model call the provider refused as too long raised its raw
   error ("Workflow error: prompt is too long: …"), and the next turn failed
