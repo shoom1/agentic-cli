@@ -252,6 +252,61 @@ def _resolved(agent: str, spec: str, settings: BaseSettings):
     )
 
 
+class TestSessionRows:
+    """The deprecated backend lists what it knows of a thread: its id and
+    its latest checkpoint's time, newest first."""
+
+    class _Saver:
+        """Each thread's checkpoints, in the order the store yields them."""
+
+        def __init__(self, checkpoints: list[tuple[str, str]]) -> None:
+            self.checkpoints = checkpoints
+
+        async def alist(self, config):
+            for thread, ts in self.checkpoints:
+                yield MagicMock(config={"configurable": {"thread_id": thread}},
+                                checkpoint={"ts": ts})
+
+    class _Graph:
+        def __init__(self, stored: set[str]) -> None:
+            self.stored = stored
+
+        async def aget_state(self, config):
+            thread = config["configurable"]["thread_id"]
+            return MagicMock(values={"messages": ["Hi."]} if thread in self.stored else {})
+
+    def _manager(self, checkpoints: list[tuple[str, str]]) -> "LangGraphWorkflowManager":
+        manager = LangGraphWorkflowManager.__new__(LangGraphWorkflowManager)
+        manager._checkpointer = self._Saver(checkpoints)
+        manager._compiled_graph = self._Graph({thread for thread, _ in checkpoints})
+        return manager
+
+    async def test_each_thread_is_a_row_of_its_id_newest_first(self):
+        from agentic_cli.workflow.sessions import SessionInfo
+
+        # The memory saver yields threads oldest first.
+        manager = self._manager([
+            ("a", "2026-10-24T08:00:00+00:00"), ("a", "2026-10-24T08:05:00+00:00"),
+            ("b", "2026-10-24T09:00:00+00:00"),
+        ])
+        late_a = datetime(2026, 10, 24, 8, 5, tzinfo=timezone.utc)
+        b = datetime(2026, 10, 24, 9, 0, tzinfo=timezone.utc)
+
+        assert await manager.list_sessions() == [
+            SessionInfo("b", updated=b), SessionInfo("a", updated=late_a),
+        ]
+        assert await manager.list_sessions(limit=1) == [SessionInfo("b", updated=b)]
+
+    async def test_session_info_is_the_row_or_none(self):
+        from agentic_cli.workflow.sessions import SessionInfo
+
+        manager = self._manager([("a", "2026-10-24T08:00:00+00:00")])
+
+        assert await manager.session_info("a") == SessionInfo("a")
+        assert await manager.session_info("a", user_id="u") == SessionInfo("a")
+        assert await manager.session_info("missing") is None
+
+
 class TestLangGraphBuilder:
     """Tests for LangGraph graph construction."""
 

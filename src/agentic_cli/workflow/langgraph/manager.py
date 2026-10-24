@@ -19,12 +19,14 @@ Requires the 'langgraph' optional dependency:
 from __future__ import annotations
 
 import warnings
+from datetime import datetime, timezone
 from typing import AsyncGenerator, Any, Callable, Literal, TYPE_CHECKING
 
 from agentic_cli.workflow.base_manager import BaseWorkflowManager
 from agentic_cli.workflow.events import WorkflowEvent, EventType
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.langgraph.graph_builder import LangGraphBuilder
+from agentic_cli.workflow.sessions import SessionInfo
 from agentic_cli.config import get_settings
 from agentic_cli.logging import Loggers, bind_context
 
@@ -611,22 +613,48 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
         """True if the checkpointer holds state for this thread."""
         return await self._get_state_values(session_id) is not None
 
-    async def list_sessions(self) -> list[dict]:
-        """List persisted threads (session ids) from the checkpointer."""
+    async def list_sessions(self, *, limit: int | None = None) -> list[SessionInfo]:
+        """Persisted threads from the checkpointer, newest first: each one's id
+        and its latest checkpoint's time (no title or turns).
+
+        Args:
+            limit: Only the newest this many (None: all of them).
+        """
         if not self._checkpointer:
             return []
-        seen: dict[str, Any] = {}
+        latest: dict[str, datetime | None] = {}
         try:
             async for cp in self._checkpointer.alist(None):
                 tid = (getattr(cp, "config", None) or {}).get("configurable", {}).get(
                     "thread_id"
                 )
-                if tid and tid not in seen:
-                    seen[tid] = cp
+                if not tid:
+                    continue
+                ts = (getattr(cp, "checkpoint", None) or {}).get("ts")
+                when = datetime.fromisoformat(ts) if isinstance(ts, str) else None
+                seen = latest.get(tid)
+                if tid not in latest or (when is not None and (seen is None or when > seen)):
+                    latest[tid] = when
         except Exception:
             logger.debug("langgraph_list_sessions_failed", exc_info=True)
             return []
-        return [{"session_id": tid, "message_count": None} for tid in seen]
+        oldest = datetime.min.replace(tzinfo=timezone.utc)
+        rows = sorted(
+            (SessionInfo(tid, updated=when) for tid, when in latest.items()),
+            key=lambda row: row.updated or oldest,
+            reverse=True,
+        )
+        return rows if limit is None else rows[:limit]
+
+    async def session_info(
+        self, session_id: str, *, user_id: str | None = None
+    ) -> SessionInfo | None:
+        """A thread's row, its id alone, or None when it holds no state.
+
+        ``user_id`` is taken as the other backends take it, and unused: this
+        backend's threads are keyed by the session id alone.
+        """
+        return SessionInfo(session_id) if await self.session_exists(session_id) else None
 
     async def delete_session(self, session_id: str) -> bool:
         """Delete a thread's persisted state from the checkpointer."""
