@@ -274,7 +274,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `adk_inject_state` frontmatter keys, stay ADK-only.
   `agentic_cli.tools.skills.make_skill_tools(skills)` returns the tools and
   the instruction.
-- **Job resume on Deep Agents** (`job_auto_resume`, `/resume`). A
+- **Job resume on Deep Agents** (`job_auto_resume`, `/jobs resume`). A
   long-running tool's call gets the tool's pending result at once, and the
   turn ends. When the job finishes, `resume_with_job_result(record)` runs a
   turn in the job's conversation whose input is one user message the

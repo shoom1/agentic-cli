@@ -1486,8 +1486,8 @@ model and its `max_tokens`.
   `BaseCLIApp.start_new_session()`, which an app can call too: a new
   session id, the task box and the usage counters reset, and, with
   `auto_extract_session_facts` on, the facts of the conversation being left
-  saved first, as at exit ("Saving facts from the conversation…" while it
-  runs). Its line names the conversation left when `/sessions` lists it
+  saved first when a turn ran in it, as at exit ("Saving facts from the
+  conversation…" while it runs). Its line names the conversation left when `/sessions` lists it
   (a turn ran in it). Ctrl+C stops it, and nothing changes. The model, the
   settings, "Allow for this session" grants, sandbox kernels and background
   jobs carry on, and a job reports to the conversation that started it,
