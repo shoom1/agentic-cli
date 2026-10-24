@@ -188,10 +188,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `{workspace}/sessions/checkpoints.db`, next to ADK's `sessions.db`
     (`sqlite_uri` may point ADK and Deep Agents at one file: their tables do
     not collide), Postgres at `postgres_uri`, or memory. Every session hook
-    takes `user_id`. `list_sessions` gives each session's `last_update`
-    (epoch seconds) and `message_count`, `delete_session` also removes the
-    sub-agents' checkpoints and returns False for an unknown id, and
-    `recent_messages` is the user's and the assistant's text.
+    takes `user_id`. `list_sessions` gives each conversation's row
+    (`SessionInfo`, below) from its newest checkpoint, `delete_session` also
+    removes the sub-agents' checkpoints and returns False for an unknown id,
+    and `recent_messages` is the user's and the assistant's text.
   - **Lifecycle, as on ADK.** A cleanup or a model switch waits for the
     running turn. A failed initialization closes the checkpointer it
     opened. A model switch (`reinitialize(preserve_sessions=True)`) keeps the
@@ -552,6 +552,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in the totals, and `ctx` and the task list stay the current
   conversation's (`process_resume(..., current_session_id=...)`). `/clear`
   is still a screen clear.
+- **A session list's rows: `SessionInfo` and `session_info()`.**
+  `list_sessions(*, user_id=None, limit=None)` returns one frozen
+  `SessionInfo(session_id, title, turns, updated)` per stored conversation,
+  newest first (`limit` keeps the newest), on every backend, and
+  `session_info(session_id, *, user_id=None)` one conversation's, or None
+  when it is not stored (`SessionInfo` is exported from `agentic_cli`). The title is the
+  first prompt on one line (`agentic_cli.workflow.sessions.session_title`:
+  control characters removed, whitespace collapsed, at most 80 characters,
+  a longer one cut with "…"); the turns count what the user typed, not a
+  job's notice or resume, a delegated request or a summary; `updated` is
+  when it last changed. ADK keeps the title and the turns in two
+  session-state keys, `agentic_cli.title` and `agentic_cli.turns`, saved
+  with each user turn's message (`Runner.run_async(state_delta=)`), so
+  listing reads no events; a conversation stored before them is read from
+  its events, for the rows returned, and nothing is written back (its place
+  in the list stays). Deep Agents reads both from each conversation's newest
+  checkpoint; LangGraph knows only the id. `/sessions` shows the title (as
+  typed, never as Rich markup, as the id is; "(no prompt yet)" without one)
+  and the turns, and refuses to delete the conversation the user is in.
 
 ### Changed
 
@@ -1007,6 +1026,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in one expression; the part is the same), and `/compact` and the overflow
   summary leave 2.13's new `isolation_scope` argument of ADK's compaction at
   its default, a chat session's root agent's own.
+- **`list_sessions` returns `SessionInfo` rows, not dicts** (breaking for
+  library callers): `session["session_id"]` is `session.session_id`,
+  `last_update` (epoch seconds) is `updated` (an aware `datetime`), and
+  `message_count` (every message, and always 0 on ADK) is `turns`. A
+  backend of an application's own that keeps sessions implements
+  `session_info` too, which `/resume` and the startup flags call.
 
 ### Deprecated
 
@@ -1223,6 +1248,12 @@ step; each entry says what to use instead.
 
 ### Fixed
 
+- **On ADK, `/sessions` counts a conversation's turns, and deleting an
+  unknown one says so.** Messages read 0 for every session (ADK's listing
+  loads no events), and `delete_session` returned True for any id, so
+  `/sessions --delete=typo` said "Session 'typo' deleted."; it returns
+  False, as on Deep Agents. `recent_messages` also joined a reply's
+  thinking into its text, which fact extraction then read; it is left out.
 - **`context_max_tokens` is saved.** A field is never saved when its name
   looks like a credential, and `token` anywhere in a name counted, so the
   context ceiling (and any application's `*_max_tokens` or tokenizer

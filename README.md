@@ -1509,7 +1509,7 @@ Built-in slash commands available in all apps:
 | `/jobs` | | List and manage long-running background jobs (`/jobs all`, `/jobs <id>`, `/jobs cancel <id>`, `/jobs clean`) |
 | `/resume` | | Resume the agent with results from finished background jobs |
 | `/papers` | `/docs` | List knowledge-base documents (filter by source, query, --global) |
-| `/sessions` | `/sess` | List saved sessions (and delete with `--delete=<id>`) |
+| `/sessions` | `/sess` | List saved sessions: title, turns, last update (delete one with `--delete=<id>`) |
 | `/compact` | | Summarize the conversation now, keeping the newest turns word for word (`/compact <focus>`: what the summary should keep above all) |
 | `/new` | | Start a new conversation; the current one stays in `/sessions` |
 
