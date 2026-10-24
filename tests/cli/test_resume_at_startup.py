@@ -111,6 +111,26 @@ def quiet_app(monkeypatch):
 
 
 @pytest.fixture
+def logged(monkeypatch) -> list[dict]:
+    """Every log call of ``cli/app.py``, with its level.
+
+    Recorded on the module's logger: ``structlog.testing.capture_logs()``
+    sees nothing once an earlier test has cached a configured logger.
+    """
+    events: list[dict] = []
+
+    class Recorder:
+        def __getattr__(self, level: str):
+            def log(event: str, **fields) -> None:
+                events.append({"event": event, "log_level": level, **fields})
+
+            return log
+
+    monkeypatch.setattr(app_module, "logger", Recorder())
+    return events
+
+
+@pytest.fixture
 def manager(monkeypatch, tmp_path) -> ScriptedManager:
     """The scripted manager every app here builds, with no conversation stored."""
     monkeypatch.chdir(tmp_path)
@@ -385,6 +405,36 @@ class TestWhenItCannot:
 
         assert session.said("error") == ["Could not open 'abc': the status bar broke"]
 
+    @pytest.mark.parametrize("start, broken", [
+        (SessionStart("resume", "abc"), "session_info"),
+        (SessionStart("continue"), "list_sessions"),
+        (SessionStart(), "load_session"),
+        (SessionStart("resume", "abc"), "show"),  # once the prompt is up
+    ])
+    async def test_a_failure_is_logged_at_debug_never_drawn_over_the_ui(
+        self, manager, monkeypatch, logged, start, broken
+    ):
+        """At the default log level a warning prints its traceback on the
+        terminal, over the prompt; the user is told in one line instead."""
+        def boom(*args, **kwargs):
+            raise RuntimeError("database is locked")
+
+        async def failing(*args, **kwargs):
+            boom()
+
+        store(manager, "abc", "Plan the trip", "Sure.", hours=2)
+        if broken == "show":
+            monkeypatch.setattr(app_module, "_show_new_context", boom)
+        else:
+            monkeypatch.setattr(manager, broken, failing)
+        session = Session(until=lambda s: bool(s.said("error") or s.said("warning")))
+        app = app_with(session, start)
+
+        await app.run()
+
+        assert session.said("error") or session.said("warning")
+        assert [e["log_level"] for e in logged if e.get("exc_info")] == ["debug"]
+
     async def test_an_exit_while_it_resumes_says_nothing_of_a_cancel(self, manager, monkeypatch):
         """At startup a Ctrl+C (or /exit) ends the app: its resume is
         cancelled on the way out, and that is no "Operation cancelled..."."""
@@ -502,6 +552,22 @@ class TestMain:
 
         assert code == 0 and self.FlagApp.last.shout is True
         assert self.FlagApp.last.session_id == "abc"
+
+    def test_a_ctrl_c_before_the_prompt_ends_it_with_130_not_a_traceback(
+        self, manager, monkeypatch
+    ):
+        """Before the prompt the terminal is not raw yet: Ctrl+C is a
+        KeyboardInterrupt out of ``asyncio.run``, as during a slow start."""
+        async def interrupted(app):
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(self.FlagApp, "run", interrupted)
+        self.FlagApp.session_fake = Session()
+        try:
+            self.FlagApp.main(["--resume", "abc"])
+        except BaseException as ended:  # noqa: BLE001 - one escaping would stop pytest
+            outcome = ended
+        assert isinstance(outcome, SystemExit) and outcome.code == 130
 
     def test_its_command_is_the_script_or_the_module_run(self, monkeypatch):
         monkeypatch.setattr(sys, "argv", ["/usr/local/bin/research-demo"])

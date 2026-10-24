@@ -605,7 +605,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   resumes that one, and refuses one that is not saved before the prompt is
   drawn ("No conversation '<id>' found. Run <app> --resume to pick one.",
   status 1); `--resume` alone opens the picker once the prompt is up, where
-  Ctrl+C ends the app, as at an idle prompt. A workflow that cannot start
+  Ctrl+C ends the app, as at an idle prompt (a Ctrl+C before the prompt,
+  while the workflow starts, ends it with status 130). A workflow that cannot start
   keeps the prompt and says how to resume after `/settings`; a backend
   without sessions refuses all three (status 1); a store that fails refuses
   `--resume <id>` (status 1) and starts the others in a new conversation,

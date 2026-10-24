@@ -756,8 +756,9 @@ class BaseCLIApp:
         arguments by default) for ``-c``/``--continue`` and ``-r``/``--resume
         [ID]`` (``cli/session_args.py``) and whatever ``add_arguments`` adds,
         builds the app with ``from_args``, sets its ``session_start``, and runs it.
-        The status is 1 when ``--resume <id>`` names no stored conversation
-        or the backend keeps none, else 0.
+        The status is 1 when ``--resume <id>`` cannot be opened (not stored,
+        or the store failed) or the backend keeps no sessions, 130 after a
+        Ctrl+C before the prompt, else 0.
         """
         import argparse
 
@@ -769,7 +770,10 @@ class BaseCLIApp:
         app = cls.from_args(args)
         app.session_start = parse_session_start(args)
         app._command = command
-        asyncio.run(app.run())
+        try:
+            asyncio.run(app.run())
+        except KeyboardInterrupt:  # Ctrl+C before the prompt: the terminal is not raw yet
+            raise SystemExit(130) from None
         raise SystemExit(app.exit_status)
 
     @classmethod
@@ -1401,7 +1405,7 @@ class BaseCLIApp:
             elif mode == "pick":
                 self._pending_pick = True
         except Exception as error:  # noqa: BLE001 - the store failed, not the app
-            logger.warning("startup_session_lookup_failed", mode=mode, exc_info=True)
+            logger.debug("startup_session_lookup_failed", mode=mode, exc_info=True)
             reason = str(error) or type(error).__name__
             if mode == "resume":
                 self.session.add_error(f"Could not open '{target}': {reason}")
@@ -1414,7 +1418,7 @@ class BaseCLIApp:
         try:
             resumed = await workflow.load_session(self._session_id)
         except Exception as error:  # noqa: BLE001 - turns name their conversation anyway
-            logger.warning("session_adopt_failed", exc_info=True)
+            logger.debug("session_adopt_failed", exc_info=True)
             self.session.add_warning(
                 f"Cannot adopt session — {str(error) or type(error).__name__}"
             )
@@ -1447,7 +1451,7 @@ class BaseCLIApp:
             if target is not None:
                 await self._resume(target)
         except Exception as error:  # noqa: BLE001 - the new conversation goes on
-            logger.warning("startup_open_failed", session_id=target, exc_info=True)
+            logger.debug("startup_open_failed", session_id=target, exc_info=True)
             reason = str(error) or type(error).__name__
             if target is None:
                 self.session.add_error(f"Could not list the saved conversations: {reason}")
