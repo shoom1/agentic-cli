@@ -689,7 +689,7 @@ class TestANewSessionOnADK:
         try:
             old = app.session_id
             new = await app.start_new_session()
-            listed = [s["session_id"] for s in await manager.list_sessions()]
+            listed = [s.session_id for s in await manager.list_sessions()]
         finally:
             await manager.cleanup()
 

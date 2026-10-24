@@ -461,7 +461,7 @@ class TestSharedFileWithAdk:
                     )}
                 assert {"sessions", "events", "checkpoints", "writes"} <= tables
 
-                assert _ids(await adk.list_sessions(user_id="u")) == ["s"]
+                assert [r.session_id for r in await adk.list_sessions(user_id="u")] == ["s"]
                 assert _ids(await deep.list_sessions(user_id="u")) == ["s"]
                 assert [m["content"] for m in await adk.recent_messages("s", user_id="u")] == [
                     "Hello, ADK."

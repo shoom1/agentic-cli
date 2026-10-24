@@ -64,7 +64,10 @@ async def test_the_session_hooks_find_the_saved_session(open_manager):
 
     assert await manager.session_exists(SESSION_ID, user_id=USER_ID) is True
     listed = await manager.list_sessions(user_id=USER_ID)
-    assert [s["session_id"] for s in listed] == [SESSION_ID]
+    # Saved before the title and turn keys: its row is read from its events.
+    assert [(s.session_id, s.title, s.turns) for s in listed] == [
+        (SESSION_ID, "Search arXiv for speculative decoding.", 1)
+    ]
     assert await manager.recent_messages(SESSION_ID, user_id=USER_ID) == [
         {"role": "user", "content": "Search arXiv for speculative decoding."},
         {"role": "assistant", "content": "Found 2 papers; the analysis is running."},

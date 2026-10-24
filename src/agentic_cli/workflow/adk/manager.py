@@ -43,8 +43,10 @@ from agentic_cli.workflow.adk.model_factory import build_adk_model, generate_tex
 from agentic_cli.workflow.adk.overflow_plugin import OverflowPlugin
 from agentic_cli.workflow.adk.permission_plugin import PermissionPlugin
 from agentic_cli.workflow.adk.plugins import LLMLoggingPlugin, SentRequestLoggingPlugin
+from agentic_cli.workflow.adk.sessions import row_from_events, row_from_state, turn_state
 from agentic_cli.workflow.adk.tool_result_cap_plugin import ToolResultCapPlugin
 from agentic_cli.workflow.service_registry import JOB_MANAGER
+from agentic_cli.workflow.sessions import SessionInfo
 from agentic_cli.workflow.tool_output import tool_output_dir
 
 from agentic_cli.config import (
@@ -926,7 +928,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             # Context setup
             with self._workflow_context(session_id=current_session_id, user_id=user_id):
                 # Session handling
-                await self._get_or_create_session(user_id, current_session_id)
+                session = await self._get_or_create_session(user_id, current_session_id)
 
                 # Create message
                 new_message = types.Content(
@@ -938,6 +940,8 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     session_id=current_session_id,
                     user_id=user_id,
                     new_message=new_message,
+                    # The conversation's row (workflow/adk/sessions.py).
+                    state_delta=turn_state(session, message),
                 ):
                     yield event
 
@@ -947,12 +951,14 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         session_id: str,
         user_id: str,
         new_message: "types.Content",
+        state_delta: dict[str, Any] | None = None,
     ) -> AsyncGenerator[WorkflowEvent, None]:
         """Run the ADK runner for one invocation and stream WorkflowEvents.
 
         Shared by ``process()`` (user message) and ``resume_with_job_result()``
         (function response). The caller must already be inside
-        ``_workflow_context`` with the session prepared.
+        ``_workflow_context`` with the session prepared. ``state_delta`` is
+        saved with ``new_message`` (a user turn's row).
 
         What is reported from inside a model call (a summary that starts, its
         usage, what it did) is merged into the stream as it happens
@@ -967,6 +973,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                 session_id=session_id,
                 user_id=user_id,
                 new_message=new_message,
+                state_delta=state_delta,
             )
             # aclosing: a cancelled turn closes the merge, which closes the
             # runner, and its tasks, now, in the task that iterates it.
@@ -1234,12 +1241,19 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         )
         return session is not None and bool(getattr(session, "events", None))
 
-    async def list_sessions(self, *, user_id: str | None = None) -> list[dict]:
-        """List persisted sessions for a user (most recent first).
+    async def list_sessions(
+        self, *, user_id: str | None = None, limit: int | None = None
+    ) -> list[SessionInfo]:
+        """A user's stored conversations, newest first.
+
+        Each row comes from its session's state, which ADK's listing returns
+        without the events; a conversation from before those keys is read
+        once, for the rows returned (``workflow/adk/sessions.py``). A session
+        without events is no conversation and is left out.
 
         Args:
-            user_id: Owner whose sessions to list (defaults to
-                ``settings.default_user``).
+            user_id: Their owner (defaults to ``settings.default_user``).
+            limit: Only the newest this many (None: all of them).
         """
         if not self._session_service:
             return []
@@ -1247,16 +1261,40 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         resp = await self._session_service.list_sessions(
             app_name=ref.app_name, user_id=ref.user_id,
         )
-        sessions = [
-            {
-                "session_id": s.id,
-                "last_update": getattr(s, "last_update_time", None),
-                "message_count": len(getattr(s, "events", None) or []),
-            }
-            for s in getattr(resp, "sessions", [])
-        ]
-        sessions.sort(key=lambda x: x["last_update"] or 0, reverse=True)
-        return sessions
+        listed = sorted(
+            getattr(resp, "sessions", []),
+            key=lambda s: s.last_update_time or 0,
+            reverse=True,
+        )
+        rows: list[SessionInfo] = []
+        for session in listed:
+            if limit is not None and len(rows) >= limit:
+                break
+            row = row_from_state(session) or await self.session_info(
+                session.id, user_id=ref.user_id
+            )
+            if row is not None:
+                rows.append(row)
+        return rows
+
+    async def session_info(
+        self, session_id: str, *, user_id: str | None = None
+    ) -> SessionInfo | None:
+        """One stored conversation's row, or None when it is not stored.
+
+        Args:
+            session_id: The conversation.
+            user_id: Its owner (defaults to ``settings.default_user``).
+        """
+        if not self._session_service:
+            return None
+        ref = self.session_ref(session_id, user_id)
+        session = await self._session_service.get_session(
+            app_name=ref.app_name, user_id=ref.user_id, session_id=ref.session_id,
+        )
+        if session is None or not session.events:
+            return None
+        return row_from_state(session) or row_from_events(session)
 
     async def delete_session(self, session_id: str, *, user_id: str | None = None) -> bool:
         """Delete a persisted session from the store.
