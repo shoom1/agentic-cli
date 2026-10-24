@@ -12,9 +12,11 @@ import asyncio
 import dataclasses
 import logging
 import re
+import sys
 import warnings
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from prompt_toolkit.completion import Completer, Completion
@@ -25,6 +27,13 @@ from thinking_prompt import AppInfo, ThinkingPromptSession, ThinkingPromptStyles
 
 from agentic_cli.cli.commands import Command, CommandRegistry
 from agentic_cli.cli.message_processor import MessageProcessor, _says_so_when_stopped
+from agentic_cli.cli.session_resume import (
+    PICK_LIMIT,
+    picker,
+    replay_lines,
+    resumed_line,
+    show_replay,
+)
 from agentic_cli.cli.usage_tracker import UsageTracker
 from agentic_cli.cli.workflow_controller import WorkflowController
 from agentic_cli.config import MODEL_ROLE_KEY_PREFIX, BaseSettings
@@ -417,6 +426,9 @@ class BaseCLIApp:
         # Serializes turns: a user turn and a background-job resume turn must
         # never overlap (shared session + thinking boxes).
         self._turn_lock = asyncio.Lock()
+        # Whether a turn ran in the current conversation since it was adopted:
+        # its facts are saved on leaving it, or at exit, only then.
+        self._turned = False
 
         # === UI: ThinkingPromptSession ===
         completer = SlashCommandCompleter(self.command_registry.get_completions())
@@ -895,6 +907,7 @@ class BaseCLIApp:
 
         # Delegate to message processor (one turn at a time).
         async with self._turn_lock:
+            self._turned = True  # the conversation now holds this message
             await self._message_processor.process(
                 message=message,
                 workflow_controller=self._workflow_controller,
@@ -961,6 +974,8 @@ class BaseCLIApp:
         """
         try:
             async with self._turn_lock:
+                if getattr(record, "session_id", None) == self._session_id:
+                    self._turned = True  # the resume adds to this conversation
                 result = await self._message_processor.process_resume(
                     record=record,
                     workflow_controller=self._workflow_controller,
@@ -1027,8 +1042,9 @@ class BaseCLIApp:
         Waits for a running turn or job resume (the turn lock), then:
 
         - with ``auto_extract_session_facts`` on, extracts the facts of the
-          conversation being left, as at exit, under a status line ("Saving
-          facts from the conversation…"; a failure never stops it);
+          conversation being left when a turn ran in it since it was opened,
+          as at exit, under a status line ("Saving facts from the
+          conversation…"; a failure never stops it);
         - adopts a new session id once the workflow has taken it
           (``workflow.load_session``), and every later turn targets it;
         - ends the task box and forgets its tasks, zeroes the usage counters,
@@ -1056,12 +1072,14 @@ class BaseCLIApp:
                 old = self._session_id
                 controller = self._workflow_controller
                 ready = controller.is_ready
-                await self._saving_facts(old)
+                if self._turned:  # facts once per conversation used
+                    await self._saving_facts(old)
                 stored = ready and await self._is_stored(controller.workflow, old)
                 new = uuid.uuid4().hex[:12]
                 if ready:
                     await controller.workflow.load_session(new)
                 self._session_id = new
+                self._turned = False
                 self._message_processor.reset()
                 self._usage_tracker.reset()
                 # The trigger as a /settings rebuild shows it; no prompt yet.
@@ -1072,6 +1090,102 @@ class BaseCLIApp:
                     line += f" Previous: {old}, listed in /sessions."
                 self.session.add_message("system", line)
                 return new
+
+    async def resume_session(self, session_id: str) -> bool:
+        """Switch to the stored conversation ``session_id`` (``/resume``), and show where it left off.
+
+        Waits for a running turn or job resume (the turn lock), then reads the
+        conversation first, its row (``workflow.session_info``) and its
+        messages, and makes what it will show: one that is not stored, or
+        cannot be read, changes nothing. Then, as ``start_new_session`` does,
+        it saves the facts of the conversation being left (when
+        ``auto_extract_session_facts`` is on and a turn ran in it since it was
+        opened), adopts the id once the workflow has taken it
+        (``load_session``; one that fails changes nothing either), ends the
+        task box and zeroes the usage counters. It says "Resumed:
+        <title> (<id>, 12 turns, last active 2h ago)." and replays the last
+        messages (``cli/session_resume.py``). Ctrl+C stops it like any
+        request, "Operation cancelled...", once, and nothing has changed.
+
+        Returns:
+            True once ``session_id`` is the current conversation. False, with
+            nothing changed, when it is already ("Already in this
+            conversation."), is not stored ("No conversation '<id>'
+            found."), or could not be read ("Could not open '<id>': ...").
+        """
+        with _says_so_when_stopped(self.session):
+            async with self._turn_lock:
+                if session_id == self._session_id:
+                    self.session.add_message("system", "Already in this conversation.")
+                    return False
+                controller = self._workflow_controller
+                if not controller.is_ready:
+                    self.session.add_error(
+                        f"Could not open '{session_id}': the workflow is not ready."
+                    )
+                    return False
+                workflow = controller.workflow
+                try:
+                    info = await workflow.session_info(session_id)
+                    messages = (
+                        await workflow.recent_messages(session_id, sys.maxsize) if info else []
+                    )
+                except Exception as error:  # noqa: BLE001 - a store error changes nothing
+                    logger.debug("session_open_failed", session_id=session_id, exc_info=True)
+                    reason = str(error) or type(error).__name__
+                    self.session.add_error(f"Could not open '{session_id}': {reason}")
+                    return False
+                if info is None:
+                    self.session.add_error(f"No conversation '{session_id}' found.")
+                    return False
+                # Made before anything changes: a display error changes nothing.
+                line = resumed_line(info, datetime.now(timezone.utc))
+                replay = replay_lines(messages)
+                old = self._session_id
+                if self._turned:  # facts once per conversation used
+                    await self._saving_facts(old)
+                try:
+                    await workflow.load_session(session_id)
+                except Exception as error:  # noqa: BLE001 - the id is not adopted
+                    logger.debug("session_open_failed", session_id=session_id, exc_info=True)
+                    reason = str(error) or type(error).__name__
+                    self.session.add_error(f"Could not open '{session_id}': {reason}")
+                    return False
+                self._session_id = session_id
+                self._turned = False
+                self._message_processor.reset()
+                self._usage_tracker.reset()
+                _show_new_context(controller, self.session, swapped=False)
+                logger.info("session_resumed", session_id=session_id, previous=old)
+                self.session.add_message("system", line)
+                show_replay(self.session, replay)
+                return True
+
+    async def pick_session(self) -> str | None:
+        """Ask which stored conversation to open: the newest ``PICK_LIMIT`` but this one.
+
+        Not under the turn lock: it waits on a dialog (``resume_session``
+        takes the lock).
+
+        Returns:
+            The id picked, or None: Esc, or no other conversation is stored
+            ("No other conversations to resume.").
+
+        Raises:
+            RuntimeError: The workflow is not ready, or the session is not
+                running (a dialog needs it); ``/resume`` checks both.
+        """
+        workflow = self._workflow_controller.workflow
+        rows = [
+            info for info in await workflow.list_sessions(limit=PICK_LIMIT + 1)
+            if info.session_id != self._session_id
+        ][:PICK_LIMIT]
+        if not rows:
+            self.session.add_message("system", "No other conversations to resume.")
+            return None
+        dialog, ids = picker(rows, datetime.now(timezone.utc))
+        picked = await self.session.show_dialog(dialog)
+        return None if picked is None else ids.get(picked)
 
     async def _saving_facts(self, session_id: str) -> None:
         """Extract ``session_id``'s facts (if enabled) under a status line saying so."""
@@ -1148,9 +1262,12 @@ class BaseCLIApp:
         Gated by the ``auto_extract_session_facts`` setting; a no-op when the
         workflow isn't ready or has no memory store. Never raises — fact
         extraction must not block a clean shutdown. The conversation is the
-        current one, which the manager also holds (``load_session``).
+        current one, which the manager also holds (``load_session``), and only
+        when a turn ran in it since it was opened: a resumed conversation left
+        as it was has nothing new.
         """
-        await self._extract_session_facts()
+        if self._turned:
+            await self._extract_session_facts()
 
     async def run(self) -> None:
         """Run the main application loop."""

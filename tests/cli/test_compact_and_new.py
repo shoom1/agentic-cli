@@ -537,6 +537,7 @@ class TestStartNewSession:
         workflow = Workflow()
         app = app_on(workflow, fake_settings(auto_extract_session_facts=True))
         old = app.session_id
+        await app.process_input("Hello.")
 
         new = await app.start_new_session()
 
@@ -554,10 +555,11 @@ class TestStartNewSession:
             return []
 
         workflow.on_session_end = on_session_end
+        await app.process_input("Hello.")
         await app.start_new_session()
 
         assert lines == [app_module.SAVING_FACTS]
-        (box,) = app.session.boxes
+        box = app.session.boxes[-1]  # after the turn's own
         assert box.finish.call_args == call(add_to_history=False, echo_to_console=False)
 
     async def test_ctrl_c_while_facts_are_saved_says_so_once_and_changes_nothing(self, project):
@@ -607,11 +609,24 @@ class TestStartNewSession:
     async def test_the_exit_extracts_the_facts_of_the_current_conversation(self, project):
         workflow = Workflow()
         app = app_on(workflow, fake_settings(auto_extract_session_facts=True))
+        await app.process_input("Hello.")
+        opened = app.session.start_thinking.call_count
 
         await app._extract_session_facts_on_exit()
 
         assert workflow.ended == [workflow.session_ref(app.session_id, app.settings.default_user)]
-        assert app.session.start_thinking.call_count == 0  # no box once the session ended
+        assert app.session.start_thinking.call_count == opened  # no box once the session ended
+
+    async def test_a_conversation_no_turn_ran_in_has_no_facts_to_save(self, project):
+        """Facts are saved once per conversation used, not on every leaving."""
+        workflow = Workflow()
+        app = app_on(workflow, fake_settings(auto_extract_session_facts=True))
+
+        await app.start_new_session()
+        await app._extract_session_facts_on_exit()
+
+        assert "on_session_end" not in workflow.calls
+        assert app.session.start_thinking.call_count == 0
 
     async def test_without_fact_extraction_none_are(self, project):
         workflow = Workflow()
@@ -625,6 +640,7 @@ class TestStartNewSession:
         workflow = Workflow()
         workflow.end_error = RuntimeError("the store is gone")
         app = app_on(workflow, fake_settings(auto_extract_session_facts=True))
+        await app.process_input("Hello.")
 
         new = await app.start_new_session()
 

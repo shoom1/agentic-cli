@@ -172,6 +172,28 @@ class TestAdkNativeSessions:
         assert await mgr.load_session("brand-new") is False
         assert mgr.session_id == "brand-new"
 
+    async def test_a_cancelled_load_session_adopts_nothing(self, tmp_path: Path):
+        import asyncio
+
+        mgr, settings = self._manager(tmp_path)
+        await self._seed(mgr, settings, "sess-y", "hi")
+        entered, gate = asyncio.Event(), asyncio.Event()
+        exists = mgr.session_exists
+
+        async def slow(session_id, *, user_id=None):
+            entered.set()
+            await gate.wait()
+            return await exists(session_id, user_id=user_id)
+
+        mgr.session_exists = slow
+        loading = asyncio.create_task(mgr.load_session("sess-y"))
+        await asyncio.wait_for(entered.wait(), 5)
+        loading.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await loading
+
+        assert mgr.session_id == "default_session"
+
     async def test_persists_across_fresh_manager(self, tmp_path: Path):
         mgr, settings = self._manager(tmp_path)
         await self._seed(mgr, settings, "sess-z", "durable")

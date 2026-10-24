@@ -66,6 +66,7 @@ def _app(records: list, *, ready: bool = True, has_jm: bool = True, result=None)
     app._settings = SimpleNamespace(job_auto_resume=True)
     app._usage_tracker = None
     app._session_id = "s"
+    app._turned = False
     return app, jm
 
 
@@ -198,6 +199,7 @@ class TestShutdownOrder:
         calls: list[str] = []
         app = BaseCLIApp.__new__(BaseCLIApp)
         app._settings = SimpleNamespace(auto_extract_session_facts=True)
+        app._turned = True  # a turn ran: only the closed controller stops it
         app._workflow_controller = SimpleNamespace(
             is_ready=False,
             workflow=SimpleNamespace(
@@ -243,6 +245,7 @@ def _strict_app(records: list, processor=None):
     app._settings = SimpleNamespace(job_auto_resume=True)
     app._usage_tracker = None
     app._session_id = "s"
+    app._turned = False
     return app, jm
 
 

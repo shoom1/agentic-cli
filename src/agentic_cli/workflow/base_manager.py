@@ -1462,17 +1462,18 @@ class BaseWorkflowManager(ABC):
 
         Returns True if that session already has content (i.e. a real resume),
         False if it's new — but the id is adopted either way so the next turn
-        continues it. A backend without durable sessions has nothing to resume,
-        so it adopts the id and returns False.
+        continues it, once the store was asked (a cancel or an error before
+        that adopts nothing). A backend without durable sessions has nothing
+        to resume, so it adopts the id and returns False.
 
         Args:
             session_id: Session to adopt.
             user_id: Owner to look the session up as (defaults to
                 ``settings.default_user``).
         """
-        if hasattr(self, "session_id"):
-            self.session_id = session_id
         if not self.supports_sessions:
+            if hasattr(self, "session_id"):
+                self.session_id = session_id
             logger.info(
                 "session_adopted", session_id=session_id, resumed=False,
                 backend_sessions=False,
@@ -1482,6 +1483,8 @@ class BaseWorkflowManager(ABC):
             exists = await self.session_exists(session_id)
         else:
             exists = await self.session_exists(session_id, user_id=user_id)
+        if hasattr(self, "session_id"):
+            self.session_id = session_id
         logger.info("session_adopted", session_id=session_id, resumed=exists)
         return exists
 
