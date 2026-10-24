@@ -1,5 +1,5 @@
 """Turns on a real console, over a pty: Ctrl+C, a question, typing ahead,
-``/new``, ``/compact`` and the status bar's ``ctx``.
+``/new``, ``/resume``, ``/compact`` and the status bar's ``ctx``.
 
 thinking-prompt 0.4's Ctrl+C cancels the turn's task, its dialogs are
 ``Dialog`` objects, drawn in a box or inline, and it refuses Enter while a
@@ -217,6 +217,28 @@ def test_new_starts_a_conversation_and_the_next_turn_runs_in_it(console):
     sessions = re.findall(r"Session: ([0-9a-f]{12})", console.transcript)
     assert sessions[0] == previous != new
     assert sessions[-1] == new
+
+
+def test_resume_picks_a_conversation_and_shows_where_it_left_off(console):
+    """The picker lists the other conversation; Enter opens it, its last
+    messages are shown again, and the next turn runs in it."""
+    console.type_line("Plan the trip")
+    console.expect("Echo: Plan the trip")
+    console.type_line("/new")
+    console.expect("New conversation ")
+    console.type_line("/resume")
+    console.expect("Resume a conversation")
+    console.expect("· Plan the trip · ")
+    console.send("\r")
+    console.expect("Resumed: Plan the trip (")
+    console.expect("Echo: Plan the trip")
+    (resumed,) = re.findall(r"Resumed: Plan the trip \(([0-9a-f]{12}), 1 turn,", console.transcript)
+    console.type_line("which")
+    console.expect(f"Session: {resumed}")
+    console.exit()
+
+    (new,) = re.findall(r"New conversation ([0-9a-f]{12})\.", console.transcript)
+    assert resumed != new
 
 
 def test_compact_shows_the_summarizing_line_then_what_it_did(console):
