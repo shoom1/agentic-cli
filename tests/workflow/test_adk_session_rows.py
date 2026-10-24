@@ -8,6 +8,10 @@ from before the keys is read from its events, for the rows returned, and
 nothing is written back: its place in the list stays. A job's resume adds no
 turn, nor does a delegated request or a summary: nobody typed them.
 
+The other hooks a resume reads: ``recent_messages`` is the user's and the
+main agent's text, without its thinking, and deleting a conversation that is
+not stored says so (False).
+
 Turns run on the real ADK manager, Claude on ``FakeAPI``; the conversations
 from before the keys are written straight into a sqlite session store.
 """
@@ -34,7 +38,7 @@ from agentic_cli.workflow.adk.sessions import (  # noqa: E402
     typed_prompts,
 )
 from agentic_cli.workflow.sessions import SessionInfo  # noqa: E402
-from tests.workflow.adk.fakes import FakeAPI  # noqa: E402
+from tests.workflow.adk.fakes import FakeAPI, anthropic_message  # noqa: E402
 from tests.workflow.test_adk_delegation import (  # noqa: E402,F401
     STARTED,
     TURNS,
@@ -293,3 +297,38 @@ class TestAConversationFromBeforeTheKeys:
             await manager.cleanup()
 
         assert listed == [] and info is None
+
+
+class TestRecentAndDelete:
+    async def test_recent_messages_leave_the_thinking_out(self, project, monkeypatch):
+        thought = "The user wants Lisbon; keep it short."
+        route(monkeypatch, anthropic, "AsyncAnthropic", FakeAPI(Team(coordinator=[
+            anthropic_message(
+                {"type": "thinking", "thinking": thought, "signature": "sig-1"},
+                {"type": "text", "text": "Lisbon, then."},
+            ),
+        ])))
+        manager = manager_for(team())
+        try:
+            await turn(manager, "Where to?")
+            recent = await manager.recent_messages("s", user_id="u")
+        finally:
+            await manager.cleanup()
+
+        assert recent == [
+            {"role": "user", "content": "Where to?"},
+            {"role": "assistant", "content": "Lisbon, then."},
+        ]
+
+    async def test_deleting_a_conversation_that_is_not_stored_says_so(self, project, monkeypatch):
+        route(monkeypatch, anthropic, "AsyncAnthropic", FakeAPI(chat("Hi.")))
+        manager = manager_for(team())
+        try:
+            await turn(manager, "Hello.")
+            missing = await manager.delete_session("missing", user_id="u")
+            deleted = await manager.delete_session("s", user_id="u")
+            listed = await manager.list_sessions(user_id="u")
+        finally:
+            await manager.cleanup()
+
+        assert (missing, deleted, listed) == (False, True, [])

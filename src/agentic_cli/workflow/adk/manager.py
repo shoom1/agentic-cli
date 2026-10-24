@@ -1299,13 +1299,24 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
     async def delete_session(self, session_id: str, *, user_id: str | None = None) -> bool:
         """Delete a persisted session from the store.
 
+        ADK's own delete answers nothing, for an unknown id too, so the
+        session is looked up first.
+
         Args:
             session_id: Session to delete.
             user_id: Owner of the session (defaults to ``settings.default_user``).
+
+        Returns:
+            False if there is no such session.
         """
         if not self._session_service:
             return False
         ref = self.session_ref(session_id, user_id)
+        stored = await self._session_service.get_session(
+            app_name=ref.app_name, user_id=ref.user_id, session_id=ref.session_id,
+        )
+        if stored is None:
+            return False
         await self._session_service.delete_session(
             app_name=ref.app_name,
             user_id=ref.user_id,
@@ -1316,9 +1327,10 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
     async def recent_messages(
         self, session_id: str, limit: int = 20, *, user_id: str | None = None
     ) -> list[dict]:
-        """Recent text messages from the stored session (for fact extraction).
+        """Recent text messages from the stored session (fact extraction, a resume's replay).
 
-        The user's and the root agent's: a sub-agent's text is its work,
+        Text only: a reply's thinking is left out. The user's and the root
+        agent's: a sub-agent's text is its work,
         which its parent read as a tool result, not a reply. A native ADK
         YAML app's agents transfer, and each one replies, so all are read. A
         job notice (``job_notice``) is left out, as on Deep Agents: nobody
@@ -1353,7 +1365,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             role = getattr(content, "role", None)
             text = " ".join(
                 p.text for p in (getattr(content, "parts", None) or [])
-                if getattr(p, "text", None)
+                if getattr(p, "text", None) and not getattr(p, "thought", False)
             )
             if role == "user" and text.startswith(JOB_NOTICE_HEADER):
                 continue
