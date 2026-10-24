@@ -1315,6 +1315,14 @@ step; each entry says what to use instead.
   - `disabled` for `none`, except on the models that cannot stop thinking
     (Opus 5.5, Sonnet 5.5, Fable 5 and Fable 5.1), which run adaptive
     thinking at effort `low`.
+- **A knowledge-base search finds every document that matches, however many
+  chunks another has.** It ranked `top_k * 2` chunks, then kept one hit per
+  document and dropped those the filters refuse, so a document with many
+  matching chunks filled that list on its own: a filtered search for
+  another document came back empty (with `top_k=2`; `top_k=100` found it),
+  and an unfiltered one returned fewer documents than matched. The ranked
+  list now widens, four times at a step, until `top_k` documents pass or
+  every chunk is ranked.
 - **The LangGraph backend showed no thinking text.** It read thinking only
   from a `text` field, which Claude's and Gemini's thinking blocks do not
   have. It now reads each answer's standard content blocks, so Claude's

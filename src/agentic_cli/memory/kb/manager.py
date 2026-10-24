@@ -971,25 +971,52 @@ class KnowledgeBaseManager:
             query_embedding = self._embedding_service.embed_text(query)
             embed_time = (time.time() - embed_start) * 1000
 
-        with self._transaction():  # also reads again what another process added
+        with self._transaction():  # reads again what another process added
+            chunk_count = len(self._chunks)
+
+        # One hit per document, the filters applied after ranking: one
+        # document's chunks could fill a ranked list of fixed length and hide
+        # every other document, so the list widens until top_k documents
+        # pass, or every chunk is ranked.
+        candidates = top_k * 2
+        while True:
             if query_embedding is not None:
-                search_start = time.time()
-                semantic_results = self._vector_store.search(query_embedding, top_k * 2)
-                search_time = (time.time() - search_start) * 1000
+                with self._lock:
+                    search_start = time.time()
+                    semantic_results = self._vector_store.search(query_embedding, candidates)
+                    search_time += (time.time() - search_start) * 1000
 
-        # BM25 search
-        bm25_results = []
-        bm25_index = getattr(self, "_bm25_index", None)
-        if bm25_index is not None:
-            bm25_results = bm25_index.search(query, top_k=top_k * 2)
+            # BM25 search
+            bm25_results = []
+            bm25_index = getattr(self, "_bm25_index", None)
+            if bm25_index is not None:
+                bm25_results = bm25_index.search(query, top_k=candidates)
 
-        # Fuse results
-        if bm25_results:
-            fused = self._fuse_results(semantic_results, bm25_results)
-        else:
-            fused = semantic_results
+            # Fuse results
+            if bm25_results:
+                fused = self._fuse_results(semantic_results, bm25_results)
+            else:
+                fused = semantic_results
 
-        # Build SearchResult objects, apply filters, deduplicate
+            results = self._search_results(fused, filters, top_k)
+            if len(results) >= top_k or candidates >= chunk_count:
+                break
+            candidates *= 4
+
+        total_time = (time.time() - start_time) * 1000
+
+        return {
+            "results": [r.to_dict() for r in results],
+            "total_matches": len(results),
+            "query_embedding_time_ms": round(embed_time, 2),
+            "search_time_ms": round(search_time, 2),
+            "total_time_ms": round(total_time, 2),
+        }
+
+    def _search_results(
+        self, fused: list[tuple[str, float]], filters: dict[str, Any] | None, top_k: int,
+    ) -> list[SearchResult]:
+        """The ranked chunks as results: the first of each document the filters keep."""
         results: list[SearchResult] = []
         seen_docs: set[str] = set()
         with self._lock:
@@ -1016,16 +1043,7 @@ class KnowledgeBaseManager:
                         highlight=highlight,
                     )
                 )
-
-        total_time = (time.time() - start_time) * 1000
-
-        return {
-            "results": [r.to_dict() for r in results],
-            "total_matches": len(results),
-            "query_embedding_time_ms": round(embed_time, 2),
-            "search_time_ms": round(search_time, 2),
-            "total_time_ms": round(total_time, 2),
-        }
+        return results
 
     @staticmethod
     def _fuse_results(
