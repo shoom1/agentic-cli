@@ -3,17 +3,25 @@
 Memories persist to ``memories.json`` in the store's directory (embeddings in
 ``memories_embeddings.json``). Search is by substring, or by semantic
 similarity when the store has an embedding service.
+
+Every CLI session of an application opens the same store, so each read or
+change holds the folder's lock and first reads again what another process
+wrote (``MemoryStore._transaction``); otherwise one session's next save
+rewrote the files from what it read earlier, dropping the other's memories.
 """
 
 import json
 import math
 import threading
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from agentic_cli.memory._core.filelock import file_stamp, folder_lock
 from agentic_cli.memory._core.io import atomic_write_json
 from agentic_cli.memory._core.log import get_logger
 from agentic_cli.memory._core.model_record import read_model_record, record_for, write_model_record
@@ -116,14 +124,36 @@ class MemoryStore:
         self._path = base_dir / "memories.json"
         self._embeddings_path = base_dir / "memories_embeddings.json"
         self._model_path = base_dir / "embedding_model.json"
+        self._lock_path = base_dir / ".lock"
         self._items: dict[str, MemoryItem] = {}
         # Guards self._items and _save() — LangGraph's ToolNode runs sync tools
         # concurrently in executor threads, so store/update/delete/search (and
-        # the full-file rewrite in _save) must not interleave.
+        # the full-file rewrite in _save) must not interleave. The folder lock
+        # does the same for other processes (_transaction).
         self._lock = threading.Lock()
-        self._load()
-        if self._embedding_service:
-            self._open_with_embeddings()
+        # memories.json as this store last read or wrote it.
+        self._stamp: tuple[int, int, int] | None = None
+        with self._lock, folder_lock(self._lock_path):
+            self._load()
+            if self._embedding_service:
+                self._open_with_embeddings()
+            self._stamp = file_stamp(self._path)
+
+    @contextmanager
+    def _transaction(self) -> Iterator[None]:
+        """Hold the store for one read or change, as every process sees it.
+
+        The thread lock keeps this store's threads apart and the folder lock
+        every process that opened the folder; what another process wrote
+        since this store last read or wrote ``memories.json`` is read again
+        first, so a change applies to the store as it is now.
+        """
+        with self._lock, folder_lock(self._lock_path):
+            if file_stamp(self._path) != self._stamp:
+                self._items = {}
+                self._load()
+                self._stamp = file_stamp(self._path)
+            yield
 
     def _open_with_embeddings(self) -> None:
         """Reconcile the vectors with the model, then embed what is missing.
@@ -183,6 +213,7 @@ class MemoryStore:
     def _save(self) -> None:
         data = [item.to_dict() for item in self._items.values()]
         atomic_write_json(self._path, data)
+        self._stamp = file_stamp(self._path)
         self._save_embeddings()
 
     def _save_embeddings(self) -> None:
@@ -248,7 +279,7 @@ class MemoryStore:
         # touch shared state.
         if self._embedding_service:
             item.embedding = self._embedding_service.embed_text(content)
-        with self._lock:
+        with self._transaction():
             self._items[item.id] = item
             self._save()
         return item.id
@@ -264,7 +295,7 @@ class MemoryStore:
         Returns:
             True if updated, False if item not found.
         """
-        with self._lock:
+        with self._transaction():
             item = self._items.get(item_id)
             if item is None:
                 return False
@@ -293,7 +324,7 @@ class MemoryStore:
         Returns:
             True if deleted/archived, False if item not found.
         """
-        with self._lock:
+        with self._transaction():
             item = self._items.get(item_id)
             if item is None:
                 return False
@@ -319,7 +350,7 @@ class MemoryStore:
         Returns:
             List of matching MemoryItem objects.
         """
-        with self._lock:
+        with self._transaction():
             candidates = [
                 item for item in self._items.values()
                 if include_archived or not item.archived
@@ -387,16 +418,17 @@ class MemoryStore:
         similar = []
         if self._embedding_service:
             new_embedding = self._embedding_service.embed_text(content)
-            for item in self._items.values():
-                if item.archived or item.embedding is None:
-                    continue
-                sim = self._cosine_similarity(new_embedding, item.embedding)
-                if sim >= similarity_threshold:
-                    similar.append({
-                        "id": item.id,
-                        "content": item.content,
-                        "similarity": round(sim, 4),
-                    })
+            with self._transaction():
+                for item in self._items.values():
+                    if item.archived or item.embedding is None:
+                        continue
+                    sim = self._cosine_similarity(new_embedding, item.embedding)
+                    if sim >= similarity_threshold:
+                        similar.append({
+                            "id": item.id,
+                            "content": item.content,
+                            "similarity": round(sim, 4),
+                        })
             similar.sort(key=lambda x: x["similarity"], reverse=True)
 
         item_id = self.store(content, tags=tags, importance=importance)
@@ -412,10 +444,10 @@ class MemoryStore:
         Returns:
             Formatted string of all non-archived memories, or empty string if none.
         """
-        if not self._items:
-            return ""
+        with self._transaction():
+            items = list(self._items.values())
         lines = []
-        for item in self._items.values():
+        for item in items:
             if item.archived:
                 continue
             tag_str = f" [{', '.join(item.tags)}]" if item.tags else ""
@@ -433,6 +465,10 @@ class MemoryStore:
         Returns:
             Dict with archived_count and remaining_count.
         """
+        with self._transaction():
+            return self._apply_forgetting(policy)
+
+    def _apply_forgetting(self, policy: ForgettingPolicy) -> dict[str, Any]:
         now = datetime.now()
         archived_count = 0
         candidates = [item for item in self._items.values() if not item.archived]

@@ -1226,6 +1226,16 @@ step; each entry says what to use instead.
   (`github_token`, `hf_token`); `api_key`, `secret`, `password` and
   `credential` still count anywhere, and a `SecretStr` field is still never
   saved.
+- **Memory stores open on one folder no longer drop each other's memories.**
+  Every CLI session of an application opens the same memory store
+  (`<workspace_dir>/memory`). Each kept the memories it read when it opened
+  and rewrote the files from them on every change, so with two sessions
+  open, a memory stored in one and then one in the other left only the
+  second, and an update or deletion could be undone the same way. Each read
+  or change now holds the folder's lock file (`.lock`, an `flock`) and first
+  reads again what another process wrote, so a change applies to the store
+  as it is now, and a session finds the others' new memories without
+  restarting.
 - **On ADK, a model call's usage names the model of the agent that made
   it.** `LLM_USAGE` named the default model for every agent's call, so a
   sub-agent on a model of its own, or a root agent with its own `model`,

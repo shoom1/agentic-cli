@@ -152,7 +152,8 @@ class TestMemoryStore:
 
         # The writer's temp file (``.memories.json.<random>.tmp``) must not
         # survive; without an embedding service there's no embeddings file.
-        assert sorted(p.name for p in (tmp_path / "memory").iterdir()) == ["memories.json"]
+        # ``.lock`` is the folder's lock file (see MemoryStore._transaction).
+        assert sorted(p.name for p in (tmp_path / "memory").iterdir()) == [".lock", "memories.json"]
 
     def test_created_at_is_set(self, tmp_path):
         from agentic_cli.memory import MemoryStore
