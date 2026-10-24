@@ -13,6 +13,7 @@ provider, no key) in a child process and type at it. Every wait is an
 from __future__ import annotations
 
 import io
+import json
 import re
 import sys
 from pathlib import Path
@@ -39,16 +40,21 @@ class Console:
 
     ``env`` is the child's whole environment, ``child_env(home)`` when
     omitted; a test that needs one more variable starts from ``child_env``.
+    ``args`` are the app's command-line arguments; ``prompt`` False skips
+    waiting for the prompt, for a start that never draws one.
     """
 
-    def __init__(self, cwd: Path, home: Path, env: dict[str, str] | None = None) -> None:
+    def __init__(
+        self, cwd: Path, home: Path, env: dict[str, str] | None = None,
+        *, args: tuple[str, ...] = (), prompt: bool = True,
+    ) -> None:
         import pexpect
 
         self.cwd = cwd
         self._log = io.StringIO()
         self.child = pexpect.spawn(
             sys.executable,
-            [str(CONSOLE_APP)],
+            [str(CONSOLE_APP), *args],
             cwd=str(cwd),
             env=child_env(home) if env is None else env,
             encoding="utf-8",
@@ -57,7 +63,8 @@ class Console:
             dimensions=TERM_SIZE,
         )
         self.child.logfile_read = self._log
-        self.expect(">>>", timeout=STARTUP_TIMEOUT)
+        if prompt:
+            self.expect(">>>", timeout=STARTUP_TIMEOUT)
 
     def expect(self, text: str, timeout: float = STEP_TIMEOUT) -> None:
         """Wait for ``text`` (literally) in the output."""
@@ -239,6 +246,85 @@ def test_resume_picks_a_conversation_and_shows_where_it_left_off(console):
 
     (new,) = re.findall(r"New conversation ([0-9a-f]{12})\.", console.transcript)
     assert resumed != new
+
+
+def test_resume_of_a_conversation_that_is_not_stored_exits_before_the_prompt(tmp_path):
+    import pexpect
+
+    (tmp_path / "home").mkdir()
+    console = Console(tmp_path, tmp_path / "home", args=("--resume", "zzz"), prompt=False)
+    try:
+        console.expect(f"No conversation 'zzz' found. Run python {CONSOLE_APP} --resume to pick one.",
+                       timeout=STARTUP_TIMEOUT)
+        console.child.expect(pexpect.EOF, timeout=STEP_TIMEOUT)
+        console.child.close()
+    finally:
+        console.child.close(force=True)
+
+    assert console.child.exitstatus == 1
+    assert ">>>" not in console.transcript
+    assert "Traceback (most recent call last)" not in console.transcript
+
+
+def _seed(cwd: Path) -> None:
+    """A conversation stored by an earlier run (``console_app.py``'s seed.json)."""
+    (cwd / "seed.json").write_text(json.dumps({
+        "abc123def456": {"messages": [["user", "Plan the trip"], ["assistant", "Sure."]],
+                         "hours": 2},
+    }))
+
+
+def test_continue_resumes_the_newest_once_the_prompt_is_up(tmp_path):
+    (tmp_path / "home").mkdir()
+    _seed(tmp_path)
+    console = Console(tmp_path, tmp_path / "home", args=("--continue",))
+    try:
+        console.expect("Resumed: Plan the trip (abc123def456, 1 turn, last active 2h ago).")
+        console.expect("Sure.")
+        console.type_line("which")
+        console.expect("Session: abc123def456")
+        console.exit()
+    finally:
+        console.child.close(force=True)
+
+    transcript = console.transcript
+    assert transcript.index(">>>") < transcript.index("Resumed:")
+
+
+def test_ctrl_c_at_the_startup_picker_ends_the_app(tmp_path):
+    """Ruling: the startup picker runs before any request, so Ctrl+C there
+    ends the app, as at an idle prompt; nothing says a request was cancelled."""
+    import pexpect
+
+    (tmp_path / "home").mkdir()
+    _seed(tmp_path)
+    console = Console(tmp_path, tmp_path / "home", args=("--resume",))
+    try:
+        console.expect("Resume a conversation")
+        console.expect("· Plan the trip · ")
+        console.send("\x03")
+        console.expect("Goodbye!")
+        console.child.expect(pexpect.EOF, timeout=STEP_TIMEOUT)
+        console.child.close()
+    finally:
+        console.child.close(force=True)
+
+    assert console.child.exitstatus == 0
+    assert "Operation cancelled" not in console.transcript
+    assert "Resumed:" not in console.transcript
+
+
+def test_continue_with_nothing_stored_starts_a_new_conversation(tmp_path):
+    (tmp_path / "home").mkdir()
+    console = Console(tmp_path, tmp_path / "home", args=("--continue",))
+    try:
+        console.type_line("which")
+        console.expect("Session: ")
+        console.exit()
+    finally:
+        console.child.close(force=True)
+
+    assert "No conversation to continue; starting a new one." in console.transcript
 
 
 def test_compact_shows_the_summarizing_line_then_what_it_did(console):

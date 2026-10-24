@@ -403,8 +403,10 @@ class BaseCLIApp:
             app_info: The startup banner (name, version, welcome message)
             agent_configs: List of agent configurations for the workflow
             settings: Application settings instance
-            session_id: Optional session ID for save/resume. If provided,
-                       the session will be loaded on startup and saved on exit.
+            session_id: The conversation to start in, new or stored (for
+                library use and tests); without it a fresh id is generated.
+                ``main()`` takes ``--continue`` and ``--resume [ID]``
+                instead (``session_start``).
 
         Raises:
             TypeError: The app still defines ``get_styles()``, which
@@ -414,7 +416,7 @@ class BaseCLIApp:
             raise TypeError(_GET_STYLES_REMOVED)
 
         # Sessions are durable by default: a fresh id is generated when none is
-        # given (resumable later via /sessions or --session); an explicit id
+        # given (resumable later with /resume or --resume); an explicit id
         # requests a resume.
         import uuid
 
@@ -1486,9 +1488,10 @@ class BaseCLIApp:
         _warn_if_langgraph(self._settings, self.session)
 
         async with self._workflow_controller.background_init(self.session):
-            # Adopt this run's session id (generated or --session) so every turn
-            # targets it; a fresh id starts a new durable session rather than
-            # falling back to the shared 'default_session'.
+            # Adopt this run's session id (generated, or session_id=) so every
+            # turn targets it; a fresh id starts a new durable session rather
+            # than falling back to the shared 'default_session'. --resume <id>
+            # of a conversation that is not stored ends here, before the prompt.
             if not await self._adopt_session_on_startup():
                 logger.info("app_start_refused", exit_status=self.exit_status)
                 return

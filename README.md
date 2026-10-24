@@ -14,7 +14,7 @@ Agentic CLI provides the core infrastructure for building interactive CLI applic
 - **Built-in Tools**: Python execution, stateful sandbox, file operations, web search, web fetch, arXiv search
 - **Knowledge Base**: Semantic + BM25 hybrid search with RRF fusion, per-document markdown sidecars, and agent-authored concept pages
 - **Semantic Memory**: Embedding-backed memory with lifecycle management, contradiction detection, and forgetting policy
-- **Durable Sessions**: Conversations persist continuously by default (SQLite; PostgreSQL or ephemeral memory optional) and resume across CLI restarts with `--session <id>`
+- **Durable Sessions**: Conversations persist continuously by default (SQLite; PostgreSQL or ephemeral memory optional) and resume across CLI restarts: `--continue` (the newest), `--resume <id>`, or `--resume` and `/resume` for a picker
 - **Context Window Management**: Summarization near the model's input budget on ADK and Deep Agents, requests trimmed to fit, a provider's overflow recovered or explained, and token-usage visibility
 - **Model Catalog**: Live model listings from each provider, cached for a day, shown by `/models`
 - **Type-safe Configuration**: Composable settings mixins (`pydantic-settings`)
@@ -156,6 +156,62 @@ Run with your API key:
 export GOOGLE_API_KEY="your-api-key"
 python my_app.py
 ```
+
+### Resuming a conversation
+
+Conversations are saved as they run (`session_store`: sqlite by default).
+Run the app through `BaseCLIApp.main()` and every app takes the same flags:
+
+```bash
+my-app                  # a new conversation; at exit, once a turn ran, its id is named
+my-app --continue       # the newest saved conversation (-c)
+my-app --resume <id>    # that one (-r); an id that is not saved exits with status 1
+my-app --resume         # pick one from a list, once the prompt is up
+```
+
+Inside the app, `/resume` opens the same picker (Enter opens a
+conversation, Esc keeps the current one) and `/resume <id>` opens one by
+id; `/sessions` lists them with their titles (the first prompt), turns and
+last update. A resumed conversation shows its last 10 messages again. The
+model and the settings stay this run's; "Allow for this session" grants,
+sandbox kernels and the task list are not restored.
+
+`main()` parses the flags, builds the app with `from_args` (by default
+`cls()`), runs it and exits with its `exit_status`. Point the console
+script at it, and add flags of your own with two classmethods (`-c`, `-r`
+and `-h` are taken):
+
+```python
+import argparse
+
+class MyApp(BaseCLIApp):
+    def __init__(self, verbose: bool = False) -> None:
+        super().__init__(
+            app_info=AppInfo(name="My App", version="0.1.0"),
+            agent_configs=AGENTS,
+            settings=BaseSettings(),
+        )
+        self.verbose = verbose
+
+    @classmethod
+    def add_arguments(cls, parser: argparse.ArgumentParser) -> None:
+        parser.add_argument("--verbose", action="store_true")
+
+    @classmethod
+    def from_args(cls, args: argparse.Namespace) -> "MyApp":
+        return cls(verbose=args.verbose)
+
+# pyproject.toml: [project.scripts] my-app = "my_app.cli:MyApp.main"
+if __name__ == "__main__":
+    MyApp.main()
+```
+
+An app built and run directly (`asyncio.run(app.run())`) starts a new
+conversation, and is pointed at `/resume <id>` at exit; set
+`app.session_start = SessionStart("continue")` (or `"resume"` with an id, or
+`"pick"`; `agentic_cli.cli.session_args`) before `run()` to start otherwise,
+and exit with `app.exit_status` (1 when `"resume"` names a conversation that
+is not saved: `run()` then returns before the prompt).
 
 ### Customizing the CLI
 
@@ -1645,14 +1701,17 @@ python examples/hello_langgraph.py
 # Research demo (full features)
 research-demo                      # console script, installed with the package
 python -m research_demo            # equivalent module invocation
-python -m research_demo --session my-research   # resume a durable session by id
+research-demo --continue           # the newest saved conversation
+research-demo --resume <id>        # a saved conversation by id (--resume alone: pick one)
 
 # From a checkout without installing, run it from the repository root:
 python -m examples.research_demo
 ```
 
-Sessions are durable by default: every run gets a session id, `--session <id>`
-resumes a stored one, and `/sessions` lists or deletes them. The demo adds
+Sessions are durable by default: every run gets a session id, named at exit
+when it is stored; `--continue` and `--resume` reopen one, `/resume` switches
+to another without a restart, and `/sessions` lists or deletes them (see
+[Resuming a conversation](#resuming-a-conversation)). The demo adds
 `/memory`, `/files` and `/kb-backfill` to the built-in commands.
 
 ## Development
