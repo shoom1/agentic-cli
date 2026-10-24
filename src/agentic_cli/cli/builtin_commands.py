@@ -289,6 +289,11 @@ class JobsCommand(Command):
             rec = manager.cancel(parts[1])
             if rec is None:
                 app.session.add_warning(f"No such job: {parts[1]}")
+            elif rec.cancel_requested and rec.state.value == "running":
+                app.session.add_warning(
+                    f"Job '{parts[1]}' is still running: it cannot be interrupted now, "
+                    "and is recorded as cancelled when it ends."
+                )
             else:
                 app.session.add_success(f"Job '{parts[1]}' → {rec.state.value}.")
             return

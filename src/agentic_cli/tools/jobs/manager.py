@@ -247,6 +247,10 @@ class JobRecord:
     # relaunches a queued job nor writes off a running one whose handle lives
     # in the owner's memory.
     exec_owner: str | None = None
+    # Set when a cancel could not stop the job (a running in-process thread, a
+    # process that outlived SIGTERM): it stays RUNNING, holding its slot, and
+    # is recorded CANCELLED when it ends.
+    cancel_requested: bool = False
 
     @property
     def resumed(self) -> bool:
@@ -294,6 +298,8 @@ class JobRecord:
             "exit_code": self.exit_code,
             "tags": self.tags,
         }
+        if self.cancel_requested:
+            out["cancel_requested"] = True
         if self.resume_on_complete:
             out["resume_state"] = self.resume_state
             if self.resume_error:
@@ -510,7 +516,10 @@ class JobManager:
         rewrite a recorded success as CANCELLED). A job another live manager is
         executing is only cancelled when the backend can reach it from here
         (``cancels_foreign_jobs``); otherwise the record is returned unchanged
-        rather than reported cancelled while it keeps running.
+        rather than reported cancelled while it keeps running. A job the
+        backend could not stop (``JobBackend.cancel`` returned False) stays
+        RUNNING with ``cancel_requested``, holding its slot, and is recorded
+        CANCELLED when it ends; the next queued job starts then, not now.
 
         Returns:
             The record — check ``state`` for what actually happened — or None
@@ -540,7 +549,14 @@ class JobManager:
                             owner=rec.exec_owner,
                         )
                         return rec
-                    self._backends[rec.backend].cancel(rec, self._job_dir(job_id))
+                    stopped = (
+                        self._backends[rec.backend].cancel(rec, self._job_dir(job_id))
+                        is not False
+                    )
+                    if not stopped:
+                        rec.cancel_requested = True
+                        self._persist(rec, owns_shared_state=True)
+                        return rec
                     rec.state = JobState.CANCELLED
                     rec.finished_at = _now()
                     self._persist(rec, owns_shared_state=True)
@@ -1121,6 +1137,8 @@ class JobManager:
                 owner=rec.exec_owner,
             )
             return status
+        if new_state in TERMINAL_STATES and rec.cancel_requested:
+            new_state = JobState.CANCELLED  # it ended after it was cancelled
         rec.state = new_state
         if new_state in TERMINAL_STATES and rec.finished_at is None:
             rec.finished_at = _now()
