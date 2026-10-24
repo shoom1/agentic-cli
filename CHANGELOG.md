@@ -274,7 +274,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `adk_inject_state` frontmatter keys, stay ADK-only.
   `agentic_cli.tools.skills.make_skill_tools(skills)` returns the tools and
   the instruction.
-- **Job resume on Deep Agents** (`job_auto_resume`, `/resume`). A
+- **Job resume on Deep Agents** (`job_auto_resume`, `/jobs resume`). A
   long-running tool's call gets the tool's pending result at once, and the
   turn ends. When the job finishes, `resume_with_job_result(record)` runs a
   turn in the job's conversation whose input is one user message the
@@ -571,9 +571,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   checkpoint; LangGraph knows only the id. `/sessions` shows the title (as
   typed, never as Rich markup, as the id is; "(no prompt yet)" without one)
   and the turns, and refuses to delete the conversation the user is in.
+- **`/resume [<id>]` reopens a saved conversation without a restart**, and
+  its public twins `BaseCLIApp.resume_session(session_id) -> bool` and
+  `BaseCLIApp.pick_session() -> str | None`. `/resume` opens a picker, "Resume
+  a conversation": the 50 newest other conversations, newest first, each
+  with how long ago, its turns, its title and its id (in that order, so a
+  narrow terminal clips the title, not what tells rows apart); Enter opens one, Esc
+  keeps the current one ("No other conversations to resume." when there are
+  none). `/resume <id>` opens that one. Under the turn lock it reads the
+  conversation first, so one that is not stored ("No conversation '<id>'
+  found."), already open ("Already in this conversation.") or unreadable
+  ("Could not open '<id>': <error>") changes nothing; then, as `/new` does,
+  the facts of the conversation left are extracted (when that is on), the
+  id is adopted once the workflow has taken it, and the task box and the
+  usage counters start over. It says "Resumed: <title> (<id>, 12 turns, last
+  active 2h ago)." and shows the last 10 messages again, the user's as typed
+  and the main agent's as a turn shows them, each cut at 2,000 characters,
+  after "… N earlier messages" when there are more. Ctrl+C stops it like any
+  request. Background jobs keep reporting to the conversation that started
+  them. A conversation's facts (`auto_extract_session_facts`) are saved once
+  per conversation used: on leaving it (`/new`, `/resume`) or at exit, only
+  when a turn ran in it since it was opened, so switching back and forth, or
+  resuming one and leaving it as it was, stores no duplicates.
 
 ### Changed
 
+- **`/resume` reopens conversations; finished jobs resume with `/jobs
+  resume`** (breaking). The old `ResumeCommand` is gone, and `/jobs`
+  gains `resume`: it runs the resumes of finished, resume-flagged jobs, as
+  `/resume` did ("No finished background jobs to resume." when there are
+  none).
 - **A context overflow on ADK is recovered once, or ends in one clear
   error.** A model call the provider refused as too long raised its raw
   error ("Workflow error: prompt is too long: …"), and the next turn failed

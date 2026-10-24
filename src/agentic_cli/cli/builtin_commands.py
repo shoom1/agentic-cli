@@ -261,13 +261,14 @@ class JobsCommand(Command):
         super().__init__(
             name="jobs",
             description="List and manage long-running jobs",
-            usage="/jobs [all | <id> | cancel <id> | clean]",
-            examples=["/jobs", "/jobs all", "/jobs <id>", "/jobs cancel <id>", "/jobs clean"],
+            usage="/jobs [all | <id> | cancel <id> | clean | resume]",
+            examples=["/jobs", "/jobs all", "/jobs <id>", "/jobs cancel <id>", "/jobs clean",
+                      "/jobs resume"],
             category=CommandCategory.WORKFLOW,
         )
 
     async def execute(self, args: str, app: Any) -> None:
-        """List running jobs, show one job, cancel, or clean completed jobs."""
+        """List running jobs, show one job, cancel, clean completed jobs, or resume finished ones."""
         try:
             manager = getattr(app.workflow, "job_manager", None)
         except (RuntimeError, AttributeError):
@@ -301,6 +302,15 @@ class JobsCommand(Command):
         if parts and parts[0] == "clean":
             n = manager.clean()
             app.session.add_success(f"Removed {n} completed job(s).")
+            return
+
+        if parts and parts[0] == "resume":
+            # Each finished, resume-flagged job resumes its agent (a turn).
+            resume = getattr(app, "resume_finished_jobs", None)
+            if resume is None:
+                app.session.add_warning("Resume is not supported by this app.")
+            elif await resume() == 0:
+                app.session.add_message("system", "No finished background jobs to resume.")
             return
 
         # A bare id → details + recent logs for that one job.
@@ -354,29 +364,6 @@ class JobsCommand(Command):
         if tail:
             body += "\n\n-- last stdout --\n" + "\n".join(tail)
         app.session.add_rich(Panel(body, title=f"Job {rec.job_id}", expand=False))
-
-
-class ResumeCommand(Command):
-    """Resume the agent with finished background-job results."""
-
-    def __init__(self) -> None:
-        super().__init__(
-            name="resume",
-            description="Resume the agent with results from finished background jobs",
-            usage="/resume",
-            examples=["/resume"],
-            category=CommandCategory.WORKFLOW,
-        )
-
-    async def execute(self, args: str, app: Any) -> None:
-        """Drain any finished resume-flagged jobs through resume turns."""
-        resume = getattr(app, "resume_finished_jobs", None)
-        if resume is None:
-            app.session.add_warning("Resume is not supported by this app.")
-            return
-        n = await resume()
-        if n == 0:
-            app.session.add_message("system", "No finished background jobs to resume.")
 
 
 class PapersCommand(Command):
@@ -460,6 +447,26 @@ class PapersCommand(Command):
         app.session.add_rich(table)
 
 
+def _session_workflow(app: Any) -> Any:
+    """The app's workflow when it keeps sessions; otherwise None, and the user is told why."""
+    try:
+        workflow = app.workflow
+    except (RuntimeError, AttributeError):
+        workflow = None
+    if workflow is None:
+        app.session.add_warning("Sessions not available yet — workflow is initializing.")
+        return None
+    # An empty list would read as "you have no saved sessions"; say plainly
+    # that this backend keeps none.
+    if not getattr(workflow, "supports_sessions", False):
+        app.session.add_warning(
+            f"The {getattr(workflow, 'backend_type', 'current')} backend does not "
+            "persist sessions, so there are none to list, resume or delete."
+        )
+        return None
+    return workflow
+
+
 class SessionsCommand(Command):
     """List and manage saved sessions.
 
@@ -486,28 +493,13 @@ class SessionsCommand(Command):
         parsed = self.parse_args(args)
         delete_id = parsed.get_option("delete", "", str) or ""
 
-        try:
-            workflow = app.workflow
-        except (RuntimeError, AttributeError):
-            workflow = None
+        workflow = _session_workflow(app)
         if workflow is None:
-            app.session.add_warning("Sessions not available yet — workflow is initializing.")
-            return
-
-        # An empty list would read as "you have no saved sessions"; say plainly
-        # that this backend keeps none.
-        if not getattr(workflow, "supports_sessions", False):
-            app.session.add_warning(
-                f"The {getattr(workflow, 'backend_type', 'current')} backend does not "
-                "persist sessions, so there are none to list or delete."
-            )
             return
 
         if delete_id:
             if delete_id == app.session_id:
-                app.session.add_error(
-                    "You are in this conversation; start another with /new first."
-                )
+                app.session.add_error("You are in this conversation; /new or /resume another first.")
                 return
             if await workflow.delete_session(delete_id):
                 app.session.add_success(f"Session '{delete_id}' deleted.")
@@ -539,6 +531,30 @@ class SessionsCommand(Command):
             table.add_row(label, title, turns, updated)
 
         app.session.add_rich(table)
+
+
+class ResumeSessionCommand(Command):
+    """Reopen a stored conversation: from a picker, or the one named."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            name="resume",
+            description="Resume a saved conversation (pick one, or name its id)",
+            usage="/resume [<id>]",
+            examples=["/resume", "/resume 3f2a9c1d0b7e"],
+            category=CommandCategory.SESSION,
+        )
+
+    async def execute(self, args: str, app: Any) -> None:
+        """Resume the conversation named, or the one picked (``pick_session``)."""
+        if _session_workflow(app) is None:
+            return
+        session_id = self.parse_args(args).positional.strip()
+        if not session_id:
+            session_id = await app.pick_session()
+            if session_id is None:
+                return
+        await app.resume_session(session_id)
 
 
 class CompactCommand(Command):

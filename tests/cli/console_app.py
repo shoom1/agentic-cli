@@ -21,7 +21,9 @@ What the workflow answers:
 ``/compact`` reports that a summary is being written, waits until a file
 named ``summarized`` appears, then reports its usage and what it did: 2
 messages, 7,400 tokens before and 1,200 after. A session is stored once a
-turn ran in it (``session_exists``), as ``/new``'s line asks.
+turn ran in it (``session_exists``), as ``/new``'s line asks, and ``/resume``
+lists and reopens it: its row (the first prompt, the turns) and its messages,
+each turn's prompt and the reply it echoed.
 
 With a file named ``init-fails`` in the working directory at startup, the
 first initialization fails, and the next one (a turn retries it) waits until
@@ -31,6 +33,7 @@ a file named ``ready`` appears.
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -41,7 +44,7 @@ from agentic_cli.workflow import live_events
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.context import CompactResult
 from agentic_cli.workflow.events import InputType, UserInputRequest, WorkflowEvent
-from agentic_cli.workflow.sessions import SessionRef
+from agentic_cli.workflow.sessions import SessionInfo, SessionRef, session_title
 
 
 class ScriptedManager:
@@ -61,6 +64,9 @@ class ScriptedManager:
         self.is_initialized = False
         self._input_callback: Any = None
         self._sessions: set[str | None] = set()
+        #: Each stored conversation's messages and when it last changed.
+        self._messages: dict[str, list[dict]] = {}
+        self._updated: dict[str, datetime] = {}
 
     async def initialize_services(self) -> None:
         ScriptedManager.initializations += 1
@@ -79,6 +85,26 @@ class ScriptedManager:
 
     async def session_exists(self, session_id, *, user_id=None) -> bool:
         return session_id in self._sessions
+
+    def _row(self, session_id: str) -> SessionInfo:
+        prompts = [m["content"] for m in self._messages[session_id] if m["role"] == "user"]
+        return SessionInfo(session_id, session_title(prompts[0]), len(prompts),
+                           self._updated[session_id])
+
+    async def session_info(self, session_id, *, user_id=None) -> SessionInfo | None:
+        return self._row(session_id) if session_id in self._messages else None
+
+    async def list_sessions(self, *, user_id=None, limit=None) -> list[SessionInfo]:
+        rows = sorted((self._row(s) for s in self._messages),
+                      key=lambda row: row.updated, reverse=True)
+        return rows if limit is None else rows[:limit]
+
+    async def recent_messages(self, session_id, limit=20, *, user_id=None) -> list[dict]:
+        return self._messages.get(session_id, [])[-limit:]
+
+    def _said(self, session_id: str, role: str, content: str) -> None:
+        self._messages.setdefault(session_id, []).append({"role": role, "content": content})
+        self._updated[session_id] = datetime.now(timezone.utc)
 
     async def cleanup(self) -> None:
         self.is_initialized = False
@@ -108,6 +134,7 @@ class ScriptedManager:
 
     async def process(self, message: str, user_id: str, session_id: str | None = None):
         self._sessions.add(session_id)
+        self._said(session_id, "user", message)
         if message == "slow":
             yield WorkflowEvent.thinking("Working on it")
             await asyncio.Event().wait()  # until Ctrl+C cancels the turn
@@ -129,6 +156,7 @@ class ScriptedManager:
         elif message == "which":
             yield WorkflowEvent.text(f"Session: {session_id}")
         else:
+            self._said(session_id, "assistant", f"Echo: {message}")
             yield WorkflowEvent.text(f"Echo: {message}")
             usage = WorkflowEvent.llm_usage(model=self.model, prompt_tokens=4_000,
                                             completion_tokens=5)

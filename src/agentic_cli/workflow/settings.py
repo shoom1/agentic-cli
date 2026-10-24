@@ -575,7 +575,7 @@ class WorkflowSettingsMixin:
         description=(
             "When True, a finished long-running job that opted in "
             "(resume_on_complete) automatically resumes the agent with its "
-            "result at the next turn boundary (or via /resume)."
+            "result at the next turn boundary (or via /jobs resume)."
         ),
         json_schema_extra={"ui_order": 141},
     )
