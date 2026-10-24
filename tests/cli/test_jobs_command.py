@@ -1,9 +1,11 @@
-"""``/jobs``: the job list draws in colors every theme can read."""
+"""``/jobs``: the job list draws in colors every theme can read; ``/jobs resume``
+runs the resumes of finished jobs (what ``/resume`` did before it opened
+conversations)."""
 
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 from rich.table import Table
 
@@ -56,3 +58,28 @@ async def test_a_cancelled_job_is_reported_cancelled():
     await JobsCommand().execute("cancel j1", app)
 
     app.session.add_success.assert_called_once_with("Job 'j1' → cancelled.")
+
+
+async def test_resume_runs_the_finished_jobs_resumes():
+    app = SimpleNamespace(
+        workflow=SimpleNamespace(job_manager=MagicMock()), session=autospec_session(),
+        resume_finished_jobs=AsyncMock(return_value=2),
+    )
+
+    await JobsCommand().execute("resume", app)
+
+    app.resume_finished_jobs.assert_awaited_once_with()
+    app.session.add_message.assert_not_called()
+
+
+async def test_resume_with_nothing_finished_says_so():
+    app = SimpleNamespace(
+        workflow=SimpleNamespace(job_manager=MagicMock()), session=autospec_session(),
+        resume_finished_jobs=AsyncMock(return_value=0),
+    )
+
+    await JobsCommand().execute("resume", app)
+
+    app.session.add_message.assert_called_once_with(
+        "system", "No finished background jobs to resume."
+    )

@@ -299,7 +299,7 @@ What it supports:
 - **Prompt caching** on Claude, as on ADK (see [Prompt caching](#prompt-caching)).
 - **MCP tools, Agent Skills, raw LLM logging and job resume**, from the same
   `AgentConfig.mcp_servers`, `AgentConfig.skills`, `raw_llm_logging` and
-  `job_auto_resume` (or `/resume`) as on ADK. An MCP tool is gated under the
+  `job_auto_resume` (or `/jobs resume`) as on ADK. An MCP tool is gated under the
   `mcp` capability, with its name as the target.
 
 How it differs from ADK:
@@ -1506,12 +1506,12 @@ Built-in slash commands available in all apps:
 | `/settings` | `/set`, `/config` | Interactive settings editor: the default model, the `fast` and `strong` roles' models, thinking effort (saved to the project file) |
 | `/models` | | Each provider's listing status and models (`/models <text>` filters, `/models refresh` lists again) |
 | `/sandbox` | `/sb` | List / reset stateful sandbox sessions |
-| `/jobs` | | List and manage long-running background jobs (`/jobs all`, `/jobs <id>`, `/jobs cancel <id>`, `/jobs clean`) |
-| `/resume` | | Resume the agent with results from finished background jobs |
+| `/jobs` | | List and manage long-running background jobs (`/jobs all`, `/jobs <id>`, `/jobs cancel <id>`, `/jobs clean`; `/jobs resume` resumes the agent with finished jobs' results) |
 | `/papers` | `/docs` | List knowledge-base documents (filter by source, query, --global) |
 | `/sessions` | `/sess` | List saved sessions: title, turns, last update (delete one with `--delete=<id>`) |
 | `/compact` | | Summarize the conversation now, keeping the newest turns word for word (`/compact <focus>`: what the summary should keep above all) |
 | `/new` | | Start a new conversation; the current one stays in `/sessions` |
+| `/resume` | | Reopen a saved conversation: pick one (Enter opens it, Esc cancels), or `/resume <id>`; the last messages are shown again |
 
 Apps can add more of their own. `research_demo`, for instance, registers
 `/memory`, `/files` and `/kb-backfill` on top of the built-ins above.

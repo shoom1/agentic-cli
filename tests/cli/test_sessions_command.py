@@ -152,7 +152,7 @@ async def test_the_conversation_the_user_is_in_is_not_deleted():
 
     assert wf.deleted == []
     assert app.session.errors() == [
-        "You are in this conversation; start another with /new first."
+        "You are in this conversation; /new or /resume another first."
     ]
 
 

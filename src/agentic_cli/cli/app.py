@@ -827,7 +827,7 @@ class BaseCLIApp:
             StatusCommand,
             SandboxCommand,
             JobsCommand,
-            ResumeCommand,
+            ResumeSessionCommand,
             PapersCommand,
             SessionsCommand,
             CompactCommand,
@@ -842,7 +842,7 @@ class BaseCLIApp:
         self.command_registry.register(StatusCommand())
         self.command_registry.register(SandboxCommand())
         self.command_registry.register(JobsCommand())
-        self.command_registry.register(ResumeCommand())
+        self.command_registry.register(ResumeSessionCommand())
         self.command_registry.register(SettingsCommand())
         self.command_registry.register(PapersCommand())
         self.command_registry.register(SessionsCommand())
@@ -927,7 +927,7 @@ class BaseCLIApp:
 
         Each resume is a serialized turn (via the turn lock) so it never
         overlaps a user turn or another resume. Used at turn boundaries (auto,
-        gated) and by the /resume command (explicit, ungated).
+        gated) and by ``/jobs resume`` (explicit, ungated).
 
         Delivery follows the job's resume lifecycle: the job is *claimed*
         (pending → resuming) before the turn runs, so a crash cannot silently
