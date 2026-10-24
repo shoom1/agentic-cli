@@ -6,7 +6,9 @@ same session_id and the model answers with it — proving cross-restart durabili
 with full fidelity, no custom snapshot.
 
 The same check runs on the LangGraph and Deep Agents backends (their
-persistent checkpointers).
+persistent checkpointers). On ADK and Deep Agents, a fresh manager also lists
+the conversation as ``/resume`` shows it (its first prompt, its turns) and
+reads back the messages a resume replays.
 
 @pytest.mark.llm (needs GOOGLE_API_KEY); skipped by default:
 
@@ -153,3 +155,38 @@ async def test_deepagents_session_survives_a_fresh_manager(tmp_path: Path, monke
         assert _NAME in answer.lower(), f"deepagents did not recall across restart: {answer!r}"
     finally:
         await m2.cleanup()
+
+
+@pytest.mark.parametrize("orchestrator", ["adk", "deepagents"])
+async def test_a_stored_conversation_is_listed_and_replayed_after_a_restart(
+    tmp_path: Path, monkeypatch, orchestrator: str
+):
+    if orchestrator == "deepagents":
+        pytest.importorskip("deepagents")
+    monkeypatch.chdir(tmp_path)
+    settings = BaseSettings(
+        workspace_dir=tmp_path, session_store="sqlite", permissions_enabled=False,
+        orchestrator=orchestrator,
+    )
+    set_settings(settings)
+    sid, user = f"{orchestrator}-listed", settings.default_user
+
+    m1 = create_workflow_manager_from_settings(agent_configs=[_AGENT], settings=settings)
+    await _run(m1, _TELL, sid, user)
+    await _run(m1, _ASK, sid, user)
+    await m1.cleanup()
+
+    m2 = create_workflow_manager_from_settings(agent_configs=[_AGENT], settings=settings)
+    await m2.initialize_services()
+    try:
+        (row,) = await m2.list_sessions()
+        info = await m2.session_info(sid)
+        recent = await m2.recent_messages(sid, 10)
+    finally:
+        await m2.cleanup()
+
+    assert (row.session_id, row.title, row.turns) == (sid, _TELL, 2)
+    assert info == row
+    assert [m["role"] for m in recent] == ["user", "assistant", "user", "assistant"]
+    assert recent[0]["content"] == _TELL
+    assert _NAME in recent[-1]["content"].lower()
