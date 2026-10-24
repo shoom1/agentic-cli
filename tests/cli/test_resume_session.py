@@ -69,12 +69,18 @@ NOW = datetime.now(timezone.utc)
 
 
 def conversation(session_id: str, title: str, messages: int, *, hours: float = 2.0):
-    """A stored conversation: its row and its ``messages`` texts, alternating."""
+    """A stored conversation: its row and its ``messages`` texts, alternating.
+
+    Its time is ``hours`` before the call, not before ``NOW``: the picker
+    reads the clock when it runs, maybe minutes after this module loaded.
+    """
     texts = [
         {"role": "user" if i % 2 == 0 else "assistant", "content": f"{session_id} message {i}"}
         for i in range(messages)
     ]
-    info = SessionInfo(session_id, title, (messages + 1) // 2, NOW - timedelta(hours=hours))
+    info = SessionInfo(
+        session_id, title, (messages + 1) // 2, datetime.now(timezone.utc) - timedelta(hours=hours)
+    )
     return info, texts
 
 
