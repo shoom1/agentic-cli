@@ -20,6 +20,8 @@ import os
 import re
 import threading
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
@@ -34,6 +36,7 @@ from agentic_cli.memory.kb.models import (
     SourceType,
 )
 from agentic_cli.memory.kb.vector_store import VectorStore
+from agentic_cli.memory._core.filelock import file_stamp, folder_lock
 from agentic_cli.memory._core.io import atomic_write_json, atomic_write_text
 from agentic_cli.memory._core.model_record import ModelRecord, read_model_record, write_model_record
 from agentic_cli.memory._core.log import get_logger
@@ -183,6 +186,9 @@ class KnowledgeBaseManager:
         self._concepts_store: "ConceptStore | None" = None
         self._summarizer = summarizer
         self._use_mock = use_mock
+        # The keyword index follows the argument, not the fallback to mock
+        # embeddings _create_services may make.
+        self._mock_bm25 = use_mock
 
         self.kb_dir = base_dir
         self.documents_dir = base_dir / "documents"
@@ -207,13 +213,30 @@ class KnowledgeBaseManager:
                 embedding or EmbeddingConfig(), embedding_service
             )
 
-        # Load document metadata
         self._documents: dict[str, Document] = {}
         self._chunks: dict[str, DocumentChunk] = {}
+        self._bm25_index = None
+        # Every CLI session of an application opens the same knowledge bases,
+        # so the state is read, and each read or change made, holding the
+        # folder's lock (see _transaction). metadata.json as this knowledge
+        # base last read or wrote it:
+        self._lock_path = self.kb_dir / ".lock"
+        self._stamp: tuple[int, int, int] | None = None
+        with self._lock, folder_lock(self._lock_path):
+            self._read_state()
+            self._stamp = file_stamp(self.metadata_path)
+
+    def _read_state(self) -> None:
+        """Read the documents and the keyword index from disk.
+
+        The vector store has read its own index already. A real index must
+        have been built by the model this knowledge base has now (see
+        _reconcile_index).
+        """
+        self._documents = {}
+        self._chunks = {}
         self._load_metadata()
 
-        # A real index must have been built by the model this knowledge base
-        # has now (see _reconcile_index).
         if self._has_real_index():
             self._reconcile_index()
 
@@ -221,7 +244,7 @@ class KnowledgeBaseManager:
         self._bm25_index = None
         try:
             from agentic_cli.memory.kb.bm25_index import create_bm25_index
-            self._bm25_index = create_bm25_index(use_mock=use_mock)
+            self._bm25_index = create_bm25_index(use_mock=self._mock_bm25)
             if self.embeddings_dir.exists():
                 try:
                     self._bm25_index.load(self.embeddings_dir)
@@ -229,7 +252,7 @@ class KnowledgeBaseManager:
                     # Unreadable: start empty so the chunks are indexed again
                     # below, rather than leaving keyword search with nothing.
                     logger.warning("bm25_index_unreadable", path=str(self.embeddings_dir))
-                    self._bm25_index = create_bm25_index(use_mock=use_mock)
+                    self._bm25_index = create_bm25_index(use_mock=self._mock_bm25)
             if self._bm25_index.size != len(self._chunks):
                 # Each backend keeps its own index file, so one saved by
                 # another backend (a library installed or removed since) is
@@ -243,6 +266,26 @@ class KnowledgeBaseManager:
                 self._bm25_index.save(self.embeddings_dir)
         except Exception:
             logger.debug("bm25_init_skipped")
+
+    @contextmanager
+    def _transaction(self) -> Iterator[None]:
+        """Hold the knowledge base for one read or change, as every process sees it.
+
+        The thread lock keeps this manager's threads apart and the folder
+        lock every process that opened the folder. What another process
+        wrote since this one last read or wrote ``metadata.json`` (every
+        change writes it) is read again first, vectors and keyword index
+        included, so a change applies to the knowledge base as it is now:
+        each kept its documents from when it opened and rewrote the index
+        from them, dropping what another session had added since.
+        """
+        with self._lock, folder_lock(self._lock_path):
+            if file_stamp(self.metadata_path) != self._stamp:
+                self._vector_store.clear()
+                self._vector_store.load()
+                self._read_state()
+                self._stamp = file_stamp(self.metadata_path)
+            yield
 
     @property
     def concepts(self) -> "ConceptStore":
@@ -512,16 +555,19 @@ class KnowledgeBaseManager:
         made without holding ``_lock``, derived from the document's text) and
         then need to write it back safely — the pattern ``kb_read`` uses: a
         ``delete_document`` (or ``clear``) during that call must not be
-        followed by the write. Both hold ``_lock`` while removing a document,
-        and so does this check and write, so they cannot interleave.
+        followed by the write. Both hold the knowledge base (``_transaction``)
+        while removing a document, and so does this check and write, so they
+        cannot interleave, in this process or another. The document is looked
+        up by its id: reading the knowledge base again makes new objects.
 
         Returns:
             True if the sidecar was written.
         """
-        with self._lock:
-            if self._documents.get(doc.id) is not doc:
+        with self._transaction():
+            current = self._documents.get(doc.id)
+            if current is None:
                 return False
-            self._write_sidecar(doc, payload)
+            self._write_sidecar(current, payload)
             return True
 
     def _delete_sidecar(self, doc_id: str) -> None:
@@ -674,6 +720,7 @@ class KnowledgeBaseManager:
             "updated_at": datetime.now().isoformat(),
         }
         atomic_write_json(self.metadata_path, data)
+        self._stamp = file_stamp(self.metadata_path)
 
     # ------------------------------------------------------------------
     # File storage
@@ -868,7 +915,7 @@ class KnowledgeBaseManager:
                 chunk.embedding = embedding
 
         # Mutate shared state under lock
-        with self._lock:
+        with self._transaction():
             # Add embeddings first — if this fails, no state is modified
             if doc.chunks and embeddings:
                 chunk_ids = [c.id for c in doc.chunks]
@@ -918,12 +965,14 @@ class KnowledgeBaseManager:
         # Semantic search
         semantic_results: list[tuple[str, float]] = []
         embed_time = search_time = 0.0
+        query_embedding = None
         if not isinstance(self._embedding_service, MockEmbeddingService):
             embed_start = time.time()
             query_embedding = self._embedding_service.embed_text(query)
             embed_time = (time.time() - embed_start) * 1000
 
-            with self._lock:
+        with self._transaction():  # also reads again what another process added
+            if query_embedding is not None:
                 search_start = time.time()
                 semantic_results = self._vector_store.search(query_embedding, top_k * 2)
                 search_time = (time.time() - search_start) * 1000
@@ -1006,7 +1055,8 @@ class KnowledgeBaseManager:
         Returns:
             Document if found, None otherwise.
         """
-        return self._documents.get(doc_id)
+        with self._transaction():
+            return self._documents.get(doc_id)
 
     def find_document(self, id_or_title: str) -> Document | None:
         """Find a document by exact ID, ID prefix, or title substring.
@@ -1022,19 +1072,22 @@ class KnowledgeBaseManager:
         Returns:
             Document if found, None otherwise.
         """
+        with self._transaction():
+            documents = dict(self._documents)
+
         # Exact ID
-        doc = self._documents.get(id_or_title)
+        doc = documents.get(id_or_title)
         if doc:
             return doc
 
         # ID prefix
-        for doc_id, d in self._documents.items():
+        for doc_id, d in documents.items():
             if doc_id.startswith(id_or_title):
                 return d
 
         # Title substring (case-insensitive)
         query_lower = id_or_title.lower()
-        for d in self._documents.values():
+        for d in documents.values():
             if query_lower in d.title.lower():
                 return d
 
@@ -1054,7 +1107,8 @@ class KnowledgeBaseManager:
         Returns:
             List of documents.
         """
-        docs = list(self._documents.values())
+        with self._transaction():
+            docs = list(self._documents.values())
 
         if source_type:
             docs = [d for d in docs if d.source_type == source_type]
@@ -1073,7 +1127,7 @@ class KnowledgeBaseManager:
         Returns:
             True if deleted, False if not found.
         """
-        with self._lock:
+        with self._transaction():
             doc = self._documents.get(doc_id)
             if not doc:
                 return False
@@ -1110,17 +1164,21 @@ class KnowledgeBaseManager:
         Returns:
             Dict with document count, chunk count, and other stats.
         """
+        with self._transaction():
+            documents = list(self._documents.values())
+            chunk_count = len(self._chunks)
+            vector_count = self._vector_store.size
         source_counts: dict[str, int] = {}
-        for doc in self._documents.values():
+        for doc in documents:
             source = doc.source_type.value
             source_counts[source] = source_counts.get(source, 0) + 1
 
         embedding_model = getattr(self._embedding_service, "model_name", "unknown")
 
         return {
-            "document_count": len(self._documents),
-            "chunk_count": len(self._chunks),
-            "vector_count": self._vector_store.size,
+            "document_count": len(documents),
+            "chunk_count": chunk_count,
+            "vector_count": vector_count,
             "source_counts": source_counts,
             "embedding_model": embedding_model,
             "embedding_dim": self._embedding_service.embedding_dim,
@@ -1128,7 +1186,7 @@ class KnowledgeBaseManager:
 
     def clear(self) -> None:
         """Clear all documents from the knowledge base."""
-        with self._lock:
+        with self._transaction():
             # Delete per-document content files, sidecars and stored files
             for doc_id, doc in list(self._documents.items()):
                 self._delete_document_content(doc_id)
@@ -1183,7 +1241,7 @@ class KnowledgeBaseManager:
         # Check-and-set the running flag and snapshot the work list under
         # one lock acquisition so a second thread cannot slip past the
         # guard between the read and the write.
-        with self._lock:
+        with self._transaction():
             if self._backfill_running:
                 raise BackfillAlreadyRunning(
                     "backfill_sidecars is already running on this KB"
@@ -1202,7 +1260,7 @@ class KnowledgeBaseManager:
                 # been removed since the snapshot was taken. Checked
                 # under the lock so a concurrent delete_document cannot
                 # interleave between the check and use.
-                with self._lock:
+                with self._transaction():
                     if doc.id not in self._documents:
                         continue
                 lock = self.get_or_create_sidecar_lock(doc.id)
@@ -1211,7 +1269,7 @@ class KnowledgeBaseManager:
                     # have written it (e.g. lazy kb_read fallback).
                     if self.sidecar_path(doc.id).exists():
                         continue
-                    with self._lock:
+                    with self._transaction():
                         if doc.id not in self._documents:
                             continue
                     if progress_cb is not None:

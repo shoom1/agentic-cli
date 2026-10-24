@@ -1251,6 +1251,18 @@ step; each entry says what to use instead.
   to the log file only, as Deep Agents' logging does, and each of its
   records names the model of the agent that made the call, not the default
   model.
+- **Knowledge bases open on one folder no longer drop each other's
+  documents.** Every CLI session of an application opens the same project
+  and user knowledge bases. Each kept the documents it read when it opened
+  and rewrote `metadata.json`, the vector index and the keyword index from
+  them on every change, so with two sessions open, a document ingested in
+  one and then one in the other left only the second (the first's files
+  stayed on disk, listed nowhere), and a deletion could be undone the same
+  way. Each read or change now holds the folder's lock file (`.lock`) and
+  first reads again, vectors and keyword index included, what another
+  process wrote; a session finds the others' new documents without
+  restarting. A sidecar is written for a document that is still there, by
+  id: a document another session deleted gets none.
 - **Ctrl+C while `/settings` restarts the workflow no longer leaves the new
   values live and unsaved.** A Save that changes the model, a role's model,
   the thinking effort or the orchestrator restarts the workflow on them, and
