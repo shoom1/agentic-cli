@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Saving settings keeps the project's deny rules.** The project
+  `./.{app_name}/settings.json` may hold `permissions.deny` rules, which the
+  permission engine reads from the file itself, but a settings save (any
+  `/settings` change, or `SettingsPersistence.save` without `path=`) rewrote
+  that file with its settings alone and dropped the section, so after the
+  next start a read the project denied was allowed (since 0.6.0). These
+  saves now keep the section as it is; a full save of a project file that is
+  not valid JSON raises instead of replacing it, as the `/settings` save
+  already did. The startup warning that called the section an ignored setting
+  is gone: its deny rules apply (its allow rules, as before, do not). A
+  `permissions` entry in a cwd `.env` is still reported as ignored.
 - **`web_fetch` opens a connection for each request.** Its transport connects
   to the address it validated, so its connection pool is keyed by that IP,
   not the hostname, and it kept connections alive across fetches (since
@@ -1323,6 +1334,16 @@ step; each entry says what to use instead.
 
 ### Fixed
 
+- **A memory edited without an embedding service is embedded again.** Where
+  no service runs (no `kb` extra, say), `MemoryStore.update` clears an edited
+  memory's vector, which was of its old text; when that was the only vector,
+  `memories_embeddings.json` was not rewritten, so the next store with a
+  service paired the new text with the old text's vector, and a search found
+  the memory by what it used to say. The file is now rewritten, empty if need
+  be, and the memory is embedded again when a store with a service opens it.
+  An edit whose embedding fails (a network error, say) now leaves the memory
+  as it was: it kept the new text with the old text's vector, which the next
+  save wrote.
 - **A request stopped with Ctrl+C, or cut off by a crash, leaves every tool
   call with one result** (`workflow/interrupts.py`), on both backends. ADK
   dropped a call a cancel left open from every later request, so the model

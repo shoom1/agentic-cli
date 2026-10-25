@@ -85,6 +85,11 @@ PROJECT_SETTABLE_KEYS = frozenset({
 # lists them (BaseCLIApp._build_ui_items), unlike any other user-scoped key.
 USER_PREFERENCE_KEYS = frozenset({"ui_theme", "dialog_placement"})
 
+# Sections of the project file that are not settings: the permission engine
+# reads its deny rules from the file itself (workflow/permissions/engine.py),
+# so the loader passes over them and every save keeps them as they are.
+PROJECT_PRESERVED_KEYS = frozenset({"permissions"})
+
 # Identity fields set by the application, not the user
 IDENTITY_FIELDS = frozenset({
     "app_name",
@@ -214,7 +219,9 @@ class SettingsPersistence:
           regardless of whether they match the schema default, because
           subclasses may have different effective defaults. The file is fully
           rewritten, which also heals stale pre-P0-1 files holding keys the
-          loader now ignores.
+          loader now ignores; its ``PROJECT_PRESERVED_KEYS`` sections (the
+          project's deny rules) are kept as they are, so a malformed project
+          file raises rather than being clobbered.
         - User config (~/.{app_name}/settings.json) receives the remaining
           user-scoped fields, but only those differing from the settings
           class default (so code-default changes keep applying for untouched
@@ -263,6 +270,10 @@ class SettingsPersistence:
         user_updates, user_removals = self._split_user_scoped(settings, data)
 
         project_path = self.project_config_path
+        existing = self._read_object(project_path)
+        project_data.update(
+            {k: existing[k] for k in sorted(PROJECT_PRESERVED_KEYS) if k in existing}
+        )
         project_path.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_text(
             project_path, json.dumps(project_data, indent=2, default=str)
@@ -276,7 +287,8 @@ class SettingsPersistence:
     def _save_keys(self, settings: "BaseSettings", keys: set[str]) -> SettingsSaveResult:
         """Write only ``keys``: project-settable ones merged into the project
         file, the rest updated in (or, back at default, removed from) the
-        user file. Nothing else is touched."""
+        user file. Nothing else is touched (the project file's
+        ``PROJECT_PRESERVED_KEYS`` sections are kept)."""
         from pydantic_core import PydanticUndefined
 
         from agentic_cli.file_utils import atomic_write_text
@@ -295,9 +307,12 @@ class SettingsPersistence:
         project_updates = {k: dump[k] for k in sorted(keys) if k in PROJECT_SETTABLE_KEYS}
         if project_updates or entry_fields:
             existing = self._read_object(project_path)
-            # Keep the file's other allowlisted entries; drop stale ones the
-            # loader would ignore anyway.
-            merged = {k: v for k, v in existing.items() if k in PROJECT_SETTABLE_KEYS}
+            # Keep the file's other allowlisted entries and its deny rules;
+            # drop stale ones the loader would ignore anyway.
+            merged = {
+                k: v for k, v in existing.items()
+                if k in PROJECT_SETTABLE_KEYS or k in PROJECT_PRESERVED_KEYS
+            }
             merged.update(project_updates)
             for field in entry_fields:
                 own = merged.get(field)
