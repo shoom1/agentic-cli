@@ -356,7 +356,10 @@ What it supports:
 - **MCP tools, Agent Skills, raw LLM logging and job resume**, from the same
   `AgentConfig.mcp_servers`, `AgentConfig.skills`, `raw_llm_logging` and
   `job_auto_resume` (or `/jobs resume`) as on ADK. An MCP tool is gated under the
-  `mcp` capability, with its name as the target.
+  `mcp` capability, with its name as the target. A finished job reaches the
+  root agent as a message of its own, which opens with `[Automatic job
+  notification — not written by the user]`, in the conversation that started
+  it, as on ADK.
 
 How it differs from ADK:
 - **The delegation tool's name**: a sub-agent is delegated to and returns
@@ -367,10 +370,6 @@ How it differs from ADK:
   automatic and bills no storage.
 - **No code-execution events**: `CODE_EXECUTION`, `EXECUTABLE_CODE` and
   `FILE_DATA` come from Gemini's code execution on ADK.
-- **A finished job** reaches the root agent as a message of its own, which
-  opens with `[Automatic job notification — not written by the user]`, rather
-  than as the result of the call that started it. (On ADK only a sub-agent's
-  job is told that way.)
 - **A sub-agent's failure ends the turn** with one error; on ADK the
   coordinator carries on, and the user gets a warning.
 - **Its own sessions**: neither backend reads the other's, so switching the

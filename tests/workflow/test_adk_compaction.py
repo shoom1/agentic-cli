@@ -39,6 +39,7 @@ from google.adk.apps import compaction as adk_compaction  # noqa: E402
 from agentic_cli.cli.message_processor import CANCELLED_LINE, MessageProcessor  # noqa: E402
 from agentic_cli.config import BaseSettings  # noqa: E402
 from agentic_cli.tools.jobs import JobState  # noqa: E402
+from agentic_cli.tools.jobs.resume import JOB_NOTICE_HEADER  # noqa: E402
 from agentic_cli.cli.usage_tracker import UsageTracker  # noqa: E402
 from agentic_cli.tools.registry import ToolCategory, register_tool  # noqa: E402
 from agentic_cli.workflow import live_events  # noqa: E402
@@ -675,7 +676,9 @@ def _record(call_id: str) -> SimpleNamespace:
 
 
 class TestAJobResumedAfterASummary:
-    async def test_its_result_finds_its_call_and_the_turn_answers(self, project, monkeypatch):
+    async def test_its_notice_follows_the_summary_and_the_turn_answers(
+        self, project, monkeypatch
+    ):
         answers = serve(monkeypatch, Claude(solo=[
             calls("compaction_probe_start_job", "toolu_j1", command="make"), says("Started."),
             says("A2."), says("A3.", OVER), says("A4."), says("The build finished."),
@@ -701,11 +704,11 @@ class TestAJobResumedAfterASummary:
         assert answers.asked == ["solo"] * 4 + ["summary", "solo", "solo"]
         assert len(summarized) == 1
         assert "solo called compaction_probe_start_job" in lines(answers.bodies("summary")[0])[0]
-        # ADK puts the call back in front of the job's result.
+        # The job is told after the summary and the turns kept, as a notice.
         last = lines(answers.bodies("solo")[-1])
         assert last[0].startswith(f"user: {SUMMARY_PREFIX}")
-        assert last[-2:] == ["assistant: called compaction_probe_start_job#toolu_j1",
-                             "user: result#toolu_j1"]
+        assert last[-1].startswith(f"user: {JOB_NOTICE_HEADER}")
+        assert "assistant: A4." in last
         assert "built ok" in json.dumps(answers.bodies("solo")[-1]["messages"][-1])
         assert texts(resumed) == ["The build finished."]
         assert [e for e in resumed if e.type is EventType.ERROR] == []

@@ -29,6 +29,7 @@ controller holds a fake workflow (``tests/cli/test_compact_and_new.py``).
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 from unittest.mock import call
 
@@ -344,6 +345,50 @@ class TestResumeSession:
         await asyncio.wait_for(resuming, 5)
 
         assert waited and app.session_id == "abc"
+
+
+class _Jobs:
+    """A job manager holding finished jobs that wait to be told."""
+
+    def __init__(self, *records) -> None:
+        self.records = list(records)
+        self.claimed: list[str] = []
+
+    def awaiting_resume(self):
+        return [r for r in self.records if r.job_id not in self.claimed]
+
+    def begin_resume(self, job_id: str) -> bool:
+        self.claimed.append(job_id)
+        return True
+
+    def complete_resume(self, job_id: str, *, delivered: bool, error=None) -> None:
+        pass
+
+
+class TestItsFinishedJobs:
+    @pytest.mark.parametrize("auto, told", [(True, ["j1"]), (False, [])])
+    async def test_they_are_told_once_it_is_open_when_auto_resume_is_on(
+        self, project, auto, told
+    ):
+        from agentic_cli.cli.message_processor import TurnResult, TurnStatus
+
+        workflow = Workflow(conversation("abc", "Plan the trip", 2))
+        app = app_on(workflow, fake_settings(job_auto_resume=auto))
+        me = app.settings.default_user
+        workflow.job_manager = _Jobs(
+            SimpleNamespace(job_id="j1", name="build", session_id="abc", user_id=me),
+            SimpleNamespace(job_id="j2", name="other", session_id="xyz", user_id=me),
+        )
+        seen: list[tuple[str, str]] = []
+
+        async def process_resume(*, record, current_session_id=None, **_):
+            seen.append((record.job_id, current_session_id))
+            return TurnResult(TurnStatus.COMPLETED)
+
+        app._message_processor.process_resume = process_resume
+
+        assert await app.resume_session("abc")
+        assert seen == [(job, "abc") for job in told]
 
 
 class TestPickSession:

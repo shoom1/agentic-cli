@@ -1337,6 +1337,22 @@ step; each entry says what to use instead.
   "Operation cancelled..." one line now names each that is still queued or
   running: "Still running in the background: build (j1). Stop one with
   /jobs cancel <id>."
+- **A finished job is told in its own conversation, and on ADK after the
+  turns since it started.** ADK delivered a job's result to its pending call
+  itself, and ADK then sent the model the call, that result and nothing in
+  between, so the agent answered without what the user had said since; it
+  is now one user-role notice, as on Deep Agents (an app built from configs;
+  a native ADK YAML app keeps the call's result), and `can_resume` no longer
+  needs the call's id. `/jobs resume` and the turn-boundary resume delivered
+  every waiting job into the conversation on screen, another's too; they
+  now deliver the current conversation's, and opening a conversation
+  (`/resume`, `--continue`, `--resume <id>`) resumes its finished jobs when
+  `job_auto_resume` is on. The status bar's `↻N` counts the current
+  conversation's waiting jobs whatever the setting, `↻N: /jobs resume` when
+  it is off (it showed nothing then). The notice now asks the agent, on a
+  line after its header, to tell the user what the job's result means:
+  without it Gemini 2.5 Flash, live, said nothing in about one resume in
+  five.
 - **On ADK, `/sessions` counts a conversation's turns, and deleting an
   unknown one says so.** Messages read 0 for every session (ADK's listing
   loads no events), and `delete_session` returned True for any id, so

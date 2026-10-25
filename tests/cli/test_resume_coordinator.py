@@ -79,6 +79,25 @@ async def test_resumes_each_awaiting_job_once():
     assert jm.completed == [("a", True, None), ("b", True, None)]
 
 
+async def test_only_this_conversations_jobs_are_resumed():
+    """Another conversation's job waits until that conversation is open; one
+    with no conversation still goes through (it is told it is unavailable)."""
+    recs = [
+        SimpleNamespace(job_id="here", session_id="s", user_id="me"),
+        SimpleNamespace(job_id="elsewhere", session_id="other", user_id="me"),
+        SimpleNamespace(job_id="someone-else", session_id="s", user_id="them"),
+        SimpleNamespace(job_id="orphan", session_id=None, user_id=None),
+    ]
+    app, jm = _app(recs)
+    app._settings.default_user = "me"
+
+    n = await app.resume_finished_jobs()
+
+    assert n == 2
+    assert app._message_processor.resumed == ["here", "orphan"]
+    assert jm.claimed == ["here", "orphan"]
+
+
 async def test_claims_before_processing_and_records_after():
     order: list = []
     app, jm = _app([SimpleNamespace(job_id="a")])
