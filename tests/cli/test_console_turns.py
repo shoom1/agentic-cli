@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import re
+import shlex
 import sys
 from pathlib import Path
 
@@ -254,7 +256,9 @@ def test_resume_of_a_conversation_that_is_not_stored_exits_before_the_prompt(tmp
     (tmp_path / "home").mkdir()
     console = Console(tmp_path, tmp_path / "home", args=("--resume", "zzz"), prompt=False)
     try:
-        console.expect(f"No conversation 'zzz' found. Run python {CONSOLE_APP} --resume to pick one.",
+        # The command as it was run: this interpreter, the script's path quoted.
+        run = f"{os.path.basename(sys.executable)} {shlex.quote(str(CONSOLE_APP))}"
+        console.expect(f"No conversation 'zzz' found. Run {run} --resume to pick one.",
                        timeout=STARTUP_TIMEOUT)
         console.child.expect(pexpect.EOF, timeout=STEP_TIMEOUT)
         console.child.close()

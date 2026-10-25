@@ -559,18 +559,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `session_info(session_id, *, user_id=None)` one conversation's, or None
   when it is not stored (`SessionInfo` is exported from `agentic_cli`). The title is the
   first prompt on one line (`agentic_cli.workflow.sessions.session_title`:
-  control characters removed, whitespace collapsed, at most 80 characters,
+  control and invisible format characters removed, the zero-width joiners
+  kept, whitespace collapsed, at most 80 characters,
   a longer one cut with "…"); the turns count what the user typed, not a
   job's notice or resume, a delegated request or a summary; `updated` is
   when it last changed. ADK keeps the title and the turns in two
   session-state keys, `agentic_cli.title` and `agentic_cli.turns`, saved
   with each user turn's message (`Runner.run_async(state_delta=)`), so
   listing reads no events; a conversation stored before them is read from
-  its events, for the rows returned, and nothing is written back (its place
-  in the list stays). Deep Agents reads both from each conversation's newest
+  its events, for the rows returned (one that cannot be read is listed by
+  its id alone), and nothing is written back (its place in the list stays). Deep Agents reads both from each conversation's newest
   checkpoint; LangGraph knows only the id. `/sessions` shows the title (as
-  typed, never as Rich markup, as the id is; "(no prompt yet)" without one)
-  and the turns, and refuses to delete the conversation the user is in.
+  typed, neither Rich markup nor emoji codes, as the id is; "(no prompt
+  yet)" for a stored one without, nothing where the backend cannot tell, as
+  on LangGraph) and the turns, and refuses to delete the conversation the
+  user is in.
 - **`/resume [<id>]` reopens a saved conversation without a restart**, and
   its public twins `BaseCLIApp.resume_session(session_id) -> bool` and
   `BaseCLIApp.pick_session() -> str | None`. `/resume` opens a picker, "Resume
@@ -597,14 +600,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   [ID]`.** Point an app's console script at it (`my-app =
   "my_app.cli:MyApp.main"`): it parses the session flags
   (`agentic_cli.cli.session_args`: `add_session_arguments`, `SessionStart`,
-  `parse_session_start`) and the app's own (`add_arguments(parser)`), builds
-  the app with `from_args(args)` (by default `cls()`), sets its
+  also exported from `agentic_cli.cli`, `parse_session_start`) and the app's
+  own (`add_arguments(parser)`), builds the app with `from_args(args)` (by
+  default `cls()`; it returns `Self`), sets its
   `session_start`, runs it and exits with its `exit_status`. `-c`/`--continue`
   resumes the newest saved conversation once the prompt is up, or says "No
   conversation to continue; starting a new one."; `-r`/`--resume <id>`
   resumes that one, and refuses one that is not saved before the prompt is
   drawn ("No conversation '<id>' found. Run <app> --resume to pick one.",
-  status 1); `--resume` alone opens the picker once the prompt is up, where
+  status 1; on `session_store=memory`, which holds none to pick, without the
+  pick); a resume that fails once the prompt is up says so ("Could not open
+  '<id>': …", or, when it opened, "Opened '<id>', but could not show where
+  it left off: …"); `--resume` alone opens the picker once the prompt is up, where
   Ctrl+C ends the app, as at an idle prompt (a Ctrl+C before the prompt,
   while the workflow starts, ends it with status 130). A workflow that cannot start
   keeps the prompt and says how to resume after `/settings`; a backend
@@ -1385,19 +1392,9 @@ step; each entry says what to use instead.
   `workflow.sessions.ConversationChangedError`, said plainly: "Conversation
   '<id>' was changed by another process during this turn. Send your message
   again to go on from what it holds now."
-- **Session listing and resume details.** `/sessions` shows a title or an
-  id as typed, emoji codes too (":x:" was turned into an emoji, and an id
-  could not be copied back); on a backend that cannot tell a title
-  (LangGraph) the row, the picker and the "Resumed:" line no longer say
-  "(no prompt yet)"; one conversation from before the title keys that cannot
-  be read is listed by its id instead of failing the whole ADK listing; a
-  title keeps its zero-width joiners (a Persian word, a family emoji); a
-  `/resume` whose switch failed after the facts were saved no longer saves
-  them again; a startup resume that fails after the conversation opened says
-  "Opened '<id>', but could not show where it left off: …"; on
-  `session_store=memory` the refusal of `--resume <id>` no longer says to
-  pick one from a store that holds none; `SessionStart` is exported from
-  `agentic_cli.cli`, and `from_args` returns `Self`.
+- **`/sessions` shows a session id as typed.** Rich turned an emoji code
+  in an id (":x:") into an emoji, so the id could not be copied back into
+  `--delete=`.
 - **On ADK, `/sessions` counts a conversation's turns, and deleting an
   unknown one says so.** Messages read 0 for every session (ADK's listing
   loads no events), and `delete_session` returned True for any id, so
