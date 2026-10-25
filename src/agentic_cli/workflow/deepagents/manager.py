@@ -72,6 +72,7 @@ from agentic_cli.workflow.deepagents.summarization import (
 )
 from agentic_cli.workflow.deepagents.tools import to_langchain_tools
 from agentic_cli.workflow.events import WorkflowEvent
+from agentic_cli.workflow.interrupts import OpenCalls
 from agentic_cli.workflow.langchain_models import build_chat_model
 from agentic_cli.workflow.live_events import LiveEvents, merged
 from agentic_cli.workflow.llm_log import LLMLogWriter
@@ -165,6 +166,9 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
 
         # The raw LLM log, made on the first turn that logs (it creates the file).
         self._llm_log: LLMLogWriter | None = None
+        # What became of the turns' tool calls: the next turn answers those a
+        # cancel left open from it (workflow/interrupts.py).
+        self._open_calls = OpenCalls()
 
         # Notices for the next turn to open with, as recoverable ERROR events
         # (an MCP server that could not start, an MCP tool skipped).
@@ -272,6 +276,7 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             checkpointer=self._checkpointer,
             bound=self._identify_tool,
             summarizers=summarizers,
+            open_calls=self._open_calls,
         )
         self._root_name = graph.root_name
         self._root_summarization = summarizers.get(graph.root_name)
@@ -736,7 +741,10 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
                         if event is not None:
                             count += 1
                             yield event
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, GeneratorExit):
+            # Its open calls are answered before the next turn's first model
+            # call, from what the record kept (InterruptedCallsMiddleware).
+            self._open_calls.cancelled(ref)
             raise
         except Exception as error:
             logger.warning(
@@ -745,10 +753,13 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
                 error=truncate(str(error), _MAX_LOGGED_ERROR),
                 exc_info=error,
             )
+            self._open_calls.clear()
             event = self._apply_event_hook(processor.turn_failed(error))
             if event is not None:
                 yield event
             return
+        # Every call of the turn has its result in the checkpoint now.
+        self._open_calls.clear()
         logger.info("message_processed", event_count=count)
 
     def _raw_llm_log(self) -> LLMLogWriter | None:

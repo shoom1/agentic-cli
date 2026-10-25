@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from contextvars import ContextVar
 from typing import Any, TypeVar
 
@@ -114,7 +114,7 @@ def current() -> LiveEvents | None:
 
 
 async def merged(
-    source: AsyncIterator[T], live: LiveEvents
+    source: AsyncIterator[T], live: LiveEvents, *, on_stop: Callable[[], None] | None = None
 ) -> AsyncIterator[T | WorkflowEvent]:
     """``source``'s items, with the events ``live`` receives as they arrive.
 
@@ -129,9 +129,13 @@ async def merged(
     stop, cancelled and awaited, and the source is closed in the pump's own
     task: a stream built on anyio or LangGraph's runner must be closed in the
     task that iterated it. A source that swallows the cancel and yields once
-    more does not keep the pump pulling.
+    more does not keep the pump pulling. ``on_stop`` is called when the
+    consumer stops before the source ended, before the source is cancelled:
+    ADK's runner seals what a stopped invocation left open only when its
+    abort signal is set by then.
     """
     queue = live._queue
+    ended = False
     pulled = asyncio.Event()
     pulled.set()
     stopped = asyncio.Event()
@@ -145,14 +149,18 @@ async def merged(
                 yield value
                 pulled.set()
             elif kind == _ERROR:
+                ended = True
                 raise value
             else:  # _DONE
+                ended = True
                 break
         while not queue.empty():
             kind, value = queue.get_nowait()
             if kind == _EVENT:
                 yield value
     finally:
+        if not ended and on_stop is not None:
+            on_stop()
         # Wake a pump waiting for the consumer, so that it stops instead of
         # pulling again, then cancel one still inside the source.
         stopped.set()

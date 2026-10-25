@@ -21,8 +21,10 @@ changed. Deep Agents marks forks beta with a ``LangChainBetaWarning``
 LangChain would print over the UI; that one warning is filtered, and a
 debug log (``deepagents_fork_beta``) says which agents fork.
 
-Every stack, outermost first: ``PatchToolCallsMiddleware`` (answers a tool
-call a cancelled turn left without a result, before each run), the
+Every stack, outermost first: ``InterruptedCallsMiddleware`` (answers a
+tool call a cancelled turn or a crash left without a result, before each
+run, as ``workflow/interrupts.py`` says; Deep Agents' own
+``PatchToolCallsMiddleware`` without the manager's record), the
 coordinator's ``SubAgentMiddleware`` (so its ``task`` tool is gated like any
 other), then the model side and the tool side.
 
@@ -71,11 +73,13 @@ from agentic_cli.workflow.deepagents.middleware import (
     ActiveToolCallMiddleware,
     ContextOverflowMiddleware,
     ForeignReasoningMiddleware,
+    InterruptedCallsMiddleware,
     PermissionMiddleware,
     ToolCallErrorMiddleware,
     ToolResultCapMiddleware,
 )
 from agentic_cli.workflow.deepagents.state import AgentCliState
+from agentic_cli.workflow.interrupts import OpenCalls
 from agentic_cli.workflow.deepagents.summarization import (
     ReportingSummarizationMiddleware,
     build_summarization,
@@ -109,6 +113,7 @@ def build_agent_tree(
     checkpointer: "BaseCheckpointSaver | None",
     bound: Callable[[object], ToolDefinition | None] = identify_tool,
     summarizers: dict[str, ReportingSummarizationMiddleware] | None = None,
+    open_calls: OpenCalls | None = None,
 ) -> "CompiledStateGraph":
     """Build every agent, bottom-up, and return the root.
 
@@ -137,6 +142,8 @@ def build_agent_tree(
             middleware, by name (none for an agent built without settings):
             the manager keeps the root's to summarize on demand
             (``compact``).
+        open_calls: The manager's record of its calls, for answering those
+            a cancelled turn leaves open (``InterruptedCallsMiddleware``).
 
     Raises:
         AgentGraphError: A coordinator's own tools include one named
@@ -164,8 +171,12 @@ def build_agent_tree(
             system_prompt=prompts[name],
             middleware=_middleware(
                 subagents,
+                first=(
+                    PatchToolCallsMiddleware() if open_calls is None
+                    else InterruptedCallsMiddleware(open_calls, root=name == root)
+                ),
                 model_side=model_side,
-                tool_side=_tool_side(config, settings, bound=bound),
+                tool_side=_tool_side(config, settings, bound=bound, open_calls=open_calls),
             ),
             state_schema=AgentCliState,
             name=name,
@@ -195,10 +206,11 @@ def _own_tools(
 def _middleware(
     subagents: list[CompiledSubAgent],
     *,
+    first: "AgentMiddleware",
     model_side: list["AgentMiddleware"],
     tool_side: list["AgentMiddleware"],
 ) -> list["AgentMiddleware"]:
-    stack: list[AgentMiddleware] = [PatchToolCallsMiddleware()]
+    stack: list[AgentMiddleware] = [first]
     if subagents:
         stack.append(_delegation(subagents))
     return stack + model_side + tool_side
@@ -209,9 +221,12 @@ def _tool_side(
     settings: "BaseSettings | None",
     *,
     bound: Callable[[object], ToolDefinition | None],
+    open_calls: OpenCalls | None = None,
 ) -> list["AgentMiddleware"]:
     """What runs each of the agent's tool calls, outermost first."""
-    stack: list[AgentMiddleware] = [PermissionMiddleware(config.name, bound=bound)]
+    stack: list[AgentMiddleware] = [
+        PermissionMiddleware(config.name, bound=bound, open_calls=open_calls)
+    ]
     if settings is not None:
         # Inside the gate, whose denials are short; outside the tool-error
         # middleware, so an error result is capped too.

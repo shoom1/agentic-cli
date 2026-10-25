@@ -32,6 +32,7 @@ ADK_CACHE_LOGGER = "google_adk.google.adk.models.gemini_context_cache_manager"
 ADK_COMPACTION_LOGGER = "google_adk.google.adk.apps.compaction"
 ADK_NODE_LOGGER = "google_adk.google.adk.workflow._node_runner"
 ADK_PLUGIN_LOGGER = "google_adk.google.adk.plugins.plugin_manager"
+ADK_REARRANGER_LOGGER = "google_adk.google.adk.flows.llm_flows.tools._rearranger"
 
 
 class _LogRecorder:
@@ -208,6 +209,28 @@ async def test_adks_context_cache_advice_is_logged_not_printed(logged, tmp_path,
     advice = [e for e in logged if e["event"] == "adk_uncached_agent_transfer"]
     assert [e["log_level"] for e in advice] == ["debug"]
     assert "has no context_cache_config" in advice[0]["message"]
+
+
+# --- calls left without a result ----------------------------------------------------
+#
+# ADK drops a call no result answers from every later request, and warns on
+# each: a session a crash (or a cancel from before the abort signal) left so.
+# The next turn answers it (workflow/adk/interrupted_calls_plugin.py), so the
+# warning has nothing for the user and would print over the UI.
+
+
+def test_adks_dropped_call_warning_is_logged_not_printed(logged, caplog):
+    _install_adk_notice_hook()
+
+    with caplog.at_level(logging.WARNING, logger=ADK_REARRANGER_LOGGER):
+        logging.getLogger(ADK_REARRANGER_LOGGER).warning(
+            "Dropping function calls with no matching function response: %s", ["call-1"]
+        )
+
+    assert [r for r in caplog.records if r.name == ADK_REARRANGER_LOGGER] == []
+    (entry,) = [e for e in logged if e["event"] == "adk_dropped_open_calls"]
+    assert entry["log_level"] == "debug"
+    assert "call-1" in entry["message"]
 
 
 # --- ADK's context-cache failures ----------------------------------------------------

@@ -29,6 +29,7 @@ Adapter check order (mirrors LangGraph wrapper for consistency):
 
 from __future__ import annotations
 
+import contextlib
 from typing import Any, TYPE_CHECKING
 
 from google.adk.plugins.base_plugin import BasePlugin
@@ -47,6 +48,8 @@ from agentic_cli.workflow.service_registry import PERMISSION_ENGINE, get_service
 if TYPE_CHECKING:
     from google.adk.tools import BaseTool
     from google.adk.tools.tool_context import ToolContext
+
+    from agentic_cli.workflow.interrupts import OpenCalls
 
 logger = Loggers.workflow()
 
@@ -165,10 +168,22 @@ def _no_engine_result(tool_name: str) -> dict | None:
 
 
 class PermissionPlugin(BasePlugin):
-    """ADK plugin: gates every tool call through :class:`PermissionEngine`."""
+    """ADK plugin: gates every tool call through :class:`PermissionEngine`.
 
-    def __init__(self) -> None:
+    Args:
+        open_calls: The manager's record of its calls, marked while a call
+            waits at its prompt: a cancel there means it was not run.
+    """
+
+    def __init__(self, open_calls: "OpenCalls | None" = None) -> None:
         super().__init__(name="permission")
+        self._open_calls = open_calls
+
+    def _asking(self, tool_context: "ToolContext | None"):
+        call_id = getattr(tool_context, "function_call_id", None)
+        if self._open_calls is None:
+            return contextlib.nullcontext()
+        return self._open_calls.asking(call_id)
 
     async def before_tool_callback(
         self,
@@ -194,7 +209,8 @@ class PermissionPlugin(BasePlugin):
         if defn is _MCP:
             # MCP tools are created inside ADK when the server connects, so
             # they carry no binding; gate them under a synthetic capability.
-            return await self._check_mcp(tool)
+            with self._asking(tool_context):
+                return await self._check_mcp(tool)
 
         caps = defn.capabilities
 
@@ -212,7 +228,8 @@ class PermissionPlugin(BasePlugin):
         if engine is None:
             return _no_engine_result(defn.name)
 
-        result = await engine.check(defn.name, caps, tool_args)
+        with self._asking(tool_context):
+            result = await engine.check(defn.name, caps, tool_args)
         if result.allowed:
             return None
         return {"success": False, "error": f"Permission denied: {result.reason}"}
