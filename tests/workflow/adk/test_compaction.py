@@ -153,9 +153,10 @@ class TestSummaryRange:
         assert summary_range(events, keep_tokens=tokens(*events[6:]) + 1, kind=CLAUDE) == 2
 
     def test_a_call_never_answered_does_not_hold_the_cut_back(self):
-        # A turn cancelled mid-tool leaves a call no result will ever answer;
-        # ADK hands it over as dead. Kept out, it would stand before every
-        # later cut, and the conversation would never be summarized again.
+        # A crash mid-tool (or a cancel from before the abort signal) leaves a
+        # call no result answers; ADK hands it over as dead. Kept out, it
+        # would stand before every later cut, and the conversation would
+        # never be summarized again.
         events = [user("Zero.", 0), said("A0.", 1), user("One.", 2), called("lookup", "c1", 3),
                   user("Two.", 4), said("A2.", 5), user("Three.", 6)]
 

@@ -43,6 +43,7 @@ from agentic_cli.workflow.model_settings import ModelSettings, ThinkingSettings
 from agentic_cli.workflow.sessions import (
     SessionInfo,
     SessionRef,
+    get_active_tool_call,
     get_active_turn,
     reset_active_turn,
     set_active_turn,
@@ -1351,7 +1352,13 @@ class BaseWorkflowManager(ABC):
                 "Call set_input_callback() before invoking tools that require user input."
             )
 
-        return await callback(request)
+        # A call cancelled at its question was not run (workflow/interrupts.py).
+        call = get_active_tool_call()
+        open_calls = getattr(self, "_open_calls", None)
+        if call is None or open_calls is None:
+            return await callback(request)
+        with open_calls.asking(call.call_id):
+            return await callback(request)
 
     # Async context manager support
 

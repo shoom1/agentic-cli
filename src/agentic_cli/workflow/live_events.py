@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from contextvars import ContextVar
 from typing import Any, TypeVar
 
@@ -113,8 +113,12 @@ def current() -> LiveEvents | None:
     return _reporter.get()
 
 
+#: How long a turn cancelled twice still waits for its source to close.
+STOP_GRACE = 5.0
+
+
 async def merged(
-    source: AsyncIterator[T], live: LiveEvents
+    source: AsyncIterator[T], live: LiveEvents, *, on_stop: Callable[[], None] | None = None
 ) -> AsyncIterator[T | WorkflowEvent]:
     """``source``'s items, with the events ``live`` receives as they arrive.
 
@@ -129,9 +133,13 @@ async def merged(
     stop, cancelled and awaited, and the source is closed in the pump's own
     task: a stream built on anyio or LangGraph's runner must be closed in the
     task that iterated it. A source that swallows the cancel and yields once
-    more does not keep the pump pulling.
+    more does not keep the pump pulling. ``on_stop`` is called when the
+    consumer stops before the source ended, before the source is cancelled:
+    ADK's runner seals what a stopped invocation left open only when its
+    abort signal is set by then.
     """
     queue = live._queue
+    ended = False
     pulled = asyncio.Event()
     pulled.set()
     stopped = asyncio.Event()
@@ -145,22 +153,44 @@ async def merged(
                 yield value
                 pulled.set()
             elif kind == _ERROR:
+                ended = True
                 raise value
             else:  # _DONE
+                ended = True
                 break
         while not queue.empty():
             kind, value = queue.get_nowait()
             if kind == _EVENT:
                 yield value
     finally:
+        if not ended and on_stop is not None:
+            on_stop()
         # Wake a pump waiting for the consumer, so that it stops instead of
-        # pulling again, then cancel one still inside the source.
+        # pulling again, then cancel one still inside the source, and wait
+        # for it: ADK seals a stopped run as its runner closes. A second
+        # cancel (Ctrl+C pressed again) waits too, up to STOP_GRACE, so the
+        # turn ends only once that is done, then raises.
         stopped.set()
         pulled.set()
         pump.cancel()
-        await asyncio.wait([pump])
-        if not pump.cancelled() and pump.exception() is not None:
+        again: BaseException | None = None
+        deadline: float | None = None
+        loop = asyncio.get_running_loop()
+        while not pump.done():
+            timeout = None if deadline is None else max(0.0, deadline - loop.time())
+            try:
+                await asyncio.wait([pump], timeout=timeout)
+            except asyncio.CancelledError as cancel:
+                again = cancel
+                deadline = deadline or loop.time() + STOP_GRACE
+                continue
+            if not pump.done():  # past the grace: it ends on its own
+                logger.debug("live_events_pump_left_running")
+                break
+        if pump.done() and not pump.cancelled() and pump.exception() is not None:
             logger.debug("live_events_pump_failed", error_type=type(pump.exception()).__name__)
+        if again is not None:
+            raise again
 
 
 async def _pump(

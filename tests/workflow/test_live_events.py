@@ -222,6 +222,39 @@ class TestMerged:
         with pytest.raises(Halt):
             await asyncio.wait_for(consume(merged(source(), LiveEvents())), 2)
 
+    async def test_a_consumer_that_stops_early_is_reported_before_the_source_is_cancelled(self):
+        """ADK's abort signal must be set before its runner is cancelled."""
+        seen: list[str] = []
+
+        async def source():
+            yield 1
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                seen.append("source cancelled")
+                raise
+
+        stream = merged(source(), LiveEvents(), on_stop=lambda: seen.append("stopped"))
+        assert await anext(stream) == 1
+        waiting = asyncio.ensure_future(anext(stream))
+        await asyncio.sleep(0.01)
+        waiting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiting
+        await stream.aclose()
+
+        assert seen == ["stopped", "source cancelled"]
+
+    async def test_a_source_that_ends_is_no_stop(self):
+        stopped: list[str] = []
+
+        async def source():
+            yield 1
+
+        items = await consume(merged(source(), LiveEvents(), on_stop=lambda: stopped.append("x")))
+
+        assert items == [1] and stopped == []
+
 
 class TestReporting:
     async def test_without_a_reporter_nothing_is_reported(self):

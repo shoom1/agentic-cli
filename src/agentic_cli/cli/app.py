@@ -175,9 +175,12 @@ class _AdkCacheFailureFilter(logging.Filter):
 # user reads its error as an ERROR event or as the turn's error. ADK logs one
 # twice for the main agent, from the node and from the runner ("Root node %s
 # failed.", matched exactly: "Root node %s was cancelled …" passes), and a
-# failed overflow retry once more, from the plugin manager. Each entry: the
-# logger, what a record's message starts with or (``msg=``) its exact format,
-# and the debug event it becomes.
+# failed overflow retry once more, from the plugin manager. ADK also warns on
+# every request of a session holding a call without a result, which it drops:
+# the next turn answers such a call (workflow/adk/interrupted_calls_plugin.py),
+# so the warning has nothing for the user either. Each entry: the logger, what
+# a record's message starts with or (``msg=``) its exact format, and the debug
+# event it becomes.
 _ADK_FAILURES = (
     ("google_adk.google.adk.apps.compaction", {"prefix": "Event compaction failed"},
      "adk_compaction_failed"),
@@ -186,6 +189,9 @@ _ADK_FAILURES = (
     ("google_adk.google.adk.runners", {"msg": "Root node %s failed."}, "adk_root_node_failed"),
     ("google_adk.google.adk.plugins.plugin_manager",
      {"prefix": "Error in plugin 'context_overflow'"}, "adk_overflow_plugin_failed"),
+    ("google_adk.google.adk.flows.llm_flows.tools._rearranger",
+     {"prefix": "Dropping function calls with no matching function response"},
+     "adk_dropped_open_calls"),
 )
 
 
@@ -228,9 +234,10 @@ def _install_adk_notice_hook() -> None:
     ADK's experimental-feature notices at debug and passes every other warning
     to the hook it replaced; a filter on ADK's runner logger does the same for
     its context-cache advice, one on its context-cache logger for a cache it
-    could not create or delete, and one each on its compaction, node, runner
+    could not create or delete, one each on its compaction, node, runner
     and plugin-manager loggers for the traceback of a summary, a model call or
-    an overflow retry that failed. Only
+    an overflow retry that failed, and one on its rearranger for a call
+    without a result it drops. Only
     the CLI installs them, so library users and the test suite keep Python's
     own handling. Installing twice changes nothing.
     """

@@ -10,6 +10,7 @@ For alternative orchestration backends (e.g., LangGraph), see the base_manager m
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 from typing import TYPE_CHECKING, AsyncGenerator, Any, Callable
@@ -27,6 +28,7 @@ from agentic_cli.workflow import live_events
 from agentic_cli.workflow.base_manager import BaseWorkflowManager
 from agentic_cli.workflow.context import CompactResult, context_budget
 from agentic_cli.workflow.events import WorkflowEvent, EventType
+from agentic_cli.workflow.interrupts import OpenCalls
 from agentic_cli.workflow.config import AgentConfig, AgentGraph, validate_agent_graph
 from agentic_cli.workflow.adk import delegation
 from agentic_cli.workflow.adk.compaction import (
@@ -39,6 +41,7 @@ from agentic_cli.workflow.adk.compaction import (
 )
 from agentic_cli.workflow.adk.event_processor import ADKEventProcessor
 from agentic_cli.workflow.adk.fit_guard_plugin import FitGuardPlugin
+from agentic_cli.workflow.adk.interrupted_calls_plugin import InterruptedCallsPlugin, left_open
 from agentic_cli.workflow.adk.model_factory import build_adk_model, generate_text
 from agentic_cli.workflow.adk.overflow_plugin import OverflowPlugin
 from agentic_cli.workflow.adk.permission_plugin import PermissionPlugin
@@ -205,6 +208,9 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         # reference to exist before process() is called)
         self._llm_logging_plugin: LLMLoggingPlugin | None = None
         self._task_progress_plugin: "TaskProgressPlugin | None" = None
+        # What became of the turns' tool calls: a cancelled turn answers the
+        # ones it leaves open from it (workflow/interrupts.py).
+        self._open_calls = OpenCalls()
 
         # Resolve bare ``claude-*`` strings (e.g. from agent YAML / native ADK
         # configs) to the direct-API DirectAnthropicLlm instead of Vertex Claude.
@@ -562,7 +568,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
 
         # ToolErrorPlugin: ADK ends the turn when a tool raises; this turns the
         # exception into an error result the model can read.
-        plugins: list = [PermissionPlugin(), ToolErrorPlugin()]
+        plugins: list = [PermissionPlugin(self._open_calls), ToolErrorPlugin()]
 
         # Task progress tracking via ToolContext.state
         self._task_progress_plugin = TaskProgressPlugin()
@@ -682,9 +688,13 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             # plugin: ADK stops at the first plugin whose after_tool_callback
             # returns a value, and this one returns the cut. Not for a native
             # ADK app, whose agents' own after_tool_callbacks it would skip.
-            plugins.append(ToolResultCapPlugin(
+            cap = ToolResultCapPlugin(
                 self._settings.tool_result_max_chars, tool_output_dir(self._settings.app_name)
-            ))
+            )
+            # Before the cap, which returns its cut: this one records every
+            # result, for the calls a cancel leaves open.
+            plugins.append(InterruptedCallsPlugin(self._open_calls, cap))
+            plugins.append(cap)
             kinds = {name: model.record.kind for name, model in self._resolved_models.items()}
             fit_guard = FitGuardPlugin(self._budgets, kinds)
             # A call refused as too long: summarize (the root) or trim, retry
@@ -890,6 +900,26 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
 
         return session
 
+    async def _answer_left_open(self, session: Session) -> Session:
+        """Answer the calls nothing answered (``interrupted_calls_plugin.left_open``).
+
+        A crash, or a cancel from before ``abort_signal`` was set, leaves
+        them; ADK would keep a long-running one in every request, which
+        Claude and OpenAI refuse, and drop any other one with a warning.
+        """
+        if self._adk_config_path:
+            # A native app's agents are ADK's own, and ADK leaves some calls
+            # open on purpose (a task-mode sub-agent waiting for the user).
+            return session
+        answers = left_open(session.events, self._open_calls)
+        for event in answers:
+            await self._session_service.append_event(session, event)
+        if answers:
+            logger.debug("left_open_calls_answered", count=sum(
+                len(event.content.parts) for event in answers
+            ))
+        return session
+
     # -------------------------------------------------------------------------
     # Main processing
     # -------------------------------------------------------------------------
@@ -929,6 +959,8 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             with self._workflow_context(session_id=current_session_id, user_id=user_id):
                 # Session handling
                 session = await self._get_or_create_session(user_id, current_session_id)
+                # A crash (or an old cancel) may have left calls without a result.
+                session = await self._answer_left_open(session)
 
                 # Create message
                 new_message = types.Content(
@@ -936,14 +968,17 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     parts=[types.Part.from_text(text=message)],
                 )
 
-                async for event in self._run_and_stream(
+                # aclosing: a consumer that closes this generator closes the
+                # run now, inside the turn, so its calls are answered first.
+                async with contextlib.aclosing(self._run_and_stream(
                     session_id=current_session_id,
                     user_id=user_id,
                     new_message=new_message,
                     # The conversation's row (workflow/adk/sessions.py).
                     state_delta=turn_state(session, message),
-                ):
-                    yield event
+                )) as events:
+                    async for event in events:
+                        yield event
 
     async def _run_and_stream(
         self,
@@ -968,32 +1003,42 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         """
         event_count = 0
         live = live_events.LiveEvents()
+        # Set when the turn is stopped: ADK then answers, as it closes, the
+        # calls the invocation leaves open (InterruptedCallsPlugin words them).
+        aborted = asyncio.Event()
         with live_events.reporting(live):
             stream = self._runner.run_async(
                 session_id=session_id,
                 user_id=user_id,
                 new_message=new_message,
                 state_delta=state_delta,
+                abort_signal=aborted,
             )
-            # aclosing: a cancelled turn closes the merge, which closes the
-            # runner, and its tasks, now, in the task that iterates it.
-            async with contextlib.aclosing(live_events.merged(stream, live)) as items:
-                try:
-                    async for item in items:
-                        if isinstance(item, WorkflowEvent):
-                            reported = self._apply_event_hook(item)
-                            if reported:
+            try:
+                # aclosing: a cancelled turn closes the merge, which closes the
+                # runner, and its tasks, now, in the task that iterates it.
+                # A stop sets the abort signal before the runner is cancelled.
+                merging = live_events.merged(stream, live, on_stop=aborted.set)
+                async with contextlib.aclosing(merging) as items:
+                    try:
+                        async for item in items:
+                            if isinstance(item, WorkflowEvent):
+                                reported = self._apply_event_hook(item)
+                                if reported:
+                                    event_count += 1
+                                    yield reported
+                                continue
+                            async for workflow_event in self._workflow_events(item, session_id):
                                 event_count += 1
-                                yield reported
-                            continue
-                        async for workflow_event in self._workflow_events(item, session_id):
-                            event_count += 1
-                            yield workflow_event
-                except RuntimeError as error:
-                    cause = _plugin_cause(error)
-                    if cause is error:
-                        raise
-                    raise cause from None
+                                yield workflow_event
+                    except RuntimeError as error:
+                        cause = _plugin_cause(error)
+                        if cause is error:
+                            raise
+                        raise cause from None
+            finally:
+                # Every call of the turn is answered now, sealed or returned.
+                self._open_calls.clear()
 
         # Final drain — catches progress from the last tool call
         if self._task_progress_plugin:
@@ -1136,12 +1181,13 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                 logger.info("job_resume_started", job_id=record.job_id,
                             call_id=record.call_id, state=record.state.value,
                             caller=author)
-                async for event in self._run_and_stream(
+                async with contextlib.aclosing(self._run_and_stream(
                     session_id=session_id,
                     user_id=user_id,
                     new_message=new_message,
-                ):
-                    yield event
+                )) as events:
+                    async for event in events:
+                        yield event
 
     @property
     def supports_compact(self) -> bool:

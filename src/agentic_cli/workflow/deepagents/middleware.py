@@ -36,9 +36,18 @@ from langchain.agents.middleware import (
     ToolCallRequest,
 )
 from langchain_core.exceptions import ContextOverflowError
-from langchain_core.messages import ToolCall, ToolMessage
+from langchain_core.messages import (
+    AIMessage,
+    AnyMessage,
+    HumanMessage,
+    RemoveMessage,
+    ToolCall,
+    ToolMessage,
+)
 from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.errors import GraphBubbleUp
+from langgraph.graph.message import REMOVE_ALL_MESSAGES
+from langgraph.runtime import Runtime
 from langgraph.types import Command
 
 from agentic_cli.logging import Loggers
@@ -47,11 +56,13 @@ from agentic_cli.paths import resolve_path
 from agentic_cli.tools._core.delegation import TASK_TOOL
 from agentic_cli.tools.registry import ToolDefinition, get_registry, identify_tool
 from agentic_cli.workflow.context import is_context_overflow
+from agentic_cli.workflow.interrupts import MARKER, OpenCalls
 from agentic_cli.workflow.langchain_models import without_foreign_reasoning
 from agentic_cli.workflow.permissions.capabilities import _CapabilityExempt
 from agentic_cli.workflow.service_registry import PERMISSION_ENGINE, get_service
 from agentic_cli.workflow.sessions import (
     ToolCallRef,
+    get_active_turn,
     reset_active_tool_call,
     set_active_tool_call,
 )
@@ -110,6 +121,8 @@ class PermissionMiddleware(AgentMiddleware):
         bound: Resolves a tool object the framework bound. Defaults to the
             framework registry's identity map; a Deep Agents manager passes
             its MCP tools' map chained before it.
+        open_calls: The manager's record of its calls, marked while a call
+            waits at its prompt: a cancel there means it was not run.
     """
 
     def __init__(
@@ -117,10 +130,12 @@ class PermissionMiddleware(AgentMiddleware):
         agent_name: str,
         *,
         bound: Callable[[object], ToolDefinition | None] = identify_tool,
+        open_calls: OpenCalls | None = None,
     ) -> None:
         super().__init__()
         self.agent_name = agent_name
         self._bound = bound
+        self._open_calls = open_calls
 
     async def awrap_tool_call(
         self,
@@ -186,7 +201,11 @@ class PermissionMiddleware(AgentMiddleware):
             )
             return _denied("permission engine unavailable", call)
 
-        result = await engine.check(definition.name, capabilities, call["args"])
+        if self._open_calls is None:
+            result = await engine.check(definition.name, capabilities, call["args"])
+        else:
+            with self._open_calls.asking(call["id"]):
+                result = await engine.check(definition.name, capabilities, call["args"])
         if result.allowed:
             return None
         return _denied(result.reason, call)
@@ -423,6 +442,124 @@ class ToolCallErrorMiddleware(AgentMiddleware):
             if _is_delegation(request.tool):
                 raise
             return _error_message(request.tool_call, error)
+
+
+class InterruptedCallsMiddleware(AgentMiddleware):
+    """Every call gets one result, the ones a stopped turn left open too.
+
+    It takes the place of Deep Agents' ``PatchToolCallsMiddleware``, first in
+    every stack: before each run it answers a call no ``ToolMessage``
+    answers, as ``workflow/interrupts.py`` says. A call that finished before
+    the cancel keeps its result: LangGraph drops a stopped step's writes when
+    new input arrives, so that result is kept here as it passes (outermost,
+    after the gate, the cap and the error handling). A call that waited at
+    its permission prompt was not run; one whose job was submitted runs on;
+    any other was interrupted, by the user when this manager saw the cancel.
+    On the main agent, a turn the user stopped before any reply leaves
+    ``MARKER`` as its reply, so the next turn answers only the new message.
+
+    Args:
+        open_calls: The manager's record of its calls.
+        root: Whether this is the main agent's stack.
+    """
+
+    def __init__(self, open_calls: OpenCalls, *, root: bool) -> None:
+        super().__init__()
+        self._open = open_calls
+        self._root = root
+
+    def before_agent(self, state: Any, runtime: Runtime[Any]) -> dict[str, Any] | None:  # noqa: ARG002
+        messages: list[AnyMessage] = state["messages"]
+        if not messages:
+            return None
+        by_user = self._root and self._open.take_cancel(get_active_turn())
+        answered = {message.tool_call_id for message in messages if message.type == "tool"}
+        patched: list[AnyMessage] = []
+        updates: dict[str, Any] = {}
+        changed = False
+        for message in messages:
+            patched.append(message)
+            if not isinstance(message, AIMessage):
+                continue
+            for call in (*message.tool_calls, *message.invalid_tool_calls):
+                call_id = call["id"]
+                if call_id is None or call_id in answered:
+                    continue
+                patched.append(self._answer(call, by_user=by_user, updates=updates))
+                changed = True
+        if (
+            by_user and not changed and len(patched) >= 2
+            and isinstance(patched[-1], HumanMessage) and not _a_reply(patched[-2])
+        ):
+            # Stopped before its reply, maybe after tool results: no call was
+            # open, and the model is told the turn stopped all the same.
+            patched.insert(-1, AIMessage(content=MARKER))
+            changed = True
+        if not changed:
+            return None
+        return {**updates, "messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), *patched]}
+
+    def _answer(self, call: Any, *, by_user: bool, updates: dict[str, Any]) -> ToolMessage:
+        name = call["name"] or "unknown"
+        if call.get("type") == "invalid_tool_call":
+            return ToolMessage(
+                content=f"Tool call {name} with id {call['id']} could not be executed - "
+                "arguments were malformed or truncated.",
+                name=name, tool_call_id=call["id"], status="error",
+            )
+        answer = self._open.answer(call["id"], by_user=by_user)
+        if isinstance(answer, _Finished):
+            # The rest of what it changed (save_tasks' tasks, a delegation's
+            # plan): LangGraph dropped it with the stopped step's writes.
+            updates.update(answer.updates)
+            return answer.message
+        return ToolMessage(
+            content=json.dumps(answer), name=name, tool_call_id=call["id"],
+            status="success" if answer.get("success") else "error",
+        )
+
+    async def awrap_tool_call(
+        self,
+        request: ToolCallRequest,
+        handler: Callable[[ToolCallRequest], Awaitable[_ToolResult]],
+    ) -> _ToolResult:
+        result = await handler(request)
+        self._record(request.tool_call, result)
+        return result
+
+    def wrap_tool_call(
+        self,
+        request: ToolCallRequest,
+        handler: Callable[[ToolCallRequest], _ToolResult],
+    ) -> _ToolResult:
+        result = handler(request)
+        self._record(request.tool_call, result)
+        return result
+
+    def _record(self, call: ToolCall, result: _ToolResult) -> None:
+        updates: dict[str, Any] = {}
+        if isinstance(result, Command):
+            update = result.update if isinstance(result.update, dict) else {}
+            updates = {key: value for key, value in update.items() if key != "messages"}
+            result = next((
+                m for m in update.get("messages", ())
+                if isinstance(m, ToolMessage) and m.tool_call_id == call["id"]
+            ), None)
+        if isinstance(result, ToolMessage):
+            self._open.finished(call["id"], _Finished(result, updates))
+
+
+@dataclasses.dataclass(frozen=True)
+class _Finished:
+    """A call that returned before the cancel: its message, and the rest of its update."""
+
+    message: ToolMessage
+    updates: dict[str, Any]
+
+
+def _a_reply(message: AnyMessage) -> bool:
+    """Whether ``message`` ended its turn: the agent's text, with no call."""
+    return isinstance(message, AIMessage) and not message.tool_calls
 
 
 class ActiveToolCallMiddleware(AgentMiddleware):

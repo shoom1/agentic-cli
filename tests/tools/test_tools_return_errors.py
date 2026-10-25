@@ -116,8 +116,11 @@ class TestToolErrorPlugin:
         from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager
         from agentic_cli.workflow.adk.tool_error_plugin import ToolErrorPlugin
 
+        from agentic_cli.workflow.interrupts import OpenCalls
+
         manager = GoogleADKWorkflowManager.__new__(GoogleADKWorkflowManager)
         manager._settings = SimpleNamespace(raw_llm_logging=False)
+        manager._open_calls = OpenCalls()
         assert any(isinstance(p, ToolErrorPlugin) for p in manager._init_plugins())
 
 

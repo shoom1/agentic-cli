@@ -755,9 +755,9 @@ async def compaction_probe_wait(seconds: int = 1) -> dict:
 
 
 async def test_a_call_left_open_by_ctrl_c_does_not_stop_summaries(project, monkeypatch):
-    """Ctrl+C while a tool runs leaves its call unanswered for good. ADK hands it
-    over as dead, and it is summarized with the turns around it: later turns
-    past the trigger are still summarized."""
+    """Ctrl+C while a tool runs: its call is answered as interrupted
+    (workflow/interrupts.py), and it is summarized with the turns around it:
+    later turns past the trigger are still summarized."""
     WAITING.append(asyncio.Event())
     answers = serve(monkeypatch, Claude(solo=[
         says("A0."), calls("compaction_probe_wait", "toolu_w1", seconds=1),
