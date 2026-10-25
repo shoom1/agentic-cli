@@ -20,6 +20,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   already did. The startup warning that called the section an ignored setting
   is gone: its deny rules apply (its allow rules, as before, do not). A
   `permissions` entry in a cwd `.env` is still reported as ignored.
+- **`web_fetch` opens a connection for each request.** Its transport connects
+  to the address it validated, so its connection pool is keyed by that IP,
+  not the hostname, and it kept connections alive across fetches (since
+  0.6.0): a fetch of a second hostname on the same IP (shared hosting, a CDN,
+  or a DNS answer an attacker controls) within httpx's five-second keep-alive,
+  after a response read to its end, went over the TLS connection whose
+  certificate had been checked for the first hostname, and the second's was
+  never checked. No connection is kept alive now, so each request makes its
+  own TLS handshake, verified for its own hostname; HTTP/2, which shares a
+  connection between requests, stays off. Each page, robots.txt and
+  redirect now costs its own handshake.
 - **A skill name is looked up only under `skills_dirs`, never in the working
   directory.** `SkillStore` (ADK and Deep Agents) tried a bare name such as
   `report-writer` as a folder in the working directory first, so in a cloned

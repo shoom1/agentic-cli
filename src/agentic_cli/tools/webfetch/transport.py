@@ -10,13 +10,20 @@ from agentic_cli.tools.webfetch.validator import URLValidator, BlockedAddressErr
 class PinnedTransport(httpx.AsyncBaseTransport):
     """Connect every request to a validated pinned IP.
 
-    Wraps an inner transport (default httpx.AsyncHTTPTransport(); a
+    Wraps an inner transport (its own by default, below; a
     httpx.MockTransport in tests). Resolves the host (all A+AAAA), requires all
     addresses globally routable, and rewrites the request to connect to the
     literal validated IP while preserving the Host header and TLS SNI — so cert
     verification stays bound to the hostname and the validated address IS the
     connected address (no TOCTOU). Sitting at the transport layer, it covers the
     initial fetch, every manually-issued redirect hop, and the robots fetch.
+
+    Its own inner transport keeps no connection alive: the pool is keyed by
+    the pinned IP, so a connection kept for one hostname (its certificate
+    checked for that name) would carry the next request for any other
+    hostname on that IP. Each request opens its own connection, which holds
+    only over HTTP/1.1 (an HTTP/2 connection carries many requests at once).
+    An ``inner`` given instead must not reuse a connection either.
     """
 
     def __init__(
@@ -25,7 +32,10 @@ class PinnedTransport(httpx.AsyncBaseTransport):
         inner: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self._validator = validator
-        self._inner = inner if inner is not None else httpx.AsyncHTTPTransport()
+        self._inner = inner if inner is not None else httpx.AsyncHTTPTransport(
+            http2=False,
+            limits=httpx.Limits(max_connections=100, max_keepalive_connections=0),
+        )
 
     def _pin(self, request: httpx.Request) -> None:
         host = request.url.host
@@ -48,5 +58,5 @@ class PinnedTransport(httpx.AsyncBaseTransport):
         # a short-lived httpx.AsyncClient(transport=self) and closes it on exit,
         # which would otherwise tear down the shared inner pool under a
         # concurrent call. The inner pool persists for the fetcher's lifetime
-        # (which also enables connection keep-alive across fetches).
+        # (it keeps no connection alive: see the class docstring).
         return None
