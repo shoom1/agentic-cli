@@ -17,6 +17,7 @@ from thinking_prompt import ButtonConfig, Dialog, TextField
 
 from agentic_cli.constants import truncate
 from agentic_cli.logging import Loggers, bind_context
+from agentic_cli.workflow.sessions import ConversationChangedError
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -809,6 +810,10 @@ class MessageProcessor:
                         "it again would duplicate this turn (and repeat any "
                         "tool calls it made). Send the request again once the "
                         "limit resets."
+                    )
+                elif isinstance(e, ConversationChangedError):
+                    ui.add_error(
+                        f"{e} Send your message again to go on from what it holds now."
                     )
                 else:
                     ui.add_error(f"Workflow error: {e}")

@@ -57,6 +57,25 @@ class SessionInfo:
     updated: datetime | None = None
 
 
+class ConversationChangedError(RuntimeError):
+    """Another process changed the conversation while this turn ran.
+
+    ADK refuses to append to a session changed in its store since it was
+    read (``StaleSessionError``); the CLI holds a lock on the conversation it
+    has open (``cli/conversation_lock.py``), so this comes from a writer that
+    does not.
+
+    Attributes:
+        session_id: The conversation.
+    """
+
+    def __init__(self, session_id: str) -> None:
+        super().__init__(
+            f"Conversation '{session_id}' was changed by another process during this turn."
+        )
+        self.session_id = session_id
+
+
 #: The longest title, in characters.
 TITLE_MAX = 80
 

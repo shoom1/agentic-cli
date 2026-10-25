@@ -28,6 +28,7 @@ from thinking_prompt import AppInfo, ThinkingPromptSession, ThinkingPromptStyles
 
 from agentic_cli.cli.commands import Command, CommandRegistry
 from agentic_cli.cli.message_processor import MessageProcessor, _says_so_when_stopped
+from agentic_cli.cli.conversation_lock import ConversationLock, Taken
 from agentic_cli.cli.session_args import SessionStart, add_session_arguments, parse_session_start
 from agentic_cli.cli.session_resume import (
     PICK_LIMIT,
@@ -439,6 +440,9 @@ class BaseCLIApp:
         self._session_start = SessionStart()
         self._pending_resume: str | None = None
         self._pending_pick = False
+        # The conversation this process has open, held against another
+        # process opening it (cli/conversation_lock.py; made on first use).
+        self._conversation_lock: ConversationLock | None = None
         # The command main() was run as, for the lines naming --resume.
         self._command: str | None = None
         #: The process's exit status after run(): 1 when the start was refused.
@@ -1245,6 +1249,7 @@ class BaseCLIApp:
                 new = uuid.uuid4().hex[:12]
                 if ready:
                     await controller.workflow.load_session(new)
+                self._hold(new)  # a new id: nobody else has it open
                 self._session_id = new
                 self._turned = False
                 self._message_processor.reset()
@@ -1357,15 +1362,31 @@ class BaseCLIApp:
             line = resumed_line(info, datetime.now(timezone.utc))
             replay = replay_lines(messages)
             old = self._session_id
-            if self._turned:  # facts once per conversation used
-                await self._saving_facts(old)
-            try:
-                await workflow.load_session(session_id)
-            except Exception as error:  # noqa: BLE001 - the id is not adopted
-                logger.debug("session_open_failed", session_id=session_id, exc_info=True)
-                reason = str(error) or type(error).__name__
-                self.session.add_error(f"Could not open '{session_id}': {reason}")
+            # Held beside the one it is in until the switch is done: a Ctrl+C
+            # or a failure below keeps the one it stays in, and lets this go.
+            taken = self._acquire(session_id)
+            if isinstance(taken, int):
+                self.session.add_error(
+                    f"Could not open '{session_id}': it is open in another process ({taken})."
+                )
                 return False
+            adopted = False
+            try:
+                if self._turned:  # facts once per conversation used
+                    await self._saving_facts(old)
+                try:
+                    await workflow.load_session(session_id)
+                except Exception as error:  # noqa: BLE001 - the id is not adopted
+                    logger.debug("session_open_failed", session_id=session_id, exc_info=True)
+                    reason = str(error) or type(error).__name__
+                    self.session.add_error(f"Could not open '{session_id}': {reason}")
+                    return False
+                adopted = True
+            finally:
+                if adopted:
+                    self._commit(taken)
+                else:
+                    self._abandon(taken)
             self._session_id = session_id
             self._turned = False
             self._message_processor.reset()
@@ -1501,10 +1522,23 @@ class BaseCLIApp:
                     self.session.add_error(f"No conversation '{target}' found.{run}{note}")
                     self.exit_status = 1
                     return False
+                holder = self._hold(target)
+                if holder is not None:
+                    self.session.add_error(
+                        f"Conversation '{target}' is open in another process ({holder})."
+                    )
+                    self.exit_status = 1
+                    return False
                 self._pending_resume = target
             elif mode == "continue":
                 newest = await workflow.list_sessions(limit=1)
-                if newest:
+                holder = self._hold(newest[0].session_id) if newest else None
+                if newest and holder is not None:
+                    self.session.add_warning(
+                        f"The newest conversation, '{newest[0].session_id}', is open in "
+                        f"another process ({holder}); starting a new one."
+                    )
+                elif newest:
                     self._pending_resume = newest[0].session_id
                 else:
                     self.session.add_message(
@@ -1523,6 +1557,14 @@ class BaseCLIApp:
                 f"Could not list the saved conversations: {reason}. Starting a new one."
             )
 
+        if self._pending_resume is None:  # this run's own conversation, held until it leaves
+            holder = self._hold(self._session_id)
+            if holder is not None:
+                self.session.add_error(
+                    f"Conversation '{self._session_id}' is open in another process ({holder})."
+                )
+                self.exit_status = 1
+                return False
         try:
             resumed = await workflow.load_session(self._session_id)
         except Exception as error:  # noqa: BLE001 - turns name their conversation anyway
@@ -1556,15 +1598,66 @@ class BaseCLIApp:
         try:
             if target is None:
                 target = await self.pick_session()
-            if target is not None:
-                await self._resume(target)
+            if target is not None and not await self._resume(target):
+                self._hold(self._session_id)  # it stays in its new one: give the target back
         except Exception as error:  # noqa: BLE001 - the new conversation goes on
+            if self._session_id != target:
+                self._hold(self._session_id)
             logger.debug("startup_open_failed", session_id=target, exc_info=True)
             reason = str(error) or type(error).__name__
             if target is None:
                 self.session.add_error(f"Could not list the saved conversations: {reason}")
             else:
                 self.session.add_error(f"Could not open '{target}': {reason}")
+
+    def _conversation_key(self, session_id: str) -> tuple:
+        """What names a stored conversation for its lock: the same id in
+        another backend or store is another conversation."""
+        orchestrator = getattr(self._settings, "orchestrator", "")
+        return (
+            getattr(orchestrator, "value", orchestrator), self._settings.session_store,
+            self._settings.app_name, self._settings.default_user, session_id,
+        )
+
+    def _acquire(self, session_id: str) -> "Taken | int | None":
+        """``_hold``'s first half: ``session_id`` held beside the one held now.
+
+        Returns:
+            The hold to ``_commit`` or ``_abandon``; the process id holding it
+            elsewhere; None on the memory store, which locks nothing.
+        """
+        if self._settings.session_store == "memory":
+            return None
+        return self._lock().acquire(self._conversation_key(session_id))
+
+    def _commit(self, taken: "Taken | None") -> None:
+        if taken is not None:
+            self._lock().commit(taken)
+
+    def _abandon(self, taken: "Taken | None") -> None:
+        if taken is not None:
+            self._lock().abandon(taken)
+
+    def _lock(self) -> ConversationLock:
+        if self._conversation_lock is None:
+            self._conversation_lock = ConversationLock(self._settings.sessions_dir / "locks")
+        return self._conversation_lock
+
+    def _hold(self, session_id: str) -> int | None:
+        """Hold ``session_id``'s conversation for this process, letting go of the one before.
+
+        Two CLIs on one conversation lose a turn (Deep Agents keeps one of two
+        runs from the same checkpoint; ADK fails the second writer), so one
+        another process holds is refused. Nothing is held on the memory store,
+        whose conversations are this process's alone.
+
+        Returns:
+            None once it is held; else the process id of the one holding it
+            (0 when unknown), and the conversation held before stays held.
+        """
+        if self._settings.session_store == "memory":
+            return None
+        return self._lock().take(self._conversation_key(session_id))
 
     def _resume_hint(self) -> str:
         """The exit line that names how to come back to the current conversation."""
@@ -1643,6 +1736,8 @@ class BaseCLIApp:
         # No save-on-exit: durable session stores persist continuously per turn.
 
         logger.info("app_ending")
+        if self._conversation_lock is not None:
+            self._conversation_lock.release()
         if resumable:
             self.session.add_message("system", self._resume_hint())
         self.session.add_message("system", "Goodbye!")

@@ -29,6 +29,7 @@ agentic-cli/
 │   ├── cli/
 │   │   ├── app.py            # BaseCLIApp (main(): the command line, add_arguments/from_args, exit_status; session_start: how run() begins, its resume or picker once the prompt is up (_open_on_startup; Ctrl+C there ends the app); the --resume hint at exit; the session it builds; get_theme(name); /settings model pickers: _model_choices; the LangGraph deprecation notice; an orchestrator swap: the new backend takes the conversation's id, `_SWAP_NOTE` says its history stays behind; compact(), start_new_session() and resume_session(): /compact, /new and /resume, under the turn lock (pick_session(), the picker, is not: it waits on a dialog); a conversation's facts saved once per conversation used (_turned); another conversation's job resume keeps ctx and the task list)
 │   │   ├── commands.py       # Command, CommandRegistry
+│   │   ├── conversation_lock.py # ConversationLock: one process per stored conversation (flock under <sessions_dir>/locks/; BaseCLIApp._hold refuses one held elsewhere)
 │   │   ├── builtin_commands.py # /help, /status (the main agent's context rows: context_budget), /models (ModelsCommand), /sessions, /resume [<id>] (sessions), /jobs (resume: finished jobs), /compact [focus], /new, ...
 │   │   ├── workflow_controller.py  # WorkflowController (lazy/background init, orchestrator swap; the status bar names the main agent's model)
 │   │   ├── session_resume.py # What /resume shows: the picker (picker), the "Resumed:" line, the replay of the last 10 messages
@@ -58,7 +59,7 @@ agentic-cli/
 │   │   ├── tool_errors.py    # tool_error_result / unknown_tool_result: ADK's error shapes, for ADK and Deep Agents
 │   │   ├── tool_output.py    # cap_tool_result: a result over tool_result_max_chars cut (head and tail, a note), its full output saved in ./.{app_name}/tool-output/ for read_file; both backends
 │   │   ├── summary_prompt.py # SUMMARY_PROMPT (LangChain's DEFAULT_SUMMARY_PROMPT, copied with its MIT notice: ADK runs without LangChain), SUMMARY_PREFIX, summary_prompt/with_focus; both backends
-│   │   ├── sessions.py       # SessionRef; SessionInfo (a session list's row) and session_title; the active turn; the active tool call (ToolCallRef)
+│   │   ├── sessions.py       # SessionRef; SessionInfo (a session list's row) and session_title; ConversationChangedError (ADK's stale session); the active turn; the active tool call (ToolCallRef)
 │   │   ├── mcp.py            # MCPServerConfig → to_adk_toolset / to_langchain_connection
 │   │   ├── permissions/      # Framework-independent capability engine
 │   │   │   ├── engine.py     # PermissionEngine (deny-wins, default-ASK)

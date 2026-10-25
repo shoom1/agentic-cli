@@ -22,6 +22,7 @@ from google.adk.apps.app import EventsCompactionConfig, validate_app_name
 from google.adk.agents import LlmAgent, Agent
 from google.adk.agents.context_cache_config import ContextCacheConfig
 from google.adk.sessions import InMemorySessionService, BaseSessionService, Session
+from google.adk.errors import StaleSessionError
 from google.adk.tools import LongRunningFunctionTool
 
 from agentic_cli.workflow import live_events
@@ -49,7 +50,7 @@ from agentic_cli.workflow.adk.plugins import LLMLoggingPlugin, SentRequestLoggin
 from agentic_cli.workflow.adk.sessions import row_from_events, row_from_state, turn_state
 from agentic_cli.workflow.adk.tool_result_cap_plugin import ToolResultCapPlugin
 from agentic_cli.workflow.service_registry import JOB_MANAGER
-from agentic_cli.workflow.sessions import SessionInfo
+from agentic_cli.workflow.sessions import ConversationChangedError, SessionInfo
 from agentic_cli.workflow.tool_output import tool_output_dir
 
 from agentic_cli.config import (
@@ -1033,6 +1034,8 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                             async for workflow_event in self._workflow_events(item, session_id):
                                 event_count += 1
                                 yield workflow_event
+                    except StaleSessionError:
+                        raise ConversationChangedError(session_id) from None
                     except RuntimeError as error:
                         cause = _plugin_cause(error)
                         if cause is error:

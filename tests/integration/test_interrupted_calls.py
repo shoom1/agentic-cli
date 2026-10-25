@@ -700,3 +700,35 @@ async def test_on_adk_a_jobs_resume_answers_its_open_call_first(hermetic, monkey
     assert claude.refused == []
     assert [e.content for e in events if e.type is EventType.TEXT] == ["The build finished."]
     assert "toolu_j" in results(claude.last("Answer"))
+
+
+# --- another process wrote the conversation (ADK) ----------------------------------------
+
+
+async def test_on_adk_a_turn_the_store_finds_stale_says_so_plainly(hermetic, monkeypatch):
+    """ADK refuses to append to a session another process changed since it
+    was read (StaleSessionError): the turn raises one error that says so."""
+    from google.adk.errors import StaleSessionError
+
+    from agentic_cli.workflow.sessions import ConversationChangedError
+
+    serve(monkeypatch, Claude(Answer=[say("First."), say("Second.")]), "adk")
+    manager = solo("adk")
+    try:
+        await turn(manager, "Hello.")
+        service = manager._session_service
+        real = service.append_event
+
+        async def stale(session, event):
+            if event.author != "user":
+                raise StaleSessionError("The session has been modified in storage.")
+            return await real(session, event)
+
+        monkeypatch.setattr(service, "append_event", stale)
+        with pytest.raises(ConversationChangedError) as raised:
+            await turn(manager, "Hello again.")
+    finally:
+        await manager.cleanup()
+
+    assert raised.value.session_id == "s"
+    assert str(raised.value) == "Conversation 's' was changed by another process during this turn."

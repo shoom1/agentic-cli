@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import sys
 from datetime import datetime, timedelta, timezone
 from types import ModuleType, SimpleNamespace
@@ -132,8 +133,12 @@ def logged(monkeypatch) -> list[dict]:
 
 @pytest.fixture
 def manager(monkeypatch, tmp_path) -> ScriptedManager:
-    """The scripted manager every app here builds, with no conversation stored."""
+    """The scripted manager every app here builds, with no conversation stored.
+
+    HOME is the test's: the app's conversation locks live in its workspace.
+    """
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
     manager = ScriptedManager()
     monkeypatch.setattr(
         "agentic_cli.cli.workflow_controller.create_workflow_manager_from_settings",
@@ -499,6 +504,93 @@ class TestWhenItCannot:
     def test_a_start_must_be_a_session_start(self, manager):
         with pytest.raises(TypeError, match="SessionStart"):
             App().session_start = "continue"  # type: ignore[assignment]
+
+
+class TestAConversationOpenElsewhere:
+    """Two CLIs on one conversation lose a turn: another process's is refused."""
+
+    @staticmethod
+    def held_elsewhere(app: App, session_id: str) -> None:
+        from agentic_cli.cli.conversation_lock import ConversationLock
+
+        other = ConversationLock(app.settings.sessions_dir / "locks")
+        assert other.take(app._conversation_key(session_id)) is None
+        TestAConversationOpenElsewhere.others.append(other)
+
+    others: list = []
+
+    async def test_resume_of_one_open_elsewhere_is_refused_before_the_prompt(self, manager):
+        store(manager, "abc", "Plan the trip", "Sure.", hours=2)
+        session = Session()
+        app = app_with(session, SessionStart("resume", "abc"))
+        self.held_elsewhere(app, "abc")
+
+        await app.run()
+
+        assert app.exit_status == 1 and not session.prompted
+        assert session.said("error") == [
+            f"Conversation 'abc' is open in another process ({os.getpid()})."
+        ]
+
+    async def test_continue_starts_a_new_one_when_the_newest_is_open_elsewhere(self, manager):
+        store(manager, "abc", "Plan the trip", "Sure.", hours=2)
+        session = Session()
+        app = app_with(session, SessionStart("continue"))
+        self.held_elsewhere(app, "abc")
+
+        await app.run()
+
+        assert session.prompted and app.exit_status == 0 and app.session_id != "abc"
+        assert session.said("warning") == [
+            f"The newest conversation, 'abc', is open in another process ({os.getpid()}); "
+            "starting a new one."
+        ]
+
+    async def test_a_startup_open_that_fails_gives_it_back(self, manager, monkeypatch):
+        """The resume once the prompt is up fails: the app runs in its new
+        conversation, which it holds, and lets the one it did not open go."""
+        from agentic_cli.cli.conversation_lock import ConversationLock
+
+        store(manager, "abc", "Plan the trip", "Sure.", hours=2)
+
+        async def unreadable(session_id, limit=20, *, user_id=None):
+            raise RuntimeError("a damaged row")
+
+        monkeypatch.setattr(manager, "recent_messages", unreadable)
+        held: list = []
+
+        def looked(session) -> bool:
+            if session.said("error") and not held:
+                for session_id in ("abc", app.session_id):
+                    other = ConversationLock(app.settings.sessions_dir / "locks")
+                    held.append(other.take(app._conversation_key(session_id)) is not None)
+                    other.release()
+            return bool(held)
+
+        session = Session(until=looked)
+        app = app_with(session, SessionStart("resume", "abc"))
+        await app.run()
+
+        assert app.session_id != "abc"
+        assert held == [False, True]  # abc free, its own conversation held
+
+    async def test_the_app_holds_the_conversation_it_opened(self, manager):
+        from agentic_cli.cli.conversation_lock import ConversationLock
+
+        store(manager, "abc", "Plan the trip", "Sure.", hours=2)
+        held: list = []
+
+        def looked(session) -> bool:
+            if resumed(session) and not held:  # while the app has it open
+                other = ConversationLock(app.settings.sessions_dir / "locks")
+                held.append(other.take(app._conversation_key("abc")))
+            return bool(held)
+
+        session = Session(until=looked)
+        app = app_with(session, SessionStart("resume", "abc"))
+        await app.run()
+
+        assert held == [os.getpid()]
 
 
 class TestTheExitHint:
