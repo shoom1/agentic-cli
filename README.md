@@ -14,7 +14,7 @@ Agentic CLI provides the core infrastructure for building interactive CLI applic
 - **Built-in Tools**: Python execution, stateful sandbox, file operations, web search, web fetch, arXiv search
 - **Knowledge Base**: Semantic + BM25 hybrid search with RRF fusion, per-document markdown sidecars, and agent-authored concept pages
 - **Semantic Memory**: Embedding-backed memory with lifecycle management, contradiction detection, and forgetting policy
-- **Durable Sessions**: Conversations persist continuously by default (SQLite; PostgreSQL or ephemeral memory optional) and resume across CLI restarts: `--continue` (the newest), `--resume <id>`, or `--resume` and `/resume` for a picker
+- **Durable Sessions**: Conversations persist continuously by default (SQLite; PostgreSQL or ephemeral memory optional) and resume across CLI restarts: `--continue` (the newest), `--resume <id>`, or `/resume` in the app for a picker
 - **Context Window Management**: Summarization near the model's input budget on ADK and Deep Agents, requests trimmed to fit, a provider's overflow recovered or explained, and token-usage visibility
 - **Model Catalog**: Live model listings from each provider, cached for a day, shown by `/models`
 - **Type-safe Configuration**: Composable settings mixins (`pydantic-settings`)
@@ -164,20 +164,19 @@ Run the app through `BaseCLIApp.main()` and every app takes the same flags:
 
 ```bash
 my-app                  # a new conversation; at exit, once a turn ran, its id is named
-my-app --continue       # the newest saved conversation (-c)
+my-app --continue       # the newest saved conversation no other run has open (-c)
 my-app --resume <id>    # that one (-r); an id that is not saved exits with status 1
-my-app --resume         # pick one from a list, once the prompt is up
 ```
 
-Inside the app, `/resume` opens the same picker (Enter opens a
-conversation, Esc keeps the current one) and `/resume <id>` opens one by
-id; `/sessions` lists them with their titles (the first prompt), turns and
+Inside the app, `/resume` opens a picker (Enter opens a conversation, Esc
+keeps the current one) and `/resume <id>` opens one by id; `/sessions` lists them with their titles (the first prompt), turns and
 last update. A resumed conversation shows its last 10 messages again. The
 model and the settings stay this run's; "Allow for this session" grants,
 sandbox kernels and the task list are not restored. One conversation is
 open in one process at a time: two would lose a turn, so a conversation
 another run has open is refused ("Conversation '<id>' is open in another
-process (1234)."; `--continue` then starts a new one).
+process (1234)."; `--continue` passes over it to the newest one free among
+the 50 newest, and says so).
 
 `main()` parses the flags, builds the app with `from_args` (by default
 `cls()`), runs it and exits with its `exit_status`. Point the console
@@ -211,8 +210,8 @@ if __name__ == "__main__":
 
 An app built and run directly (`asyncio.run(app.run())`) starts a new
 conversation, and is pointed at `/resume <id>` at exit; set
-`app.session_start = SessionStart("continue")` (or `"resume"` with an id, or
-`"pick"`; `agentic_cli.cli.session_args`) before `run()` to start otherwise,
+`app.session_start = SessionStart("continue")` (or `"resume"` with an id;
+`agentic_cli.cli.session_args`) before `run()` to start otherwise,
 and exit with `app.exit_status` (1 when `"resume"` names a conversation that
 is not saved: `run()` then returns before the prompt).
 
@@ -1717,7 +1716,7 @@ python examples/hello_langgraph.py
 research-demo                      # console script, installed with the package
 python -m research_demo            # equivalent module invocation
 research-demo --continue           # the newest saved conversation
-research-demo --resume <id>        # a saved conversation by id (--resume alone: pick one)
+research-demo --resume <id>        # a saved conversation by id (/resume in the app: pick one)
 
 # From a checkout without installing, run it from the repository root:
 python -m examples.research_demo

@@ -254,7 +254,7 @@ def test_resume_of_a_conversation_that_is_not_stored_exits_before_the_prompt(tmp
     (tmp_path / "home").mkdir()
     console = Console(tmp_path, tmp_path / "home", args=("--resume", "zzz"), prompt=False)
     try:
-        # The console app keeps its conversations in memory: nothing to pick from.
+        # The console app keeps its conversations in memory: nothing to open instead.
         console.expect("No conversation 'zzz' found. "
                        "(session_store is memory: conversations end with the app)",
                        timeout=STARTUP_TIMEOUT)
@@ -291,29 +291,6 @@ def test_continue_resumes_the_newest_once_the_prompt_is_up(tmp_path):
 
     transcript = console.transcript
     assert transcript.index(">>>") < transcript.index("Resumed:")
-
-
-def test_ctrl_c_at_the_startup_picker_ends_the_app(tmp_path):
-    """Ruling: the startup picker runs before any request, so Ctrl+C there
-    ends the app, as at an idle prompt; nothing says a request was cancelled."""
-    import pexpect
-
-    (tmp_path / "home").mkdir()
-    _seed(tmp_path)
-    console = Console(tmp_path, tmp_path / "home", args=("--resume",))
-    try:
-        console.expect("Resume a conversation")
-        console.expect("· Plan the trip · ")
-        console.send("\x03")
-        console.expect("Goodbye!")
-        console.child.expect(pexpect.EOF, timeout=STEP_TIMEOUT)
-        console.child.close()
-    finally:
-        console.child.close(force=True)
-
-    assert console.child.exitstatus == 0
-    assert "Operation cancelled" not in console.transcript
-    assert "Resumed:" not in console.transcript
 
 
 def test_continue_with_nothing_stored_starts_a_new_conversation(tmp_path):

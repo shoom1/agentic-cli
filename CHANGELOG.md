@@ -629,15 +629,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   resumes the newest saved conversation once the prompt is up, or says "No
   conversation to continue; starting a new one."; `-r`/`--resume <id>`
   resumes that one, and refuses one that is not saved before the prompt is
-  drawn ("No conversation '<id>' found. Run <app> --resume to pick one.",
-  status 1; on `session_store=memory`, which holds none to pick, without the
-  pick); a resume that fails once the prompt is up says so ("Could not open
-  '<id>': …", or, when it opened, "Opened '<id>', but could not show where
-  it left off: …"); `--resume` alone opens the picker once the prompt is up, where
-  Ctrl+C ends the app, as at an idle prompt (a Ctrl+C before the prompt,
-  while the workflow starts, ends it with status 130). A workflow that cannot start
-  keeps the prompt and says how to resume after `/settings`; a backend
-  without sessions refuses all three (status 1); a store that fails refuses
+  drawn ("No conversation '<id>' found: <app> --continue opens the newest,
+  /resume in the app picks one.", status 1; on `session_store=memory`, which
+  holds none, without the pointers); a resume that fails once the prompt is
+  up says so ("Could not open '<id>': …", or, when it opened, "Opened '<id>',
+  but could not show where it left off: …"); Ctrl+C while it runs ends the
+  app, as at an idle prompt (a Ctrl+C before the prompt, while the workflow
+  starts, ends it with status 130). `--resume` needs its id: the picker is
+  `/resume`, in the app, and `--resume` alone is refused with "--resume needs
+  a conversation id: --continue opens the newest, /resume in the app picks
+  one" (status 2; `session_args.SessionArgumentParser`, the parser `main()`
+  builds). A
+  workflow that cannot start keeps the prompt and says how to resume after
+  `/settings`; a backend without sessions refuses both (status 1); a store that fails refuses
   `--resume <id>` (status 1) and starts the others in a new conversation,
   saying why; on `session_store=memory` the lines say that conversations
   end with the app. At exit, a saved conversation a turn ran in is named:
@@ -658,8 +662,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `/resume` did ("No finished background jobs to resume." when there are
   none).
 - **The research demo runs through `BaseCLIApp.main()`**: `research-demo
-  --continue`, `--resume <id>` or `--resume`; its own `--session <id>`
-  is gone.
+  --continue` or `--resume <id>`; its own `--session <id>` is gone.
 - **A context overflow on ADK is recovered once, or ends in one clear
   error.** A model call the provider refused as too long raised its raw
   error ("Workflow error: prompt is too long: …"), and the next turn failed
@@ -1416,8 +1419,11 @@ step; each entry says what to use instead.
   `<sessions_dir>/locks/`, released by the OS when the process ends;
   nothing on `session_store=memory`). Another run is refused: `--resume
   <id>` exits 1 before the prompt ("Conversation '<id>' is open in another
-  process (1234)."), `/resume <id>` changes nothing, and `--continue`, when
-  the newest is held, starts a new conversation and says why. A switch holds
+  process (1234)."), `/resume <id>` changes nothing, and `--continue` passes
+  over the conversations other processes hold to the newest one free ("The
+  newest conversation, '<id>', is open in another process (1234); continuing
+  '<other>'."; several are named, past three a count), or starts a new
+  conversation when none of the 50 newest is free. A switch holds
   the conversation it leaves until it is done, so a Ctrl+C or a failure
   keeps the right one held. ADK's stale
   session (a writer without the lock) is now

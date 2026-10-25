@@ -4,8 +4,7 @@ Usage:
     research-demo                    # console script (after pip install -e .)
     python -m research_demo
     research-demo --continue         # the newest saved conversation
-    research-demo --resume <id>      # a saved conversation by id
-    research-demo --resume           # pick one
+    research-demo --resume <id>      # a saved conversation by id (/resume in the app: pick one)
 """
 
 from .app import ResearchDemoApp

@@ -175,7 +175,23 @@ class TestSessionFlags:
 
         assert done.returncode == 0, done.stderr
         assert done.stdout.startswith("usage: python -m research_demo")
-        assert "--continue" in done.stdout and "--resume [ID]" in done.stdout
+        assert "--continue" in done.stdout and "--resume ID" in done.stdout
+
+    def test_resume_without_an_id_says_what_to_use(self, sandbox) -> None:
+        """The picker is /resume, in the app: main()'s parser says so."""
+        import subprocess
+
+        home, cwd = sandbox
+        done = subprocess.run(
+            [*_argv(), "--resume"], cwd=cwd, env=child_env(home), capture_output=True,
+            text=True, timeout=60,
+        )
+
+        assert done.returncode == 2
+        assert (
+            "error: --resume needs a conversation id: --continue opens the newest, "
+            "/resume in the app picks one"
+        ) in done.stderr
 
     def test_without_credentials_a_resume_keeps_the_prompt_and_says_how(self, sandbox) -> None:
         """No key: the workflow cannot start, so the conversation cannot be
