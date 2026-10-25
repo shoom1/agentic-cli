@@ -1367,6 +1367,20 @@ step; each entry says what to use instead.
   backend now takes the conversation's id, and one line says: "This
   conversation's history stays with the previous backend: switch back to
   continue it. Here it starts empty."
+- **A conversation is open in one process at a time.** Two CLIs on one
+  stored conversation lost a turn: Deep Agents kept one of two runs from the
+  same checkpoint, and ADK failed the second writer with "Workflow error:
+  The session has been modified in storage…". The CLI now holds a lock on
+  the conversation it has open (`cli/conversation_lock.py`: an `flock` under
+  `<sessions_dir>/locks/`, released by the OS when the process ends;
+  nothing on `session_store=memory`). Another run is refused: `--resume
+  <id>` exits 1 before the prompt ("Conversation '<id>' is open in another
+  process (1234)."), `/resume <id>` changes nothing, and `--continue`, when
+  the newest is held, starts a new conversation and says why. ADK's stale
+  session (a writer without the lock) is now
+  `workflow.sessions.ConversationChangedError`, said plainly: "Conversation
+  '<id>' was changed by another process during this turn. Send your message
+  again to go on from what it holds now."
 - **On ADK, `/sessions` counts a conversation's turns, and deleting an
   unknown one says so.** Messages read 0 for every session (ADK's listing
   loads no events), and `delete_session` returned True for any id, so

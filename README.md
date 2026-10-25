@@ -174,7 +174,10 @@ conversation, Esc keeps the current one) and `/resume <id>` opens one by
 id; `/sessions` lists them with their titles (the first prompt), turns and
 last update. A resumed conversation shows its last 10 messages again. The
 model and the settings stay this run's; "Allow for this session" grants,
-sandbox kernels and the task list are not restored.
+sandbox kernels and the task list are not restored. One conversation is
+open in one process at a time: two would lose a turn, so a conversation
+another run has open is refused ("Conversation '<id>' is open in another
+process (1234)."; `--continue` then starts a new one).
 
 `main()` parses the flags, builds the app with `from_args` (by default
 `cls()`), runs it and exits with its `exit_status`. Point the console

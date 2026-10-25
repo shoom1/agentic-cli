@@ -365,6 +365,30 @@ class _Jobs:
         pass
 
 
+class TestAConversationOpenElsewhere:
+    async def test_it_is_refused_and_nothing_changes(self, project, monkeypatch):
+        import os
+
+        from agentic_cli.cli.conversation_lock import ConversationLock
+
+        monkeypatch.setenv("HOME", str(project))
+        workflow = Workflow(conversation("abc", "Plan the trip", 2))
+        from agentic_cli.config import BaseSettings
+
+        app = app_on(workflow, BaseSettings(session_store="sqlite"))
+        before = app.session_id
+        other = ConversationLock(app.settings.sessions_dir / "locks")
+        assert other.take(app._conversation_key("abc")) is None
+
+        assert await app.resume_session("abc") is False
+
+        assert app.session_id == before
+        assert not [c for c in workflow.calls if c.startswith("load_session")]
+        assert said(app.session, "add_error") == [
+            f"Could not open 'abc': it is open in another process ({os.getpid()})."
+        ]
+
+
 class TestItsFinishedJobs:
     @pytest.mark.parametrize("auto, told", [(True, ["j1"]), (False, [])])
     async def test_they_are_told_once_it_is_open_when_auto_resume_is_on(

@@ -246,6 +246,23 @@ async def test_a_cancelled_turn_that_started_no_job_says_only_that(ui):
     assert said == [CANCELLED_LINE]
 
 
+async def test_a_conversation_changed_elsewhere_is_said_plainly(ui):
+    from agentic_cli.workflow.sessions import ConversationChangedError
+
+    class Changed(Workflow):
+        async def _stream(self):
+            raise ConversationChangedError("abc")
+            yield  # pragma: no cover
+
+    result = await MessageProcessor().process("hi", ReplayController(Changed()), ui, SETTINGS)
+
+    assert not result.delivered
+    ui.add_error.assert_called_once_with(
+        "Conversation 'abc' was changed by another process during this turn. "
+        "Send your message again to go on from what it holds now."
+    )
+
+
 # --- with a question open (Review Focus 1) ---------------------------------------------
 
 
