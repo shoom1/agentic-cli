@@ -79,6 +79,21 @@ class TestProjectSettingsAllowlist:
         )
 
 
+    def test_the_permissions_section_is_not_reported_as_ignored(self, tmp_path, monkeypatch):
+        """The permission engine reads the project file's deny rules itself:
+        the section is no setting, and saying it was ignored is wrong."""
+        import structlog
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        _write_project_settings(tmp_path, "agentic_cli", {
+            "permissions": {"deny": [{"capability": "filesystem.read", "target": "notes/**"}]},
+        })
+        from agentic_cli.config import BaseSettings
+        with structlog.testing.capture_logs() as logs:
+            BaseSettings()
+        assert [e for e in logs if e.get("event") == "untrusted_project_setting_ignored"] == []
+
+
 class TestCwdDotenvFiltering:
     def _subclass_with_env_file(self, env_file):
         from agentic_cli.config import BaseSettings
@@ -106,6 +121,22 @@ class TestCwdDotenvFiltering:
         s = self._subclass_with_env_file(".env")()
         assert s.raw_llm_logging is False       # sensitive dropped
         assert s.default_model == "claude-sonnet-4-5"     # benign kept
+
+    def test_a_permissions_entry_in_a_cwd_env_is_reported_as_ignored(self, tmp_path, monkeypatch):
+        """No one reads permission rules from a .env: unlike the project
+        file's section, they do not apply, and the user is told."""
+        import structlog
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        (tmp_path / ".env").write_text(
+            'AGENTIC_PERMISSIONS={"deny": [{"capability": "filesystem.read", "target": "notes/**"}]}\n'
+        )
+        with structlog.testing.capture_logs() as logs:
+            self._subclass_with_env_file(".env")()
+        assert [
+            (e.get("key"), e.get("source")) for e in logs
+            if e.get("event") == "untrusted_project_setting_ignored"
+        ] == [("permissions", "cwd .env")]
 
     def test_absolute_env_file_is_trusted(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
