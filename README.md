@@ -1052,8 +1052,11 @@ every provider accepts: a call that finished keeps its result, a running one
 is answered "Interrupted by the user before it finished; it may have partly
 run…", one waiting at its permission prompt or at a question "Not run: the
 user cancelled it.", and a request stopped before its reply leaves
-"(Interrupted by the user.)" as the agent's reply. A call a crash left open is answered the same
-way on the next turn. Background jobs the request started keep running.
+"(Interrupted by the user.)" as the agent's reply. A call a crash left open
+is answered the same way on the next turn. Background jobs the request
+started keep running, and a line after the cancel names each still queued
+or running, with how to stop it: "Still running in the background: build
+(j1). Stop one with /jobs cancel <id>."
 
 The HITL input callback is **context-local**: `set_input_callback()` binds it
 for the calling context (and any task started from it), so two consumers of one

@@ -16,6 +16,7 @@ the session does. The session is specced from ``ThinkingPromptSession``.
 from __future__ import annotations
 
 import asyncio
+import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call
 
@@ -30,6 +31,7 @@ from agentic_cli.cli.message_processor import (
 )
 from agentic_cli.cli.workflow_controller import WorkflowController
 from agentic_cli.config import BaseSettings
+from agentic_cli.tools.jobs import JobState
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.events import InputType, UserInputRequest, WorkflowEvent
 from tests.cli.dialog_fakes import autospec_session, opening_boxes
@@ -186,6 +188,62 @@ async def test_a_turn_cancelled_before_any_task_progress(ui):
     (events_box,) = ui.boxes
     assert events_box.finish.call_args_list == [OUT_OF_THE_TRANSCRIPT]
     assert _cancelled_lines(ui) == [call("system", CANCELLED_LINE)]
+
+
+# --- background jobs go on -------------------------------------------------------------
+
+
+class _Jobs:
+    """A job manager's listing: the records it was given."""
+
+    def __init__(self, *records) -> None:
+        self.records = list(records)
+
+    def list(self, *, active_only: bool = False, **_):
+        active = (JobState.QUEUED, JobState.RUNNING)
+        return [r for r in self.records if not active_only or r.state in active]
+
+
+def _job(job_id: str, name: str, state=JobState.RUNNING, *, ago: float = 0.0):
+    return SimpleNamespace(job_id=job_id, name=name, state=state,
+                           submitted_at=time.time() - ago)
+
+
+async def test_a_cancelled_turn_names_the_background_jobs_it_started(ui):
+    """Ctrl+C stops the request, not the jobs it put in the background: each
+    one still queued or running is named, with how to stop it."""
+    workflow = Workflow()
+    workflow.job_manager = _Jobs(_job("old", "earlier", ago=60))
+    turn = asyncio.create_task(
+        MessageProcessor().process("hi", ReplayController(workflow), ui, SETTINGS)
+    )
+    await asyncio.wait_for(workflow.streaming.wait(), timeout=2)
+    workflow.job_manager.records += [
+        _job("j1", "build"), _job("j2", "train", JobState.QUEUED),
+        _job("j3", "quick", JobState.SUCCEEDED),
+    ]
+    turn.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await turn
+
+    said = [c.args[1] for c in ui.add_message.call_args_list if c.args[0] == "system"]
+    assert said == [
+        CANCELLED_LINE,
+        "Still running in the background: build (j1), train (j2). "
+        "Stop one with /jobs cancel <id>.",
+    ]
+
+
+async def test_a_cancelled_turn_that_started_no_job_says_only_that(ui):
+    workflow = Workflow()
+    workflow.job_manager = _Jobs(_job("old", "earlier", ago=60))
+    turn = asyncio.create_task(
+        MessageProcessor().process("hi", ReplayController(workflow), ui, SETTINGS)
+    )
+    await _cancel_once_streaming(workflow, turn)
+
+    said = [c.args[1] for c in ui.add_message.call_args_list if c.args[0] == "system"]
+    assert said == [CANCELLED_LINE]
 
 
 # --- with a question open (Review Focus 1) ---------------------------------------------

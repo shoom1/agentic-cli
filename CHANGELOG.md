@@ -1332,6 +1332,11 @@ step; each entry says what to use instead.
   ADK's warning goes to the debug log (`adk_dropped_open_calls`). On Deep
   Agents `InterruptedCallsMiddleware` takes `PatchToolCallsMiddleware`'s
   place.
+- **Ctrl+C names the background jobs it leaves running.** A stopped request
+  does not stop the jobs it submitted, and nothing said so; after
+  "Operation cancelled..." one line now names each that is still queued or
+  running: "Still running in the background: build (j1). Stop one with
+  /jobs cancel <id>."
 - **On ADK, `/sessions` counts a conversation's turns, and deleting an
   unknown one says so.** Messages read 0 for every session (ADK's listing
   loads no events), and `delete_session` returned True for any id, so

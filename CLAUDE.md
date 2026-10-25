@@ -33,7 +33,7 @@ agentic-cli/
 │   │   ├── workflow_controller.py  # WorkflowController (lazy/background init, orchestrator swap; the status bar names the main agent's model)
 │   │   ├── session_resume.py # What /resume shows: the picker (picker), the "Resumed:" line, the replay of the last 10 messages
 │   │   ├── session_args.py # --continue / --resume [ID] → SessionStart (BaseCLIApp.main() adds them; start: new, continue, resume, pick)
-│   │   ├── message_processor.py    # WorkflowEvent → ThinkingPromptSession rendering; Ctrl+C stops the request being processed (its boxes end with it; "Operation cancelled..." once; CancelledError re-raised); tool questions as dialogs; process_compact: /compact run as a turn (compact() as its event source, live events merged in)
+│   │   ├── message_processor.py    # WorkflowEvent → ThinkingPromptSession rendering; Ctrl+C stops the request being processed (its boxes end with it; "Operation cancelled..." once, then the background jobs it submitted that still run, named; CancelledError re-raised); tool questions as dialogs; process_compact: /compact run as a turn (compact() as its event source, live events merged in)
 │   │   ├── settings_command.py     # /settings: a Dialog with Save and Cancel; the fields that changed → apply_settings
 │   │   ├── settings_introspection.py # Pydantic field → thinking-prompt form field (built complete: they are frozen)
 │   │   └── usage_tracker.py        # Token usage / status bar: ctx = the main agent's last prompt over its context_trigger (sub-agent and summary calls never move it)
