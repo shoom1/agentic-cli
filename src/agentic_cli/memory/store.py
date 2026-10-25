@@ -302,14 +302,15 @@ class MemoryStore:
             if item is None:
                 return False
             if content is not None:
-                item.content = content
                 # The embedding is of the content, so only new content
-                # replaces it.
-                item.embedding = (
+                # replaces it, and both change together: an embedding that
+                # fails leaves the memory as it was.
+                embedding = (
                     self._embedding_service.embed_text(content)
                     if self._embedding_service
                     else None
                 )
+                item.content, item.embedding = content, embedding
             if tags is not _SENTINEL:
                 item.tags = tags
             item.updated_at = datetime.now().isoformat()
