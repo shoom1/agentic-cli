@@ -32,6 +32,11 @@ from google.adk.plugins.base_plugin import BasePlugin
 from google.genai import types
 
 from agentic_cli.workflow.interrupts import INTERRUPTED, MARKER, OpenCalls
+from agentic_cli.workflow.sessions import (
+    ToolCallRef,
+    reset_active_tool_call,
+    set_active_tool_call,
+)
 
 if TYPE_CHECKING:
     from google.adk.agents.invocation_context import InvocationContext
@@ -47,11 +52,15 @@ ABORTED = "INVOCATION_ABORTED"
 
 @dataclass(frozen=True, slots=True)
 class _Finished:
-    """A call that returned before the cancel: what the cap needs to cut it."""
+    """A call that returned before the cancel: what the cap needs to cut it,
+    and the state it changed (ADK stores a call's state change with its
+    result, which a seal replaces: save_tasks would say it saved, and not)."""
 
     tool: "BaseTool"
     tool_args: dict[str, Any]
     result: Any
+    state_delta: dict[str, Any]
+    artifact_delta: dict[str, Any]
 
 
 class InterruptedCallsPlugin(BasePlugin):
@@ -66,6 +75,18 @@ class InterruptedCallsPlugin(BasePlugin):
         super().__init__(name="interrupted_calls")
         self._open = open_calls
         self._cap = cap
+        # Each running call's active-tool-call token, by call id.
+        self._active: dict[str, Any] = {}
+
+    async def before_tool_callback(
+        self, *, tool: "BaseTool", tool_args: dict[str, Any], tool_context: "ToolContext | None"
+    ) -> None:
+        """Mark the call running (``workflow.sessions.get_active_tool_call``):
+        a question it asks then knows which call waits on it."""
+        call_id = getattr(tool_context, "function_call_id", None)
+        if call_id:
+            self._active[call_id] = set_active_tool_call(ToolCallRef(call_id, tool.name))
+        return None
 
     async def after_tool_callback(
         self,
@@ -75,9 +96,34 @@ class InterruptedCallsPlugin(BasePlugin):
         tool_context: "ToolContext | None",
         result: Any,
     ) -> None:
-        if tool_context is not None:
-            self._open.finished(tool_context.function_call_id, _Finished(tool, tool_args, result))
+        if tool_context is None:
+            return None
+        self._done(tool_context.function_call_id)
+        if result is None and getattr(tool, "is_long_running", False):
+            # ADK gives a long-running call that returned nothing no result:
+            # its job answers it (OpenCalls.answer), never null.
+            return None
+        actions = tool_context.actions
+        self._open.finished(tool_context.function_call_id, _Finished(
+            tool, tool_args, result,
+            dict(actions.state_delta or {}), dict(actions.artifact_delta or {}),
+        ))
         return None
+
+    async def on_tool_error_callback(
+        self, *, tool: "BaseTool", tool_args: dict[str, Any], tool_context: "ToolContext",
+        error: Exception,
+    ) -> None:
+        self._done(getattr(tool_context, "function_call_id", None))
+        return None
+
+    def _done(self, call_id: str | None) -> None:
+        token = self._active.pop(call_id, None) if call_id else None
+        if token is not None:
+            try:
+                reset_active_tool_call(token)
+            except ValueError:  # set in another context: it ends with that context
+                pass
 
     async def on_event_callback(
         self, *, invocation_context: "InvocationContext", event: Event
@@ -89,15 +135,21 @@ class InterruptedCallsPlugin(BasePlugin):
             return event.model_copy(update={"content": types.Content(
                 role="model", parts=[types.Part(text=MARKER)],
             )})
-        parts = [await self._answered(part) for part in content.parts]
-        return event.model_copy(update={"content": types.Content(role=content.role, parts=parts)})
+        actions = event.actions.model_copy(deep=True)
+        parts = [await self._answered(part, actions) for part in content.parts]
+        return event.model_copy(update={
+            "content": types.Content(role=content.role, parts=parts), "actions": actions,
+        })
 
-    async def _answered(self, part: types.Part) -> types.Part:
+    async def _answered(self, part: types.Part, actions: Any) -> types.Part:
         call = part.function_response
         if call is None:
             return part
         answer = self._open.answer(call.id, by_user=True)
         if isinstance(answer, _Finished):
+            # Its state change is stored with the seal, as with its result.
+            actions.state_delta.update(answer.state_delta)
+            actions.artifact_delta.update(answer.artifact_delta)
             answer = await self._capped(answer)
         return types.Part(function_response=types.FunctionResponse(
             id=call.id, name=call.name, response=_as_response(answer),

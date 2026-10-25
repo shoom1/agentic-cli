@@ -475,6 +475,7 @@ class InterruptedCallsMiddleware(AgentMiddleware):
         by_user = self._root and self._open.take_cancel(get_active_turn())
         answered = {message.tool_call_id for message in messages if message.type == "tool"}
         patched: list[AnyMessage] = []
+        updates: dict[str, Any] = {}
         changed = False
         for message in messages:
             patched.append(message)
@@ -484,19 +485,21 @@ class InterruptedCallsMiddleware(AgentMiddleware):
                 call_id = call["id"]
                 if call_id is None or call_id in answered:
                     continue
-                patched.append(self._answer(call, by_user=by_user))
+                patched.append(self._answer(call, by_user=by_user, updates=updates))
                 changed = True
         if (
             by_user and not changed and len(patched) >= 2
-            and isinstance(patched[-1], HumanMessage) and isinstance(patched[-2], HumanMessage)
+            and isinstance(patched[-1], HumanMessage) and not _a_reply(patched[-2])
         ):
+            # Stopped before its reply, maybe after tool results: no call was
+            # open, and the model is told the turn stopped all the same.
             patched.insert(-1, AIMessage(content=MARKER))
             changed = True
         if not changed:
             return None
-        return {"messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), *patched]}
+        return {**updates, "messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), *patched]}
 
-    def _answer(self, call: Any, *, by_user: bool) -> ToolMessage:
+    def _answer(self, call: Any, *, by_user: bool, updates: dict[str, Any]) -> ToolMessage:
         name = call["name"] or "unknown"
         if call.get("type") == "invalid_tool_call":
             return ToolMessage(
@@ -505,8 +508,11 @@ class InterruptedCallsMiddleware(AgentMiddleware):
                 name=name, tool_call_id=call["id"], status="error",
             )
         answer = self._open.answer(call["id"], by_user=by_user)
-        if isinstance(answer, ToolMessage):
-            return answer
+        if isinstance(answer, _Finished):
+            # The rest of what it changed (save_tasks' tasks, a delegation's
+            # plan): LangGraph dropped it with the stopped step's writes.
+            updates.update(answer.updates)
+            return answer.message
         return ToolMessage(
             content=json.dumps(answer), name=name, tool_call_id=call["id"],
             status="success" if answer.get("success") else "error",
@@ -531,14 +537,29 @@ class InterruptedCallsMiddleware(AgentMiddleware):
         return result
 
     def _record(self, call: ToolCall, result: _ToolResult) -> None:
+        updates: dict[str, Any] = {}
         if isinstance(result, Command):
             update = result.update if isinstance(result.update, dict) else {}
+            updates = {key: value for key, value in update.items() if key != "messages"}
             result = next((
                 m for m in update.get("messages", ())
                 if isinstance(m, ToolMessage) and m.tool_call_id == call["id"]
             ), None)
         if isinstance(result, ToolMessage):
-            self._open.finished(call["id"], result)
+            self._open.finished(call["id"], _Finished(result, updates))
+
+
+@dataclasses.dataclass(frozen=True)
+class _Finished:
+    """A call that returned before the cancel: its message, and the rest of its update."""
+
+    message: ToolMessage
+    updates: dict[str, Any]
+
+
+def _a_reply(message: AnyMessage) -> bool:
+    """Whether ``message`` ended its turn: the agent's text, with no call."""
+    return isinstance(message, AIMessage) and not message.tool_calls
 
 
 class ActiveToolCallMiddleware(AgentMiddleware):

@@ -25,6 +25,7 @@ whose ``tool_result`` is missing.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import threading
 from pathlib import Path
@@ -41,6 +42,7 @@ from agentic_cli.tools.registry import Capability, register_tool  # noqa: E402
 from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager  # noqa: E402
 from agentic_cli.workflow.config import AgentConfig  # noqa: E402
 from agentic_cli.workflow.deepagents.manager import DeepAgentsWorkflowManager  # noqa: E402
+from agentic_cli.workflow.events import EventType  # noqa: E402
 from agentic_cli.workflow.interrupts import (  # noqa: E402
     INTERRUPTED,
     INTERRUPTED_BY_USER,
@@ -378,6 +380,222 @@ async def test_a_call_whose_job_was_submitted_is_answered_with_the_running_job(
     assert claude.refused == []
     assert sent["success"] is True and sent["state"] in ("queued", "running")
     assert sent["job_id"] and "result arrives when it ends" in sent["note"]
+
+
+@register_tool(capabilities=EXEMPT, description="Slow to stop (a test tool).")
+async def ic_slow_stop() -> dict:
+    """Wait until cancelled, then take a while to clean up, as a process's tool does."""
+    SIGNALS["started"].set()
+    try:
+        await asyncio.Event().wait()
+    except asyncio.CancelledError:
+        await asyncio.sleep(0.5)
+        raise
+    return {"success": True}
+
+
+@register_tool(capabilities=EXEMPT, long_running=True, requires=JOB_MANAGER,
+               description="Starts a background job and returns nothing (a test tool).")
+async def ic_start_job_quietly(tool_context=None) -> None:
+    """Start a job and return nothing, a supported starter shape."""
+    get_service(JOB_MANAGER).submit(
+        tool="ic_start_job_quietly", backend="inprocess", spec={"target": _until_released},
+        resume_on_complete=True, call_id=getattr(tool_context, "function_call_id", None),
+    )
+    SIGNALS["finished"].set()
+    return None
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+async def test_a_cancel_during_a_later_model_call_leaves_a_note(hermetic, monkeypatch, backend):
+    """The stop lands while the model answers its tool's result: no call is
+    open, and the model is told the turn was stopped all the same."""
+    claude = serve(monkeypatch, Claude(Answer=[
+        calls(("ic_fast", {"topic": "tea"}, "toolu_f")), "hold", say("Back again."),
+    ]), backend)
+    manager = solo(backend, ic_fast)
+    try:
+        await cancelled(manager, "Look tea up and explain.")
+        await turn(manager, "Hello again.")
+    finally:
+        await manager.cleanup()
+
+    assert claude.refused == []
+    assert lines(claude.last("Answer"))[-2:] == [f"assistant: {MARKER}", "user: Hello again."]
+    assert "tea is 42" in results(claude.last("Answer"))["toolu_f"]
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+async def test_a_turn_its_consumer_closes_is_closed_inside_it(hermetic, monkeypatch, backend):
+    """A library caller may stop reading at an event and close process()
+    rather than cancel it: the run stops, and its calls are answered (the
+    model is told the user stopped it), before the turn lets go."""
+    claude = serve(monkeypatch, Claude(Answer=[
+        calls(("ic_wait", {}, "toolu_w")), say("Back again."),
+    ]), backend)
+    manager = solo(backend, ic_wait, session_store="sqlite")
+    try:
+        async with contextlib.aclosing(manager.process("Wait for it.", "u", session_id="s")) as events:
+            async for event in events:
+                if event.type is EventType.TOOL_CALL:
+                    break
+        closed_inside = not manager._turn_lock.locked()
+        await asyncio.wait_for(turn(manager, "Hello again."), timeout=10)
+    finally:
+        await manager.cleanup()
+
+    # Deep Agents may not have saved the step yet: then no call is open, and
+    # the marker says the turn stopped.
+    sent = claude.last("Answer")
+    assert closed_inside and claude.refused == []
+    assert (INTERRUPTED_BY_USER in results(sent).get("toolu_w", "")
+            or f"assistant: {MARKER}" in lines(sent))
+
+
+@pytest.mark.parametrize("store", ["memory", "sqlite"])
+async def test_on_adk_a_second_ctrl_c_waits_for_the_answers(hermetic, monkeypatch, caplog, store):
+    """Pressed again while a tool takes a while to stop: the turn still ends
+    with its calls answered, the finished one with its result."""
+    claude = serve(monkeypatch, Claude(Answer=[
+        calls(("ic_fast", {"topic": "tea"}, "toolu_f"), ("ic_slow_stop", {}, "toolu_w")),
+        say("Back again."),
+    ]), "adk")
+    manager = solo("adk", ic_fast, ic_slow_stop, session_store=store)
+    try:
+        with caplog.at_level("WARNING"):
+            running = asyncio.create_task(turn(manager, "Both, please."))
+            await asyncio.wait_for(SIGNALS["started"].wait(), timeout=5)
+            await asyncio.wait_for(SIGNALS["finished"].wait(), timeout=5)
+            await asyncio.sleep(0.05)
+            running.cancel()
+            await asyncio.sleep(0.1)
+            running.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await running
+            await turn(manager, "Hello again.")
+    finally:
+        await manager.cleanup()
+
+    sent = results(claude.last("Answer"))
+    assert claude.refused == []
+    assert "tea is 42" in sent["toolu_f"] and INTERRUPTED_BY_USER in sent["toolu_w"]
+    assert [r.getMessage() for r in caplog.records if r.levelno >= 40] == []
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+async def test_a_finished_state_tool_keeps_its_change(hermetic, monkeypatch, backend):
+    """save_tasks beside a call still running: told it saved, it did save."""
+    tasks = [{"description": "Brew tea", "status": "in_progress"}]
+    serve(monkeypatch, Claude(Answer=[
+        calls(("save_tasks", {"tasks": tasks}, "toolu_t"), ("ic_wait", {}, "toolu_w")),
+        say("Back again."),
+    ]), backend)
+    manager = manager_for(backend, [AgentConfig(
+        name="solo", prompt="Answer.", tools=[ic_wait], include_state_tools=True,
+    )])
+    try:
+        running = asyncio.create_task(turn(manager, "Plan and wait."))
+        await asyncio.wait_for(SIGNALS["started"].wait(), timeout=5)
+        await asyncio.sleep(0.1)
+        running.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await running
+        await turn(manager, "Hello again.")
+        if backend == "adk":
+            session = await manager._session_service.get_session(
+                app_name=manager.app_name, user_id="u", session_id="s")
+            saved = session.state.get("tasks")
+        else:
+            from agentic_cli.workflow.deepagents.sessions import run_config
+
+            state = await manager._root.aget_state(run_config(manager.session_ref("s", "u")))
+            saved = state.values.get("tasks")
+    finally:
+        await manager.cleanup()
+
+    assert [t["description"] for t in saved] == ["Brew tea"]
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+async def test_a_call_waiting_at_its_question_is_not_run(hermetic, monkeypatch, backend):
+    from agentic_cli.tools.interaction_tools import ask_clarification
+
+    claude = serve(monkeypatch, Claude(Answer=[
+        calls(("ask_clarification", {"question": "Which file?"}, "toolu_q")), say("Back again."),
+    ]), backend)
+    manager = solo(backend, ask_clarification)
+
+    async def never_answered(request) -> str:
+        SIGNALS["asked"].set()
+        await asyncio.Event().wait()
+        return "x"
+
+    manager.set_input_callback(never_answered)
+    try:
+        await cancelled(manager, "Ask me.", until="asked")
+        await turn(manager, "Hello again.")
+    finally:
+        await manager.cleanup()
+
+    assert NOT_RUN in results(claude.last("Answer"))["toolu_q"]
+
+
+async def test_on_adk_a_quiet_starter_beside_a_cancel_is_answered_with_its_job(
+    hermetic, monkeypatch
+):
+    """A long-running starter that returned nothing gets no result from ADK:
+    its job's state answers it, never null."""
+    claude = serve(monkeypatch, Claude(Answer=[
+        calls(("ic_start_job_quietly", {}, "toolu_j"), ("ic_wait", {}, "toolu_w")),
+        say("Back again."),
+    ]), "adk")
+    manager = solo("adk", ic_start_job_quietly, ic_wait)
+    JOB_RELEASE.clear()
+    try:
+        running = asyncio.create_task(turn(manager, "Build and wait."))
+        await asyncio.wait_for(SIGNALS["started"].wait(), timeout=5)
+        await asyncio.wait_for(SIGNALS["finished"].wait(), timeout=5)
+        await asyncio.sleep(0.05)
+        running.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await running
+        await turn(manager, "Hello again.")
+    finally:
+        JOB_RELEASE.set()
+        await manager.cleanup()
+
+    assert json.loads(results(claude.last("Answer"))["toolu_j"])["job_id"]
+
+
+async def test_on_a_native_adk_app_nothing_is_answered_for_it(hermetic):
+    """ADK leaves some calls open on purpose (a task-mode sub-agent waiting
+    for the user): a native app's own agents get ADK's handling alone."""
+    from types import SimpleNamespace
+
+    from google.adk.events import Event
+    from google.genai import types
+
+    from agentic_cli.workflow.interrupts import OpenCalls
+
+    manager = GoogleADKWorkflowManager.__new__(GoogleADKWorkflowManager)
+    manager._adk_config_path = "root_agent.yaml"
+    manager._open_calls = OpenCalls()
+    appended: list = []
+
+    async def append_event(session, event):
+        appended.append(event)
+
+    manager._session_service = SimpleNamespace(append_event=append_event)
+    session = SimpleNamespace(events=[Event(
+        invocation_id="e-1", author="coordinator",
+        content=types.Content(role="model", parts=[types.Part(
+            function_call=types.FunctionCall(id="toolu_task", name="booker", args={}),
+        )]),
+    )])
+
+    await manager._answer_left_open(session)
+
+    assert appended == []
 
 
 # --- a crash ----------------------------------------------------------------------------

@@ -1050,9 +1050,9 @@ was stopped. The whole request stops, its sub-agents too, and every tool call
 the model made is given one result, so the next turn starts from a history
 every provider accepts: a call that finished keeps its result, a running one
 is answered "Interrupted by the user before it finished; it may have partly
-run…", one waiting at its permission prompt "Not run: the user cancelled
-it.", and a request stopped before any reply leaves "(Interrupted by the
-user.)" as the agent's reply. A call a crash left open is answered the same
+run…", one waiting at its permission prompt or at a question "Not run: the
+user cancelled it.", and a request stopped before its reply leaves
+"(Interrupted by the user.)" as the agent's reply. A call a crash left open is answered the same
 way on the next turn. Background jobs the request started keep running.
 
 The HITL input callback is **context-local**: `set_input_callback()` binds it

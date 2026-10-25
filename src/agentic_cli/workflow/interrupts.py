@@ -6,11 +6,15 @@ model made then gets exactly one result, so the history stays valid for every
 provider (Claude and OpenAI refuse a call without its result) and the model
 knows what happened rather than running a side effect again blindly:
 
-- a call that finished before the cancel keeps its real result;
+- a call that finished before the cancel keeps its real result, and the
+  state it changed (``save_tasks``' tasks, a delegation's plan);
 - a running call, or a delegation, is answered ``INTERRUPTED_BY_USER``;
-- a call waiting at its permission prompt (or a question) is ``NOT_RUN``;
-- a cancel with no call open leaves ``MARKER`` as the main agent's reply, so
-  the next turn answers the new message rather than the old one too;
+- a call waiting at its permission prompt (both gates mark it) or at a
+  question it asked (``BaseWorkflowManager.request_user_input``, by the
+  active tool call) is ``NOT_RUN``;
+- a cancel with no call open (during the first model call, or one after
+  tool results) leaves ``MARKER`` as the main agent's reply, so the next
+  turn answers the new message rather than resuming the old one;
 - a call a crash left open (nothing ran on the way out) is answered
   ``INTERRUPTED`` on the next turn.
 

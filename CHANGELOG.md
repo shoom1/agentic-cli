@@ -1312,17 +1312,23 @@ step; each entry says what to use instead.
   OpenAI refuse, so every later turn of that conversation failed. Deep
   Agents reported a call that had finished beside the cancelled one as "did
   not complete", so a side effect could be repeated. Now a call that
-  finished keeps its result, a running one is answered "Interrupted by the
-  user before it finished; it may have partly run. Check before running it
-  again.", one waiting at its permission prompt "Not run: the user cancelled
-  it.", a delegation to a sub-agent as interrupted, and a call whose job was
-  already submitted with the job's state; a request stopped before any reply
-  leaves "(Interrupted by the user.)" as the main agent's reply, so the next
-  turn answers the new message alone. ADK seals the cancelled invocation
+  finished keeps its result and the state it changed (`save_tasks`' tasks),
+  a running one is answered "Interrupted by the user before it finished; it
+  may have partly run. Check before running it again.", one waiting at its
+  permission prompt or at a question "Not run: the user cancelled it.", a
+  delegation to a sub-agent as interrupted, and a call whose job was already
+  submitted with the job's state; a request stopped before its reply (also
+  after tool results) leaves "(Interrupted by the user.)" as the main
+  agent's reply, so the next turn answers the new message alone. A turn
+  ends only once that is stored: closed by its consumer (`aclosing`), or
+  cancelled again while a tool takes a while to stop (up to 5 s,
+  `live_events.STOP_GRACE`). ADK seals the cancelled invocation
   through `Runner.run_async(abort_signal=)` (`InterruptedCallsPlugin` words
   it; `live_events.merged(on_stop=)` sets the signal before the runner is
   cancelled), and a call nothing sealed (a crash, or a session from before)
-  is answered "Interrupted before it finished …" when the next turn starts;
+  is answered "Interrupted before it finished …" when the next turn starts
+  (an app built from configs: a native ADK YAML app keeps ADK's own
+  handling, which leaves a task-mode sub-agent's call open on purpose);
   ADK's warning goes to the debug log (`adk_dropped_open_calls`). On Deep
   Agents `InterruptedCallsMiddleware` takes `PatchToolCallsMiddleware`'s
   place.

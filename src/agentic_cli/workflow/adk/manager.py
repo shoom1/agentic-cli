@@ -907,6 +907,10 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         them; ADK would keep a long-running one in every request, which
         Claude and OpenAI refuse, and drop any other one with a warning.
         """
+        if self._adk_config_path:
+            # A native app's agents are ADK's own, and ADK leaves some calls
+            # open on purpose (a task-mode sub-agent waiting for the user).
+            return session
         answers = left_open(session.events, self._open_calls)
         for event in answers:
             await self._session_service.append_event(session, event)
@@ -964,14 +968,17 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     parts=[types.Part.from_text(text=message)],
                 )
 
-                async for event in self._run_and_stream(
+                # aclosing: a consumer that closes this generator closes the
+                # run now, inside the turn, so its calls are answered first.
+                async with contextlib.aclosing(self._run_and_stream(
                     session_id=current_session_id,
                     user_id=user_id,
                     new_message=new_message,
                     # The conversation's row (workflow/adk/sessions.py).
                     state_delta=turn_state(session, message),
-                ):
-                    yield event
+                )) as events:
+                    async for event in events:
+                        yield event
 
     async def _run_and_stream(
         self,
@@ -1174,12 +1181,13 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                 logger.info("job_resume_started", job_id=record.job_id,
                             call_id=record.call_id, state=record.state.value,
                             caller=author)
-                async for event in self._run_and_stream(
+                async with contextlib.aclosing(self._run_and_stream(
                     session_id=session_id,
                     user_id=user_id,
                     new_message=new_message,
-                ):
-                    yield event
+                )) as events:
+                    async for event in events:
+                        yield event
 
     @property
     def supports_compact(self) -> bool:

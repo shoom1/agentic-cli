@@ -501,10 +501,13 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
                 for notice in self._take_notices():
                     yield notice
                 ref = self.session_ref(current_session_id, user_id)
-                async for event in self._run_turn(
+                # aclosing: a consumer that closes this generator closes the
+                # run now, inside the turn, so its cancel is on record first.
+                async with contextlib.aclosing(self._run_turn(
                     ref, {"messages": [HumanMessage(content=message)]}
-                ):
-                    yield event
+                )) as events:
+                    async for event in events:
+                        yield event
 
     async def can_resume(self, record) -> bool:
         """True iff the job's conversation is still there to resume into.
@@ -585,10 +588,11 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
                 )
                 for notice in self._take_notices():
                     yield notice
-                async for event in self._run_turn(
+                async with contextlib.aclosing(self._run_turn(
                     ref, {"messages": [job_notification(record, result)]}
-                ):
-                    yield event
+                )) as events:
+                    async for event in events:
+                        yield event
 
     async def compact(
         self, session: "SessionRef", focus: str | None = None
