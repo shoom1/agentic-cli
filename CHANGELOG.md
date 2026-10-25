@@ -12,13 +12,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Saving settings keeps the project's deny rules.** The project
   `./.{app_name}/settings.json` may hold `permissions.deny` rules, which the
   permission engine reads from the file itself, but a settings save (any
-  `/settings` change, or `SettingsPersistence.save`) rewrote that file with
-  its settings alone and dropped the section, so after the next start a read
-  the project denied was allowed (since 0.6.1). Both saves now keep the
-  section as it is; a full save of a project file that is not valid JSON
-  raises instead of replacing it, as the `/settings` save already did. The
-  startup warning that called the section an ignored setting is gone: its
-  deny rules apply (its allow rules, as before, do not).
+  `/settings` change, or `SettingsPersistence.save` without `path=`) rewrote
+  that file with its settings alone and dropped the section, so after the
+  next start a read the project denied was allowed (since 0.6.0). These
+  saves now keep the section as it is; a full save of a project file that is
+  not valid JSON raises instead of replacing it, as the `/settings` save
+  already did. The startup warning that called the section an ignored setting
+  is gone: its deny rules apply (its allow rules, as before, do not). A
+  `permissions` entry in a cwd `.env` is still reported as ignored.
 - **A skill name is looked up only under `skills_dirs`, never in the working
   directory.** `SkillStore` (ADK and Deep Agents) tried a bare name such as
   `report-writer` as a folder in the working directory first, so in a cloned

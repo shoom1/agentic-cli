@@ -89,9 +89,10 @@ class _AllowlistFilterSource(PydanticBaseSettingsSource):
     by an older version still holds settings since removed (0.6's
     ``context_window_*``), and settings are built before logging is
     configured, when structlog prints even a debug log above the UI. The
-    ``permissions`` section (``PROJECT_PRESERVED_KEYS``) is passed over
-    without a log too: it sets no setting, the permission engine reads its
-    deny rules from the file itself.
+    ``passed_over`` keys are dropped without a log too: the project file's
+    ``permissions`` section (``PROJECT_PRESERVED_KEYS``) sets no setting, and
+    the permission engine reads its deny rules from the file itself (no one
+    reads one from a ``.env``, which is still reported).
     """
 
     def __init__(
@@ -99,10 +100,12 @@ class _AllowlistFilterSource(PydanticBaseSettingsSource):
         settings_cls: Type[PydanticBaseSettings],
         inner: PydanticBaseSettingsSource,
         label: str,
+        passed_over: frozenset[str] = frozenset(),
     ) -> None:
         super().__init__(settings_cls)
         self._inner = inner
         self._label = label
+        self._passed_over = passed_over
 
     def get_field_value(self, field: Any, field_name: str) -> Tuple[Any, str, bool]:
         # Unused: __call__ is overridden to filter the inner source's output.
@@ -114,8 +117,8 @@ class _AllowlistFilterSource(PydanticBaseSettingsSource):
         for key, value in self._inner().items():
             if key in _PROJECT_SETTABLE_KEYS:
                 kept[key] = value
-            elif key in _PROJECT_PRESERVED_KEYS:
-                continue  # the permission engine reads it (deny rules only)
+            elif key in self._passed_over:
+                continue  # read by others (the project file's deny rules)
             elif key in settings:
                 logger.warning(
                     "untrusted_project_setting_ignored", key=key, source=self._label
@@ -203,6 +206,8 @@ def _get_json_config_source(
         settings_cls,
         JsonConfigSettingsSource(settings_cls, json_file=json_file),
         "project settings.json",
+        # The permission engine reads this file's deny rules itself.
+        passed_over=_PROJECT_PRESERVED_KEYS,
     )
 
 

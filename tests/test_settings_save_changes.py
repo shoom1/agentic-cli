@@ -273,3 +273,18 @@ class TestTheProjectPermissionRules:
             SettingsPersistence(APP).save(settings)
 
         assert fs["project"].read_text() == '{"permissions": {"deny": ['
+
+    def test_a_full_save_takes_no_project_rule_into_the_user_file(self, fs):
+        """The project file is untrusted, so its allow rules never apply; a
+        save must not carry them into the trusted user file."""
+        allow = {"allow": [{"capability": "filesystem.write", "target": "/**"}], **self.DENY}
+        self._seed(fs, {"permissions": allow})
+        settings = BaseSettings()
+        assert settings.permissions == BaseSettings.model_fields["permissions"].get_default(
+            call_default_factory=True
+        )
+
+        SettingsPersistence(APP).save(settings)
+
+        assert "permissions" not in _read(fs["user"])
+        assert _read(fs["project"])["permissions"] == allow
