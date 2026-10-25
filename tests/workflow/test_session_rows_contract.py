@@ -95,3 +95,21 @@ async def test_a_conversation_that_is_not_stored(backend):
     assert await backend.session_info("s1", user_id="someone-else") is None
     assert await backend.delete_session("missing", user_id="u") is False
     assert [r.session_id for r in await backend.list_sessions(user_id="someone-else")] == []
+
+
+async def test_a_job_told_to_the_conversation_is_no_turn(backend):
+    """Nobody typed a job's notice: the turns and the title stay the user's."""
+    from types import SimpleNamespace
+
+    from agentic_cli.tools.jobs import JobState
+
+    await say(backend, "Build it.", "s1")
+    record = SimpleNamespace(
+        job_id="j1", tool="build", call_id="c1", call_name="build", session_id="s1",
+        user_id="u", state=JobState.SUCCEEDED, exit_code=0, error=None,
+    )
+    async for _ in backend.resume_with_job_result(record, result="built"):
+        pass
+
+    row = await backend.session_info("s1", user_id="u")
+    assert (row.title, row.turns) == ("Build it.", 1)

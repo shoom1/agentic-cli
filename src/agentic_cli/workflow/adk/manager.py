@@ -47,7 +47,12 @@ from agentic_cli.workflow.adk.model_factory import build_adk_model, generate_tex
 from agentic_cli.workflow.adk.overflow_plugin import OverflowPlugin
 from agentic_cli.workflow.adk.permission_plugin import PermissionPlugin
 from agentic_cli.workflow.adk.plugins import LLMLoggingPlugin, SentRequestLoggingPlugin
-from agentic_cli.workflow.adk.sessions import row_from_events, row_from_state, turn_state
+from agentic_cli.workflow.adk.sessions import (
+    last_updated,
+    row_from_events,
+    row_from_state,
+    turn_state,
+)
 from agentic_cli.workflow.adk.tool_result_cap_plugin import ToolResultCapPlugin
 from agentic_cli.workflow.service_registry import JOB_MANAGER
 from agentic_cli.workflow.sessions import ConversationChangedError, SessionInfo
@@ -1323,9 +1328,13 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         for session in listed:
             if limit is not None and len(rows) >= limit:
                 break
-            row = row_from_state(session) or await self.session_info(
-                session.id, user_id=ref.user_id
-            )
+            row = row_from_state(session)
+            if row is None:
+                try:
+                    row = await self.session_info(session.id, user_id=ref.user_id)
+                except Exception:  # noqa: BLE001 - one unreadable row is no unreadable store
+                    logger.debug("session_row_unreadable", session_id=session.id, exc_info=True)
+                    row = SessionInfo(session.id, updated=last_updated(session))
             if row is not None:
                 rows.append(row)
         return rows

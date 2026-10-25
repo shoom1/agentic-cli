@@ -81,16 +81,17 @@ def row_from_state(session: "Session") -> SessionInfo | None:
     turns = state.get(TURNS_KEY)
     if not isinstance(turns, int):
         return None
-    return SessionInfo(session.id, str(state.get(TITLE_KEY) or ""), turns, _updated(session))
+    return SessionInfo(session.id, str(state.get(TITLE_KEY) or ""), turns, last_updated(session))
 
 
 def row_from_events(session: "Session") -> SessionInfo:
     """The row of a conversation from before the keys, read from its events."""
     typed = typed_prompts(session.events)
     title = session_title(typed[0]) if typed else ""
-    return SessionInfo(session.id, title, len(typed), _updated(session))
+    return SessionInfo(session.id, title, len(typed), last_updated(session))
 
 
-def _updated(session: "Session") -> datetime | None:
+def last_updated(session: "Session") -> datetime | None:
+    """When the session last changed, aware (UTC); None when unknown."""
     stamp = session.last_update_time
     return datetime.fromtimestamp(stamp, tz=timezone.utc) if stamp else None

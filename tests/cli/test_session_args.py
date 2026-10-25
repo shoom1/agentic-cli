@@ -59,3 +59,11 @@ def test_the_help_names_both(capsys):
 def test_a_start_that_cannot_be_is_refused(mode, session_id):
     with pytest.raises(ValueError):
         SessionStart(mode, session_id)  # type: ignore[arg-type]
+
+
+def test_session_start_is_exported_with_the_app():
+    """An app overriding from_args builds its own start: it imports it from agentic_cli.cli."""
+    from agentic_cli.cli import SessionStart as exported
+    from agentic_cli.cli.session_args import SessionStart
+
+    assert exported is SessionStart

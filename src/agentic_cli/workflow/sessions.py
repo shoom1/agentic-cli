@@ -84,13 +84,22 @@ def session_title(text: str) -> str:
     """``text`` as a conversation's title: one line, at most ``TITLE_MAX`` characters.
 
     Control and invisible format characters are removed (a soft hyphen
-    joins its word again), each run of whitespace becomes one space, and a
-    longer text is cut with "…".
+    joins its word again; the zero-width joiners stay: they change the text,
+    a Persian word or an emoji sequence, not hide it), each run of
+    whitespace becomes one space, and a longer text is cut with "…".
     """
-    line = " ".join("".join(ch for ch in text if ch.isprintable() or ch.isspace()).split())
+    line = " ".join("".join(ch for ch in text if _kept(ch)).split())
     if len(line) <= TITLE_MAX:
         return line
     return line[: TITLE_MAX - 1].rstrip() + "…"
+
+
+def _kept(ch: str) -> bool:
+    return ch.isprintable() or ch.isspace() or ch in _JOINERS
+
+
+#: Zero-width non-joiner and joiner.
+_JOINERS = "\u200c\u200d"
 
 
 # The conversation whose turn is currently executing. A ContextVar, not a

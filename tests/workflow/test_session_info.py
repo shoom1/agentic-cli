@@ -32,6 +32,12 @@ class TestSessionTitle:
         assert session_title("co\xadop") == "coop"  # a soft hyphen
         assert session_title("trip \u200emarks") == "trip marks"  # a left-to-right mark
 
+    def test_the_joiners_are_kept(self):
+        """They change the text, not hide it: a Persian word, a family emoji."""
+        assert session_title("می\u200cخواهم") == "می\u200cخواهم"
+        family = "\U0001F468\u200d\U0001F469\u200d\U0001F467"
+        assert session_title(f"For the {family}") == f"For the {family}"
+
     def test_a_long_prompt_is_cut_with_an_ellipsis(self):
         title = session_title("word " * 40)
         assert len(title) == TITLE_MAX == 80

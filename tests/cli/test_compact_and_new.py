@@ -628,6 +628,23 @@ class TestStartNewSession:
         assert "on_session_end" not in workflow.calls
         assert app.session.start_thinking.call_count == 0
 
+    async def test_a_new_conversation_that_fails_after_saving_them_saves_none_again(
+        self, project, monkeypatch
+    ):
+        workflow = Workflow()
+        app = app_on(workflow, fake_settings(auto_extract_session_facts=True))
+        await app.process_input("Hello.")
+
+        async def unavailable(session_id, user_id=None) -> bool:
+            raise RuntimeError("database is locked")
+
+        monkeypatch.setattr(workflow, "load_session", unavailable)
+        with pytest.raises(RuntimeError):
+            await app.start_new_session()
+        await app._extract_session_facts_on_exit()
+
+        assert workflow.calls.count("on_session_end") == 1
+
     async def test_without_fact_extraction_none_are(self, project):
         workflow = Workflow()
         app = app_on(workflow, fake_settings(auto_extract_session_facts=False))

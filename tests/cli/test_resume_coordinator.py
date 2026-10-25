@@ -360,3 +360,11 @@ class TestClaimIsAlwaysClosed:
 
         assert sorted(counts) == [0, 1], "both coordinators claimed the same job"
         assert len(jm.completed) == 1
+
+
+async def test_an_app_built_without_init_has_run_no_turn():
+    """Apps and fakes built with ``__new__`` read ``_turned`` at a job's
+    resume and at exit: it is False until a turn runs."""
+    app = BaseCLIApp.__new__(BaseCLIApp)
+
+    assert app._turned is False

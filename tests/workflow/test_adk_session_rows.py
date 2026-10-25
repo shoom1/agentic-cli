@@ -271,6 +271,27 @@ class TestAConversationFromBeforeTheKeys:
         assert after.last_update_time == before
         assert TURNS_KEY not in after.state  # nothing written back
 
+    async def test_one_that_cannot_be_read_is_listed_by_its_id(self, project, monkeypatch):
+        """A damaged row, say: the listing goes on, the row says what it can."""
+        manager = sqlite_manager()
+        await manager.initialize_services()
+        try:
+            await seed(manager, "old", [text_event("user", "Plan the trip.")])
+            await seed(manager, "bad", [text_event("user", "Unreadable.")])
+
+            async def unreadable(session_id, *, user_id=None):
+                raise ValueError("a damaged event row")
+
+            monkeypatch.setattr(manager, "session_info", unreadable)
+            listed = await manager.list_sessions(user_id="u")
+        finally:
+            await manager.cleanup()
+
+        assert {(r.session_id, r.title, r.turns) for r in listed} == {
+            ("old", "", None), ("bad", "", None),
+        }
+        assert all(r.updated is not None for r in listed)
+
     async def test_its_next_turn_counts_the_turns_it_had(self, project, monkeypatch):
         route(monkeypatch, anthropic, "AsyncAnthropic", FakeAPI(chat("Again.")))
         manager = sqlite_manager()

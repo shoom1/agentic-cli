@@ -10,6 +10,7 @@ from agentic_cli.cli.commands import (
 )
 from agentic_cli.cli.app import BaseCLIApp
 from agentic_cli.cli.message_processor import MessageProcessor
+from agentic_cli.cli.session_args import SessionStart
 from agentic_cli.cli.workflow_controller import WorkflowController
 from agentic_cli.settings_mixins import CLISettingsMixin
 
@@ -21,6 +22,7 @@ __all__ = [
     "CommandRegistry",
     "MessageProcessor",
     "ParsedArgs",
+    "SessionStart",
     "WorkflowController",
     "CLISettingsMixin",
 ]
