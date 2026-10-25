@@ -221,7 +221,9 @@ class MemoryStore:
         for item_id, item in self._items.items():
             if item.embedding is not None:
                 emb_data[item_id] = item.embedding
-        if emb_data:
+        # A file left as it was would keep the vector of a memory whose
+        # vector was cleared (an edit without a service): write it even empty.
+        if emb_data or self._embeddings_path.exists():
             atomic_write_json(self._embeddings_path, emb_data)
 
     def _ensure_embeddings(self) -> None:
