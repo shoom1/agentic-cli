@@ -302,14 +302,21 @@ _MEMORY_NOTE = " (session_store is memory: conversations end with the app)"
 
 
 def _passed_over_line(passed_over: list[tuple[str, int]], *, continuing: str | None) -> str:
-    """What ``--continue`` says of the newer conversations other processes have open."""
+    """What ``--continue`` says of the newer conversations other processes have
+    open: each by its id and holder, past three a count."""
     if len(passed_over) == 1:
         (session_id, holder), = passed_over
         held = (
             f"The newest conversation, '{session_id}', is open in another process ({holder})"
         )
     else:
-        held = f"The {len(passed_over)} newest conversations are open in other processes"
+        names = [f"'{session_id}' ({holder})" for session_id, holder in passed_over[:3]]
+        if len(passed_over) > 3:
+            names.append(f"{len(passed_over) - 3} more")
+        held = (
+            f"The newest conversations, {', '.join(names[:-1])} and {names[-1]}, "
+            "are open elsewhere"
+        )
     then = f"continuing '{continuing}'" if continuing else "starting a new one"
     return f"{held}; {then}."
 
@@ -1528,7 +1535,8 @@ class BaseCLIApp:
         unnamed runs silently share one conversation. By ``session_start``:
 
         - ``"continue"`` finds the newest stored conversation no other
-          process has open (``_newest_free``), which ``_open_on_startup``
+          process has open (``_newest_free``, among the newest ``PICK_LIMIT``
+          when the newest is held), which ``_open_on_startup``
           resumes once the prompt is up, or says there is none ("No
           conversation to continue; starting a new one.");
         - ``"resume"`` checks its conversation is stored first: one that is
@@ -1581,8 +1589,15 @@ class BaseCLIApp:
                     return False
                 self._pending_resume = target
             elif mode == "continue":
-                rows = await workflow.list_sessions(limit=PICK_LIMIT)
-                self._pending_resume, passed_over = self._newest_free(rows)
+                # A listing can read whole sessions (ADK's from before the
+                # title keys): the newest alone, unless it is held.
+                self._pending_resume, passed_over = self._newest_free(
+                    await workflow.list_sessions(limit=1)
+                )
+                if passed_over:
+                    self._pending_resume, passed_over = self._newest_free(
+                        await workflow.list_sessions(limit=PICK_LIMIT)
+                    )
                 if passed_over:
                     self.session.add_warning(_passed_over_line(
                         passed_over, continuing=self._pending_resume

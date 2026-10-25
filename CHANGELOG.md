@@ -627,7 +627,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   starts, ends it with status 130). `--resume` needs its id: the picker is
   `/resume`, in the app, and `--resume` alone is refused with "--resume needs
   a conversation id: --continue opens the newest, /resume in the app picks
-  one" (`session_args.SessionArgumentParser`, the parser `main()` builds). A
+  one" (status 2; `session_args.SessionArgumentParser`, the parser `main()`
+  builds). A
   workflow that cannot start keeps the prompt and says how to resume after
   `/settings`; a backend without sessions refuses both (status 1); a store that fails refuses
   `--resume <id>` (status 1) and starts the others in a new conversation,
@@ -1410,7 +1411,8 @@ step; each entry says what to use instead.
   process (1234)."), `/resume <id>` changes nothing, and `--continue` passes
   over the conversations other processes hold to the newest one free ("The
   newest conversation, '<id>', is open in another process (1234); continuing
-  '<other>'."), or starts a new conversation when every one is held. A switch holds
+  '<other>'."; several are named, past three a count), or starts a new
+  conversation when none of the 50 newest is free. A switch holds
   the conversation it leaves until it is done, so a Ctrl+C or a failure
   keeps the right one held. ADK's stale
   session (a writer without the lock) is now

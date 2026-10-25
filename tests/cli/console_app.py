@@ -1,7 +1,7 @@
 """A CLI app for the console tests: ``BaseCLIApp`` over a scripted workflow.
 
 It runs through ``BaseCLIApp.main()``, so it takes the session flags
-(``--continue``, ``--resume [ID]``) as any app does.
+(``--continue``, ``--resume <id>``) as any app does.
 
 ``tests/cli/test_console_turns.py`` runs it in a child process over a pty;
 without a ``test_`` prefix, pytest does not collect it. Nothing reaches a
@@ -194,7 +194,7 @@ def main() -> None:
     workflow_controller.create_workflow_manager_from_settings = (
         lambda **kwargs: ScriptedManager()
     )
-    ConsoleApp.main()  # the session flags: --continue, --resume [ID]
+    ConsoleApp.main()  # the session flags: --continue, --resume <id>
 
 
 if __name__ == "__main__":

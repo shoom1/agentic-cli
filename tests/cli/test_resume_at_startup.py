@@ -56,11 +56,9 @@ class Session:
     """The terminal: records what the app shows; its prompt stays up until
     ``until`` says the startup work is done, then plays ``inputs``."""
 
-    def __init__(self, *, inputs=(), picks=(), until=None) -> None:
+    def __init__(self, *, inputs=(), until=None) -> None:
         self.shown: list[tuple[str, str]] = []
         self.inputs = list(inputs)
-        self.picks = list(picks)
-        self.dialogs: list = []
         self.until = until
         self.prompted = False
         self.app = SimpleNamespace(is_running=False)  # until the prompt is up
@@ -84,17 +82,14 @@ class Session:
         return handler
 
     async def show_dialog(self, dialog):
-        self.dialogs.append(dialog)
-        (field,) = dialog.fields
-        pick = self.picks.pop(0)
-        return None if pick is None else field.options[pick]
+        raise AssertionError(f"no dialog opens at startup: {dialog.title!r}")
 
     async def run_async(self) -> None:
         self.prompted = True
         self.app.is_running = True
         self.shown.append(("prompt", ""))
         # The startup work polls is_running every 20 ms: let it run, even for
-        # a test that waits on nothing, so a pick or resume set by mistake shows.
+        # a test that waits on nothing, so a resume set by mistake shows.
         await asyncio.sleep(0.05)
         for _ in range(200):
             if self.until is None or self.until(self):
@@ -502,6 +497,47 @@ class TestAConversationOpenElsewhere:
             f"Conversation 'abc' is open in another process ({os.getpid()})."
         ]
 
+    @staticmethod
+    def listed(manager, monkeypatch) -> list:
+        """The ``limit`` of each listing the app asks for."""
+        limits: list = []
+        real = manager.list_sessions
+
+        async def list_sessions(*, user_id=None, limit=None):
+            limits.append(limit)
+            return await real(user_id=user_id, limit=limit)
+
+        monkeypatch.setattr(manager, "list_sessions", list_sessions)
+        return limits
+
+    async def test_continue_lists_one_conversation_when_the_newest_is_free(
+        self, manager, monkeypatch
+    ):
+        """A listing can read whole old sessions (ADK, from before the title
+        keys): --continue reads more only when the newest is held."""
+        store(manager, "abc", "Plan the trip", "Sure.", hours=2)
+        limits = self.listed(manager, monkeypatch)
+        session = Session(until=resumed)
+        app = app_with(session, SessionStart("continue"))
+
+        await app.run()
+
+        assert app.session_id == "abc" and limits == [1]
+
+    async def test_continue_lists_further_when_the_newest_is_held(self, manager, monkeypatch):
+        from agentic_cli.cli.session_resume import PICK_LIMIT
+
+        store(manager, "abc", "Plan the trip", "Sure.", hours=2)
+        store(manager, "def", "Fix the build", "Done.", hours=1)
+        limits = self.listed(manager, monkeypatch)
+        session = Session(until=resumed)
+        app = app_with(session, SessionStart("continue"))
+        self.held_elsewhere(app, "def")
+
+        await app.run()
+
+        assert app.session_id == "abc" and limits == [1, PICK_LIMIT]
+
     async def test_continue_takes_the_newest_one_not_open_elsewhere(self, manager):
         """Another terminal has the newest open: this one goes on with its
         own last conversation, the next newest, and says which it passed over."""
@@ -542,9 +578,19 @@ class TestAConversationOpenElsewhere:
         await app.run()
 
         assert session.prompted and app.session_id not in ("abc", "def")
+        pid = os.getpid()
         assert session.said("warning") == [
-            "The 2 newest conversations are open in other processes; starting a new one."
+            f"The newest conversations, 'def' ({pid}) and 'abc' ({pid}), are open "
+            "elsewhere; starting a new one."
         ]
+
+    def test_past_three_the_line_counts_the_rest(self):
+        held = [(name, n) for n, name in enumerate("abcde", start=1)]
+
+        assert app_module._passed_over_line(held, continuing="f") == (
+            "The newest conversations, 'a' (1), 'b' (2), 'c' (3) and 2 more, are open "
+            "elsewhere; continuing 'f'."
+        )
 
     async def test_continue_starts_a_new_one_when_the_newest_is_open_elsewhere(self, manager):
         store(manager, "abc", "Plan the trip", "Sure.", hours=2)
@@ -671,6 +717,16 @@ class TestMain:
         with pytest.raises(SystemExit) as exited:
             self.FlagApp.main(list(argv))
         return exited.value.code
+
+    def test_resume_without_an_id_says_what_to_use(self, manager, capsys):
+        with pytest.raises(SystemExit) as exited:
+            self.FlagApp.main(["--resume"])
+
+        assert exited.value.code == 2
+        assert (
+            "--resume needs a conversation id: --continue opens the newest, "
+            "/resume in the app picks one"
+        ) in capsys.readouterr().err
 
     def test_it_exits_with_the_apps_status(self, manager):
         code = self.run_main("--resume", "zzz", session=Session())

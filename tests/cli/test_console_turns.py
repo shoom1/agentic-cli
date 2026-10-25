@@ -254,7 +254,7 @@ def test_resume_of_a_conversation_that_is_not_stored_exits_before_the_prompt(tmp
     (tmp_path / "home").mkdir()
     console = Console(tmp_path, tmp_path / "home", args=("--resume", "zzz"), prompt=False)
     try:
-        # The console app keeps its conversations in memory: nothing to pick from.
+        # The console app keeps its conversations in memory: nothing to open instead.
         console.expect("No conversation 'zzz' found. "
                        "(session_store is memory: conversations end with the app)",
                        timeout=STARTUP_TIMEOUT)
