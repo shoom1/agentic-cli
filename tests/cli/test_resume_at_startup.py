@@ -546,6 +546,34 @@ class TestAConversationOpenElsewhere:
             "starting a new one."
         ]
 
+    async def test_a_startup_open_that_fails_gives_it_back(self, manager, monkeypatch):
+        """The resume once the prompt is up fails: the app runs in its new
+        conversation, which it holds, and lets the one it did not open go."""
+        from agentic_cli.cli.conversation_lock import ConversationLock
+
+        store(manager, "abc", "Plan the trip", "Sure.", hours=2)
+
+        async def unreadable(session_id, limit=20, *, user_id=None):
+            raise RuntimeError("a damaged row")
+
+        monkeypatch.setattr(manager, "recent_messages", unreadable)
+        held: list = []
+
+        def looked(session) -> bool:
+            if session.said("error") and not held:
+                for session_id in ("abc", app.session_id):
+                    other = ConversationLock(app.settings.sessions_dir / "locks")
+                    held.append(other.take(app._conversation_key(session_id)) is not None)
+                    other.release()
+            return bool(held)
+
+        session = Session(until=looked)
+        app = app_with(session, SessionStart("resume", "abc"))
+        await app.run()
+
+        assert app.session_id != "abc"
+        assert held == [False, True]  # abc free, its own conversation held
+
     async def test_the_app_holds_the_conversation_it_opened(self, manager):
         from agentic_cli.cli.conversation_lock import ConversationLock
 

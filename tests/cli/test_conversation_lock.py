@@ -69,3 +69,26 @@ def test_its_files_are_private(tmp_path):
 
     (path,) = (tmp_path / "locks").iterdir()
     assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_a_switch_holds_both_until_it_commits(tmp_path):
+    mine, theirs = ConversationLock(tmp_path), ConversationLock(tmp_path)
+    mine.take((*KEY, "abc"))
+
+    taken = mine.acquire((*KEY, "xyz"))
+    assert theirs.take((*KEY, "abc")) == os.getpid()  # still held
+    assert theirs.take((*KEY, "xyz")) == os.getpid()
+
+    mine.commit(taken)
+    assert theirs.take((*KEY, "abc")) is None
+    assert ConversationLock(tmp_path).take((*KEY, "xyz")) == os.getpid()
+
+
+def test_a_switch_that_does_not_happen_lets_the_new_one_go(tmp_path):
+    mine, theirs = ConversationLock(tmp_path), ConversationLock(tmp_path)
+    mine.take((*KEY, "abc"))
+
+    mine.abandon(mine.acquire((*KEY, "xyz")))
+
+    assert theirs.take((*KEY, "xyz")) is None
+    assert ConversationLock(tmp_path).take((*KEY, "abc")) == os.getpid()

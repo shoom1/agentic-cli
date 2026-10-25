@@ -28,7 +28,7 @@ from thinking_prompt import AppInfo, ThinkingPromptSession, ThinkingPromptStyles
 
 from agentic_cli.cli.commands import Command, CommandRegistry
 from agentic_cli.cli.message_processor import MessageProcessor, _says_so_when_stopped
-from agentic_cli.cli.conversation_lock import ConversationLock
+from agentic_cli.cli.conversation_lock import ConversationLock, Taken
 from agentic_cli.cli.session_args import SessionStart, add_session_arguments, parse_session_start
 from agentic_cli.cli.session_resume import (
     PICK_LIMIT,
@@ -1362,22 +1362,31 @@ class BaseCLIApp:
             line = resumed_line(info, datetime.now(timezone.utc))
             replay = replay_lines(messages)
             old = self._session_id
-            holder = self._hold(session_id)
-            if holder is not None:
+            # Held beside the one it is in until the switch is done: a Ctrl+C
+            # or a failure below keeps the one it stays in, and lets this go.
+            taken = self._acquire(session_id)
+            if isinstance(taken, int):
                 self.session.add_error(
-                    f"Could not open '{session_id}': it is open in another process ({holder})."
+                    f"Could not open '{session_id}': it is open in another process ({taken})."
                 )
                 return False
-            if self._turned:  # facts once per conversation used
-                await self._saving_facts(old)
+            adopted = False
             try:
-                await workflow.load_session(session_id)
-            except Exception as error:  # noqa: BLE001 - the id is not adopted
-                logger.debug("session_open_failed", session_id=session_id, exc_info=True)
-                reason = str(error) or type(error).__name__
-                self.session.add_error(f"Could not open '{session_id}': {reason}")
-                self._hold(old)  # back to the conversation it stays in
-                return False
+                if self._turned:  # facts once per conversation used
+                    await self._saving_facts(old)
+                try:
+                    await workflow.load_session(session_id)
+                except Exception as error:  # noqa: BLE001 - the id is not adopted
+                    logger.debug("session_open_failed", session_id=session_id, exc_info=True)
+                    reason = str(error) or type(error).__name__
+                    self.session.add_error(f"Could not open '{session_id}': {reason}")
+                    return False
+                adopted = True
+            finally:
+                if adopted:
+                    self._commit(taken)
+                else:
+                    self._abandon(taken)
             self._session_id = session_id
             self._turned = False
             self._message_processor.reset()
@@ -1589,9 +1598,11 @@ class BaseCLIApp:
         try:
             if target is None:
                 target = await self.pick_session()
-            if target is not None:
-                await self._resume(target)
+            if target is not None and not await self._resume(target):
+                self._hold(self._session_id)  # it stays in its new one: give the target back
         except Exception as error:  # noqa: BLE001 - the new conversation goes on
+            if self._session_id != target:
+                self._hold(self._session_id)
             logger.debug("startup_open_failed", session_id=target, exc_info=True)
             reason = str(error) or type(error).__name__
             if target is None:
@@ -1608,6 +1619,30 @@ class BaseCLIApp:
             self._settings.app_name, self._settings.default_user, session_id,
         )
 
+    def _acquire(self, session_id: str) -> "Taken | int | None":
+        """``_hold``'s first half: ``session_id`` held beside the one held now.
+
+        Returns:
+            The hold to ``_commit`` or ``_abandon``; the process id holding it
+            elsewhere; None on the memory store, which locks nothing.
+        """
+        if self._settings.session_store == "memory":
+            return None
+        return self._lock().acquire(self._conversation_key(session_id))
+
+    def _commit(self, taken: "Taken | None") -> None:
+        if taken is not None:
+            self._lock().commit(taken)
+
+    def _abandon(self, taken: "Taken | None") -> None:
+        if taken is not None:
+            self._lock().abandon(taken)
+
+    def _lock(self) -> ConversationLock:
+        if self._conversation_lock is None:
+            self._conversation_lock = ConversationLock(self._settings.sessions_dir / "locks")
+        return self._conversation_lock
+
     def _hold(self, session_id: str) -> int | None:
         """Hold ``session_id``'s conversation for this process, letting go of the one before.
 
@@ -1622,9 +1657,7 @@ class BaseCLIApp:
         """
         if self._settings.session_store == "memory":
             return None
-        if self._conversation_lock is None:
-            self._conversation_lock = ConversationLock(self._settings.sessions_dir / "locks")
-        return self._conversation_lock.take(self._conversation_key(session_id))
+        return self._lock().take(self._conversation_key(session_id))
 
     def _resume_hint(self) -> str:
         """The exit line that names how to come back to the current conversation."""

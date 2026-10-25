@@ -389,6 +389,57 @@ class TestAConversationOpenElsewhere:
         ]
 
 
+class TestTheLockOnASwitchThatDoesNotHappen:
+    """The conversation the app is in stays held, and the one it did not
+    open is not, however the switch ends."""
+
+    @staticmethod
+    def app_holding(project, monkeypatch):
+        from agentic_cli.config import BaseSettings
+
+        monkeypatch.setenv("HOME", str(project))
+        workflow = Workflow(conversation("a", "A", 2), conversation("b", "B", 2))
+        app = app_on(workflow, BaseSettings(session_store="sqlite"))
+        assert app._hold(app.session_id) is None
+        return app, workflow
+
+    @staticmethod
+    def free(app, session_id: str) -> bool:
+        from agentic_cli.cli.conversation_lock import ConversationLock
+
+        other = ConversationLock(app.settings.sessions_dir / "locks")
+        taken = other.take(app._conversation_key(session_id)) is None
+        other.release()
+        return taken
+
+    async def test_a_ctrl_c_while_it_loads(self, project, monkeypatch):
+        app, workflow = self.app_holding(project, monkeypatch)
+        old, loading = app.session_id, asyncio.Event()
+
+        async def load_session(session_id, user_id=None):
+            loading.set()
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(workflow, "load_session", load_session)
+        switch = asyncio.create_task(app.resume_session("b"))
+        await asyncio.wait_for(loading.wait(), 5)
+        switch.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await switch
+
+        assert app.session_id == old
+        assert not self.free(app, old) and self.free(app, "b")
+
+    async def test_a_load_that_fails(self, project, monkeypatch):
+        app, workflow = self.app_holding(project, monkeypatch)
+        old = app.session_id
+        workflow.load_error = RuntimeError("database is locked")
+
+        assert await app.resume_session("b") is False
+
+        assert not self.free(app, old) and self.free(app, "b")
+
+
 class TestItsFinishedJobs:
     @pytest.mark.parametrize("auto, told", [(True, ["j1"]), (False, [])])
     async def test_they_are_told_once_it_is_open_when_auto_resume_is_on(

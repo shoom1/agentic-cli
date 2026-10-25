@@ -1376,7 +1376,9 @@ step; each entry says what to use instead.
   nothing on `session_store=memory`). Another run is refused: `--resume
   <id>` exits 1 before the prompt ("Conversation '<id>' is open in another
   process (1234)."), `/resume <id>` changes nothing, and `--continue`, when
-  the newest is held, starts a new conversation and says why. ADK's stale
+  the newest is held, starts a new conversation and says why. A switch holds
+  the conversation it leaves until it is done, so a Ctrl+C or a failure
+  keeps the right one held. ADK's stale
   session (a writer without the lock) is now
   `workflow.sessions.ConversationChangedError`, said plainly: "Conversation
   '<id>' was changed by another process during this turn. Send your message
