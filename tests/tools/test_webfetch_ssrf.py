@@ -292,3 +292,7 @@ class TestOneConnectionPerRequest:
         """An HTTP/2 connection carries many requests at once, whatever the
         keep-alive limit: one connection per request needs HTTP/1.1."""
         assert PinnedTransport(URLValidator())._inner._pool._http2 is False
+
+    def test_the_connection_cap_stays_httpx_s(self):
+        """Limits() without max_connections lifts httpx's cap of 100."""
+        assert PinnedTransport(URLValidator())._inner._pool._max_connections == 100

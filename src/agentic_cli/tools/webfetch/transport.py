@@ -10,7 +10,7 @@ from agentic_cli.tools.webfetch.validator import URLValidator, BlockedAddressErr
 class PinnedTransport(httpx.AsyncBaseTransport):
     """Connect every request to a validated pinned IP.
 
-    Wraps an inner transport (default httpx.AsyncHTTPTransport(); a
+    Wraps an inner transport (its own by default, below; a
     httpx.MockTransport in tests). Resolves the host (all A+AAAA), requires all
     addresses globally routable, and rewrites the request to connect to the
     literal validated IP while preserving the Host header and TLS SNI — so cert
@@ -23,6 +23,7 @@ class PinnedTransport(httpx.AsyncBaseTransport):
     checked for that name) would carry the next request for any other
     hostname on that IP. Each request opens its own connection, which holds
     only over HTTP/1.1 (an HTTP/2 connection carries many requests at once).
+    An ``inner`` given instead must not reuse a connection either.
     """
 
     def __init__(
@@ -32,7 +33,8 @@ class PinnedTransport(httpx.AsyncBaseTransport):
     ) -> None:
         self._validator = validator
         self._inner = inner if inner is not None else httpx.AsyncHTTPTransport(
-            http2=False, limits=httpx.Limits(max_keepalive_connections=0)
+            http2=False,
+            limits=httpx.Limits(max_connections=100, max_keepalive_connections=0),
         )
 
     def _pin(self, request: httpx.Request) -> None:
