@@ -70,7 +70,7 @@ class Session:
     def add_error(self, text): self.shown.append(("error", text))
     def add_success(self, text): self.shown.append(("success", text))
     def add_message(self, role, text): self.shown.append((role, text))
-    def add_response(self, text, markdown=False): self.shown.append(("response", text))
+    def add_response(self, text, *, markdown=False): self.shown.append(("response", text))
     def add_rich(self, renderable): self.shown.append(("rich", str(renderable)))
     def set_status(self, text): pass
     def exit(self): pass
@@ -93,10 +93,13 @@ class Session:
         self.prompted = True
         self.app.is_running = True
         self.shown.append(("prompt", ""))
-        for _ in range(500):
+        # The startup work polls is_running every 20 ms: let it run, even for
+        # a test that waits on nothing, so a pick or resume set by mistake shows.
+        await asyncio.sleep(0.05)
+        for _ in range(200):
             if self.until is None or self.until(self):
                 break
-            await asyncio.sleep(0)
+            await asyncio.sleep(0.01)
         for text in self.inputs:
             await self._handler(text)
 
@@ -277,6 +280,19 @@ class TestResumeById:
             "No conversation 'zzz' found. Run research-demo --resume to pick one."
         ]
 
+    async def test_on_the_memory_store_the_refusal_offers_no_picker(self, manager):
+        """Nothing is stored there: "Run ... --resume to pick one" would pick nothing."""
+        session = Session()
+        app = app_with(session, SessionStart("resume", "zzz"), store="memory")
+        app._command = "my-app"
+
+        await app.run()
+
+        assert session.said("error") == [
+            "No conversation 'zzz' found. "
+            "(session_store is memory: conversations end with the app)"
+        ]
+
     async def test_on_the_memory_store_the_refusal_says_why(self, manager):
         session = Session()
         app = app_with(session, SessionStart("resume", "zzz"), store="memory")
@@ -321,6 +337,7 @@ class TestPick:
 
         await app.run()
 
+        assert session.dialogs  # the picker opened, and Esc closed it
         assert app.session_id == fresh and not resumed(session)
 
 
@@ -354,6 +371,9 @@ class TestWhenItCannot:
         await app.run()
 
         assert session.prompted and session.dialogs == [] and app.exit_status == 0
+        # No picker was set to fail once the prompt is up (the workflow's
+        # own failure is said, as at any start).
+        assert not [e for e in session.said("error") if "conversation" in e or "picker" in e]
         assert (
             "Could not open the picker: the workflow did not start. "
             "Fix it with /settings, then /resume."
@@ -436,7 +456,11 @@ class TestWhenItCannot:
 
         await app.run()
 
-        assert session.said("error") == ["Could not open 'abc': the status bar broke"]
+        # Opened, so the next turn goes there: it says so, and what failed.
+        assert app.session_id == "abc"
+        assert session.said("error") == [
+            "Opened 'abc', but could not show where it left off: the status bar broke"
+        ]
 
     @pytest.mark.parametrize("start, broken", [
         (SessionStart("resume", "abc"), "session_info"),
@@ -486,6 +510,7 @@ class TestWhenItCannot:
 
         await app.run()
 
+        assert reading.is_set()  # the resume was under way
         assert CANCELLED_LINE not in session.said("system")
         assert session.said("system")[-1] == "Goodbye!"
 
@@ -689,19 +714,46 @@ class TestMain:
             outcome = ended
         assert isinstance(outcome, SystemExit) and outcome.code == 130
 
-    def test_its_command_is_the_script_or_the_module_run(self, monkeypatch):
-        monkeypatch.setattr(sys, "argv", ["/usr/local/bin/research-demo"])
-        monkeypatch.setitem(sys.modules, "__main__", ModuleType("__main__"))
-        assert app_module._command_name() == "research-demo"
+    @pytest.fixture
+    def run_as(self, monkeypatch):
+        """Run "as" a command: ``argv[0]``, the ``__main__`` spec, the
+        interpreter, and what PATH finds for a name."""
+        def run(argv0: str, spec: str | None = None, *, on_path: dict | None = None,
+                python: str = "/usr/bin/python3"):
+            main = ModuleType("__main__")
+            if spec is not None:
+                main.__spec__ = SimpleNamespace(name=spec)
+            monkeypatch.setitem(sys.modules, "__main__", main)
+            monkeypatch.setattr(sys, "argv", [argv0])
+            monkeypatch.setattr(sys, "executable", python)
+            monkeypatch.setattr(app_module.shutil, "which",
+                                lambda name: (on_path or {}).get(name))
+            return app_module._command_name()
+        return run
 
-        main = ModuleType("__main__")
-        main.__spec__ = SimpleNamespace(name="research_demo.__main__")
-        monkeypatch.setitem(sys.modules, "__main__", main)
-        assert app_module._command_name() == "python -m research_demo"
+    def test_its_command_is_the_script_or_the_module_run(self, run_as):
+        assert run_as("/usr/local/bin/research-demo",
+                      on_path={"research-demo": "/usr/local/bin/research-demo"}) == "research-demo"
+        assert run_as("x", "research_demo.__main__") == "python3 -m research_demo"
 
-    def test_a_script_run_by_python_is_named_as_it_was_run(self, monkeypatch):
-        monkeypatch.setitem(sys.modules, "__main__", ModuleType("__main__"))
-        monkeypatch.setattr(sys, "argv", ["my_app.py"])
-        assert app_module._command_name() == "python my_app.py"
-        monkeypatch.setattr(sys, "argv", ["/home/me/apps/my_app.py"])
-        assert app_module._command_name() == "python /home/me/apps/my_app.py"
+    def test_the_interpreter_is_named_as_it_was_run(self, run_as):
+        assert run_as("x", "research_demo.__main__", python="/opt/conda/bin/python") == (
+            "python -m research_demo"
+        )
+
+    def test_a_script_run_by_python_is_named_as_it_was_run(self, run_as):
+        assert run_as("my_app.py") == "python3 my_app.py"
+        assert run_as("/home/me/apps/my_app.py") == "python3 /home/me/apps/my_app.py"
+        assert run_as("/home/me/my apps/app.py") == "python3 '/home/me/my apps/app.py'"
+
+    def test_a_script_off_the_path_is_named_by_its_path(self, run_as):
+        assert run_as("./my_app") == "./my_app"
+
+    def test_a_windows_console_script_is_named_not_its_launcher(self, run_as):
+        """pip's .exe launcher runs a zip whose module is __main__."""
+        launcher = "C:\\Users\\me\\Scripts\\research-demo"
+        assert run_as(launcher, "__main__",
+                      on_path={"research-demo": launcher + ".EXE"}) == "research-demo"
+
+    def test_a_zipapp_is_named_as_run(self, run_as):
+        assert run_as("app.pyz", "__main__") == "python3 app.pyz"

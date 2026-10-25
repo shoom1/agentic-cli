@@ -7,6 +7,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from agentic_cli.cli.commands import Command, CommandCategory
+from agentic_cli.cli.session_resume import NO_PROMPT
 
 if TYPE_CHECKING:
     from agentic_cli.cli.app import BaseCLIApp
@@ -488,7 +489,7 @@ class SessionsCommand(Command):
 
     async def execute(self, args: str, app: Any) -> None:
         """Display persisted sessions (from the native store) or delete one."""
-        from rich.markup import escape
+        from rich.text import Text
 
         parsed = self.parse_args(args)
         delete_id = parsed.get_option("delete", "", str) or ""
@@ -522,8 +523,15 @@ class SessionsCommand(Command):
 
         for info in sessions:
             sid = info.session_id
-            label = escape(f"* {sid}" if sid == current_sid else sid)  # an id is no markup
-            title = escape(info.title) if info.title else "[dim](no prompt yet)[/dim]"
+            # Text: an id and a title are shown as typed, neither markup nor
+            # emoji codes (":x:"), so an id can be copied back.
+            label = Text(f"* {sid}" if sid == current_sid else sid)
+            if info.title:
+                title = Text(info.title)
+            elif info.turns is not None:  # stored, and no prompt in it yet
+                title = Text(NO_PROMPT, style="dim")
+            else:  # a backend that cannot tell (LangGraph)
+                title = Text("")
             turns = "" if info.turns is None else str(info.turns)
             updated = (
                 info.updated.astimezone().strftime("%Y-%m-%d %H:%M") if info.updated else ""

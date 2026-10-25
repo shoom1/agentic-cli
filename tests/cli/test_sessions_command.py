@@ -114,14 +114,32 @@ async def test_an_id_is_shown_as_given_never_as_markup():
     assert "[/x]" in table and "* [red]y" in table
 
 
-async def test_without_a_prompt_the_title_says_so_and_unknown_counts_are_blank():
+async def test_without_a_prompt_the_title_says_so():
+    app = _App(_Workflow([SessionInfo("a", "", 0, None)]))
+
+    await SessionsCommand().execute("", app)
+
+    assert "(no prompt yet)" in _table(app)
+
+
+async def test_a_backend_that_cannot_tell_leaves_title_and_turns_blank():
+    """LangGraph knows the id alone: it cannot say there was no prompt."""
     app = _App(_Workflow([SessionInfo("a", "", None, None)]))
 
     await SessionsCommand().execute("", app)
 
     table = _table(app)
-    assert "(no prompt yet)" in table
-    assert "None" not in table
+    assert "(no prompt yet)" not in table and "None" not in table
+
+
+async def test_emoji_codes_are_shown_as_typed():
+    """Rich turns ":x:" into an emoji in a plain cell; an id must stay copyable."""
+    app = _App(_Workflow([SessionInfo("ab:x:cd", "Parse a:b:c and :smile: then", 1, WHEN)]))
+
+    await SessionsCommand().execute("", app)
+
+    table = _table(app)
+    assert "Parse a:b:c and :smile: then" in table and "ab:x:cd" in table
 
 
 async def test_empty_message():

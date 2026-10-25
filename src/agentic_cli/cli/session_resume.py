@@ -64,6 +64,14 @@ def _turns(turns: int | None) -> str:
     return "1 turn" if turns == 1 else f"{turns} turns"
 
 
+def title_of(info: "SessionInfo") -> str:
+    """A row's title: its first prompt, ``NO_PROMPT`` for one stored without
+    any, or "" when the backend cannot tell (LangGraph knows the id alone)."""
+    if info.title:
+        return info.title
+    return NO_PROMPT if info.turns is not None else ""
+
+
 def resumed_line(info: "SessionInfo", now: datetime) -> str:
     """What a resume says: "Resumed: <title> (<id>, 12 turns, last active 2h ago)."."""
     details = [info.session_id]
@@ -72,7 +80,10 @@ def resumed_line(info: "SessionInfo", now: datetime) -> str:
     when = ago(info.updated, now)
     if when:
         details.append(f"last active {when}")
-    return f"Resumed: {info.title or NO_PROMPT} ({', '.join(details)})."
+    title = title_of(info)
+    if not title:
+        return f"Resumed: {', '.join(details)}."
+    return f"Resumed: {title} ({', '.join(details)})."
 
 
 def _text(content: Any) -> str:
@@ -131,9 +142,9 @@ def picker(rows: list["SessionInfo"], now: datetime) -> tuple[Dialog, dict[str, 
     ids: dict[str, str] = {}
     for info in rows:
         when, turns = ago(info.updated, now).ljust(8), _turns(info.turns).ljust(9)
-        ids[f"{when} · {turns} · {info.title or NO_PROMPT} · {info.session_id}"] = (
-            info.session_id
-        )
+        title = title_of(info)
+        middle = f" · {title}" if title else ""
+        ids[f"{when} · {turns}{middle} · {info.session_id}"] = info.session_id
     dialog = Dialog(
         "Resume a conversation",
         fields=[ChoiceField("session", "", options=list(ids))],

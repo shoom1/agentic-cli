@@ -612,8 +612,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--resume <id>` (status 1) and starts the others in a new conversation,
   saying why; on `session_store=memory` the lines say that conversations
   end with the app. At exit, a saved conversation a turn ran in is named:
-  "Resume this conversation with: <app> --resume <id>" (`python -m <pkg>`,
-  `python <script>.py` or the console script, as it was run), or "… with
+  "Resume this conversation with: <app> --resume <id>" (`python3 -m <pkg>`
+  with the interpreter as it was run, `python3 <script>` for a script or a
+  zipapp, path quoted, or the console script: its name when PATH finds it,
+  else its path; a Windows launcher counts as the console script), or "… with
   /resume <id>" for an app not run through `main()`. `BaseCLIApp` now
   defines `main`, `add_arguments`, `from_args`, `session_start` (a
   `SessionStart`; `ValueError` for an app built with `session_id=`) and
@@ -1383,6 +1385,19 @@ step; each entry says what to use instead.
   `workflow.sessions.ConversationChangedError`, said plainly: "Conversation
   '<id>' was changed by another process during this turn. Send your message
   again to go on from what it holds now."
+- **Session listing and resume details.** `/sessions` shows a title or an
+  id as typed, emoji codes too (":x:" was turned into an emoji, and an id
+  could not be copied back); on a backend that cannot tell a title
+  (LangGraph) the row, the picker and the "Resumed:" line no longer say
+  "(no prompt yet)"; one conversation from before the title keys that cannot
+  be read is listed by its id instead of failing the whole ADK listing; a
+  title keeps its zero-width joiners (a Persian word, a family emoji); a
+  `/resume` whose switch failed after the facts were saved no longer saves
+  them again; a startup resume that fails after the conversation opened says
+  "Opened '<id>', but could not show where it left off: …"; on
+  `session_store=memory` the refusal of `--resume <id>` no longer says to
+  pick one from a store that holds none; `SessionStart` is exported from
+  `agentic_cli.cli`, and `from_args` returns `Self`.
 - **On ADK, `/sessions` counts a conversation's turns, and deleting an
   unknown one says so.** Messages read 0 for every session (ADK's listing
   loads no events), and `delete_session` returned True for any id, so

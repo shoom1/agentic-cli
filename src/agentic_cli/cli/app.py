@@ -13,12 +13,14 @@ import dataclasses
 import logging
 import os
 import re
+import shlex
+import shutil
 import sys
 import warnings
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, NoReturn
+from typing import TYPE_CHECKING, Any, NoReturn, Self
 
 from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.document import Document
@@ -294,15 +296,35 @@ _MEMORY_NOTE = " (session_store is memory: conversations end with the app)"
 
 
 def _command_name() -> str:
-    """The command this process was run as: ``python -m <package>``,
-    ``python <script>.py``, or a console script's name."""
+    """The command this process was run as, to type again.
+
+    ``<python> -m <package>`` (the interpreter as it was run, ``python3``
+    say); ``<python> <script>`` for a script or a zipapp; a console script's
+    name when PATH finds it, else its path. On Windows pip's launcher runs a
+    zip whose module is ``__main__``, which is no ``-m`` run.
+    """
+    python = os.path.basename(sys.executable) or "python"
     spec = getattr(sys.modules.get("__main__"), "__spec__", None)
-    if spec is not None and spec.name:
-        return f"python -m {spec.name.removesuffix('.__main__')}"
+    if spec is not None and spec.name and spec.name != "__main__":
+        return f"{python} -m {spec.name.removesuffix('.__main__')}"
     script = sys.argv[0] if sys.argv and sys.argv[0] else "app"
-    if script.endswith(".py"):  # run as `python my_app.py`: name it so
-        return f"python {script}"
-    return os.path.basename(script)
+    if script.endswith((".py", ".pyz")) or os.path.isdir(script):
+        return f"{python} {shlex.quote(script)}"
+    name = re.split(r"[\\/]", script)[-1].removesuffix(".exe")
+    found = shutil.which(name)
+    if found is not None and _same_program(found, script):
+        return name
+    return shlex.quote(script)
+
+
+def _same_program(found: str, script: str) -> bool:
+    """Whether PATH's ``found`` is ``script`` (an .exe found for a launcher too)."""
+    def key(path: str) -> str:
+        return os.path.splitext(os.path.normcase(path).replace("\\", "/"))[0]
+
+    return key(found) == key(script) or key(os.path.realpath(found)) == key(
+        os.path.realpath(script)
+    )
 
 
 def _runs_langgraph(settings: BaseSettings) -> bool:
@@ -403,6 +425,11 @@ class BaseCLIApp:
     - get_ui_setting_keys(): Customize settings dialog fields
     - apply_settings(): Handle additional custom settings
     """
+
+    #: A turn ran in the current conversation since it was opened (its facts
+    #: are saved on leaving it). A class default: an app built with
+    #: ``__new__`` (tests, an application's own construction) reads it too.
+    _turned: bool = False
 
     def __init__(
         self,
@@ -802,7 +829,7 @@ class BaseCLIApp:
         """
 
     @classmethod
-    def from_args(cls, args: "argparse.Namespace") -> "BaseCLIApp":
+    def from_args(cls, args: "argparse.Namespace") -> Self:
         """Build the app ``main()`` runs: ``cls()`` by default.
 
         An app whose constructor takes arguments, or that reads flags of its
@@ -1245,6 +1272,7 @@ class BaseCLIApp:
                 ready = controller.is_ready
                 if self._turned:  # facts once per conversation used
                     await self._saving_facts(old)
+                    self._turned = False
                 stored = ready and await self._is_stored(controller.workflow, old)
                 new = uuid.uuid4().hex[:12]
                 if ready:
@@ -1374,6 +1402,7 @@ class BaseCLIApp:
             try:
                 if self._turned:  # facts once per conversation used
                     await self._saving_facts(old)
+                    self._turned = False  # saved: a switch that fails now saves none again
                 try:
                     await workflow.load_session(session_id)
                 except Exception as error:  # noqa: BLE001 - the id is not adopted
@@ -1518,7 +1547,11 @@ class BaseCLIApp:
         try:
             if mode == "resume":
                 if await workflow.session_info(target) is None:
-                    run = f" Run {self._command} --resume to pick one." if self._command else ""
+                    # On the memory store there is nothing to pick from.
+                    run = (
+                        f" Run {self._command} --resume to pick one."
+                        if self._command and not note else ""
+                    )
                     self.session.add_error(f"No conversation '{target}' found.{run}{note}")
                     self.exit_status = 1
                     return False
@@ -1607,6 +1640,10 @@ class BaseCLIApp:
             reason = str(error) or type(error).__name__
             if target is None:
                 self.session.add_error(f"Could not list the saved conversations: {reason}")
+            elif self._session_id == target:  # opened: the next turn goes there
+                self.session.add_error(
+                    f"Opened '{target}', but could not show where it left off: {reason}"
+                )
             else:
                 self.session.add_error(f"Could not open '{target}': {reason}")
 

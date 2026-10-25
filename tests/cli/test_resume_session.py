@@ -154,7 +154,30 @@ class TestResumedLine:
         assert resumed_line(SessionInfo("abc", "", 1, None), NOW) == (
             "Resumed: (no prompt yet) (abc, 1 turn)."
         )
-        assert resumed_line(SessionInfo("abc"), NOW) == "Resumed: (no prompt yet) (abc)."
+        assert resumed_line(SessionInfo("abc", "", 0, None), NOW) == (
+            "Resumed: (no prompt yet) (abc, 0 turns)."
+        )
+
+    def test_a_backend_that_cannot_tell_a_title_says_none(self):
+        """LangGraph knows the id alone: no "(no prompt yet)" it cannot know."""
+        assert resumed_line(SessionInfo("abc"), NOW) == "Resumed: abc."
+        info = SessionInfo("abc", "", None, NOW - timedelta(hours=2))
+        assert resumed_line(info, NOW) == "Resumed: abc, last active 2h ago."
+
+
+class TestPickerRows:
+    def test_a_row_without_a_known_title_leaves_it_out(self):
+        from agentic_cli.cli.session_resume import picker
+
+        _, ids = picker([
+            SessionInfo("abc", "", None, NOW - timedelta(hours=2)),
+            SessionInfo("new", "", 0, NOW),
+        ], NOW)
+
+        assert list(ids) == [
+            "2h ago   ·           · abc",
+            "just now · 0 turns   · (no prompt yet) · new",
+        ]
 
 
 class TestResumeSession:
@@ -545,6 +568,18 @@ class TestFactsAreSavedOncePerConversationUsed:
         await app.process_input("Hello.")
         await app.resume_session("b")
         await app.resume_session("a")
+        await app._extract_session_facts_on_exit()
+
+        assert workflow.ended == [workflow.session_ref("a", app.settings.default_user)]
+
+    async def test_a_switch_that_fails_after_saving_them_saves_none_again(self, project):
+        workflow = Workflow(conversation("a", "A", 2), conversation("b", "B", 2))
+        app = app_on(workflow, fake_settings(auto_extract_session_facts=True))
+        await app.resume_session("a")
+        await app.process_input("Hello.")
+
+        workflow.load_error = RuntimeError("database is locked")
+        assert await app.resume_session("b") is False
         await app._extract_session_facts_on_exit()
 
         assert workflow.ended == [workflow.session_ref("a", app.settings.default_user)]
