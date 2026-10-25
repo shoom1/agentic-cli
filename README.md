@@ -1019,8 +1019,9 @@ reviewer = AgentConfig(name="reviewer", prompt="Check what was said.",
   returns the job's id at once, and the sub-agent answers its parent in the
   same turn. When the job finishes, the main agent is told, in a message of
   its own that opens with `[Automatic job notification — not written by the
-  user]`, on both backends, which fact extraction leaves out. On ADK the main
-  agent's own job still answers the call that started it.
+  user]`, on both backends, which fact extraction leaves out. The main
+  agent's own job is told the same way (a native ADK YAML app's still
+  answers the call that started it).
 - **A native ADK YAML app** (`adk_config_path`) is built by ADK and keeps
   `transfer_to_agent`: the agent it transfers to takes the conversation and
   answers the user.
@@ -1571,7 +1572,7 @@ Built-in slash commands available in all apps:
 | `/settings` | `/set`, `/config` | Interactive settings editor: the default model, the `fast` and `strong` roles' models, thinking effort (saved to the project file) |
 | `/models` | | Each provider's listing status and models (`/models <text>` filters, `/models refresh` lists again) |
 | `/sandbox` | `/sb` | List / reset stateful sandbox sessions |
-| `/jobs` | | List and manage long-running background jobs (`/jobs all`, `/jobs <id>`, `/jobs cancel <id>`, `/jobs clean`; `/jobs resume` resumes the agent with finished jobs' results) |
+| `/jobs` | | List and manage long-running background jobs (`/jobs all`, `/jobs <id>`, `/jobs cancel <id>`, `/jobs clean`; `/jobs resume` tells the agent this conversation's finished jobs) |
 | `/papers` | `/docs` | List knowledge-base documents (filter by source, query, --global) |
 | `/sessions` | `/sess` | List saved sessions: title, turns, last update (delete one with `--delete=<id>`) |
 | `/compact` | | Summarize the conversation now, keeping the newest turns word for word (`/compact <focus>`: what the summary should keep above all) |

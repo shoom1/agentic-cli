@@ -106,7 +106,7 @@ def _resume_manager(
 
     class _SessionService:
         async def get_session(self, *, app_name, user_id, session_id):
-            return object() if session_exists else None
+            return SimpleNamespace(events=[]) if session_exists else None
 
     mgr._session_service = _SessionService()
     return mgr

@@ -675,3 +675,28 @@ class TestTheADKItRestsOn:
         from agentic_cli.workflow.adk.interrupted_calls_plugin import ABORTED
 
         assert _abort_events._INVOCATION_ABORTED == ABORTED
+
+
+async def test_on_adk_a_jobs_resume_answers_its_open_call_first(hermetic, monkeypatch):
+    """A starter that returned nothing leaves its call open (ADK sends no
+    result for it); the job's notice must not reach Claude beside it."""
+    claude = serve(monkeypatch, Claude(Answer=[
+        calls(("ic_start_job_quietly", {}, "toolu_j")), say("The build finished."),
+    ]), "adk")
+    manager = solo("adk", ic_start_job_quietly)
+    JOB_RELEASE.set()  # the job ends at once
+    try:
+        await turn(manager, "Build it.")
+        jobs = manager.job_manager
+        (record,) = [r for r in jobs.list() if r.call_id == "toolu_j"]
+        for _ in range(200):
+            if jobs.get(record.job_id).state.value in ("succeeded", "failed"):
+                break
+            await asyncio.sleep(0.01)
+        events = [e async for e in manager.resume_with_job_result(jobs.get(record.job_id))]
+    finally:
+        await manager.cleanup()
+
+    assert claude.refused == []
+    assert [e.content for e in events if e.type is EventType.TEXT] == ["The build finished."]
+    assert "toolu_j" in results(claude.last("Answer"))

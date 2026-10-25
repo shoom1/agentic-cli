@@ -54,11 +54,17 @@ class _FakeMessageProcessor:
         return self._result
 
 
-def _app(records: list, *, ready: bool = True, has_jm: bool = True, result=None):
+def _app(records: list, *, ready: bool = True, has_jm: bool = True, result=None,
+         gone: tuple = ()):
+    """``gone``: the conversations that can be opened no more (can_resume False)."""
     app = BaseCLIApp.__new__(BaseCLIApp)
     jm = _FakeJM(records) if has_jm else None
+
+    async def can_resume(record) -> bool:
+        return getattr(record, "session_id", None) not in gone
+
     app._workflow_controller = SimpleNamespace(
-        is_ready=ready, workflow=SimpleNamespace(job_manager=jm)
+        is_ready=ready, workflow=SimpleNamespace(job_manager=jm, can_resume=can_resume)
     )
     app._turn_lock = asyncio.Lock()
     app._message_processor = _FakeMessageProcessor(result)
@@ -96,6 +102,22 @@ async def test_only_this_conversations_jobs_are_resumed():
     assert n == 2
     assert app._message_processor.resumed == ["here", "orphan"]
     assert jm.claimed == ["here", "orphan"]
+
+
+async def test_a_job_whose_conversation_is_gone_is_told_here():
+    """A deleted conversation, or the memory store after a restart: it can be
+    opened no more, so its job is told here (as unavailable), not kept forever."""
+    recs = [
+        SimpleNamespace(job_id="gone", session_id="deleted", user_id="me"),
+        SimpleNamespace(job_id="waits", session_id="other", user_id="me"),
+    ]
+    app, jm = _app(recs, gone=("deleted",))
+    app._settings.default_user = "me"
+
+    await app.resume_finished_jobs()
+
+    assert app._message_processor.resumed == ["gone"]
+    assert jm.claimed == ["gone"]
 
 
 async def test_claims_before_processing_and_records_after():

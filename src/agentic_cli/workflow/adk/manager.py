@@ -421,7 +421,8 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
 
         A long-running tool returns a ``job_id`` immediately and the model is
         instructed not to re-call it while pending; the eventual result is
-        delivered later as a ``FunctionResponse`` (see ``resume_with_job_result``).
+        told later (``resume_with_job_result``: a notice; a native app's
+        answers the call).
         Detection is by registry identity — the exact object the default
         registry issued, never a matching name — so a plain callable an
         application names after a long-running tool keeps its ordinary
@@ -991,9 +992,10 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         """Run the ADK runner for one invocation and stream WorkflowEvents.
 
         Shared by ``process()`` (user message) and ``resume_with_job_result()``
-        (function response). The caller must already be inside
-        ``_workflow_context`` with the session prepared. ``state_delta`` is
-        saved with ``new_message`` (a user turn's row).
+        (the job's notice, or a native app's function response). The caller
+        must already be inside ``_workflow_context`` with the session
+        prepared. ``state_delta`` is saved with ``new_message`` (a user
+        turn's row).
 
         What is reported from inside a model call (a summary that starts, its
         usage, what it did) is merged into the stream as it happens
@@ -1141,8 +1143,8 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         # with a user turn, and must not run against a released backend.
         async with self._turn_admission():
             with self._workflow_context(session_id=session_id, user_id=user_id):
-                # The pending call lives in the existing session; don't create a
-                # new empty one (that would have no call to answer).
+                # The job's conversation must exist; don't create a new empty
+                # one (it never saw the job).
                 session = await self._session_service.get_session(
                     app_name=self.app_name, user_id=user_id, session_id=session_id,
                 )
@@ -1150,6 +1152,11 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     logger.warning("job_resume_session_missing", job_id=record.job_id,
                                    session_id=session_id)
                     return
+                if not native:
+                    # A call still open (a starter that returned nothing, a
+                    # crash's) gets its result before the notice: Claude and
+                    # OpenAI refuse a call without one.
+                    session = await self._answer_left_open(session)
 
                 if result is None:
                     jm = self._services.get(JOB_MANAGER)

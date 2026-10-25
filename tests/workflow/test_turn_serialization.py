@@ -197,7 +197,7 @@ class TestTurnSerialization:
             )
 
             async def _get_session(**kwargs):
-                return SimpleNamespace(id="sess-r")
+                return SimpleNamespace(id="sess-r", events=[])
 
             h.manager._session_service = SimpleNamespace(get_session=_get_session)
 

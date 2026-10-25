@@ -171,6 +171,34 @@ def resumed(session: Session) -> bool:
     return any(text.startswith("Resumed:") for text in session.said("system"))
 
 
+class TestItsFinishedJobs:
+    async def test_at_startup_they_are_named_not_run(self, manager, monkeypatch):
+        """Outside the input handler Ctrl+C cannot stop a turn: the jobs wait
+        for the first turn boundary, or for /jobs resume."""
+        store(manager, "abc", "Plan the trip", "Sure.", hours=2)
+        record = SimpleNamespace(job_id="j1", name="build", session_id="abc",
+                                 user_id=None, resume_on_complete=True)
+        manager.job_manager = SimpleNamespace(awaiting_resume=lambda: [record])
+        session = Session(until=resumed)
+        app = App()
+        app.session = session
+        app.session_start = SessionStart("resume", "abc")
+        app._settings.job_auto_resume = True
+        ran: list = []
+
+        async def process_resume(**kwargs):
+            ran.append(kwargs["record"].job_id)
+
+        monkeypatch.setattr(app._message_processor, "process_resume", process_resume)
+
+        await app.run()
+
+        assert ran == []
+        assert "A finished job waits for this conversation: /jobs resume tells it now." in (
+            session.said("system")
+        )
+
+
 class TestContinue:
     async def test_it_resumes_the_newest_once_the_prompt_is_up(self, manager):
         store(manager, "old", "Plan the trip", "Sure.", hours=5)
