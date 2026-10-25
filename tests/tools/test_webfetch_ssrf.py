@@ -181,3 +181,114 @@ class TestSharedTransportLifecycle:
         async with httpx.AsyncClient(transport=transport) as client2:
             r = await client2.get("https://example.com/y")
         assert r.status_code == 200
+
+
+class _Stream:
+    """One fake TCP connection: records its TLS name and the Host of each request."""
+
+    def __init__(self, n: int, log: list[tuple]):
+        self.n, self.log, self.pending = n, log, 0
+
+    async def read(self, max_bytes, timeout=None):
+        import asyncio
+
+        await asyncio.sleep(0)  # let parallel requests interleave
+        if self.pending:
+            self.pending -= 1
+            return b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
+        return b""
+
+    async def write(self, buffer, timeout=None):
+        hosts = [line for line in buffer.split(b"\r\n") if line.lower().startswith(b"host:")]
+        if hosts:  # h11 writes the end of the message separately
+            self.log.append(("request", self.n, hosts[0].split(b":", 1)[1].strip().decode()))
+            self.pending += 1
+
+    async def aclose(self):
+        pass
+
+    async def start_tls(self, ssl_context, server_hostname=None, timeout=None):
+        self.log.append(("tls", self.n, server_hostname))
+        return self
+
+    def get_extra_info(self, info):
+        if info == "ssl_object":
+            class _SSL:
+                def selected_alpn_protocol(self):
+                    return "http/1.1"
+            return _SSL()
+        return None
+
+
+class _Network:
+    """httpcore's network backend, faked: every connect is a new ``_Stream``."""
+
+    def __init__(self):
+        self.log: list[tuple] = []
+        self.count = 0
+
+    async def connect_tcp(self, host, port, timeout=None, local_address=None, socket_options=None):
+        self.count += 1
+        return _Stream(self.count, self.log)
+
+    async def connect_unix_socket(self, path, timeout=None, socket_options=None):
+        raise NotImplementedError
+
+    async def sleep(self, seconds):
+        pass
+
+    def requests_by_tls_name(self) -> list[tuple[str, str]]:
+        """(the name a connection's TLS was verified for, the Host it carried), per request."""
+        tls = {n: name for kind, n, name in self.log if kind == "tls"}
+        return [(tls[n], host) for kind, n, host in self.log if kind == "request"]
+
+
+class TestOneConnectionPerRequest:
+    """The pool is keyed by the pinned IP, so a connection kept alive for one
+    hostname would carry a request for another hostname on that IP without its
+    certificate ever being checked. Each request gets its own connection."""
+
+    @pytest.fixture
+    def network(self, monkeypatch):
+        # Both names resolve to one public address (shared hosting, a CDN).
+        monkeypatch.setattr(socket, "getaddrinfo", stub_getaddrinfo("93.184.216.34"))
+        return _Network()
+
+    def _transport(self, network: _Network) -> PinnedTransport:
+        transport = PinnedTransport(URLValidator())  # its own inner, as webfetch builds it
+        transport._inner._pool._network_backend = network  # only the network is faked
+        return transport
+
+    @pytest.mark.asyncio
+    async def test_two_hosts_on_one_ip_each_get_their_own_tls_handshake(self, network):
+        transport = self._transport(network)
+        for url in ("https://first.example/", "https://second.example/"):
+            async with httpx.AsyncClient(transport=transport) as client:  # as each fetch does
+                assert (await client.get(url)).text == "ok"
+
+        assert network.requests_by_tls_name() == [
+            ("first.example", "first.example"),
+            ("second.example", "second.example"),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_parallel_requests_each_go_over_a_connection_verified_for_their_host(
+        self, network
+    ):
+        import asyncio
+
+        transport = self._transport(network)
+        urls = ["https://first.example/", "https://second.example/"] * 3
+        async with httpx.AsyncClient(transport=transport) as client:
+            for _ in range(2):
+                await asyncio.gather(*(client.get(url) for url in urls))
+
+        pairs = network.requests_by_tls_name()
+        assert len(pairs) == 12
+        assert all(tls_name == host for tls_name, host in pairs), pairs
+        assert network.count == 12  # one connection per request
+
+    def test_http2_stays_off(self):
+        """An HTTP/2 connection carries many requests at once, whatever the
+        keep-alive limit: one connection per request needs HTTP/1.1."""
+        assert PinnedTransport(URLValidator())._inner._pool._http2 is False
