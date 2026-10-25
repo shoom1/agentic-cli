@@ -210,3 +210,66 @@ class TestSettingsCommandSavesTheChanges:
         app.save_settings = legacy_save_settings
         await SettingsCommand().execute("", app)
         assert calls == ["called"]
+
+
+class TestTheProjectPermissionRules:
+    """The project file's ``permissions`` section is no setting: the permission
+    engine reads its deny rules from the file itself, so no settings save may
+    drop them (a /settings change used to turn a denied read into an allowed one)."""
+
+    DENY = {"deny": [{"capability": "filesystem.read", "target": "notes/**"}]}
+
+    def _seed(self, fs, data: dict) -> None:
+        fs["project"].parent.mkdir(parents=True, exist_ok=True)
+        fs["project"].write_text(json.dumps(data))
+
+    @staticmethod
+    def _project_denials() -> list[tuple[str, str]]:
+        """The deny rules the engine reads from the project file."""
+        from unittest.mock import MagicMock
+
+        from agentic_cli.workflow.permissions import (
+            Effect,
+            PermissionContext,
+            PermissionEngine,
+            RuleSource,
+        )
+
+        ctx = PermissionContext(workdir=Path.cwd(), home=Path.home(), app_name=APP)
+        engine = PermissionEngine(settings=BaseSettings(), workflow=MagicMock(), ctx=ctx)
+        return [
+            (r.capability, r.target) for r in engine.rules
+            if r.source is RuleSource.PROJECT and r.effect is Effect.DENY
+        ]
+
+    def test_saving_a_changed_key_keeps_the_project_permission_rules(self, fs):
+        self._seed(fs, {"log_level": "debug", "permissions": self.DENY})
+        denied = self._project_denials()
+        assert denied, "the seeded deny rule is read"
+        settings = BaseSettings()
+        settings.update_setting("thinking_effort", "low")
+
+        SettingsPersistence(APP).save(settings, keys={"thinking_effort"})
+
+        assert _read(fs["project"])["permissions"] == self.DENY
+        assert self._project_denials() == denied
+
+    def test_a_full_save_keeps_the_project_permission_rules(self, fs):
+        self._seed(fs, {"log_level": "debug", "permissions": self.DENY})
+        denied = self._project_denials()
+
+        SettingsPersistence(APP).save(BaseSettings())
+
+        assert _read(fs["project"])["permissions"] == self.DENY
+        assert self._project_denials() == denied
+
+    def test_a_full_save_leaves_a_malformed_project_file_as_it_is(self, fs):
+        """Rewriting a file that cannot be read would drop any rules it holds."""
+        settings = BaseSettings()  # loaded before the file broke
+        fs["project"].parent.mkdir(parents=True)
+        fs["project"].write_text('{"permissions": {"deny": [')
+
+        with pytest.raises(ValueError):
+            SettingsPersistence(APP).save(settings)
+
+        assert fs["project"].read_text() == '{"permissions": {"deny": ['

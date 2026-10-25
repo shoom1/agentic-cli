@@ -50,6 +50,7 @@ from agentic_cli.settings_mixins import AppSettingsMixin, CLISettingsMixin
 from agentic_cli.settings_persistence import (
     CREDENTIAL_KEY_RE as _CREDENTIAL_KEY_RE,
     PROJECT_SETTABLE_KEYS as _PROJECT_SETTABLE_KEYS,
+    PROJECT_PRESERVED_KEYS as _PROJECT_PRESERVED_KEYS,
     get_project_config_path,
     get_user_config_path,
 )
@@ -87,7 +88,10 @@ class _AllowlistFilterSource(PydanticBaseSettingsSource):
     set nothing anyway, so it is dropped without a log: a project file saved
     by an older version still holds settings since removed (0.6's
     ``context_window_*``), and settings are built before logging is
-    configured, when structlog prints even a debug log above the UI.
+    configured, when structlog prints even a debug log above the UI. The
+    ``permissions`` section (``PROJECT_PRESERVED_KEYS``) is passed over
+    without a log too: it sets no setting, the permission engine reads its
+    deny rules from the file itself.
     """
 
     def __init__(
@@ -110,6 +114,8 @@ class _AllowlistFilterSource(PydanticBaseSettingsSource):
         for key, value in self._inner().items():
             if key in _PROJECT_SETTABLE_KEYS:
                 kept[key] = value
+            elif key in _PROJECT_PRESERVED_KEYS:
+                continue  # the permission engine reads it (deny rules only)
             elif key in settings:
                 logger.warning(
                     "untrusted_project_setting_ignored", key=key, source=self._label

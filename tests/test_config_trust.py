@@ -79,6 +79,20 @@ class TestProjectSettingsAllowlist:
         )
 
 
+    def test_the_permissions_section_is_not_reported_as_ignored(self, tmp_path, monkeypatch):
+        """The permission engine reads the project file's deny rules itself:
+        the section is no setting, and saying it was ignored is wrong."""
+        import structlog
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        _write_project_settings(tmp_path, "agentic_cli", {
+            "permissions": {"deny": [{"capability": "filesystem.read", "target": "notes/**"}]},
+        })
+        from agentic_cli.config import BaseSettings
+        with structlog.testing.capture_logs() as logs:
+            BaseSettings()
+        assert [e for e in logs if e.get("event") == "untrusted_project_setting_ignored"] == []
+
 class TestCwdDotenvFiltering:
     def _subclass_with_env_file(self, env_file):
         from agentic_cli.config import BaseSettings
