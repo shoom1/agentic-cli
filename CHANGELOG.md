@@ -1323,6 +1323,16 @@ step; each entry says what to use instead.
 
 ### Fixed
 
+- **A memory edited without an embedding service is embedded again.** Where
+  no service runs (no `kb` extra, say), `MemoryStore.update` clears an edited
+  memory's vector, which was of its old text; when that was the only vector,
+  `memories_embeddings.json` was not rewritten, so the next store with a
+  service paired the new text with the old text's vector, and a search found
+  the memory by what it used to say. The file is now rewritten, empty if need
+  be, and the memory is embedded again when a store with a service opens it.
+  An edit whose embedding fails (a network error, say) now leaves the memory
+  as it was: it kept the new text with the old text's vector, which the next
+  save wrote.
 - **A request stopped with Ctrl+C, or cut off by a crash, leaves every tool
   call with one result** (`workflow/interrupts.py`), on both backends. ADK
   dropped a call a cancel left open from every later request, so the model
