@@ -75,8 +75,8 @@ def run_shell_job(command: str, name: str = "", cwd: str = "", tool_context=None
 
     Because this is marked ``long_running``, ADK wraps it as a
     ``LongRunningFunctionTool`` and injects ``tool_context``; we capture its
-    ``function_call_id`` so the harness can later deliver the result back to
-    *this* call and auto-resume the agent (phase-2 push/resume). On Deep
+    ``function_call_id`` so the harness links the job to *this* call and,
+    once it finishes, tells the agent its result (phase-2 push/resume). On Deep
     Agents ``tool_context`` is None, and ``JobManager.submit`` takes the call
     id from the active tool call. Session/user are auto-filled from the active
     turn by ``JobManager.submit``.

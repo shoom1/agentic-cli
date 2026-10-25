@@ -134,7 +134,8 @@ class TestSegmentLogic:
         seg = mon._build_segment([rec])
         assert seg is not None and "↻1 to resume" in seg
 
-    def test_no_resume_cue_when_disabled(self, jm: JobManager):
+    def test_with_auto_resume_off_the_cue_names_the_command(self, jm: JobManager):
+        """Nothing resumes it on its own, so the cue says how to."""
         from agentic_cli.tools.jobs import JobRecord
 
         ui = FakeUI()
@@ -145,8 +146,25 @@ class TestSegmentLogic:
             job_id="j1", tool="run_shell_job", backend="subprocess", name="build",
             state=JobState.SUCCEEDED, resume_on_complete=True, call_id="c1",
         )
-        # First-sight terminal job → no ✓ note, and the cue is gated off → None.
-        assert mon._build_segment([rec]) is None
+        # First-sight terminal job → no ✓ note; the cue alone.
+        assert mon._build_segment([rec]) == "↻1: /jobs resume"
+
+    def test_the_cue_counts_only_this_conversations_jobs(self, jm: JobManager):
+        """Another conversation's job is told when that one is opened."""
+        from agentic_cli.tools.jobs import JobRecord
+
+        ui = FakeUI()
+        mon = JobMonitor(
+            ui, FakeController(ui, jm), settings=SimpleNamespace(job_auto_resume=True),
+            conversation=lambda: ("me", "s"),
+        )
+        recs = [
+            JobRecord(job_id=f"j{n}", tool="run_shell_job", backend="subprocess", name="build",
+                      state=JobState.SUCCEEDED, resume_on_complete=True, call_id=f"c{n}",
+                      session_id=session, user_id="me")
+            for n, session in enumerate(["s", "s", "other"])
+        ]
+        assert mon._build_segment(recs) == "↻2 to resume"
 
     def test_no_resume_cue_for_already_resumed(self, jm: JobManager):
         from agentic_cli.tools.jobs import JobRecord

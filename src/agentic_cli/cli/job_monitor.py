@@ -27,6 +27,8 @@ from typing import TYPE_CHECKING, Any, AsyncIterator
 from agentic_cli.logging import Loggers
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from thinking_prompt import ThinkingPromptSession
 
     from agentic_cli.cli.workflow_controller import WorkflowController
@@ -55,6 +57,10 @@ class JobMonitor:
             ``job_manager`` and composes the full status bar.
         interval: Seconds between ticks.
         note_ticks: How many ticks a finished-job note stays in the segment.
+        conversation: The current conversation's ``(user, session)``: the
+            resume cue counts only its finished jobs (another's are told when
+            it is opened). The cue shows whatever ``job_auto_resume`` says,
+            naming ``/jobs resume`` when nothing resumes them on its own.
     """
 
     def __init__(
@@ -65,10 +71,14 @@ class JobMonitor:
         settings: Any = None,
         interval: float = _DEFAULT_INTERVAL,
         note_ticks: int = _DEFAULT_NOTE_TICKS,
+        conversation: "Callable[[], tuple[str | None, str | None]] | None" = None,
     ) -> None:
         self._ui = ui
         self._controller = controller
         self._settings = settings
+        # (user, session) of the conversation shown: the resume cue counts its
+        # jobs only (None: every job).
+        self._conversation = conversation
         self._interval = interval
         self._note_ticks = note_ticks
         self._task: asyncio.Task[None] | None = None
@@ -160,6 +170,7 @@ class JobMonitor:
         running = queued = pending_resume = 0
         seen: set[str] = set()
         auto_resume = bool(getattr(self._settings, "job_auto_resume", False))
+        here = self._conversation() if self._conversation is not None else None
 
         for rec in recs:
             seen.add(rec.job_id)
@@ -169,10 +180,10 @@ class JobMonitor:
             elif state == "queued":
                 queued += 1
             if (
-                auto_resume
-                and getattr(rec, "resume_on_complete", False)
+                getattr(rec, "resume_on_complete", False)
                 and not getattr(rec, "resumed", False)
                 and state in terminal_vals
+                and _belongs(rec, here)
             ):
                 pending_resume += 1
             prev = self._states.get(rec.job_id)
@@ -201,10 +212,26 @@ class JobMonitor:
             parts.append("jobs: " + ", ".join(active))
         parts.extend(label for label, _ in self._notes)
         if pending_resume:
-            parts.append(f"↻{pending_resume} to resume")
+            # Off, nothing resumes them on its own: the cue says how to.
+            parts.append(
+                f"↻{pending_resume} to resume" if auto_resume
+                else f"↻{pending_resume}: /jobs resume"
+            )
         return " · ".join(parts) if parts else None
 
     @staticmethod
     def _short(name: str, limit: int = 24) -> str:
         name = (name or "").strip() or "job"
         return name if len(name) <= limit else name[: limit - 1] + "…"
+
+
+def _belongs(record: Any, here: "tuple[str | None, str | None] | None") -> bool:
+    """Whether ``record`` waits for the conversation ``here`` (user, session).
+
+    As the resume coordinator picks them: a job with no conversation counts
+    everywhere (it is told it is unavailable).
+    """
+    if here is None or getattr(record, "session_id", None) is None:
+        return True
+    user, session = here
+    return record.session_id == session and getattr(record, "user_id", None) in (None, user)

@@ -730,16 +730,15 @@ class BaseWorkflowManager(ABC):
 
         Base default: False (no resume support). Backends that implement
         ``resume_with_job_result`` override this to report whether the
-        originating conversation is still available: on ADK the session that
-        holds the pending call, on Deep Agents the conversation's thread (it
-        needs no call id). Used by the harness to resume vs. surface a
+        originating conversation is still available: on ADK its session, on
+        Deep Agents the conversation's thread. Used by the harness to resume vs. surface a
         "finished while its conversation was unavailable" notice.
 
         Sessions are durable by default (``session_store='sqlite'``), so a
         conversation normally survives a CLI restart and stays resumable. It is
         unavailable when, for example, it was deleted, the record is missing the
-        identifiers the backend needs (session and user; on ADK the call id
-        too), or the run used the explicitly ephemeral
+        identifiers the backend needs (session and user; a native ADK YAML
+        app's call id too), or the run used the explicitly ephemeral
         ``session_store='memory'`` and the process restarted.
         """
         return False

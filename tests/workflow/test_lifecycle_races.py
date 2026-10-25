@@ -84,7 +84,7 @@ class _AdmissionHarness:
 
     @staticmethod
     async def _get_session(**kwargs):
-        return SimpleNamespace(id=kwargs.get("session_id"))
+        return SimpleNamespace(id=kwargs.get("session_id"), events=[])
 
     async def drain(self, session_id: str) -> list[str]:
         return [

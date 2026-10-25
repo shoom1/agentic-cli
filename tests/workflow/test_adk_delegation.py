@@ -61,7 +61,11 @@ from agentic_cli.cli.usage_tracker import UsageTracker, format_tokens  # noqa: E
 from agentic_cli.config import BaseSettings  # noqa: E402
 from agentic_cli.tools._core.delegation import TASK_TOOL  # noqa: E402
 from agentic_cli.tools.jobs import JobState  # noqa: E402
-from agentic_cli.tools.jobs.resume import JOB_NOTICE_HEADER, job_result_payload  # noqa: E402
+from agentic_cli.tools.jobs.resume import (  # noqa: E402
+    JOB_NOTICE_ASK,
+    JOB_NOTICE_HEADER,
+    job_result_payload,
+)
 from agentic_cli.tools.registry import (  # noqa: E402
     ToolCategory,
     get_registry,
@@ -1044,7 +1048,7 @@ class TestJobs:
 
         # As on Deep Agents: the root runs on the notice, the sub-agent does not.
         assert answers.agents[before:] == ["coordinator"]
-        notice = JOB_NOTICE_HEADER + "\n" + json.dumps(
+        notice = JOB_NOTICE_HEADER + "\n" + JOB_NOTICE_ASK + "\n" + json.dumps(
             job_result_payload(record, "built ok"), ensure_ascii=False
         )
         assert _last_user_text(answers.bodies("coordinator")[-1]) == notice
@@ -1071,30 +1075,39 @@ class TestJobs:
             {"role": "assistant", "content": "The build finished: built ok."},
         ]
 
-    async def test_the_main_agents_own_job_answers_its_call(self, project, monkeypatch):
+    async def test_the_main_agents_own_job_is_told_after_the_turns_since(
+        self, project, monkeypatch
+    ):
+        """As a sub-agent's: a notice. A result for the call itself made ADK
+        send the call, its result and nothing between (its rearranger), so
+        the main agent answered without what the user said meanwhile."""
         answers = Team(coordinator=[
             calls("delegation_probe_start_job", "toolu_j1", command="make"),
             says("Started job j1."),
+            says("Four."),
             says("The build finished."),
         ])
         route(monkeypatch, anthropic, "AsyncAnthropic", FakeAPI(answers))
         manager = manager_for(team(tools=[delegation_probe_start_job]))
         try:
             events = await turn(manager, "Build it.")
+            await turn(manager, "Meanwhile, what is 2+2?")
             asked = len(answers.sent)
             record = _record(STARTED[-1])
             resumed = [e async for e in manager.resume_with_job_result(record, result="built ok")]
         finally:
             await manager.cleanup()
 
-        # The pending call's own result: a function response, not a notice.
         assert STARTED[-1] == "toolu_j1"
         assert texts(events) == ["Started job j1."]
         assert answers.agents[asked:] == ["coordinator"]
-        (block,) = [b for b in answers.bodies("coordinator")[-1]["messages"][-1]["content"]
-                    if b["type"] == "tool_result"]
-        assert block["tool_use_id"] == "toolu_j1"
-        assert "built ok" in json.dumps(block["content"])
+        sent = answers.bodies("coordinator")[-1]
+        assert "user: Meanwhile, what is 2+2?" in lines(sent)
+        assert "assistant: Four." in lines(sent)
+        notice = JOB_NOTICE_HEADER + "\n" + JOB_NOTICE_ASK + "\n" + json.dumps(
+            job_result_payload(record, "built ok"), ensure_ascii=False
+        )
+        assert _last_user_text(sent) == notice
         assert texts(resumed) == ["The build finished."]
 
 

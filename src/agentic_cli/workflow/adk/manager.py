@@ -421,7 +421,8 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
 
         A long-running tool returns a ``job_id`` immediately and the model is
         instructed not to re-call it while pending; the eventual result is
-        delivered later as a ``FunctionResponse`` (see ``resume_with_job_result``).
+        told later (``resume_with_job_result``: a notice; a native app's
+        answers the call).
         Detection is by registry identity — the exact object the default
         registry issued, never a matching name — so a plain callable an
         application names after a long-running tool keeps its ordinary
@@ -991,9 +992,10 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         """Run the ADK runner for one invocation and stream WorkflowEvents.
 
         Shared by ``process()`` (user message) and ``resume_with_job_result()``
-        (function response). The caller must already be inside
-        ``_workflow_context`` with the session prepared. ``state_delta`` is
-        saved with ``new_message`` (a user turn's row).
+        (the job's notice, or a native app's function response). The caller
+        must already be inside ``_workflow_context`` with the session
+        prepared. ``state_delta`` is saved with ``new_message`` (a user
+        turn's row).
 
         What is reported from inside a model call (a summary that starts, its
         usage, what it did) is merged into the stream as it happens
@@ -1082,16 +1084,18 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
     async def can_resume(self, record) -> bool:
         """True iff the originating ADK session still exists to resume into.
 
-        Requires the resume ids and a session holding the pending call. The
-        session service is durable by default (``session_store='sqlite'``), so
-        the session normally survives a CLI restart and the job stays
-        resumable. This returns False — and the harness surfaces a notice
-        instead of a dead resume turn — when the session is genuinely gone: it
-        was deleted, the record lacks its session/user/call ids, or the run used
-        the explicitly ephemeral ``session_store='memory'`` and the process
-        restarted.
+        Requires the record's session and user (and, for a native ADK YAML
+        app, whose job answers its pending call, the call's id). The session
+        service is durable by default (``session_store='sqlite'``), so the
+        session normally survives a CLI restart and the job stays resumable.
+        This returns False — and the harness surfaces a notice instead of a
+        dead resume turn — when the session is genuinely gone: it was
+        deleted, the record lacks those ids, or the run used the explicitly
+        ephemeral ``session_store='memory'`` and the process restarted.
         """
-        if not (record.session_id and record.user_id and record.call_id):
+        if not (record.session_id and record.user_id):
+            return False
+        if self._adk_config_path and not record.call_id:
             return False
         if self._session_service is None:
             return False
@@ -1105,17 +1109,16 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
     ) -> AsyncGenerator[WorkflowEvent, None]:
         """Resume the agent with a finished long-running job's result.
 
-        Delivers the result to the pending long-running tool call as an ADK
-        ``FunctionResponse`` (matching ``record.call_id``) and re-invokes the
-        runner, streaming the follow-up turn's events. The originating session
-        must still contain the pending call (it is persisted); if it's gone or
-        the record lacks the ids needed to resume, this yields nothing.
-
-        A call a sub-agent made (in an app built from agent configs) already
-        has its result, the job's id: a sub-agent's starter is an ordinary
-        call. Its job is told to the root agent instead, which runs on one
-        user-role text, ``job_notice`` (``JOB_NOTICE_HEADER`` and the
-        payload), as on Deep Agents.
+        In an app built from agent configs the root agent runs on one
+        user-role text, ``job_notice`` (``JOB_NOTICE_HEADER`` and the payload),
+        as on Deep Agents, whoever started the job: the call already has its
+        result (the job's id, or "pending"), and a result for the call itself
+        made ADK send the call, that result and nothing between (its
+        rearranger), so the agent answered without the turns since. A native
+        ADK YAML app's job still answers its pending call, as an ADK
+        ``FunctionResponse`` matching ``record.call_id``. The originating
+        session must still exist; if it's gone or the record lacks the ids
+        needed to resume, this yields nothing.
 
         Args:
             record: The terminal ``JobRecord`` to resume from.
@@ -1123,7 +1126,8 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         """
         session_id = record.session_id
         user_id = record.user_id
-        if not session_id or not user_id or not record.call_id:
+        native = bool(self._adk_config_path)
+        if not session_id or not user_id or (native and not record.call_id):
             logger.warning(
                 "job_resume_missing_ids",
                 job_id=getattr(record, "job_id", None),
@@ -1139,8 +1143,8 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         # with a user turn, and must not run against a released backend.
         async with self._turn_admission():
             with self._workflow_context(session_id=session_id, user_id=user_id):
-                # The pending call lives in the existing session; don't create a
-                # new empty one (that would have no call to answer).
+                # The job's conversation must exist; don't create a new empty
+                # one (it never saw the job).
                 session = await self._session_service.get_session(
                     app_name=self.app_name, user_id=user_id, session_id=session_id,
                 )
@@ -1148,6 +1152,11 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     logger.warning("job_resume_session_missing", job_id=record.job_id,
                                    session_id=session_id)
                     return
+                if not native:
+                    # A call still open (a starter that returned nothing, a
+                    # crash's) gets its result before the notice: Claude and
+                    # OpenAI refuse a call without one.
+                    session = await self._answer_left_open(session)
 
                 if result is None:
                     jm = self._services.get(JOB_MANAGER)
@@ -1155,13 +1164,8 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                         result = jm.result(record.job_id)
 
                 author = _author_of_call(session, record.call_id)
-                if (
-                    author is not None
-                    and author != self._root_agent.name
-                    and not self._adk_config_path
-                ):
-                    # A sub-agent's call, answered with the job's id: the
-                    # root is told, as on Deep Agents.
+                if not native:
+                    # The root is told, as on Deep Agents.
                     new_message = types.Content(
                         role="user",
                         parts=[types.Part.from_text(text=job_notice(record, result))],

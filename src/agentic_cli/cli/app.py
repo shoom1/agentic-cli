@@ -1034,9 +1034,14 @@ class BaseCLIApp:
     async def resume_finished_jobs(self) -> int:
         """Resume the agent for each finished, resume-flagged background job.
 
-        Each resume is a serialized turn (via the turn lock) so it never
-        overlaps a user turn or another resume. Used at turn boundaries (auto,
-        gated) and by ``/jobs resume`` (explicit, ungated).
+        Only the current conversation's jobs (and any without a conversation,
+        which are told it is unavailable): another conversation's job waits
+        until that conversation is opened (``resume_session``, or at startup),
+        instead of answering in this one's transcript. Each resume is a
+        serialized turn (via the turn lock) so it never overlaps a user turn
+        or another resume. Used at turn boundaries (auto, gated), when a
+        conversation is opened (gated) and by ``/jobs resume`` (explicit,
+        ungated).
 
         Delivery follows the job's resume lifecycle: the job is *claimed*
         (pending → resuming) before the turn runs, so a crash cannot silently
@@ -1057,7 +1062,12 @@ class BaseCLIApp:
             return 0
 
         attempted = 0
+        workflow = self._workflow_controller.workflow
         for record in jm.awaiting_resume():
+            if not self._job_belongs_here(record) and await self._can_be_opened(
+                workflow, record
+            ):
+                continue  # told when its conversation is opened
             # Claim first: durable, so an interrupted delivery is recoverable
             # and two coordinators can't both deliver the same result.
             if not jm.begin_resume(record.job_id):
@@ -1065,6 +1075,29 @@ class BaseCLIApp:
             attempted += 1
             await self._deliver_resume(jm, record)
         return attempted
+
+    @staticmethod
+    async def _can_be_opened(workflow: Any, record: Any) -> bool:
+        """Whether ``record``'s conversation can still be opened, to be told there.
+
+        One deleted, or kept in memory by an earlier run, cannot: its job is
+        told here instead, as unavailable, rather than never.
+        """
+        try:
+            return bool(await workflow.can_resume(record))
+        except Exception:  # noqa: BLE001 - unknown: it waits for its conversation
+            logger.debug("job_conversation_check_failed", job_id=record.job_id, exc_info=True)
+            return True
+
+    def _job_belongs_here(self, record: Any) -> bool:
+        """Whether ``record`` is the current conversation's job (or no conversation's)."""
+        session_id = getattr(record, "session_id", None)
+        if session_id is None:
+            return True
+        user_id = getattr(record, "user_id", None)
+        return session_id == self._session_id and user_id in (
+            None, getattr(self._settings, "default_user", None)
+        )
 
     async def _deliver_resume(self, jm, record) -> bool:
         """Run one claimed job's resume turn and close out its transition.
@@ -1223,11 +1256,54 @@ class BaseCLIApp:
             found."), or could not be read ("Could not open '<id>': ...").
         """
         with _says_so_when_stopped(self.session):
-            return await self._resume(session_id)
+            opened = await self._open_conversation(session_id)
+        if opened:
+            await self._tell_its_finished_jobs()
+        return opened
 
     async def _resume(self, session_id: str) -> bool:
         """``resume_session`` without its "Operation cancelled..." line: at
-        startup (``_open_on_startup``) a Ctrl+C ends the app, not the switch."""
+        startup (``_open_on_startup``) a Ctrl+C ends the app, not the switch.
+
+        Its finished jobs are named, not run: this runs outside the input
+        handler, where Ctrl+C cannot stop a turn. They are told at the first
+        turn boundary (``job_auto_resume``) or by ``/jobs resume``.
+        """
+        opened = await self._open_conversation(session_id)
+        if opened:
+            self._name_its_waiting_jobs()
+        return opened
+
+    def _name_its_waiting_jobs(self) -> None:
+        """Say how many finished jobs wait for this conversation, and how to tell them."""
+        jm = getattr(self._workflow_controller.workflow, "job_manager", None)
+        if jm is None:
+            return
+        waiting = [
+            r for r in jm.awaiting_resume()
+            if getattr(r, "session_id", None) == self._session_id and self._job_belongs_here(r)
+        ]
+        if len(waiting) == 1:
+            self.session.add_message(
+                "system", "A finished job waits for this conversation: /jobs resume tells it now."
+            )
+        elif waiting:
+            self.session.add_message(
+                "system",
+                f"{len(waiting)} finished jobs wait for this conversation: "
+                "/jobs resume tells them now.",
+            )
+
+    async def _tell_its_finished_jobs(self) -> None:
+        """Once a conversation is open, its finished jobs resume (``job_auto_resume``).
+
+        After the switch, outside the turn lock: each resume is a turn of its own.
+        """
+        if getattr(self._settings, "job_auto_resume", False):
+            await self.resume_finished_jobs()
+
+    async def _open_conversation(self, session_id: str) -> bool:
+        """The switch itself, under the turn lock (``resume_session``)."""
         async with self._turn_lock:
             if session_id == self._session_id:
                 self.session.add_message("system", "Already in this conversation.")
@@ -1491,7 +1567,8 @@ class BaseCLIApp:
         from agentic_cli.cli.job_monitor import JobMonitor
 
         job_monitor = JobMonitor(
-            self.session, self._workflow_controller, settings=self._settings
+            self.session, self._workflow_controller, settings=self._settings,
+            conversation=lambda: (self._settings.default_user, self._session_id),
         )
 
         # Once, before anything waits for the workflow: a backend that cannot

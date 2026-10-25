@@ -356,7 +356,10 @@ What it supports:
 - **MCP tools, Agent Skills, raw LLM logging and job resume**, from the same
   `AgentConfig.mcp_servers`, `AgentConfig.skills`, `raw_llm_logging` and
   `job_auto_resume` (or `/jobs resume`) as on ADK. An MCP tool is gated under the
-  `mcp` capability, with its name as the target.
+  `mcp` capability, with its name as the target. A finished job reaches the
+  root agent as a message of its own, which opens with `[Automatic job
+  notification — not written by the user]`, in the conversation that started
+  it, as on ADK.
 
 How it differs from ADK:
 - **The delegation tool's name**: a sub-agent is delegated to and returns
@@ -367,10 +370,6 @@ How it differs from ADK:
   automatic and bills no storage.
 - **No code-execution events**: `CODE_EXECUTION`, `EXECUTABLE_CODE` and
   `FILE_DATA` come from Gemini's code execution on ADK.
-- **A finished job** reaches the root agent as a message of its own, which
-  opens with `[Automatic job notification — not written by the user]`, rather
-  than as the result of the call that started it. (On ADK only a sub-agent's
-  job is told that way.)
 - **A sub-agent's failure ends the turn** with one error; on ADK the
   coordinator carries on, and the user gets a warning.
 - **Its own sessions**: neither backend reads the other's, so switching the
@@ -1020,8 +1019,9 @@ reviewer = AgentConfig(name="reviewer", prompt="Check what was said.",
   returns the job's id at once, and the sub-agent answers its parent in the
   same turn. When the job finishes, the main agent is told, in a message of
   its own that opens with `[Automatic job notification — not written by the
-  user]`, on both backends, which fact extraction leaves out. On ADK the main
-  agent's own job still answers the call that started it.
+  user]`, on both backends, which fact extraction leaves out. The main
+  agent's own job is told the same way (a native ADK YAML app's still
+  answers the call that started it).
 - **A native ADK YAML app** (`adk_config_path`) is built by ADK and keeps
   `transfer_to_agent`: the agent it transfers to takes the conversation and
   answers the user.
@@ -1572,7 +1572,7 @@ Built-in slash commands available in all apps:
 | `/settings` | `/set`, `/config` | Interactive settings editor: the default model, the `fast` and `strong` roles' models, thinking effort (saved to the project file) |
 | `/models` | | Each provider's listing status and models (`/models <text>` filters, `/models refresh` lists again) |
 | `/sandbox` | `/sb` | List / reset stateful sandbox sessions |
-| `/jobs` | | List and manage long-running background jobs (`/jobs all`, `/jobs <id>`, `/jobs cancel <id>`, `/jobs clean`; `/jobs resume` resumes the agent with finished jobs' results) |
+| `/jobs` | | List and manage long-running background jobs (`/jobs all`, `/jobs <id>`, `/jobs cancel <id>`, `/jobs clean`; `/jobs resume` tells the agent this conversation's finished jobs) |
 | `/papers` | `/docs` | List knowledge-base documents (filter by source, query, --global) |
 | `/sessions` | `/sess` | List saved sessions: title, turns, last update (delete one with `--delete=<id>`) |
 | `/compact` | | Summarize the conversation now, keeping the newest turns word for word (`/compact <focus>`: what the summary should keep above all) |

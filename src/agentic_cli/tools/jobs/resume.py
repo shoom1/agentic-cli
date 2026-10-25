@@ -5,13 +5,12 @@ the agent with this payload: a summary and a pointer, not the raw result, so
 the resumed turn's context stays lean. The agent pulls the whole result or
 the logs with ``job_result`` / ``job_logs`` by the job's id.
 
-ADK delivers the payload as the pending call's ``FunctionResponse`` when the
-root agent made the call. A call that is already answered cannot be answered
-again (Anthropic and OpenAI accept one result per call): on Deep Agents every
-job's call has its "pending" result, and on ADK so does a sub-agent's, whose
-starter is an ordinary call (``workflow/adk/delegation.py``). Those jobs are
-told to the root agent in a message of its own, ``job_notice``, which opens
-with ``JOB_NOTICE_HEADER``.
+A job's call already has its result, "pending" (or the job's id), and a call
+that is answered cannot be answered again (Anthropic and OpenAI accept one
+result per call; ADK, given a second, sent the call, that result and nothing
+between). So a finished job is told to the root agent in a message of its
+own, ``job_notice``, which opens with ``JOB_NOTICE_HEADER``, on both backends;
+only a native ADK YAML app answers the job's call with the payload.
 """
 
 from __future__ import annotations
@@ -22,6 +21,9 @@ from typing import Any
 #: Opens a job notification, so the model can tell it from what the user
 #: wrote.
 JOB_NOTICE_HEADER = "[Automatic job notification — not written by the user]"
+#: What the notice asks of the agent: without it a model may take the notice
+#: in and say nothing (Gemini, live, about one resume in five).
+JOB_NOTICE_ASK = "A background job you started has finished. Tell the user what it means."
 
 #: Longest result text the payload carries.
 _RESULT_SUMMARY_LIMIT = 1000
@@ -62,15 +64,16 @@ def job_result_payload(record: Any, result: Any) -> dict:
 def job_notice(record: Any, result: Any) -> str:
     """The text that tells the root agent ``record``'s job finished.
 
-    ``JOB_NOTICE_HEADER``, then ``job_result_payload`` as JSON: what both
-    backends send when the job's call cannot take the payload as its result.
+    ``JOB_NOTICE_HEADER``, ``JOB_NOTICE_ASK``, then ``job_result_payload``
+    as JSON, a line each: what both backends send when a job finishes (a
+    native ADK YAML app answers the job's call instead).
 
     Args:
         record: The finished ``JobRecord``.
         result: The job's result, or None.
     """
     payload = job_result_payload(record, result)
-    return f"{JOB_NOTICE_HEADER}\n{json.dumps(payload, ensure_ascii=False)}"
+    return f"{JOB_NOTICE_HEADER}\n{JOB_NOTICE_ASK}\n{json.dumps(payload, ensure_ascii=False)}"
 
 
 def _summarize_result(result: Any) -> str | None:

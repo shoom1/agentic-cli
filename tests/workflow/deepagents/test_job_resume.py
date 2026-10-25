@@ -36,7 +36,11 @@ from langchain_core.messages import HumanMessage  # noqa: E402
 from agentic_cli.config import BaseSettings  # noqa: E402
 from agentic_cli.tools.jobs import JobState  # noqa: E402
 from agentic_cli.tools.jobs.backends import TERMINAL_STATES  # noqa: E402
-from agentic_cli.tools.jobs.resume import JOB_NOTICE_HEADER, job_result_payload  # noqa: E402
+from agentic_cli.tools.jobs.resume import (  # noqa: E402
+    JOB_NOTICE_ASK,
+    JOB_NOTICE_HEADER,
+    job_result_payload,
+)
 from agentic_cli.tools.registry import register_tool  # noqa: E402
 from agentic_cli.workflow.config import AgentConfig  # noqa: E402
 from agentic_cli.workflow.deepagents import manager as manager_module  # noqa: E402
@@ -215,7 +219,7 @@ def _record(**over) -> SimpleNamespace:
 
 def _notice_text(record, result) -> str:
     payload = json.dumps(job_result_payload(record, result), ensure_ascii=False)
-    return f"{JOB_NOTICE_HEADER}\n{payload}"
+    return f"{JOB_NOTICE_HEADER}\n{JOB_NOTICE_ASK}\n{payload}"
 
 
 async def _finished(manager, job_id: str):
@@ -409,7 +413,8 @@ class TestTheResumeTurn:
         assert type(notice) is HumanMessage
         assert notice.content == _notice_text(record, "built docs")
         assert notice.content.startswith(
-            "[Automatic job notification — not written by the user]\n{"
+            "[Automatic job notification — not written by the user]\n"
+            "A background job you started has finished. Tell the user what it means.\n{"
         )
         assert notice.response_metadata == {
             "agentic_cli": {"kind": "job_result", "job_id": record.job_id}

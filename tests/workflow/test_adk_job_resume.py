@@ -21,6 +21,7 @@ from google.adk.tools import LongRunningFunctionTool  # noqa: E402
 from agentic_cli.tools.jobs import JobState  # noqa: E402
 from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager  # noqa: E402
 from agentic_cli.workflow.interrupts import OpenCalls  # noqa: E402
+from agentic_cli.tools.jobs.resume import JOB_NOTICE_ASK, JOB_NOTICE_HEADER  # noqa: E402
 from agentic_cli.workflow.events import EventType, WorkflowEvent  # noqa: E402
 
 
@@ -72,10 +73,13 @@ class _FakeRunner:
             yield n
 
 
-def _resume_manager(runner: _FakeRunner, *, session_exists: bool = True) -> GoogleADKWorkflowManager:
+def _resume_manager(
+    runner: _FakeRunner, *, session_exists: bool = True, native: bool = False
+) -> GoogleADKWorkflowManager:
     mgr = GoogleADKWorkflowManager.__new__(GoogleADKWorkflowManager)
     mgr._settings = SimpleNamespace(app_name="test", default_user="default_user")
     mgr._open_calls = OpenCalls()
+    mgr._adk_config_path = "root_agent.yaml" if native else None
     mgr._app_name = "test"
     mgr._services = {}
     # Turns serialize on the manager's turn lock (see the concurrency contract).
@@ -102,7 +106,7 @@ def _resume_manager(runner: _FakeRunner, *, session_exists: bool = True) -> Goog
 
     class _SessionService:
         async def get_session(self, *, app_name, user_id, session_id):
-            return object() if session_exists else None
+            return SimpleNamespace(events=[]) if session_exists else None
 
     mgr._session_service = _SessionService()
     return mgr
@@ -117,9 +121,34 @@ def _record(**over):
     return SimpleNamespace(**base)
 
 
-async def test_resume_sends_function_response_and_streams():
+def _notice_payload(runner: _FakeRunner) -> dict:
+    """The payload of the job notice the fake runner was given."""
+    text = runner.calls[0].new_message.parts[0].text
+    header, ask, payload = text.split("\n", 2)
+    assert (header, ask) == (JOB_NOTICE_HEADER, JOB_NOTICE_ASK)
+    return json.loads(payload)
+
+
+async def test_resume_sends_the_job_notice_and_streams():
+    """One user-role notice, as on Deep Agents: a result for the pending call
+    itself made ADK leave out every turn since it (its rearranger)."""
     runner = _FakeRunner()
     mgr = _resume_manager(runner)
+    events = [ev async for ev in mgr.resume_with_job_result(_record(), result="build output")]
+
+    assert [e.content for e in events] == ["ev-1", "ev-2"]
+    assert len(runner.calls) == 1
+    assert runner.calls[0].new_message.role == "user"
+    payload = _notice_payload(runner)
+    assert payload["state"] == "succeeded"
+    assert payload["exit_code"] == 0
+    assert payload["result_summary"] == "build output"
+
+
+async def test_a_native_adk_app_still_answers_the_pending_call():
+    """A native ADK YAML app's agents are ADK's own: its job answers its call."""
+    runner = _FakeRunner()
+    mgr = _resume_manager(runner, native=True)
     events = [ev async for ev in mgr.resume_with_job_result(_record(), result="build output")]
 
     # One WorkflowEvent per adk event from the fake runner.
@@ -144,8 +173,7 @@ async def test_resume_fetches_result_from_job_manager_when_omitted():
     mgr._services["job_manager"] = SimpleNamespace(result=lambda jid: f"fetched:{jid}")
 
     [ev async for ev in mgr.resume_with_job_result(_record())]
-    fr = runner.calls[0].new_message.parts[0].function_response
-    assert fr.response["result_summary"] == "fetched:j1"
+    assert _notice_payload(runner)["result_summary"] == "fetched:j1"
 
 
 # What ADK sent before the payload moved to ``tools/jobs/resume.py``, byte for
@@ -205,8 +233,7 @@ async def test_resume_payload_is_unchanged(over, result, sent):
 
     [ev async for ev in mgr.resume_with_job_result(_record(**over), result=result)]
 
-    fr = runner.calls[0].new_message.parts[0].function_response
-    assert json.dumps(fr.response) == sent
+    assert _notice_payload(runner) == json.loads(sent)
 
 
 @pytest.mark.parametrize(("over", "result", "sent"), _PINNED_PAYLOADS)
@@ -217,9 +244,17 @@ def test_the_shared_payload_is_the_one_adk_sends(over, result, sent):
     assert json.dumps(job_result_payload(_record(**over), result)) == sent
 
 
-async def test_resume_missing_call_id_yields_nothing():
+async def test_a_job_without_its_call_id_is_still_told():
+    """The notice names the job, not the call: the conversation is enough."""
     runner = _FakeRunner()
     mgr = _resume_manager(runner)
+    [ev async for ev in mgr.resume_with_job_result(_record(call_id=None), result="x")]
+    assert _notice_payload(runner)["job_id"] == "j1"
+
+
+async def test_on_a_native_app_a_missing_call_id_yields_nothing():
+    runner = _FakeRunner()
+    mgr = _resume_manager(runner, native=True)
     events = [ev async for ev in mgr.resume_with_job_result(_record(call_id=None), result="x")]
     assert events == []
     assert runner.calls == []
@@ -244,10 +279,11 @@ class _SessionSvc:
         return object() if self._present else None
 
 
-def _can_resume_manager(present: bool) -> GoogleADKWorkflowManager:
+def _can_resume_manager(present: bool, *, native: bool = False) -> GoogleADKWorkflowManager:
     mgr = GoogleADKWorkflowManager.__new__(GoogleADKWorkflowManager)
     mgr._app_name = "test"
     mgr._session_service = _SessionSvc(present)
+    mgr._adk_config_path = "root_agent.yaml" if native else None
     return mgr
 
 
@@ -264,5 +300,11 @@ async def test_can_resume_false_when_session_missing():
 
 async def test_can_resume_false_when_ids_missing():
     mgr = _can_resume_manager(True)
-    assert await mgr.can_resume(_record(call_id=None)) is False
     assert await mgr.can_resume(_record(session_id=None)) is False
+    assert await mgr.can_resume(_record(user_id=None)) is False
+
+
+async def test_a_job_without_its_call_id_can_resume_but_not_on_a_native_app():
+    assert await _can_resume_manager(True).can_resume(_record(call_id=None)) is True
+    native = _can_resume_manager(True, native=True)
+    assert await native.can_resume(_record(call_id=None)) is False

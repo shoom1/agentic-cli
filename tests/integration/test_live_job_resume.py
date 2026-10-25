@@ -279,8 +279,12 @@ async def test_full_resume_loop_via_coordinator(live_settings):
         app._turn_lock = asyncio.Lock()
         app._message_processor = MessageProcessor()
         app.session = session
-        app._settings = live_settings
+        # The CLI runs every turn as default_user, in the current conversation:
+        # only that conversation's jobs are resumed.
+        app._settings = live_settings.model_copy(update={"default_user": "tester"})
         app._usage_tracker = None
+        app._session_id = "loop-1"
+        app._turned = False
 
         n = await app.resume_finished_jobs()
 
