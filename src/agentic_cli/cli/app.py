@@ -31,7 +31,12 @@ from thinking_prompt import AppInfo, ThinkingPromptSession, ThinkingPromptStyles
 from agentic_cli.cli.commands import Command, CommandRegistry
 from agentic_cli.cli.message_processor import MessageProcessor, _says_so_when_stopped
 from agentic_cli.cli.conversation_lock import ConversationLock, Taken
-from agentic_cli.cli.session_args import SessionStart, add_session_arguments, parse_session_start
+from agentic_cli.cli.session_args import (
+    SessionArgumentParser,
+    SessionStart,
+    add_session_arguments,
+    parse_session_start,
+)
 from agentic_cli.cli.session_resume import (
     PICK_LIMIT,
     picker,
@@ -57,6 +62,7 @@ if TYPE_CHECKING:
     from agentic_cli.workflow import GoogleADKWorkflowManager, EventType, WorkflowEvent
     from agentic_cli.workflow.base_manager import BaseWorkflowManager
     from agentic_cli.workflow.context import CompactResult
+    from agentic_cli.workflow.sessions import SessionInfo
     from agentic_cli.workflow.config import AgentConfig
 
 logger = Loggers.cli()
@@ -295,6 +301,19 @@ _SWAP_NOTE = (
 _MEMORY_NOTE = " (session_store is memory: conversations end with the app)"
 
 
+def _passed_over_line(passed_over: list[tuple[str, int]], *, continuing: str | None) -> str:
+    """What ``--continue`` says of the newer conversations other processes have open."""
+    if len(passed_over) == 1:
+        (session_id, holder), = passed_over
+        held = (
+            f"The newest conversation, '{session_id}', is open in another process ({holder})"
+        )
+    else:
+        held = f"The {len(passed_over)} newest conversations are open in other processes"
+    then = f"continuing '{continuing}'" if continuing else "starting a new one"
+    return f"{held}; {then}."
+
+
 def _command_name() -> str:
     """The command this process was run as, to type again.
 
@@ -446,7 +465,7 @@ class BaseCLIApp:
             settings: Application settings instance
             session_id: The conversation to start in, new or stored (for
                 library use and tests); without it a fresh id is generated.
-                ``main()`` takes ``--continue`` and ``--resume [ID]``
+                ``main()`` takes ``--continue`` and ``--resume <id>``
                 instead (``session_start``).
 
         Raises:
@@ -466,7 +485,6 @@ class BaseCLIApp:
         # How run() starts (``session_start``), and what it opens once the prompt is up.
         self._session_start = SessionStart()
         self._pending_resume: str | None = None
-        self._pending_pick = False
         # The conversation this process has open, held against another
         # process opening it (cli/conversation_lock.py; made on first use).
         self._conversation_lock: ConversationLock | None = None
@@ -768,7 +786,8 @@ class BaseCLIApp:
     @property
     def session_start(self) -> SessionStart:
         """How ``run()`` starts: a new conversation (the default), the newest
-        stored one, one by id, or a picker (``cli/session_args.py``).
+        stored one no other process has open, or one by id
+        (``cli/session_args.py``).
 
         ``main()`` sets it from the command line; set it before ``run()``.
 
@@ -798,16 +817,14 @@ class BaseCLIApp:
         Point an app's console script at it (``myapp =
         "myapp.cli.app:MyApp.main"``). It parses ``argv`` (the process's
         arguments by default) for ``-c``/``--continue`` and ``-r``/``--resume
-        [ID]`` (``cli/session_args.py``) and whatever ``add_arguments`` adds,
+        <id>`` (``cli/session_args.py``) and whatever ``add_arguments`` adds,
         builds the app with ``from_args``, sets its ``session_start``, and runs it.
         The status is 1 when ``--resume <id>`` cannot be opened (not stored,
         or the store failed) or the backend keeps no sessions, 130 after a
         Ctrl+C before the prompt, else 0.
         """
-        import argparse
-
         command = _command_name()
-        parser = argparse.ArgumentParser(prog=command)
+        parser = SessionArgumentParser(prog=command)
         add_session_arguments(parser)
         cls.add_arguments(parser)
         args = parser.parse_args(None if argv is None else list(argv))
@@ -1510,14 +1527,15 @@ class BaseCLIApp:
         otherwise turns fall back to the manager's ``default_session`` and
         unnamed runs silently share one conversation. By ``session_start``:
 
-        - ``"continue"`` finds the newest stored conversation, which
-          ``_open_on_startup`` resumes once the prompt is up, or says there is
-          none ("No conversation to continue; starting a new one.");
+        - ``"continue"`` finds the newest stored conversation no other
+          process has open (``_newest_free``), which ``_open_on_startup``
+          resumes once the prompt is up, or says there is none ("No
+          conversation to continue; starting a new one.");
         - ``"resume"`` checks its conversation is stored first: one that is
-          not is refused ("No conversation '<id>' found. Run <app> --resume
-          to pick one."), ``exit_status`` is 1, and False is returned;
-        - ``"pick"`` starts in the new conversation, and the picker opens
-          once the prompt is up; ``"new"`` starts in the new conversation.
+          not is refused ("No conversation '<id>' found: <app> --continue
+          opens the newest, /resume in the app picks one."), ``exit_status``
+          is 1, and False is returned;
+        - ``"new"`` starts in the new conversation.
 
         A workflow that cannot start keeps the prompt, so ``/settings`` can
         fix it, and says how to resume then; a backend without sessions
@@ -1533,8 +1551,6 @@ class BaseCLIApp:
                           f"Fix it with /settings, then /resume {target}.",
                 "continue": "Could not continue: the workflow did not start. "
                             "Fix it with /settings, then /resume.",
-                "pick": "Could not open the picker: the workflow did not start. "
-                        "Fix it with /settings, then /resume.",
             }.get(mode, "Cannot adopt session — workflow not initialized."))
             return True
 
@@ -1547,12 +1563,13 @@ class BaseCLIApp:
         try:
             if mode == "resume":
                 if await workflow.session_info(target) is None:
-                    # On the memory store there is nothing to pick from.
+                    # On the memory store there is nothing to open instead.
                     run = (
-                        f" Run {self._command} --resume to pick one."
-                        if self._command and not note else ""
+                        f": {self._command} --continue opens the newest, "
+                        "/resume in the app picks one."
+                        if self._command and not note else "."
                     )
-                    self.session.add_error(f"No conversation '{target}' found.{run}{note}")
+                    self.session.add_error(f"No conversation '{target}' found{run}{note}")
                     self.exit_status = 1
                     return False
                 holder = self._hold(target)
@@ -1564,21 +1581,16 @@ class BaseCLIApp:
                     return False
                 self._pending_resume = target
             elif mode == "continue":
-                newest = await workflow.list_sessions(limit=1)
-                holder = self._hold(newest[0].session_id) if newest else None
-                if newest and holder is not None:
-                    self.session.add_warning(
-                        f"The newest conversation, '{newest[0].session_id}', is open in "
-                        f"another process ({holder}); starting a new one."
-                    )
-                elif newest:
-                    self._pending_resume = newest[0].session_id
-                else:
+                rows = await workflow.list_sessions(limit=PICK_LIMIT)
+                self._pending_resume, passed_over = self._newest_free(rows)
+                if passed_over:
+                    self.session.add_warning(_passed_over_line(
+                        passed_over, continuing=self._pending_resume
+                    ))
+                elif self._pending_resume is None:
                     self.session.add_message(
                         "system", f"No conversation to continue; starting a new one.{note}"
                     )
-            elif mode == "pick":
-                self._pending_pick = True
         except Exception as error:  # noqa: BLE001 - the store failed, not the app
             logger.debug("startup_session_lookup_failed", mode=mode, exc_info=True)
             reason = str(error) or type(error).__name__
@@ -1613,34 +1625,44 @@ class BaseCLIApp:
             self.session.add_message("system", f"New session '{self._session_id}'.")
         return True
 
-    async def _open_on_startup(self) -> None:
-        """Once the prompt is up: resume what ``--continue``/``--resume <id>``
-        chose, or open the picker for ``--resume`` alone.
+    def _newest_free(self, rows: "list[SessionInfo]") -> tuple[str | None, list[tuple[str, int]]]:
+        """The newest of ``rows`` no other process has open, now held here.
 
-        A dialog needs the running session, and a replay reads best under the
-        welcome banner, so this waits until the session runs. It runs outside
+        Returns:
+            Its id (None when every one is open elsewhere, or there is none),
+            and the newer ones passed over, each with the process holding it.
+        """
+        passed_over: list[tuple[str, int]] = []
+        for info in rows:
+            holder = self._hold(info.session_id)
+            if holder is None:
+                return info.session_id, passed_over
+            passed_over.append((info.session_id, holder))
+        return None, passed_over
+
+    async def _open_on_startup(self) -> None:
+        """Once the prompt is up: resume what ``--continue``/``--resume <id>`` chose.
+
+        A replay reads best under the welcome banner, so this waits until the
+        session runs. It runs outside
         the input handler, so a Ctrl+C here ends the app, as at an idle prompt
         (its resume, cancelled on the way out, says nothing of a cancel). A
         failure is said and logged: the new conversation goes on.
         """
-        if self._pending_resume is None and not self._pending_pick:
+        if self._pending_resume is None:
             return
         while not self.session.app.is_running:
             await asyncio.sleep(0.02)
         target = self._pending_resume
         try:
-            if target is None:
-                target = await self.pick_session()
-            if target is not None and not await self._resume(target):
+            if not await self._resume(target):
                 self._hold(self._session_id)  # it stays in its new one: give the target back
         except Exception as error:  # noqa: BLE001 - the new conversation goes on
             if self._session_id != target:
                 self._hold(self._session_id)
             logger.debug("startup_open_failed", session_id=target, exc_info=True)
             reason = str(error) or type(error).__name__
-            if target is None:
-                self.session.add_error(f"Could not list the saved conversations: {reason}")
-            elif self._session_id == target:  # opened: the next turn goes there
+            if self._session_id == target:  # opened: the next turn goes there
                 self.session.add_error(
                     f"Opened '{target}', but could not show where it left off: {reason}"
                 )
