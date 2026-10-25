@@ -373,7 +373,9 @@ How it differs from ADK:
 - **A sub-agent's failure ends the turn** with one error; on ADK the
   coordinator carries on, and the user gets a warning.
 - **Its own sessions**: neither backend reads the other's, so switching the
-  orchestrator starts a new conversation.
+  orchestrator in `/settings` continues the conversation's id from empty on
+  the new one, and says that its history stays with the previous backend
+  (switching back continues it).
 
 Requires: `pip install 'agentic-cli[deepagents]'`
 

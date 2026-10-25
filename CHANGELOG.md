@@ -1359,6 +1359,14 @@ step; each entry says what to use instead.
   now asks the agent, on a line after its header, to tell the user what the
   job's result means: without it Gemini 2.5 Flash, live, said nothing in
   about one resume in five.
+- **An orchestrator switch in `/settings` says the conversation's history
+  stays behind, and keeps its id.** Sessions do not move between backends,
+  and the switch said nothing: the new backend started the conversation
+  empty, and it ran under its default session, so `/status` showed
+  `default_session` and the facts saved at exit were read from it. The new
+  backend now takes the conversation's id, and one line says: "This
+  conversation's history stays with the previous backend: switch back to
+  continue it. Here it starts empty."
 - **On ADK, `/sessions` counts a conversation's turns, and deleting an
   unknown one says so.** Messages read 0 for every session (ADK's listing
   loads no events), and `delete_session` returned True for any id, so
