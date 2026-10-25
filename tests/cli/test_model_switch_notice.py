@@ -5,7 +5,8 @@ The conversation is kept, but no model is sent another provider's reasoning
 prompt cache. That switch used to be silent. Now ``apply_settings`` adds one
 system line per switch, naming the agents and both models; a switch within
 one provider loses nothing and stays silent, and so does an orchestrator swap,
-which starts a new manager rather than carrying the conversation over.
+which starts a new manager: it says, instead, that the conversation's history
+stays with the previous backend.
 """
 
 from __future__ import annotations
@@ -148,7 +149,12 @@ class FakeManager:
         self.is_initialized = True
         self.reports_models = reports_models
         self.cleanup = AsyncMock()
+        self.loaded: list[str] = []
         self._use(model)
+
+    async def load_session(self, session_id: str, *, user_id=None) -> bool:
+        self.loaded.append(session_id)
+        return False
 
     def _use(self, model: str) -> None:
         self.model = model
@@ -165,10 +171,14 @@ class FakeManager:
         self._use(model or self.model)
 
 
-async def test_an_orchestrator_swap_is_silent():
-    """A swap starts another manager: the conversation does not carry over to it."""
+async def test_an_orchestrator_swap_opens_the_conversation_there_and_says_so():
+    """A swap starts another manager, and sessions do not move between
+    backends: the new one takes the conversation's id, from empty (so
+    /status and the facts saved at exit name it, not its default session),
+    and one line says where the history stays."""
     settings = _settings()
     app = _app(settings, FakeManager(GEMINI))
+    app._session_id = "conv-1"
     replacement = FakeManager(CLAUDE, backend="langgraph")
 
     with patch(
@@ -178,7 +188,11 @@ async def test_an_orchestrator_swap_is_silent():
         assert await app.apply_settings({"orchestrator": "langgraph", "model": CLAUDE})
 
     assert app._workflow_controller.workflow is replacement
-    assert app.notices == []
+    assert replacement.loaded == ["conv-1"]
+    assert app.notices == [
+        "This conversation's history stays with the previous backend: switch back "
+        "to continue it. Here it starts empty."
+    ]
 
 
 async def test_a_manager_without_agent_models_is_silent():

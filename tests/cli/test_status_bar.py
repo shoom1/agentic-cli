@@ -126,9 +126,10 @@ class TestAfterASave:
         )
         replacement = SimpleNamespace(
             model=OPUS, backend_type="langgraph", is_initialized=True, cleanup=AsyncMock(),
-            initialize_services=AsyncMock(),
+            initialize_services=AsyncMock(), load_session=AsyncMock(return_value=False),
         )
         app = app_for(solo(), settings, previous)
+        app._session_id = "s"
         used(app, 150_000)
 
         with patch(

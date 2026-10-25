@@ -282,6 +282,12 @@ _LANGGRAPH_DEPRECATION = (
 )
 
 
+#: What an orchestrator swap says: sessions do not move between backends.
+_SWAP_NOTE = (
+    "This conversation's history stays with the previous backend: switch back "
+    "to continue it. Here it starts empty."
+)
+
 #: Why nothing is stored on the memory store, after a startup line.
 _MEMORY_NOTE = " (session_store is memory: conversations end with the app)"
 
@@ -868,6 +874,7 @@ class BaseCLIApp:
         # Reinitialize workflow if needed
         controller = self._workflow_controller
         switched: list[str] = []
+        swap_note: str | None = None
         if needs_reinit and controller.is_ready:
             previous = controller.workflow
             previous_model = previous.model
@@ -909,6 +916,8 @@ class BaseCLIApp:
                 switched = _provider_switches(
                     previous_models, getattr(previous, "agent_models", {})
                 )
+            else:
+                swap_note = await self._open_here(controller.workflow)
             _show_new_context(
                 controller, self.session, swapped=controller.workflow is not previous
             )
@@ -920,12 +929,28 @@ class BaseCLIApp:
             self.session.add_message("system", notice)
         if not was_langgraph:  # a switch to it, not a change made while on it
             _warn_if_langgraph(self._settings, self.session)
+        if swap_note is not None:
+            self.session.add_message("system", swap_note)
         if self._settings.ui_theme != theme_before:
             # Repaint: text printed before would keep the old theme's colors.
             # The transcript is printed again, the lines above included.
             theme = self.get_theme(self._settings.ui_theme)
             self.session.set_theme(theme, repaint=True)
         return True
+
+    async def _open_here(self, workflow: Any) -> str:
+        """The conversation's id on a new backend after a swap, and what to say.
+
+        Sessions do not move between backends (neither reads the other's
+        store), so the new one continues the id from empty; adopting it there
+        keeps ``/status`` and the facts saved at exit on this conversation,
+        not on the manager's default session.
+        """
+        try:
+            await workflow.load_session(self._session_id)
+        except Exception:  # noqa: BLE001 - the next turn names its conversation anyway
+            logger.debug("swap_adopt_failed", session_id=self._session_id, exc_info=True)
+        return _SWAP_NOTE
 
     def _register_builtin_commands(self) -> None:
         """Register built-in commands."""
