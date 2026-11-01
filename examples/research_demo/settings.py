@@ -1,10 +1,55 @@
-"""Settings for the Research Demo application."""
+"""Settings for the Research Demo application.
+
+The demo ships a short list of models (``models``) and the OpenRouter
+provider (``model_providers``), the way an app built on agentic-cli offers
+its users a choice of models. The ``/settings`` model pickers offer the
+models of the list whose provider has a key (and the model each role
+resolves to):
+
+- Google: ``GOOGLE_API_KEY``, for Gemini 3.5 Flash-Lite and Gemini 3.8 Flash.
+- Anthropic: ``ANTHROPIC_API_KEY``, for Claude Haiku 5.5, Claude Sonnet 5.5
+  and Claude Opus 5.5.
+- OpenRouter: ``OPENROUTER_API_KEY``, for Qwen3.7 Plus, DeepSeek V4 Pro and
+  Kimi K3.
+
+The list holds no Gemini Pro (Google's is a preview, which a later release
+retires), so with only a Google key the Strong Model picker shows the
+newest Pro the workflow computes for the ``strong`` role.
+
+Put the keys in ``~/.research_demo/.env`` (``OPENROUTER_API_KEY=...``, one per
+line) or in the environment; a ``.env`` in the working directory is never
+read for them.
+
+To pick a model, open ``/settings``: Default Model offers the list, and the
+pick is saved to the project's ``./.research_demo/settings.json``. ``/models``
+shows the list, with what is known about each model and why one is not
+offered; ``/models <text>`` searches every provider's full listing, such as
+``/models llama``, to find an id to add to the list in
+``~/.research_demo/settings.json``::
+
+    {"models": {"openrouter:meta-llama/llama-3.3-70b-instruct": {}}}
+
+Without a ``default_model``, the demo runs on the list's default-tier model:
+Gemini 3.8 Flash with a Google key, else Claude Sonnet 5.5. An OpenRouter
+model has no tier, so with an OpenRouter key alone, choose the default model
+too: ``RESEARCH_DEMO_DEFAULT_MODEL=openrouter:qwen/qwen3.7-plus`` (in the
+environment or ``~/.research_demo/.env``), ``"default_model":
+"openrouter:qwen/qwen3.7-plus"`` in ``~/.research_demo/settings.json``, or a
+pick in ``/settings``, which works while the workflow is down.
+"""
 
 from pathlib import Path
 
+from pydantic import Field
 from pydantic_settings import SettingsConfigDict
 
 from agentic_cli import BaseSettings
+from agentic_cli.models import ModelEntry, ProviderSpec
+
+# The framework's fields whose defaults the demo overrides. A field declared
+# again replaces its title and description, so they are carried over.
+_MODELS = BaseSettings.model_fields["models"]
+_PROVIDERS = BaseSettings.model_fields["model_providers"]
 
 
 class ResearchDemoSettings(BaseSettings):
@@ -25,13 +70,48 @@ class ResearchDemoSettings(BaseSettings):
        API keys here or in real environment variables
     6. Field defaults (including the ones set in ``model_post_init`` below)
 
-    JSON sources are only consulted when the file exists.
+    JSON sources are only consulted when the file exists. ``models`` and
+    ``model_providers`` are the exception to "highest precedence wins": the
+    sources' entries are added to the demo's, field by field, and none is
+    removed (``model_providers`` from the user config and the environment
+    only).
     """
 
     model_config = SettingsConfigDict(
         env_file=str(Path.home() / ".research_demo" / ".env"),
         env_prefix="RESEARCH_DEMO_",
         extra="ignore",
+    )
+
+    # OpenRouter's key is read from OPENROUTER_API_KEY, in the environment or
+    # in ~/.research_demo/.env.
+    model_providers: dict[str, ProviderSpec] = Field(
+        default_factory=lambda: {
+            "openrouter": ProviderSpec(
+                kind="openrouter",
+                base_url="https://openrouter.ai/api/v1",
+                api_key_env="OPENROUTER_API_KEY",
+            ),
+        },
+        title=_PROVIDERS.title,
+        description=_PROVIDERS.description,
+    )
+    # Two Gemini models (fast, default tier), three Claude models (fast,
+    # default, strong), and three open models on OpenRouter. Each entry is
+    # empty: the listings and the shipped table say what each model takes.
+    models: dict[str, ModelEntry] = Field(
+        default_factory=lambda: {
+            "google:gemini-3.5-flash-lite": ModelEntry(),
+            "google:gemini-3.8-flash": ModelEntry(),
+            "anthropic:claude-haiku-5-5": ModelEntry(),
+            "anthropic:claude-sonnet-5-5": ModelEntry(),
+            "anthropic:claude-opus-5-5": ModelEntry(),
+            "openrouter:qwen/qwen3.7-plus": ModelEntry(),
+            "openrouter:deepseek/deepseek-v4-pro": ModelEntry(),
+            "openrouter:moonshotai/kimi-k3": ModelEntry(),
+        },
+        title=_MODELS.title,
+        description=_MODELS.description,
     )
 
     def __init__(self, **kwargs):
