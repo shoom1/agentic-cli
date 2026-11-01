@@ -55,10 +55,10 @@ SECRET_FIELDS = frozenset({
 # (config._AllowlistFilterSource) and the save-side split
 # (SettingsPersistence.save), so writer and reader cannot drift apart.
 PROJECT_SETTABLE_KEYS = frozenset({
-    # model / behavior. model_roles and pinned_models choose among the providers
-    # and endpoints the user defined; model_endpoints (base URLs a key is sent
-    # to) is deliberately absent.
-    "default_model", "model_roles", "pinned_models", "thinking_effort", "orchestrator",
+    # model / behavior. model_roles and models choose among the providers and
+    # endpoints the user defined (an entry's numbers are hints); model_endpoints
+    # (base URLs a key is sent to) is deliberately absent.
+    "default_model", "model_roles", "models", "thinking_effort", "orchestrator",
     # when a conversation is summarized (workflow/context.py)
     "context_summarize_at", "context_max_tokens",
     # when a tool result is cut (workflow/tool_output.py; the folder is fixed)
@@ -89,6 +89,13 @@ USER_PREFERENCE_KEYS = frozenset({"ui_theme", "dialog_placement"})
 # reads its deny rules from the file itself (workflow/permissions/engine.py),
 # so the loader passes over them and every save keeps them as they are.
 PROJECT_PRESERVED_KEYS = frozenset({"permissions"})
+
+# Settings written by hand, or shipped by the app in its settings class, and
+# never by save(): their live value merges the app's entries with every
+# file's, so a save would copy the app's shipped entries (and the other
+# file's) into the file it writes. Every save leaves each file's own section
+# as it is, and a dump (path=) leaves them out.
+HAND_EDITED_KEYS = frozenset({"models"})
 
 # Identity fields set by the application, not the user
 IDENTITY_FIELDS = frozenset({
@@ -215,13 +222,14 @@ class SettingsPersistence:
         Default save writes two files:
 
         - Project config (./.{app_name}/settings.json) receives ONLY
-          allowlisted (``PROJECT_SETTABLE_KEYS``) fields, always all of them —
-          regardless of whether they match the schema default, because
-          subclasses may have different effective defaults. The file is fully
-          rewritten, which also heals stale pre-P0-1 files holding keys the
-          loader now ignores; its ``PROJECT_PRESERVED_KEYS`` sections (the
-          project's deny rules) are kept as they are, so a malformed project
-          file raises rather than being clobbered.
+          allowlisted (``PROJECT_SETTABLE_KEYS``) fields, always all of them
+          but the ``HAND_EDITED_KEYS`` — regardless of whether they match the
+          schema default, because subclasses may have different effective
+          defaults. The file is fully rewritten, which also heals stale
+          pre-P0-1 files holding keys the loader now ignores; its
+          ``PROJECT_PRESERVED_KEYS`` sections (the project's deny rules) and
+          its own ``HAND_EDITED_KEYS`` sections are kept as they are, so a
+          malformed project file raises rather than being clobbered.
         - User config (~/.{app_name}/settings.json) receives the remaining
           user-scoped fields, but only those differing from the settings
           class default (so code-default changes keep applying for untouched
@@ -231,9 +239,11 @@ class SettingsPersistence:
           verbatim; a malformed user file raises rather than being clobbered.
 
         Secrets and identity fields are never written anywhere: see
-        ``is_secret_field``.
+        ``is_secret_field``. Nor are ``HAND_EDITED_KEYS`` (``models``): each
+        file keeps its own section of them as it is.
         With an explicit ``path=``, the legacy behavior is kept: one full
-        dump (minus secrets/identity) to that file, no split.
+        dump (minus secrets/identity and ``HAND_EDITED_KEYS``) to that file,
+        no split.
 
         Args:
             settings: Settings instance to save
@@ -251,9 +261,10 @@ class SettingsPersistence:
         if keys is not None:
             return self._save_keys(settings, set(keys) - secret - IDENTITY_FIELDS)
 
-        # Get settings as dict, excluding secrets and identity fields
+        # Get settings as dict, excluding secrets, identity fields and the
+        # hand-edited ones
         data = settings.model_dump(
-            exclude=secret | IDENTITY_FIELDS,
+            exclude=secret | IDENTITY_FIELDS | HAND_EDITED_KEYS,
             exclude_none=True,
         )
 
@@ -271,9 +282,11 @@ class SettingsPersistence:
 
         project_path = self.project_config_path
         existing = self._read_object(project_path)
-        project_data.update(
-            {k: existing[k] for k in sorted(PROJECT_PRESERVED_KEYS) if k in existing}
-        )
+        project_data.update({
+            k: existing[k]
+            for k in sorted(PROJECT_PRESERVED_KEYS | HAND_EDITED_KEYS)
+            if k in existing
+        })
         project_path.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_text(
             project_path, json.dumps(project_data, indent=2, default=str)
@@ -288,11 +301,13 @@ class SettingsPersistence:
         """Write only ``keys``: project-settable ones merged into the project
         file, the rest updated in (or, back at default, removed from) the
         user file. Nothing else is touched (the project file's
-        ``PROJECT_PRESERVED_KEYS`` sections are kept)."""
+        ``PROJECT_PRESERVED_KEYS`` sections are kept), and ``HAND_EDITED_KEYS``
+        (and their ``field.entry`` keys) are never written."""
         from pydantic_core import PydanticUndefined
 
         from agentic_cli.file_utils import atomic_write_text
 
+        keys = {k for k in keys if k.partition(".")[0] not in HAND_EDITED_KEYS}
         fields = type(settings).model_fields
         entries: dict[str, set[str]] = {}
         for key in keys:

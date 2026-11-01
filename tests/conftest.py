@@ -149,7 +149,7 @@ def settings_double(**attributes: Any) -> MagicMock:
     settings.google_api_key = "test-key"
     for name in ("anthropic_api_key", "openai_api_key", "openrouter_api_key", "default_model"):
         setattr(settings, name, None)
-    settings.model_roles, settings.model_endpoints, settings.pinned_models = {}, {}, []
+    settings.model_roles, settings.model_endpoints, settings.models = {}, {}, {}
     settings.thinking_effort = "medium"
     settings.configure_mock(**attributes)
     return settings
@@ -194,8 +194,10 @@ def _no_model_listings(monkeypatch: pytest.MonkeyPatch) -> None:
         async def load(self) -> None:
             return None
 
-    def build_catalog(settings, endpoints, *, transport=None):
-        return _UnlistedCatalog(endpoints=endpoints)
+    def build_catalog(settings, providers, *, transport=None):
+        return _UnlistedCatalog(
+            providers=providers, entries=model_services.entries_from_settings(settings)
+        )
 
     monkeypatch.setattr(model_services, "build_catalog", build_catalog, raising=False)
 

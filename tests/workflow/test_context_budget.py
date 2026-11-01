@@ -49,7 +49,7 @@ from agentic_cli.workflow.context import (
     overflow_message,
 )
 from agentic_cli.workflow.events import EventType
-from tests.models.fakes import endpoints as fake_endpoints
+from tests.models.fakes import providers as fake_providers
 from tests.workflow.adk.fakes import FakeAPI, anthropic_message
 
 #: The settings 0.7.0 removed.
@@ -72,11 +72,11 @@ OPUS = "anthropic:claude-opus-4-7"
 
 def resolved(spec: str, agent: str = "writer"):
     """``spec`` resolved for ``agent`` as a manager would, without listings."""
-    endpoints = fake_endpoints(anthropic="a-test-key", google="g-test-key", openai="o-test-key")
+    providers = fake_providers(anthropic="a-test-key", google="g-test-key", openai="o-test-key")
     return resolve_model(
         agent=agent, spec=spec, generation=None, thinking_effort="none",
         roles=RoleMap(default_model=None, model_roles={}),
-        catalog=ModelCatalog(endpoints=endpoints), endpoints=endpoints,
+        catalog=ModelCatalog(providers=providers), providers=providers,
     )
 
 
@@ -175,8 +175,7 @@ class TestContextBudget:
             context_budget(model, settings())
 
         # An endpoint model's usual fix: say how large its window is.
-        assert "context_window" in str(caught.value)
-        assert "model_endpoints" in str(caught.value)
+        assert "Set the model's context_window in models" in str(caught.value)
 
     def test_a_known_window_is_not_told_to_declare_one(self):
         small = windowed(resolved(SONNET), 20_000)
@@ -184,7 +183,7 @@ class TestContextBudget:
         with pytest.raises(ContextBudgetError) as caught:
             context_budget(small, settings())
 
-        assert "model_endpoints" not in str(caught.value)
+        assert "context_window" not in str(caught.value)
 
     def test_a_window_too_small_for_any_max_tokens_says_so(self):
         # A local 16k model with no max_tokens: B = 15,564. No max_tokens can

@@ -1,4 +1,4 @@
-"""Provider kinds and named endpoints.
+"""Provider kinds, the built-in providers and the user's named endpoints.
 
 Four providers are built in: Google, Anthropic and OpenAI on their SDK's
 default host, and OpenRouter. A user adds OpenAI-compatible servers (vLLM and
@@ -8,12 +8,13 @@ send the user's key to its own server.
 
 An endpoint's key is read from the environment variable its ``api_key_env``
 names, never stored. Without one the client sends a placeholder key, which is
-what a local server without authentication expects.
+what a local server without authentication expects. What the user says about
+the models an endpoint serves is a ``models`` entry (``entries.ModelEntry``),
+keyed ``<endpoint>:<model>``.
 """
 
 from __future__ import annotations
 
-import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
@@ -23,7 +24,7 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from agentic_cli.models.refs import validate_endpoint_name
+from agentic_cli.models.refs import validate_provider_name
 
 
 class ProviderKind(str, Enum):
@@ -58,41 +59,7 @@ _BUILTIN_KINDS: tuple[ProviderKind, ...] = (
 )
 _BUILTIN_BASE_URLS: Mapping[ProviderKind, str] = {ProviderKind.OPENROUTER: OPENROUTER_BASE_URL}
 
-_LEVEL = re.compile(r"[a-z][a-z0-9_]*")
 _ENV_VAR = r"^[A-Z_][A-Z0-9_]*$"
-
-
-class DeclaredModel(BaseModel):
-    """What the user declares about one model an endpoint serves.
-
-    An endpoint's ``/v1/models`` listing gives little more than the served
-    name and context length, so what a model can do comes from here.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    context_window: int | None = Field(default=None, ge=1)
-    max_output: int | None = Field(default=None, ge=1)
-    tools: bool = True
-    image_input: bool = False
-    #: ``chat_template``: thinking switched by ``chat_template_kwargs.enable_thinking``
-    #: (Qwen3 and similar on vLLM); ``effort``: a ``reasoning_effort`` parameter.
-    thinking: Literal["none", "chat_template", "effort"] = "none"
-    #: The effort ladder, lowest first; used only when ``thinking == "effort"``.
-    effort_levels: list[str] = Field(default_factory=lambda: ["low", "medium", "high"])
-    reasoning_text: bool = True
-
-    @field_validator("effort_levels")
-    @classmethod
-    def _check_levels(cls, levels: list[str]) -> list[str]:
-        if not levels:
-            raise ValueError("effort_levels must name at least one level")
-        bad = [level for level in levels if not _LEVEL.fullmatch(level)]
-        if bad:
-            raise ValueError(f"effort level(s) {bad} must be lowercase names")
-        if len(set(levels)) != len(levels):
-            raise ValueError("effort_levels must not repeat a level")
-        return levels
 
 
 class EndpointSpec(BaseModel):
@@ -104,7 +71,6 @@ class EndpointSpec(BaseModel):
     kind: Literal["openai_compatible"] = "openai_compatible"
     base_url: str
     api_key_env: str | None = Field(default=None, pattern=_ENV_VAR)
-    models: dict[str, DeclaredModel] = Field(default_factory=dict)
 
     @field_validator("base_url")
     @classmethod
@@ -135,20 +101,10 @@ class EndpointSpec(BaseModel):
             raise ValueError("base_url must not have a fragment")
         return url.rstrip("/")
 
-    @field_validator("models")
-    @classmethod
-    def _check_model_ids(cls, models: dict[str, DeclaredModel]) -> dict[str, DeclaredModel]:
-        for model_id in models:
-            if not model_id or any(ch.isspace() for ch in model_id):
-                raise ValueError(
-                    f"model id {model_id!r} must be a non-empty name without whitespace"
-                )
-        return models
-
 
 @dataclass(frozen=True)
-class Endpoint:
-    """A provider the workflow can send requests to.
+class Provider:
+    """A provider the workflow can send requests to: a built-in or a user endpoint.
 
     ``base_url`` is None for Google, Anthropic and OpenAI (the SDK's default
     host). ``api_key`` never appears in ``repr``.
@@ -158,7 +114,6 @@ class Endpoint:
     kind: ProviderKind
     base_url: str | None
     api_key: str | None = field(default=None, repr=False)
-    models: Mapping[str, DeclaredModel] = field(default_factory=dict)
 
     @property
     def has_credentials(self) -> bool:
@@ -168,10 +123,10 @@ class Endpoint:
         return bool(self.api_key)
 
 
-def build_endpoints(
+def build_providers(
     *, keys: Mapping[str, str | None], specs: Mapping[str, EndpointSpec], env: Mapping[str, str]
-) -> dict[str, Endpoint]:
-    """The four built-in providers plus one endpoint per spec.
+) -> dict[str, Provider]:
+    """The four built-in providers plus one provider per endpoint spec.
 
     Args:
         keys: Each built-in provider's key (``google``, ``anthropic``,
@@ -185,21 +140,20 @@ def build_endpoints(
         ModelSpecError: If an endpoint name is malformed or reuses a built-in
             provider name.
     """
-    endpoints: dict[str, Endpoint] = {}
+    providers: dict[str, Provider] = {}
     for kind in _BUILTIN_KINDS:
-        endpoints[kind.value] = Endpoint(
+        providers[kind.value] = Provider(
             name=kind.value,
             kind=kind,
             base_url=_BUILTIN_BASE_URLS.get(kind),
             api_key=keys.get(kind.value) or None,
         )
     for name, spec in specs.items():
-        validate_endpoint_name(name)
-        endpoints[name] = Endpoint(
+        validate_provider_name(name)
+        providers[name] = Provider(
             name=name,
             kind=ProviderKind.OPENAI_COMPATIBLE,
             base_url=spec.base_url,
             api_key=(env.get(spec.api_key_env) or None) if spec.api_key_env else None,
-            models=MappingProxyType(dict(spec.models)),
         )
-    return endpoints
+    return providers

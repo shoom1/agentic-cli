@@ -1,4 +1,4 @@
-"""Model knowledge for every backend: references, endpoints and records.
+"""Model knowledge for every backend: references, providers and records.
 
 Provisional in 0.7.0: names and signatures may still change.
 
@@ -7,8 +7,10 @@ agentic-cli and no provider SDK (``tests/models/test_boundary.py`` checks
 both); each backend's adapter turns what it resolves into SDK objects.
 
 - ``refs``: ``provider:model`` references, bare model ids and role names.
-- ``endpoints``: provider kinds, the built-in providers and the user's
+- ``providers``: provider kinds, the built-in providers and the user's
   OpenAI-compatible endpoints.
+- ``entries``: ``ModelEntry``, what the ``models`` setting says about one
+  model, keyed by its ``provider:model`` reference.
 - ``records``: ``ModelRecord``, what is known about one model, and its
   ``ThinkingRule``.
 - ``table``: the shipped table (``data/table.json``): family rules, per-model
@@ -18,20 +20,20 @@ both); each backend's adapter turns what it resolves into SDK objects.
 - ``resolve``: ``resolve_model``, one agent's model, thinking, ``max_tokens``
   and sampling settings as a ``ResolvedModel``.
 - ``discovery``: one lister per provider, over its REST API with httpx.
-- ``catalog``: ``ModelCatalog``, the records merged from declarations,
+- ``catalog``: ``ModelCatalog``, the records merged from ``models`` entries,
   listings and the table; which ids each provider rejects; the listing cache
   and its background refresh.
 """
 
 from agentic_cli.models.catalog import ModelCatalog, ProviderState, ProviderStatus
-from agentic_cli.models.endpoints import (
+from agentic_cli.models.entries import ModelEntry, parse_entry_key
+from agentic_cli.models.providers import (
     OPENROUTER_BASE_URL,
     PROVIDER_KEY_ENV,
-    DeclaredModel,
-    Endpoint,
     EndpointSpec,
+    Provider,
     ProviderKind,
-    build_endpoints,
+    build_providers,
 )
 from agentic_cli.models.records import (
     CacheMechanism,
@@ -47,7 +49,7 @@ from agentic_cli.models.refs import (
     RoleRef,
     parse_ref,
     parse_spec,
-    validate_endpoint_name,
+    validate_provider_name,
     validate_role_name,
 )
 from agentic_cli.models.resolve import (
@@ -67,11 +69,10 @@ __all__ = [
     "BUILTIN_ROLES",
     "CacheMechanism",
     "CatalogView",
-    "DeclaredModel",
-    "Endpoint",
     "EndpointSpec",
     "GenerationSettings",
     "ModelCatalog",
+    "ModelEntry",
     "ModelRecord",
     "ModelRef",
     "ModelResolutionError",
@@ -79,6 +80,7 @@ __all__ = [
     "NativeThinking",
     "OPENROUTER_BASE_URL",
     "PROVIDER_KEY_ENV",
+    "Provider",
     "ProviderKind",
     "ProviderState",
     "ProviderStatus",
@@ -89,12 +91,13 @@ __all__ = [
     "ThinkingIntent",
     "ThinkingMechanism",
     "ThinkingRule",
-    "build_endpoints",
+    "build_providers",
     "load_table",
+    "parse_entry_key",
     "parse_ref",
     "parse_spec",
     "resolve_model",
-    "validate_endpoint_name",
+    "validate_provider_name",
     "validate_role_name",
     "version_key",
 ]

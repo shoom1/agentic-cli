@@ -20,7 +20,7 @@ import logging
 from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
-from agentic_cli.models.endpoints import PROVIDER_KEY_ENV, Endpoint
+from agentic_cli.models.providers import PROVIDER_KEY_ENV, Provider
 from agentic_cli.models.refs import (
     BUILTIN_ROLES,
     ModelRef,
@@ -89,7 +89,7 @@ class RoleMap:
         return self._roles.get(role)
 
     def resolve(
-        self, role: str, *, catalog: "CatalogView", endpoints: Mapping[str, Endpoint]
+        self, role: str, *, catalog: "CatalogView", providers: Mapping[str, Provider]
     ) -> ModelRef:
         """The model ``role`` names now.
 
@@ -103,7 +103,7 @@ class RoleMap:
         if mapped is not None:
             return mapped
         if role in BUILTIN_ROLES:
-            return self._computed(role, catalog, endpoints)
+            return self._computed(role, catalog, providers)
         if role not in _WARNED_ROLES:
             _WARNED_ROLES.add(role)
             logger.warning(
@@ -111,7 +111,7 @@ class RoleMap:
                 "Map it in model_roles to choose one.",
                 role,
             )
-        return self.resolve("default", catalog=catalog, endpoints=endpoints)
+        return self.resolve("default", catalog=catalog, providers=providers)
 
     def referenced(self) -> tuple[str, ...]:
         """Every reference this map holds, canonical and once each."""
@@ -119,13 +119,13 @@ class RoleMap:
         return tuple(dict.fromkeys(str(ref) for ref in refs if ref is not None))
 
     def _computed(
-        self, tier: str, catalog: "CatalogView", endpoints: Mapping[str, Endpoint]
+        self, tier: str, catalog: "CatalogView", providers: Mapping[str, Provider]
     ) -> ModelRef:
-        for provider in _ROLE_PROVIDERS:
-            endpoint = endpoints.get(provider)
-            if endpoint is None or not endpoint.has_credentials:
+        for name in _ROLE_PROVIDERS:
+            provider = providers.get(name)
+            if provider is None or not provider.has_credentials:
                 continue
-            candidates = [r for r in catalog.records(provider) if r.tier == tier]
+            candidates = [r for r in catalog.records(name) if r.tier == tier]
             if candidates:
                 return _newest(candidates).ref
         variables = ", ".join(PROVIDER_KEY_ENV[p] for p in _ROLE_PROVIDERS)

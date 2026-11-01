@@ -35,10 +35,11 @@ from google.genai import types  # noqa: E402
 from openai import AsyncOpenAI  # noqa: E402
 
 from agentic_cli.models import (  # noqa: E402
-    DeclaredModel,
     EndpointSpec,
     ModelCatalog,
+    ModelEntry,
     ModelRecord,
+    ModelRef,
     ProviderKind,
     ResolvedModel,
     RoleMap,
@@ -53,7 +54,7 @@ from agentic_cli.workflow.adk.anthropic_llm import (  # noqa: E402
 from agentic_cli.workflow.adk.model_factory import AdkModel, build_adk_model  # noqa: E402
 from agentic_cli.workflow.adk.openai_compatible import OpenAICompatibleLlm  # noqa: E402
 from agentic_cli.workflow.model_settings import ModelSettings, ThinkingSettings  # noqa: E402
-from tests.models.fakes import FakeCatalog, endpoints  # noqa: E402
+from tests.models.fakes import FakeCatalog, providers  # noqa: E402
 from tests.workflow.adk.fakes import (  # noqa: E402
     FakeAPI,
     anthropic_message,
@@ -95,18 +96,19 @@ OPENROUTER_REASONER = ModelRecord(
     ),
     reasoning_text=True,
 )
-#: A user's vLLM server, its key in LOCAL_KEY.
+#: A user's vLLM server, its key in LOCAL_KEY, and a server that needs none.
 LOCAL = {
-    "local": EndpointSpec(
-        base_url="http://localhost:8000/v1",
-        api_key_env="LOCAL_KEY",
-        models={
-            "Qwen/Qwen3-32B": DeclaredModel(thinking="chat_template"),
-            "reasoner": DeclaredModel(thinking="effort", effort_levels=["low", "medium", "high"]),
-            "plain": DeclaredModel(),
-        },
+    "local": EndpointSpec(base_url="http://localhost:8000/v1", api_key_env="LOCAL_KEY"),
+    "keyless": EndpointSpec(base_url="http://localhost:9000/v1"),
+}
+#: What the user says about their models (``models`` entries).
+LOCAL_ENTRIES = {
+    ModelRef("local", "Qwen/Qwen3-32B"): ModelEntry(thinking="chat_template"),
+    ModelRef("local", "reasoner"): ModelEntry(
+        thinking="effort", effort_levels=["low", "medium", "high"]
     ),
-    "keyless": EndpointSpec(base_url="http://localhost:9000/v1", models={"plain": DeclaredModel()}),
+    ModelRef("local", "plain"): ModelEntry(),
+    ModelRef("keyless", "plain"): ModelEntry(),
 }
 
 
@@ -123,17 +125,14 @@ def resolved(
     ``effort`` is the global ``thinking_effort``; ``thinking`` (with
     ``budget``) the agent's own mode; ``generation`` its other model settings.
     The catalog is the shipped table, plus ``OPENROUTER_REASONER`` and the
-    models ``LOCAL`` declares.
+    ``LOCAL_ENTRIES`` models.
     """
     if thinking is not None:
         generation["thinking"] = ThinkingSettings(mode=thinking, budget_tokens=budget)
-    every = endpoints(**KEYS, specs=LOCAL, env={"LOCAL_KEY": "l-test-key"})
-    declared = ModelCatalog(endpoints=every)  # never loaded: declarations and the table
-    catalog = FakeCatalog([
-        OPENROUTER_REASONER,
-        *declared.records("local"),
-        *declared.records("keyless"),
-    ])
+    every = providers(**KEYS, specs=LOCAL, env={"LOCAL_KEY": "l-test-key"})
+    # Never loaded: the entries and the table.
+    configured = ModelCatalog(providers=every, entries=LOCAL_ENTRIES)
+    catalog = FakeCatalog([OPENROUTER_REASONER, *map(configured.record, LOCAL_ENTRIES)])
     return resolve_model(
         agent="writer",
         spec=spec,
@@ -141,7 +140,7 @@ def resolved(
         thinking_effort=effort,
         roles=RoleMap(default_model=None, model_roles={}),
         catalog=catalog,
-        endpoints=every,
+        providers=every,
     )
 
 
@@ -445,7 +444,7 @@ class TestClaude:
         body = api.bodies[0]
         assert body["thinking"] == {"type": "adaptive", "display": "summarized"}
         assert body["output_config"] == {"effort": "high"}
-        assert api.requests[0].headers["x-api-key"] == "a-test-key"
+        assert api.sent_key() == "a-test-key"
 
     async def test_adk_has_no_sampling_warning_to_print(self, settings):
         """ADK warns when it drops sampling settings for a thinking Claude; it

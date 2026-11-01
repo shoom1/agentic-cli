@@ -37,13 +37,8 @@ KEYS = {
     "OPENROUTER_API_KEY": "r-secret-key-4",
 }
 ENDPOINT_KEY = "v-secret-key-5"
-LAB = {
-    "lab": {
-        "base_url": "http://localhost:8000/v1",
-        "api_key_env": "LAB_KEY",
-        "models": {"Qwen/Qwen3-32B": {"context_window": 32768, "thinking": "chat_template"}},
-    }
-}
+LAB = {"lab": {"base_url": "http://localhost:8000/v1", "api_key_env": "LAB_KEY"}}
+LAB_MODELS = {"lab:Qwen/Qwen3-32B": {"context_window": 32768, "thinking": "chat_template"}}
 
 
 @pytest.fixture(autouse=True)
@@ -66,9 +61,10 @@ def api(monkeypatch) -> ProviderAPI:
     """Every catalog built for the settings lists ``api``'s answers, and caches them."""
     fake = ProviderAPI()
 
-    def build_catalog(settings, endpoints, *, transport=None):
+    def build_catalog(settings, providers, *, transport=None):
         return ModelCatalog(
-            endpoints=endpoints,
+            providers=providers,
+            entries=model_services.entries_from_settings(settings),
             cache_path=model_services.model_cache_path(settings),
             transport=fake.transport,
         )
@@ -142,7 +138,7 @@ async def models(app: App, args: str = "") -> Screen:
 
 async def _ready(settings: BaseSettings, api: ProviderAPI, model: str) -> SimpleNamespace:
     """A ready workflow's view: its loaded catalog and its default model."""
-    catalog = model_services.build_catalog(settings, model_services.endpoints_from_settings(settings))
+    catalog = model_services.build_catalog(settings, model_services.providers_from_settings(settings))
     await catalog.load()
     return SimpleNamespace(catalog=catalog, model=model)
 
@@ -237,15 +233,17 @@ async def test_the_table_shows_each_model_s_record_and_roles(api, monkeypatch):
     assert "anthropic:" not in screen.text
 
 
-async def test_an_endpoint_s_declared_models_are_shown(api, monkeypatch):
+async def test_an_endpoint_s_models_show_their_entries(api, monkeypatch):
     monkeypatch.setenv("LAB_KEY", ENDPOINT_KEY)
-    settings = BaseSettings(model_endpoints=LAB, default_model="lab:Qwen/Qwen3-32B")
+    settings = BaseSettings(
+        model_endpoints=LAB, models=LAB_MODELS, default_model="lab:Qwen/Qwen3-32B"
+    )
     workflow = await _ready(settings, api, "lab:Qwen/Qwen3-32B")
 
     screen = await models(App(settings, workflow))
 
     qwen = _row(screen, "lab:Qwen/Qwen3-32B")
-    assert "32,768" in qwen and "on/off" in qwen and "declared" in qwen and "default" in qwen
+    assert "32,768" in qwen and "on/off" in qwen and "config" in qwen and "default" in qwen
     assert "endpoint" in _row(screen, "lab")
 
 

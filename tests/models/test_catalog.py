@@ -1,4 +1,4 @@
-"""The catalog: records merged from listings, the table and declarations; validation; refresh.
+"""The catalog: records merged from ``models`` entries, listings and the table; validation; refresh.
 
 Listings come from ``ProviderAPI``, a fake of every provider's model list
 behind ``httpx.MockTransport``. The on-disk cache is covered in
@@ -13,9 +13,9 @@ import time
 import pytest
 
 from agentic_cli.models import (
-    DeclaredModel,
     EndpointSpec,
     ModelCatalog,
+    ModelEntry,
     ModelRef,
     ModelResolutionError,
     NativeThinking,
@@ -28,21 +28,27 @@ from agentic_cli.models import (
     load_table,
     resolve_model,
 )
-from tests.models.fakes import Clock, ProviderAPI, endpoints, hang, recorded, refuse
+from tests.models.fakes import Clock, ProviderAPI, hang, providers, recorded, refuse
 
 KEYS = {"google": "g-test-key", "anthropic": "a-test-key", "openai": "o-test-key"}
-VLLM = EndpointSpec(
-    base_url="http://gpu-box:8000/v1",
-    models={
-        "Qwen/Qwen3-32B": DeclaredModel(context_window=16384, thinking="chat_template"),
-        "declared-only": DeclaredModel(thinking="effort", effort_levels=["low", "high"]),
-    },
-)
+VLLM = EndpointSpec(base_url="http://gpu-box:8000/v1")
+#: What the user says about two of the server's models: one it serves, one it does not list.
+ENTRIES = {
+    ModelRef("local-vllm", "Qwen/Qwen3-32B"): ModelEntry(
+        context_window=16384, thinking="chat_template"
+    ),
+    ModelRef("local-vllm", "entry-only"): ModelEntry(
+        thinking="effort", effort_levels=["low", "high"]
+    ),
+}
 
 
-def catalog_for(api: ProviderAPI | None = None, *, specs=None, clock=None, **keys) -> ModelCatalog:
+def catalog_for(
+    api: ProviderAPI | None = None, *, specs=None, entries=None, clock=None, **keys
+) -> ModelCatalog:
     return ModelCatalog(
-        endpoints=endpoints(specs=specs or {}, **keys),
+        providers=providers(specs=specs or {}, **keys),
+        entries=entries,
         transport=(api or ProviderAPI()).transport,
         clock=clock or Clock(),
     )
@@ -229,7 +235,7 @@ class TestAnthropic:
         resolved = resolve_model(
             agent="writer", spec=f"anthropic:{model}", generation=None, thinking_effort="none",
             roles=RoleMap(default_model=None, model_roles={}), catalog=catalog,
-            endpoints=endpoints(anthropic=KEYS["anthropic"]),
+            providers=providers(anthropic=KEYS["anthropic"]),
         )
 
         assert resolved.thinking == expected
@@ -312,51 +318,142 @@ class TestOpenRouter:
         assert catalog.records("openrouter") == []
 
 
-class TestEndpoints:
-    async def test_declared_and_listed_models(self):
-        catalog = await loaded(specs={"local-vllm": VLLM})
+class TestEntries:
+    async def test_an_endpoint_s_entries_and_listed_models(self):
+        catalog = await loaded(specs={"local-vllm": VLLM}, entries=ENTRIES)
 
         def record(model: str):
             return catalog.record(ModelRef("local-vllm", model))
 
         qwen = record("Qwen/Qwen3-32B")
-        assert qwen.context_window == 16384  # declared beats the listing's 32768
+        assert qwen.context_window == 16384  # the entry beats the listing's 32768
         assert qwen.thinking.mechanism is ThinkingMechanism.CHAT_TEMPLATE
-        assert qwen.sources["context_window"] == "declared"
+        assert qwen.sources["context_window"] == "config"
+        assert qwen.sources["thinking"] == "config"
         assert qwen.kind is ProviderKind.OPENAI_COMPATIBLE
-        lora = record("qwen3-sql-lora")  # listed, not declared
+        lora = record("qwen3-sql-lora")  # listed, no entry
         assert (lora.tools, lora.context_window) == (True, 32768)
         assert lora.sources["context_window"] == "listing"
-        effort = record("declared-only")  # declared, not served
+        effort = record("entry-only")  # an entry, not served
         assert effort.thinking == ThinkingRule(ThinkingMechanism.EFFORT, levels=("low", "high"))
-        assert set(ids(catalog.records("local-vllm"))) == {
-            "Qwen/Qwen3-32B", "declared-only", "qwen3-sql-lora",
-        }
+        # The provider's records are what it serves, each with its entry.
+        assert set(ids(catalog.records("local-vllm"))) == {"Qwen/Qwen3-32B", "qwen3-sql-lora"}
+        assert qwen in catalog.records("local-vllm")
 
-    async def test_a_declaration_without_a_number_takes_the_listing(self):
-        spec = EndpointSpec(
-            base_url="http://gpu-box:8000/v1", models={"Qwen/Qwen3-32B": DeclaredModel()}
-        )
-        catalog = await loaded(specs={"local-vllm": spec})
+    async def test_an_entry_without_a_number_takes_the_listing(self):
+        entries = {ModelRef("local-vllm", "Qwen/Qwen3-32B"): ModelEntry()}
+        catalog = await loaded(specs={"local-vllm": VLLM}, entries=entries)
 
         record = catalog.record(ModelRef("local-vllm", "Qwen/Qwen3-32B"))
 
         assert record.context_window == 32768
         assert record.sources["context_window"] == "listing"
-        assert record.sources["tools"] == "declared"
+        assert "config" not in record.sources.values()
 
-    async def test_a_listing_is_authoritative_for_undeclared_ids_only(self):
-        catalog = await loaded(specs={"local-vllm": VLLM})
+    async def test_a_fresh_listing_rejects_only_ids_without_an_entry(self):
+        catalog = await loaded(specs={"local-vllm": VLLM}, entries=ENTRIES)
 
         with pytest.raises(ModelResolutionError, match="local-vllm:other is not available"):
             catalog.record(ModelRef("local-vllm", "other"))
-        assert catalog.record(ModelRef("local-vllm", "declared-only")).model == "declared-only"
+        assert catalog.record(ModelRef("local-vllm", "entry-only")).model == "entry-only"
 
-    async def test_a_server_that_is_down_still_has_its_declared_models(self):
-        catalog = await loaded(ProviderAPI(endpoint=refuse), specs={"local-vllm": VLLM})
+    async def test_a_server_that_is_down_still_takes_its_entries(self):
+        catalog = await loaded(
+            ProviderAPI(endpoint=refuse), specs={"local-vllm": VLLM}, entries=ENTRIES
+        )
 
-        assert set(ids(catalog.records("local-vllm"))) == {"Qwen/Qwen3-32B", "declared-only"}
+        assert catalog.records("local-vllm") == []
+        qwen = catalog.record(ModelRef("local-vllm", "Qwen/Qwen3-32B"))
+        assert (qwen.context_window, qwen.sources["context_window"]) == (16384, "config")
         assert catalog.record(ModelRef("local-vllm", "anything")).tools is True
+
+    async def test_an_entry_vouches_for_no_builtin_model_its_fresh_listing_lacks(self):
+        """Only an endpoint's listing may leave out a model it serves."""
+        typo = ModelRef("anthropic", "claude-sonnet-9-9")
+        catalog = await loaded(entries={typo: ModelEntry()}, anthropic=KEYS["anthropic"])
+
+        with pytest.raises(ModelResolutionError, match=f"{typo} is not available"):
+            catalog.record(typo)
+        assert str(typo) not in catalog.picker_refs(entries=[str(typo)])
+
+    async def test_an_entry_beats_the_listing_which_beats_the_table(self):
+        sonnet = ModelRef("anthropic", "claude-sonnet-4-6")
+        entries = {sonnet: ModelEntry(context_window=200_000, image_input=False)}
+        catalog = await loaded(entries=entries, anthropic=KEYS["anthropic"])
+
+        record = catalog.record(sonnet)
+
+        assert (record.context_window, record.sources["context_window"]) == (200_000, "config")
+        assert (record.image_input, record.sources["image_input"]) == (False, "config")
+        assert (record.max_output, record.sources["max_output"]) == (64_000, "listing")
+        assert record.sources["cache"] == "table"
+        assert record.thinking.mechanism is ADAPTIVE  # the listing's: no entry may set it
+        # /models reads the provider's records: the same record, entry and all.
+        assert record in catalog.records("anthropic")
+
+    async def test_a_model_no_listing_or_fallback_holds_takes_its_entry_over_the_table(self):
+        sonnet = ModelRef("anthropic", "claude-sonnet-4-7")  # not among the fallbacks
+        catalog = catalog_for(
+            entries={sonnet: ModelEntry(max_output=32_000)}, anthropic=KEYS["anthropic"]
+        )
+
+        record = catalog.record(sonnet)
+
+        assert (record.max_output, record.sources["max_output"]) == (32_000, "config")
+        assert record.sources["tier"] == "table"
+
+    async def test_thinking_effort_without_levels_takes_the_default_ladder(self):
+        entries = {ModelRef("local-vllm", "Qwen/Qwen3-32B"): ModelEntry(thinking="effort")}
+        catalog = await loaded(specs={"local-vllm": VLLM}, entries=entries)
+
+        record = catalog.record(ModelRef("local-vllm", "Qwen/Qwen3-32B"))
+
+        assert record.thinking == ThinkingRule(
+            ThinkingMechanism.EFFORT, levels=("low", "medium", "high")
+        )
+
+    async def test_thinking_effort_on_a_model_that_takes_one_keeps_its_ladder(self):
+        """Saying what the listing says changes nothing: ``none`` stays the
+        lowest effort (thinking off), and minimal and xhigh stay."""
+        qwen = ModelRef("openrouter", "qwen/qwen3-235b-a22b")
+        catalog = await loaded(
+            entries={qwen: ModelEntry(thinking="effort")}, openrouter="r-test-key"
+        )
+
+        record = catalog.record(qwen)
+
+        assert record.thinking == ThinkingRule(
+            ThinkingMechanism.EFFORT, levels=("none", "minimal", "low", "medium", "high", "xhigh")
+        )
+        assert record.sources["thinking"] == "listing"
+
+    async def test_effort_levels_alone_replace_an_effort_ladder_and_nothing_else(self):
+        qwen = ModelRef("openrouter", "qwen/qwen3-235b-a22b")
+        llama = ModelRef("openrouter", "meta-llama/llama-3.3-70b-instruct")
+        entries = {
+            qwen: ModelEntry(effort_levels=["low", "high"]),
+            llama: ModelEntry(effort_levels=["low", "high"]),
+        }
+        catalog = await loaded(entries=entries, openrouter="r-test-key")
+
+        reasoning, plain = catalog.record(qwen), catalog.record(llama)
+
+        assert reasoning.thinking == ThinkingRule(ThinkingMechanism.EFFORT, levels=("low", "high"))
+        assert reasoning.sources["thinking"] == "config"
+        assert plain.thinking.mechanism is ThinkingMechanism.NONE  # no ladder to replace
+        assert plain.sources["thinking"] != "config"
+
+    async def test_an_entry_s_thinking_none_turns_a_listed_knob_off(self):
+        qwen = ModelRef("openrouter", "qwen/qwen3-235b-a22b")
+        catalog = await loaded(
+            entries={qwen: ModelEntry(thinking="none", reasoning_text=False)},
+            openrouter="r-test-key",
+        )
+
+        record = catalog.record(qwen)
+
+        assert record.thinking == ThinkingRule()
+        assert (record.reasoning_text, record.sources["reasoning_text"]) == (False, "config")
 
 
 # --- validation ----------------------------------------------------------------
@@ -435,11 +532,11 @@ class TestRoles:
     async def test_fallback_records_fill_the_roles_on_an_offline_first_run(self):
         catalog = await loaded(ProviderAPI(google=refuse), google=KEYS["google"])
         roles = RoleMap(default_model=None, model_roles={})
-        eps = endpoints(google=KEYS["google"])
+        keyed = providers(google=KEYS["google"])
 
         assert catalog.status()[0].state is ProviderState.DEGRADED
         resolved = {
-            role: str(roles.resolve(role, catalog=catalog, endpoints=eps))
+            role: str(roles.resolve(role, catalog=catalog, providers=keyed))
             for role in ("default", "fast", "strong")
         }
         assert resolved == {
@@ -451,10 +548,10 @@ class TestRoles:
     async def test_a_fresh_listing_fills_the_roles_with_its_newest(self):
         catalog = await loaded(anthropic=KEYS["anthropic"])
         roles = RoleMap(default_model=None, model_roles={})
-        eps = endpoints(anthropic=KEYS["anthropic"])
+        keyed = providers(anthropic=KEYS["anthropic"])
 
         def role(name: str) -> str:
-            return str(roles.resolve(name, catalog=catalog, endpoints=eps))
+            return str(roles.resolve(name, catalog=catalog, providers=keyed))
 
         assert role("default") == "anthropic:claude-sonnet-5-5"
         assert role("strong") == "anthropic:claude-opus-4-7"
@@ -466,7 +563,7 @@ class TestRoles:
 class TestPickerRefs:
     async def test_the_runnable_models_by_provider_tier_and_newest(self):
         catalog = await loaded(
-            specs={"local-vllm": VLLM},
+            specs={"local-vllm": VLLM}, entries=ENTRIES,
             google=KEYS["google"], anthropic=KEYS["anthropic"], openrouter="r-test-key",
         )
 
@@ -474,7 +571,7 @@ class TestPickerRefs:
             referenced=[
                 "openrouter:qwen/qwen3-235b-a22b", "fast", "google:gemini-2.5-flash", "anthropic:",
             ],
-            pinned=["openrouter:anthropic/claude-sonnet-4.5"],
+            entries=[*map(str, ENTRIES), "openrouter:anthropic/claude-sonnet-4.5"],
         )
 
         assert refs == [
@@ -496,14 +593,14 @@ class TestPickerRefs:
             "openrouter:anthropic/claude-sonnet-4.5",
             "local-vllm:Qwen/Qwen3-32B",
             "local-vllm:qwen3-sql-lora",
-            "local-vllm:declared-only",
+            "local-vllm:entry-only",
         ]
 
     async def test_openrouter_needs_a_reference_and_a_key(self):
         keyless = await loaded(google=KEYS["google"])
         keyed = await loaded(openrouter="r-test-key")
 
-        assert keyless.picker_refs(pinned=["openrouter:qwen/qwen3-235b-a22b"]) == [
+        assert keyless.picker_refs(entries=["openrouter:qwen/qwen3-235b-a22b"]) == [
             r for r in keyless.picker_refs() if r.startswith("google:")
         ]
         assert keyed.picker_refs() == []
@@ -536,7 +633,7 @@ class TestLoad:
         assert refused.record(ModelRef("google", "gemini-9-ultra")).model == "gemini-9-ultra"
 
         hung = ModelCatalog(
-            endpoints=endpoints(google=KEYS["google"], anthropic=KEYS["anthropic"]),
+            providers=providers(google=KEYS["google"], anthropic=KEYS["anthropic"]),
             transport=ProviderAPI(google=hang, anthropic=hang).transport,
             timeout=0.3,
         )
@@ -629,11 +726,11 @@ class TestRefresh:
 
     async def test_aclose_cancels_the_background_refresh(self, tmp_path):
         clock, cache = Clock(), tmp_path / "model_cache.json"
-        eps = endpoints(google=KEYS["google"])
-        await ModelCatalog(endpoints=eps, cache_path=cache, transport=ProviderAPI().transport,
+        keyed = providers(google=KEYS["google"])
+        await ModelCatalog(providers=keyed, cache_path=cache, transport=ProviderAPI().transport,
                            clock=clock).load()
         clock.now += 2 * 86400  # the cached listing is now stale
-        catalog = ModelCatalog(endpoints=eps, cache_path=cache,
+        catalog = ModelCatalog(providers=keyed, cache_path=cache,
                                transport=ProviderAPI(google=hang).transport, clock=clock)
         await catalog.load()
         task = catalog.start_background_refresh()

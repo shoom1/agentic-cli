@@ -656,8 +656,8 @@ class TestLifecycle:
         monkeypatch.setattr(manager_module, "open_checkpointer", open_checkpointer)
         settings = BaseSettings(
             session_store="sqlite", default_model="local:small",
-            model_endpoints={"local": {"base_url": "http://localhost:8000/v1",
-                                       "models": {"small": {"context_window": 4_000}}}},
+            model_endpoints={"local": {"base_url": "http://localhost:8000/v1"}},
+            models={"local:small": {"context_window": 4_000}},
         )
         manager = DeepAgentsWorkflowManager(agent_configs=[_researcher(servers())],
                                             settings=settings)

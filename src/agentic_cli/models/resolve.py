@@ -21,7 +21,7 @@ model (``minimal``, ``xhigh``, ``max``, …), checked against its ladder.
   adaptive thinking with that effort; ``budget`` is an error.
 - Claude, budget (up to 4.5): ``none`` is disabled; low / medium / high are
   budgets 4096 / 10000 / 32000; ``budget`` N is at least 1024.
-- Effort (OpenAI and OpenRouter reasoning models, endpoints declaring
+- Effort (OpenAI and OpenRouter reasoning models, models entries declaring
   effort): ``none`` is the lowest effort on the ladder; low / medium / high
   are those efforts; ``budget`` is an error.
 - Chat template (endpoints): ``none`` is ``enable_thinking: false``,
@@ -38,7 +38,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Protocol
 
-from agentic_cli.models.endpoints import PROVIDER_KEY_ENV, Endpoint, ProviderKind
+from agentic_cli.models.providers import PROVIDER_KEY_ENV, Provider, ProviderKind
 from agentic_cli.models.records import ModelRecord, ThinkingMechanism, ThinkingRule
 from agentic_cli.models.refs import ModelRef, ModelSpecError, RoleRef, parse_spec
 
@@ -134,7 +134,8 @@ class ResolvedModel:
 
     agent: str | None
     record: ModelRecord
-    endpoint: Endpoint
+    #: The provider object the model runs on (``record.provider`` is its name).
+    provider: Provider
     #: None: the model has no thinking knob.
     thinking: NativeThinking | None
     max_tokens: int | None
@@ -165,7 +166,7 @@ def resolve_model(
     thinking_effort: str,
     roles: "RoleMap",
     catalog: CatalogView,
-    endpoints: Mapping[str, Endpoint],
+    providers: Mapping[str, Provider],
 ) -> ResolvedModel:
     """Resolve one agent's model.
 
@@ -179,7 +180,7 @@ def resolve_model(
             thinking of its own.
         roles: Maps a role to a reference.
         catalog: Gives the model's record.
-        endpoints: Every provider and endpoint, by name.
+        providers: Every provider and endpoint, by name.
 
     Raises:
         ModelResolutionError: For a malformed spec, an unmapped role nothing
@@ -192,23 +193,23 @@ def resolve_model(
     try:
         parsed = parse_spec(spec) if spec is not None else RoleRef("default")
         ref = (
-            roles.resolve(parsed.role, catalog=catalog, endpoints=endpoints)
+            roles.resolve(parsed.role, catalog=catalog, providers=providers)
             if isinstance(parsed, RoleRef)
             else parsed
         )
     except (ModelSpecError, ModelResolutionError) as exc:
         raise ModelResolutionError(f"{who}: {exc}") from None
 
-    endpoint = endpoints.get(ref.provider)
-    if endpoint is None:
+    provider = providers.get(ref.provider)
+    if provider is None:
         defined = ", ".join(
-            sorted(n for n, e in endpoints.items() if e.kind is ProviderKind.OPENAI_COMPATIBLE)
+            sorted(n for n, p in providers.items() if p.kind is ProviderKind.OPENAI_COMPATIBLE)
         )
         raise ModelResolutionError(
             f"{who}: model {str(ref)!r} names endpoint {ref.provider!r}, which is not defined in "
             f"model_endpoints (user settings); defined endpoints: {defined or 'none'}."
         )
-    if not endpoint.has_credentials:
+    if not provider.has_credentials:
         variable = PROVIDER_KEY_ENV.get(ref.provider, "the provider's API key")
         raise ModelResolutionError(
             f"{who}: model {str(ref)!r} needs the {ref.provider} API key; set {variable}."
@@ -229,7 +230,7 @@ def resolve_model(
     return ResolvedModel(
         agent=agent,
         record=record,
-        endpoint=endpoint,
+        provider=provider,
         thinking=thinking,
         max_tokens=max_tokens,
         stop_sequences=tuple(stop) if stop is not None else None,

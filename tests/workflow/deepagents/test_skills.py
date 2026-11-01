@@ -400,12 +400,12 @@ class TestAsOnADK:
         (tmp_path / "home").mkdir()
         monkeypatch.chdir(tmp_path)
         monkeypatch.setenv("HOME", str(tmp_path / "home"))
-        endpoints = {"local": {"base_url": "http://localhost:8000/v1",
-                               "models": {"small": {"context_window": 32_000}}}}
+        endpoints = {"local": {"base_url": "http://localhost:8000/v1"}}
         call = ("load_skill_resource", {"skill_name": "pdf-tools", "file_path": "assets/logo.png"})
         models = scripted(monkeypatch, writer=_steps(call))
         with MockContext(
-            session_store="memory", skills_dirs=[str(skills_dir)], model_endpoints=endpoints
+            session_store="memory", skills_dirs=[str(skills_dir)], model_endpoints=endpoints,
+            models={"local:small": {"context_window": 32_000}},
         ) as context:
             manager = DeepAgentsWorkflowManager(
                 agent_configs=[_writer()], settings=context.settings, model="local:small"

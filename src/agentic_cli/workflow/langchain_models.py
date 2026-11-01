@@ -140,7 +140,7 @@ def _gemini(resolved: ResolvedModel, settings: "BaseSettings") -> tuple[type, di
 
     fields = {
         "model": resolved.record.model,
-        "api_key": resolved.endpoint.api_key,
+        "api_key": resolved.provider.api_key,
         "timeout": REQUEST_TIMEOUT,
         "max_retries": settings.retry_max_attempts,
         # Passed even when unset: the class's own temperature is 0.7.
@@ -164,7 +164,7 @@ def _claude(resolved: ResolvedModel, settings: "BaseSettings") -> tuple[type, di
 
     fields = {
         "model": resolved.record.model,
-        "api_key": resolved.endpoint.api_key,
+        "api_key": resolved.provider.api_key,
         "max_tokens": resolved.max_tokens,
         "default_request_timeout": settings.anthropic_request_timeout,
         "max_retries": settings.retry_max_attempts,
@@ -193,7 +193,7 @@ def _claude_thinking(thinking: NativeThinking) -> dict[str, Any]:
 def _gpt(resolved: ResolvedModel, settings: "BaseSettings") -> tuple[type, dict[str, Any]]:
     fields = {
         **_openai_fields(resolved, settings),
-        "api_key": resolved.endpoint.api_key,
+        "api_key": resolved.provider.api_key,
         "use_responses_api": True,
         "store": False,
     }
@@ -217,10 +217,10 @@ def _openrouter(
     headers = openrouter_headers(app_name)
     fields = {
         "model": resolved.record.model,
-        "api_key": resolved.endpoint.api_key,
+        "api_key": resolved.provider.api_key,
         # Explicit, or the class reads its host and attribution from the
         # environment.
-        "base_url": resolved.endpoint.base_url,
+        "base_url": resolved.provider.base_url,
         "app_url": headers["HTTP-Referer"],
         "app_title": headers["X-Title"],
         "timeout": int(REQUEST_TIMEOUT * 1000),  # milliseconds
@@ -238,8 +238,8 @@ def _openrouter(
 def _endpoint(resolved: ResolvedModel, settings: "BaseSettings") -> dict[str, Any]:
     return {
         **_openai_fields(resolved, settings),
-        "api_key": resolved.endpoint.api_key or PLACEHOLDER_KEY,
-        "base_url": resolved.endpoint.base_url,
+        "api_key": resolved.provider.api_key or PLACEHOLDER_KEY,
+        "base_url": resolved.provider.base_url,
         "use_responses_api": False,
         # ChatOpenAI streams usage only from OpenAI's own host unless told.
         "stream_usage": True,

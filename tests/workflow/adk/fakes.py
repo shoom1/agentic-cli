@@ -41,6 +41,15 @@ class FakeAPI:
     def bodies(self) -> list[dict[str, Any]]:
         return [json.loads(request.content) for request in self.requests]
 
+    def sent_key(self, index: int = 0) -> str | None:
+        """The API key request ``index`` carried: anthropic 1.x sends it as
+        ``x-api-key``, 2.x as an ``Authorization`` bearer token."""
+        headers = self.requests[index].headers
+        if "x-api-key" in headers:
+            return headers["x-api-key"]
+        scheme, _, token = headers.get("authorization", "").partition(" ")
+        return token if scheme.lower() == "bearer" else None
+
     @property
     def transport(self) -> httpx.MockTransport:
         return httpx.MockTransport(self._handler(httpx))

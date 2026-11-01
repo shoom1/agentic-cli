@@ -27,7 +27,7 @@ def isolated(tmp_path, monkeypatch):
     (tmp_path / "project").mkdir()
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.chdir(tmp_path / "project")
-    for var in (*_KEY_VARS, "LAB_KEY", "AGENTIC_DEFAULT_MODEL"):
+    for var in (*_KEY_VARS, "LAB_KEY", "AGENTIC_DEFAULT_MODEL", "AGENTIC_MODELS"):
         monkeypatch.delenv(var, raising=False)
 
 
@@ -51,27 +51,42 @@ def test_provider_keys_without_keys():
     )
 
 
-def test_endpoints_from_settings():
+def test_providers_from_settings():
     settings = BaseSettings(anthropic_api_key="k-a", model_endpoints=_lab())
 
-    endpoints = model_services.endpoints_from_settings(settings, env={"LAB_KEY": "k-lab"})
+    providers = model_services.providers_from_settings(settings, env={"LAB_KEY": "k-lab"})
 
-    assert set(endpoints) == {"google", "anthropic", "openai", "openrouter", "lab"}
-    assert endpoints["anthropic"].api_key == "k-a"
-    assert not endpoints["google"].has_credentials
-    assert endpoints["lab"].kind is ProviderKind.OPENAI_COMPATIBLE
-    assert endpoints["lab"].base_url == "http://gpu-box:8000/v1"
-    assert endpoints["lab"].api_key == "k-lab"
+    assert set(providers) == {"google", "anthropic", "openai", "openrouter", "lab"}
+    assert providers["anthropic"].api_key == "k-a"
+    assert not providers["google"].has_credentials
+    assert providers["lab"].kind is ProviderKind.OPENAI_COMPATIBLE
+    assert providers["lab"].base_url == "http://gpu-box:8000/v1"
+    assert providers["lab"].api_key == "k-lab"
 
 
 def test_an_endpoint_key_comes_from_the_process_environment_by_default(monkeypatch):
     monkeypatch.setenv("LAB_KEY", "k-from-env")
     settings = BaseSettings(openai_api_key="k-o", model_endpoints=_lab())
 
-    endpoints = model_services.endpoints_from_settings(settings)
+    providers = model_services.providers_from_settings(settings)
 
-    assert endpoints["lab"].api_key == "k-from-env"
-    assert endpoints["openai"].api_key == "k-o"
+    assert providers["lab"].api_key == "k-from-env"
+    assert providers["openai"].api_key == "k-o"
+
+
+def test_entries_from_settings_by_reference_in_their_order():
+    settings = BaseSettings(models={
+        "openrouter:qwen/qwen3-235b-a22b:free": {},
+        "anthropic:claude-sonnet-4-6": {"context_window": 200_000},
+    })
+
+    entries = model_services.entries_from_settings(settings)
+
+    assert list(entries) == [
+        ModelRef("openrouter", "qwen/qwen3-235b-a22b:free"),
+        ModelRef("anthropic", "claude-sonnet-4-6"),
+    ]
+    assert entries[ModelRef("anthropic", "claude-sonnet-4-6")].context_window == 200_000
 
 
 def test_role_map_from_settings():
@@ -105,10 +120,10 @@ def test_model_cache_path_is_in_the_user_folder(tmp_path):
 
 async def test_build_catalog_caches_listings_in_the_user_folder():
     settings = BaseSettings(google_api_key="k-g")
-    endpoints = model_services.endpoints_from_settings(settings)
+    providers = model_services.providers_from_settings(settings)
     transport = httpx.MockTransport(lambda request: httpx.Response(200, json={"models": []}))
 
-    catalog = build_catalog(settings, endpoints, transport=transport)
+    catalog = build_catalog(settings, providers, transport=transport)
     await catalog.load()
 
     cache = model_services.model_cache_path(settings)
@@ -116,3 +131,14 @@ async def test_build_catalog_caches_listings_in_the_user_folder():
     assert stat.S_IMODE(cache.stat().st_mode) == 0o600
     assert b"k-g" not in cache.read_bytes()
     assert catalog.is_authoritative("google")
+
+
+def test_build_catalog_takes_the_settings_entries():
+    settings = BaseSettings(
+        google_api_key="k-g", models={"google:gemini-2.5-flash": {"max_output": 1_000}}
+    )
+
+    catalog = build_catalog(settings, model_services.providers_from_settings(settings))
+
+    record = catalog.record(ModelRef("google", "gemini-2.5-flash"))
+    assert (record.max_output, record.sources["max_output"]) == (1_000, "config")

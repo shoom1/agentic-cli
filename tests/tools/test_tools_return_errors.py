@@ -186,7 +186,7 @@ class TestLangGraphTurnSurvivesARaisingTool:
         from langchain_core.messages import AIMessage
         from langgraph.graph import END, StateGraph
 
-        from agentic_cli.models import ModelCatalog, RoleMap, build_endpoints, resolve_model
+        from agentic_cli.models import ModelCatalog, RoleMap, build_providers, resolve_model
         from agentic_cli.tools.registry import ToolCategory, register_tool
         from agentic_cli.workflow.config import AgentConfig
         from agentic_cli.workflow.langgraph.graph_builder import LangGraphBuilder
@@ -199,11 +199,11 @@ class TestLangGraphTurnSurvivesARaisingTool:
             raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
 
         keys = {"google": None, "anthropic": None, "openai": "o-test-key", "openrouter": None}
-        endpoints = build_endpoints(keys=keys, specs={}, env={})
+        providers = build_providers(keys=keys, specs={}, env={})
         model = resolve_model(
             agent="a", spec="openai:gpt-4o-mini", generation=None, thinking_effort="none",
             roles=RoleMap(default_model=None, model_roles={}),
-            catalog=ModelCatalog(endpoints=endpoints), endpoints=endpoints,
+            catalog=ModelCatalog(providers=providers), providers=providers,
         )
         built = LangGraphBuilder(mock_context.settings).build(
             [AgentConfig(name="a", prompt="p", tools=[_errors_probe_raises])], {"a": model},

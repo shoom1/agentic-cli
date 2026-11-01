@@ -24,6 +24,7 @@ from agentic_cli.cli.settings_command import SettingsCommand
 from tests.cli.dialog_fakes import autospec_session, edited_dialog
 
 EXCLUDED_EVENT = "user_scoped_setting_excluded_from_ui"
+HAND_EDITED_EVENT = "hand_edited_setting_excluded_from_ui"
 
 
 def _make_app(settings, keys: list[str]) -> BaseCLIApp:
@@ -170,6 +171,20 @@ class TestUserPreferences:
         assert (placement.label, placement.options, placement.default) == (
             "Dialog Placement", ["box", "inline"], "box",
         )
+        assert not any(e.get("event") == EXCLUDED_EVENT for e in logs)
+
+    def test_a_hand_edited_key_is_refused_though_a_project_may_set_it(
+        self, isolated_settings
+    ):
+        """No save writes ``models``: an edit in the dialog would be gone at the
+        next start, and an assignment drops the app's shipped entries."""
+        app = _make_app(isolated_settings, ["ui_theme", "models"])
+
+        with structlog.testing.capture_logs() as logs:
+            items = app._build_ui_items()
+
+        assert _item_keys(items) == ["ui_theme"]
+        assert [e.get("key") for e in logs if e.get("event") == HAND_EDITED_EVENT] == ["models"]
         assert not any(e.get("event") == EXCLUDED_EVENT for e in logs)
 
     def test_any_other_user_scoped_key_is_still_refused(self, isolated_settings):

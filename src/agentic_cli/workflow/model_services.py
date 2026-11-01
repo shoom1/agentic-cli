@@ -1,7 +1,7 @@
 """Where agentic-cli's settings become arguments for ``agentic_cli.models``.
 
-The models package takes plain arguments (provider keys, endpoint specs, role
-mappings, a cache path). This module is the one place that reads them from
+The models package takes plain arguments (provider keys, endpoint specs, model
+entries, role mappings, a cache path). This module is the one place that reads them from
 settings, so the package never sees a settings object. A workflow manager
 builds its catalog here (``build_catalog``) when it initializes.
 """
@@ -13,7 +13,15 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from agentic_cli.models import Endpoint, ModelCatalog, RoleMap, build_endpoints
+from agentic_cli.models import (
+    ModelCatalog,
+    ModelEntry,
+    ModelRef,
+    Provider,
+    RoleMap,
+    build_providers,
+    parse_entry_key,
+)
 
 if TYPE_CHECKING:
     import httpx
@@ -31,20 +39,26 @@ def provider_keys(settings: "BaseSettings") -> dict[str, str | None]:
     }
 
 
-def endpoints_from_settings(
+def providers_from_settings(
     settings: "BaseSettings", env: Mapping[str, str] | None = None
-) -> dict[str, Endpoint]:
+) -> dict[str, Provider]:
     """The built-in providers and the user's ``model_endpoints``.
 
     An endpoint's key is read from ``env`` (the process environment by
     default) under the variable its ``api_key_env`` names, and from nowhere
     else.
     """
-    return build_endpoints(
+    return build_providers(
         keys=provider_keys(settings),
         specs=settings.model_endpoints,
         env=os.environ if env is None else env,
     )
+
+
+def entries_from_settings(settings: "BaseSettings") -> dict[ModelRef, ModelEntry]:
+    """The ``models`` entries by reference, in their order: the app's first,
+    then the user's, the project's and the environment's additions."""
+    return {parse_entry_key(key): entry for key, entry in settings.models.items()}
 
 
 def role_map_from_settings(settings: "BaseSettings", manager_model: str | None = None) -> RoleMap:
@@ -71,18 +85,21 @@ def model_cache_path(settings: "BaseSettings") -> Path:
 
 def build_catalog(
     settings: "BaseSettings",
-    endpoints: Mapping[str, Endpoint],
+    providers: Mapping[str, Provider],
     *,
     transport: "httpx.AsyncBaseTransport | None" = None,
 ) -> ModelCatalog:
-    """The catalog a workflow manager loads: ``endpoints``' models, cached in
-    ``model_cache_path(settings)``.
+    """The catalog a workflow manager loads: ``providers``' models, cached in
+    ``model_cache_path(settings)``, with the ``models`` entries.
 
     Args:
-        settings: Name the app, and so the cache file.
-        endpoints: Every provider and endpoint (``endpoints_from_settings``).
+        settings: Give the entries, and name the app, and so the cache file.
+        providers: Every provider and endpoint (``providers_from_settings``).
         transport: The HTTP transport for listings; httpx's own by default.
     """
     return ModelCatalog(
-        endpoints=endpoints, cache_path=model_cache_path(settings), transport=transport
+        providers=providers,
+        entries=entries_from_settings(settings),
+        cache_path=model_cache_path(settings),
+        transport=transport,
     )

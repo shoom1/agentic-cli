@@ -148,7 +148,8 @@ agentic-cli/
 │   │       └── _mock_vector_store.py, _mock_bm25.py
 │   ├── models/               # Model knowledge (provisional); imports nothing else from agentic_cli, no provider SDK
 │   │   ├── refs.py           # parse_spec/parse_ref: provider:model, bare ids, role names
-│   │   ├── endpoints.py      # ProviderKind, EndpointSpec (settings), Endpoint, build_endpoints
+│   │   ├── providers.py      # ProviderKind, EndpointSpec (settings), Provider, build_providers
+│   │   ├── entries.py        # ModelEntry (the models setting), parse_entry_key, check_entries
 │   │   ├── records.py        # ModelRecord, ThinkingRule
 │   │   ├── table.py          # ShippedTable, load_table() (data/table.json: family rules, numbers, fallbacks)
 │   │   ├── roles.py          # RoleMap: default / fast / strong / app roles → references

@@ -260,6 +260,10 @@ class BaseSettings(WorkflowSettingsMixin, AppSettingsMixin, CLISettingsMixin, Py
     def update_setting(self, key: str, value: Any) -> None:
         """Update a single setting, using dedicated setters where required.
 
+        A hand-edited setting (``settings_persistence.HAND_EDITED_KEYS``:
+        ``models``) takes the value as given, for this session only: the
+        app's shipped entries are not merged in, and no save writes it.
+
         Args:
             key: Setting name. ``model`` sets ``default_model``, and
                 ``model_role:<role>`` maps one role in ``model_roles`` (the
@@ -501,9 +505,9 @@ def validate_settings(
 
     The static half of model validation:
 
-    - every reference parses: ``default_model``, ``model_roles``,
-      ``pinned_models`` and each agent's ``model`` (a role must map to a
-      model, never another role);
+    - every reference parses: ``default_model``, ``model_roles`` and each
+      agent's ``model`` (a role must map to a model, never another role);
+      ``models`` keys are checked when the settings load;
     - every endpoint a reference names is defined in ``model_endpoints``;
     - every provider a model will run on has a key: the default model's,
       each agent's, and that of each role an agent names;
@@ -549,8 +553,8 @@ def _model_settings_problems(
     from agentic_cli.workflow import model_services
 
     errors: list[str] = []
-    endpoints = model_services.endpoints_from_settings(settings)
-    if not any(endpoint.has_credentials for endpoint in endpoints.values()):
+    providers = model_services.providers_from_settings(settings)
+    if not any(provider.has_credentials for provider in providers.values()):
         variables = list(PROVIDER_KEY_ENV.values())
         errors.append(
             f"No model provider is configured: set {', '.join(variables[:-1])} or "
@@ -587,8 +591,6 @@ def _model_settings_problems(
             roles = model_services.role_map_from_settings(settings, manager_model)
         except ModelSpecError as exc:  # a role name, or a mapping of default
             errors.append(str(exc))
-    for index, spec in enumerate(settings.pinned_models):
-        setting(f"pinned_models[{index}]", spec)
 
     for config in agent_configs or []:
         spec = getattr(config, "model", None)
@@ -611,29 +613,29 @@ def _model_settings_problems(
         runs.append((who, parsed))
 
     defined = ", ".join(
-        sorted(n for n, e in endpoints.items() if e.kind is ProviderKind.OPENAI_COMPATIBLE)
+        sorted(n for n, p in providers.items() if p.kind is ProviderKind.OPENAI_COMPATIBLE)
     )
     for who, ref in named:
-        if ref.provider not in endpoints:
+        if ref.provider not in providers:
             errors.append(
                 f"{who}: model {str(ref)!r} names endpoint {ref.provider!r}, which is not "
                 f"defined in model_endpoints (user settings); defined endpoints: "
                 f"{defined or 'none'}."
             )
     for who, ref in runs:
-        endpoint = endpoints.get(ref.provider)
-        if endpoint is not None and not endpoint.has_credentials:
+        provider = providers.get(ref.provider)
+        if provider is not None and not provider.has_credentials:
             variable = PROVIDER_KEY_ENV.get(ref.provider, "the provider's API key")
             errors.append(
                 f"{who}: model {str(ref)!r} needs the {ref.provider} API key; set {variable}."
             )
         spec = settings.model_endpoints.get(ref.provider)
         if (
-            endpoint is not None
-            and endpoint.kind is ProviderKind.OPENAI_COMPATIBLE
+            provider is not None
+            and provider.kind is ProviderKind.OPENAI_COMPATIBLE
             and spec is not None
             and spec.api_key_env
-            and not endpoint.api_key
+            and not provider.api_key
         ):
             # Otherwise its requests carry a placeholder key: a bare 401.
             errors.append(

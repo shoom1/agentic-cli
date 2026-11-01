@@ -175,7 +175,7 @@ def _gemini(resolved: ResolvedModel, settings: "BaseSettings") -> AdkModel:
         model=Gemini(
             model=resolved.record.model,
             client_kwargs={
-                "api_key": resolved.endpoint.api_key,
+                "api_key": resolved.provider.api_key,
                 # A bound for the calls ADK makes without a config of their
                 # own; a request's own options (generation's above, a cache
                 # create's) replace it.
@@ -213,7 +213,7 @@ def _claude(resolved: ResolvedModel, settings: "BaseSettings") -> AdkModel:
             )
         )
     client = AsyncAnthropic(
-        api_key=resolved.endpoint.api_key,
+        api_key=resolved.provider.api_key,
         # Also what lets ADK's unstreamed requests carry a max_tokens the SDK
         # would otherwise insist on streaming.
         timeout=settings.anthropic_request_timeout,
@@ -273,12 +273,12 @@ def _openai_compatible(
 ) -> AdkModel:
     from agentic_cli.workflow.adk.openai_compatible import OpenAICompatibleLlm
 
-    endpoint = resolved.endpoint
+    provider = resolved.provider
     headers = None
-    if endpoint.kind is ProviderKind.OPENROUTER:
+    if provider.kind is ProviderKind.OPENROUTER:
         headers = openrouter_headers(app_name)
     client = _openai_client(
-        resolved, settings, base_url=endpoint.base_url, default_headers=headers
+        resolved, settings, base_url=provider.base_url, default_headers=headers
     )
     return AdkModel(
         model=OpenAICompatibleLlm(
@@ -296,7 +296,7 @@ def _openai_client(resolved: ResolvedModel, settings: "BaseSettings", **kwargs: 
     from openai import AsyncOpenAI
 
     return AsyncOpenAI(
-        api_key=resolved.endpoint.api_key or PLACEHOLDER_KEY,
+        api_key=resolved.provider.api_key or PLACEHOLDER_KEY,
         timeout=httpx.Timeout(REQUEST_TIMEOUT, connect=CONNECT_TIMEOUT),
         max_retries=settings.retry_max_attempts,
         **kwargs,

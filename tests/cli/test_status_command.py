@@ -26,7 +26,7 @@ from tests.cli.dialog_fakes import autospec_session
 SONNET = "anthropic:claude-sonnet-4-5"  # a 200,000-token window
 OPUS = "anthropic:claude-opus-4-7"  # a 1,000,000-token window
 #: The user's server, serving a model whose window it does not declare.
-ENDPOINTS = {"local": {"base_url": "http://localhost:8000/v1", "models": {"unknown": {}}}}
+ENDPOINTS = {"local": {"base_url": "http://localhost:8000/v1"}}
 
 
 @pytest.fixture(autouse=True)

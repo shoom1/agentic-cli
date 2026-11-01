@@ -14,7 +14,7 @@ from agentic_cli.models import (
     ProviderKind,
     RoleMap,
 )
-from tests.models.fakes import FakeCatalog, endpoints, table_records
+from tests.models.fakes import FakeCatalog, providers, table_records
 
 G, A, O = ProviderKind.GOOGLE, ProviderKind.ANTHROPIC, ProviderKind.OPENAI
 
@@ -78,19 +78,19 @@ class TestMappedRoles:
         roles = _roles(default_model="google:gemini-2.5-flash", manager_model="gpt-5.5")
 
         assert roles.spec_for("default") == ModelRef("openai", "gpt-5.5")
-        assert roles.resolve("default", catalog=CATALOG, endpoints=endpoints()) == ModelRef("openai", "gpt-5.5")
+        assert roles.resolve("default", catalog=CATALOG, providers=providers()) == ModelRef("openai", "gpt-5.5")
 
     def test_default_is_default_model_when_set(self):
         roles = _roles(default_model="anthropic:claude-opus-5-5")
 
-        assert roles.resolve("default", catalog=CATALOG, endpoints=endpoints(google="k")) == ModelRef(
+        assert roles.resolve("default", catalog=CATALOG, providers=providers(google="k")) == ModelRef(
             "anthropic", "claude-opus-5-5"
         )
 
     def test_a_role_mapped_to_openrouter(self):
         roles = _roles(model_roles={"strong": "openrouter:qwen/qwen3-235b-a22b:free"})
 
-        assert roles.resolve("strong", catalog=CATALOG, endpoints=endpoints(google="k")) == ModelRef(
+        assert roles.resolve("strong", catalog=CATALOG, providers=providers(google="k")) == ModelRef(
             "openrouter", "qwen/qwen3-235b-a22b:free"
         )
 
@@ -122,7 +122,7 @@ class TestComputedRoles:
         ],
     )
     def test_tiers_per_provider(self, keys, role, expected):
-        resolved = _roles().resolve(role, catalog=CATALOG, endpoints=endpoints(**keys))
+        resolved = _roles().resolve(role, catalog=CATALOG, providers=providers(**keys))
 
         assert str(resolved) == expected
 
@@ -135,7 +135,7 @@ class TestComputedRoles:
         ],
     )
     def test_the_provider_order_is_google_anthropic_openai(self, keys, provider):
-        resolved = _roles().resolve("default", catalog=CATALOG, endpoints=endpoints(**keys))
+        resolved = _roles().resolve("default", catalog=CATALOG, providers=providers(**keys))
 
         assert resolved.provider == provider
 
@@ -143,7 +143,7 @@ class TestComputedRoles:
         catalog = FakeCatalog([*table_records(G, "gemini-2.5-flash"), *ANTHROPIC])
 
         resolved = _roles().resolve(
-            "strong", catalog=catalog, endpoints=endpoints(google="k", anthropic="k")
+            "strong", catalog=catalog, providers=providers(google="k", anthropic="k")
         )
 
         assert resolved == ModelRef("anthropic", "claude-opus-5-5")
@@ -153,7 +153,7 @@ class TestComputedRoles:
             table_records(G, "gemini-2.5-flash", "gemini-3.5-flash-preview", "gemini-3.5-flash")
         )
 
-        resolved = _roles().resolve("default", catalog=catalog, endpoints=endpoints(google="k"))
+        resolved = _roles().resolve("default", catalog=catalog, providers=providers(google="k"))
 
         assert resolved == ModelRef("google", "gemini-3.5-flash")
 
@@ -161,7 +161,7 @@ class TestComputedRoles:
         """gpt-5.4-mini and gpt-5.4-nano are both fast and both 5.4."""
         catalog = FakeCatalog(table_records(O, "gpt-5.4-nano", "gpt-5.4-mini"))
 
-        resolved = _roles().resolve("fast", catalog=catalog, endpoints=endpoints(openai="k"))
+        resolved = _roles().resolve("fast", catalog=catalog, providers=providers(openai="k"))
 
         assert resolved == ModelRef("openai", "gpt-5.4-mini")
 
@@ -171,14 +171,14 @@ class TestComputedRoles:
         )
 
         with pytest.raises(ModelResolutionError) as exc:
-            _roles().resolve("default", catalog=catalog, endpoints=endpoints(openrouter="k"))
+            _roles().resolve("default", catalog=catalog, providers=providers(openrouter="k"))
 
         assert "default" in str(exc.value)
         assert "default_model" in str(exc.value)
 
     def test_no_key_is_an_error_naming_the_role_and_the_fix(self):
         with pytest.raises(ModelResolutionError) as exc:
-            _roles().resolve("fast", catalog=CATALOG, endpoints=endpoints())
+            _roles().resolve("fast", catalog=CATALOG, providers=providers())
 
         message = str(exc.value)
         assert "'fast'" in message
@@ -190,7 +190,7 @@ class TestAppRoles:
     def test_a_mapped_app_role(self):
         roles = _roles(model_roles={"vision": "google:gemini-2.5-pro"})
 
-        assert roles.resolve("vision", catalog=CATALOG, endpoints=endpoints()) == ModelRef(
+        assert roles.resolve("vision", catalog=CATALOG, providers=providers()) == ModelRef(
             "google", "gemini-2.5-pro"
         )
 
@@ -202,8 +202,8 @@ class TestAppRoles:
         roles = _roles(default_model="anthropic:claude-sonnet-4-5")
 
         with caplog.at_level(logging.WARNING, logger="agentic_cli.models.roles"):
-            first = roles.resolve("vision", catalog=CATALOG, endpoints=endpoints())
-            second = roles.resolve("vision", catalog=CATALOG, endpoints=endpoints())
+            first = roles.resolve("vision", catalog=CATALOG, providers=providers())
+            second = roles.resolve("vision", catalog=CATALOG, providers=providers())
 
         assert first == second == ModelRef("anthropic", "claude-sonnet-4-5")
         warnings = [r for r in caplog.records if r.name == "agentic_cli.models.roles"]
@@ -216,8 +216,8 @@ class TestAppRoles:
         with caplog.at_level(logging.WARNING, logger="agentic_cli.models.roles"):
             for _ in range(3):
                 roles = _roles(default_model="anthropic:claude-sonnet-4-5")
-                roles.resolve("vision", catalog=CATALOG, endpoints=endpoints())
-            roles.resolve("critic", catalog=CATALOG, endpoints=endpoints())
+                roles.resolve("vision", catalog=CATALOG, providers=providers())
+            roles.resolve("critic", catalog=CATALOG, providers=providers())
 
         warned = [r.getMessage() for r in caplog.records if r.name == "agentic_cli.models.roles"]
         assert len(warned) == 2
@@ -225,4 +225,4 @@ class TestAppRoles:
 
     def test_an_invalid_role_name_is_an_error(self):
         with pytest.raises(ModelSpecError):
-            _roles().resolve("Vision", catalog=CATALOG, endpoints=endpoints())
+            _roles().resolve("Vision", catalog=CATALOG, providers=providers())

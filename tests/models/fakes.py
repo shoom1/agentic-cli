@@ -1,4 +1,4 @@
-"""Stand-ins for the models tests: a catalog view, endpoints and the provider APIs."""
+"""Stand-ins for the models tests: a catalog view, providers and the provider APIs."""
 
 from __future__ import annotations
 
@@ -12,23 +12,23 @@ from typing import Any
 import httpx
 
 from agentic_cli.models import (
-    Endpoint,
     EndpointSpec,
     ModelRecord,
     ModelRef,
     ModelResolutionError,
+    Provider,
     ProviderKind,
-    build_endpoints,
+    build_providers,
     load_table,
 )
 
 
-def endpoints(
+def providers(
     *, specs: Mapping[str, EndpointSpec] | None = None, env: Mapping[str, str] | None = None, **keys: str
-) -> dict[str, Endpoint]:
+) -> dict[str, Provider]:
     """The built-in providers with the given keys (``google="k"``), plus ``specs``."""
     all_keys = {"google": None, "anthropic": None, "openai": None, "openrouter": None, **keys}
-    return build_endpoints(keys=all_keys, specs=specs or {}, env=env or {})
+    return build_providers(keys=all_keys, specs=specs or {}, env=env or {})
 
 
 def table_records(kind: ProviderKind, *models: str, provider: str | None = None) -> list[ModelRecord]:

@@ -240,15 +240,15 @@ def _resolved(agent: str, spec: str, settings: BaseSettings):
     from agentic_cli.models import ModelCatalog, RoleMap, resolve_model
     from agentic_cli.workflow import model_services
 
-    endpoints = model_services.endpoints_from_settings(settings)
+    providers = model_services.providers_from_settings(settings)
     return resolve_model(
         agent=agent,
         spec=spec,
         generation=None,
         thinking_effort=settings.thinking_effort,
         roles=RoleMap(default_model=None, model_roles={}),
-        catalog=ModelCatalog(endpoints=endpoints),
-        endpoints=endpoints,
+        catalog=ModelCatalog(providers=providers),
+        providers=providers,
     )
 
 

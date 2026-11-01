@@ -25,7 +25,7 @@ from agentic_cli.models.discovery import (
     get_json,
     text,
 )
-from agentic_cli.models.endpoints import Endpoint
+from agentic_cli.models.providers import Provider
 
 URL = "https://generativelanguage.googleapis.com/v1beta/models"
 _REQUIRED_METHODS = frozenset({"generateContent", "createCachedContent"})
@@ -38,8 +38,8 @@ _EXCLUDED = re.compile(
 )
 
 
-async def fetch(client: httpx.AsyncClient, endpoint: Endpoint) -> list[ListedModel]:
-    headers = {"x-goog-api-key": endpoint.api_key or ""}
+async def fetch(client: httpx.AsyncClient, provider: Provider) -> list[ListedModel]:
+    headers = {"x-goog-api-key": provider.api_key or ""}
     models: list[ListedModel] = []
 
     async def page(token: str | None) -> str | None:

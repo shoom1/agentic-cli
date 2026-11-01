@@ -138,8 +138,8 @@ class Unlisted(ModelCatalog):
         return None
 
 
-model_services.build_catalog = lambda settings, endpoints, *, transport=None: Unlisted(
-    endpoints=endpoints
+model_services.build_catalog = lambda settings, providers, *, transport=None: Unlisted(
+    providers=providers
 )
 
 

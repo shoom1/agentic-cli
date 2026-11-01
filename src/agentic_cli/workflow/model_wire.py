@@ -40,6 +40,6 @@ def reasoning_body(resolved: ResolvedModel) -> dict[str, Any]:
         return {}
     if thinking.mechanism is ThinkingMechanism.CHAT_TEMPLATE:
         return {"chat_template_kwargs": {"enable_thinking": thinking.enabled}}
-    if resolved.endpoint.kind is ProviderKind.OPENROUTER:
+    if resolved.provider.kind is ProviderKind.OPENROUTER:
         return {"reasoning": {"effort": thinking.level}}
     return {"reasoning_effort": thinking.level}  # an endpoint that declares effort

@@ -10,13 +10,13 @@ from __future__ import annotations
 import httpx
 
 from agentic_cli.models.discovery import ListedModel, entries, get_json, text
-from agentic_cli.models.endpoints import Endpoint
+from agentic_cli.models.providers import Provider
 
 URL = "https://api.openai.com/v1/models"
 
 
-async def fetch(client: httpx.AsyncClient, endpoint: Endpoint) -> list[ListedModel]:
-    headers = {"authorization": f"Bearer {endpoint.api_key or ''}"}
+async def fetch(client: httpx.AsyncClient, provider: Provider) -> list[ListedModel]:
+    headers = {"authorization": f"Bearer {provider.api_key or ''}"}
     document = await get_json(client, URL, headers=headers)
     return [
         ListedModel(id=model_id)

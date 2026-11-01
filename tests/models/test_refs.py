@@ -14,7 +14,7 @@ from agentic_cli.models import (
     RoleRef,
     parse_ref,
     parse_spec,
-    validate_endpoint_name,
+    validate_provider_name,
     validate_role_name,
 )
 
@@ -136,19 +136,19 @@ def test_a_role_name_has_no_digits(name):
 
 @pytest.mark.parametrize("name", ["local-vllm", "lab_server", "vllm2"])
 def test_a_valid_endpoint_name(name):
-    assert validate_endpoint_name(name) == name
+    assert validate_provider_name(name) == name
 
 
 @pytest.mark.parametrize("name", list(BUILTIN_PROVIDERS))
 def test_an_endpoint_cannot_reuse_a_builtin_provider_name(name):
     with pytest.raises(ModelSpecError, match="built-in"):
-        validate_endpoint_name(name)
+        validate_provider_name(name)
 
 
 @pytest.mark.parametrize("name", ["Local", "local vllm", "", "-x", "x" * 65])
 def test_a_malformed_endpoint_name(name):
     with pytest.raises(ModelSpecError):
-        validate_endpoint_name(name)
+        validate_provider_name(name)
 
 
 def test_a_record_knows_its_reference():

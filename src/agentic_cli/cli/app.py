@@ -48,7 +48,11 @@ from agentic_cli.cli.usage_tracker import UsageTracker
 from agentic_cli.cli.workflow_controller import WorkflowController
 from agentic_cli.config import MODEL_ROLE_KEY_PREFIX, BaseSettings
 from agentic_cli.logging import Loggers, configure_logging
-from agentic_cli.settings_persistence import PROJECT_SETTABLE_KEYS, USER_PREFERENCE_KEYS
+from agentic_cli.settings_persistence import (
+    HAND_EDITED_KEYS,
+    PROJECT_SETTABLE_KEYS,
+    USER_PREFERENCE_KEYS,
+)
 from agentic_cli.workflow.settings import OrchestratorType
 
 if TYPE_CHECKING:
@@ -57,7 +61,7 @@ if TYPE_CHECKING:
 
     from thinking_prompt import Field
 
-    from agentic_cli.models import CatalogView, Endpoint, ModelRef, ResolvedModel, RoleMap
+    from agentic_cli.models import CatalogView, ModelRef, Provider, ResolvedModel, RoleMap
     from agentic_cli.settings_persistence import SettingsSaveResult
     from agentic_cli.workflow import GoogleADKWorkflowManager, EventType, WorkflowEvent
     from agentic_cli.workflow.base_manager import BaseWorkflowManager
@@ -629,7 +633,7 @@ class BaseCLIApp:
         ]
         choices: _ModelChoices | None = None  # one catalog for every picker
         items: list[tuple[int, Field]] = []
-        shown = PROJECT_SETTABLE_KEYS | USER_PREFERENCE_KEYS
+        shown = (PROJECT_SETTABLE_KEYS | USER_PREFERENCE_KEYS) - HAND_EDITED_KEYS
 
         for key in keys:
             # Project-scope guard: the dialog may only expose settings the
@@ -638,9 +642,15 @@ class BaseCLIApp:
             # every project. Any other user-scoped key would save to the user
             # ~/.{app}/settings.json and leak the change across all projects
             # of the app. model_endpoints is one: it holds the addresses a key
-            # is sent to.
-            if _ui_key_target_field(key) not in shown:
-                logger.warning("user_scoped_setting_excluded_from_ui", key=key)
+            # is sent to. Nor does it expose a hand-edited key
+            # (HAND_EDITED_KEYS: models): no save writes one, so an edit
+            # would be gone at the next start.
+            target = _ui_key_target_field(key)
+            if target not in shown:
+                if target in HAND_EDITED_KEYS:
+                    logger.warning("hand_edited_setting_excluded_from_ui", key=key)
+                else:
+                    logger.warning("user_scoped_setting_excluded_from_ui", key=key)
                 continue
 
             if _is_model_picker(key):
@@ -676,7 +686,7 @@ class BaseCLIApp:
         each provider with a key, and the default model the settings name (or
         compute). A role shows the model it maps, else the one it resolves
         to (an app's own role runs on the default model). Models a role
-        names, and pinned ones, are offered too.
+        names, and those ``models`` lists, are offered too.
 
         Args:
             roles: The roles other than ``default`` whose model to show.
@@ -688,14 +698,16 @@ class BaseCLIApp:
             role_map = model_services.role_map_from_settings(self._settings)
         except ValueError:
             return _ModelChoices(options=[], current={}, thinking=None)
-        endpoints = model_services.endpoints_from_settings(self._settings)
+        providers = model_services.providers_from_settings(self._settings)
+        entries = model_services.entries_from_settings(self._settings)
         controller = self._workflow_controller
         workflow = controller.workflow if controller.is_ready else None
         if workflow is not None and workflow.catalog is not None:
             catalog, default = workflow.catalog, workflow.model
         else:
-            catalog = ModelCatalog(endpoints=endpoints)  # not loaded: the shipped table
-            default = _resolved_role(role_map, "default", catalog, endpoints)
+            # Not loaded: the entries and the shipped table.
+            catalog = ModelCatalog(providers=providers, entries=entries)
+            default = _resolved_role(role_map, "default", catalog, providers)
 
         current: dict[str, str | None] = {"default": default}
         for role in roles:
@@ -703,18 +715,20 @@ class BaseCLIApp:
             if mapped is not None:
                 current[role] = str(mapped)
             elif role in BUILTIN_ROLES:
-                current[role] = _resolved_role(role_map, role, catalog, endpoints)
+                current[role] = _resolved_role(role_map, role, catalog, providers)
             else:
                 current[role] = default
         referenced = [*(ref for ref in current.values() if ref), *role_map.referenced()]
         return _ModelChoices(
-            options=catalog.picker_refs(referenced=referenced, pinned=self._settings.pinned_models),
+            options=catalog.picker_refs(
+                referenced=referenced, entries=[str(ref) for ref in entries]
+            ),
             current=current,
-            thinking=self._thinking_meaning(default, catalog, endpoints),
+            thinking=self._thinking_meaning(default, catalog, providers),
         )
 
     def _thinking_meaning(
-        self, model: str | None, catalog: "CatalogView", endpoints: "Mapping[str, Endpoint]"
+        self, model: str | None, catalog: "CatalogView", providers: "Mapping[str, Provider]"
     ) -> str | None:
         """``high → anthropic:claude-sonnet-4-6: adaptive, effort high``: the
         thinking effort, resolved on ``model`` as the workflow resolves it."""
@@ -731,7 +745,7 @@ class BaseCLIApp:
                 thinking_effort=effort,
                 roles=RoleMap(default_model=None, model_roles={}),  # a reference needs none
                 catalog=catalog,
-                endpoints=endpoints,
+                providers=providers,
             )
         except ModelResolutionError:
             return None
@@ -1848,13 +1862,13 @@ _MODEL_PICKER_MAX_WIDTH = 48
 
 
 def _resolved_role(
-    roles: "RoleMap", role: str, catalog: "CatalogView", endpoints: "Mapping[str, Endpoint]"
+    roles: "RoleMap", role: str, catalog: "CatalogView", providers: "Mapping[str, Provider]"
 ) -> str | None:
     """The reference ``role`` resolves to, or None when nothing can fill it."""
     from agentic_cli.models import ModelResolutionError
 
     try:
-        return str(roles.resolve(role, catalog=catalog, endpoints=endpoints))
+        return str(roles.resolve(role, catalog=catalog, providers=providers))
     except ModelResolutionError:
         return None
 

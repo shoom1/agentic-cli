@@ -85,20 +85,21 @@ def test_the_dialog_has_a_model_picker_per_role():
 
 def test_every_model_picker_offers_exactly_the_runnable_models():
     """The keyed providers' models, plus the OpenRouter models a role maps or
-    the user pinned; nothing of a provider without a key."""
+    ``models`` lists; nothing of a provider without a key."""
     settings = BaseSettings(
         google_api_key="k-g",
         anthropic_api_key="k-a",
         openrouter_api_key="k-r",
         model_roles={"strong": "openrouter:qwen/qwen3-235b-a22b"},
-        pinned_models=["openrouter:meta-llama/llama-3.3-70b-instruct"],
+        models={"openrouter:meta-llama/llama-3.3-70b-instruct": {}},
     )
 
     items = _items(_app(settings))
 
-    catalog = ModelCatalog(endpoints=model_services.endpoints_from_settings(settings))
+    catalog = ModelCatalog(providers=model_services.providers_from_settings(settings))
     runnable = catalog.picker_refs(
-        referenced=["openrouter:qwen/qwen3-235b-a22b"], pinned=settings.pinned_models
+        referenced=["openrouter:qwen/qwen3-235b-a22b"],
+        entries=["openrouter:meta-llama/llama-3.3-70b-instruct"],
     )
     assert set(runnable) == (
         _refs(ProviderKind.GOOGLE)
@@ -112,7 +113,7 @@ def test_every_model_picker_offers_exactly_the_runnable_models():
 async def test_once_the_workflow_is_ready_the_pickers_offer_its_catalog():
     settings = BaseSettings(google_api_key="k-g")
     catalog = ModelCatalog(
-        endpoints=model_services.endpoints_from_settings(settings),
+        providers=model_services.providers_from_settings(settings),
         transport=ProviderAPI().transport,
     )
     await catalog.load()
@@ -135,7 +136,7 @@ async def test_a_picker_s_menu_shows_every_model_whole():
     which a picker's is, up to the room its dialog leaves it."""
     settings = BaseSettings(google_api_key="k-g", anthropic_api_key="k-a")
     catalog = ModelCatalog(
-        endpoints=model_services.endpoints_from_settings(settings),
+        providers=model_services.providers_from_settings(settings),
         transport=ProviderAPI().transport,
     )
     await catalog.load()
@@ -251,6 +252,16 @@ def test_the_role_pickers_pass_the_project_scope_guard_and_model_endpoints_does_
             "high",
             "high → openai:gpt-4.1: ignored (no thinking knob)",
         ),
+        (
+            # Before the workflow starts too, a model's entry says how it thinks.
+            {
+                "model_endpoints": {"lab": {"base_url": "http://gpu-box:8000/v1"}},
+                "models": {"lab:Qwen/Qwen3-32B": {"thinking": "chat_template"}},
+                "default_model": "lab:Qwen/Qwen3-32B",
+            },
+            "high",
+            "high → lab:Qwen/Qwen3-32B: thinking on",
+        ),
     ],
 )
 def test_the_thinking_effort_says_what_it_means_for_the_default_model(values, effort, description):
@@ -265,7 +276,7 @@ def test_a_ready_workflow_describes_the_model_it_runs():
         google_api_key="k-g", anthropic_api_key="k-a",
         default_model="gemini-2.5-flash", thinking_effort="high",
     )
-    catalog = ModelCatalog(endpoints=model_services.endpoints_from_settings(settings))
+    catalog = ModelCatalog(providers=model_services.providers_from_settings(settings))
     workflow = SimpleNamespace(catalog=catalog, model="anthropic:claude-sonnet-4-6")
 
     description = _items(_app(settings, workflow))["thinking_effort"].description
@@ -424,6 +435,22 @@ async def test_a_pick_saves_only_that_role_to_the_project_file(home, monkeypatch
     validate_settings(BaseSettings())
 
 
+async def test_a_pick_keeps_the_project_s_models_as_they_are(home, monkeypatch):
+    _write(_project_file(home), {"models": {"google:gemini-2.5-pro": {"max_output": 1_000}}})
+    monkeypatch.setenv("GOOGLE_API_KEY", "k-g")
+    settings = BaseSettings()
+    app = _dialog_app(
+        settings, FakeManager(settings), edits={"model_role:fast": "google:gemini-2.5-pro"}
+    )
+
+    await _run_dialog(app)
+
+    assert json.loads(_project_file(home).read_text()) == {
+        "models": {"google:gemini-2.5-pro": {"max_output": 1_000}},
+        "model_roles": {"fast": "google:gemini-2.5-pro"},
+    }
+
+
 async def test_a_role_from_the_environment_is_not_made_permanent(home, monkeypatch):
     monkeypatch.setenv("AGENTIC_MODEL_ROLES", json.dumps({"strong": "anthropic:claude-opus-4-6"}))
     monkeypatch.setenv("GOOGLE_API_KEY", "k-g")
@@ -476,8 +503,12 @@ def listed(monkeypatch) -> ProviderAPI:
     """Every catalog a manager builds lists the recorded payloads."""
     api = ProviderAPI()
 
-    def build_catalog(settings, endpoints, *, transport=None):
-        return ModelCatalog(endpoints=endpoints, transport=api.transport)
+    def build_catalog(settings, providers, *, transport=None):
+        return ModelCatalog(
+            providers=providers,
+            entries=model_services.entries_from_settings(settings),
+            transport=api.transport,
+        )
 
     monkeypatch.setattr(model_services, "build_catalog", build_catalog)
     return api

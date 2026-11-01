@@ -70,10 +70,10 @@ def test_the_current_model_shows_as_its_reference():
     assert _model_item(_app(settings)).default == "google:gemini-2.5-pro"
 
 
-def test_a_pinned_model_is_offered():
+def test_a_models_entry_is_offered():
     settings = BaseSettings(
         google_api_key="k-g", openrouter_api_key="k-r",
-        pinned_models=["openrouter:qwen/qwen3-235b-a22b"],
+        models={"openrouter:qwen/qwen3-235b-a22b": {}},
     )
 
     assert "openrouter:qwen/qwen3-235b-a22b" in _model_item(_app(settings)).options
@@ -86,7 +86,7 @@ def test_without_any_provider_there_is_no_model_picker():
 async def test_a_ready_workflow_offers_its_catalog():
     settings = BaseSettings(google_api_key="k-g")
     catalog = ModelCatalog(
-        endpoints=model_services.endpoints_from_settings(settings),
+        providers=model_services.providers_from_settings(settings),
         transport=ProviderAPI().transport,
     )
     await catalog.load()
