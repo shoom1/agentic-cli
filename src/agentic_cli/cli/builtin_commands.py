@@ -709,8 +709,15 @@ async def _search_models(
 ) -> None:
     """The models of the providers' full listings whose reference contains
     ``text``, each marked when the list offers it: how a user finds an exact
-    id to copy into ``models``."""
+    id to copy into ``models``. A provider whose listing failed is named, so
+    "no match" never stands for a listing that could not be read."""
     found = await catalog.search(text)
+    for status in catalog.status():
+        if status.has_credentials and status.state.value == "degraded":
+            app.session.add_warning(
+                f"Could not list {status.provider} models ({status.error}): "
+                "the search could not look in its listing."
+            )
     if not found:
         app.session.add_message("system", f"No model matches {text!r}.")
         return

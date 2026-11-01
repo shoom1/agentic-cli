@@ -24,6 +24,7 @@ from agentic_cli.models import (
     ModelResolutionError,
     ProviderSpec,
     ProviderState,
+    RoleMap,
 )
 from tests.models.fakes import (
     OPENROUTER_URL,
@@ -640,6 +641,29 @@ async def test_a_new_entry_is_still_confirmed_once(cache):
         assert catalog.offered() == [str(NEW)]
 
     assert calls == [["anthropic"], []]
+
+
+async def test_a_stale_listing_keeps_out_an_entry_it_recorded_as_absent(cache):
+    """A start more than a day after the listing that found an entry's model
+    retired uses that listing while a refresh runs: the entry stays out of
+    the list, so no role is computed onto a model the provider lacks."""
+    clock = Clock()
+    retired = ModelRef("anthropic", "claude-sonnet-9-9")  # the list's newest Sonnet
+    entries = {retired: ModelEntry(), ModelRef("anthropic", "claude-haiku-4-5"): ModelEntry()}
+    await make(cache, entries=entries, anthropic=KEYS["anthropic"], clock=clock).load()
+    clock.now += DAY + 600
+
+    catalog = make(cache, NoNetwork(), entries=entries, anthropic=KEYS["anthropic"], clock=clock)
+    await catalog.load()
+
+    assert states(catalog)["anthropic"] is ProviderState.STALE
+    assert catalog.not_offered() == {str(retired): "not served by anthropic"}
+    assert retired not in [record.ref for record in catalog.entry_records()]
+    default = RoleMap(default_model=None, model_roles={}).resolve(
+        "default", catalog=catalog, providers=providers(anthropic=KEYS["anthropic"])
+    )
+    assert default != retired
+    assert default.model in {record.model for record in catalog.records("anthropic")}
 
 
 async def test_offline_a_recorded_absence_keeps_the_listing_authoritative(cache):

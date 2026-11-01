@@ -410,6 +410,23 @@ async def test_a_search_that_matches_nothing_says_so(api, monkeypatch):
     assert "google:gemini" not in screen.text
 
 
+async def test_a_search_says_when_a_provider_could_not_be_listed(monkeypatch):
+    """A provider just added with a wrong key: its listing fails during the
+    search, and the screen says so instead of only "No model matches"."""
+    keys(monkeypatch, "google", "openrouter")
+    fake = ProviderAPI(openrouter=401)
+    patch_catalogs(monkeypatch, transport=fake.transport, cached=True)
+    settings = BaseSettings(model_providers=OPENROUTER, models={"google:gemini-2.5-flash": {}})
+    workflow = await _ready(settings, fake, "google:gemini-2.5-flash")
+
+    screen = await models(App(settings, workflow), "qwen")
+
+    (warning,) = screen.of("warning")
+    assert warning.startswith("Could not list openrouter models (")
+    assert "401" in warning and warning.endswith("the search could not look in its listing.")
+    assert screen.of("message") == ["No model matches 'qwen'."]
+
+
 async def test_a_search_finds_what_the_list_leaves_out(api, monkeypatch):
     """OpenRouter's catalog runs to hundreds of models: the list has the one in
     use, and a search finds the others to copy into models."""

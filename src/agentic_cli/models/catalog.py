@@ -458,7 +458,7 @@ class ModelCatalog:
     def not_offered(self) -> dict[str, str]:
         """The ``models`` entries the list leaves out, each with why: its
         provider is not defined, has no key, or does not serve it (a fresh
-        listing lacks it)."""
+        listing lacks it, or the listing in use recorded it as absent)."""
         left_out = ((ref, self._entry_left_out(ref)) for ref in self._entries)
         return {str(ref): reason for ref, reason in left_out if reason is not None}
 
@@ -546,9 +546,24 @@ class ModelCatalog:
             return f"provider {ref.provider!r} is not defined in model_providers"
         if not state.provider.has_credentials:
             return f"no key: set {state.provider.key_env}"
-        if self._rejected(ref):
+        if self._rejected(ref) or self._known_absent(ref):
             return f"not served by {ref.provider}"
         return None
+
+    def _known_absent(self, ref: ModelRef) -> bool:
+        """Whether the listing in use, though not fresh (a stale one, or one
+        kept through a failed refresh), recorded the entry ``ref`` as absent.
+
+        It cannot reject an id (``record()`` still accepts it), but the list
+        leaves the entry out: a role computed from the list must not run on a
+        model the provider has retired while a refresh is under way.
+        """
+        state = self._states[ref.provider]
+        return (
+            state.known is not ProviderState.FRESH
+            and state.listing is not None
+            and ref.model in state.absent
+        )
 
     def _tier_models(self) -> list[ModelRef]:
         """Each built-in provider's newest model of each tier, for a list with no entry."""
