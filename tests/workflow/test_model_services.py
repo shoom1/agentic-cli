@@ -10,8 +10,10 @@ from pathlib import Path
 import httpx
 import pytest
 from pydantic import Field
+from pydantic_settings import BaseSettings as PydanticBaseSettings
+from pydantic_settings import SettingsConfigDict
 
-from agentic_cli.config import BaseSettings
+from agentic_cli.config import BaseSettings, validate_settings
 from agentic_cli.models import (
     ModelCatalog,
     ModelRef,
@@ -20,9 +22,11 @@ from agentic_cli.models import (
     ProviderSpec,
     RoleMap,
 )
+from agentic_cli.settings_mixins import AppSettingsMixin, CLISettingsMixin
 from agentic_cli.workflow import model_services
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.model_services import build_catalog
+from agentic_cli.workflow.settings import WorkflowSettingsMixin
 from tests.models.fakes import openrouter_spec
 
 _KEY_VARS = ("GOOGLE_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY")
@@ -199,6 +203,29 @@ class TestUserLevelEnvFiles:
         providers = model_services.providers_from_settings(settings, env={})
 
         assert providers["lab"].api_key is None
+
+    def test_settings_composed_from_the_mixins_read_their_class_s_env_files(self, tmp_path):
+        """Settings composed from the exported mixins over pydantic-settings' own
+        BaseSettings have no ``env_files``: their class's ``env_file`` is read
+        (its user-level entries), and they validate."""
+        env_file = tmp_path / "home" / ".app" / ".env"
+        env_file.parent.mkdir()
+        env_file.write_text("LAB_KEY=k-from-file\n")
+
+        class Composed(
+            WorkflowSettingsMixin, AppSettingsMixin, CLISettingsMixin, PydanticBaseSettings
+        ):
+            model_config = SettingsConfigDict(
+                env_prefix="COMPOSED_", extra="ignore", env_file=[".env", str(env_file)]
+            )
+            model_providers: dict[str, ProviderSpec] = Field(default_factory=lambda: {"lab": LAB})
+
+        settings = Composed(default_model="lab:qwen3-32b")
+
+        assert model_services.user_env_files(settings) == (env_file,)
+        lab = model_services.providers_from_settings(settings)["lab"]
+        assert (lab.api_key, lab.has_credentials) == ("k-from-file", True)
+        validate_settings(settings)
 
 
 def test_entries_from_settings_by_reference_in_their_order():

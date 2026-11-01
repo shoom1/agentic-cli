@@ -71,8 +71,20 @@ def user_env_files(settings: "BaseSettings") -> tuple[Path, ...]:
     A cwd-relative one (``.env``) is never among them: a cloned repository can
     ship it, so it supplies no key (``BaseSettings.settings_customise_sources``
     filters it the same way).
+
+    Settings composed from the mixins over pydantic-settings' own
+    ``BaseSettings`` have no ``env_files``; their class's ``env_file`` is used.
     """
-    files = (Path(entry).expanduser() for entry in settings.env_files)
+    entries = getattr(settings, "env_files", None)
+    if entries is None:
+        env_file = type(settings).model_config.get("env_file")
+        if env_file is None:
+            entries = ()
+        elif isinstance(env_file, (str, os.PathLike)):
+            entries = (env_file,)
+        else:
+            entries = tuple(env_file)
+    files = (Path(entry).expanduser() for entry in entries)
     return tuple(path for path in files if path.is_absolute())
 
 
