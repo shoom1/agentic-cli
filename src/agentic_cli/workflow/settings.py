@@ -87,8 +87,8 @@ class WorkflowSettingsMixin:
         title="Model",
         description=(
             "The default model, as a provider:model reference or a model id "
-            "(when unset, the newest default-tier model of the first provider "
-            "with a key)"
+            "(when unset, the newest default-tier model in models, else of the "
+            "first provider with a key)"
         ),
         json_schema_extra={"ui_order": 10},
     )

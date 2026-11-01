@@ -483,10 +483,73 @@ class TestSettingsValidation:
         self, temp_workspace: Path, monkeypatch
     ):
         monkeypatch.setenv("LAB_KEY", "lab-test-key")
-        settings = self._settings(temp_workspace, model_providers=self.LAB)
+        settings = self._settings(
+            temp_workspace, model_providers=self.LAB, default_model="lab:Qwen/Qwen3-32B"
+        )
         agents = [AgentConfig(name="writer", prompt="p", model="lab:Qwen/Qwen3-32B")]
 
         validate_settings(settings, agents)
+
+    #: What startup says of a built-in role nothing can fill (models/roles.py).
+    NO_DEFAULT = (
+        "No model for role 'default': set default_model, or set a Google, Anthropic or "
+        "OpenAI key (GOOGLE_API_KEY, ANTHROPIC_API_KEY, OPENAI_API_KEY) so the newest "
+        "default-tier model is used."
+    )
+
+    def test_on_configured_providers_alone_the_default_model_must_be_set(
+        self, temp_workspace: Path, monkeypatch
+    ):
+        """A configured provider's model has no tier, so with no built-in key
+        nothing computes the default role: said once, before any listing, not
+        by each agent that runs on it at startup."""
+        monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+        settings = self._settings(temp_workspace, model_providers=self.OPENROUTER)
+        agents = [AgentConfig(name=name, prompt="p") for name in ("a", "b", "c", "d")]
+
+        assert self._problems(settings, agents) == [self.NO_DEFAULT]
+
+    def test_an_unmapped_built_in_role_an_agent_names_is_reported_once_each(
+        self, temp_workspace: Path, monkeypatch
+    ):
+        monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+        settings = self._settings(
+            temp_workspace,
+            model_providers=self.OPENROUTER,
+            default_model="openrouter:qwen/qwen3.7-plus",
+        )
+        agents = [
+            AgentConfig(name="a", prompt="p", model="fast"),
+            AgentConfig(name="b", prompt="p", model="fast"),
+            AgentConfig(name="c", prompt="p", model="strong"),
+        ]
+
+        assert self._problems(settings, agents) == [
+            "No model for role 'fast': map it in model_roles['fast'], or set a Google, "
+            "Anthropic or OpenAI key (GOOGLE_API_KEY, ANTHROPIC_API_KEY, OPENAI_API_KEY) so "
+            "the newest fast-tier model is used.",
+            "No model for role 'strong': map it in model_roles['strong'], or set a Google, "
+            "Anthropic or OpenAI key (GOOGLE_API_KEY, ANTHROPIC_API_KEY, OPENAI_API_KEY) so "
+            "the newest strong-tier model is used.",
+        ]
+
+    def test_a_default_model_fills_the_default_role(self, temp_workspace: Path, monkeypatch):
+        monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+        settings = self._settings(
+            temp_workspace,
+            model_providers=self.OPENROUTER,
+            default_model="openrouter:qwen/qwen3.7-plus",
+        )
+
+        validate_settings(settings, [AgentConfig(name="a", prompt="p")])
+
+    def test_a_built_in_key_fills_the_default_role(self, temp_workspace: Path, monkeypatch):
+        monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+        settings = self._settings(
+            temp_workspace, {"GOOGLE_API_KEY": "test-key"}, model_providers=self.OPENROUTER
+        )
+
+        validate_settings(settings, [AgentConfig(name="a", prompt="p")])
 
     def test_an_unused_provider_s_unset_key_variable_is_no_error(
         self, temp_workspace: Path, monkeypatch
@@ -510,6 +573,7 @@ class TestSettingsValidation:
                 "openrouter:qwen/qwen3-32b": {"thinking": "effort"},
                 "lab:Qwen/Qwen3-32B": {"thinking": "chat_template"},
             },
+            default_model="openrouter:qwen/qwen3-32b",
         )
 
         assert self._problems(settings) == [

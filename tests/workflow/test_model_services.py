@@ -312,6 +312,18 @@ def test_build_catalog_takes_the_roles_computed_from_the_providers(real_catalogs
     assert catalog.in_use == ("google", "openrouter")
 
 
+def test_a_computed_role_the_list_can_fill_needs_no_other_provider(real_catalogs):
+    """No default model is set, and the list has a default-tier model: the
+    default role takes it, so no other provider is in use."""
+    settings = BaseSettings(
+        google_api_key="k-g", anthropic_api_key="k-a", models={"anthropic:claude-sonnet-4-6": {}}
+    )
+
+    catalog = build_catalog(settings, model_services.providers_from_settings(settings))
+
+    assert catalog.in_use == ("anthropic",)
+
+
 # --- what the catalog is told: the references and the roles computed ---------------
 
 

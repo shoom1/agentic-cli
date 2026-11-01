@@ -412,6 +412,12 @@ class TestTheModelsList:
         assert settings.model_roles == {"fast": "google:gemini-2.5-flash"}
         assert _specs(settings.model_providers) == {"openrouter": OPENROUTER.model_dump()}
 
+    def test_default_model_says_the_list_fills_it_first(self):
+        assert BaseSettings.model_fields["default_model"].description == (
+            "The default model, as a provider:model reference or a model id (when unset, "
+            "the newest default-tier model in models, else of the first provider with a key)"
+        )
+
     def test_an_assigned_list_is_validated_and_set_as_given(self):
         settings = _app_settings()()
 

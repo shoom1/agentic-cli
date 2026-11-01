@@ -106,6 +106,10 @@ class CatalogView(Protocol):
         """Every record the catalog holds for one provider."""
         ...
 
+    def entry_records(self) -> Sequence[ModelRecord]:
+        """The records of the ``models`` entries the list offers, in its order."""
+        ...
+
 
 @dataclass(frozen=True)
 class NativeThinking:
@@ -188,17 +192,20 @@ def resolve_model(
             can fill, an undefined provider, a provider without a key, a model
             an authoritative listing lacks, or a thinking mode the model does
             not have. The message names the agent (or the default model), the
-            model and the allowed values.
+            model and the allowed values; a role nothing can fill is the
+            role's alone, the same for every agent on it.
     """
     who = f"Agent {agent!r}" if agent else "Default model"
     try:
         parsed = parse_spec(spec) if spec is not None else RoleRef("default")
+        # A ModelResolutionError from the roles is a role nothing can fill:
+        # it passes as it is, so a manager reports it once, not per agent.
         ref = (
             roles.resolve(parsed.role, catalog=catalog, providers=providers)
             if isinstance(parsed, RoleRef)
             else parsed
         )
-    except (ModelSpecError, ModelResolutionError) as exc:
+    except ModelSpecError as exc:
         raise ModelResolutionError(f"{who}: {exc}") from None
 
     provider = providers.get(ref.provider)

@@ -592,6 +592,20 @@ class TestRoles:
             "strong": "google:gemini-3.1-pro-preview",
         }
 
+    async def test_the_list_s_entries_fill_the_roles_first(self):
+        """Not the listing's newest: the list's own model of each tier, when it has one."""
+        entries = {GEMINI: ModelEntry(), ModelRef("google", "gemini-2.5-pro"): ModelEntry()}
+        catalog = await loaded(entries=entries, google=KEYS["google"])
+        roles = RoleMap(default_model=None, model_roles={})
+        keyed = providers(google=KEYS["google"])
+
+        def role(name: str) -> str:
+            return str(roles.resolve(name, catalog=catalog, providers=keyed))
+
+        assert role("default") == "google:gemini-2.5-flash"  # not gemini-3-flash-preview
+        assert role("strong") == "google:gemini-2.5-pro"  # not gemini-3.1-pro-preview
+        assert role("fast") == "google:gemini-2.5-flash-lite"  # none in the list: the listing's
+
     async def test_a_fresh_listing_fills_the_roles_with_its_newest(self):
         catalog = await loaded(anthropic=KEYS["anthropic"])
         roles = RoleMap(default_model=None, model_roles={})
@@ -652,6 +666,45 @@ class TestInUse:
         )
 
         assert catalog.in_use == ("google", "anthropic", "openrouter")
+
+    def test_a_computed_role_an_entry_can_fill_puts_no_built_in_provider_in_use(self):
+        catalog = catalog_for(
+            entries={ModelRef("anthropic", "claude-sonnet-4-6"): ModelEntry(), QWEN: ModelEntry()},
+            computed_roles=["default"],
+            google=KEYS["google"], anthropic=KEYS["anthropic"], openrouter="r-test-key",
+        )
+
+        assert catalog.in_use == ("anthropic", "openrouter")
+
+    def test_one_computed_role_no_entry_can_fill_puts_them_all_in_use(self):
+        catalog = catalog_for(
+            entries={ModelRef("anthropic", "claude-sonnet-4-6"): ModelEntry()},
+            computed_roles=["default", "fast"],
+            google=KEYS["google"], anthropic=KEYS["anthropic"],
+        )
+
+        assert catalog.in_use == ("google", "anthropic")
+
+    async def test_when_the_listings_leave_a_computed_role_no_entry_the_built_ins_are_listed(
+        self,
+    ):
+        """Rule 4 again, once the listings have spoken: the entry of the default
+        role's tier is retired, so the role falls back to the built-ins, which
+        are listed for it."""
+        api = ProviderAPI()
+        retired, haiku = ModelRef("anthropic", "claude-sonnet-9-9"), ModelRef("anthropic", "claude-haiku-4-5")
+
+        catalog = await loaded(
+            api, entries={retired: ModelEntry(), haiku: ModelEntry()}, computed_roles=["default"],
+            google=KEYS["google"], anthropic=KEYS["anthropic"],
+        )
+
+        assert sorted(api.calls) == ["anthropic", "google"]
+        assert catalog.in_use == ("google", "anthropic")
+        roles = RoleMap(default_model=None, model_roles={})
+        keyed = providers(google=KEYS["google"], anthropic=KEYS["anthropic"])
+        default = roles.resolve("default", catalog=catalog, providers=keyed)
+        assert default == ModelRef("google", "gemini-3-flash-preview")  # listed, not the table's
 
     async def test_load_lists_the_providers_in_use_only(self):
         api = ProviderAPI()

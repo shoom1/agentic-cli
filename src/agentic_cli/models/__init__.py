@@ -15,8 +15,8 @@ both); each backend's adapter turns what it resolves into SDK objects.
   ``ThinkingRule``.
 - ``table``: the shipped table (``data/table.json``): family rules, per-model
   numbers and the fallback model lists.
-- ``roles``: ``RoleMap``, role names to references, computed from the
-  providers with a key when unmapped.
+- ``roles``: ``RoleMap``, role names to references; an unmapped built-in
+  role is computed from the list, else from the providers with a key.
 - ``resolve``: ``resolve_model``, one agent's model, thinking, ``max_tokens``
   and sampling settings as a ``ResolvedModel``.
 - ``discovery``: one lister per provider, over its REST API with httpx.

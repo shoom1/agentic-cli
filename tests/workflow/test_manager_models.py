@@ -315,6 +315,25 @@ class TestResolution:
         with pytest.raises(SettingsValidationError, match="set ANTHROPIC_API_KEY"):
             await keyless.initialize_services()
 
+    async def test_a_role_nothing_can_fill_is_reported_once(self, providers, monkeypatch):
+        """With no built-in key, the default role has no model: the default
+        model and each of the four agents on it fail alike, said once."""
+        monkeypatch.setenv("OPENROUTER_API_KEY", "or-test-key")
+        configs = [
+            AgentConfig(name="coordinator", prompt="p", sub_agents=["a", "b", "c"]),
+            *(AgentConfig(name=name, prompt="p") for name in ("a", "b", "c")),
+        ]
+        manager = adk(configs, settings(model_providers=OPENROUTER))
+
+        with pytest.raises(SettingsValidationError) as caught:
+            await manager.initialize_services(validate=False)  # past the static check
+
+        assert str(caught.value) == (
+            "No model for role 'default': set default_model, or set a Google, Anthropic or "
+            "OpenAI key (GOOGLE_API_KEY, ANTHROPIC_API_KEY, OPENAI_API_KEY) so the newest "
+            "default-tier model is used."
+        )
+
     async def test_an_unmapped_app_role_runs_on_the_default_model(self, providers, monkeypatch):
         keys(monkeypatch, "google")
         manager = adk(team("vision"), settings(default_model="gemini-2.5-pro"))
@@ -343,6 +362,22 @@ class TestManagerModel:
         monkeypatch.delenv("GOOGLE_API_KEY")
         assert adk(team(), settings()).model == "anthropic:claude-sonnet-4-6"
         assert providers.calls == []
+
+    async def test_without_a_default_model_the_list_s_newest_default_tier_model(
+        self, providers, monkeypatch
+    ):
+        """Before and after the start, and only the list's provider is listed."""
+        keys(monkeypatch, "google", "anthropic")
+        s = settings(models={"anthropic:claude-sonnet-4-5": {}, "anthropic:claude-sonnet-4-6": {}})
+        manager = adk(team(), s)
+
+        assert manager.model == "anthropic:claude-sonnet-4-6"
+        await manager.initialize_services()
+        try:
+            assert manager.model == "anthropic:claude-sonnet-4-6"
+            assert providers.calls == ["anthropic"]
+        finally:
+            await manager.cleanup()
 
     def test_without_any_key_there_is_no_default_model(self, home):
         with pytest.raises(ModelResolutionError, match="No model for role 'default'"):

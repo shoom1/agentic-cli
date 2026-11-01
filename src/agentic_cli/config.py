@@ -546,6 +546,11 @@ def validate_settings(
       each agent's, and that of each role an agent names (a built-in has its
       key; a configured provider's ``api_key_env`` is set, in the environment
       or the app's user-level env files, or it names none);
+    - a built-in role that is computed, not mapped (``default`` without a
+      ``default_model``, a ``fast`` or ``strong`` an agent names), has a model
+      to be computed from: only a Google, Anthropic or OpenAI model has a
+      tier, so without one of their keys it has none (said once, as startup
+      would say it);
     - no ``models`` entry asks an ``openrouter`` provider for chat-template
       thinking;
     - some provider can be called (else the message names the built-ins'
@@ -590,6 +595,7 @@ def _model_settings_problems(
         parse_spec,
     )
     from agentic_cli.models.providers import undefined_provider_message
+    from agentic_cli.models.roles import unfilled_role_message
     from agentic_cli.workflow import model_services
 
     errors: list[str] = []
@@ -616,6 +622,11 @@ def _model_settings_problems(
                 f"No model provider is configured: {builtin}, or define a provider in "
                 "model_providers (user settings)."
             )
+    elif not any(p.builtin and p.has_credentials for p in providers.values()):
+        # Only a built-in provider's model has a tier, so a role computed from
+        # the tiers has no model: say so now, once, not at startup per agent.
+        computed = model_services.computed_roles(settings, agent_configs or (), manager_model)
+        errors.extend(unfilled_role_message(role) for role in computed)
 
     # Every reference a setting or an agent names, and those a model runs on.
     named: list[tuple[str, ModelRef]] = []

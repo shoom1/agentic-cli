@@ -175,6 +175,78 @@ class TestComputedRoles:
         assert "GOOGLE_API_KEY" in message
 
 
+class TestRolesFromTheList:
+    """An unmapped built-in role takes its tier's model from the list
+    (the ``models`` entries it offers) before the providers' own models."""
+
+    def test_the_newest_entry_of_its_tier(self):
+        entries = table_records(A, "claude-haiku-4-5", "claude-sonnet-4-5", "claude-sonnet-4-6")
+        catalog = FakeCatalog([*GOOGLE, *ANTHROPIC], entries=entries)
+        keyed = providers(google="k", anthropic="k")
+
+        def role(name: str) -> str:
+            return str(_roles().resolve(name, catalog=catalog, providers=keyed))
+
+        # Not Google's, though Google comes first among the providers with a key.
+        assert role("default") == "anthropic:claude-sonnet-4-6"
+        assert role("fast") == "anthropic:claude-haiku-4-5"
+        # No entry of its tier: the newest of the first provider with a key.
+        assert role("strong") == "google:gemini-3.1-pro-preview"
+
+    def test_the_provider_the_list_names_first_that_has_one(self):
+        """Across providers "newest" means little: the list's order decides."""
+        entries = [
+            *table_records(A, "claude-haiku-4-5"),
+            *table_records(G, "gemini-3.5-flash"),
+            *table_records(A, "claude-sonnet-4-5"),
+        ]
+        catalog = FakeCatalog(entries=entries)
+
+        resolved = _roles().resolve(
+            "default", catalog=catalog, providers=providers(google="k", anthropic="k")
+        )
+
+        assert resolved == ModelRef("anthropic", "claude-sonnet-4-5")
+
+    def test_the_first_provider_s_model_though_a_later_one_s_is_newer(self):
+        """The newest among the first provider's, not the newest of all."""
+        entries = [*table_records(G, "gemini-2.5-flash"), *table_records(A, "claude-sonnet-4-6")]
+        catalog = FakeCatalog(entries=entries)
+
+        resolved = _roles().resolve(
+            "default", catalog=catalog, providers=providers(google="k", anthropic="k")
+        )
+
+        assert resolved == ModelRef("google", "gemini-2.5-flash")
+
+    def test_a_configured_provider_s_entry_has_no_tier_and_fills_no_role(self):
+        entries = table_records(
+            ProviderKind.OPENROUTER, "anthropic/claude-sonnet-4.5", provider="openrouter"
+        )
+        catalog = FakeCatalog(GOOGLE, entries=entries)
+
+        resolved = _roles().resolve(
+            "default", catalog=catalog, providers=providers(google="k", openrouter="k")
+        )
+
+        assert resolved == ModelRef("google", "gemini-3.5-flash")
+
+    def test_with_configured_providers_only_the_default_model_is_set_by_hand(self):
+        entries = table_records(ProviderKind.OPENROUTER, "qwen/qwen3-235b-a22b", provider="openrouter")
+        catalog = FakeCatalog(entries=entries)
+
+        with pytest.raises(ModelResolutionError, match="set default_model"):
+            _roles().resolve("default", catalog=catalog, providers=providers(openrouter="k"))
+
+    def test_a_mapped_role_is_its_mapping(self):
+        catalog = FakeCatalog(entries=table_records(A, "claude-sonnet-4-6"))
+        roles = _roles(default_model="google:gemini-2.5-pro")
+
+        resolved = roles.resolve("default", catalog=catalog, providers=providers(anthropic="k"))
+
+        assert resolved == ModelRef("google", "gemini-2.5-pro")
+
+
 class TestAppRoles:
     def test_a_mapped_app_role(self):
         roles = _roles(model_roles={"vision": "google:gemini-2.5-pro"})

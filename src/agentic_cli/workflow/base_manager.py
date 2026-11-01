@@ -130,7 +130,8 @@ class BaseWorkflowManager(ABC):
                 reference or a model id (never a role). It takes the
                 ``default`` role for this manager only; without it, the
                 default is ``settings.default_model``, else the newest
-                default-tier model of the first provider with a key.
+                default-tier model in ``settings.models``, else of the first
+                provider with a key.
             on_event: Optional hook to transform/filter events before yielding.
         """
         from agentic_cli.config import get_settings
@@ -1089,7 +1090,8 @@ class BaseWorkflowManager(ABC):
 
         Raises:
             SettingsValidationError: Listing each agent (or the default model)
-                that cannot run, with the model and the allowed values.
+                that cannot run, with the model and the allowed values; a
+                problem several share (a role nothing can fill) once.
         """
         from agentic_cli.config import SettingsValidationError
         from agentic_cli.workflow import model_services
@@ -1113,7 +1115,7 @@ class BaseWorkflowManager(ABC):
             else:
                 resolved[config.name] = model
         if errors:
-            raise SettingsValidationError("\n".join(errors))
+            raise SettingsValidationError("\n".join(dict.fromkeys(errors)))
 
         self._default_model, self._resolved_models = default, resolved
         logger.info(
@@ -1172,7 +1174,13 @@ class BaseWorkflowManager(ABC):
 
         providers = model_services.providers_from_settings(self._settings)
         roles = model_services.role_map_from_settings(self._settings, self._model_override)
-        catalog = ModelCatalog(providers=providers)  # never loaded: the shipped table
+        # Never loaded: the entries and the shipped table.
+        catalog = model_services.build_catalog(
+            self._settings,
+            providers,
+            agent_configs=self._agent_configs,
+            manager_model=self._model_override,
+        )
         return roles.resolve("default", catalog=catalog, providers=providers)
 
     def _validate_agent_graph(self) -> "AgentGraph | None":

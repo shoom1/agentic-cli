@@ -17,12 +17,14 @@ of its source (``ModelRecord.sources``):
 providers of the ``models`` entries that can run (defined, with
 credentials); the providers of the models a setting, an agent or the manager
 names (``references``); and every built-in provider with a key when no entry
-can run, or when a role is computed (``computed_roles``). ``load`` asks the
-last rule again once the listings have rejected what they lack, and lists
-the built-ins it then needs. Only these are listed at startup and refreshed
-in the background; one whose ``list_models`` is False is in use but never
-listed. ``search`` lists any other provider with credentials the first time
-it is searched, and any whose listing is not fresh.
+can run, or when a role is computed (``computed_roles``) that no entry can
+fill (a built-in model's tier comes from the table's family rules). ``load``
+asks the last two rules again once the listings have rejected what they
+lack, and lists the built-ins they then need. Only these are listed at
+startup and refreshed in the background; one whose ``list_models`` is False
+is in use but never listed. ``search`` lists any other provider with
+credentials the first time it is searched, and any whose listing is not
+fresh.
 
 **The list** (``offered``) is what the model pickers offer: the entries that
 can run, then the models the references and the caller name, each once; when
@@ -188,8 +190,9 @@ class ModelCatalog:
         references: The models a setting, an agent or the manager names:
             their providers are in use, and the list offers them.
         computed_roles: The built-in roles (``default``, ``fast``,
-            ``strong``) nothing maps, which take a model of their tier from
-            the built-in providers with a key: those are in use too.
+            ``strong``) nothing maps, which take a model of their tier: from
+            the entries, else from the built-in providers with a key, which
+            are then in use too.
         cache_path: The listing cache; None keeps listings in memory only.
         table: The shipped table (the packaged one by default).
         ttl_seconds: How long a listing stays fresh.
@@ -252,11 +255,11 @@ class ModelCatalog:
         timeout: the first run still validates ids. A cached listing that
         lacks an entry's model is listed again, once, unless it recorded
         that model as absent. When the listings leave no entry that can run,
-        the built-in providers with a key are in use after all, and those
-        not yet loaded are (rule 3, asked again). Then each entry left out of
-        the list is warned of, once per process, unless only its key is
-        missing (``not_offered`` says that). Never raises for a network or
-        cache problem.
+        or none of a computed role's tier, the built-in providers with a key
+        are in use after all, and those not yet loaded are. Then each entry
+        left out of the list is warned of, once per process, unless only its
+        key is missing (``not_offered`` says that). Never raises for a
+        network or cache problem.
         """
         cached = self._read_cache()
         to_list: list[str] = []
@@ -476,8 +479,15 @@ class ModelCatalog:
 
     def _needs_builtins(self, entries: list[ModelRef]) -> bool:
         """Whether the built-in providers with a key are in use, given the
-        entries that can run: none can, or a role is computed."""
-        return not entries or bool(self._computed_roles)
+        entries that can run: none can, or a role is computed that none of
+        them can fill (none is of its tier)."""
+        tiers = {self._tier(ref) for ref in entries}
+        return not entries or any(role not in tiers for role in self._computed_roles)
+
+    def _tier(self, ref: ModelRef) -> str | None:
+        """A model's tier, from the table's family rules: a built-in model's only."""
+        kind = self._states[ref.provider].provider.kind
+        return self._table.record_for(ref.provider, kind, ref.model).tier
 
     def _keyed_builtins(self) -> list[str]:
         return [
@@ -487,10 +497,10 @@ class ModelCatalog:
         ]
 
     async def _load_builtins_now_needed(self) -> None:
-        """Ask the built-ins' rule again with the entries the listings left
-        offered, and load the built-ins it now needs: from the cache when it
-        holds their listing, else listed once (a retired entry that was the
-        only one that could run leaves the list to the tiers)."""
+        """Ask the built-ins' rules again with the entries the listings left
+        offered, and load the built-ins they now need: from the cache when it
+        holds their listing, else listed once (a retired entry may have been
+        the only one that could run, or the one of a computed role's tier)."""
         offered = [ref for ref in self._entries if self._entry_left_out(ref) is None]
         if not self._needs_builtins(offered):
             return

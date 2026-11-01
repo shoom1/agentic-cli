@@ -5,12 +5,15 @@ override comes first). ``fast`` and ``strong`` are mapped in ``model_roles``.
 An app adds a role by naming it in an agent's model, and may ship a default
 mapping by overriding the ``model_roles`` default in its settings class.
 
-A built-in role nobody mapped takes the newest model of its tier from the
-first provider with a key, in the order Google, Anthropic, OpenAI: Flash-Lite /
-Flash / Pro, Haiku / Sonnet / Opus, mini / standard / pro. A configured
-provider's models (``model_providers``) never fill a role on their own; the
-user maps them. An app role nobody mapped falls back to ``default``, with a
-warning once per process.
+A built-in role nobody mapped takes a model of its tier (Flash-Lite / Flash /
+Pro, Haiku / Sonnet / Opus, mini / standard / pro): the newest in the list
+(the ``models`` entries it offers), of the provider the list names first among
+those with one; else the newest of the first provider with a key, in the
+order Google, Anthropic, OpenAI. Only a built-in provider's model has a tier:
+a configured provider's models (``model_providers``) never fill a role on
+their own, so an app or a user on configured providers only sets
+``default_model``. An app role nobody mapped falls back to ``default``, with
+a warning once per process.
 
 A role's value is always a model, never another role.
 """
@@ -116,6 +119,13 @@ class RoleMap:
     def _computed(
         self, tier: str, catalog: "CatalogView", providers: Mapping[str, Provider]
     ) -> ModelRef:
+        # The list first. Across providers "newest" means little, so the
+        # provider the list names first among those with a model of the tier.
+        listed = catalog.entry_records()
+        for name in dict.fromkeys(record.provider for record in listed):
+            candidates = [r for r in listed if r.provider == name and r.tier == tier]
+            if candidates:
+                return newest(candidates).ref
         for name in _ROLE_PROVIDERS:
             provider = providers.get(name)
             if provider is None or not provider.has_credentials:
@@ -123,12 +133,22 @@ class RoleMap:
             candidates = [r for r in catalog.records(name) if r.tier == tier]
             if candidates:
                 return newest(candidates).ref
-        variables = ", ".join(PROVIDER_KEY_ENV[p] for p in _ROLE_PROVIDERS)
-        fix = "set default_model" if tier == "default" else f"map it in model_roles[{tier!r}]"
-        raise ModelResolutionError(
-            f"No model for role {tier!r}: {fix}, or set a Google, Anthropic or OpenAI key "
-            f"({variables}) so the newest {tier}-tier model is used."
-        )
+        raise ModelResolutionError(unfilled_role_message(tier))
+
+
+def unfilled_role_message(role: str) -> str:
+    """What to say of a built-in role nobody maps when nothing can fill it:
+    no entry of its tier in the list, and no Google, Anthropic or OpenAI key.
+
+    The same at startup (``RoleMap.resolve``) and in the static check
+    (``config.validate_settings``), which says it before any listing.
+    """
+    variables = ", ".join(PROVIDER_KEY_ENV[p] for p in _ROLE_PROVIDERS)
+    fix = "set default_model" if role == "default" else f"map it in model_roles[{role!r}]"
+    return (
+        f"No model for role {role!r}: {fix}, or set a Google, Anthropic or OpenAI key "
+        f"({variables}) so the newest {role}-tier model is used."
+    )
 
 
 def _ref_setting(key: str, spec: str | None) -> ModelRef | None:
