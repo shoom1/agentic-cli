@@ -95,14 +95,14 @@ def test_deep_agents_summarizes_with_the_same_prompt():
     from agentic_cli.config import BaseSettings
     from agentic_cli.models import ModelCatalog, RoleMap, resolve_model
     from agentic_cli.workflow.deepagents.summarization import build_summarization
-    from tests.models.fakes import endpoints as fake_endpoints
+    from tests.models.fakes import providers as fake_providers
     from tests.workflow.deepagents.fakes import ScriptedChat
 
-    endpoints = fake_endpoints(anthropic="a-test-key")
+    providers = fake_providers(anthropic="a-test-key")
     model = resolve_model(
         agent="solo", spec="anthropic:claude-sonnet-4-5", generation=None,
         thinking_effort="none", roles=RoleMap(default_model=None, model_roles={}),
-        catalog=ModelCatalog(endpoints=endpoints), endpoints=endpoints,
+        catalog=ModelCatalog(providers=providers), providers=providers,
     )
 
     middleware = build_summarization(

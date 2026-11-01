@@ -18,7 +18,7 @@ from agentic_cli.models import (
     ModelSpecError,
     RoleMap,
     parse_ref,
-    validate_endpoint_name,
+    validate_provider_name,
 )
 from agentic_cli.workflow.context import MIN_BUDGET
 
@@ -480,7 +480,7 @@ class WorkflowSettingsMixin:
     def _validate_endpoint_names(cls, v: dict[str, EndpointSpec]) -> dict[str, EndpointSpec]:
         """Endpoint names are provider names in references: no built-in's name."""
         for name in v:
-            validate_endpoint_name(name)
+            validate_provider_name(name)
         return v
 
     @field_validator("model_roles")

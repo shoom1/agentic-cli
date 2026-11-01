@@ -17,7 +17,7 @@ import pytest
 
 from agentic_cli.models import EndpointSpec
 from agentic_cli.models.discovery import ListedModel, Listing, list_models
-from tests.models.fakes import endpoints
+from tests.models.fakes import providers
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "model_listings"
 
@@ -35,12 +35,12 @@ def payload(name: str) -> dict:
     return json.loads((FIXTURES / f"{name}.json").read_text(encoding="utf-8"))
 
 
-def endpoint(provider: str, *, keyed: bool = True):
-    """The endpoint for ``provider`` (a built-in, or ``local-vllm``), with its test key."""
+def provider_for(name: str, *, keyed: bool = True):
+    """The provider ``name`` (a built-in, or ``local-vllm``), with its test key."""
     builtins = ("google", "anthropic", "openai", "openrouter")
     keys = {name: KEYS[name] for name in builtins} if keyed else {}
     env = {"VLLM_KEY": KEYS["local-vllm"]} if keyed else {}
-    return endpoints(specs={"local-vllm": VLLM_SPEC}, env=env, **keys)[provider]
+    return providers(specs={"local-vllm": VLLM_SPEC}, env=env, **keys)[name]
 
 
 class Server:
@@ -76,7 +76,7 @@ FIXTURE_FOR = {
 
 
 async def listed(provider: str, server: Server, **kwargs) -> Listing:
-    return await list_models(endpoint(provider, **kwargs), transport=server.transport)
+    return await list_models(provider_for(provider, **kwargs), transport=server.transport)
 
 
 def by_id(listing: Listing) -> dict[str, ListedModel]:
@@ -413,7 +413,7 @@ async def test_numbers_that_are_not_positive_integers_are_unknown():
 
 async def test_the_listing_names_its_provider_and_time():
     listing = await list_models(
-        endpoint("local-vllm"), transport=serving(payload("vllm")).transport, clock=lambda: 1234.5
+        provider_for("local-vllm"), transport=serving(payload("vllm")).transport, clock=lambda: 1234.5
     )
 
     assert (listing.provider, listing.ok, listing.fetched_at, listing.error) == (
@@ -433,7 +433,7 @@ async def test_an_injected_transport_is_left_open():
 
     transport = Recording(lambda r: httpx.Response(200, json=payload("openai")))
 
-    await list_models(endpoint("openai"), transport=transport)
+    await list_models(provider_for("openai"), transport=transport)
 
     assert transport.closed is False
 
@@ -474,7 +474,7 @@ async def test_a_failure_is_a_failed_listing_never_an_exception(provider, failur
     make_handler, reason = FAILURES[failure]
 
     listing = await list_models(
-        endpoint(provider), transport=Server(make_handler(provider)).transport, clock=lambda: 99.0
+        provider_for(provider), transport=Server(make_handler(provider)).transport, clock=lambda: 99.0
     )
 
     assert listing.ok is False
@@ -493,7 +493,7 @@ async def test_a_hung_server_is_cut_off_at_the_timeout():
         await asyncio.sleep(30)
 
     started = time.monotonic()
-    listing = await list_models(endpoint("google"), transport=Server(hang).transport, timeout=0.2)
+    listing = await list_models(provider_for("google"), transport=Server(hang).transport, timeout=0.2)
 
     assert time.monotonic() - started < 2
     assert listing.ok is False

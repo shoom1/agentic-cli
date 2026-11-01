@@ -49,7 +49,7 @@ from agentic_cli.workflow.context import (
     overflow_message,
 )
 from agentic_cli.workflow.events import EventType
-from tests.models.fakes import endpoints as fake_endpoints
+from tests.models.fakes import providers as fake_providers
 from tests.workflow.adk.fakes import FakeAPI, anthropic_message
 
 #: The settings 0.7.0 removed.
@@ -72,11 +72,11 @@ OPUS = "anthropic:claude-opus-4-7"
 
 def resolved(spec: str, agent: str = "writer"):
     """``spec`` resolved for ``agent`` as a manager would, without listings."""
-    endpoints = fake_endpoints(anthropic="a-test-key", google="g-test-key", openai="o-test-key")
+    providers = fake_providers(anthropic="a-test-key", google="g-test-key", openai="o-test-key")
     return resolve_model(
         agent=agent, spec=spec, generation=None, thinking_effort="none",
         roles=RoleMap(default_model=None, model_roles={}),
-        catalog=ModelCatalog(endpoints=endpoints), endpoints=endpoints,
+        catalog=ModelCatalog(providers=providers), providers=providers,
     )
 
 

@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Literal
 
-from agentic_cli.models.endpoints import ProviderKind
+from agentic_cli.models.providers import ProviderKind
 from agentic_cli.models.refs import ModelRef
 
 

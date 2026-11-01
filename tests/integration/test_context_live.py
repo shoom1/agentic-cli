@@ -110,8 +110,8 @@ def _needs(*variables: str):
 def listed(monkeypatch):
     """Real model listings, as on a first start, written to no cache file."""
 
-    def build_catalog(settings, endpoints, *, transport=None):
-        return ModelCatalog(endpoints=endpoints)
+    def build_catalog(settings, providers, *, transport=None):
+        return ModelCatalog(providers=providers)
 
     monkeypatch.setattr(model_services, "build_catalog", build_catalog)
 

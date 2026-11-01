@@ -86,7 +86,7 @@ def test_without_any_provider_there_is_no_model_picker():
 async def test_a_ready_workflow_offers_its_catalog():
     settings = BaseSettings(google_api_key="k-g")
     catalog = ModelCatalog(
-        endpoints=model_services.endpoints_from_settings(settings),
+        providers=model_services.providers_from_settings(settings),
         transport=ProviderAPI().transport,
     )
     await catalog.load()

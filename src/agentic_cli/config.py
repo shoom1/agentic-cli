@@ -549,8 +549,8 @@ def _model_settings_problems(
     from agentic_cli.workflow import model_services
 
     errors: list[str] = []
-    endpoints = model_services.endpoints_from_settings(settings)
-    if not any(endpoint.has_credentials for endpoint in endpoints.values()):
+    providers = model_services.providers_from_settings(settings)
+    if not any(provider.has_credentials for provider in providers.values()):
         variables = list(PROVIDER_KEY_ENV.values())
         errors.append(
             f"No model provider is configured: set {', '.join(variables[:-1])} or "
@@ -611,29 +611,29 @@ def _model_settings_problems(
         runs.append((who, parsed))
 
     defined = ", ".join(
-        sorted(n for n, e in endpoints.items() if e.kind is ProviderKind.OPENAI_COMPATIBLE)
+        sorted(n for n, p in providers.items() if p.kind is ProviderKind.OPENAI_COMPATIBLE)
     )
     for who, ref in named:
-        if ref.provider not in endpoints:
+        if ref.provider not in providers:
             errors.append(
                 f"{who}: model {str(ref)!r} names endpoint {ref.provider!r}, which is not "
                 f"defined in model_endpoints (user settings); defined endpoints: "
                 f"{defined or 'none'}."
             )
     for who, ref in runs:
-        endpoint = endpoints.get(ref.provider)
-        if endpoint is not None and not endpoint.has_credentials:
+        provider = providers.get(ref.provider)
+        if provider is not None and not provider.has_credentials:
             variable = PROVIDER_KEY_ENV.get(ref.provider, "the provider's API key")
             errors.append(
                 f"{who}: model {str(ref)!r} needs the {ref.provider} API key; set {variable}."
             )
         spec = settings.model_endpoints.get(ref.provider)
         if (
-            endpoint is not None
-            and endpoint.kind is ProviderKind.OPENAI_COMPATIBLE
+            provider is not None
+            and provider.kind is ProviderKind.OPENAI_COMPATIBLE
             and spec is not None
             and spec.api_key_env
-            and not endpoint.api_key
+            and not provider.api_key
         ):
             # Otherwise its requests carry a placeholder key: a bare 401.
             errors.append(

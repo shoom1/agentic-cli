@@ -21,7 +21,7 @@ from agentic_cli.models import (
     ThinkingRule,
     resolve_model,
 )
-from tests.models.fakes import FakeCatalog, endpoints, table_records
+from tests.models.fakes import FakeCatalog, providers, table_records
 
 G, A, O = ProviderKind.GOOGLE, ProviderKind.ANTHROPIC, ProviderKind.OPENAI
 M = ThinkingMechanism
@@ -82,7 +82,7 @@ def _resolve(spec: str | None, *, mode: str | None = None, budget: int | None = 
         thinking_effort=effort,
         roles=roles or RoleMap(default_model=None, model_roles={}),
         catalog=catalog,
-        endpoints=endpoints(specs={"lab": LAB}, **(ALL_KEYS if keys is None else keys)),
+        providers=providers(specs={"lab": LAB}, **(ALL_KEYS if keys is None else keys)),
     )
 
 
@@ -353,8 +353,8 @@ def test_the_resolved_model_carries_the_record_and_endpoint():
     assert resolved.agent == "writer"
     assert resolved.ref == ModelRef("anthropic", "claude-sonnet-4-5")
     assert resolved.record.ref == resolved.ref
-    assert resolved.endpoint.name == "anthropic"
-    assert resolved.endpoint.api_key == "k-a"
+    assert resolved.provider.name == "anthropic"
+    assert resolved.provider.api_key == "k-a"
 
 
 def test_no_spec_means_the_default_role():
@@ -369,7 +369,7 @@ def test_a_role_spec_resolves_through_the_role_map():
     resolved = _resolve("fast", roles=roles)
 
     assert resolved.ref == ModelRef("lab", "Qwen/Qwen3-32B")
-    assert resolved.endpoint.kind is ProviderKind.OPENAI_COMPATIBLE
+    assert resolved.provider.kind is ProviderKind.OPENAI_COMPATIBLE
 
 
 def test_an_unknown_endpoint_is_an_error_naming_agent_and_endpoint():

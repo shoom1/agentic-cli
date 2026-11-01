@@ -51,7 +51,7 @@ from pydantic import PrivateAttr  # noqa: E402
 
 from agentic_cli.config import BaseSettings  # noqa: E402
 from agentic_cli.models import ModelCatalog, ProviderKind, RoleMap, resolve_model  # noqa: E402
-from agentic_cli.models.endpoints import EndpointSpec  # noqa: E402
+from agentic_cli.models.providers import EndpointSpec  # noqa: E402
 from agentic_cli.tools.registry import register_tool  # noqa: E402
 from agentic_cli.workflow.config import AgentConfig  # noqa: E402
 from agentic_cli.workflow.context import (  # noqa: E402
@@ -83,7 +83,7 @@ from agentic_cli.workflow.deepagents.summarization import (  # noqa: E402
 from agentic_cli.workflow import live_events  # noqa: E402
 from agentic_cli.workflow.events import EventType  # noqa: E402
 from agentic_cli.workflow.permissions import EXEMPT  # noqa: E402
-from tests.models.fakes import endpoints as fake_endpoints  # noqa: E402
+from tests.models.fakes import providers as fake_providers  # noqa: E402
 from tests.workflow.adk.fakes import FakeAPI, chat_completion, openai_response  # noqa: E402
 from tests.workflow.deepagents.fakes import ScriptedChat, ScriptedModels, ai  # noqa: E402
 from tests.workflow.langchain_fakes import (  # noqa: E402
@@ -153,14 +153,14 @@ def hermetic(tmp_path, monkeypatch):
 
 def resolved(spec: str, agent: str = "a", *, effort: str = "none"):
     """``spec`` resolved for ``agent`` as a manager would, without listings."""
-    endpoints = fake_endpoints(
+    providers = fake_providers(
         specs={"local": EndpointSpec(**SMALL["local"])},
         anthropic="a-test-key", google="g-test-key", openai="o-test-key",
     )
     return resolve_model(
         agent=agent, spec=spec, generation=None, thinking_effort=effort,
         roles=RoleMap(default_model=None, model_roles={}),
-        catalog=ModelCatalog(endpoints=endpoints), endpoints=endpoints,
+        catalog=ModelCatalog(providers=providers), providers=providers,
     )
 
 

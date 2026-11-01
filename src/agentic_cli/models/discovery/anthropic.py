@@ -29,7 +29,7 @@ from agentic_cli.models.discovery import (
     get_json,
     text,
 )
-from agentic_cli.models.endpoints import Endpoint
+from agentic_cli.models.providers import Provider
 
 URL = "https://api.anthropic.com/v1/models"
 API_VERSION = "2023-06-01"
@@ -39,8 +39,8 @@ _DATE_SUFFIX = re.compile(r"-\d{8}$")
 _VERTEX_DATE_SUFFIX = re.compile(r"@\d{4}-\d{2}-\d{2}$")
 
 
-async def fetch(client: httpx.AsyncClient, endpoint: Endpoint) -> list[ListedModel]:
-    headers = {"x-api-key": endpoint.api_key or "", "anthropic-version": API_VERSION}
+async def fetch(client: httpx.AsyncClient, provider: Provider) -> list[ListedModel]:
+    headers = {"x-api-key": provider.api_key or "", "anthropic-version": API_VERSION}
     models: dict[str, ListedModel] = {}
 
     async def page(after: str | None) -> str | None:

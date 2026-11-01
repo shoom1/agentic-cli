@@ -57,7 +57,7 @@ if TYPE_CHECKING:
 
     from thinking_prompt import Field
 
-    from agentic_cli.models import CatalogView, Endpoint, ModelRef, ResolvedModel, RoleMap
+    from agentic_cli.models import CatalogView, ModelRef, Provider, ResolvedModel, RoleMap
     from agentic_cli.settings_persistence import SettingsSaveResult
     from agentic_cli.workflow import GoogleADKWorkflowManager, EventType, WorkflowEvent
     from agentic_cli.workflow.base_manager import BaseWorkflowManager
@@ -688,14 +688,14 @@ class BaseCLIApp:
             role_map = model_services.role_map_from_settings(self._settings)
         except ValueError:
             return _ModelChoices(options=[], current={}, thinking=None)
-        endpoints = model_services.endpoints_from_settings(self._settings)
+        providers = model_services.providers_from_settings(self._settings)
         controller = self._workflow_controller
         workflow = controller.workflow if controller.is_ready else None
         if workflow is not None and workflow.catalog is not None:
             catalog, default = workflow.catalog, workflow.model
         else:
-            catalog = ModelCatalog(endpoints=endpoints)  # not loaded: the shipped table
-            default = _resolved_role(role_map, "default", catalog, endpoints)
+            catalog = ModelCatalog(providers=providers)  # not loaded: the shipped table
+            default = _resolved_role(role_map, "default", catalog, providers)
 
         current: dict[str, str | None] = {"default": default}
         for role in roles:
@@ -703,18 +703,18 @@ class BaseCLIApp:
             if mapped is not None:
                 current[role] = str(mapped)
             elif role in BUILTIN_ROLES:
-                current[role] = _resolved_role(role_map, role, catalog, endpoints)
+                current[role] = _resolved_role(role_map, role, catalog, providers)
             else:
                 current[role] = default
         referenced = [*(ref for ref in current.values() if ref), *role_map.referenced()]
         return _ModelChoices(
             options=catalog.picker_refs(referenced=referenced, pinned=self._settings.pinned_models),
             current=current,
-            thinking=self._thinking_meaning(default, catalog, endpoints),
+            thinking=self._thinking_meaning(default, catalog, providers),
         )
 
     def _thinking_meaning(
-        self, model: str | None, catalog: "CatalogView", endpoints: "Mapping[str, Endpoint]"
+        self, model: str | None, catalog: "CatalogView", providers: "Mapping[str, Provider]"
     ) -> str | None:
         """``high → anthropic:claude-sonnet-4-6: adaptive, effort high``: the
         thinking effort, resolved on ``model`` as the workflow resolves it."""
@@ -731,7 +731,7 @@ class BaseCLIApp:
                 thinking_effort=effort,
                 roles=RoleMap(default_model=None, model_roles={}),  # a reference needs none
                 catalog=catalog,
-                endpoints=endpoints,
+                providers=providers,
             )
         except ModelResolutionError:
             return None
@@ -1848,13 +1848,13 @@ _MODEL_PICKER_MAX_WIDTH = 48
 
 
 def _resolved_role(
-    roles: "RoleMap", role: str, catalog: "CatalogView", endpoints: "Mapping[str, Endpoint]"
+    roles: "RoleMap", role: str, catalog: "CatalogView", providers: "Mapping[str, Provider]"
 ) -> str | None:
     """The reference ``role`` resolves to, or None when nothing can fill it."""
     from agentic_cli.models import ModelResolutionError
 
     try:
-        return str(roles.resolve(role, catalog=catalog, endpoints=endpoints))
+        return str(roles.resolve(role, catalog=catalog, providers=providers))
     except ModelResolutionError:
         return None
 

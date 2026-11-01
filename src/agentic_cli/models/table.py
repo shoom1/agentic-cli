@@ -29,7 +29,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from agentic_cli.models.endpoints import ProviderKind
+from agentic_cli.models.providers import ProviderKind
 from agentic_cli.models.records import (
     CacheMechanism,
     ModelRecord,

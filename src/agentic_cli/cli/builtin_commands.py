@@ -625,7 +625,7 @@ class ModelsCommand(Command):
             workflow = app.workflow
         except (RuntimeError, AttributeError):
             workflow = None
-        endpoints = model_services.endpoints_from_settings(app.settings)
+        providers = model_services.providers_from_settings(app.settings)
         catalog = getattr(workflow, "catalog", None)
         owned = catalog is None
         if owned:
@@ -635,14 +635,14 @@ class ModelsCommand(Command):
                 app.session.add_message(
                     "system", "The workflow is not initialized yet: showing the model cache."
                 )
-            catalog = model_services.build_catalog(app.settings, endpoints)
+            catalog = model_services.build_catalog(app.settings, providers)
             await catalog.load()
         try:
             if text.lower() == "refresh":
-                await _refresh_models(app, catalog, endpoints)
+                await _refresh_models(app, catalog, providers)
             else:
                 default = getattr(workflow, "model", None)
-                _show_models(app, catalog, endpoints, default, text)
+                _show_models(app, catalog, providers, default, text)
         finally:
             if owned:
                 await catalog.aclose()
@@ -669,11 +669,11 @@ _SOURCES = ("declared", "listing", "table", "default")
 
 
 def _show_models(
-    app: Any, catalog: "ModelCatalog", endpoints: Any, default: str | None, text: str
+    app: Any, catalog: "ModelCatalog", providers: Any, default: str | None, text: str
 ) -> None:
     """The status rows, then the models of each provider with credentials."""
     statuses = catalog.status()
-    app.session.add_rich(_status_table(statuses, endpoints))
+    app.session.add_rich(_status_table(statuses, providers))
     records = [
         record
         for status in statuses
@@ -688,7 +688,7 @@ def _show_models(
             f"No model matches {text!r}." if text else "No models: no provider has a key.",
         )
         return
-    roles = _roles_by_model(app.settings, catalog, endpoints, default)
+    roles = _roles_by_model(app.settings, catalog, providers, default)
     title = f"Models matching {text!r}" if text else "Models"
     table = Table(title=f"{title} ({len(records)})", show_lines=False, padding=(0, 1))
     table.add_column("Model", style="bold cyan", no_wrap=True)
@@ -713,7 +713,7 @@ def _show_models(
     app.session.add_rich(table)
 
 
-async def _refresh_models(app: Any, catalog: "ModelCatalog", endpoints: Any) -> None:
+async def _refresh_models(app: Any, catalog: "ModelCatalog", providers: Any) -> None:
     """List every provider with credentials again, and report what changed."""
     before = {s.provider: {r.model for r in catalog.records(s.provider)} for s in catalog.status()}
     statuses = await catalog.refresh()
@@ -734,10 +734,10 @@ async def _refresh_models(app: Any, catalog: "ModelCatalog", endpoints: Any) -> 
         app.session.add_message(
             "system", f"Listed {listed} provider(s) again: their models are unchanged."
         )
-    app.session.add_rich(_status_table(catalog.status(), endpoints))
+    app.session.add_rich(_status_table(catalog.status(), providers))
 
 
-def _status_table(statuses: "list[ProviderStatus]", endpoints: Any) -> Table:
+def _status_table(statuses: "list[ProviderStatus]", providers: Any) -> Table:
     """One row per provider and endpoint. Never a key: only whether there is one."""
     now = time.time()
     table = Table(title="Providers", show_lines=False, padding=(0, 1))
@@ -748,8 +748,8 @@ def _status_table(statuses: "list[ProviderStatus]", endpoints: Any) -> Table:
     table.add_column("Models", justify="right", no_wrap=True)
     table.add_column("Error", style="red")
     for status in statuses:
-        endpoint = endpoints.get(status.provider)
-        if endpoint is not None and endpoint.kind.value == "openai_compatible":
+        provider = providers.get(status.provider)
+        if provider is not None and provider.kind.value == "openai_compatible":
             credentials = "endpoint"
         else:
             credentials = "key" if status.has_credentials else "no key"
@@ -766,7 +766,7 @@ def _status_table(statuses: "list[ProviderStatus]", endpoints: Any) -> Table:
 
 
 def _roles_by_model(
-    settings: Any, catalog: "ModelCatalog", endpoints: Any, default: str | None
+    settings: Any, catalog: "ModelCatalog", providers: Any, default: str | None
 ) -> dict[str, list[str]]:
     """Each model's roles: the built-in ones (mapped or computed) and the mapped app roles."""
     from agentic_cli.models import BUILTIN_ROLES, ModelResolutionError
@@ -782,7 +782,7 @@ def _roles_by_model(
             ref = default
         else:
             try:
-                ref = str(role_map.resolve(role, catalog=catalog, endpoints=endpoints))
+                ref = str(role_map.resolve(role, catalog=catalog, providers=providers))
             except (ModelResolutionError, ValueError):
                 continue
         roles.setdefault(ref, []).append(role)

@@ -10,15 +10,15 @@ from __future__ import annotations
 import httpx
 
 from agentic_cli.models.discovery import ListedModel, count, entries, get_json, text
-from agentic_cli.models.endpoints import Endpoint
+from agentic_cli.models.providers import Provider
 
 #: The key sent to an endpoint that names none.
 PLACEHOLDER_KEY = "EMPTY"
 
 
-async def fetch(client: httpx.AsyncClient, endpoint: Endpoint) -> list[ListedModel]:
-    headers = {"authorization": f"Bearer {endpoint.api_key or PLACEHOLDER_KEY}"}
-    document = await get_json(client, f"{endpoint.base_url}/models", headers=headers)
+async def fetch(client: httpx.AsyncClient, provider: Provider) -> list[ListedModel]:
+    headers = {"authorization": f"Bearer {provider.api_key or PLACEHOLDER_KEY}"}
+    document = await get_json(client, f"{provider.base_url}/models", headers=headers)
     return [
         ListedModel(id=model_id, context_window=count(entry.get("max_model_len")))
         for entry in entries(document, "data")

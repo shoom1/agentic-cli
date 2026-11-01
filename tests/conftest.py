@@ -194,8 +194,8 @@ def _no_model_listings(monkeypatch: pytest.MonkeyPatch) -> None:
         async def load(self) -> None:
             return None
 
-    def build_catalog(settings, endpoints, *, transport=None):
-        return _UnlistedCatalog(endpoints=endpoints)
+    def build_catalog(settings, providers, *, transport=None):
+        return _UnlistedCatalog(providers=providers)
 
     monkeypatch.setattr(model_services, "build_catalog", build_catalog, raising=False)
 

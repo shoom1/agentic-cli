@@ -85,8 +85,8 @@ def providers(home, monkeypatch) -> ProviderAPI:
     api = ProviderAPI()
     cache = home / "home" / ".agentic_cli" / "model_cache.json"
 
-    def build_catalog(settings, endpoints, *, transport=None):
-        return ModelCatalog(endpoints=endpoints, cache_path=cache, transport=api.transport)
+    def build_catalog(settings, providers, *, transport=None):
+        return ModelCatalog(providers=providers, cache_path=cache, transport=api.transport)
 
     monkeypatch.setattr(model_services, "build_catalog", build_catalog)
     return api
@@ -931,8 +931,8 @@ class TestCatalogLifecycle:
         built: list[ModelCatalog] = []
         build = model_services.build_catalog
 
-        def recording(settings, endpoints, *, transport=None):
-            built.append(build(settings, endpoints))
+        def recording(settings, providers, *, transport=None):
+            built.append(build(settings, providers))
             return built[-1]
 
         monkeypatch.setattr(model_services, "build_catalog", recording)

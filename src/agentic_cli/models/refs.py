@@ -141,7 +141,7 @@ def validate_role_name(name: str) -> str:
     return name
 
 
-def validate_endpoint_name(name: str) -> str:
+def validate_provider_name(name: str) -> str:
     """Return ``name`` if it can name a user endpoint.
 
     Raises:

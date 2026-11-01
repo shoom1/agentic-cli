@@ -46,7 +46,7 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from agentic_cli.models.discovery import DEFAULT_TIMEOUT, ListedModel, Listing, list_models
-from agentic_cli.models.endpoints import DeclaredModel, Endpoint, ProviderKind
+from agentic_cli.models.providers import DeclaredModel, Provider, ProviderKind
 from agentic_cli.models.records import ModelRecord, ThinkingMechanism, ThinkingRule
 from agentic_cli.models.refs import ModelRef, ModelSpecError, parse_ref
 from agentic_cli.models.resolve import ModelResolutionError
@@ -118,7 +118,7 @@ class ProviderStatus:
 
 @dataclass
 class _Provider:
-    endpoint: Endpoint
+    provider: Provider
     state: ProviderState = ProviderState.UNATTEMPTED
     #: The last successful listing; kept through a failed refresh.
     listing: Listing | None = None
@@ -137,8 +137,8 @@ class ModelCatalog:
     """Records for every provider's models, from listings, declarations and the table.
 
     Args:
-        endpoints: Every provider and user endpoint, by name
-            (``build_endpoints``).
+        providers: Every provider and user endpoint, by name
+            (``build_providers``).
         cache_path: The listing cache; None keeps listings in memory only.
         table: The shipped table (the packaged one by default).
         ttl_seconds: How long a listing stays fresh.
@@ -151,7 +151,7 @@ class ModelCatalog:
     def __init__(
         self,
         *,
-        endpoints: Mapping[str, Endpoint],
+        providers: Mapping[str, Provider],
         cache_path: Path | None = None,
         table: ShippedTable | None = None,
         ttl_seconds: float = DEFAULT_TTL,
@@ -165,7 +165,7 @@ class ModelCatalog:
         self._transport = transport
         self._timeout = timeout
         self._clock = clock
-        self._providers = {name: _Provider(endpoint) for name, endpoint in endpoints.items()}
+        self._providers = {name: _Provider(provider) for name, provider in providers.items()}
         for provider in self._providers.values():
             self._rebuild(provider)
         # Cache entries this catalog does not use (a provider without
@@ -189,11 +189,11 @@ class ModelCatalog:
         to_list: list[str] = []
         for name, provider in self._providers.items():
             entry = cached.get(name)
-            if not provider.endpoint.has_credentials:
+            if not provider.provider.has_credentials:
                 if entry is not None:
                     self._kept[name] = entry
                 continue
-            if entry is None or entry.base_url != provider.endpoint.base_url:
+            if entry is None or entry.base_url != provider.provider.base_url:
                 to_list.append(name)
             else:
                 self._adopt(provider, entry)
@@ -213,7 +213,7 @@ class ModelCatalog:
         due = [
             name
             for name, provider in self._providers.items()
-            if provider.due and provider.endpoint.has_credentials
+            if provider.due and provider.provider.has_credentials
         ]
         if not due:
             return None
@@ -234,7 +234,7 @@ class ModelCatalog:
         """
         names = list(self._providers) if providers is None else list(dict.fromkeys(providers))
         names = [name for name in names if name in self._providers]
-        listable = [name for name in names if self._providers[name].endpoint.has_credentials]
+        listable = [name for name in names if self._providers[name].provider.has_credentials]
         await asyncio.gather(*(self._list(name) for name in listable))
         return [self._status(name) for name in names]
 
@@ -296,7 +296,7 @@ class ModelCatalog:
             raise ModelResolutionError(
                 f"Model {ref} is not available. Available {ref.provider} models: {shown}"
             )
-        return self._table.record_for(ref.provider, provider.endpoint.kind, ref.model)
+        return self._table.record_for(ref.provider, provider.provider.kind, ref.model)
 
     def records(self, provider: str) -> list[ModelRecord]:
         """The models offered for ``provider``: its listing's, else the fallbacks."""
@@ -325,8 +325,10 @@ class ModelCatalog:
         """
         chosen: dict[ModelRef, ModelRecord] = {}
         for provider in self._providers.values():
-            endpoint = provider.endpoint
-            if endpoint.has_credentials and endpoint.kind is not ProviderKind.OPENROUTER:
+            if (
+                provider.provider.has_credentials
+                and provider.provider.kind is not ProviderKind.OPENROUTER
+            ):
                 for record in provider.offered:
                     chosen.setdefault(record.ref, record)
         for spec in (*referenced, *pinned):
@@ -335,7 +337,7 @@ class ModelCatalog:
             except ModelSpecError:
                 continue
             provider = self._providers.get(ref.provider)
-            if ref in chosen or provider is None or not provider.endpoint.has_credentials:
+            if ref in chosen or provider is None or not provider.provider.has_credentials:
                 continue
             try:
                 chosen[ref] = self.record(ref)
@@ -359,7 +361,7 @@ class ModelCatalog:
     async def _list(self, name: str, *, startup: bool = False) -> None:
         provider = self._providers[name]
         listing = await list_models(
-            provider.endpoint, transport=self._transport, timeout=self._timeout, clock=self._clock
+            provider.provider, transport=self._transport, timeout=self._timeout, clock=self._clock
         )
         if listing.ok:
             provider.listing, provider.failure = listing, None
@@ -384,7 +386,7 @@ class ModelCatalog:
     def _adopt(self, provider: _Provider, entry: _CacheEntry) -> None:
         """Use a cache entry: fresh, stale, or a cached failure."""
         listing = Listing(
-            provider=provider.endpoint.name,
+            provider=provider.provider.name,
             ok=entry.ok,
             models=tuple(ListedModel(**model.model_dump()) for model in entry.models),
             fetched_at=entry.fetched_at,
@@ -408,7 +410,7 @@ class ModelCatalog:
         latest = provider.listing or provider.failure
         return ProviderStatus(
             provider=name,
-            has_credentials=provider.endpoint.has_credentials,
+            has_credentials=provider.provider.has_credentials,
             state=provider.state,
             fetched_at=latest.fetched_at if latest is not None else None,
             model_count=len(provider.offered),
@@ -424,10 +426,10 @@ class ModelCatalog:
         provider.offered = tuple(offered)
 
     def _records_for(self, provider: _Provider) -> tuple[dict[str, ModelRecord], list[ModelRecord]]:
-        endpoint, listing = provider.endpoint, provider.listing
-        name, kind = endpoint.name, endpoint.kind
+        listing = provider.listing
+        name, kind = provider.provider.name, provider.provider.kind
         if kind is ProviderKind.OPENAI_COMPATIBLE:
-            return self._endpoint_records(endpoint, listing)
+            return self._endpoint_records(provider.provider, listing)
         if listing is None:
             models = self._table.fallback_models(kind)
             fallback = [self._table.record_for(name, kind, model) for model in models]
@@ -504,17 +506,17 @@ class ModelCatalog:
         )
 
     def _endpoint_records(
-        self, endpoint: Endpoint, listing: Listing | None
+        self, provider: Provider, listing: Listing | None
     ) -> tuple[dict[str, ModelRecord], list[ModelRecord]]:
         """Declared models (always), then the served ones nobody declared."""
         served = {model.id: model for model in listing.models} if listing is not None else {}
         records: dict[str, ModelRecord] = {}
-        for model_id, declared in endpoint.models.items():
-            records[model_id] = self._declared(endpoint, model_id, declared, served.get(model_id))
+        for model_id, declared in provider.models.items():
+            records[model_id] = self._declared(provider, model_id, declared, served.get(model_id))
         for model_id, listed in served.items():
             if model_id not in records:
                 # Not declared: assumed tool-capable (the conservative record).
-                record = self._table.record_for(endpoint.name, endpoint.kind, model_id)
+                record = self._table.record_for(provider.name, provider.kind, model_id)
                 records[model_id] = _merge(
                     record,
                     "listing",
@@ -525,12 +527,12 @@ class ModelCatalog:
 
     def _declared(
         self,
-        endpoint: Endpoint,
+        provider: Provider,
         model_id: str,
         declared: DeclaredModel,
         listed: ListedModel | None,
     ) -> ModelRecord:
-        record = self._table.record_for(endpoint.name, endpoint.kind, model_id)
+        record = self._table.record_for(provider.name, provider.kind, model_id)
         if listed is not None:
             record = _merge(
                 record,
@@ -592,7 +594,7 @@ class ModelCatalog:
                     "fetched_at": listing.fetched_at,
                     "ok": listing.ok,
                     "error": listing.error,
-                    "base_url": provider.endpoint.base_url,
+                    "base_url": provider.provider.base_url,
                     "models": [dataclasses.asdict(model) for model in listing.models],
                 }
         try:

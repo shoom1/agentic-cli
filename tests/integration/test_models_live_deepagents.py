@@ -114,8 +114,8 @@ def listed(monkeypatch):
     (``tests/conftest.py`` otherwise gives every manager an unlisted catalog.)
     """
 
-    def build_catalog(settings, endpoints, *, transport=None):
-        return ModelCatalog(endpoints=endpoints)
+    def build_catalog(settings, providers, *, transport=None):
+        return ModelCatalog(providers=providers)
 
     monkeypatch.setattr(model_services, "build_catalog", build_catalog)
 

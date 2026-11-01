@@ -96,7 +96,7 @@ def test_every_model_picker_offers_exactly_the_runnable_models():
 
     items = _items(_app(settings))
 
-    catalog = ModelCatalog(endpoints=model_services.endpoints_from_settings(settings))
+    catalog = ModelCatalog(providers=model_services.providers_from_settings(settings))
     runnable = catalog.picker_refs(
         referenced=["openrouter:qwen/qwen3-235b-a22b"], pinned=settings.pinned_models
     )
@@ -112,7 +112,7 @@ def test_every_model_picker_offers_exactly_the_runnable_models():
 async def test_once_the_workflow_is_ready_the_pickers_offer_its_catalog():
     settings = BaseSettings(google_api_key="k-g")
     catalog = ModelCatalog(
-        endpoints=model_services.endpoints_from_settings(settings),
+        providers=model_services.providers_from_settings(settings),
         transport=ProviderAPI().transport,
     )
     await catalog.load()
@@ -135,7 +135,7 @@ async def test_a_picker_s_menu_shows_every_model_whole():
     which a picker's is, up to the room its dialog leaves it."""
     settings = BaseSettings(google_api_key="k-g", anthropic_api_key="k-a")
     catalog = ModelCatalog(
-        endpoints=model_services.endpoints_from_settings(settings),
+        providers=model_services.providers_from_settings(settings),
         transport=ProviderAPI().transport,
     )
     await catalog.load()
@@ -265,7 +265,7 @@ def test_a_ready_workflow_describes_the_model_it_runs():
         google_api_key="k-g", anthropic_api_key="k-a",
         default_model="gemini-2.5-flash", thinking_effort="high",
     )
-    catalog = ModelCatalog(endpoints=model_services.endpoints_from_settings(settings))
+    catalog = ModelCatalog(providers=model_services.providers_from_settings(settings))
     workflow = SimpleNamespace(catalog=catalog, model="anthropic:claude-sonnet-4-6")
 
     description = _items(_app(settings, workflow))["thinking_effort"].description
@@ -476,8 +476,8 @@ def listed(monkeypatch) -> ProviderAPI:
     """Every catalog a manager builds lists the recorded payloads."""
     api = ProviderAPI()
 
-    def build_catalog(settings, endpoints, *, transport=None):
-        return ModelCatalog(endpoints=endpoints, transport=api.transport)
+    def build_catalog(settings, providers, *, transport=None):
+        return ModelCatalog(providers=providers, transport=api.transport)
 
     monkeypatch.setattr(model_services, "build_catalog", build_catalog)
     return api

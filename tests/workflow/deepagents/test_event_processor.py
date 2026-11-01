@@ -52,10 +52,10 @@ from agentic_cli.workflow.deepagents.event_processor import (  # noqa: E402
 from agentic_cli.workflow.deepagents.tools import to_langchain_tools  # noqa: E402
 from agentic_cli.workflow.events import EventType, WorkflowEvent  # noqa: E402
 from agentic_cli.workflow.live_events import LiveEvents, merged  # noqa: E402
-from tests.models.fakes import endpoints  # noqa: E402
+from tests.models.fakes import providers  # noqa: E402
 from tests.workflow.deepagents.fakes import ScriptedChat, ai, task  # noqa: E402
 
-_ENDPOINTS = endpoints(anthropic="a-test-key", google="g-test-key", openai="o-test-key")
+_PROVIDERS = providers(anthropic="a-test-key", google="g-test-key", openai="o-test-key")
 
 
 def _model(agent: str, spec: str):
@@ -66,8 +66,8 @@ def _model(agent: str, spec: str):
         generation=None,
         thinking_effort="none",
         roles=RoleMap(default_model=None, model_roles={}),
-        catalog=ModelCatalog(endpoints=_ENDPOINTS),
-        endpoints=_ENDPOINTS,
+        catalog=ModelCatalog(providers=_PROVIDERS),
+        providers=_PROVIDERS,
     )
 
 

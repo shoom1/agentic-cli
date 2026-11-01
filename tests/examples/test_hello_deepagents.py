@@ -46,8 +46,8 @@ class Unlisted(ModelCatalog):
         return None
 
 
-model_services.build_catalog = lambda settings, endpoints, *, transport=None: Unlisted(
-    endpoints=endpoints
+model_services.build_catalog = lambda settings, providers, *, transport=None: Unlisted(
+    providers=providers
 )
 manager_module.build_chat_model = ScriptedModels(assistant=[
     ai(calls=[("calculate", {{"expression": "6 * 7"}}), ("echo", {{"message": "hi"}})]),

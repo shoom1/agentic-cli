@@ -29,11 +29,11 @@ from agentic_cli.workflow.events import (
 )
 from agentic_cli.models import (
     CatalogView,
-    Endpoint,
     ModelCatalog,
     ModelRef,
     ModelResolutionError,
     ModelSpecError,
+    Provider,
     ResolvedModel,
     RoleMap,
     resolve_model,
@@ -1064,18 +1064,18 @@ class BaseWorkflowManager(ABC):
         from agentic_cli.config import SettingsValidationError
         from agentic_cli.workflow import model_services
 
-        endpoints = model_services.endpoints_from_settings(self._settings)
-        self._catalog = model_services.build_catalog(self._settings, endpoints)
+        providers = model_services.providers_from_settings(self._settings)
+        self._catalog = model_services.build_catalog(self._settings, providers)
         await self._catalog.load()
         try:
-            self._resolve_models(endpoints)
+            self._resolve_models(providers)
         except SettingsValidationError:
             # A cached listing can predate a model the provider now serves.
             if not await self._catalog.confirm_rejections():
                 raise
-            self._resolve_models(endpoints)
+            self._resolve_models(providers)
 
-    def _resolve_models(self, endpoints: Mapping[str, Endpoint]) -> None:
+    def _resolve_models(self, providers: Mapping[str, Provider]) -> None:
         """Resolve the default model and every agent's, all or nothing.
 
         Every agent is resolved before any backend object is built, and every
@@ -1098,7 +1098,7 @@ class BaseWorkflowManager(ABC):
         default = None
         for config in (None, *self._agent_configs):
             try:
-                model = self._resolve_for(config, roles, self._catalog, endpoints)
+                model = self._resolve_for(config, roles, self._catalog, providers)
             except ModelResolutionError as exc:
                 errors.append(str(exc))
                 continue
@@ -1121,7 +1121,7 @@ class BaseWorkflowManager(ABC):
         config: AgentConfig | None,
         roles: RoleMap,
         catalog: CatalogView,
-        endpoints: Mapping[str, Endpoint],
+        providers: Mapping[str, Provider],
     ) -> ResolvedModel:
         """One agent's model (None: the manager's default model)."""
         return resolve_model(
@@ -1131,7 +1131,7 @@ class BaseWorkflowManager(ABC):
             thinking_effort=self._settings.thinking_effort,
             roles=roles,
             catalog=catalog,
-            endpoints=endpoints,
+            providers=providers,
         )
 
     def _simple_model(self, max_tokens: int, agent: str | None = None) -> ResolvedModel:
@@ -1157,17 +1157,17 @@ class BaseWorkflowManager(ABC):
             thinking_effort="none",
             roles=RoleMap(default_model=None, model_roles={}),  # a reference needs none
             catalog=self._catalog,
-            endpoints={base.endpoint.name: base.endpoint},
+            providers={base.provider.name: base.provider},
         )
 
     def _default_ref_without_listings(self) -> ModelRef:
         """The default role's model, from settings and the shipped table only."""
         from agentic_cli.workflow import model_services
 
-        endpoints = model_services.endpoints_from_settings(self._settings)
+        providers = model_services.providers_from_settings(self._settings)
         roles = model_services.role_map_from_settings(self._settings, self._model_override)
-        catalog = ModelCatalog(endpoints=endpoints)  # never loaded: the shipped table
-        return roles.resolve("default", catalog=catalog, endpoints=endpoints)
+        catalog = ModelCatalog(providers=providers)  # never loaded: the shipped table
+        return roles.resolve("default", catalog=catalog, providers=providers)
 
     def _validate_agent_graph(self) -> "AgentGraph | None":
         """Validate the declared agent graph. Backends may narrow this.

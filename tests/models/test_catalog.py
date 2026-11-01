@@ -28,7 +28,7 @@ from agentic_cli.models import (
     load_table,
     resolve_model,
 )
-from tests.models.fakes import Clock, ProviderAPI, endpoints, hang, recorded, refuse
+from tests.models.fakes import Clock, ProviderAPI, hang, providers, recorded, refuse
 
 KEYS = {"google": "g-test-key", "anthropic": "a-test-key", "openai": "o-test-key"}
 VLLM = EndpointSpec(
@@ -42,7 +42,7 @@ VLLM = EndpointSpec(
 
 def catalog_for(api: ProviderAPI | None = None, *, specs=None, clock=None, **keys) -> ModelCatalog:
     return ModelCatalog(
-        endpoints=endpoints(specs=specs or {}, **keys),
+        providers=providers(specs=specs or {}, **keys),
         transport=(api or ProviderAPI()).transport,
         clock=clock or Clock(),
     )
@@ -229,7 +229,7 @@ class TestAnthropic:
         resolved = resolve_model(
             agent="writer", spec=f"anthropic:{model}", generation=None, thinking_effort="none",
             roles=RoleMap(default_model=None, model_roles={}), catalog=catalog,
-            endpoints=endpoints(anthropic=KEYS["anthropic"]),
+            providers=providers(anthropic=KEYS["anthropic"]),
         )
 
         assert resolved.thinking == expected
@@ -435,11 +435,11 @@ class TestRoles:
     async def test_fallback_records_fill_the_roles_on_an_offline_first_run(self):
         catalog = await loaded(ProviderAPI(google=refuse), google=KEYS["google"])
         roles = RoleMap(default_model=None, model_roles={})
-        eps = endpoints(google=KEYS["google"])
+        keyed = providers(google=KEYS["google"])
 
         assert catalog.status()[0].state is ProviderState.DEGRADED
         resolved = {
-            role: str(roles.resolve(role, catalog=catalog, endpoints=eps))
+            role: str(roles.resolve(role, catalog=catalog, providers=keyed))
             for role in ("default", "fast", "strong")
         }
         assert resolved == {
@@ -451,10 +451,10 @@ class TestRoles:
     async def test_a_fresh_listing_fills_the_roles_with_its_newest(self):
         catalog = await loaded(anthropic=KEYS["anthropic"])
         roles = RoleMap(default_model=None, model_roles={})
-        eps = endpoints(anthropic=KEYS["anthropic"])
+        keyed = providers(anthropic=KEYS["anthropic"])
 
         def role(name: str) -> str:
-            return str(roles.resolve(name, catalog=catalog, endpoints=eps))
+            return str(roles.resolve(name, catalog=catalog, providers=keyed))
 
         assert role("default") == "anthropic:claude-sonnet-5-5"
         assert role("strong") == "anthropic:claude-opus-4-7"
@@ -536,7 +536,7 @@ class TestLoad:
         assert refused.record(ModelRef("google", "gemini-9-ultra")).model == "gemini-9-ultra"
 
         hung = ModelCatalog(
-            endpoints=endpoints(google=KEYS["google"], anthropic=KEYS["anthropic"]),
+            providers=providers(google=KEYS["google"], anthropic=KEYS["anthropic"]),
             transport=ProviderAPI(google=hang, anthropic=hang).transport,
             timeout=0.3,
         )
@@ -629,11 +629,11 @@ class TestRefresh:
 
     async def test_aclose_cancels_the_background_refresh(self, tmp_path):
         clock, cache = Clock(), tmp_path / "model_cache.json"
-        eps = endpoints(google=KEYS["google"])
-        await ModelCatalog(endpoints=eps, cache_path=cache, transport=ProviderAPI().transport,
+        keyed = providers(google=KEYS["google"])
+        await ModelCatalog(providers=keyed, cache_path=cache, transport=ProviderAPI().transport,
                            clock=clock).load()
         clock.now += 2 * 86400  # the cached listing is now stale
-        catalog = ModelCatalog(endpoints=eps, cache_path=cache,
+        catalog = ModelCatalog(providers=keyed, cache_path=cache,
                                transport=ProviderAPI(google=hang).transport, clock=clock)
         await catalog.load()
         task = catalog.start_background_refresh()

@@ -1,4 +1,4 @@
-"""Provider kinds and named endpoints.
+"""Provider kinds, the built-in providers and the user's named endpoints.
 
 Four providers are built in: Google, Anthropic and OpenAI on their SDK's
 default host, and OpenRouter. A user adds OpenAI-compatible servers (vLLM and
@@ -23,7 +23,7 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from agentic_cli.models.refs import validate_endpoint_name
+from agentic_cli.models.refs import validate_provider_name
 
 
 class ProviderKind(str, Enum):
@@ -147,8 +147,8 @@ class EndpointSpec(BaseModel):
 
 
 @dataclass(frozen=True)
-class Endpoint:
-    """A provider the workflow can send requests to.
+class Provider:
+    """A provider the workflow can send requests to: a built-in or a user endpoint.
 
     ``base_url`` is None for Google, Anthropic and OpenAI (the SDK's default
     host). ``api_key`` never appears in ``repr``.
@@ -168,10 +168,10 @@ class Endpoint:
         return bool(self.api_key)
 
 
-def build_endpoints(
+def build_providers(
     *, keys: Mapping[str, str | None], specs: Mapping[str, EndpointSpec], env: Mapping[str, str]
-) -> dict[str, Endpoint]:
-    """The four built-in providers plus one endpoint per spec.
+) -> dict[str, Provider]:
+    """The four built-in providers plus one provider per endpoint spec.
 
     Args:
         keys: Each built-in provider's key (``google``, ``anthropic``,
@@ -185,21 +185,21 @@ def build_endpoints(
         ModelSpecError: If an endpoint name is malformed or reuses a built-in
             provider name.
     """
-    endpoints: dict[str, Endpoint] = {}
+    providers: dict[str, Provider] = {}
     for kind in _BUILTIN_KINDS:
-        endpoints[kind.value] = Endpoint(
+        providers[kind.value] = Provider(
             name=kind.value,
             kind=kind,
             base_url=_BUILTIN_BASE_URLS.get(kind),
             api_key=keys.get(kind.value) or None,
         )
     for name, spec in specs.items():
-        validate_endpoint_name(name)
-        endpoints[name] = Endpoint(
+        validate_provider_name(name)
+        providers[name] = Provider(
             name=name,
             kind=ProviderKind.OPENAI_COMPATIBLE,
             base_url=spec.base_url,
             api_key=(env.get(spec.api_key_env) or None) if spec.api_key_env else None,
             models=MappingProxyType(dict(spec.models)),
         )
-    return endpoints
+    return providers

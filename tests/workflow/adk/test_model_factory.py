@@ -53,7 +53,7 @@ from agentic_cli.workflow.adk.anthropic_llm import (  # noqa: E402
 from agentic_cli.workflow.adk.model_factory import AdkModel, build_adk_model  # noqa: E402
 from agentic_cli.workflow.adk.openai_compatible import OpenAICompatibleLlm  # noqa: E402
 from agentic_cli.workflow.model_settings import ModelSettings, ThinkingSettings  # noqa: E402
-from tests.models.fakes import FakeCatalog, endpoints  # noqa: E402
+from tests.models.fakes import FakeCatalog, providers  # noqa: E402
 from tests.workflow.adk.fakes import (  # noqa: E402
     FakeAPI,
     anthropic_message,
@@ -127,8 +127,8 @@ def resolved(
     """
     if thinking is not None:
         generation["thinking"] = ThinkingSettings(mode=thinking, budget_tokens=budget)
-    every = endpoints(**KEYS, specs=LOCAL, env={"LOCAL_KEY": "l-test-key"})
-    declared = ModelCatalog(endpoints=every)  # never loaded: declarations and the table
+    every = providers(**KEYS, specs=LOCAL, env={"LOCAL_KEY": "l-test-key"})
+    declared = ModelCatalog(providers=every)  # never loaded: declarations and the table
     catalog = FakeCatalog([
         OPENROUTER_REASONER,
         *declared.records("local"),
@@ -141,7 +141,7 @@ def resolved(
         thinking_effort=effort,
         roles=RoleMap(default_model=None, model_roles={}),
         catalog=catalog,
-        endpoints=every,
+        providers=every,
     )
 
 

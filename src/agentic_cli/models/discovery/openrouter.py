@@ -14,12 +14,12 @@ from typing import Any
 import httpx
 
 from agentic_cli.models.discovery import ListedModel, child, count, entries, get_json, text
-from agentic_cli.models.endpoints import OPENROUTER_BASE_URL, Endpoint
+from agentic_cli.models.providers import OPENROUTER_BASE_URL, Provider
 
 
-async def fetch(client: httpx.AsyncClient, endpoint: Endpoint) -> list[ListedModel]:
-    headers = {"authorization": f"Bearer {endpoint.api_key}"} if endpoint.api_key else {}
-    url = f"{endpoint.base_url or OPENROUTER_BASE_URL}/models"
+async def fetch(client: httpx.AsyncClient, provider: Provider) -> list[ListedModel]:
+    headers = {"authorization": f"Bearer {provider.api_key}"} if provider.api_key else {}
+    url = f"{provider.base_url or OPENROUTER_BASE_URL}/models"
     document = await get_json(client, url, headers=headers)
     models = (_model(entry) for entry in entries(document, "data"))
     return [model for model in models if model is not None]

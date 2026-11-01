@@ -21,7 +21,7 @@ from agentic_cli.models import (
     ModelResolutionError,
     ProviderState,
 )
-from tests.models.fakes import Clock, ProviderAPI, endpoints, hang, recorded, refuse
+from tests.models.fakes import Clock, ProviderAPI, hang, providers, recorded, refuse
 
 DAY = 86400.0
 KEYS = {
@@ -36,7 +36,7 @@ VLLM = EndpointSpec(base_url="http://gpu-box:8000/v1", api_key_env="VLLM_KEY")
 
 def make(cache, api=None, *, clock=None, specs=None, **keys) -> ModelCatalog:
     return ModelCatalog(
-        endpoints=endpoints(specs=specs or {}, env={"VLLM_KEY": ENDPOINT_KEY}, **keys),
+        providers=providers(specs=specs or {}, env={"VLLM_KEY": ENDPOINT_KEY}, **keys),
         cache_path=cache,
         transport=(api or ProviderAPI()).transport,
         clock=clock or Clock(),
@@ -111,8 +111,8 @@ async def test_an_endpoint_entry_records_its_base_url(cache):
 
 
 async def test_no_cache_path_means_no_file(tmp_path):
-    eps = endpoints(google=KEYS["google"])
-    catalog = ModelCatalog(endpoints=eps, transport=ProviderAPI().transport)
+    keyed = providers(google=KEYS["google"])
+    catalog = ModelCatalog(providers=keyed, transport=ProviderAPI().transport)
 
     await catalog.load()
 

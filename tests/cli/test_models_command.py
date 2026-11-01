@@ -66,9 +66,9 @@ def api(monkeypatch) -> ProviderAPI:
     """Every catalog built for the settings lists ``api``'s answers, and caches them."""
     fake = ProviderAPI()
 
-    def build_catalog(settings, endpoints, *, transport=None):
+    def build_catalog(settings, providers, *, transport=None):
         return ModelCatalog(
-            endpoints=endpoints,
+            providers=providers,
             cache_path=model_services.model_cache_path(settings),
             transport=fake.transport,
         )
@@ -142,7 +142,7 @@ async def models(app: App, args: str = "") -> Screen:
 
 async def _ready(settings: BaseSettings, api: ProviderAPI, model: str) -> SimpleNamespace:
     """A ready workflow's view: its loaded catalog and its default model."""
-    catalog = model_services.build_catalog(settings, model_services.endpoints_from_settings(settings))
+    catalog = model_services.build_catalog(settings, model_services.providers_from_settings(settings))
     await catalog.load()
     return SimpleNamespace(catalog=catalog, model=model)
 

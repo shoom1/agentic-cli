@@ -31,7 +31,7 @@ from typing import Any
 
 import httpx
 
-from agentic_cli.models.endpoints import Endpoint, ProviderKind
+from agentic_cli.models.providers import Provider, ProviderKind
 
 logger = logging.getLogger(__name__)
 
@@ -87,16 +87,16 @@ class ListingError(Exception):
 
 
 async def list_models(
-    endpoint: Endpoint,
+    provider: Provider,
     *,
     transport: httpx.AsyncBaseTransport | None = None,
     timeout: float = DEFAULT_TIMEOUT,
     clock: Callable[[], float] = time.time,
 ) -> Listing:
-    """List the models ``endpoint`` serves.
+    """List the models ``provider`` serves.
 
     Args:
-        endpoint: The provider or user endpoint to ask.
+        provider: The provider or user endpoint to ask.
         transport: The HTTP transport (a fake one in tests). The caller keeps
             ownership: it is not closed here, so one transport can serve
             several listings at once.
@@ -107,14 +107,14 @@ async def list_models(
         The listing; a failed one for any HTTP, network or response-shape
         problem, never an exception.
     """
-    fetch = _fetcher(endpoint.kind)
+    fetch = _fetcher(provider.kind)
     try:
         async with asyncio.timeout(timeout):
             async with httpx.AsyncClient(
                 transport=_Borrowed(transport) if transport is not None else None,
                 timeout=timeout,
             ) as client:
-                models = await fetch(client, endpoint)
+                models = await fetch(client, provider)
     except (TimeoutError, httpx.TimeoutException):
         error = f"timed out after {timeout:g}s"
     except httpx.HTTPStatusError as exc:
@@ -125,14 +125,14 @@ async def list_models(
     except ListingError as exc:
         error = str(exc)
     except Exception as exc:  # noqa: BLE001 - a listing never fails startup
-        logger.debug("Listing %s raised", endpoint.name, exc_info=True)
+        logger.debug("Listing %s raised", provider.name, exc_info=True)
         error = f"unexpected response ({type(exc).__name__})"
     else:
-        return Listing(provider=endpoint.name, ok=True, models=tuple(models), fetched_at=clock())
+        return Listing(provider=provider.name, ok=True, models=tuple(models), fetched_at=clock())
 
-    error = _redact(error, endpoint.api_key)
-    logger.debug("Listing %s failed: %s", endpoint.name, error)
-    return Listing(provider=endpoint.name, ok=False, models=(), fetched_at=clock(), error=error)
+    error = _redact(error, provider.api_key)
+    logger.debug("Listing %s failed: %s", provider.name, error)
+    return Listing(provider=provider.name, ok=False, models=(), fetched_at=clock(), error=error)
 
 
 # --- helpers for the listers ---------------------------------------------------
@@ -237,7 +237,7 @@ class _Borrowed(httpx.AsyncBaseTransport):
 
 def _fetcher(
     kind: ProviderKind,
-) -> Callable[[httpx.AsyncClient, Endpoint], Awaitable[list[ListedModel]]]:
+) -> Callable[[httpx.AsyncClient, Provider], Awaitable[list[ListedModel]]]:
     # Imported here: the listers import this module's types and helpers.
     from agentic_cli.models.discovery import (
         anthropic,
