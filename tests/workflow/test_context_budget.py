@@ -175,8 +175,7 @@ class TestContextBudget:
             context_budget(model, settings())
 
         # An endpoint model's usual fix: say how large its window is.
-        assert "context_window" in str(caught.value)
-        assert "model_endpoints" in str(caught.value)
+        assert "Set the model's context_window in models" in str(caught.value)
 
     def test_a_known_window_is_not_told_to_declare_one(self):
         small = windowed(resolved(SONNET), 20_000)
@@ -184,7 +183,7 @@ class TestContextBudget:
         with pytest.raises(ContextBudgetError) as caught:
             context_budget(small, settings())
 
-        assert "model_endpoints" not in str(caught.value)
+        assert "context_window" not in str(caught.value)
 
     def test_a_window_too_small_for_any_max_tokens_says_so(self):
         # A local 16k model with no max_tokens: B = 15,564. No max_tokens can

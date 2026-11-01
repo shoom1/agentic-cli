@@ -7,25 +7,38 @@ HITL (human-in-the-loop), memory management, API keys, and tool configuration.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from enum import Enum
-from typing import Literal, get_args
+from typing import Annotated, Any, Literal, get_args
 
-from pydantic import AliasChoices, BaseModel, Field, field_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    Field,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 from agentic_cli.logging import Loggers
 from agentic_cli.models import (
     EndpointSpec,
+    ModelEntry,
     ModelSpecError,
     RoleMap,
     parse_ref,
     validate_provider_name,
 )
+from agentic_cli.models.entries import check_entries
 from agentic_cli.workflow.context import MIN_BUDGET
 
 logger = Loggers.config()
 
 #: The global thinking effort, applied to every agent without its own.
 _ThinkingEffort = Literal["none", "low", "medium", "high"]
+#: The settings an app's settings class ships entries in, merged with the
+#: sources' entries rather than replaced by them (``_merge_shipped_entries``).
+_SHIPPED_ENTRY_FIELDS = ("models",)
 
 
 class PermissionRuleConfig(BaseModel):
@@ -54,8 +67,9 @@ class WorkflowSettingsMixin:
     """Settings for agentic workflow configuration.
 
     Mixin class that provides workflow-specific settings including:
-    - Model selection: the default model, roles, pinned models and the
-      user's endpoints (read through ``workflow.model_services``)
+    - Model selection: the default model, roles, the models list
+      (``models``) and the user's endpoints (read through
+      ``workflow.model_services``)
     - Provider API keys
     - Orchestrator and retry settings
     - Tool configuration (web search/fetch, KB, shell, executor)
@@ -88,32 +102,50 @@ class WorkflowSettingsMixin:
     #
     # model_endpoints is user-only (not in PROJECT_SETTABLE_KEYS): it holds base
     # URLs, so a project file that could set it could send the user's key to
-    # its own server. model_roles and pinned_models only choose among providers
-    # and endpoints the user defined, so a project may set them.
+    # its own server. model_roles and models only choose among providers and
+    # endpoints the user defined (an entry's numbers are hints), so a project
+    # may set them.
     model_endpoints: dict[str, EndpointSpec] = Field(
         default_factory=dict,
         title="Model Endpoints",
         description=(
-            "OpenAI-compatible servers (vLLM and the like) by name: base_url, the "
-            "environment variable holding the key (api_key_env), and the models "
-            "served. User settings only."
+            "OpenAI-compatible servers (vLLM and the like) by name: base_url and the "
+            "environment variable holding the key (api_key_env). User settings only."
         ),
     )
-    model_roles: dict[str, str] = Field(
-        default_factory=dict,
-        title="Model Roles",
-        description=(
-            "The model for each role other than default (fast, strong, or an app's "
-            "own), as a provider:model reference or a model id"
+    # model_roles and models are declared in Annotated form, with no class
+    # attribute: an app's settings class overrides their defaults, and pydantic
+    # warns when a field shadows an attribute of a parent class.
+    model_roles: Annotated[
+        dict[str, str],
+        Field(
+            default_factory=dict,
+            title="Model Roles",
+            description=(
+                "The model for each role other than default (fast, strong, or an app's "
+                "own), as a provider:model reference or a model id"
+            ),
+            json_schema_extra={"ui_order": 11},
         ),
-        json_schema_extra={"ui_order": 11},
-    )
-    pinned_models: list[str] = Field(
-        default_factory=list,
-        title="Pinned Models",
-        description="Models the model pickers always offer, as provider:model references",
-        json_schema_extra={"ui_order": 12},
-    )
+    ]
+    # An app ships its list by overriding this default in its settings class;
+    # the user's, the project's and the environment's entries are merged into
+    # it field by field (_merge_shipped_entries). No save writes it
+    # (settings_persistence.HAND_EDITED_KEYS), nor does the /settings dialog
+    # show it.
+    models: Annotated[
+        dict[str, ModelEntry],
+        Field(
+            default_factory=dict,
+            title="Models",
+            description=(
+                "The models the model pickers offer, by provider:model reference, each "
+                "with optional details: context_window, max_output, tools, image_input, "
+                "and for a model on a model_providers provider thinking, effort_levels and "
+                "reasoning_text. An app ships its list; user and project settings add to it."
+            ),
+        ),
+    ]
 
     # When a conversation is summarized, on every backend (workflow/context.py):
     # at context_summarize_at of the model's input budget, or at
@@ -490,15 +522,38 @@ class WorkflowSettingsMixin:
         RoleMap(default_model=None, model_roles=v)
         return v
 
-    @field_validator("pinned_models")
+    @field_validator("models")
     @classmethod
-    def _validate_pinned_models(cls, v: list[str]) -> list[str]:
-        for index, spec in enumerate(v):
-            try:
-                parse_ref(spec)
-            except ModelSpecError as exc:
-                raise ValueError(f"pinned_models[{index}]: {exc}") from None
-        return v
+    def _validate_models(cls, v: dict[str, ModelEntry]) -> dict[str, ModelEntry]:
+        """Each key a provider:model reference; no thinking fields on a built-in's model."""
+        return check_entries(v)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _merge_shipped_entries(cls, data: Any, info: ValidationInfo) -> Any:
+        """The app's shipped entries, then the sources' over them, field by field.
+
+        pydantic-settings merges a dict setting across the user file, the
+        project file and the environment key by key, but a value from any of
+        them replaces the class default, where an app ships its entries: so
+        the merge is done here, on the raw values, before validation (a
+        partial override of an entry validates). The merged value is always
+        put in the input, so the app's own entries are validated too.
+
+        An assignment (``update_setting``) sets the value it is given: pydantic
+        validates only the field assigned there, and takes the rest of what
+        this returns as the object's other fields, unvalidated, so nothing is
+        changed.
+        """
+        if info.field_name is not None or not isinstance(data, dict):
+            return data
+        merged = dict(data)
+        for name in _SHIPPED_ENTRY_FIELDS:
+            shipped = cls.model_fields[name].get_default(call_default_factory=True) or {}
+            given = data.get(name, {})
+            if (shipped or name in data) and isinstance(given, Mapping):
+                merged[name] = _merged_entries(shipped, given)
+        return merged
 
     @field_validator("sandbox_network")
     @classmethod
@@ -778,3 +833,28 @@ class WorkflowSettingsMixin:
 
         if self.anthropic_api_key:
             os.environ["ANTHROPIC_API_KEY"] = self.anthropic_api_key
+
+
+def _merged_entries(shipped: Mapping[str, Any], given: Mapping[str, Any]) -> dict[str, Any]:
+    """The app's entries, then the sources' value, field by field.
+
+    Keys keep the shipped order, then the sources' new keys in theirs. An
+    entry that is neither a model nor a mapping is passed on as it is, for
+    validation to refuse.
+    """
+    merged = {key: _entry_fields(value) for key, value in shipped.items()}
+    for key, value in given.items():
+        fields, earlier = _entry_fields(value), merged.get(key)
+        if isinstance(earlier, dict) and isinstance(fields, dict):
+            fields = {**earlier, **fields}
+        merged[key] = fields
+    return merged
+
+
+def _entry_fields(value: Any) -> Any:
+    """An entry's fields as given: a model's set fields, a mapping's items."""
+    if isinstance(value, BaseModel):
+        return value.model_dump(exclude_unset=True)
+    if isinstance(value, Mapping):
+        return dict(value)
+    return value

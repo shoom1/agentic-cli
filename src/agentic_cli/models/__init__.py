@@ -9,6 +9,8 @@ both); each backend's adapter turns what it resolves into SDK objects.
 - ``refs``: ``provider:model`` references, bare model ids and role names.
 - ``providers``: provider kinds, the built-in providers and the user's
   OpenAI-compatible endpoints.
+- ``entries``: ``ModelEntry``, what the ``models`` setting says about one
+  model, keyed by its ``provider:model`` reference.
 - ``records``: ``ModelRecord``, what is known about one model, and its
   ``ThinkingRule``.
 - ``table``: the shipped table (``data/table.json``): family rules, per-model
@@ -18,16 +20,16 @@ both); each backend's adapter turns what it resolves into SDK objects.
 - ``resolve``: ``resolve_model``, one agent's model, thinking, ``max_tokens``
   and sampling settings as a ``ResolvedModel``.
 - ``discovery``: one lister per provider, over its REST API with httpx.
-- ``catalog``: ``ModelCatalog``, the records merged from declarations,
+- ``catalog``: ``ModelCatalog``, the records merged from ``models`` entries,
   listings and the table; which ids each provider rejects; the listing cache
   and its background refresh.
 """
 
 from agentic_cli.models.catalog import ModelCatalog, ProviderState, ProviderStatus
+from agentic_cli.models.entries import ModelEntry, parse_entry_key
 from agentic_cli.models.providers import (
     OPENROUTER_BASE_URL,
     PROVIDER_KEY_ENV,
-    DeclaredModel,
     EndpointSpec,
     Provider,
     ProviderKind,
@@ -67,10 +69,10 @@ __all__ = [
     "BUILTIN_ROLES",
     "CacheMechanism",
     "CatalogView",
-    "DeclaredModel",
     "EndpointSpec",
     "GenerationSettings",
     "ModelCatalog",
+    "ModelEntry",
     "ModelRecord",
     "ModelRef",
     "ModelResolutionError",
@@ -91,6 +93,7 @@ __all__ = [
     "ThinkingRule",
     "build_providers",
     "load_table",
+    "parse_entry_key",
     "parse_ref",
     "parse_spec",
     "resolve_model",

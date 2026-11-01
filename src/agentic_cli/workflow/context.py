@@ -12,8 +12,8 @@ resolved ``max_tokens``), with ``context_summarize_at`` f and
 - the trigger ``T = min(floor(f B), C)``, or ``floor(f B)`` when C is 0;
 - the tail kept word for word ``K = floor(0.12 T)``.
 
-A model whose window is unknown (an endpoint model without a declared
-window, an OpenRouter id before a listing) counts as ``UNKNOWN_WINDOW``. A
+A model whose window is unknown (an endpoint model whose ``models`` entry
+gives none, an OpenRouter id before a listing) counts as ``UNKNOWN_WINDOW``. A
 budget under ``MIN_BUDGET`` leaves no room to work in, so it fails where the
 agents are built, naming the model and its ``max_tokens``.
 
@@ -159,9 +159,8 @@ def context_budget(resolved: "ResolvedModel", settings: "BaseSettings") -> Conte
         else:
             size = f"unknown, {window:,} assumed"
             advice = (
-                "Declare the model's context_window (in model_endpoints for a model "
-                "your server serves), lower its max_tokens, or choose a model with a "
-                "larger window."
+                "Set the model's context_window in models, lower its max_tokens, or "
+                "choose a model with a larger window."
             )
         raise ContextBudgetError(
             f"{who} cannot work on {resolved.ref}: its window ({size}) less max_tokens "

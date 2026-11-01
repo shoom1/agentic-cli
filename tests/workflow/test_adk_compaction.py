@@ -374,8 +374,8 @@ class TestSummarizing:
         api = FakeAPI(openai_response())
         route(monkeypatch, openai, "AsyncOpenAI", api)
         manager = solo(
-            model_endpoints={"local": {"base_url": "http://localhost:8000/v1",
-                                       "models": {"tiny": {"context_window": 10_000}}}},
+            model_endpoints={"local": {"base_url": "http://localhost:8000/v1"}},
+            models={"local:tiny": {"context_window": 10_000}},
             default_model="local:tiny",
         )
 

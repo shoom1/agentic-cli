@@ -34,12 +34,8 @@ from tests.workflow.test_adk_context_cache import route_gemini  # noqa: E402
 from tests.workflow.test_manager_models import route  # noqa: E402
 
 #: The user's server: one model of unknown window (128,000 assumed), one of 20,000.
-ENDPOINTS = {
-    "local": {
-        "base_url": "http://localhost:8000/v1",
-        "models": {"unknown": {}, "small": {"context_window": 20_000}},
-    }
-}
+ENDPOINTS = {"local": {"base_url": "http://localhost:8000/v1"}}
+MODELS = {"local:unknown": {}, "local:small": {"context_window": 20_000}}
 HUGE = "word " * 24_000  # 120,000 characters, about 33,000 tokens with the margin
 BIG = "word " * 8_000  # 40,000 characters
 
@@ -93,7 +89,7 @@ def solo(model: str = "local:unknown", **values) -> GoogleADKWorkflowManager:
         agent_configs=[AgentConfig(name="solo", prompt="You help.",
                                    include_state_tools=values.pop("state_tools", False))],
         settings=BaseSettings(session_store="memory", model_endpoints=ENDPOINTS,
-                              default_model=model, **values),
+                              models=MODELS, default_model=model, **values),
     )
 
 
@@ -211,7 +207,7 @@ class TestASmallerSubAgent:
                             model="local:small", context="inherit", include_state_tools=False),
             ],
             settings=BaseSettings(session_store="memory", model_endpoints=ENDPOINTS,
-                                  default_model="claude-sonnet-4-6"),
+                                  models=MODELS, default_model="claude-sonnet-4-6"),
         )
         try:
             await turn(manager, f"One: {BIG}")

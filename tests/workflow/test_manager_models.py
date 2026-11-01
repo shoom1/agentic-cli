@@ -86,7 +86,12 @@ def providers(home, monkeypatch) -> ProviderAPI:
     cache = home / "home" / ".agentic_cli" / "model_cache.json"
 
     def build_catalog(settings, providers, *, transport=None):
-        return ModelCatalog(providers=providers, cache_path=cache, transport=api.transport)
+        return ModelCatalog(
+            providers=providers,
+            entries=model_services.entries_from_settings(settings),
+            cache_path=cache,
+            transport=api.transport,
+        )
 
     monkeypatch.setattr(model_services, "build_catalog", build_catalog)
     return api
@@ -107,13 +112,10 @@ def refreshing() -> list[asyncio.Task]:
     return [t for t in asyncio.all_tasks() if t.get_name() == REFRESH_TASK and not t.done()]
 
 
-#: A user's vLLM server, serving the recorded vllm.json listing.
-LOCAL = {
-    "local": {
-        "base_url": "http://localhost:8000/v1",
-        "models": {"Qwen/Qwen3-32B": {"thinking": "chat_template"}},
-    }
-}
+#: A user's vLLM server, serving the recorded vllm.json listing, and what the
+#: user says about one of its models.
+LOCAL = {"local": {"base_url": "http://localhost:8000/v1"}}
+LOCAL_MODELS = {"local:Qwen/Qwen3-32B": {"thinking": "chat_template"}}
 
 
 def route(monkeypatch, sdk, client_class: str, api: FakeAPI) -> None:
@@ -381,8 +383,8 @@ class TestAdkModels:
             AgentConfig(name="researcher", prompt="Research.", model="gemini-3-flash-preview"),
             AgentConfig(name="drafter", prompt="Draft.", model="local:Qwen/Qwen3-32B"),
         ]
-        manager = adk(configs, settings(model_endpoints=LOCAL, thinking_effort="high",
-                                         default_model="gemini-2.5-flash"))
+        manager = adk(configs, settings(model_endpoints=LOCAL, models=LOCAL_MODELS,
+                                         thinking_effort="high", default_model="gemini-2.5-flash"))
 
         await manager.initialize_services()
         try:
@@ -463,7 +465,8 @@ class TestGenerateSimple:
         api = FakeAPI(chat_completion("A summary."))
         route(monkeypatch, openai, "AsyncOpenAI", api)
         manager = adk(team(), settings(
-            model_endpoints=LOCAL, default_model="local:Qwen/Qwen3-32B", thinking_effort="high"
+            model_endpoints=LOCAL, models=LOCAL_MODELS, default_model="local:Qwen/Qwen3-32B",
+            thinking_effort="high",
         ))
         try:
             summary = await manager.generate_simple("Summarize this.", max_tokens=123)
@@ -674,7 +677,8 @@ class TestLangGraphModels:
             AgentConfig(name="researcher", prompt="Research.", model="gemini-3-flash-preview"),
             AgentConfig(name="drafter", prompt="Draft.", model="local:Qwen/Qwen3-32B"),
         ]
-        manager = _langgraph(configs, settings(model_endpoints=LOCAL, thinking_effort="high",
+        manager = _langgraph(configs, settings(model_endpoints=LOCAL, models=LOCAL_MODELS,
+                                               thinking_effort="high",
                                                default_model="gemini-2.5-flash"))
 
         await manager.initialize_services()
@@ -812,8 +816,8 @@ class TestLangGraphModels:
         lc.route(monkeypatch, openai, "AsyncOpenAI", FakeAPI(server._handle))
         manager = _langgraph(
             [AgentConfig(name="solo", prompt="Answer.")],
-            settings(model_endpoints=LOCAL, default_model="local:Qwen/Qwen3-32B",
-                     thinking_effort="high"),
+            settings(model_endpoints=LOCAL, models=LOCAL_MODELS,
+                     default_model="local:Qwen/Qwen3-32B", thinking_effort="high"),
         )
         try:
             events = await lg_turn(manager, "Hello")
@@ -887,7 +891,8 @@ class TestLangGraphGenerateSimple:
         api = FakeAPI(chat_completion("A summary."))
         lc.route(monkeypatch, openai, "AsyncOpenAI", api)
         manager = _langgraph(team(), settings(
-            model_endpoints=LOCAL, default_model="local:Qwen/Qwen3-32B", thinking_effort="high"
+            model_endpoints=LOCAL, models=LOCAL_MODELS, default_model="local:Qwen/Qwen3-32B",
+            thinking_effort="high",
         ))
         try:
             summary = await manager.generate_simple("Summarize this.", max_tokens=123)

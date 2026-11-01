@@ -48,7 +48,12 @@ def serve(monkeypatch, home: Path, api: ProviderAPI) -> None:
     cache = home / "home" / ".agentic_cli" / "model_cache.json"
 
     def build_catalog(settings, providers, *, transport=None):
-        return ModelCatalog(providers=providers, cache_path=cache, transport=api.transport)
+        return ModelCatalog(
+            providers=providers,
+            entries=model_services.entries_from_settings(settings),
+            cache_path=cache,
+            transport=api.transport,
+        )
 
     monkeypatch.setattr(model_services, "build_catalog", build_catalog)
 

@@ -412,8 +412,7 @@ class TestAnOverflowTheSummaryCanFix:
                                        include_state_tools=False)],
             settings=BaseSettings(session_store="memory", default_model="local:unknown",
                                   model_endpoints={"local": {
-                                      "base_url": "http://localhost:8000/v1",
-                                      "models": {"unknown": {}}}}),
+                                      "base_url": "http://localhost:8000/v1"}}),
         )
         try:
             failed = []

@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "about": "agentic-cli's shipped model table: family rules (first match wins, per provider) and per-model numbers. Live listings and the user's endpoint declarations take precedence over every value here.",
+  "about": "agentic-cli's shipped model table: family rules (first match wins, per provider) and per-model numbers. The models entries and live listings take precedence over every value here.",
   "providers": {
     "google": {
       "fallback_models": [

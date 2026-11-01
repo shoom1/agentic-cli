@@ -71,8 +71,8 @@ async def test_after_a_switch_to_a_small_undeclared_window_the_conversation_goes
         agent_configs=[AgentConfig(name="solo", prompt="You help.", include_state_tools=False)],
         settings=BaseSettings(
             session_store="memory", default_model="local:big",
-            model_endpoints={"local": {"base_url": "http://localhost:8000/v1", "models": {
-                "big": {"context_window": 1_000_000}, "small": {}}}},
+            model_endpoints={"local": {"base_url": "http://localhost:8000/v1"}},
+            models={"local:big": {"context_window": 1_000_000}, "local:small": {}},
         ),
     )
     note = "word " * 12_000  # 60,000 characters, about 15,000 tokens

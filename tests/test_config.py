@@ -448,8 +448,7 @@ class TestSettingsValidation:
 
     def test_an_undefined_endpoint_is_an_error_naming_the_setting(self, temp_workspace: Path):
         settings = self._settings(
-            temp_workspace, {"GOOGLE_API_KEY": "test-key"},
-            model_roles={"fast": "local-vllm:qwen"}, pinned_models=["other-box:llama"],
+            temp_workspace, {"GOOGLE_API_KEY": "test-key"}, model_roles={"fast": "local-vllm:qwen"}
         )
         agents = [AgentConfig(name="writer", prompt="p", model="third-box:mistral")]
 
@@ -458,8 +457,15 @@ class TestSettingsValidation:
 
         message = str(caught.value)
         assert "model_roles['fast']" in message and "'local-vllm'" in message
-        assert "pinned_models[0]" in message and "'other-box'" in message
         assert "Agent 'writer'" in message and "'third-box'" in message
+
+    def test_a_models_entry_on_an_undefined_endpoint_is_no_error(self, temp_workspace: Path):
+        """A project file's list is shared by users who define different endpoints."""
+        settings = self._settings(
+            temp_workspace, {"GOOGLE_API_KEY": "test-key"}, models={"other-box:llama": {}}
+        )
+
+        validate_settings(settings)
 
     def test_every_problem_is_reported_at_once(self, temp_workspace: Path):
         settings = self._settings(temp_workspace, default_model="claude-sonnet-4")

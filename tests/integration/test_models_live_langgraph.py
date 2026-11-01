@@ -114,7 +114,9 @@ def listed(monkeypatch):
     """
 
     def build_catalog(settings, providers, *, transport=None):
-        return ModelCatalog(providers=providers)
+        return ModelCatalog(
+            providers=providers, entries=model_services.entries_from_settings(settings)
+        )
 
     monkeypatch.setattr(model_services, "build_catalog", build_catalog)
 
@@ -123,13 +125,14 @@ def _endpoints(model: str) -> dict:
     """The live vLLM server, when the case runs on it."""
     if not model.startswith(f"{VLLM_ENDPOINT}:"):
         return {}
-    served = model.partition(":")[2]
-    return {
-        VLLM_ENDPOINT: {
-            "base_url": os.environ["LIVE_VLLM_BASE_URL"],
-            "models": {served: {"thinking": "chat_template"}},
-        }
-    }
+    return {VLLM_ENDPOINT: {"base_url": os.environ["LIVE_VLLM_BASE_URL"]}}
+
+
+def _entries(model: str) -> dict:
+    """What the case says about the vLLM server's model, when it runs on it."""
+    if not model.startswith(f"{VLLM_ENDPOINT}:"):
+        return {}
+    return {model: {"thinking": "chat_template"}}
 
 
 @pytest.mark.parametrize("model, shows_thinking", CASES)
@@ -139,6 +142,7 @@ async def test_a_tool_call_with_thinking(model, shows_thinking, listed, tmp_path
         session_store="memory",
         thinking_effort="low",
         model_endpoints=_endpoints(model),
+        models=_entries(model),
     )
     manager = LangGraphWorkflowManager(
         agent_configs=[AgentConfig(name="assistant", prompt="You are a careful assistant.")],

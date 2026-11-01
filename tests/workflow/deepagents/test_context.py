@@ -50,8 +50,15 @@ from langchain_core.messages import AIMessage, HumanMessage  # noqa: E402
 from pydantic import PrivateAttr  # noqa: E402
 
 from agentic_cli.config import BaseSettings  # noqa: E402
-from agentic_cli.models import ModelCatalog, ProviderKind, RoleMap, resolve_model  # noqa: E402
-from agentic_cli.models.providers import EndpointSpec  # noqa: E402
+from agentic_cli.models import (  # noqa: E402
+    EndpointSpec,
+    ModelCatalog,
+    ModelEntry,
+    ModelRef,
+    ProviderKind,
+    RoleMap,
+    resolve_model,
+)
 from agentic_cli.tools.registry import register_tool  # noqa: E402
 from agentic_cli.workflow.config import AgentConfig  # noqa: E402
 from agentic_cli.workflow.context import (  # noqa: E402
@@ -93,14 +100,10 @@ from tests.workflow.langchain_fakes import (  # noqa: E402
     route_google,
 )
 
-#: A user's server whose model declares a 20,000-token window and no output
+#: A user's server whose model's entry says a 20,000-token window and no output
 #: limit: B = 19,000, summarize at 16,150 tokens, keep the newest 1,938.
-SMALL = {
-    "local": {
-        "base_url": "http://localhost:8000/v1",
-        "models": {"small": {"context_window": 20_000}},
-    }
-}
+SMALL = {"local": {"base_url": "http://localhost:8000/v1"}}
+SMALL_MODELS = {"local:small": {"context_window": 20_000}}
 MARK = {"type": "ephemeral", "ttl": "5m"}
 USER_TURN = "word " * 2_400  # 12,000 characters, about 3,000 tokens
 
@@ -157,10 +160,11 @@ def resolved(spec: str, agent: str = "a", *, effort: str = "none"):
         specs={"local": EndpointSpec(**SMALL["local"])},
         anthropic="a-test-key", google="g-test-key", openai="o-test-key",
     )
+    entries = {ModelRef("local", "small"): ModelEntry(context_window=20_000)}
     return resolve_model(
         agent=agent, spec=spec, generation=None, thinking_effort=effort,
         roles=RoleMap(default_model=None, model_roles={}),
-        catalog=ModelCatalog(providers=providers), providers=providers,
+        catalog=ModelCatalog(providers=providers, entries=entries), providers=providers,
     )
 
 
@@ -564,7 +568,7 @@ class EndpointAPI:
 @pytest.fixture
 def small(hermetic, monkeypatch):
     """Settings on the small-window endpoint model."""
-    return _settings(model_endpoints=SMALL, default_model="local:small")
+    return _settings(model_endpoints=SMALL, models=SMALL_MODELS, default_model="local:small")
 
 
 class _Recorder:
@@ -673,11 +677,11 @@ class TestSummarizationInATurn:
         self, hermetic, monkeypatch
     ):
         # A 4,000-token window leaves a 3,800-token budget, under 16,000.
-        tiny = {"local": {**SMALL["local"], "models": {"small": {"context_window": 4_000}}}}
+        tiny = {"local:small": {"context_window": 4_000}}
         server = EndpointAPI()
         route(monkeypatch, openai, "AsyncOpenAI", server.api)
         manager = _manager(
-            _settings(model_endpoints=tiny, default_model="local:small"),
+            _settings(model_endpoints=SMALL, models=tiny, default_model="local:small"),
             [_agent("solo", "Answer.")],
         )
         try:
@@ -696,7 +700,8 @@ class TestSummarizationInATurn:
         server = EndpointAPI(**{"Answer.": [_call("huge_report", {}, "c1")]})
         route(monkeypatch, openai, "AsyncOpenAI", server.api)
         uncut = _settings(
-            model_endpoints=SMALL, default_model="local:small", tool_result_max_chars=1_000_000
+            model_endpoints=SMALL, models=SMALL_MODELS, default_model="local:small",
+            tool_result_max_chars=1_000_000,
         )
         manager = _manager(uncut, [AgentConfig(name="solo", prompt="Answer.", tools=[huge_report])])
         try:
@@ -964,7 +969,8 @@ class TestSettingsChange:
 
         monkeypatch.setattr(agent_builder, "build_summarization", recorded)
         settings = _settings(
-            model_endpoints=SMALL, default_model="local:small", orchestrator="deepagents"
+            model_endpoints=SMALL, models=SMALL_MODELS, default_model="local:small",
+            orchestrator="deepagents",
         )
         manager = _manager(settings, [_agent("solo", "Answer.")])
         try:

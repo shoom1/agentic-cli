@@ -27,7 +27,7 @@ def isolated(tmp_path, monkeypatch):
     (tmp_path / "project").mkdir()
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.chdir(tmp_path / "project")
-    for var in (*_KEY_VARS, "LAB_KEY", "AGENTIC_DEFAULT_MODEL"):
+    for var in (*_KEY_VARS, "LAB_KEY", "AGENTIC_DEFAULT_MODEL", "AGENTIC_MODELS"):
         monkeypatch.delenv(var, raising=False)
 
 
@@ -74,6 +74,21 @@ def test_an_endpoint_key_comes_from_the_process_environment_by_default(monkeypat
     assert providers["openai"].api_key == "k-o"
 
 
+def test_entries_from_settings_by_reference_in_their_order():
+    settings = BaseSettings(models={
+        "openrouter:qwen/qwen3-235b-a22b:free": {},
+        "anthropic:claude-sonnet-4-6": {"context_window": 200_000},
+    })
+
+    entries = model_services.entries_from_settings(settings)
+
+    assert list(entries) == [
+        ModelRef("openrouter", "qwen/qwen3-235b-a22b:free"),
+        ModelRef("anthropic", "claude-sonnet-4-6"),
+    ]
+    assert entries[ModelRef("anthropic", "claude-sonnet-4-6")].context_window == 200_000
+
+
 def test_role_map_from_settings():
     settings = BaseSettings(default_model="gemini-2.5-flash", model_roles={"fast": "claude-haiku-4-5"})
 
@@ -116,3 +131,14 @@ async def test_build_catalog_caches_listings_in_the_user_folder():
     assert stat.S_IMODE(cache.stat().st_mode) == 0o600
     assert b"k-g" not in cache.read_bytes()
     assert catalog.is_authoritative("google")
+
+
+def test_build_catalog_takes_the_settings_entries():
+    settings = BaseSettings(
+        google_api_key="k-g", models={"google:gemini-2.5-flash": {"max_output": 1_000}}
+    )
+
+    catalog = build_catalog(settings, model_services.providers_from_settings(settings))
+
+    record = catalog.record(ModelRef("google", "gemini-2.5-flash"))
+    assert (record.max_output, record.sources["max_output"]) == (1_000, "config")

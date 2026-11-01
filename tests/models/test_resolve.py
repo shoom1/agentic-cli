@@ -8,7 +8,6 @@ from typing import Any
 import pytest
 
 from agentic_cli.models import (
-    DeclaredModel,
     EndpointSpec,
     ModelRecord,
     ModelRef,

@@ -665,7 +665,7 @@ _THINKING_NAMES = {
     "chat_template": "on/off",
 }
 # Where a record's values came from, highest precedence first.
-_SOURCES = ("declared", "listing", "table", "default")
+_SOURCES = ("config", "listing", "table", "default")
 
 
 def _show_models(

@@ -21,7 +21,7 @@ model (``minimal``, ``xhigh``, ``max``, …), checked against its ladder.
   adaptive thinking with that effort; ``budget`` is an error.
 - Claude, budget (up to 4.5): ``none`` is disabled; low / medium / high are
   budgets 4096 / 10000 / 32000; ``budget`` N is at least 1024.
-- Effort (OpenAI and OpenRouter reasoning models, endpoints declaring
+- Effort (OpenAI and OpenRouter reasoning models, models entries declaring
   effort): ``none`` is the lowest effort on the ladder; low / medium / high
   are those efforts; ``budget`` is an error.
 - Chat template (endpoints): ``none`` is ``enable_thinking: false``,

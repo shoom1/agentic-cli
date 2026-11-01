@@ -4,7 +4,7 @@ A record carries the model's numbers (context window, max output), what it
 accepts (tools, image input, sampling parameters), its thinking knob as a
 ``ThinkingRule``, whether it returns reasoning text, and which prompt-cache
 mechanism its provider offers. ``sources`` says where each value came from:
-``declared`` (the user's endpoint settings), ``listing`` (the provider's model
+``config`` (the model's ``models`` entry), ``listing`` (the provider's model
 list), ``table`` (the shipped table) or ``default`` (nothing knew; the
 conservative value).
 """
@@ -33,7 +33,7 @@ class ThinkingMechanism(str, Enum):
     ANTHROPIC_ADAPTIVE = "anthropic_adaptive"
     #: Claude up to 4.5: enabled thinking with ``budget_tokens``.
     ANTHROPIC_BUDGET = "anthropic_budget"
-    #: OpenAI and OpenRouter reasoning models, endpoints declaring effort.
+    #: OpenAI and OpenRouter reasoning models, models whose entry says effort.
     EFFORT = "effort"
     #: Endpoint models switched by ``chat_template_kwargs.enable_thinking``.
     CHAT_TEMPLATE = "chat_template"
@@ -95,7 +95,7 @@ class ModelRecord:
     #: ``without_thinking`` (dropped while thinking or effort is on), or
     #: ``never`` (the model rejects them).
     sampling: Literal["always", "without_thinking", "never"] = "always"
-    #: Field name -> ``declared``, ``listing``, ``table`` or ``default``.
+    #: Field name -> ``config``, ``listing``, ``table`` or ``default``.
     sources: Mapping[str, str] = field(default_factory=dict)
 
     @property

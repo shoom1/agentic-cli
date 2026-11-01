@@ -7,7 +7,6 @@ from pydantic import ValidationError
 
 from agentic_cli.models import (
     OPENROUTER_BASE_URL,
-    DeclaredModel,
     EndpointSpec,
     ModelSpecError,
     Provider,
@@ -45,11 +44,7 @@ def test_a_builtin_has_credentials_only_with_its_key():
 
 
 def test_an_endpoint_spec_becomes_an_openai_compatible_endpoint():
-    spec = EndpointSpec(
-        base_url="http://localhost:8000/v1",
-        api_key_env="LOCAL_VLLM_KEY",
-        models={"Qwen/Qwen3-32B": DeclaredModel(context_window=32768, thinking="chat_template")},
-    )
+    spec = EndpointSpec(base_url="http://localhost:8000/v1", api_key_env="LOCAL_VLLM_KEY")
 
     providers = build_providers(
         keys=_NO_KEYS, specs={"local-vllm": spec}, env={"LOCAL_VLLM_KEY": "k-vllm"}
@@ -60,7 +55,6 @@ def test_an_endpoint_spec_becomes_an_openai_compatible_endpoint():
     assert local.kind is ProviderKind.OPENAI_COMPATIBLE
     assert local.base_url == "http://localhost:8000/v1"
     assert local.api_key == "k-vllm"
-    assert local.models["Qwen/Qwen3-32B"].context_window == 32768
 
 
 def test_an_endpoint_key_comes_only_from_the_variable_it_names():
@@ -110,17 +104,6 @@ def test_a_malformed_endpoint_name_is_an_error():
         build_providers(
             keys=_NO_KEYS, specs={"Local VLLM": EndpointSpec(base_url="http://x:1/v1")}, env={}
         )
-
-
-def test_the_declared_models_cannot_be_changed_through_the_endpoint():
-    providers = build_providers(
-        keys=_NO_KEYS,
-        specs={"lab": EndpointSpec(base_url="http://x:1/v1", models={"m": DeclaredModel()})},
-        env={},
-    )
-
-    with pytest.raises(TypeError):
-        providers["lab"].models["other"] = DeclaredModel()  # type: ignore[index]
 
 
 def test_a_provider_is_frozen():
@@ -176,41 +159,7 @@ class TestEndpointSpec:
         with pytest.raises(ValidationError):
             EndpointSpec(base_url="http://x:1/v1", api_key="k-inline")
 
-    def test_a_model_id_must_be_a_plain_name(self):
+    def test_its_models_are_entries_in_models_now(self):
+        """What an endpoint serves is said in the ``models`` setting, by reference."""
         with pytest.raises(ValidationError):
-            EndpointSpec(base_url="http://x:1/v1", models={"has space": DeclaredModel()})
-        with pytest.raises(ValidationError):
-            EndpointSpec(base_url="http://x:1/v1", models={"": DeclaredModel()})
-
-
-class TestDeclaredModel:
-    def test_the_defaults(self):
-        model = DeclaredModel()
-
-        assert model.context_window is None
-        assert model.max_output is None
-        assert model.tools is True
-        assert model.image_input is False
-        assert model.thinking == "none"
-        assert model.effort_levels == ["low", "medium", "high"]
-        assert model.reasoning_text is True
-
-    @pytest.mark.parametrize("field", ["context_window", "max_output"])
-    def test_token_counts_are_positive(self, field):
-        with pytest.raises(ValidationError):
-            DeclaredModel(**{field: 0})
-
-    def test_the_thinking_kinds(self):
-        for kind in ("none", "chat_template", "effort"):
-            assert DeclaredModel(thinking=kind).thinking == kind
-        with pytest.raises(ValidationError):
-            DeclaredModel(thinking="budget")
-
-    @pytest.mark.parametrize("levels", [[], ["low", "low"], ["High"], ["very high"]])
-    def test_malformed_effort_levels(self, levels):
-        with pytest.raises(ValidationError):
-            DeclaredModel(thinking="effort", effort_levels=levels)
-
-    def test_unknown_fields_are_errors(self):
-        with pytest.raises(ValidationError):
-            DeclaredModel(context=1)
+            EndpointSpec(base_url="http://x:1/v1", models={"Qwen/Qwen3-32B": {}})

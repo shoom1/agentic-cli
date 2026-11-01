@@ -31,10 +31,11 @@ from langchain_openrouter import ChatOpenRouter  # noqa: E402
 
 from agentic_cli.models import (  # noqa: E402
     OPENROUTER_BASE_URL,
-    DeclaredModel,
     EndpointSpec,
     ModelCatalog,
+    ModelEntry,
     ModelRecord,
+    ModelRef,
     ProviderKind,
     ResolvedModel,
     RoleMap,
@@ -100,20 +101,21 @@ OPENROUTER_REASONER = ModelRecord(
 OPENROUTER_PLAIN = ModelRecord(
     provider="openrouter", kind=ProviderKind.OPENROUTER, model="meta-llama/llama-3.3-70b"
 )
-#: A user's vLLM server, its key in LOCAL_KEY.
+#: A user's vLLM server, its key in LOCAL_KEY, and a server that needs none.
 LOCAL = {
-    "local": EndpointSpec(
-        base_url="http://localhost:8000/v1",
-        api_key_env="LOCAL_KEY",
-        models={
-            "Qwen/Qwen3-32B": DeclaredModel(
-                context_window=32768, max_output=8192, thinking="chat_template"
-            ),
-            "reasoner": DeclaredModel(thinking="effort", effort_levels=["low", "medium", "high"]),
-            "plain": DeclaredModel(),
-        },
+    "local": EndpointSpec(base_url="http://localhost:8000/v1", api_key_env="LOCAL_KEY"),
+    "keyless": EndpointSpec(base_url="http://localhost:9000/v1"),
+}
+#: What the user says about their models (``models`` entries).
+LOCAL_ENTRIES = {
+    ModelRef("local", "Qwen/Qwen3-32B"): ModelEntry(
+        context_window=32768, max_output=8192, thinking="chat_template"
     ),
-    "keyless": EndpointSpec(base_url="http://localhost:9000/v1", models={"plain": DeclaredModel()}),
+    ModelRef("local", "reasoner"): ModelEntry(
+        thinking="effort", effort_levels=["low", "medium", "high"]
+    ),
+    ModelRef("local", "plain"): ModelEntry(),
+    ModelRef("keyless", "plain"): ModelEntry(),
 }
 
 
@@ -130,17 +132,17 @@ def resolved(
     ``effort`` is the global ``thinking_effort``; ``thinking`` (with
     ``budget``) the agent's own mode; ``generation`` its other model settings.
     The catalog is the shipped table, plus the OpenRouter records above and
-    the models ``LOCAL`` declares.
+    the ``LOCAL_ENTRIES`` models.
     """
     if thinking is not None:
         generation["thinking"] = ThinkingSettings(mode=thinking, budget_tokens=budget)
     every = providers(**KEYS, specs=LOCAL, env={"LOCAL_KEY": "l-test-key"})
-    declared = ModelCatalog(providers=every)  # never loaded: declarations and the table
+    # Never loaded: the entries and the table.
+    configured = ModelCatalog(providers=every, entries=LOCAL_ENTRIES)
     catalog = FakeCatalog([
         OPENROUTER_REASONER,
         OPENROUTER_PLAIN,
-        *declared.records("local"),
-        *declared.records("keyless"),
+        *map(configured.record, LOCAL_ENTRIES),
     ])
     return resolve_model(
         agent="writer",

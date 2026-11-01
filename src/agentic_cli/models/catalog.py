@@ -3,8 +3,8 @@
 Three sources, highest precedence first; each value in a record keeps the name
 of its source (``ModelRecord.sources``):
 
-1. the user's endpoint declarations (``declared``): everything about an
-   OpenAI-compatible server's models;
+1. the ``models`` entries (``config``): what an app, a user or a project says
+   about a model, field by field;
 2. live listings (``listing``): Google's token limits and thinking flag,
    Anthropic's limits, thinking types, effort levels and whether thinking
    can be turned off, OpenAI's ids, OpenRouter's limits and tool and
@@ -15,7 +15,7 @@ of its source (``ModelRecord.sources``):
 **Validation.** An unknown id is rejected only when its provider's listing is
 fresh (``ProviderState.FRESH``); a stale, failed or untried listing cannot
 prove a model does not exist, so the id is accepted with the table's record.
-A model the user declared on an endpoint is always accepted.
+A model with an entry on a user endpoint is always accepted.
 
 **Cache.** Listings are kept in a JSON file (``~/.<app>/model_cache.json`` in
 the workflow), one entry per provider or endpoint: fetch time, outcome and
@@ -46,7 +46,8 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from agentic_cli.models.discovery import DEFAULT_TIMEOUT, ListedModel, Listing, list_models
-from agentic_cli.models.providers import DeclaredModel, Provider, ProviderKind
+from agentic_cli.models.entries import DEFAULT_EFFORT_LEVELS, ModelEntry
+from agentic_cli.models.providers import Provider, ProviderKind
 from agentic_cli.models.records import ModelRecord, ThinkingMechanism, ThinkingRule
 from agentic_cli.models.refs import ModelRef, ModelSpecError, parse_ref
 from agentic_cli.models.resolve import ModelResolutionError
@@ -64,7 +65,7 @@ _OPENROUTER_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh")
 _CLAUDE_ADAPTIVE_LEVELS = ("low", "medium", "high", "max")
 _CLAUDE_BUDGETS = (4096, 10000, 32000)
 _CLAUDE_BUDGET_RANGE = (1024, 128000)
-_DECLARED_THINKING = {
+_ENTRY_THINKING = {
     "none": ThinkingMechanism.NONE,
     "chat_template": ThinkingMechanism.CHAT_TEMPLATE,
     "effort": ThinkingMechanism.EFFORT,
@@ -134,11 +135,13 @@ class _Provider:
 
 
 class ModelCatalog:
-    """Records for every provider's models, from listings, declarations and the table.
+    """Records for every provider's models, from entries, listings and the table.
 
     Args:
         providers: Every provider and user endpoint, by name
             (``build_providers``).
+        entries: The ``models`` entries, by reference: each wins, field by
+            field, over its model's listing and table values.
         cache_path: The listing cache; None keeps listings in memory only.
         table: The shipped table (the packaged one by default).
         ttl_seconds: How long a listing stays fresh.
@@ -152,6 +155,7 @@ class ModelCatalog:
         self,
         *,
         providers: Mapping[str, Provider],
+        entries: Mapping[ModelRef, ModelEntry] | None = None,
         cache_path: Path | None = None,
         table: ShippedTable | None = None,
         ttl_seconds: float = DEFAULT_TTL,
@@ -165,6 +169,7 @@ class ModelCatalog:
         self._transport = transport
         self._timeout = timeout
         self._clock = clock
+        self._entries: Mapping[ModelRef, ModelEntry] = MappingProxyType(dict(entries or {}))
         self._providers = {name: _Provider(provider) for name, provider in providers.items()}
         for provider in self._providers.values():
             self._rebuild(provider)
@@ -270,12 +275,13 @@ class ModelCatalog:
     # --- what the catalog knows ---------------------------------------------
 
     def record(self, ref: ModelRef) -> ModelRecord:
-        """The model's record.
+        """The model's record, with its ``models`` entry when it has one.
 
         Raises:
             ModelResolutionError: If the provider is neither built in nor a
-                defined endpoint, or its fresh listing lacks the model (the
-                message lists the provider's models).
+                defined endpoint, or its fresh listing lacks the model and the
+                model has no entry on an endpoint (the message lists the
+                provider's models).
         """
         provider = self._providers.get(ref.provider)
         if provider is None:
@@ -286,7 +292,11 @@ class ModelCatalog:
         found = provider.accepted.get(ref.model)
         if found is not None:
             return found
-        if provider.state is ProviderState.FRESH:
+        entry = self._entries.get(ref)
+        # A model with an entry on an endpoint is taken at its word: a
+        # server's listing can leave out a model it serves.
+        vouched = entry is not None and provider.provider.kind is ProviderKind.OPENAI_COMPATIBLE
+        if provider.state is ProviderState.FRESH and not vouched:
             if provider.from_cache:
                 self._cached_rejections.add(ref.provider)
             models = [record.model for record in provider.offered]
@@ -296,7 +306,8 @@ class ModelCatalog:
             raise ModelResolutionError(
                 f"Model {ref} is not available. Available {ref.provider} models: {shown}"
             )
-        return self._table.record_for(ref.provider, provider.provider.kind, ref.model)
+        record = self._table.record_for(ref.provider, provider.provider.kind, ref.model)
+        return _with_entry(record, entry)
 
     def records(self, provider: str) -> list[ModelRecord]:
         """The models offered for ``provider``: its listing's, else the fallbacks."""
@@ -313,15 +324,16 @@ class ModelCatalog:
         return [self._status(name) for name in self._providers]
 
     def picker_refs(
-        self, *, referenced: Iterable[str] = (), pinned: Iterable[str] = ()
+        self, *, referenced: Iterable[str] = (), entries: Iterable[str] = ()
     ) -> list[str]:
         """The references a model picker offers: runnable models only.
 
         The records of every provider with credentials except OpenRouter,
         whose catalog runs to hundreds of models: an OpenRouter model (or any
         other) is offered when it is ``referenced`` (by a role, the default
-        model or an agent) or ``pinned``. Sorted by provider, then tier
-        (fast, default, strong, none), then newest first.
+        model or an agent) or has an entry in ``models`` (``entries``).
+        Sorted by provider, then tier (fast, default, strong, none), then
+        newest first.
         """
         chosen: dict[ModelRef, ModelRecord] = {}
         for provider in self._providers.values():
@@ -331,7 +343,7 @@ class ModelCatalog:
             ):
                 for record in provider.offered:
                     chosen.setdefault(record.ref, record)
-        for spec in (*referenced, *pinned):
+        for spec in (*referenced, *entries):
             try:
                 ref = parse_ref(spec)
             except ModelSpecError:
@@ -420,10 +432,19 @@ class ModelCatalog:
     # --- records ---------------------------------------------------------------
 
     def _rebuild(self, provider: _Provider) -> None:
-        """Recompute a provider's records from what it now knows; swapped in whole."""
+        """Recompute a provider's records from what it now knows; swapped in whole.
+
+        Each record takes its model's entry here, so ``records()`` and
+        ``record()`` give the same record.
+        """
         accepted, offered = self._records_for(provider)
+        name = provider.provider.name
+        accepted = {
+            model: _with_entry(record, self._entries.get(ModelRef(name, model)))
+            for model, record in accepted.items()
+        }
         provider.accepted = MappingProxyType(accepted)
-        provider.offered = tuple(offered)
+        provider.offered = tuple(accepted[record.model] for record in offered)
 
     def _records_for(self, provider: _Provider) -> tuple[dict[str, ModelRecord], list[ModelRecord]]:
         listing = provider.listing
@@ -508,50 +529,19 @@ class ModelCatalog:
     def _endpoint_records(
         self, provider: Provider, listing: Listing | None
     ) -> tuple[dict[str, ModelRecord], list[ModelRecord]]:
-        """Declared models (always), then the served ones nobody declared."""
-        served = {model.id: model for model in listing.models} if listing is not None else {}
+        """The served models: each the conservative record (tools assumed),
+        with its served name and context length."""
         records: dict[str, ModelRecord] = {}
-        for model_id, declared in provider.models.items():
-            records[model_id] = self._declared(provider, model_id, declared, served.get(model_id))
-        for model_id, listed in served.items():
-            if model_id not in records:
-                # Not declared: assumed tool-capable (the conservative record).
-                record = self._table.record_for(provider.name, provider.kind, model_id)
-                records[model_id] = _merge(
+        for listed in listing.models if listing is not None else ():
+            if listed.id not in records:
+                record = self._table.record_for(provider.name, provider.kind, listed.id)
+                records[listed.id] = _merge(
                     record,
                     "listing",
                     display_name=listed.display_name or None,
                     context_window=listed.context_window,
                 )
         return records, list(records.values())
-
-    def _declared(
-        self,
-        provider: Provider,
-        model_id: str,
-        declared: DeclaredModel,
-        listed: ListedModel | None,
-    ) -> ModelRecord:
-        record = self._table.record_for(provider.name, provider.kind, model_id)
-        if listed is not None:
-            record = _merge(
-                record,
-                "listing",
-                display_name=listed.display_name or None,
-                context_window=listed.context_window,
-            )
-        mechanism = _DECLARED_THINKING[declared.thinking]
-        levels = tuple(declared.effort_levels) if mechanism is ThinkingMechanism.EFFORT else ()
-        return _merge(
-            record,
-            "declared",
-            context_window=declared.context_window,
-            max_output=declared.max_output,
-            tools=declared.tools,
-            image_input=declared.image_input,
-            thinking=ThinkingRule(mechanism, levels=levels),
-            reasoning_text=declared.reasoning_text,
-        )
 
     # --- the cache file ---------------------------------------------------------
 
@@ -643,6 +633,40 @@ def _claude_mechanism(table: ThinkingRule, listed: ListedModel) -> ThinkingRule 
             budget_range=_CLAUDE_BUDGET_RANGE,
         )
     return None
+
+
+def _with_entry(record: ModelRecord, entry: ModelEntry | None) -> ModelRecord:
+    """``record`` with each value its ``models`` entry sets, from ``config``.
+
+    ``thinking`` sets the mechanism (an ``effort`` ladder is the entry's
+    ``effort_levels``, else ``DEFAULT_EFFORT_LEVELS``). On a model that
+    already takes an effort, ``thinking: effort`` changes nothing and
+    ``effort_levels`` replaces its ladder; on any other, ``effort_levels``
+    alone is ignored.
+    """
+    if entry is None:
+        return record
+    takes_effort = record.thinking.mechanism is ThinkingMechanism.EFFORT
+    thinking = None
+    if entry.thinking is not None and not (entry.thinking == "effort" and takes_effort):
+        mechanism = _ENTRY_THINKING[entry.thinking]
+        if mechanism is ThinkingMechanism.EFFORT:
+            levels = tuple(entry.effort_levels or DEFAULT_EFFORT_LEVELS)
+            thinking = ThinkingRule(mechanism, levels=levels)
+        else:
+            thinking = ThinkingRule(mechanism)
+    elif entry.effort_levels is not None and takes_effort:
+        thinking = dataclasses.replace(record.thinking, levels=tuple(entry.effort_levels))
+    return _merge(
+        record,
+        "config",
+        context_window=entry.context_window,
+        max_output=entry.max_output,
+        tools=entry.tools,
+        image_input=entry.image_input,
+        thinking=thinking,
+        reasoning_text=entry.reasoning_text,
+    )
 
 
 def _merge(record: ModelRecord, source: str, **values: Any) -> ModelRecord:

@@ -70,10 +70,10 @@ def test_the_current_model_shows_as_its_reference():
     assert _model_item(_app(settings)).default == "google:gemini-2.5-pro"
 
 
-def test_a_pinned_model_is_offered():
+def test_a_models_entry_is_offered():
     settings = BaseSettings(
         google_api_key="k-g", openrouter_api_key="k-r",
-        pinned_models=["openrouter:qwen/qwen3-235b-a22b"],
+        models={"openrouter:qwen/qwen3-235b-a22b": {}},
     )
 
     assert "openrouter:qwen/qwen3-235b-a22b" in _model_item(_app(settings)).options

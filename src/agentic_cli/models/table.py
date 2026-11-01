@@ -1,7 +1,7 @@
 """The shipped model table (``data/table.json``) and the records it gives.
 
 The table is the lowest-precedence source of model knowledge, below live
-listings and the user's endpoint declarations. Per provider kind it holds:
+listings and the ``models`` entries. Per provider kind it holds:
 
 - **rules**, first match wins: a regular expression over the model id (and
   optionally a minimum version), giving the tier, the thinking knob, the cache

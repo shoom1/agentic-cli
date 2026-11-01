@@ -36,12 +36,8 @@ from tests.workflow.langchain_fakes import anthropic_reply, route  # noqa: E402
 
 #: A user's server whose model declares a 20,000-token window (as in
 #: ``test_context.py``): a sub-agent's second bulky report makes it summarize.
-SMALL = {
-    "local": {
-        "base_url": "http://localhost:8000/v1",
-        "models": {"small": {"context_window": 20_000}},
-    }
-}
+SMALL = {"local": {"base_url": "http://localhost:8000/v1"}}
+SMALL_MODELS = {"local:small": {"context_window": 20_000}}
 KEYS = {"ANTHROPIC_API_KEY": "a-test-key", "OPENAI_API_KEY": "o-test-key"}
 DIGEST_PROMPT = "Digest the notes."
 LOGGED = (EventType.LLM_REQUEST, EventType.LLM_RESPONSE)
@@ -104,6 +100,7 @@ def home(tmp_path, monkeypatch):
 
 def _settings(**values) -> BaseSettings:
     values.setdefault("model_endpoints", SMALL)
+    values.setdefault("models", SMALL_MODELS)
     values.setdefault("default_model", "local:small")
     return BaseSettings(session_store="memory", **values)
 

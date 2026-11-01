@@ -42,8 +42,8 @@ from tests.workflow.test_adk_context_cache import route_gemini  # noqa: E402
 from tests.workflow.test_manager_models import route  # noqa: E402
 
 #: The user's server, an OpenAI-compatible endpoint.
-ENDPOINTS = {"local": {"base_url": "http://localhost:8000/v1",
-                       "models": {"small": {"context_window": 32_000}}}}
+ENDPOINTS = {"local": {"base_url": "http://localhost:8000/v1"}}
+MODELS = {"local:small": {"context_window": 32_000}}
 
 
 @pytest.fixture(autouse=True)
@@ -126,7 +126,9 @@ async def test_chat_completions_pass_their_whole_prompt_count_on(monkeypatch):
                       "prompt_tokens_details": {"cached_tokens": 1_200}}
     route(monkeypatch, openai, "AsyncOpenAI", FakeAPI(reply))
 
-    usage, tracker = await usage_of_a_turn("local:small", model_endpoints=ENDPOINTS)
+    usage, tracker = await usage_of_a_turn(
+        "local:small", model_endpoints=ENDPOINTS, models=MODELS
+    )
 
     assert (usage["prompt_tokens"], usage["cached_tokens"]) == (1_550, 1_200)
     assert tracker.last_prompt_tokens == 1_550

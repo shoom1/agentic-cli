@@ -260,6 +260,10 @@ class BaseSettings(WorkflowSettingsMixin, AppSettingsMixin, CLISettingsMixin, Py
     def update_setting(self, key: str, value: Any) -> None:
         """Update a single setting, using dedicated setters where required.
 
+        A hand-edited setting (``settings_persistence.HAND_EDITED_KEYS``:
+        ``models``) takes the value as given, for this session only: the
+        app's shipped entries are not merged in, and no save writes it.
+
         Args:
             key: Setting name. ``model`` sets ``default_model``, and
                 ``model_role:<role>`` maps one role in ``model_roles`` (the
@@ -501,9 +505,9 @@ def validate_settings(
 
     The static half of model validation:
 
-    - every reference parses: ``default_model``, ``model_roles``,
-      ``pinned_models`` and each agent's ``model`` (a role must map to a
-      model, never another role);
+    - every reference parses: ``default_model``, ``model_roles`` and each
+      agent's ``model`` (a role must map to a model, never another role);
+      ``models`` keys are checked when the settings load;
     - every endpoint a reference names is defined in ``model_endpoints``;
     - every provider a model will run on has a key: the default model's,
       each agent's, and that of each role an agent names;
@@ -587,8 +591,6 @@ def _model_settings_problems(
             roles = model_services.role_map_from_settings(settings, manager_model)
         except ModelSpecError as exc:  # a role name, or a mapping of default
             errors.append(str(exc))
-    for index, spec in enumerate(settings.pinned_models):
-        setting(f"pinned_models[{index}]", spec)
 
     for config in agent_configs or []:
         spec = getattr(config, "model", None)
