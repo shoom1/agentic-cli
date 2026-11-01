@@ -3,8 +3,8 @@
 The dialog offers three model pickers: the default model (``default_model``)
 and the ``fast`` and ``strong`` roles (``model_roles``, through the synthetic
 keys ``model_role:fast`` and ``model_role:strong``). Each offers exactly the
-references the model catalog can run (``ModelCatalog.picker_refs``). Picking a
-role writes ``model_roles[<role>]`` to the project settings file and
+list (``ModelCatalog.offered``): the ``models`` entries, then the models the
+settings, the agents and the roles name, each once. Picking a role writes ``model_roles[<role>]`` to the project settings file and
 reinitializes the workflow with its sessions kept; a role the workflow cannot
 run is rolled back like any other setting. The thinking-effort picker's
 description says what the effort means for the default model.
@@ -29,10 +29,11 @@ from agentic_cli.cli.app import BaseCLIApp
 from agentic_cli.cli.settings_command import SettingsCommand
 from agentic_cli.cli.workflow_controller import WorkflowController
 from agentic_cli.config import BaseSettings, validate_settings
-from agentic_cli.models import ModelCatalog, ModelRef, ProviderKind, load_table
+from agentic_cli.models import ModelCatalog, ModelRef
 from agentic_cli.workflow import model_services
 from agentic_cli.workflow.config import AgentConfig
 from tests.cli.dialog_fakes import autospec_session, edited_dialog
+from tests.conftest import patch_catalogs
 from tests.models.fakes import ProviderAPI, openrouter_spec
 
 PICKERS = ["model", "model_role:fast", "model_role:strong"]
@@ -61,16 +62,14 @@ def _app(settings: BaseSettings, workflow=None, keys: list[str] | None = None) -
         cls = _App
     app = cls.__new__(cls)
     app._settings = settings
-    app._workflow_controller = SimpleNamespace(is_ready=workflow is not None, workflow=workflow)
+    app._workflow_controller = SimpleNamespace(
+        is_ready=workflow is not None, workflow=workflow, agent_configs=[]
+    )
     return app
 
 
 def _items(app: BaseCLIApp) -> dict:
     return {item.key: item for item in app._build_ui_items()}
-
-
-def _refs(kind: ProviderKind) -> set[str]:
-    return {f"{kind.value}:{model}" for model in load_table().fallback_models(kind)}
 
 
 # --- the pickers ------------------------------------------------------------------
@@ -83,9 +82,9 @@ def test_the_dialog_has_a_model_picker_per_role():
     assert [items[key].label for key in PICKERS] == ["Default Model", "Fast Model", "Strong Model"]
 
 
-def test_every_model_picker_offers_exactly_the_runnable_models(monkeypatch):
-    """The keyed providers' models, plus the OpenRouter models a role maps or
-    ``models`` lists; nothing of a provider without a key."""
+def test_every_model_picker_offers_exactly_the_list(monkeypatch):
+    """The ``models`` entry, the model a role maps, then the default and fast
+    models (computed); not every model of the providers with a key."""
     monkeypatch.setenv("OPENROUTER_API_KEY", "k-r")
     settings = BaseSettings(
         google_api_key="k-g",
@@ -97,18 +96,33 @@ def test_every_model_picker_offers_exactly_the_runnable_models(monkeypatch):
 
     items = _items(_app(settings))
 
-    catalog = ModelCatalog(providers=model_services.providers_from_settings(settings))
-    runnable = catalog.picker_refs(
-        referenced=["openrouter:qwen/qwen3-235b-a22b"],
-        entries=["openrouter:meta-llama/llama-3.3-70b-instruct"],
-    )
-    assert set(runnable) == (
-        _refs(ProviderKind.GOOGLE)
-        | _refs(ProviderKind.ANTHROPIC)
-        | {"openrouter:qwen/qwen3-235b-a22b", "openrouter:meta-llama/llama-3.3-70b-instruct"}
-    )
     for key in PICKERS:
-        assert items[key].options == runnable, key
+        assert items[key].options == [
+            "openrouter:meta-llama/llama-3.3-70b-instruct",
+            "openrouter:qwen/qwen3-235b-a22b",
+            "google:gemini-2.5-flash",
+            "google:gemini-3.1-flash-lite-preview",
+        ], key
+
+
+def test_before_the_workflow_is_ready_an_agent_s_model_is_offered():
+    """The app's agents, from its workflow controller, before their manager exists."""
+    settings = BaseSettings(google_api_key="k-g", anthropic_api_key="k-a")
+    agents = [AgentConfig(name="writer", prompt="Write.", model="anthropic:claude-opus-4-6")]
+    app = BaseCLIApp.__new__(BaseCLIApp)
+    app._settings = settings
+    app._workflow_controller = WorkflowController(agents, settings)
+
+    options = _items(app)["model"].options
+
+    assert options == [
+        "anthropic:claude-opus-4-6",  # the agent's
+        "google:gemini-2.5-flash",  # the roles', computed
+        "google:gemini-3.1-flash-lite-preview",
+        "google:gemini-3.1-pro-preview",
+        "anthropic:claude-haiku-4-5",  # no entry: each provider's tiers
+        "anthropic:claude-sonnet-4-6",
+    ]
 
 
 async def test_once_the_workflow_is_ready_the_pickers_offer_its_catalog():
@@ -122,10 +136,12 @@ async def test_once_the_workflow_is_ready_the_pickers_offer_its_catalog():
 
     items = _items(_app(settings, workflow))
 
-    runnable = catalog.picker_refs(referenced=["google:gemini-3-flash-preview"])
-    assert "google:gemini-2.0-flash" in runnable  # from the listing, not the table
     for key in PICKERS:
-        assert items[key].options == runnable, key
+        assert items[key].options == [
+            "google:gemini-3-flash-preview",
+            "google:gemini-2.5-flash-lite",  # the listing's, not the table's
+            "google:gemini-3.1-pro-preview",
+        ], key
     assert items["model_role:fast"].default == "google:gemini-2.5-flash-lite"  # listed
     assert items["model"].default == "google:gemini-3-flash-preview"
 
@@ -503,15 +519,7 @@ async def test_a_malformed_role_never_reaches_the_workflow(home):
 def listed(monkeypatch) -> ProviderAPI:
     """Every catalog a manager builds lists the recorded payloads."""
     api = ProviderAPI()
-
-    def build_catalog(settings, providers, *, transport=None):
-        return ModelCatalog(
-            providers=providers,
-            entries=model_services.entries_from_settings(settings),
-            transport=api.transport,
-        )
-
-    monkeypatch.setattr(model_services, "build_catalog", build_catalog)
+    patch_catalogs(monkeypatch, transport=api.transport)
     return api
 
 

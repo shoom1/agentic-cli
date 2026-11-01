@@ -65,7 +65,7 @@ class Server:
         return response
 
 
-def serving(body: dict, status: int = 200) -> Server:
+def serving(body: dict | list, status: int = 200) -> Server:
     return Server(lambda request: httpx.Response(status, json=body))
 
 
@@ -401,11 +401,54 @@ async def test_an_endpoint_lists_its_served_names():
     )
 
 
-async def test_an_endpoint_without_max_model_len():
+async def test_an_endpoint_without_a_window():
     """llama.cpp, Ollama and most other servers send ids only."""
     listing = await listed("local-vllm", serving({"object": "list", "data": [{"id": "llama3.2"}]}))
 
     assert listing.models == (ListedModel(id="llama3.2"),)
+
+
+@pytest.mark.parametrize("body", [["qwen3-32b", "llama3"], {"data": ["qwen3-32b"]}])
+async def test_a_list_without_a_model_object_is_a_failed_listing(body):
+    """Never an authoritative empty listing, which would reject every id."""
+    listing = await listed("local-vllm", serving(body))
+
+    assert listing.ok is False
+    assert listing.error.startswith("unexpected response")
+
+
+@pytest.mark.parametrize("body", [[], {"object": "list", "data": []}])
+async def test_an_empty_list_is_an_empty_listing(body):
+    listing = await listed("local-vllm", serving(body))
+
+    assert (listing.ok, listing.models) == (True, ())
+
+
+async def test_an_endpoint_s_listing_may_be_a_bare_array():
+    body = [{"id": "llama3.2", "context_length": 8192}, "not a model", {"id": "qwen3"}]
+
+    listing = await listed("local-vllm", serving(body))
+
+    assert listing.ok
+    assert listing.models == (
+        ListedModel(id="llama3.2", context_window=8192), ListedModel(id="qwen3"),
+    )
+
+
+@pytest.mark.parametrize("field", ["context_length", "context_window", "max_model_len"])
+async def test_an_endpoint_s_window_from_any_of_three_fields(field):
+    listing = await listed("local-vllm", serving({"data": [{"id": "m", field: 4096}]}))
+
+    assert listing.models == (ListedModel(id="m", context_window=4096),)
+
+
+async def test_the_first_window_field_that_is_a_count_wins():
+    both = {"id": "a", "context_length": 8192, "context_window": 4096, "max_model_len": 2048}
+    not_a_count = {"id": "b", "context_length": "8192", "context_window": 4096}
+
+    listing = await listed("local-vllm", serving({"data": [both, not_a_count]}))
+
+    assert [m.context_window for m in listing.models] == [8192, 4096]
 
 
 async def test_entries_that_are_not_models_are_skipped():
@@ -484,6 +527,7 @@ FAILURES = {
     "wrong-shape": (lambda p: lambda r: httpx.Response(200, json={"data": "x", "models": 5}),
                     "unexpected"),
     "not-an-object": (lambda p: lambda r: httpx.Response(200, json=["gpt-5"]), "unexpected"),
+    "a-scalar": (lambda p: lambda r: httpx.Response(200, json="gpt-5"), "unexpected"),
 }
 
 

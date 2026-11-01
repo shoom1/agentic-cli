@@ -117,6 +117,13 @@ def demo_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ResearchDemoApp
     return app
 
 
+@pytest.fixture
+def a_google_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A fake Google key, in the environment before ``demo_app`` loads its
+    settings: a provider is in use whatever keys the process holds."""
+    monkeypatch.setenv("GOOGLE_API_KEY", "test-google-key")
+
+
 def _script(app: ResearchDemoApp, *turns) -> ScriptedWorkflow:
     """Install a scripted workflow behind the app's controller seam."""
     workflow = ScriptedWorkflow(list(turns))
@@ -190,7 +197,9 @@ class TestCommandsBeforeReadiness:
         assert len(demo_app.session.warnings()) == 1
         assert "initializing" in demo_app.session.warnings()[0].lower()
 
-    async def test_models_answers_and_says_the_workflow_is_not_ready(self, demo_app):
+    async def test_models_answers_and_says_the_workflow_is_not_ready(
+        self, a_google_key, demo_app
+    ):
         await demo_app.process_input("/models")
 
         assert demo_app.session.errors() == [], (
@@ -198,7 +207,7 @@ class TestCommandsBeforeReadiness:
         )
         messages = [c[2] for c in demo_app.session.calls if c[0] == "message"]
         assert any("not initialized" in m for m in messages)
-        assert demo_app.session.rich(), "/models showed no provider status"
+        assert demo_app.session.rich(), "/models showed neither the list nor the providers"
 
     async def test_the_command_is_still_registered_and_echoed(self, demo_app):
         """A warning must come from the command, not from it being unknown."""

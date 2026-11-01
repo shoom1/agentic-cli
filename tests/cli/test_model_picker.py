@@ -1,9 +1,12 @@
-"""The ``/settings`` model picker offers what the model catalog can run.
+"""The ``/settings`` model picker offers the list (``ModelCatalog.offered``).
 
-Before the workflow is ready the options come from the shipped table (the
-fallback models of each provider with a key); once it is ready, from the
-workflow's own catalog, listings included. Either way they are full
-``provider:model`` references, and the current value is the default model's.
+The ``models`` entries, then the models the settings and the agents name and
+the default model, each once; without an entry that can run, each keyed
+built-in provider's fast, default and strong models. Before the workflow is
+ready the list comes from an unloaded catalog (the entries and the shipped
+table); once it is ready, from the workflow's own catalog, listings included.
+Either way the options are full ``provider:model`` references, and the
+current value is the default model's.
 """
 
 from __future__ import annotations
@@ -14,8 +17,9 @@ import pytest
 
 from agentic_cli.cli.app import BaseCLIApp
 from agentic_cli.config import BaseSettings
-from agentic_cli.models import ModelCatalog, ProviderKind, load_table
+from agentic_cli.models import ModelCatalog
 from agentic_cli.workflow import model_services
+from agentic_cli.workflow.config import AgentConfig
 from tests.models.fakes import ProviderAPI, openrouter_spec
 
 
@@ -27,14 +31,16 @@ def hermetic(tmp_path, monkeypatch):
         monkeypatch.delenv(variable, raising=False)
 
 
-def _app(settings: BaseSettings, workflow=None) -> BaseCLIApp:
+def _app(settings: BaseSettings, workflow=None, agents=()) -> BaseCLIApp:
     class _App(BaseCLIApp):
         def get_ui_setting_keys(self) -> list[str]:
             return ["model"]
 
     app = _App.__new__(_App)
     app._settings = settings
-    app._workflow_controller = SimpleNamespace(is_ready=workflow is not None, workflow=workflow)
+    app._workflow_controller = SimpleNamespace(
+        is_ready=workflow is not None, workflow=workflow, agent_configs=list(agents)
+    )
     return app
 
 
@@ -43,25 +49,32 @@ def _model_item(app: BaseCLIApp):
     return items[0] if items else None
 
 
-def _fallback_refs(kind: ProviderKind) -> set[str]:
-    return {f"{kind.value}:{model}" for model in load_table().fallback_models(kind)}
-
-
-def test_before_the_workflow_starts_the_table_s_models_of_each_keyed_provider():
+def test_before_the_workflow_starts_each_keyed_provider_s_tiers_from_the_table():
+    """No entry: the default model (computed), then each provider's newest
+    fast, default and strong model among the table's."""
     settings = BaseSettings(google_api_key="k-g", anthropic_api_key="k-a")
 
     item = _model_item(_app(settings))
 
-    assert set(item.options) == (
-        _fallback_refs(ProviderKind.GOOGLE) | _fallback_refs(ProviderKind.ANTHROPIC)
-    )
+    assert item.options == [
+        "google:gemini-2.5-flash",
+        "google:gemini-3.1-flash-lite-preview",
+        "google:gemini-3.1-pro-preview",
+        "anthropic:claude-haiku-4-5",
+        "anthropic:claude-sonnet-4-6",
+        "anthropic:claude-opus-4-6",
+    ]
     assert item.default == "google:gemini-2.5-flash"  # the default role, computed
 
 
 def test_only_providers_with_a_key_are_offered():
     item = _model_item(_app(BaseSettings(google_api_key="k-g")))
 
-    assert set(item.options) == _fallback_refs(ProviderKind.GOOGLE)
+    assert item.options == [
+        "google:gemini-2.5-flash",
+        "google:gemini-3.1-flash-lite-preview",
+        "google:gemini-3.1-pro-preview",
+    ]
 
 
 def test_the_current_model_shows_as_its_reference():
@@ -70,15 +83,42 @@ def test_the_current_model_shows_as_its_reference():
     assert _model_item(_app(settings)).default == "google:gemini-2.5-pro"
 
 
-def test_a_models_entry_is_offered(monkeypatch):
+def test_the_list_is_the_entries_then_what_the_settings_and_the_agents_name(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "k-r")
     settings = BaseSettings(
         google_api_key="k-g",
+        anthropic_api_key="k-a",
         model_providers={"openrouter": openrouter_spec()},
-        models={"openrouter:qwen/qwen3-235b-a22b": {}},
+        models={"openrouter:qwen/qwen3-235b-a22b": {}, "google:gemini-2.5-pro": {}},
+        default_model="anthropic:claude-sonnet-4-6",
+        model_roles={"fast": "google:gemini-2.5-flash-lite"},
     )
+    agents = [AgentConfig(name="writer", prompt="Write.", model="anthropic:claude-haiku-4-5")]
 
-    assert "openrouter:qwen/qwen3-235b-a22b" in _model_item(_app(settings)).options
+    item = _model_item(_app(settings, agents=agents))
+
+    # Not every model of every provider with a key: the list.
+    assert item.options == [
+        "openrouter:qwen/qwen3-235b-a22b",
+        "google:gemini-2.5-pro",
+        "anthropic:claude-sonnet-4-6",
+        "google:gemini-2.5-flash-lite",
+        "anthropic:claude-haiku-4-5",
+    ]
+
+
+def test_every_role_s_model_is_offered_though_the_app_shows_one_picker():
+    """The app shows the default model's picker only: the fast role's model,
+    computed, is in the list all the same, as /models shows it."""
+    settings = BaseSettings(google_api_key="k-g", models={"google:gemini-2.5-pro": {}})
+
+    item = _model_item(_app(settings))
+
+    assert item.options == [
+        "google:gemini-2.5-pro",  # the entry, and the strong role's
+        "google:gemini-2.5-flash",  # the default role's
+        "google:gemini-3.1-flash-lite-preview",  # the fast role's
+    ]
 
 
 def test_a_models_entry_on_a_provider_without_its_key_is_not_offered():
@@ -91,11 +131,20 @@ def test_a_models_entry_on_a_provider_without_its_key_is_not_offered():
     assert "openrouter:qwen/qwen3-235b-a22b" not in _model_item(_app(settings)).options
 
 
+def test_a_models_entry_on_a_provider_nobody_defined_is_not_offered():
+    settings = BaseSettings(google_api_key="k-g", models={"together:deepseek-ai/DeepSeek-V3.1": {}})
+
+    options = _model_item(_app(settings)).options
+
+    assert "together:deepseek-ai/DeepSeek-V3.1" not in options
+    assert "google:gemini-2.5-flash" in options  # no entry can run: the tiers
+
+
 def test_without_any_provider_there_is_no_model_picker():
     assert _model_item(_app(BaseSettings())) is None
 
 
-async def test_a_ready_workflow_offers_its_catalog():
+async def test_a_ready_workflow_offers_its_catalog_s_list():
     settings = BaseSettings(google_api_key="k-g")
     catalog = ModelCatalog(
         providers=model_services.providers_from_settings(settings),
@@ -106,6 +155,10 @@ async def test_a_ready_workflow_offers_its_catalog():
 
     item = _model_item(_app(settings, workflow))
 
-    assert item.options == catalog.picker_refs(referenced=["google:gemini-3-flash-preview"])
-    assert "google:gemini-2.0-flash" in item.options  # from the listing, not the table
+    assert item.options == catalog.offered(extra=["google:gemini-3-flash-preview"])
+    assert item.options == [
+        "google:gemini-3-flash-preview",
+        "google:gemini-2.5-flash-lite",  # the listing's newest fast model, not the table's
+        "google:gemini-3.1-pro-preview",
+    ]
     assert item.default == "google:gemini-3-flash-preview"

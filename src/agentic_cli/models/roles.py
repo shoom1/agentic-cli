@@ -5,12 +5,15 @@ override comes first). ``fast`` and ``strong`` are mapped in ``model_roles``.
 An app adds a role by naming it in an agent's model, and may ship a default
 mapping by overriding the ``model_roles`` default in its settings class.
 
-A built-in role nobody mapped takes the newest model of its tier from the
-first provider with a key, in the order Google, Anthropic, OpenAI: Flash-Lite /
-Flash / Pro, Haiku / Sonnet / Opus, mini / standard / pro. A configured
-provider's models (``model_providers``) never fill a role on their own; the
-user maps them. An app role nobody mapped falls back to ``default``, with a
-warning once per process.
+A built-in role nobody mapped takes a model of its tier (Flash-Lite / Flash /
+Pro, Haiku / Sonnet / Opus, mini / standard / pro): the newest in the list
+(the ``models`` entries it offers), of the provider the list names first among
+those with one; else the newest of the first provider with a key, in the
+order Google, Anthropic, OpenAI. Only a built-in provider's model has a tier:
+a configured provider's models (``model_providers``) never fill a role on
+their own, so an app or a user on configured providers only sets
+``default_model``. An app role nobody mapped falls back to ``default``, with
+a warning once per process.
 
 A role's value is always a model, never another role.
 """
@@ -30,10 +33,9 @@ from agentic_cli.models.refs import (
     validate_role_name,
 )
 from agentic_cli.models.resolve import ModelResolutionError
-from agentic_cli.models.table import version_key
+from agentic_cli.models.table import newest
 
 if TYPE_CHECKING:
-    from agentic_cli.models.records import ModelRecord
     from agentic_cli.models.resolve import CatalogView
 
 logger = logging.getLogger(__name__)
@@ -114,27 +116,39 @@ class RoleMap:
             )
         return self.resolve("default", catalog=catalog, providers=providers)
 
-    def referenced(self) -> tuple[str, ...]:
-        """Every reference this map holds, canonical and once each."""
-        refs = [self._manager, self._default, *self._roles.values()]
-        return tuple(dict.fromkeys(str(ref) for ref in refs if ref is not None))
-
     def _computed(
         self, tier: str, catalog: "CatalogView", providers: Mapping[str, Provider]
     ) -> ModelRef:
+        # The list first. Across providers "newest" means little, so the
+        # provider the list names first among those with a model of the tier.
+        listed = catalog.entry_records()
+        for name in dict.fromkeys(record.provider for record in listed):
+            candidates = [r for r in listed if r.provider == name and r.tier == tier]
+            if candidates:
+                return newest(candidates).ref
         for name in _ROLE_PROVIDERS:
             provider = providers.get(name)
             if provider is None or not provider.has_credentials:
                 continue
             candidates = [r for r in catalog.records(name) if r.tier == tier]
             if candidates:
-                return _newest(candidates).ref
-        variables = ", ".join(PROVIDER_KEY_ENV[p] for p in _ROLE_PROVIDERS)
-        fix = "set default_model" if tier == "default" else f"map it in model_roles[{tier!r}]"
-        raise ModelResolutionError(
-            f"No model for role {tier!r}: {fix}, or set a Google, Anthropic or OpenAI key "
-            f"({variables}) so the newest {tier}-tier model is used."
-        )
+                return newest(candidates).ref
+        raise ModelResolutionError(unfilled_role_message(tier))
+
+
+def unfilled_role_message(role: str) -> str:
+    """What to say of a built-in role nobody maps when nothing can fill it:
+    no entry of its tier in the list, and no Google, Anthropic or OpenAI key.
+
+    The same at startup (``RoleMap.resolve``) and in the static check
+    (``config.validate_settings``), which says it before any listing.
+    """
+    variables = ", ".join(PROVIDER_KEY_ENV[p] for p in _ROLE_PROVIDERS)
+    fix = "set default_model" if role == "default" else f"map it in model_roles[{role!r}]"
+    return (
+        f"No model for role {role!r}: {fix}, or set a Google, Anthropic or OpenAI key "
+        f"({variables}) so the newest {role}-tier model is used."
+    )
 
 
 def _ref_setting(key: str, spec: str | None) -> ModelRef | None:
@@ -144,9 +158,3 @@ def _ref_setting(key: str, spec: str | None) -> ModelRef | None:
         return parse_ref(spec)
     except ModelSpecError as exc:
         raise ModelSpecError(f"{key}: {exc}") from None
-
-
-def _newest(records: list["ModelRecord"]) -> "ModelRecord":
-    """The newest by version; a non-preview id wins a tie, then the first id in order."""
-    ordered = sorted(records, key=lambda r: r.model)
-    return max(ordered, key=lambda r: (version_key(r.model), "preview" not in r.model))

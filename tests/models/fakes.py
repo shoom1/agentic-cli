@@ -64,6 +64,8 @@ class FakeCatalog:
 
     An id it does not hold is rejected when its provider is ``authoritative``
     (as after a fresh listing), and otherwise gets the shipped table's record.
+    ``entries`` are the records of the ``models`` entries the list offers, in
+    its order.
     """
 
     def __init__(
@@ -72,8 +74,10 @@ class FakeCatalog:
         *,
         authoritative: Iterable[str] = (),
         kinds: Mapping[str, ProviderKind] | None = None,
+        entries: Iterable[ModelRecord] = (),
     ) -> None:
-        self._records = {record.ref: record for record in records}
+        self._entries = list(entries)
+        self._records = {record.ref: record for record in (*records, *self._entries)}
         self._authoritative = set(authoritative)
         self._kinds = dict(kinds or {})
 
@@ -90,6 +94,9 @@ class FakeCatalog:
 
     def records(self, provider: str) -> Sequence[ModelRecord]:
         return [record for record in self._records.values() if record.provider == provider]
+
+    def entry_records(self) -> Sequence[ModelRecord]:
+        return list(self._entries)
 
 
 def _builtin_kind(provider: str) -> ProviderKind:

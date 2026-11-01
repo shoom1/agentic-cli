@@ -605,19 +605,20 @@ class NewCommand(Command):
 
 
 class ModelsCommand(Command):
-    """Show what the model catalog knows: each provider's listing, and its models."""
+    """Show the list of models, find a model in the providers' listings, or list again."""
 
     def __init__(self) -> None:
         super().__init__(
             name="models",
-            description="Show each provider's models and listing status",
+            description="Show the models the pickers offer; find a model, or list again",
             usage="/models [<text> | refresh]",
-            examples=["/models", "/models flash", "/models refresh"],
+            examples=["/models", "/models qwen", "/models refresh"],
             category=CommandCategory.SETTINGS,
         )
 
     async def execute(self, args: str, app: Any) -> None:
-        """Show the catalog, filter its models by reference, or list every provider again."""
+        """Show the list and the providers in use, search the providers' full
+        listings for ``args``, or (``refresh``) list them again."""
         from agentic_cli.workflow import model_services
 
         text = args.strip()
@@ -630,19 +631,25 @@ class ModelsCommand(Command):
         owned = catalog is None
         if owned:
             # The catalog the workflow would load: the model cache, and a
-            # listing of each provider with a key and no cache entry.
+            # listing of each provider in use with a key and no cache entry.
             if workflow is None:
                 app.session.add_message(
                     "system", "The workflow is not initialized yet: showing the model cache."
                 )
-            catalog = model_services.build_catalog(app.settings, providers)
+            catalog = model_services.build_catalog(
+                app.settings, providers, agent_configs=app.agent_configs
+            )
             await catalog.load()
         try:
             if text.lower() == "refresh":
                 await _refresh_models(app, catalog, providers)
+                return
+            default = getattr(workflow, "model", None)
+            roles = model_services.role_models(app.settings, catalog, providers, default)
+            if text:
+                await _search_models(app, catalog, roles, text)
             else:
-                default = getattr(workflow, "model", None)
-                _show_models(app, catalog, providers, default, text)
+                _show_models(app, catalog, providers, roles)
         finally:
             if owned:
                 await catalog.aclose()
@@ -666,60 +673,70 @@ _THINKING_NAMES = {
 }
 # Where a record's values came from, highest precedence first.
 _SOURCES = ("config", "listing", "table", "default")
+# A search's Status for a match the list offers.
+_IN_THE_LIST = "in the list"
 
 
 def _show_models(
-    app: Any, catalog: "ModelCatalog", providers: Any, default: str | None, text: str
+    app: Any, catalog: "ModelCatalog", providers: Any, roles: dict[str, list[str]]
 ) -> None:
-    """The status rows, then the models of each provider with credentials."""
+    """The list, then each entry it leaves out with why; below, the providers in use.
+
+    The list is what the pickers offer: ``offered()`` with the roles'
+    models (``model_services.role_models``).
+    """
+    offered = catalog.offered(extra=list(roles))
+    left_out = catalog.not_offered()
+    if offered or left_out:
+        title = f"Models ({len(offered)})"
+        if left_out:
+            title = f"Models ({len(offered)} offered, {len(left_out)} not)"
+        table = _models_table(title)
+        for ref in offered:
+            _add_model_row(table, ref, _record(catalog, ref), roles, "")
+        for ref, reason in left_out.items():
+            _add_model_row(table, ref, _record(catalog, ref), roles, reason)
+        app.session.add_rich(table)
+    else:
+        app.session.add_message("system", "No models: no provider has a key.")
     statuses = catalog.status()
-    app.session.add_rich(_status_table(statuses, providers))
-    records = [
-        record
-        for status in statuses
-        if status.has_credentials
-        for record in sorted(catalog.records(status.provider), key=lambda r: r.model)
-    ]
-    if text:
-        records = [r for r in records if text.lower() in str(r.ref).lower()]
-    if not records:
-        app.session.add_message(
-            "system",
-            f"No model matches {text!r}." if text else "No models: no provider has a key.",
-        )
+    if statuses:
+        app.session.add_rich(_status_table(statuses, providers))
+
+
+async def _search_models(
+    app: Any, catalog: "ModelCatalog", roles: dict[str, list[str]], text: str
+) -> None:
+    """The models of the providers' full listings whose reference contains
+    ``text``, each marked when the list offers it: how a user finds an exact
+    id to copy into ``models``. A provider whose listing failed is named, so
+    "no match" never stands for a listing that could not be read."""
+    found = await catalog.search(text)
+    for status in catalog.status():
+        if status.has_credentials and status.state.value == "degraded":
+            app.session.add_warning(
+                f"Could not list {status.provider} models ({status.error}): "
+                "the search could not look in its listing."
+            )
+    if not found:
+        app.session.add_message("system", f"No model matches {text!r}.")
         return
-    roles = _roles_by_model(app.settings, catalog, providers, default)
-    title = f"Models matching {text!r}" if text else "Models"
-    table = Table(title=f"{title} ({len(records)})", show_lines=False, padding=(0, 1))
-    table.add_column("Model", style="bold cyan", no_wrap=True)
-    table.add_column("Context", justify="right", no_wrap=True)
-    table.add_column("Max output", justify="right", no_wrap=True)
-    table.add_column("Thinking")
-    table.add_column("Tools", no_wrap=True)
-    table.add_column("Cache", no_wrap=True)
-    table.add_column("Source", style="dim")
-    table.add_column("Roles", style="green")
-    for record in records:
-        table.add_row(
-            str(record.ref),
-            _tokens(record.context_window),
-            _tokens(record.max_output),
-            _thinking(record.thinking),
-            "yes" if record.tools else "no",
-            "—" if record.cache.value == "none" else record.cache.value,
-            _sources(record),
-            ", ".join(roles.get(str(record.ref), ())),
-        )
+    offered = set(catalog.offered(extra=list(roles)))
+    table = _models_table(f"Models matching {text!r} ({len(found)})")
+    for record in found:
+        ref = str(record.ref)
+        _add_model_row(table, ref, record, roles, _IN_THE_LIST if ref in offered else "")
     app.session.add_rich(table)
 
 
 async def _refresh_models(app: Any, catalog: "ModelCatalog", providers: Any) -> None:
-    """List every provider with credentials again, and report what changed."""
+    """List the providers in use, and those searched, again, and report what changed."""
     before = {s.provider: {r.model for r in catalog.records(s.provider)} for s in catalog.status()}
     statuses = await catalog.refresh()
     listed = changed = 0
     for status in statuses:
-        if not status.has_credentials:
+        provider = providers.get(status.provider)
+        if not status.has_credentials or (provider is not None and not provider.list_models):
             continue
         listed += 1
         if status.state.value == "degraded":
@@ -735,6 +752,56 @@ async def _refresh_models(app: Any, catalog: "ModelCatalog", providers: Any) -> 
             "system", f"Listed {listed} provider(s) again: their models are unchanged."
         )
     app.session.add_rich(_status_table(catalog.status(), providers))
+
+
+def _models_table(title: str) -> Table:
+    table = Table(title=title, show_lines=False, padding=(0, 1))
+    table.add_column("Model", style="bold cyan", no_wrap=True)
+    table.add_column("Context", justify="right", no_wrap=True)
+    table.add_column("Max output", justify="right", no_wrap=True)
+    table.add_column("Thinking")
+    table.add_column("Tools", no_wrap=True)
+    table.add_column("Cache", no_wrap=True)
+    table.add_column("Source", style="dim")
+    table.add_column("Roles", style="green")
+    table.add_column("Status", style="yellow")
+    return table
+
+
+def _add_model_row(
+    table: Table,
+    ref: str,
+    record: "ModelRecord | None",
+    roles: dict[str, list[str]],
+    status: str,
+) -> None:
+    """One model's row; without a record (an entry left out), its reference only."""
+    used_by = ", ".join(roles.get(ref, ()))
+    if record is None:
+        table.add_row(ref, "—", "—", "—", "—", "—", "", used_by, status)
+        return
+    table.add_row(
+        ref,
+        _tokens(record.context_window),
+        _tokens(record.max_output),
+        _thinking(record.thinking),
+        "yes" if record.tools else "no",
+        "—" if record.cache.value == "none" else record.cache.value,
+        _sources(record),
+        used_by,
+        status,
+    )
+
+
+def _record(catalog: "ModelCatalog", ref: str) -> "ModelRecord | None":
+    """The catalog's record of ``ref``; None for a provider it does not know,
+    or a model a fresh listing lacks."""
+    from agentic_cli.models import ModelResolutionError, parse_ref
+
+    try:
+        return catalog.record(parse_ref(ref))
+    except ModelResolutionError:
+        return None
 
 
 def _status_table(statuses: "list[ProviderStatus]", providers: Any) -> Table:
@@ -763,30 +830,6 @@ def _status_table(statuses: "list[ProviderStatus]", providers: Any) -> Table:
             status.error or "",
         )
     return table
-
-
-def _roles_by_model(
-    settings: Any, catalog: "ModelCatalog", providers: Any, default: str | None
-) -> dict[str, list[str]]:
-    """Each model's roles: the built-in ones (mapped or computed) and the mapped app roles."""
-    from agentic_cli.models import BUILTIN_ROLES, ModelResolutionError
-    from agentic_cli.workflow import model_services
-
-    try:
-        role_map = model_services.role_map_from_settings(settings)
-    except ValueError:
-        return {}
-    roles: dict[str, list[str]] = {}
-    for role in dict.fromkeys([*BUILTIN_ROLES, *settings.model_roles]):
-        if role == "default" and default:
-            ref = default
-        else:
-            try:
-                ref = str(role_map.resolve(role, catalog=catalog, providers=providers))
-            except (ModelResolutionError, ValueError):
-                continue
-        roles.setdefault(ref, []).append(role)
-    return roles
 
 
 def _thinking(rule: "ThinkingRule") -> str:

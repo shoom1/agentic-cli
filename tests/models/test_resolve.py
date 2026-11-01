@@ -413,6 +413,20 @@ def test_a_malformed_spec_is_a_resolution_error():
         _resolve("anthropic:")
 
 
+@pytest.mark.parametrize("agent", ["writer", "checker", None])
+def test_a_role_nothing_can_fill_is_said_alike_for_every_agent(agent):
+    """The role lacks a model, not the agent: the message is the role's, as
+    validate_settings gives it, so a manager reports it once."""
+    with pytest.raises(ModelResolutionError) as exc:
+        _resolve("fast", agent=agent, keys={})
+
+    assert str(exc.value) == (
+        "No model for role 'fast': map it in model_roles['fast'], or set a Google, "
+        "Anthropic or OpenAI key (GOOGLE_API_KEY, ANTHROPIC_API_KEY, OPENAI_API_KEY) so "
+        "the newest fast-tier model is used."
+    )
+
+
 def test_the_default_model_is_named_without_an_agent():
     with pytest.raises(ModelResolutionError, match="^Default model: "):
         _resolve("claude-opus-5-5", mode="budget", agent=None)

@@ -34,7 +34,7 @@ def _make_app(settings, keys: list[str]) -> BaseCLIApp:
 
     app = _App.__new__(_App)
     app._settings = settings
-    app._workflow_controller = SimpleNamespace(is_ready=False)
+    app._workflow_controller = SimpleNamespace(is_ready=False, agent_configs=[])
     return app
 
 
@@ -143,7 +143,7 @@ class TestUserPreferences:
     def test_the_default_dialog_does_not_show_them(self, isolated_settings):
         app = BaseCLIApp.__new__(BaseCLIApp)
         app._settings = isolated_settings
-        app._workflow_controller = SimpleNamespace(is_ready=False)
+        app._workflow_controller = SimpleNamespace(is_ready=False, agent_configs=[])
 
         keys = _item_keys(app._build_ui_items())
 

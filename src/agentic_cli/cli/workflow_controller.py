@@ -188,6 +188,12 @@ class WorkflowController:
         self.jobs_status_segment: str | None = None
 
     @property
+    def agent_configs(self) -> tuple["AgentConfig", ...]:
+        """The agents the workflow is built from: the ``/settings`` pickers
+        offer their models before it is ready."""
+        return tuple(self._agent_configs)
+
+    @property
     def workflow(self) -> "BaseWorkflowManager":
         """Get the workflow manager.
 
