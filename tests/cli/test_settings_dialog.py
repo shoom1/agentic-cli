@@ -66,7 +66,7 @@ def app() -> App:
     app = App.__new__(App)
     # Two providers: more models than a select shows, so the picker is a dropdown.
     app._settings = BaseSettings(google_api_key="k-g", anthropic_api_key="k-a")
-    app._workflow_controller = SimpleNamespace(is_ready=False)
+    app._workflow_controller = SimpleNamespace(is_ready=False, agent_configs=[])
     app.session = autospec_session()
     app.apply_settings = AsyncMock(return_value=True)
     app.save_settings = AsyncMock()

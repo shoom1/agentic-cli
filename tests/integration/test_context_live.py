@@ -66,14 +66,13 @@ pytest.importorskip("deepagents")
 from agentic_cli.cli.usage_tracker import UsageTracker  # noqa: E402
 from agentic_cli.config import BaseSettings  # noqa: E402
 from agentic_cli.tools.registry import register_tool  # noqa: E402
-from agentic_cli.models import ModelCatalog  # noqa: E402
-from agentic_cli.workflow import model_services  # noqa: E402
 from agentic_cli.workflow.config import AgentConfig  # noqa: E402
 from agentic_cli.workflow.context import OVERFLOW_ERROR_CODE  # noqa: E402
 from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager  # noqa: E402
 from agentic_cli.workflow.deepagents import DeepAgentsWorkflowManager  # noqa: E402
 from agentic_cli.workflow.events import EventType  # noqa: E402
 from agentic_cli.workflow.permissions import EXEMPT  # noqa: E402
+from tests.conftest import patch_catalogs  # noqa: E402
 from tests.integration.conftest import collect_events  # noqa: E402
 from tests.models.fakes import openrouter_spec  # noqa: E402
 from tests.workflow.compacting import compact_now  # noqa: E402
@@ -111,10 +110,7 @@ def _needs(*variables: str):
 def listed(monkeypatch):
     """Real model listings, as on a first start, written to no cache file."""
 
-    def build_catalog(settings, providers, *, transport=None):
-        return ModelCatalog(providers=providers)
-
-    monkeypatch.setattr(model_services, "build_catalog", build_catalog)
+    patch_catalogs(monkeypatch)
 
 
 def _settings(tmp_path, **values) -> BaseSettings:

@@ -1,17 +1,19 @@
 """Where agentic-cli's settings become arguments for ``agentic_cli.models``.
 
 The models package takes plain arguments (provider keys, provider specs and
-the environment their keys are read from, model entries, role mappings, a
-cache path). This module is the one place that reads them from settings, so
-the package never sees a settings object. A workflow manager builds its
-catalog here (``build_catalog``) when it initializes.
+the environment their keys are read from, model entries, role mappings, the
+models the settings and the agents name, a cache path). This module is the
+one place that reads them from settings, so the package never sees a settings
+object. A workflow manager builds its catalog here (``build_catalog``) when it
+initializes, and so do the ``/settings`` pickers and ``/models`` before it is
+ready.
 """
 
 from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -19,19 +21,25 @@ from typing import TYPE_CHECKING
 from dotenv import dotenv_values
 
 from agentic_cli.models import (
+    BUILTIN_ROLES,
     ModelCatalog,
     ModelEntry,
     ModelRef,
+    ModelSpecError,
     Provider,
     RoleMap,
+    RoleRef,
     build_providers,
     parse_entry_key,
+    parse_ref,
+    parse_spec,
 )
 
 if TYPE_CHECKING:
     import httpx
 
     from agentic_cli.config import BaseSettings
+    from agentic_cli.workflow.config import AgentConfig
 
 #: python-dotenv's logger, which reports each line it cannot parse at every read.
 _DOTENV_LOGGER = logging.getLogger("dotenv.main")
@@ -112,6 +120,71 @@ def entries_from_settings(settings: "BaseSettings") -> dict[ModelRef, ModelEntry
     return {parse_entry_key(key): entry for key, entry in settings.models.items()}
 
 
+def model_references(
+    settings: "BaseSettings",
+    agent_configs: Iterable["AgentConfig"] = (),
+    manager_model: str | None = None,
+) -> tuple[ModelRef, ...]:
+    """Every model the settings, the agents and the manager name, once each.
+
+    In order: the manager's own model (``manager_model``), ``default_model``,
+    each ``model_roles`` value (so the model of each mapped role an agent
+    names), then each agent's model that is a reference or a bare model id.
+    One that does not parse is left out: validation reports it.
+    """
+    references: list[ModelRef] = []
+    for spec in (manager_model, settings.default_model, *settings.model_roles.values()):
+        if not spec:
+            continue
+        try:
+            references.append(parse_ref(spec))
+        except ModelSpecError:
+            continue
+    for parsed in _agent_models(agent_configs):
+        if isinstance(parsed, ModelRef):
+            references.append(parsed)
+    return tuple(dict.fromkeys(references))
+
+
+def computed_roles(
+    settings: "BaseSettings",
+    agent_configs: Iterable["AgentConfig"] = (),
+    manager_model: str | None = None,
+) -> tuple[str, ...]:
+    """The built-in roles whose model is computed, in ``BUILTIN_ROLES`` order.
+
+    ``default`` when neither the manager's own model nor ``default_model`` is
+    set, and each other built-in role an agent names that ``model_roles``
+    does not map. (An app's own role nobody maps runs on the default model.)
+    """
+    computed: set[str] = set()
+    if not manager_model and not settings.default_model:
+        computed.add("default")
+    for parsed in _agent_models(agent_configs):
+        if (
+            isinstance(parsed, RoleRef)
+            and parsed.role in BUILTIN_ROLES
+            and parsed.role != "default"
+            and parsed.role not in settings.model_roles
+        ):
+            computed.add(parsed.role)
+    return tuple(role for role in BUILTIN_ROLES if role in computed)
+
+
+def _agent_models(agent_configs: Iterable["AgentConfig"]) -> list[ModelRef | RoleRef]:
+    """Each agent's model that names one (None runs on the default) and parses."""
+    parsed: list[ModelRef | RoleRef] = []
+    for config in agent_configs:
+        spec = getattr(config, "model", None)
+        if not spec:
+            continue
+        try:
+            parsed.append(parse_spec(spec))
+        except ModelSpecError:
+            continue
+    return parsed
+
+
 def role_map_from_settings(settings: "BaseSettings", manager_model: str | None = None) -> RoleMap:
     """The roles the settings map: ``default_model`` and ``model_roles``.
 
@@ -138,20 +211,30 @@ def build_catalog(
     settings: "BaseSettings",
     providers: Mapping[str, Provider],
     *,
+    agent_configs: Iterable["AgentConfig"] = (),
+    manager_model: str | None = None,
     transport: "httpx.AsyncBaseTransport | None" = None,
 ) -> ModelCatalog:
     """The catalog a workflow manager loads: ``providers``' models, cached in
-    ``model_cache_path(settings)``, with the ``models`` entries.
+    ``model_cache_path(settings)``, with the ``models`` entries, and the models
+    and computed roles that decide which providers are in use and what the
+    list offers.
 
     Args:
-        settings: Give the entries, and name the app, and so the cache file.
+        settings: Give the entries, the references and the roles, and name
+            the app, and so the cache file.
         providers: Every provider, built in and configured
             (``providers_from_settings``).
+        agent_configs: The agents, whose models are named too.
+        manager_model: A manager's own model override, if any.
         transport: The HTTP transport for listings; httpx's own by default.
     """
+    agent_configs = tuple(agent_configs)
     return ModelCatalog(
         providers=providers,
         entries=entries_from_settings(settings),
+        references=model_references(settings, agent_configs, manager_model),
+        computed_roles=computed_roles(settings, agent_configs, manager_model),
         cache_path=model_cache_path(settings),
         transport=transport,
     )

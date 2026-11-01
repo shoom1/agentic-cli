@@ -1,8 +1,8 @@
 """``/models`` shows what the model catalog knows.
 
-It prints each provider's status (credentials, listing state, when it was
-fetched, how many models, the last error), then a table of the models of every
-provider with credentials: reference, context window, max output, thinking,
+It prints the status of each provider in use (credentials, listing state, when
+it was fetched, how many models, the last error), then a table of the models of
+each of them with credentials: reference, context window, max output, thinking,
 tools, cache, where the values came from, and the roles that use the model.
 ``/models <text>`` filters the table by reference, ignoring case, and
 ``/models refresh`` lists every provider again now and reports what changed.
@@ -26,8 +26,8 @@ from agentic_cli.cli.app import BaseCLIApp
 from agentic_cli.cli.builtin_commands import HelpCommand
 from agentic_cli.cli.commands import CommandRegistry
 from agentic_cli.config import BaseSettings
-from agentic_cli.models import ModelCatalog
 from agentic_cli.workflow import model_services
+from tests.conftest import patch_catalogs
 from tests.models.fakes import ProviderAPI, openrouter_spec, recorded
 
 KEYS = {
@@ -61,16 +61,7 @@ def keys(monkeypatch, *providers: str) -> None:
 def api(monkeypatch) -> ProviderAPI:
     """Every catalog built for the settings lists ``api``'s answers, and caches them."""
     fake = ProviderAPI()
-
-    def build_catalog(settings, providers, *, transport=None):
-        return ModelCatalog(
-            providers=providers,
-            entries=model_services.entries_from_settings(settings),
-            cache_path=model_services.model_cache_path(settings),
-            transport=fake.transport,
-        )
-
-    monkeypatch.setattr(model_services, "build_catalog", build_catalog)
+    patch_catalogs(monkeypatch, transport=fake.transport, cached=True)
     return fake
 
 
@@ -198,7 +189,11 @@ async def test_before_the_workflow_is_ready_it_shows_the_cached_listings(api, mo
 async def test_each_provider_s_status(api, monkeypatch):
     keys(monkeypatch, "google", "openai")
     api.answers["openai"] = 401
-    settings = BaseSettings(model_providers=OPENROUTER)
+    settings = BaseSettings(
+        model_providers=OPENROUTER,
+        # Roles on providers without a key: in use, so shown.
+        model_roles={"strong": "anthropic:claude-opus-4-7", "critic": "openrouter:qwen/qwen3"},
+    )
     workflow = await _ready(settings, api, "google:gemini-2.5-flash")
 
     screen = await models(App(settings, workflow))
@@ -256,7 +251,8 @@ async def test_a_configured_provider_s_credentials(api, monkeypatch):
         **OPENROUTER,
         "local": {"base_url": "http://localhost:9000/v1"},
     }
-    settings = BaseSettings(model_providers=providers)
+    roles = {"critic": "lab:qwen3", "editor": "openrouter:qwen/qwen3", "reader": "local:qwen3"}
+    settings = BaseSettings(model_providers=providers, model_roles=roles)
     workflow = await _ready(settings, api, "google:gemini-2.5-flash")
 
     screen = await models(App(settings, workflow))
@@ -361,7 +357,9 @@ async def test_it_never_prints_a_key(api, monkeypatch):
     monkeypatch.setenv("LAB_KEY", ENDPOINT_KEY)
     api.answers["anthropic"] = 401
     api.answers["endpoint"] = 403
-    settings = BaseSettings(model_providers={**LAB, **OPENROUTER})
+    settings = BaseSettings(
+        model_providers={**LAB, **OPENROUTER}, model_roles={"critic": "lab:Qwen/Qwen3-32B"}
+    )
     workflow = await _ready(settings, api, "google:gemini-2.5-flash")
 
     printed = []

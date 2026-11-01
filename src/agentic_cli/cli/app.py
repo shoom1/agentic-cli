@@ -591,8 +591,10 @@ class BaseCLIApp:
         Override to customize which settings appear in the UI.
         Default: model, model_role:fast, model_role:strong, thinking_effort.
         ``model`` and each ``model_role:<role>`` are model pickers: they
-        offer the model catalog's runnable models as ``provider:model``
-        references, and write ``default_model`` and ``model_roles[<role>]``.
+        offer the list (``ModelCatalog.offered``: the ``models`` entries,
+        then the models the settings and the agents name) as
+        ``provider:model`` references, and write ``default_model`` and
+        ``model_roles[<role>]``.
         An app adds a picker for a role of its own as ``model_role:<role>``.
 
         Only project-scoped settings and the user's preferences may appear.
@@ -681,17 +683,18 @@ class BaseCLIApp:
     def _model_choices(self, roles: "Sequence[str]" = ()) -> _ModelChoices:
         """The model pickers' options, each role's model, and the thinking description.
 
-        Once the workflow is ready, from its catalog (listings included) and
-        its default model; before that, from the shipped table's models of
-        each provider with a key, and the default model the settings name (or
-        compute). A role shows the model it maps, else the one it resolves
-        to (an app's own role runs on the default model). Models a role
-        names, and those ``models`` lists, are offered too.
+        The options are the list (``ModelCatalog.offered``), with each role's
+        model. Once the workflow is ready, from its catalog (listings
+        included) and its default model; before that, from the catalog it
+        would load, unloaded (the entries and the shipped table), and the
+        default model the settings name (or compute). A role shows the model
+        it maps, else the one it resolves to (an app's own role runs on the
+        default model).
 
         Args:
             roles: The roles other than ``default`` whose model to show.
         """
-        from agentic_cli.models import BUILTIN_ROLES, ModelCatalog
+        from agentic_cli.models import BUILTIN_ROLES
         from agentic_cli.workflow import model_services
 
         try:
@@ -699,14 +702,16 @@ class BaseCLIApp:
         except ValueError:
             return _ModelChoices(options=[], current={}, thinking=None)
         providers = model_services.providers_from_settings(self._settings)
-        entries = model_services.entries_from_settings(self._settings)
         controller = self._workflow_controller
         workflow = controller.workflow if controller.is_ready else None
         if workflow is not None and workflow.catalog is not None:
             catalog, default = workflow.catalog, workflow.model
         else:
-            # Not loaded: the entries and the shipped table.
-            catalog = ModelCatalog(providers=providers, entries=entries)
+            # Not loaded: the entries, what the settings and agents name, and
+            # the shipped table.
+            catalog = model_services.build_catalog(
+                self._settings, providers, agent_configs=controller.agent_configs
+            )
             default = _resolved_role(role_map, "default", catalog, providers)
 
         current: dict[str, str | None] = {"default": default}
@@ -718,11 +723,8 @@ class BaseCLIApp:
                 current[role] = _resolved_role(role_map, role, catalog, providers)
             else:
                 current[role] = default
-        referenced = [*(ref for ref in current.values() if ref), *role_map.referenced()]
         return _ModelChoices(
-            options=catalog.picker_refs(
-                referenced=referenced, entries=[str(ref) for ref in entries]
-            ),
+            options=catalog.offered(extra=[ref for ref in current.values() if ref]),
             current=current,
             thinking=self._thinking_meaning(default, catalog, providers),
         )

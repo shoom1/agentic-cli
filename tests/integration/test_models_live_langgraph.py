@@ -33,11 +33,10 @@ pytest.importorskip("langgraph")
 pytest.importorskip("langchain_openrouter")
 
 from agentic_cli.config import BaseSettings  # noqa: E402
-from agentic_cli.models import ModelCatalog  # noqa: E402
-from agentic_cli.workflow import model_services  # noqa: E402
 from agentic_cli.workflow.config import AgentConfig  # noqa: E402
 from agentic_cli.workflow.events import EventType  # noqa: E402
 from agentic_cli.workflow.langgraph import LangGraphWorkflowManager  # noqa: E402
+from tests.conftest import patch_catalogs  # noqa: E402
 from tests.integration.conftest import collect_events  # noqa: E402
 from tests.models.fakes import openrouter_spec  # noqa: E402
 from tests.integration.helpers import (  # noqa: E402
@@ -114,12 +113,7 @@ def listed(monkeypatch):
     (``tests/conftest.py`` otherwise gives every manager an unlisted catalog.)
     """
 
-    def build_catalog(settings, providers, *, transport=None):
-        return ModelCatalog(
-            providers=providers, entries=model_services.entries_from_settings(settings)
-        )
-
-    monkeypatch.setattr(model_services, "build_catalog", build_catalog)
+    patch_catalogs(monkeypatch)
 
 
 def _providers(model: str) -> dict:

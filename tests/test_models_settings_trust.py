@@ -210,6 +210,7 @@ class TestTheProviders:
                 "kind": "openrouter",
                 "base_url": "https://openrouter.ai/api/v1",
                 "api_key_env": "MY_OR_KEY",
+                "list_models": True,
             },
         }
 

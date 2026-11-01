@@ -51,7 +51,7 @@ agentic-cli/
 │   │   ├── retry.py          # Rate-limit retry helpers
 │   │   ├── tool_summaries.py
 │   │   ├── memory_services.py # Settings → agentic_cli.memory arguments (KBs, memory store)
-│   │   ├── model_services.py # Settings → agentic_cli.models arguments (keys, model_providers, entries, roles); a configured provider's key: the environment, then user_env_files (absolute env_file entries; provider_env); build_catalog
+│   │   ├── model_services.py # Settings → agentic_cli.models arguments (keys, model_providers, entries, roles); a configured provider's key: the environment, then user_env_files (absolute env_file entries; provider_env); build_catalog (with model_references and computed_roles: the settings', the agents' and the manager's)
 │   │   ├── model_wire.py     # What both adapters send: timeouts, placeholder key, OpenRouter headers, reasoning_body
 │   │   ├── langchain_models.py # build_chat_model: ResolvedModel → LangChain chat model (profile=); OpenAICompatibleChat
 │   │   ├── checkpointers.py  # open_checkpointer (memory/sqlite/postgres) for the LangChain backends; deepagents_sqlite_path
@@ -154,7 +154,7 @@ agentic-cli/
 │   │   ├── table.py          # ShippedTable, load_table() (data/table.json: family rules, numbers, fallbacks)
 │   │   ├── roles.py          # RoleMap: default / fast / strong / app roles → references
 │   │   ├── resolve.py        # resolve_model → ResolvedModel (thinking, max_tokens, sampling)
-│   │   ├── catalog.py        # ModelCatalog: declarations + listings + table, validation, listing cache
+│   │   ├── catalog.py        # ModelCatalog: entries + listings + table, validation; in_use (the providers listed), offered/not_offered (the list the pickers offer), search; listing cache (address and kind)
 │   │   └── discovery/        # One lister per provider kind, over httpx
 │   └── persistence/
 │       └── session.py        # SessionPersistence
@@ -255,7 +255,7 @@ Available session methods:
 
 - **Framework**: pytest with `asyncio_mode = "auto"`
 - **MockContext**: From `tests/conftest.py` — provides isolated settings and temp dirs for all tests
-- **Model listings**: `tests/conftest.py::_no_model_listings` keeps every manager's model catalog unloaded (no network, no `~/.<app>/model_cache.json`), so any well-formed model id is accepted; a test that wants listings patches `model_services.build_catalog` with `tests/models/fakes.py::ProviderAPI`
+- **Model listings**: `tests/conftest.py::_no_model_listings` keeps every manager's model catalog unloaded (no network, no `~/.<app>/model_cache.json`), so any well-formed model id is accepted; a test that wants listings calls `tests/conftest.py::patch_catalogs` (a transport such as `tests/models/fakes.py::ProviderAPI`, the cache file or none), which keeps the real `build_catalog` and so every argument it gives
 - **Provider fakes**: model requests never reach a provider. `tests/workflow/adk/fakes.py::FakeAPI` serves an ADK-built model's client (`serve()`) and records the bodies it sends; `tests/workflow/langchain_fakes.py`'s `route*` helpers send a LangChain chat model's client to it, with the SSE replies a LangGraph or Deep Agents turn needs. A test-first run against the old code must fail offline too, so stub any client the old code would build
 - **Session fakes**: a session fake is `tests/cli/dialog_fakes.py::autospec_session()` (`create_autospec(ThinkingPromptSession)`), so a call to a method thinking-prompt lacks fails; `edited_dialog(edits)` is a real `Dialog` whose fields hold the user's edits (patch the module's `Dialog`). The render tests' `RecordingSession` and `RecordingThinkingBox` (`tests/event_replay.py`) are checked against the real classes by `tests/test_session_fakes_contract.py`. Turns on a real console run `tests/cli/console_app.py` over a pty (`tests/cli/test_console_turns.py`)
 - **Deep Agents fakes**: `tests/workflow/deepagents/fakes.py::ScriptedChat` answers each model call from a script and records the requests, so a test drives a whole agent tree offline; patch `agentic_cli.workflow.deepagents.manager.build_chat_model` with `ScriptedModels(agent=[...])`. Turns through the real provider adapters are in `tests/integration/test_deepagents_turns.py` (on `FakeAPI`), and MCP tests start the stdio server `tests/workflow/deepagents/mcp_server.py` through `test_mcp.py`'s `servers` fixture, which checks that no server outlives its test. The shared contract tests (`test_lifecycle_races.py`, `test_resource_ownership.py`, `test_model_switch_keeps_services.py`, `test_backend_isolation.py`) cover Deep Agents beside ADK, and a backend change runs them

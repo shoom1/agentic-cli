@@ -138,9 +138,7 @@ class Unlisted(ModelCatalog):
         return None
 
 
-model_services.build_catalog = lambda settings, providers, *, transport=None: Unlisted(
-    providers=providers
-)
+model_services.ModelCatalog = Unlisted  # what build_catalog builds
 
 
 async def main():

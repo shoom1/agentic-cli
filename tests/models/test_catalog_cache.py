@@ -1,14 +1,17 @@
 """The model-list cache: ``~/.<app>/model_cache.json``, read at startup, written after listings.
 
 Fresh entries (under 24 hours) spare startup the network; stale ones are used
-while a background refresh runs; a broken file is ignored and listed again
-(R9). The file is private and holds no credential.
+while a background refresh runs; a broken file, a file from before version 2,
+or an entry for another address or kind is ignored and listed again (R9). The
+entries of providers not in use are kept as they are, and a search adopts one.
+The file is private and holds no credential.
 """
 
 from __future__ import annotations
 
 import copy
 import json
+import logging
 import stat
 import time
 
@@ -16,12 +19,21 @@ import pytest
 
 from agentic_cli.models import (
     ModelCatalog,
+    ModelEntry,
     ModelRef,
     ModelResolutionError,
     ProviderSpec,
     ProviderState,
 )
-from tests.models.fakes import Clock, ProviderAPI, hang, providers, recorded, refuse
+from tests.models.fakes import (
+    OPENROUTER_URL,
+    Clock,
+    ProviderAPI,
+    hang,
+    providers,
+    recorded,
+    refuse,
+)
 
 DAY = 86400.0
 KEYS = {
@@ -32,11 +44,18 @@ KEYS = {
 }
 ENDPOINT_KEY = "v-SECRET-endpoint-key"
 VLLM = ProviderSpec(base_url="http://gpu-box:8000/v1", api_key_env="VLLM_KEY")
+#: Settings that name a model of each, so the provider is in use (and listed).
+ON_VLLM = (ModelRef("local-vllm", "Qwen/Qwen3-32B"),)
+ON_OPENROUTER = (ModelRef("openrouter", "qwen/qwen3-235b-a22b"),)
 
 
-def make(cache, api=None, *, clock=None, specs=None, **keys) -> ModelCatalog:
+def make(
+    cache, api=None, *, clock=None, specs=None, references=(), entries=None, **keys
+) -> ModelCatalog:
     return ModelCatalog(
         providers=providers(specs=specs or {}, env={"VLLM_KEY": ENDPOINT_KEY}, **keys),
+        entries=entries,
+        references=references,
         cache_path=cache,
         transport=(api or ProviderAPI()).transport,
         clock=clock or Clock(),
@@ -71,15 +90,18 @@ async def test_the_file_holds_each_listing_versioned(cache):
 
     document = read(cache)
 
-    assert document["version"] == 1
+    assert document["version"] == 2
     entry = document["providers"]["google"]
     assert (entry["fetched_at"], entry["ok"], entry["error"]) == (1234.5, True, None)
+    assert (entry["base_url"], entry["kind"]) == (None, "google")
     assert [m["id"] for m in entry["models"]][:2] == ["gemini-2.5-flash", "gemini-2.5-pro"]
     assert entry["models"][0]["context_window"] == 1048576
 
 
 async def test_the_file_is_private_and_holds_no_key(cache):
-    await make(cache, specs={"local-vllm": VLLM}, **KEYS).load()
+    await make(
+        cache, specs={"local-vllm": VLLM}, references=[*ON_VLLM, *ON_OPENROUTER], **KEYS
+    ).load()
 
     assert stat.S_IMODE(cache.stat().st_mode) == 0o600
     raw = cache.read_bytes()
@@ -104,10 +126,11 @@ async def test_what_a_listing_says_about_turning_thinking_off_survives_the_cache
     assert sonnet.can_disable is False
 
 
-async def test_an_endpoint_entry_records_its_base_url(cache):
-    await make(cache, specs={"local-vllm": VLLM}).load()
+async def test_a_configured_provider_s_entry_records_its_base_url_and_kind(cache):
+    await make(cache, specs={"local-vllm": VLLM}, references=ON_VLLM).load()
 
-    assert read(cache)["providers"]["local-vllm"]["base_url"] == "http://gpu-box:8000/v1"
+    entry = read(cache)["providers"]["local-vllm"]
+    assert (entry["base_url"], entry["kind"]) == ("http://gpu-box:8000/v1", "openai_compatible")
 
 
 async def test_no_cache_path_means_no_file(tmp_path):
@@ -211,7 +234,7 @@ async def test_a_failed_refresh_never_overwrites_a_good_entry(cache):
     assert read(cache)["providers"]["google"] == good
 
 
-async def test_entries_of_providers_not_listed_are_kept(cache):
+async def test_entries_of_providers_without_a_key_are_kept(cache):
     clock = Clock()
     await make(cache, anthropic=KEYS["anthropic"], clock=clock).load()
 
@@ -220,11 +243,32 @@ async def test_entries_of_providers_not_listed_are_kept(cache):
     await catalog.load()
 
     assert set(read(cache)["providers"]) == {"google", "anthropic"}
-    assert catalog.status()[1].state is ProviderState.UNATTEMPTED
+    assert not catalog.is_authoritative("anthropic")
 
 
-async def test_entries_of_endpoints_no_longer_defined_are_dropped(cache):
-    await make(cache, specs={"local-vllm": VLLM}).load()
+async def test_entries_of_providers_not_in_use_are_kept_as_they_are(cache):
+    clock = Clock()
+    await make(
+        cache, references=ON_OPENROUTER, google=KEYS["google"], openrouter=KEYS["openrouter"],
+        clock=clock,
+    ).load()
+    kept = read(cache)["providers"]["openrouter"]
+    clock.now += 2 * DAY  # stale, but not in use: not listed again
+    api = ProviderAPI()
+
+    catalog = make(
+        cache, api, google=KEYS["google"], openrouter=KEYS["openrouter"], clock=clock
+    )
+    await catalog.load()
+    await catalog.start_background_refresh()
+
+    assert api.calls == ["google"]
+    assert read(cache)["providers"]["openrouter"] == kept
+    assert [s.provider for s in catalog.status()] == ["google"]
+
+
+async def test_entries_of_providers_no_longer_defined_are_dropped(cache):
+    await make(cache, specs={"local-vllm": VLLM}, references=ON_VLLM).load()
 
     await make(cache, google=KEYS["google"]).load()
 
@@ -255,7 +299,7 @@ async def test_an_unwritable_cache_never_fails_startup(tmp_path):
 BROKEN = {
     "invalid JSON": lambda doc: b"{not json",
     "not an object": lambda doc: b"[1, 2, 3]",
-    "wrong version": lambda doc: json.dumps({**doc, "version": 2}).encode(),
+    "wrong version": lambda doc: json.dumps({**doc, "version": 3}).encode(),
     "no version": lambda doc: json.dumps({"providers": doc["providers"]}).encode(),
     "fetched_at a string": lambda doc: _with_google(doc, fetched_at="yesterday"),
     "ok a number": lambda doc: _with_google(doc, ok=1),
@@ -289,19 +333,154 @@ async def test_a_broken_cache_file_is_ignored(cache, damage):
 
     assert api.calls == ["google"]  # listed again
     assert states(catalog) == {"google": ProviderState.FRESH}
-    assert read(cache)["version"] == 1  # and rewritten
+    assert read(cache)["version"] == 2  # and rewritten
 
 
-async def test_an_endpoint_whose_base_url_changed_is_listed_again(cache):
+async def test_a_provider_whose_base_url_changed_is_listed_again(cache):
     clock = Clock()
-    await make(cache, specs={"local-vllm": VLLM}, google=KEYS["google"], clock=clock).load()
+    await make(
+        cache, specs={"local-vllm": VLLM}, references=ON_VLLM, google=KEYS["google"], clock=clock
+    ).load()
     moved = ProviderSpec(base_url="http://other-box:8000/v1", api_key_env="VLLM_KEY")
     api = ProviderAPI()
 
-    catalog = make(cache, api, specs={"local-vllm": moved}, google=KEYS["google"], clock=clock)
+    catalog = make(
+        cache, api, specs={"local-vllm": moved}, references=ON_VLLM, google=KEYS["google"],
+        clock=clock,
+    )
     await catalog.load()
 
     assert api.calls == ["endpoint"]  # Google's entry still served from the cache
+    assert read(cache)["providers"]["local-vllm"]["base_url"] == "http://other-box:8000/v1"
+
+
+async def test_a_provider_whose_kind_changed_is_listed_again(cache):
+    """The same address, now spoken to as OpenRouter: another lister, other facts."""
+    clock = Clock()
+    gateway = ProviderSpec(base_url=OPENROUTER_URL, api_key_env="VLLM_KEY")
+    references = [ModelRef("gateway", "qwen/qwen3-235b-a22b")]
+    await make(cache, specs={"gateway": gateway}, references=references, clock=clock).load()
+    assert read(cache)["providers"]["gateway"]["kind"] == "openai_compatible"
+    api = ProviderAPI()
+
+    as_openrouter = ProviderSpec(kind="openrouter", base_url=OPENROUTER_URL, api_key_env="VLLM_KEY")
+    catalog = make(cache, api, specs={"gateway": as_openrouter}, references=references, clock=clock)
+    await catalog.load()
+
+    assert api.calls == ["openrouter"]
+    assert read(cache)["providers"]["gateway"]["kind"] == "openrouter"
+    assert catalog.record(references[0]).sources["tools"] == "listing"  # OpenRouter's
+
+
+async def test_a_version_1_cache_is_listed_again(cache):
+    """Review Focus 2: a file from before the cache knew a provider's kind (an
+    OpenRouter entry without one) is ignored, without an error, and every
+    provider in use is listed again and written with its kind."""
+    clock = Clock()
+    cache.parent.mkdir(parents=True)
+    cache.write_text(json.dumps({"version": 1, "providers": {
+        "openrouter": {
+            "fetched_at": clock.now - 60, "ok": True, "error": None, "base_url": OPENROUTER_URL,
+            "models": [{"id": "qwen/qwen3-235b-a22b"}],
+        },
+        "google": {"fetched_at": clock.now - 60, "ok": True, "models": [{"id": "gemini-2.5-flash"}]},
+    }}))
+    api = ProviderAPI()
+
+    catalog = make(
+        cache, api, references=ON_OPENROUTER, google=KEYS["google"],
+        openrouter=KEYS["openrouter"], clock=clock,
+    )
+    await catalog.load()
+
+    assert sorted(api.calls) == ["google", "openrouter"]
+    assert states(catalog) == {"google": ProviderState.FRESH, "openrouter": ProviderState.FRESH}
+    document = read(cache)
+    assert document["version"] == 2
+    assert {name: entry["kind"] for name, entry in document["providers"].items()} == {
+        "google": "google", "openrouter": "openrouter",
+    }
+
+
+# --- search: a provider not in use, from the cache or listed --------------------------
+
+
+async def test_a_search_adopts_the_cached_listing_of_a_provider_not_in_use(cache):
+    clock = Clock()
+    await make(
+        cache, references=ON_OPENROUTER, openrouter=KEYS["openrouter"], google=KEYS["google"],
+        clock=clock,
+    ).load()  # an earlier start used OpenRouter
+    clock.now += 60
+    api = ProviderAPI()
+    catalog = make(cache, api, google=KEYS["google"], openrouter=KEYS["openrouter"], clock=clock)
+    await catalog.load()
+
+    found = await catalog.search("llama")
+
+    assert api.calls == []
+    assert [str(record.ref) for record in found] == [
+        "openrouter:meta-llama/llama-3.3-70b-instruct"
+    ]
+    assert states(catalog) == {"google": ProviderState.FRESH, "openrouter": ProviderState.FRESH}
+
+
+async def test_a_search_lists_a_provider_whose_cached_listing_is_stale(cache):
+    """Weeks after a start used OpenRouter, a search finds a model it has
+    released since: a stale listing is listed again first."""
+    clock = Clock()
+    older = recorded("openrouter")
+    older["data"] = [model for model in older["data"] if "llama" not in model["id"]]
+    await make(
+        cache, ProviderAPI(openrouter=older), references=ON_OPENROUTER,
+        openrouter=KEYS["openrouter"], clock=clock,
+    ).load()
+    clock.now += 40 * DAY
+    api = ProviderAPI()
+    catalog = make(cache, api, google=KEYS["google"], openrouter=KEYS["openrouter"], clock=clock)
+    await catalog.load()
+    api.calls.clear()
+
+    found = await catalog.search("llama")
+
+    assert api.calls == ["openrouter"]
+    assert [str(record.ref) for record in found] == [
+        "openrouter:meta-llama/llama-3.3-70b-instruct"
+    ]
+
+
+async def test_a_search_lists_a_provider_whose_cached_listing_failed(cache):
+    clock = Clock()
+    await make(
+        cache, ProviderAPI(openrouter=401), references=ON_OPENROUTER,
+        openrouter=KEYS["openrouter"], clock=clock,
+    ).load()
+    clock.now += 60  # the key has been fixed since
+    api = ProviderAPI()
+    catalog = make(cache, api, google=KEYS["google"], openrouter=KEYS["openrouter"], clock=clock)
+    await catalog.load()
+    api.calls.clear()
+
+    found = await catalog.search("llama")
+
+    assert api.calls == ["openrouter"]
+    assert len(found) == 1
+
+
+async def test_a_search_lists_a_provider_whose_cached_listing_is_for_another_address(cache):
+    clock = Clock()
+    await make(cache, specs={"local-vllm": VLLM}, references=ON_VLLM, clock=clock).load()
+    moved = ProviderSpec(base_url="http://other-box:8000/v1", api_key_env="VLLM_KEY")
+    api = ProviderAPI()
+    catalog = make(cache, api, specs={"local-vllm": moved}, google=KEYS["google"], clock=clock)
+    await catalog.load()
+
+    found = await catalog.search("qwen3")
+
+    assert sorted(api.calls) == ["endpoint", "google"]
+    assert [str(record.ref) for record in found] == [
+        "local-vllm:Qwen/Qwen3-32B", "local-vllm:qwen3-sql-lora",
+    ]
     assert read(cache)["providers"]["local-vllm"]["base_url"] == "http://other-box:8000/v1"
 
 
@@ -398,3 +577,101 @@ async def test_a_rejection_by_a_listing_from_this_start_is_not_listed_again(cach
 
     assert await catalog.confirm_rejections() is False
     assert api.calls == ["anthropic"]
+
+
+# The same holds for a models entry: before a cached listing keeps it out of
+# the list, with a warning, the provider is listed again, once, while loading.
+
+
+def _catalog_warnings(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.name == "agentic_cli.models.catalog"]
+
+
+async def test_an_entry_a_cached_listing_lacks_is_listed_again_once(cache, caplog):
+    clock = Clock()
+    await _cached_an_hour_ago(cache, clock)
+    api = ProviderAPI(anthropic=_serving(NEW.model))
+    catalog = make(cache, api, entries={NEW: ModelEntry()}, anthropic=KEYS["anthropic"], clock=clock)
+
+    with caplog.at_level(logging.WARNING, logger="agentic_cli.models.catalog"):
+        await catalog.load()
+
+    assert api.calls == ["anthropic"]
+    assert catalog.offered() == [str(NEW)]
+    assert _catalog_warnings(caplog) == []
+    assert await catalog.confirm_rejections() is False
+
+
+RETIRED = ModelRef("anthropic", "claude-sonnet-3-7")
+
+
+async def test_a_confirmed_absence_is_trusted_at_the_next_start(cache):
+    """An app's list names a model its provider has retired. The listing that
+    found it missing says so in the cache, so the next starts (within a day)
+    do not list again for it: no wait at every start."""
+    clock = Clock()
+    entries = {RETIRED: ModelEntry(), ModelRef("anthropic", "claude-sonnet-4-6"): ModelEntry()}
+    calls = []
+    for _ in range(3):
+        api = ProviderAPI()
+        catalog = make(cache, api, entries=entries, anthropic=KEYS["anthropic"], clock=clock)
+        await catalog.load()
+        calls.append(api.calls)
+        assert catalog.not_offered() == {str(RETIRED): "not served by anthropic"}
+        clock.now += 600
+
+    assert calls == [["anthropic"], [], []]
+    assert read(cache)["providers"]["anthropic"]["absent"] == [RETIRED.model]
+
+
+async def test_a_new_entry_is_still_confirmed_once(cache):
+    """A model added to the list after the cached listing may be one released
+    since: its provider is listed once more, and then trusted."""
+    clock = Clock()
+    await make(cache, entries={RETIRED: ModelEntry()}, anthropic=KEYS["anthropic"], clock=clock).load()
+    entries = {RETIRED: ModelEntry(), NEW: ModelEntry()}
+    calls = []
+    for _ in range(2):
+        clock.now += 600
+        api = ProviderAPI(anthropic=_serving(NEW.model))
+        catalog = make(cache, api, entries=entries, anthropic=KEYS["anthropic"], clock=clock)
+        await catalog.load()
+        calls.append(api.calls)
+        assert catalog.offered() == [str(NEW)]
+
+    assert calls == [["anthropic"], []]
+
+
+async def test_offline_a_recorded_absence_keeps_the_listing_authoritative(cache):
+    """With the network down, a start does not try the listing again for the
+    retired model, so the fresh cached listing still rejects a typo."""
+    clock = Clock()
+    entries = {RETIRED: ModelEntry(), ModelRef("anthropic", "claude-sonnet-4-6"): ModelEntry()}
+    await make(cache, entries=entries, anthropic=KEYS["anthropic"], clock=clock).load()
+    clock.now += 600
+    api = ProviderAPI(anthropic=refuse)
+
+    catalog = make(cache, api, entries=entries, anthropic=KEYS["anthropic"], clock=clock)
+    await catalog.load()
+
+    assert api.calls == []
+    assert catalog.is_authoritative("anthropic")
+    assert catalog.offered() == ["anthropic:claude-sonnet-4-6"]
+    with pytest.raises(ModelResolutionError, match="not available"):
+        catalog.record(ModelRef("anthropic", "claude-typo-9"))
+
+
+async def test_an_entry_the_provider_still_lacks_warns_after_one_listing(cache, caplog):
+    clock = Clock()
+    await _cached_an_hour_ago(cache, clock)
+    api = ProviderAPI()
+    catalog = make(cache, api, entries={NEW: ModelEntry()}, anthropic=KEYS["anthropic"], clock=clock)
+
+    with caplog.at_level(logging.WARNING, logger="agentic_cli.models.catalog"):
+        await catalog.load()
+
+    assert api.calls == ["anthropic"]
+    assert catalog.not_offered() == {str(NEW): "not served by anthropic"}
+    assert _catalog_warnings(caplog) == [
+        f"Model {NEW} in models is not offered: not served by anthropic"
+    ]

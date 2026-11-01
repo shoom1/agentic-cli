@@ -94,17 +94,6 @@ class TestMappedRoles:
             "openrouter", "qwen/qwen3-235b-a22b:free"
         )
 
-    def test_referenced_lists_every_reference_once(self):
-        roles = _roles(
-            default_model="gemini-2.5-flash",
-            manager_model="anthropic:claude-sonnet-4-5",
-            model_roles={"fast": "google:gemini-2.5-flash", "strong": "openrouter:x/y:free"},
-        )
-
-        assert roles.referenced() == (
-            "anthropic:claude-sonnet-4-5", "google:gemini-2.5-flash", "openrouter:x/y:free",
-        )
-
 
 class TestComputedRoles:
     @pytest.mark.parametrize(

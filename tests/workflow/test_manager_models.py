@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from pathlib import Path
 
@@ -40,6 +41,7 @@ from agentic_cli.workflow.adk.openai_compatible import OpenAICompatibleLlm  # no
 from agentic_cli.workflow.config import AgentConfig  # noqa: E402
 from agentic_cli.workflow.events import EventType  # noqa: E402
 from agentic_cli.workflow.model_settings import ModelSettings, ThinkingSettings  # noqa: E402
+from tests.conftest import patch_catalogs  # noqa: E402
 from tests.models.fakes import ProviderAPI, hang, openrouter_spec, recorded, refuse  # noqa: E402
 from tests.workflow.adk.fakes import (  # noqa: E402
     FakeAPI,
@@ -83,17 +85,7 @@ def settings(**values) -> BaseSettings:
 def providers(home, monkeypatch) -> ProviderAPI:
     """Serve the recorded listings to every catalog a manager builds."""
     api = ProviderAPI()
-    cache = home / "home" / ".agentic_cli" / "model_cache.json"
-
-    def build_catalog(settings, providers, *, transport=None):
-        return ModelCatalog(
-            providers=providers,
-            entries=model_services.entries_from_settings(settings),
-            cache_path=cache,
-            transport=api.transport,
-        )
-
-    monkeypatch.setattr(model_services, "build_catalog", build_catalog)
+    patch_catalogs(monkeypatch, transport=api.transport, cached=True)  # under home's HOME
     return api
 
 
@@ -160,6 +152,74 @@ async def test_a_0_6_settings_file_still_starts(providers, home, monkeypatch):
         assert root.sub_agents[0].model.model == "claude-sonnet-4-5"
     finally:
         await manager.cleanup()
+
+
+async def test_an_entry_on_an_undefined_provider_warns_and_is_not_offered(
+    providers, home, monkeypatch, caplog
+):
+    """Review Focus 3: a project file's models entry names a provider this
+    user has not defined (a teammate's). The app starts, the model is not
+    offered, and one warning says why."""
+    keys(monkeypatch, "google")
+    project = home / ".agentic_cli"
+    project.mkdir()
+    (project / "settings.json").write_text(json.dumps({"models": {
+        "together:deepseek-ai/DeepSeek-V3.1": {"context_window": 128000},
+        "google:gemini-2.5-flash": {},
+    }}))
+    manager = adk(team(), settings())
+
+    with caplog.at_level(logging.WARNING, logger="agentic_cli.models.catalog"):
+        await manager.initialize_services()
+    try:
+        assert manager.is_initialized
+        assert manager.catalog.offered() == ["google:gemini-2.5-flash"]
+        reason = "provider 'together' is not defined in model_providers"
+        assert manager.catalog.not_offered() == {"together:deepseek-ai/DeepSeek-V3.1": reason}
+        warnings = [r.getMessage() for r in caplog.records if r.name == "agentic_cli.models.catalog"]
+        assert warnings == [
+            f"Model together:deepseek-ai/DeepSeek-V3.1 in models is not offered: {reason}"
+        ]
+    finally:
+        await manager.cleanup()
+
+
+# --- the providers in use: what the entries, the settings and the agents name ----------
+
+
+class TestProvidersInUse:
+    async def test_only_the_providers_the_entries_the_settings_and_the_agents_name_are_listed(
+        self, providers, monkeypatch
+    ):
+        keys(monkeypatch, "google", "anthropic", "openrouter")
+        s = settings(
+            model_providers=OPENROUTER,
+            models={"google:gemini-2.5-flash": {}},
+            default_model="google:gemini-2.5-flash",
+        )
+        manager = adk(team("openrouter:qwen/qwen3-235b-a22b"), s)
+
+        await manager.initialize_services()
+        try:
+            assert manager.catalog.in_use == ("google", "openrouter")
+            assert sorted(providers.calls) == ["google", "openrouter"]  # not Anthropic
+            assert manager.catalog.offered() == [
+                "google:gemini-2.5-flash", "openrouter:qwen/qwen3-235b-a22b",
+            ]
+        finally:
+            await manager.cleanup()
+
+    async def test_the_manager_s_own_model_is_in_use(self, providers, monkeypatch):
+        keys(monkeypatch, "google", "anthropic")
+        s = settings(models={"google:gemini-2.5-flash": {}}, default_model="gemini-2.5-flash")
+        manager = adk(team(), s, model="anthropic:claude-opus-4-7")
+
+        await manager.initialize_services()
+        try:
+            assert manager.catalog.in_use == ("google", "anthropic")
+            assert "anthropic:claude-opus-4-7" in manager.catalog.offered()
+        finally:
+            await manager.cleanup()
 
 
 # --- resolution: every agent, once, all or nothing --------------------------------------
@@ -917,8 +977,8 @@ def _stale_cache(home: Path) -> None:
     cache = home / "home" / ".agentic_cli" / "model_cache.json"
     cache.parent.mkdir(parents=True, exist_ok=True)
     models = [{"id": m} for m in ("gemini-2.5-flash", "gemini-2.5-pro")]
-    cache.write_text(json.dumps({"version": 1, "providers": {"google": {
-        "fetched_at": time.time() - 3 * 86400, "ok": True, "models": models,
+    cache.write_text(json.dumps({"version": 2, "providers": {"google": {
+        "fetched_at": time.time() - 3 * 86400, "ok": True, "kind": "google", "models": models,
     }}}))
 
 
@@ -940,8 +1000,8 @@ class TestCatalogLifecycle:
         built: list[ModelCatalog] = []
         build = model_services.build_catalog
 
-        def recording(settings, providers, *, transport=None):
-            built.append(build(settings, providers))
+        def recording(*args, **kwargs):
+            built.append(build(*args, **kwargs))
             return built[-1]
 
         monkeypatch.setattr(model_services, "build_catalog", recording)

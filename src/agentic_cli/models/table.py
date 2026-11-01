@@ -21,7 +21,7 @@ from __future__ import annotations
 import functools
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from importlib import resources
 from types import MappingProxyType
@@ -91,6 +91,16 @@ def version_key(model_id: str) -> tuple[int, ...]:
     if numbers:
         return tuple(numbers)
     return tuple(int(n) for n in re.findall(r"(?<!\d)\d{1,2}(?!\d)", model_id))
+
+
+def newest(records: Iterable[ModelRecord]) -> ModelRecord:
+    """The newest by version; a non-preview id wins a tie, then the first id in order.
+
+    Raises:
+        ValueError: If there are no records.
+    """
+    ordered = sorted(records, key=lambda r: r.model)
+    return max(ordered, key=lambda r: (version_key(r.model), "preview" not in r.model))
 
 
 # --- the table file's schema ----------------------------------------------

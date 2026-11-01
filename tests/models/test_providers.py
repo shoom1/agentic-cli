@@ -167,6 +167,21 @@ def test_a_malformed_provider_name_is_an_error():
         )
 
 
+def test_a_provider_is_listed_unless_its_spec_says_not():
+    """``list_models: false``: a server with no /models route, or one whose
+    listing leaves out models it serves. The built-ins are always listed."""
+    specs = {
+        "lab": ProviderSpec(base_url="http://gpu-box:8000/v1"),
+        "local": ProviderSpec(base_url="http://localhost:8000/v1", list_models=False),
+    }
+
+    providers = build_providers(keys=_NO_KEYS, specs=specs, env={})
+
+    assert {name: p.list_models for name, p in providers.items()} == {
+        "google": True, "anthropic": True, "openai": True, "lab": True, "local": False,
+    }
+
+
 def test_a_provider_is_frozen():
     provider = Provider(name="google", kind=ProviderKind.GOOGLE, base_url=None, api_key="k")
 

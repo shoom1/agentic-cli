@@ -21,8 +21,9 @@ both); each backend's adapter turns what it resolves into SDK objects.
   and sampling settings as a ``ResolvedModel``.
 - ``discovery``: one lister per provider, over its REST API with httpx.
 - ``catalog``: ``ModelCatalog``, the records merged from ``models`` entries,
-  listings and the table; which ids each provider rejects; the listing cache
-  and its background refresh.
+  listings and the table; which ids each provider rejects; the providers in
+  use, the list the model pickers offer, and search over full listings; the
+  listing cache and its background refresh.
 """
 
 from agentic_cli.models.catalog import ModelCatalog, ProviderState, ProviderStatus

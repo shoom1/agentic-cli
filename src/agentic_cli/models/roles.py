@@ -30,10 +30,9 @@ from agentic_cli.models.refs import (
     validate_role_name,
 )
 from agentic_cli.models.resolve import ModelResolutionError
-from agentic_cli.models.table import version_key
+from agentic_cli.models.table import newest
 
 if TYPE_CHECKING:
-    from agentic_cli.models.records import ModelRecord
     from agentic_cli.models.resolve import CatalogView
 
 logger = logging.getLogger(__name__)
@@ -114,11 +113,6 @@ class RoleMap:
             )
         return self.resolve("default", catalog=catalog, providers=providers)
 
-    def referenced(self) -> tuple[str, ...]:
-        """Every reference this map holds, canonical and once each."""
-        refs = [self._manager, self._default, *self._roles.values()]
-        return tuple(dict.fromkeys(str(ref) for ref in refs if ref is not None))
-
     def _computed(
         self, tier: str, catalog: "CatalogView", providers: Mapping[str, Provider]
     ) -> ModelRef:
@@ -128,7 +122,7 @@ class RoleMap:
                 continue
             candidates = [r for r in catalog.records(name) if r.tier == tier]
             if candidates:
-                return _newest(candidates).ref
+                return newest(candidates).ref
         variables = ", ".join(PROVIDER_KEY_ENV[p] for p in _ROLE_PROVIDERS)
         fix = "set default_model" if tier == "default" else f"map it in model_roles[{tier!r}]"
         raise ModelResolutionError(
@@ -144,9 +138,3 @@ def _ref_setting(key: str, spec: str | None) -> ModelRef | None:
         return parse_ref(spec)
     except ModelSpecError as exc:
         raise ModelSpecError(f"{key}: {exc}") from None
-
-
-def _newest(records: list["ModelRecord"]) -> "ModelRecord":
-    """The newest by version; a non-preview id wins a tie, then the first id in order."""
-    ordered = sorted(records, key=lambda r: r.model)
-    return max(ordered, key=lambda r: (version_key(r.model), "preview" not in r.model))

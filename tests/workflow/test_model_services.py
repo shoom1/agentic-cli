@@ -12,12 +12,18 @@ import pytest
 from pydantic import Field
 
 from agentic_cli.config import BaseSettings
-from agentic_cli.models import ModelRef, ModelSpecError, ProviderKind, ProviderSpec, RoleMap
+from agentic_cli.models import (
+    ModelCatalog,
+    ModelRef,
+    ModelSpecError,
+    ProviderKind,
+    ProviderSpec,
+    RoleMap,
+)
 from agentic_cli.workflow import model_services
-
-# Bound before the test-suite guard (conftest ``_no_model_listings``) replaces
-# the module attribute: these tests check the real builder.
+from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.model_services import build_catalog
+from tests.models.fakes import openrouter_spec
 
 _KEY_VARS = ("GOOGLE_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY")
 LAB = ProviderSpec(base_url="http://gpu-box:8000/v1", api_key_env="LAB_KEY")
@@ -38,6 +44,17 @@ def isolated(tmp_path, monkeypatch):
 
 def _lab(**extra) -> dict:
     return {"lab": {"base_url": "http://gpu-box:8000/v1", "api_key_env": "LAB_KEY", **extra}}
+
+
+@pytest.fixture
+def real_catalogs(monkeypatch):
+    """The catalog class ``build_catalog`` builds, as shipped: the suite's guard
+    (conftest ``_no_model_listings``) keeps a manager's catalog unloaded."""
+    monkeypatch.setattr(model_services, "ModelCatalog", ModelCatalog)
+
+
+def _agents(*models: str | None) -> list[AgentConfig]:
+    return [AgentConfig(name=f"agent{i}", prompt="p", model=m) for i, m in enumerate(models)]
 
 
 def _app_with_env_files(env_file) -> type[BaseSettings]:
@@ -228,7 +245,7 @@ def test_model_cache_path_is_in_the_user_folder(tmp_path):
     )
 
 
-async def test_build_catalog_caches_listings_in_the_user_folder():
+async def test_build_catalog_caches_listings_in_the_user_folder(real_catalogs):
     settings = BaseSettings(google_api_key="k-g")
     providers = model_services.providers_from_settings(settings)
     transport = httpx.MockTransport(lambda request: httpx.Response(200, json={"models": []}))
@@ -243,7 +260,7 @@ async def test_build_catalog_caches_listings_in_the_user_folder():
     assert catalog.is_authoritative("google")
 
 
-def test_build_catalog_takes_the_settings_entries():
+def test_build_catalog_takes_the_settings_entries(real_catalogs):
     settings = BaseSettings(
         google_api_key="k-g", models={"google:gemini-2.5-flash": {"max_output": 1_000}}
     )
@@ -252,3 +269,106 @@ def test_build_catalog_takes_the_settings_entries():
 
     record = catalog.record(ModelRef("google", "gemini-2.5-flash"))
     assert (record.max_output, record.sources["max_output"]) == (1_000, "config")
+
+
+def test_build_catalog_takes_what_the_settings_the_agents_and_the_manager_name(
+    real_catalogs, monkeypatch
+):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k-r")
+    settings = BaseSettings(
+        google_api_key="k-g",
+        anthropic_api_key="k-a",
+        openai_api_key="k-o",
+        model_providers={"openrouter": openrouter_spec()},
+        models={"google:gemini-2.5-flash": {}},
+    )
+
+    catalog = build_catalog(
+        settings,
+        model_services.providers_from_settings(settings),
+        agent_configs=_agents("openrouter:qwen/qwen3-235b-a22b"),
+        manager_model="anthropic:claude-sonnet-4-6",
+    )
+
+    # The entry's provider, the agent's and the manager's; OpenAI is in none.
+    assert catalog.in_use == ("google", "anthropic", "openrouter")
+    assert catalog.offered() == [
+        "google:gemini-2.5-flash", "anthropic:claude-sonnet-4-6", "openrouter:qwen/qwen3-235b-a22b",
+    ]
+
+
+def test_build_catalog_takes_the_roles_computed_from_the_providers(real_catalogs, monkeypatch):
+    """No default model is set, so the default role is computed: from a
+    built-in provider with a key, which is then in use too."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k-r")
+    settings = BaseSettings(
+        google_api_key="k-g",
+        model_providers={"openrouter": openrouter_spec()},
+        models={"openrouter:qwen/qwen3-235b-a22b": {}},
+    )
+
+    catalog = build_catalog(settings, model_services.providers_from_settings(settings))
+
+    assert catalog.in_use == ("google", "openrouter")
+
+
+# --- what the catalog is told: the references and the roles computed ---------------
+
+
+def test_model_references_in_order_once_each():
+    settings = BaseSettings(
+        default_model="gemini-2.5-flash",
+        model_roles={"fast": "google:gemini-2.5-flash-lite", "critic": "anthropic:claude-sonnet-4-6"},
+    )
+    agents = _agents(
+        "openrouter:qwen/qwen3-235b-a22b",
+        "critic",  # a mapped role: its model, listed already
+        "strong",  # unmapped: computed, so no reference
+        "claude-opus-4-6",  # a bare id
+        "qwen3-32b",  # malformed: validation reports it
+        None,  # the default model's
+        "google:gemini-2.5-flash",
+    )
+
+    references = model_services.model_references(
+        settings, agents, manager_model="openai:gpt-5.5"
+    )
+
+    assert references == (
+        ModelRef("openai", "gpt-5.5"),
+        ModelRef("google", "gemini-2.5-flash"),
+        ModelRef("google", "gemini-2.5-flash-lite"),
+        ModelRef("anthropic", "claude-sonnet-4-6"),
+        ModelRef("openrouter", "qwen/qwen3-235b-a22b"),
+        ModelRef("anthropic", "claude-opus-4-6"),
+    )
+
+
+def test_model_references_skip_what_does_not_parse():
+    """Validation reports each of them, before any catalog is built."""
+    agents = _agents("x y", "Lab:qwen3", "lab:", "")
+
+    assert model_services.model_references(BaseSettings(), agents, manager_model="x y") == ()
+
+
+@pytest.mark.parametrize(
+    ("values", "manager_model", "models", "expected"),
+    [
+        # Nothing names the default model: it is computed.
+        ({}, None, [None], ("default",)),
+        ({"default_model": "google:gemini-2.5-flash"}, None, [None], ()),
+        ({}, "google:gemini-2.5-flash", [None], ()),
+        # A built-in role an agent names, unless model_roles maps it.
+        (
+            {"default_model": "google:gemini-2.5-flash", "model_roles": {"fast": "gpt-5.4-mini"}},
+            None,
+            ["strong", "fast", "critic", "default", "strong"],
+            ("strong",),
+        ),
+        ({}, None, ["strong", "fast"], ("default", "fast", "strong")),
+    ],
+)
+def test_computed_roles(values, manager_model, models, expected):
+    settings = BaseSettings(**values)
+
+    assert model_services.computed_roles(settings, _agents(*models), manager_model) == expected

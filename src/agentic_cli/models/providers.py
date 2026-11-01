@@ -71,6 +71,10 @@ class ProviderSpec(BaseModel):
     kind: Literal["openai_compatible", "openrouter"] = "openai_compatible"
     base_url: str
     api_key_env: str | None = Field(default=None, pattern=_ENV_VAR)
+    #: False: never listed (a server with no ``/models`` route, or one whose
+    #: listing leaves out models it serves), so every id is accepted, with the
+    #: facts its ``models`` entry and the table give.
+    list_models: bool = True
 
     @field_validator("base_url")
     @classmethod
@@ -127,6 +131,9 @@ class Provider:
     #: The variable the key is read from: PROVIDER_KEY_ENV's for a built-in,
     #: the spec's api_key_env for a configured provider (None: no key needed).
     key_env: str | None = None
+    #: Whether its models are listed (``ProviderSpec.list_models``); always
+    #: for a built-in.
+    list_models: bool = True
 
     @property
     def builtin(self) -> bool:
@@ -174,6 +181,7 @@ def build_providers(
             base_url=spec.base_url,
             api_key=(env.get(spec.api_key_env) or None) if spec.api_key_env else None,
             key_env=spec.api_key_env,
+            list_models=spec.list_models,
         )
     return providers
 

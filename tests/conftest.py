@@ -175,31 +175,70 @@ def _no_settings_from_other_tests() -> Generator[None, None, None]:
     _clear_settings()
 
 
-@pytest.fixture(autouse=True)
-def _no_model_listings(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Workflow managers list no models and touch no model cache in tests.
+def patch_catalogs(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    transport: Any = None,
+    cached: bool = False,
+    listed: bool = True,
+) -> None:
+    """Decide how every catalog the workflow builds lists its models.
 
-    A manager builds a ``ModelCatalog`` when it initializes and lists every
-    provider it has a key for, caching the result in ``~/.{app}/model_cache.json``.
-    Here its catalog is never loaded: each provider stays unattempted, so any
-    well-formed model id is accepted and roles come from the shipped table's
-    fallback models, as with 0.6's registry before a refresh. A test that
-    wants listings patches ``model_services.build_catalog`` itself
-    (``tests/workflow/test_manager_models.py``).
+    ``model_services.build_catalog`` stays the real one, so each catalog still
+    gets every argument it computes from the settings and the agents (the
+    providers, the ``models`` entries, the references, the computed roles),
+    and no test can leave one out. Only how the catalog lists is the test's:
+    the class it builds (``model_services.ModelCatalog``) is replaced.
+
+    Args:
+        monkeypatch: The test's.
+        transport: The listings' transport (``tests/models/fakes.py::ProviderAPI``);
+            None keeps httpx's own, the network (the live tests).
+        cached: Keep the cache file ``build_catalog`` names (``model_cache_path``,
+            under the test's HOME); else no cache file is read or written.
+        listed: False: ``load()`` lists nothing, so each provider stays
+            unattempted.
     """
     from agentic_cli.models import ModelCatalog
     from agentic_cli.workflow import model_services
 
-    class _UnlistedCatalog(ModelCatalog):
+    class _TestCatalog(ModelCatalog):
+        def __init__(self, **arguments: Any) -> None:
+            if not cached:
+                arguments["cache_path"] = None
+            if transport is not None:
+                arguments["transport"] = transport
+            super().__init__(**arguments)
+
         async def load(self) -> None:
-            return None
+            if listed:
+                await super().load()
 
-    def build_catalog(settings, providers, *, transport=None):
-        return _UnlistedCatalog(
-            providers=providers, entries=model_services.entries_from_settings(settings)
-        )
+    monkeypatch.setattr(model_services, "ModelCatalog", _TestCatalog)
 
-    monkeypatch.setattr(model_services, "build_catalog", build_catalog, raising=False)
+
+@pytest.fixture(autouse=True)
+def _no_model_listings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Workflow managers list no models and touch no model cache in tests.
+
+    A manager builds a ``ModelCatalog`` when it initializes and lists the
+    providers in use, caching the result in ``~/.{app}/model_cache.json``.
+    Here its catalog is never loaded: each provider stays unattempted, so any
+    well-formed model id is accepted and roles come from the shipped table's
+    fallback models, as with 0.6's registry before a refresh. A test that
+    wants listings calls ``patch_catalogs`` itself
+    (``tests/workflow/test_manager_models.py``).
+    """
+    patch_catalogs(monkeypatch, listed=False)
+
+
+@pytest.fixture(autouse=True)
+def _no_model_warnings_from_other_tests(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each test starts with no "not offered" warning given: the catalog gives
+    each one once per process (``catalog._WARNED_ENTRIES``)."""
+    from agentic_cli.models import catalog
+
+    monkeypatch.setattr(catalog, "_WARNED_ENTRIES", set())
 
 
 @pytest.fixture

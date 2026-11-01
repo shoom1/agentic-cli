@@ -12,7 +12,8 @@ never a provider SDK (only the backend adapters touch those):
 - ``openrouter``: OpenRouter's public ``GET {base_url}/models`` (the key
   is sent when there is one), with tool and reasoning support;
 - ``openai_compatible``: ``GET {base_url}/models`` on a configured provider,
-  the served names and ``max_model_len``.
+  the served names and their context length, from an object with ``data``
+  or a bare array.
 
 ``list_models`` never raises for an HTTP or network failure: it returns a
 failed ``Listing`` whose ``error`` is a short reason that never contains the
@@ -138,6 +139,27 @@ async def list_models(
 # --- helpers for the listers ---------------------------------------------------
 
 
+async def get_document(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    headers: Mapping[str, str],
+    params: Mapping[str, Any] | None = None,
+) -> Any:
+    """GET ``url`` and return its JSON, whatever its shape.
+
+    Raises:
+        httpx.HTTPStatusError: For a non-2xx status.
+        ListingError: If the body is not JSON.
+    """
+    response = await client.get(url, headers=dict(headers), params=params)
+    response.raise_for_status()
+    try:
+        return response.json()
+    except ValueError:
+        raise ListingError("invalid JSON in the response") from None
+
+
 async def get_json(
     client: httpx.AsyncClient,
     url: str,
@@ -151,12 +173,7 @@ async def get_json(
         httpx.HTTPStatusError: For a non-2xx status.
         ListingError: If the body is not a JSON object.
     """
-    response = await client.get(url, headers=dict(headers), params=params)
-    response.raise_for_status()
-    try:
-        document = response.json()
-    except ValueError:
-        raise ListingError("invalid JSON in the response") from None
+    document = await get_document(client, url, headers=headers, params=params)
     if not isinstance(document, Mapping):
         raise ListingError("unexpected response: not a JSON object")
     return document
@@ -173,6 +190,11 @@ def entries(document: Mapping[str, Any], key: str) -> Iterator[Mapping[str, Any]
     items = document.get(key)
     if not isinstance(items, list):
         raise ListingError(f"unexpected response: {key!r} is not a list")
+    return objects(items)
+
+
+def objects(items: list[Any]) -> Iterator[Mapping[str, Any]]:
+    """Each object in ``items``; anything else is skipped."""
     for item in items:
         if isinstance(item, Mapping):
             yield item

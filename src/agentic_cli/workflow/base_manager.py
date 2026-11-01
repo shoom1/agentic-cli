@@ -1057,15 +1057,21 @@ class BaseWorkflowManager(ABC):
         """Build and load the model catalog, then resolve every model.
 
         The catalog is owned from here on: ``_release_resources`` closes it.
-        Loading lists only the providers the cache cannot answer for, and a
-        provider whose cached listing rejected a model is listed again, once,
-        before startup fails on it.
+        Loading lists only the providers in use (those the entries, the
+        settings, the agents and this manager's model need) that the cache
+        cannot answer for, and a provider whose cached listing rejected a
+        model is listed again, once, before startup fails on it.
         """
         from agentic_cli.config import SettingsValidationError
         from agentic_cli.workflow import model_services
 
         providers = model_services.providers_from_settings(self._settings)
-        self._catalog = model_services.build_catalog(self._settings, providers)
+        self._catalog = model_services.build_catalog(
+            self._settings,
+            providers,
+            agent_configs=self._agent_configs,
+            manager_model=self._model_override,
+        )
         await self._catalog.load()
         try:
             self._resolve_models(providers)
