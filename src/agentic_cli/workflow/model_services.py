@@ -22,9 +22,11 @@ from dotenv import dotenv_values
 
 from agentic_cli.models import (
     BUILTIN_ROLES,
+    CatalogView,
     ModelCatalog,
     ModelEntry,
     ModelRef,
+    ModelResolutionError,
     ModelSpecError,
     Provider,
     RoleMap,
@@ -200,6 +202,37 @@ def role_map_from_settings(settings: "BaseSettings", manager_model: str | None =
         model_roles=settings.model_roles,
         manager_model=manager_model,
     )
+
+
+def role_models(
+    settings: "BaseSettings",
+    catalog: CatalogView,
+    providers: Mapping[str, Provider],
+    default: str | None = None,
+) -> dict[str, list[str]]:
+    """The roles' models, each with the roles it fills, in role order.
+
+    The models of ``default`` (``default`` when given: a manager's own
+    model), ``fast`` and ``strong``, mapped or computed, and of each mapped
+    app role; a role nothing can fill is left out. The list offers these
+    models (``ModelCatalog.offered(extra=...)``) in the ``/settings`` pickers
+    and in ``/models`` alike, whichever pickers an app shows.
+    """
+    try:
+        role_map = role_map_from_settings(settings)
+    except ModelSpecError:
+        return {}
+    models: dict[str, list[str]] = {}
+    for role in dict.fromkeys([*BUILTIN_ROLES, *settings.model_roles]):
+        if role == "default" and default:
+            ref = default
+        else:
+            try:
+                ref = str(role_map.resolve(role, catalog=catalog, providers=providers))
+            except (ModelResolutionError, ModelSpecError):
+                continue
+        models.setdefault(ref, []).append(role)
+    return models
 
 
 def model_cache_path(settings: "BaseSettings") -> Path:

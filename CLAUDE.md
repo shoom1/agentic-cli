@@ -30,7 +30,7 @@ agentic-cli/
 │   │   ├── app.py            # BaseCLIApp (main(): the command line, add_arguments/from_args, exit_status; session_start: how run() begins, its resume once the prompt is up (_open_on_startup; Ctrl+C there ends the app; --continue passes over conversations another process holds, _newest_free); the --resume hint at exit; the session it builds; get_theme(name); /settings model pickers: _model_choices; the LangGraph deprecation notice; an orchestrator swap: the new backend takes the conversation's id, `_SWAP_NOTE` says its history stays behind; compact(), start_new_session() and resume_session(): /compact, /new and /resume, under the turn lock (pick_session(), the picker, is not: it waits on a dialog); a conversation's facts saved once per conversation used (_turned); another conversation's job resume keeps ctx and the task list)
 │   │   ├── commands.py       # Command, CommandRegistry
 │   │   ├── conversation_lock.py # ConversationLock: one process per stored conversation (flock under <sessions_dir>/locks/; BaseCLIApp._hold refuses one held elsewhere)
-│   │   ├── builtin_commands.py # /help, /status (the main agent's context rows: context_budget), /models (ModelsCommand), /sessions, /resume [<id>] (sessions), /jobs (resume: finished jobs), /compact [focus], /new, ...
+│   │   ├── builtin_commands.py # /help, /status (the main agent's context rows: context_budget), /models (ModelsCommand: the list, each model's facts and sources, Status for an entry left out, the providers in use; /models <text> searches the full listings; refresh), /sessions, /resume [<id>] (sessions), /jobs (resume: finished jobs), /compact [focus], /new, ...
 │   │   ├── workflow_controller.py  # WorkflowController (lazy/background init, orchestrator swap; the status bar names the main agent's model)
 │   │   ├── session_resume.py # What /resume shows: the picker (picker), the "Resumed:" line, the replay of the last 10 messages
 │   │   ├── session_args.py # --continue / --resume <id> → SessionStart (BaseCLIApp.main() adds them; start: new, continue, resume; SessionArgumentParser: --resume without its id names --continue and /resume)
@@ -51,7 +51,7 @@ agentic-cli/
 │   │   ├── retry.py          # Rate-limit retry helpers
 │   │   ├── tool_summaries.py
 │   │   ├── memory_services.py # Settings → agentic_cli.memory arguments (KBs, memory store)
-│   │   ├── model_services.py # Settings → agentic_cli.models arguments (keys, model_providers, entries, roles); a configured provider's key: the environment, then user_env_files (absolute env_file entries; provider_env); build_catalog (with model_references and computed_roles: the settings', the agents' and the manager's)
+│   │   ├── model_services.py # Settings → agentic_cli.models arguments (keys, model_providers, entries, roles); a configured provider's key: the environment, then user_env_files (absolute env_file entries; provider_env); build_catalog (with model_references and computed_roles: the settings', the agents' and the manager's); role_models (the roles' models the list offers, for the pickers and /models)
 │   │   ├── model_wire.py     # What both adapters send: timeouts, placeholder key, OpenRouter headers, reasoning_body
 │   │   ├── langchain_models.py # build_chat_model: ResolvedModel → LangChain chat model (profile=); OpenAICompatibleChat
 │   │   ├── checkpointers.py  # open_checkpointer (memory/sqlite/postgres) for the LangChain backends; deepagents_sqlite_path

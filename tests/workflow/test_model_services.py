@@ -324,6 +324,38 @@ def test_a_computed_role_the_list_can_fill_needs_no_other_provider(real_catalogs
     assert catalog.in_use == ("anthropic",)
 
 
+def test_role_models_names_each_role_s_model(real_catalogs):
+    """The list's role models, for the pickers and /models alike: default,
+    fast and strong, mapped or computed, and each mapped app role."""
+    settings = BaseSettings(
+        google_api_key="k-g",
+        anthropic_api_key="k-a",
+        model_roles={"strong": "anthropic:claude-opus-4-6", "critic": "anthropic:claude-opus-4-6"},
+    )
+    providers = model_services.providers_from_settings(settings)
+    catalog = build_catalog(settings, providers)
+
+    assert model_services.role_models(settings, catalog, providers) == {
+        "google:gemini-2.5-flash": ["default"],
+        "google:gemini-3.1-flash-lite-preview": ["fast"],
+        "anthropic:claude-opus-4-6": ["strong", "critic"],
+    }
+    # A manager's own model is the default role's.
+    default = model_services.role_models(
+        settings, catalog, providers, default="anthropic:claude-sonnet-4-6"
+    )
+    assert default["anthropic:claude-sonnet-4-6"] == ["default"]
+
+
+def test_role_models_leave_out_a_role_nothing_can_fill():
+    settings = BaseSettings()  # no key: no role is computed
+    providers = model_services.providers_from_settings(settings)
+
+    catalog = build_catalog(settings, providers)
+
+    assert model_services.role_models(settings, catalog, providers) == {}
+
+
 # --- what the catalog is told: the references and the roles computed ---------------
 
 

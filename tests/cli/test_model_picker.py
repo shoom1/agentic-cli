@@ -107,6 +107,20 @@ def test_the_list_is_the_entries_then_what_the_settings_and_the_agents_name(monk
     ]
 
 
+def test_every_role_s_model_is_offered_though_the_app_shows_one_picker():
+    """The app shows the default model's picker only: the fast role's model,
+    computed, is in the list all the same, as /models shows it."""
+    settings = BaseSettings(google_api_key="k-g", models={"google:gemini-2.5-pro": {}})
+
+    item = _model_item(_app(settings))
+
+    assert item.options == [
+        "google:gemini-2.5-pro",  # the entry, and the strong role's
+        "google:gemini-2.5-flash",  # the default role's
+        "google:gemini-3.1-flash-lite-preview",  # the fast role's
+    ]
+
+
 def test_a_models_entry_on_a_provider_without_its_key_is_not_offered():
     settings = BaseSettings(
         google_api_key="k-g",

@@ -684,7 +684,8 @@ class BaseCLIApp:
         """The model pickers' options, each role's model, and the thinking description.
 
         The options are the list (``ModelCatalog.offered``), with each role's
-        model. Once the workflow is ready, from its catalog (listings
+        model (``model_services.role_models``, as ``/models`` has it). Once
+        the workflow is ready, from its catalog (listings
         included) and its default model; before that, from the catalog it
         would load, unloaded (the entries and the shipped table), and the
         default model the settings name (or compute). A role shows the model
@@ -710,7 +711,7 @@ class BaseCLIApp:
             # Not loaded: the entries, what the settings and agents name, and
             # the shipped table.
             catalog = model_services.build_catalog(
-                self._settings, providers, agent_configs=controller.agent_configs
+                self._settings, providers, agent_configs=self.agent_configs
             )
             default = _resolved_role(role_map, "default", catalog, providers)
 
@@ -723,8 +724,11 @@ class BaseCLIApp:
                 current[role] = _resolved_role(role_map, role, catalog, providers)
             else:
                 current[role] = default
+        # Every role's model, whichever pickers the app shows: /models offers
+        # the same list.
+        role_models = model_services.role_models(self._settings, catalog, providers, default)
         return _ModelChoices(
-            options=catalog.offered(extra=[ref for ref in current.values() if ref]),
+            options=catalog.offered(extra=list(role_models)),
             current=current,
             thinking=self._thinking_meaning(default, catalog, providers),
         )
@@ -785,6 +789,12 @@ class BaseCLIApp:
             RuntimeError: If workflow is not yet initialized
         """
         return self._workflow_controller.workflow
+
+    @property
+    def agent_configs(self) -> tuple["AgentConfig", ...]:
+        """The agents the workflow is built from, ready or not (``/models``
+        and the model pickers offer their models)."""
+        return self._workflow_controller.agent_configs
 
     @property
     def usage_tracker(self) -> UsageTracker:

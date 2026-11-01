@@ -1,11 +1,14 @@
-"""``/models`` shows what the model catalog knows.
+"""``/models`` shows the list, finds a model in a full listing, and lists again.
 
-It prints the status of each provider in use (credentials, listing state, when
-it was fetched, how many models, the last error), then a table of the models of
-each of them with credentials: reference, context window, max output, thinking,
-tools, cache, where the values came from, and the roles that use the model.
-``/models <text>`` filters the table by reference, ignoring case, and
-``/models refresh`` lists every provider again now and reports what changed.
+``/models`` shows the list the model pickers offer (``ModelCatalog.offered``):
+each model's context window, max output, thinking, tools, cache, where the
+values came from, and the roles that use it; then each ``models`` entry the
+list leaves out, its Status saying why. Below, each provider in use: its
+credentials, listing state, when it was fetched, how many models it lists and
+the last error. ``/models <text>`` searches the full listings of every
+provider with a key, ignoring case (a provider not in use is listed the first
+time), and marks each match the list already has. ``/models refresh`` lists
+the providers in use, and those searched, again now and reports what changed.
 
 It works before the workflow is initialized (from the model cache, and says
 so), and it never prints a key. Listings come from ``ProviderAPI``, a fake of
@@ -27,6 +30,7 @@ from agentic_cli.cli.builtin_commands import HelpCommand
 from agentic_cli.cli.commands import CommandRegistry
 from agentic_cli.config import BaseSettings
 from agentic_cli.workflow import model_services
+from agentic_cli.workflow.config import AgentConfig
 from tests.conftest import patch_catalogs
 from tests.models.fakes import ProviderAPI, openrouter_spec, recorded
 
@@ -102,9 +106,10 @@ class Screen:
 class App:
     """What a command sees of the app; ``workflow`` raises until one is ready."""
 
-    def __init__(self, settings: BaseSettings, workflow=None) -> None:
+    def __init__(self, settings: BaseSettings, workflow=None, agent_configs=()) -> None:
         self.settings = settings
         self._workflow = workflow
+        self.agent_configs = tuple(agent_configs)
         self.session = Screen()
 
     @property
@@ -141,6 +146,19 @@ def _row(screen: Screen, ref: str) -> str:
     return rows[0]
 
 
+def _provider_row(screen: Screen, name: str) -> str:
+    """``name``'s row in the last Providers table (a model row may name its cache)."""
+    providers = [text for text in screen.of("rich") if text.strip().startswith("Providers")]
+    rows = [line for line in providers[-1].splitlines() if line.startswith(f"│ {name} ")]
+    assert len(rows) == 1, f"{name}: {rows}"
+    return rows[0]
+
+
+def _tables(screen: Screen) -> list[str]:
+    """Each table's title, in the order they were shown."""
+    return [text.strip().splitlines()[0].strip() for text in screen.of("rich")]
+
+
 # --- registration ----------------------------------------------------------------------
 
 
@@ -157,9 +175,9 @@ async def test_models_is_a_built_in_command_listed_in_help():
 # --- before the workflow is ready ------------------------------------------------------------
 
 
-async def test_before_the_workflow_is_ready_it_says_so_and_shows_the_table(monkeypatch):
-    """No cache and no listing (the test catalog never lists): the shipped
-    table's models of each provider with a key."""
+async def test_before_the_workflow_is_ready_it_says_so_and_shows_the_list(monkeypatch):
+    """No cache and no listing (the test catalog never lists): the list from
+    the shipped table."""
     keys(monkeypatch, "google")
 
     screen = await models(App(BaseSettings()))
@@ -179,11 +197,103 @@ async def test_before_the_workflow_is_ready_it_shows_the_cached_listings(api, mo
     screen = await models(App(settings))
 
     assert api.calls == []  # a fresh cache entry needs no listing
-    assert "google:gemini-2.0-flash" in screen.text  # listed, not in the table
+    # The fast role's model is the listing's newest, not the table's.
+    assert "google:gemini-2.5-flash-lite" in screen.text
+    assert "google:gemini-3.1-flash-lite-preview" not in screen.text
     assert "fresh" in _row(screen, "google")
 
 
-# --- the status rows -----------------------------------------------------------------------
+async def test_before_the_workflow_is_ready_the_list_has_the_agents_models(monkeypatch):
+    keys(monkeypatch, "google", "anthropic")
+    settings = BaseSettings(models={"google:gemini-2.5-flash": {}})
+    agents = [AgentConfig(name="writer", prompt="Write.", model="anthropic:claude-opus-4-7")]
+
+    screen = await models(App(settings, agent_configs=agents))
+
+    assert "anthropic:claude-opus-4-7" in screen.text
+    assert "not listed" in _provider_row(screen, "anthropic")  # in use
+
+
+def test_the_app_gives_a_command_the_agents_its_workflow_is_built_from():
+    from agentic_cli.cli.workflow_controller import WorkflowController
+
+    agents = [AgentConfig(name="writer", prompt="Write.", model="anthropic:claude-opus-4-7")]
+    app = BaseCLIApp.__new__(BaseCLIApp)
+    app._workflow_controller = WorkflowController(agents, BaseSettings())
+
+    assert app.agent_configs == tuple(agents)
+
+
+# --- the list --------------------------------------------------------------------------------
+
+
+async def test_the_list_with_each_model_s_facts_sources_and_roles(api, monkeypatch):
+    keys(monkeypatch, "google")
+    settings = BaseSettings(
+        models={"google:gemini-2.5-flash": {"max_output": 1_000}},
+        model_roles={"strong": "google:gemini-2.5-pro"},
+    )
+    workflow = await _ready(settings, api, "google:gemini-2.5-flash")
+
+    screen = await models(App(settings, workflow))
+
+    flash = _row(screen, "google:gemini-2.5-flash")
+    assert "1,048,576" in flash and "1,000" in flash  # the listing's window, the entry's max
+    assert "budget 4096/12288/24576" in flash
+    assert "gemini" in flash  # its cache mechanism
+    assert "config, listing, table" in flash
+    assert "default" in flash
+    assert "strong" in _row(screen, "google:gemini-2.5-pro")  # mapped
+    assert "fast" in _row(screen, "google:gemini-2.5-flash-lite")  # computed
+    # Listed, but not in the list.
+    assert "google:gemini-2.0-flash" not in screen.text
+    assert "google:gemini-3-flash-preview" not in screen.text
+
+
+async def test_an_entry_the_list_leaves_out_says_why(api, monkeypatch):
+    keys(monkeypatch, "google")
+    settings = BaseSettings(
+        model_providers=LAB,
+        models={
+            "google:gemini-2.5-flash": {},
+            "lab:Qwen/Qwen3-32B": {},
+            "together:deepseek-ai/DeepSeek-V3.1": {},
+            "google:gemini-9-ultra": {},
+        },
+    )
+    workflow = await _ready(settings, api, "google:gemini-2.5-flash")
+
+    screen = await models(App(settings, workflow))
+
+    assert "no key: set LAB_KEY" in _row(screen, "lab:Qwen/Qwen3-32B")
+    assert "provider 'together' is not defined in model_providers" in _row(
+        screen, "together:deepseek-ai/DeepSeek-V3.1"
+    )
+    assert "not served by google" in _row(screen, "google:gemini-9-ultra")
+    flash = _row(screen, "google:gemini-2.5-flash")
+    assert "no key" not in flash and "not served" not in flash
+    assert _tables(screen)[0] == "Models (3 offered, 3 not)"
+
+
+async def test_below_the_list_the_providers_in_use(api, monkeypatch):
+    keys(monkeypatch, "google", "anthropic")
+    settings = BaseSettings(
+        models={"google:gemini-2.5-flash": {}}, default_model="google:gemini-2.5-flash"
+    )
+    workflow = await _ready(settings, api, "google:gemini-2.5-flash")
+
+    screen = await models(App(settings, workflow))
+
+    assert _tables(screen) == ["Models (3)", "Providers"]  # the entry, the fast and strong roles'
+    assert "fresh" in _row(screen, "google")
+    assert " anthropic " not in f" {screen.text} "  # a key, but nothing uses it
+
+
+async def test_without_a_key_there_are_no_models():
+    screen = await models(App(BaseSettings()))
+
+    assert "No models: no provider has a key." in screen.of("message")
+    assert _tables(screen) == []
 
 
 async def test_each_provider_s_status(api, monkeypatch):
@@ -205,28 +315,6 @@ async def test_each_provider_s_status(api, monkeypatch):
     assert "no key" in _row(screen, "anthropic")
     assert "no key" in _row(screen, "openrouter")
     assert not any("not initialized" in message for message in screen.of("message"))
-
-
-# --- the model table -------------------------------------------------------------------------
-
-
-async def test_the_table_shows_each_model_s_record_and_roles(api, monkeypatch):
-    keys(monkeypatch, "google")
-    settings = BaseSettings(model_roles={"strong": "google:gemini-2.5-pro"})
-    workflow = await _ready(settings, api, "google:gemini-2.5-flash")
-
-    screen = await models(App(settings, workflow))
-
-    flash = _row(screen, "google:gemini-2.5-flash")
-    assert "1,048,576" in flash and "65,536" in flash  # context window and max output, listed
-    assert "budget 4096/12288/24576" in flash
-    assert "gemini" in flash  # its cache mechanism
-    assert "listing, table" in flash
-    assert "default" in flash
-    assert "fast" in _row(screen, "google:gemini-2.5-flash-lite")  # computed
-    assert "strong" in _row(screen, "google:gemini-2.5-pro")  # mapped
-    # A provider without a key has no rows.
-    assert "anthropic:" not in screen.text
 
 
 async def test_a_configured_provider_s_models_show_their_entries(api, monkeypatch):
@@ -262,8 +350,44 @@ async def test_a_configured_provider_s_credentials(api, monkeypatch):
     assert "│ none needed " in _row(screen, "local")
 
 
+# --- /models <text>: a search of the full listings ----------------------------------------
+
+
+async def test_a_search_finds_models_in_a_full_listing_and_marks_the_list_s(api, monkeypatch):
+    keys(monkeypatch, "google")
+    settings = BaseSettings(models={"google:gemini-2.5-flash": {}})
+    workflow = await _ready(settings, api, "google:gemini-2.5-flash")
+
+    screen = await models(App(settings, workflow), "flash")
+
+    assert _tables(screen) == ["Models matching 'flash' (4)"]
+    assert "in the list" in _row(screen, "google:gemini-2.5-flash")
+    assert "in the list" in _row(screen, "google:gemini-2.5-flash-lite")  # the fast role's
+    assert "in the list" not in _row(screen, "google:gemini-2.0-flash")
+    assert "in the list" not in _row(screen, "google:gemini-3-flash-preview")
+
+
+async def test_a_search_lists_a_provider_not_in_use_the_first_time(api, monkeypatch):
+    keys(monkeypatch, "google", "openrouter")
+    settings = BaseSettings(model_providers=OPENROUTER, models={"google:gemini-2.5-flash": {}})
+    workflow = await _ready(settings, api, "google:gemini-2.5-flash")
+    assert api.calls == ["google"]
+    api.calls.clear()
+
+    first = await models(App(settings, workflow), "llama")
+    again = await models(App(settings, workflow), "llama")
+    listed = await models(App(settings, workflow))
+
+    assert api.calls == ["openrouter"]  # then searched in memory
+    for screen in (first, again):
+        row = _row(screen, "openrouter:meta-llama/llama-3.3-70b-instruct")
+        assert "131,072" in row and "in the list" not in row
+    assert "fresh" in _row(listed, "openrouter")  # searched: shown with the providers in use
+    assert "openrouter:meta-llama" not in listed.text  # but not in the list
+
+
 @pytest.mark.parametrize("text", ["FLASH-LITE", "flash-lite", "Flash-Lite"])
-async def test_a_filter_matches_the_reference_ignoring_case(api, monkeypatch, text):
+async def test_a_search_matches_the_reference_ignoring_case(api, monkeypatch, text):
     keys(monkeypatch, "google", "anthropic")
     settings = BaseSettings()
     workflow = await _ready(settings, api, "google:gemini-2.5-flash")
@@ -275,18 +399,20 @@ async def test_a_filter_matches_the_reference_ignoring_case(api, monkeypatch, te
     assert "anthropic:claude" not in screen.text
 
 
-async def test_a_filter_that_matches_nothing_says_so(api, monkeypatch):
+async def test_a_search_that_matches_nothing_says_so(api, monkeypatch):
     keys(monkeypatch, "google")
     settings = BaseSettings()
     workflow = await _ready(settings, api, "google:gemini-2.5-flash")
 
     screen = await models(App(settings, workflow), "no-such-model")
 
-    assert any("no-such-model" in message for message in screen.of("message"))
+    assert screen.of("message") == ["No model matches 'no-such-model'."]
     assert "google:gemini" not in screen.text
 
 
-async def test_openrouter_s_models_are_all_shown_and_filterable(api, monkeypatch):
+async def test_a_search_finds_what_the_list_leaves_out(api, monkeypatch):
+    """OpenRouter's catalog runs to hundreds of models: the list has the one in
+    use, and a search finds the others to copy into models."""
     keys(monkeypatch, "openrouter")
     settings = BaseSettings(
         model_providers=OPENROUTER, default_model="openrouter:qwen/qwen3-235b-a22b"
@@ -296,8 +422,9 @@ async def test_openrouter_s_models_are_all_shown_and_filterable(api, monkeypatch
     everything = (await models(App(settings, workflow))).text
     llama = (await models(App(settings, workflow), "llama")).text
 
-    assert "openrouter:meta-llama/llama-3.3-70b-instruct" in everything
-    assert "openrouter:qwen/qwen3-235b-a22b:free" in everything
+    assert "openrouter:qwen/qwen3-235b-a22b " in everything
+    assert "openrouter:meta-llama/llama-3.3-70b-instruct" not in everything
+    assert "openrouter:qwen/qwen3-235b-a22b:free" not in everything
     assert "openrouter:meta-llama/llama-3.3-70b-instruct" in llama
     assert "openrouter:qwen" not in llama
 
@@ -324,6 +451,7 @@ async def test_refresh_lists_again_and_reports_the_counts_that_changed(api, monk
     assert "anthropic" not in report  # unchanged
     assert any("openai" in w and "HTTP 500" in w for w in screen.of("warning"))
     assert workflow.catalog.records("google")[2].model  # the live catalog has the new listing
+    assert _tables(screen) == ["Providers"]
 
 
 async def test_refresh_with_nothing_new_says_so(api, monkeypatch):
@@ -335,6 +463,35 @@ async def test_refresh_with_nothing_new_says_so(api, monkeypatch):
 
     assert any("unchanged" in message for message in screen.of("message"))
     assert not screen.of("warning")
+
+
+async def test_refresh_never_lists_a_provider_that_is_never_listed(api, monkeypatch):
+    keys(monkeypatch, "google")
+    settings = BaseSettings(
+        model_providers={"local": {"base_url": "http://localhost:9000/v1", "list_models": False}},
+        models={"local:qwen3-32b": {}, "google:gemini-2.5-flash": {}},
+    )
+    workflow = await _ready(settings, api, "google:gemini-2.5-flash")
+    api.calls.clear()
+
+    screen = await models(App(settings, workflow), "refresh")
+
+    assert api.calls == ["google"]
+    assert screen.of("message") == ["Listed 1 provider(s) again: their models are unchanged."]
+    assert "not listed" in _provider_row(screen, "local")
+
+
+async def test_refresh_lists_the_providers_searched_too(api, monkeypatch):
+    keys(monkeypatch, "google", "openrouter")
+    settings = BaseSettings(model_providers=OPENROUTER, models={"google:gemini-2.5-flash": {}})
+    workflow = await _ready(settings, api, "google:gemini-2.5-flash")
+    await models(App(settings, workflow), "qwen")
+    api.calls.clear()
+
+    screen = await models(App(settings, workflow), "refresh")
+
+    assert sorted(api.calls) == ["google", "openrouter"]
+    assert "fresh" in _row(screen, "openrouter")
 
 
 async def test_refresh_before_the_workflow_is_ready_updates_the_cache(api, monkeypatch, home):
