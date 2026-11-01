@@ -10,8 +10,10 @@ from pathlib import Path
 import httpx
 import pytest
 from pydantic import Field
+from pydantic_settings import BaseSettings as PydanticBaseSettings
+from pydantic_settings import SettingsConfigDict
 
-from agentic_cli.config import BaseSettings
+from agentic_cli.config import BaseSettings, SettingsValidationError, validate_settings
 from agentic_cli.models import (
     ModelCatalog,
     ModelRef,
@@ -20,9 +22,11 @@ from agentic_cli.models import (
     ProviderSpec,
     RoleMap,
 )
+from agentic_cli.settings_mixins import AppSettingsMixin, CLISettingsMixin
 from agentic_cli.workflow import model_services
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.model_services import build_catalog
+from agentic_cli.workflow.settings import WorkflowSettingsMixin
 from tests.models.fakes import openrouter_spec
 
 _KEY_VARS = ("GOOGLE_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY")
@@ -199,6 +203,47 @@ class TestUserLevelEnvFiles:
         providers = model_services.providers_from_settings(settings, env={})
 
         assert providers["lab"].api_key is None
+
+    @pytest.mark.parametrize(
+        "form", ["no env_file", "None", "one string", "a Path", "~", "a list"]
+    )
+    def test_settings_composed_from_the_mixins_read_their_class_s_env_files(
+        self, tmp_path, form
+    ):
+        """Settings composed from the exported mixins over pydantic-settings' own
+        BaseSettings have no ``env_files``: their class's ``env_file`` is read
+        (its user-level entries), in each form it takes, and they validate:
+        without a file to read the key from, the key is named, nothing crashes."""
+        env_file = tmp_path / "home" / ".app" / ".env"
+        env_file.parent.mkdir()
+        env_file.write_text("LAB_KEY=k-from-file\n")
+        other = tmp_path / "other.env"
+        config, expected = {
+            "no env_file": ({}, ()),
+            "None": ({"env_file": None}, ()),
+            "one string": ({"env_file": str(env_file)}, (env_file,)),
+            "a Path": ({"env_file": env_file}, (env_file,)),
+            "~": ({"env_file": "~/.app/.env"}, (env_file,)),
+            "a list": ({"env_file": [".env", str(other), str(env_file)]}, (other, env_file)),
+        }[form]
+
+        class Composed(
+            WorkflowSettingsMixin, AppSettingsMixin, CLISettingsMixin, PydanticBaseSettings
+        ):
+            model_config = SettingsConfigDict(env_prefix="COMPOSED_", extra="ignore", **config)
+            model_providers: dict[str, ProviderSpec] = Field(default_factory=lambda: {"lab": LAB})
+
+        settings = Composed(default_model="lab:qwen3-32b")
+
+        assert model_services.user_env_files(settings) == expected
+        lab = model_services.providers_from_settings(settings)["lab"]
+        if expected:
+            assert lab.api_key == "k-from-file"
+            validate_settings(settings)
+        else:
+            assert lab.api_key is None
+            with pytest.raises(SettingsValidationError, match="set LAB_KEY in the environment"):
+                validate_settings(settings)
 
 
 def test_entries_from_settings_by_reference_in_their_order():
