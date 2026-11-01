@@ -19,15 +19,15 @@ Agentic CLI is a shared library providing the core infrastructure for building d
 agentic-cli/
 ├── src/agentic_cli/
 │   ├── __init__.py           # Package exports, lazy imports
-│   ├── config.py             # BaseSettings (pydantic-settings)
+│   ├── config.py             # BaseSettings (pydantic-settings; env_files: the env files the settings read, the constructor's _env_file else the class's; settings_customise_sources filters a cwd-relative one, the constructor's too); validate_settings: the static model checks
 │   ├── settings_mixins.py    # Composable settings field groups
-│   ├── settings_persistence.py # Trust-split save (PROJECT_SETTABLE_KEYS → project, rest → user config; excludes SECRET_FIELDS; the project file's PROJECT_PRESERVED_KEYS, its `permissions` deny rules, kept by every save but an explicit `path=` dump); USER_PREFERENCE_KEYS (ui_theme, dialog_placement): user-scoped, yet an app may list them in /settings
+│   ├── settings_persistence.py # Trust-split save (PROJECT_SETTABLE_KEYS → project, rest → user config; excludes SECRET_FIELDS; the project file's PROJECT_PRESERVED_KEYS, its `permissions` deny rules, kept by every save but an explicit `path=` dump); USER_PREFERENCE_KEYS (ui_theme, dialog_placement): user-scoped, yet an app may list them in /settings; HAND_EDITED_KEYS (models, model_providers): never written by a save (the app's shipped entries would be copied into a file), each file's own section kept (a project file's models only), never shown by /settings
 │   ├── constants.py          # Shared constants, truncate()
 │   ├── file_utils.py         # atomic_write_json / atomic_write_text
 │   ├── paths.py              # resolve_path: the one interpretation of a path argument
 │   ├── logging.py
 │   ├── cli/
-│   │   ├── app.py            # BaseCLIApp (main(): the command line, add_arguments/from_args, exit_status; session_start: how run() begins, its resume once the prompt is up (_open_on_startup; Ctrl+C there ends the app; --continue passes over conversations another process holds, _newest_free); the --resume hint at exit; the session it builds; get_theme(name); /settings model pickers: _model_choices; the LangGraph deprecation notice; an orchestrator swap: the new backend takes the conversation's id, `_SWAP_NOTE` says its history stays behind; compact(), start_new_session() and resume_session(): /compact, /new and /resume, under the turn lock (pick_session(), the picker, is not: it waits on a dialog); a conversation's facts saved once per conversation used (_turned); another conversation's job resume keeps ctx and the task list)
+│   │   ├── app.py            # BaseCLIApp (main(): the command line, add_arguments/from_args, exit_status; session_start: how run() begins, its resume once the prompt is up (_open_on_startup; Ctrl+C there ends the app; --continue passes over conversations another process holds, _newest_free); the --resume hint at exit; the session it builds; get_theme(name); /settings model pickers: _model_choices (the list: catalog.offered with model_services.role_models, as /models has it); the LangGraph deprecation notice; an orchestrator swap: the new backend takes the conversation's id, `_SWAP_NOTE` says its history stays behind; compact(), start_new_session() and resume_session(): /compact, /new and /resume, under the turn lock (pick_session(), the picker, is not: it waits on a dialog); a conversation's facts saved once per conversation used (_turned); another conversation's job resume keeps ctx and the task list)
 │   │   ├── commands.py       # Command, CommandRegistry
 │   │   ├── conversation_lock.py # ConversationLock: one process per stored conversation (flock under <sessions_dir>/locks/; BaseCLIApp._hold refuses one held elsewhere)
 │   │   ├── builtin_commands.py # /help, /status (the main agent's context rows: context_budget), /models (ModelsCommand: the list, each model's facts and sources, Status for an entry left out, the providers in use; /models <text> searches the full listings; refresh), /sessions, /resume [<id>] (sessions), /jobs (resume: finished jobs), /compact [focus], /new, ...
@@ -46,13 +46,13 @@ agentic-cli/
 │   │   ├── live_events.py    # LiveEvents, merged: events reported inside a turn (reporting/report) reach its stream as they happen; on_stop: a consumer that stops early, before the source is cancelled
 │   │   ├── interrupts.py     # What a call a cancel or a crash left open is answered with; OpenCalls (each manager's record)
 │   │   ├── config.py         # AgentConfig
-│   │   ├── settings.py       # Workflow/tool settings schema
+│   │   ├── settings.py       # Workflow/tool settings schema; models, model_providers and model_roles in Annotated form (an app's override warns nothing); _merge_shipped_entries: the app's models and model_providers, then the sources', field by field (at load only)
 │   │   ├── context.py        # ContextBudget/context_budget: when to summarize (window or the 128k floor, budget, trigger, keep; both backends, the CLI); is_context_overflow, overflow_message
 │   │   ├── retry.py          # Rate-limit retry helpers
 │   │   ├── tool_summaries.py
 │   │   ├── memory_services.py # Settings → agentic_cli.memory arguments (KBs, memory store)
 │   │   ├── model_services.py # Settings → agentic_cli.models arguments (keys, model_providers, entries, roles); a configured provider's key: the environment, then user_env_files (absolute env_file entries; provider_env); build_catalog (with model_references and computed_roles: the settings', the agents' and the manager's); role_models (the roles' models the list offers, for the pickers and /models)
-│   │   ├── model_wire.py     # What both adapters send: timeouts, placeholder key, OpenRouter headers, reasoning_body
+│   │   ├── model_wire.py     # What both adapters send: timeouts, placeholder key, an openrouter-kind provider's headers, reasoning_body (by the provider's kind and the model's thinking)
 │   │   ├── langchain_models.py # build_chat_model: ResolvedModel → LangChain chat model (profile=); OpenAICompatibleChat
 │   │   ├── checkpointers.py  # open_checkpointer (memory/sqlite/postgres) for the LangChain backends; deepagents_sqlite_path
 │   │   ├── llm_log.py        # LLMLogWriter (raw_llm_logging JSONL, 0700/0600) + redact_secrets: ADK and Deep Agents
@@ -75,7 +75,7 @@ agentic-cli/
 │   │   │   ├── sessions.py   # A conversation's row in its session state (agentic_cli.title, agentic_cli.turns), saved with each user turn (run_async(state_delta=)); typed_prompts
 │   │   │   ├── event_processor.py  # ADKEventProcessor (a sub-agent's text marked as activity)
 │   │   │   ├── model_factory.py # build_adk_model: ResolvedModel → ADK model, config, planner
-│   │   │   ├── openai_compatible.py # OpenAICompatibleLlm (OpenRouter, endpoints; reasoning text)
+│   │   │   ├── openai_compatible.py # OpenAICompatibleLlm (the configured providers: openrouter and openai_compatible kinds; reasoning text)
 │   │   │   ├── anthropic_llm.py # DirectAnthropicLlm: bare claude-* strings → direct API
 │   │   │   ├── permission_plugin.py # PermissionPlugin (gates tool calls)
 │   │   │   ├── interrupted_calls_plugin.py # InterruptedCallsPlugin: a cancelled turn's seals worded (finished results kept); left_open: a crash's calls answered at the next turn
@@ -148,13 +148,13 @@ agentic-cli/
 │   │       └── _mock_vector_store.py, _mock_bm25.py
 │   ├── models/               # Model knowledge (provisional); imports nothing else from agentic_cli, no provider SDK
 │   │   ├── refs.py           # parse_spec/parse_ref: provider:model, bare ids, role names
-│   │   ├── providers.py      # ProviderKind, ProviderSpec (model_providers: openai_compatible or openrouter), Provider (built-ins: Google, Anthropic, OpenAI; key_env, has_credentials), build_providers
+│   │   ├── providers.py      # ProviderKind, ProviderSpec (model_providers: openai_compatible or openrouter; list_models: false, never listed, any id accepted), Provider (built-ins: Google, Anthropic, OpenAI; key_env, has_credentials, list_models), build_providers
 │   │   ├── entries.py        # ModelEntry (the models setting), parse_entry_key, check_entries
 │   │   ├── records.py        # ModelRecord, ThinkingRule
 │   │   ├── table.py          # ShippedTable, load_table() (data/table.json: family rules, numbers, fallbacks)
-│   │   ├── roles.py          # RoleMap: default / fast / strong / app roles → references
+│   │   ├── roles.py          # RoleMap: default / fast / strong / app roles → references; an unmapped built-in role: the newest of its tier among the offered models entries (the first provider in list order with one), else of the first keyed built-in, else unfilled_role_message (also config's static check)
 │   │   ├── resolve.py        # resolve_model → ResolvedModel (thinking, max_tokens, sampling)
-│   │   ├── catalog.py        # ModelCatalog: entries + listings + table, validation; in_use (the providers listed), offered/not_offered (the list the pickers offer), search; listing cache (address and kind)
+│   │   ├── catalog.py        # ModelCatalog: entries + listings + table, validation; in_use (the providers listed), offered/not_offered (the list the pickers offer), search; listing cache (address, kind, and the entries' ids a listing lacked, `absent`: a retired entry costs one listing, not one per start)
 │   │   └── discovery/        # One lister per provider kind, over httpx
 │   └── persistence/
 │       └── session.py        # SessionPersistence
@@ -255,7 +255,7 @@ Available session methods:
 
 - **Framework**: pytest with `asyncio_mode = "auto"`
 - **MockContext**: From `tests/conftest.py` — provides isolated settings and temp dirs for all tests
-- **Model listings**: `tests/conftest.py::_no_model_listings` keeps every manager's model catalog unloaded (no network, no `~/.<app>/model_cache.json`), so any well-formed model id is accepted; a test that wants listings calls `tests/conftest.py::patch_catalogs` (a transport such as `tests/models/fakes.py::ProviderAPI`, the cache file or none), which keeps the real `build_catalog` and so every argument it gives
+- **Model listings**: `tests/conftest.py::_no_model_listings` keeps every manager's model catalog unloaded (no network, no `~/.<app>/model_cache.json`), so any well-formed model id is accepted; a test that wants listings calls `tests/conftest.py::patch_catalogs` (a transport such as `tests/models/fakes.py::ProviderAPI`, the cache file or none), which keeps the real `build_catalog` and so every argument it gives. OpenRouter is a configured provider: `tests/models/fakes.py::openrouter_spec()` and `providers(openrouter="k")` define it, and a settings-level test sets `model_providers` and a fake `OPENROUTER_API_KEY` in the environment
 - **Provider fakes**: model requests never reach a provider. `tests/workflow/adk/fakes.py::FakeAPI` serves an ADK-built model's client (`serve()`) and records the bodies it sends; `tests/workflow/langchain_fakes.py`'s `route*` helpers send a LangChain chat model's client to it, with the SSE replies a LangGraph or Deep Agents turn needs. A test-first run against the old code must fail offline too, so stub any client the old code would build
 - **Session fakes**: a session fake is `tests/cli/dialog_fakes.py::autospec_session()` (`create_autospec(ThinkingPromptSession)`), so a call to a method thinking-prompt lacks fails; `edited_dialog(edits)` is a real `Dialog` whose fields hold the user's edits (patch the module's `Dialog`). The render tests' `RecordingSession` and `RecordingThinkingBox` (`tests/event_replay.py`) are checked against the real classes by `tests/test_session_fakes_contract.py`. Turns on a real console run `tests/cli/console_app.py` over a pty (`tests/cli/test_console_turns.py`)
 - **Deep Agents fakes**: `tests/workflow/deepagents/fakes.py::ScriptedChat` answers each model call from a script and records the requests, so a test drives a whole agent tree offline; patch `agentic_cli.workflow.deepagents.manager.build_chat_model` with `ScriptedModels(agent=[...])`. Turns through the real provider adapters are in `tests/integration/test_deepagents_turns.py` (on `FakeAPI`), and MCP tests start the stdio server `tests/workflow/deepagents/mcp_server.py` through `test_mcp.py`'s `servers` fixture, which checks that no server outlives its test. The shared contract tests (`test_lifecycle_races.py`, `test_resource_ownership.py`, `test_model_switch_keeps_services.py`, `test_backend_isolation.py`) cover Deep Agents beside ADK, and a backend change runs them

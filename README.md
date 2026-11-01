@@ -7,7 +7,7 @@ A framework for building domain-specific agentic CLI applications powered by LLM
 Agentic CLI provides the core infrastructure for building interactive CLI applications that leverage LLM agents for complex tasks. It offers:
 
 - **Pluggable Orchestration**: Choose Google ADK (the default) or Deep Agents for agent workflows; both run every model provider. LangGraph is deprecated and will be removed in 0.8.0
-- **Any Model, Per Agent**: Gemini, Claude, GPT, OpenRouter's models and your own OpenAI-compatible server (vLLM), mixed in one agent tree; models named by reference or role, with one set of thinking levels
+- **Any Model, Per Agent**: Gemini, Claude and GPT built in, and any OpenAI-compatible host configured by name (OpenRouter, Together, Fireworks, your own vLLM), mixed in one agent tree; models named by reference or role, with one set of thinking levels
 - **Rich Terminal UI**: Dual thinking boxes, markdown rendering, and streaming responses via `thinking-prompt`
 - **Declarative Agents**: Define agents with simple configuration objects
 - **Native Tool Architecture**: Backend-specific tool factories for each backend, with automatic HITL confirmation for dangerous tools
@@ -16,7 +16,7 @@ Agentic CLI provides the core infrastructure for building interactive CLI applic
 - **Semantic Memory**: Embedding-backed memory with lifecycle management, contradiction detection, and forgetting policy
 - **Durable Sessions**: Conversations persist continuously by default (SQLite; PostgreSQL or ephemeral memory optional) and resume across CLI restarts: `--continue` (the newest), `--resume <id>`, or `/resume` in the app for a picker
 - **Context Window Management**: Summarization near the model's input budget on ADK and Deep Agents, requests trimmed to fit, a provider's overflow recovered or explained, and token-usage visibility
-- **Model Catalog**: Live model listings from each provider, cached for a day, shown by `/models`
+- **A Short Model List**: the app ships the models its pickers offer, and the user and the project add to them; each provider's live listing, cached for a day, checks them, and `/models` shows them and searches the full listings
 - **Type-safe Configuration**: Composable settings mixins (`pydantic-settings`)
 
 ## Architecture
@@ -56,7 +56,7 @@ Agentic CLI provides the core infrastructure for building interactive CLI applic
 ## Requirements
 
 - Python 3.12+
-- A key for at least one model provider (Google, Anthropic, OpenAI or OpenRouter), or an OpenAI-compatible server of your own (see [Models and providers](#models-and-providers))
+- A key for at least one model provider (Google, Anthropic or OpenAI, or a host such as OpenRouter configured in `model_providers`), or an OpenAI-compatible server of your own (see [Models and providers](#models-and-providers))
 
 ## Installation
 
@@ -287,8 +287,9 @@ manager = GoogleADKWorkflowManager(
 ADK integrations:
 - **Model factory** — `workflow.adk.model_factory.build_adk_model` builds each
   agent's model from its resolved model: ADK's `Gemini`, `AnthropicLlm` and
-  `OpenAIResponsesLlm`, and `OpenAICompatibleLlm` for OpenRouter and your
-  endpoints, which shows their reasoning text
+  `OpenAIResponsesLlm`, and `OpenAICompatibleLlm` for the providers in
+  `model_providers` (OpenRouter and OpenAI-compatible hosts), which shows
+  their reasoning text
 - **Delegation** — a sub-agent runs in ADK's `single_turn` mode: its parent
   calls it as a tool named after it and gets its answer back in the same turn
   (see [Sub-agent context](#sub-agent-context))
@@ -408,8 +409,8 @@ Features:
 - **One chat model per agent**: `workflow.langchain_models.build_chat_model` builds
   it once, from the agent's resolved model, with its key, timeout and retries:
   `ChatGoogleGenerativeAI` (the Gemini API, not Vertex AI), `ChatAnthropic`,
-  `ChatOpenAI` on the Responses API, `ChatOpenRouter`, and `OpenAICompatibleChat`
-  for your endpoints
+  `ChatOpenAI` on the Responses API, `ChatOpenRouter` for an `openrouter`
+  provider, and `OpenAICompatibleChat` for an OpenAI-compatible one
 - **Per-agent settings and thinking**: each agent's `model_settings` apply, and
   thinking text reaches the thinking box for every provider
 - **Retry policies**: Automatic retry with exponential backoff
@@ -423,7 +424,7 @@ Requires: `pip install agentic-cli[langgraph]`
 | Feature | Google ADK | Deep Agents | LangGraph (deprecated) |
 |---------|------------|-------------|------------------------|
 | Install | Core | `deepagents` extra | `langgraph` extra |
-| Model providers | Gemini, Claude, GPT (Responses API), OpenRouter, OpenAI-compatible endpoints | The same | The same |
+| Model providers | Gemini, Claude, GPT (Responses API), and OpenRouter and OpenAI-compatible hosts (`model_providers`) | The same | The same |
 | Delegation | `<sub-agent>(request=...)`: the sub-agent answers its parent, the coordinator answers the user | `task`: the same | Routing between agent nodes |
 | Sub-agent context | `fresh` or `inherit` | `fresh` or `inherit` (a fork) | Ignored |
 | State persistence | SQLite (default), PostgreSQL, or memory | The same, as a LangGraph checkpointer | Memory, PostgreSQL, or SQLite |
@@ -483,12 +484,13 @@ Sources are consulted highest-precedence first (JSON sources only when the file 
 6. **Field defaults**
 
 Levels 1, 2 and 4 are trusted; **level 3 is not**, and neither is a
-*cwd-relative* `env_file`. A cloned repository can ship both, so both are
+*cwd-relative* `env_file`, the class's or one given to the constructor
+(`_env_file`). A cloned repository can ship both, so both are
 filtered down to an explicit allowlist of benign keys (model and behaviour
 settings, timeouts, sandbox *resource* limits, `session_store`, log verbosity).
 Security-relevant keys set from an untrusted source — executor backend, sandbox
 image/mounts/user, OS-sandbox policy, `skills_dirs`, shell sandbox settings,
-`workspace_dir`, `raw_llm_logging`, permission rules, `model_endpoints` (the
+`workspace_dir`, `raw_llm_logging`, permission rules, `model_providers` (the
 addresses a key is sent to), and any credential — are dropped with a logged
 warning rather than applied. A key that names no setting at all (one an
 older version had, say) is dropped silently.
@@ -503,11 +505,10 @@ absolute/user-level file. A key placed in a cwd `.env` is deliberately ignored.
 | `google_api_key` | `GOOGLE_API_KEY` | None | Google API key for Gemini |
 | `anthropic_api_key` | `ANTHROPIC_API_KEY` | None | Anthropic API key for Claude |
 | `openai_api_key` | `OPENAI_API_KEY` | None | OpenAI API key for GPT |
-| `openrouter_api_key` | `OPENROUTER_API_KEY` | None | OpenRouter API key |
 | `default_model` | `AGENTIC_DEFAULT_MODEL` | Auto | The default model: a `provider:model` reference or a model id |
 | `model_roles` | `AGENTIC_MODEL_ROLES` | {} | A model per role: `fast`, `strong`, or an app's own |
-| `pinned_models` | `AGENTIC_PINNED_MODELS` | [] | Models the `/settings` model pickers always offer |
-| `model_endpoints` | `AGENTIC_MODEL_ENDPOINTS` | {} | Your OpenAI-compatible servers (never from a project file) |
+| `models` | `AGENTIC_MODELS` | The app's | The models the pickers offer, by `provider:model`, with optional details; added to the app's (see [Models and providers](#models-and-providers)) |
+| `model_providers` | `AGENTIC_MODEL_PROVIDERS` | The app's | OpenRouter and OpenAI-compatible hosts by name (never from a project file) |
 | `thinking_effort` | `AGENTIC_THINKING_EFFORT` | "medium" | Thinking level: none, low, medium, high |
 | `prompt_caching_enabled` | `AGENTIC_PROMPT_CACHING_ENABLED` | true | Prompt caching: Claude, and Gemini on ADK |
 | `orchestrator` | `AGENTIC_ORCHESTRATOR` | "adk" | Orchestrator: `adk`, `deepagents`, or `langgraph` (deprecated) |
@@ -581,24 +582,202 @@ with SettingsContext(custom_settings):
 ## Models and providers
 
 Each agent runs on a model named by a reference or a role, decided once, when
-the workflow starts. Every backend runs every provider: Gemini, Claude, GPT,
-OpenRouter's models, and models on an OpenAI-compatible server of your own
-(vLLM and the like), and one agent tree can mix them. What agentic-cli knows
-about models lives in `agentic_cli.models` (provisional in 0.7.0: its names
-may still change): a table of model families shipped with the package, merged
-with each provider's live model list.
+the workflow starts. Three providers are built in: Google (Gemini), Anthropic
+(Claude) and OpenAI (GPT). Any other host is configured by name in
+`model_providers`: OpenRouter, Together, Fireworks, or a vLLM server of your
+own. Every backend runs every provider, and one agent tree can mix them.
 
-### References and roles
+The model pickers offer a short list, `models`: the app ships it, and the user
+and the project add to it. What agentic-cli knows about models lives in
+`agentic_cli.models` (provisional in 0.7.0: its names may still change): a
+table of model families shipped with the package, merged with each provider's
+live model list and with what the `models` entries say.
 
-A model is named the same way in `default_model`, `model_roles`,
-`pinned_models`, `AgentConfig.model`, `Manager(model=...)` and agent YAML:
+### References
+
+A model is named the same way in `models`, `default_model`, `model_roles`,
+`AgentConfig.model`, `Manager(model=...)` and agent YAML:
 
 | You write | It means |
 |-----------|----------|
-| `anthropic:claude-sonnet-4-6` | `provider:model`. The provider is `google`, `anthropic`, `openai`, `openrouter`, or one of your endpoints |
-| `openrouter:qwen/qwen3-235b-a22b:free` | Split on the first colon only, so the model id keeps its own colons |
-| `gemini-2.5-flash`, `claude-sonnet-4-6`, `gpt-5.5`, `o3` | A bare `gemini-`, `claude-`, `gpt-` or `o<digit>` id names its provider |
-| `fast` | Any other bare name is a role. A role name has no digits, so a bare `qwen3-32b` is an error that asks for its provider (`local-vllm:qwen3-32b`) |
+| `anthropic:claude-sonnet-5-5` | `provider:model`. The provider is `google`, `anthropic`, `openai`, or the name of one in `model_providers` |
+| `openrouter:qwen/qwen3.7-plus` | A configured provider's model, under the id its host gives it |
+| `openrouter:vendor/model:free` | Split on the first colon only, so a model id keeps its own colons |
+| `gemini-3.8-flash`, `claude-sonnet-5-5`, `gpt-5.5`, `o3` | A bare `gemini-`, `claude-`, `gpt-` or `o<digit>` id names its provider (not in `models`, whose keys are always `provider:model`) |
+| `fast` | Any other bare name is a role (see [Roles](#roles)). A role name has no digits, so a bare `qwen3-32b` is an error that asks for its provider (`local:qwen3-32b`) |
+
+### Built-in providers and their keys
+
+| Provider | Setting | Environment variable |
+|----------|---------|----------------------|
+| Google (the Gemini API) | `google_api_key` | `GOOGLE_API_KEY` |
+| Anthropic | `anthropic_api_key` | `ANTHROPIC_API_KEY` |
+| OpenAI | `openai_api_key` | `OPENAI_API_KEY` |
+
+Keys are never saved and never shown (not in `repr`, not by `/models`), and a
+project settings file or a cwd `.env` cannot set them: put them in the
+environment or a user-level dotenv file (see
+[Precedence and the trust boundary](#precedence-and-the-trust-boundary)). Each
+model's client is given its key. Google, Anthropic and OpenAI models go to
+their SDK's default host; Vertex AI is not supported.
+
+### Configured providers: `model_providers`
+
+Every other provider is an entry of `model_providers`, by name. A user defines
+them in `~/.my_app/settings.json`:
+
+```json
+{
+  "model_providers": {
+    "openrouter": {
+      "kind": "openrouter",
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key_env": "OPENROUTER_API_KEY"
+    },
+    "together": {
+      "base_url": "https://api.together.xyz/v1",
+      "api_key_env": "TOGETHER_API_KEY"
+    },
+    "fireworks": {
+      "base_url": "https://api.fireworks.ai/inference/v1",
+      "api_key_env": "FIREWORKS_API_KEY"
+    },
+    "local": {
+      "base_url": "http://localhost:8000/v1"
+    }
+  }
+}
+```
+
+| Field | Default | Meaning |
+|-------|---------|---------|
+| `kind` | `"openai_compatible"` | The API it speaks: `openai_compatible` (Together, Fireworks, vLLM and the like) or `openrouter` |
+| `base_url` | required | `http` or `https`, a host, an optional port and path; no user name, password, query or fragment |
+| `api_key_env` | none | The environment variable holding the key. Without one, the client sends the placeholder key `EMPTY` (never `OPENAI_API_KEY`), as a server without authentication expects. Required for `kind: openrouter` |
+| `list_models` | `true` | `false`: the provider is never listed, and every model id is accepted (see below) |
+
+- **A name** is lowercase letters, digits, `_` and `-`, starting with a
+  letter, and cannot be `google`, `anthropic` or `openai`. `openrouter` is an
+  ordinary name: what makes a provider OpenRouter is `kind: openrouter`, under
+  any name. That kind adds OpenRouter's model listing (limits, image input,
+  tools, whether the model reasons), the `HTTP-Referer` and `X-Title` headers
+  naming the app, and `reasoning.effort` (`none` to `xhigh`) for a model the
+  listing says reasons.
+- **Where it is defined**: the app's settings class, the user file or the
+  environment (`AGENTIC_MODEL_PROVIDERS`, or your app's prefix, as JSON). A
+  provider holds the address its key is sent to, so a project settings file,
+  which a cloned repository can ship, or a cwd `.env` that sets
+  `model_providers` is ignored with a warning. A user's entry adds a
+  provider, or overrides fields of the app's provider of the same name one by
+  one (only its `api_key_env`, say).
+- **Its key** is read from the variable `api_key_env` names: in the process
+  environment, then in the app's user-level env files (each `env_file` of the
+  settings class that is absolute once `~` is expanded, such as the research
+  demo's `~/.research_demo/.env`), the environment winning. A cwd `.env`, a
+  project file or a `models` entry never supplies it, and it is never stored.
+  When the variable is not set, the provider cannot be called: its `models`
+  entries are not offered, and a model that runs on it fails at startup,
+  naming the variable and where it is read.
+- **Together and Fireworks** speak the OpenAI API, so they need no `kind`.
+  Once the key is set, `/models together:` lists every Together model (a
+  search matches the `provider:model` reference): copy the exact id into
+  `models` as `together:<id>`.
+- **A local vLLM server** names no key here. vLLM lists the model it serves,
+  with its window (`max_model_len`). A server without a `/models` route, or
+  one whose listing leaves out models it serves, takes `"list_models": false`:
+  it is never listed, any id is accepted, and a model's facts come from its
+  `models` entry and the table, so give its `context_window` (an unknown
+  window counts as 128,000 tokens).
+- `/settings` never shows `model_providers`, and no save writes it: it is
+  edited by hand.
+
+### The list: `models`
+
+`models` maps a `provider:model` reference to what is known about that model.
+Each key is a model the model pickers offer; every field is optional:
+
+```json
+{
+  "models": {
+    "anthropic:claude-sonnet-5-5": {},
+    "google:gemini-3.8-flash": {},
+    "openrouter:qwen/qwen3.7-plus": {},
+    "openrouter:deepseek/deepseek-v4-pro": {},
+    "local:Qwen/Qwen3-32B": {"context_window": 32768, "thinking": "chat_template"}
+  }
+}
+```
+
+| Field | For | Meaning |
+|-------|-----|---------|
+| `context_window`, `max_output` | Any model | Token counts, at least 1 |
+| `tools`, `image_input` | Any model | Whether it takes tools, and images |
+| `thinking` | A configured provider's model | `none`, `chat_template` (vLLM's `chat_template_kwargs.enable_thinking`) or `effort` (`reasoning_effort`, or OpenRouter's `reasoning.effort`); on an `openrouter` provider, `none` or `effort` |
+| `effort_levels` | A configured provider's model | Its effort levels, lowest first, as lowercase names: by default `low`, `medium`, `high`, or the levels OpenRouter's listing gives a reasoning model |
+| `reasoning_text` | A configured provider's model | Whether it sends its reasoning as text |
+
+- A field that is set wins over the provider's listing and the shipped
+  table; one left out keeps theirs. An empty entry, `{}`, adds the model to
+  the list and changes nothing about it.
+- The thinking fields are for a configured provider's model only. Google's,
+  Anthropic's and OpenAI's thinking comes from their listings and the table,
+  so an entry on one of their models that sets `thinking`, `effort_levels` or
+  `reasoning_text` fails when the settings load. So does a bare id as a key
+  (`claude-sonnet-5-5`): the message gives its full form, so that one model
+  has one key.
+- **Who sets it**: the app's settings class, then the user file, the project
+  file and the environment (`AGENTIC_MODELS`, or your app's prefix, as JSON),
+  in that order. Each adds models, or overrides an earlier entry's fields
+  one by one; nothing removes an entry. A project may add entries: they only
+  choose among the providers the app and the user defined, and their numbers
+  are hints. An entry on a provider this user has not defined is not
+  offered, with a warning, rather than an error: a project file is shared
+  by users with different providers.
+- `/settings` never shows `models`, and no save writes it, so the app's
+  entries are never copied into a user's or a project's file. Edit it by hand.
+
+An app ships its providers and its list by overriding the two fields'
+defaults in its settings class, as `examples/research_demo/settings.py` does:
+
+```python
+from pydantic import Field
+
+from agentic_cli import BaseSettings
+from agentic_cli.models import ModelEntry, ProviderSpec
+
+# A field declared again replaces its title and description: carry them over.
+_PROVIDERS = BaseSettings.model_fields["model_providers"]
+_MODELS = BaseSettings.model_fields["models"]
+
+
+class MySettings(BaseSettings):
+    model_providers: dict[str, ProviderSpec] = Field(
+        default_factory=lambda: {
+            "openrouter": ProviderSpec(
+                kind="openrouter",
+                base_url="https://openrouter.ai/api/v1",
+                api_key_env="OPENROUTER_API_KEY",
+            ),
+        },
+        title=_PROVIDERS.title,
+        description=_PROVIDERS.description,
+    )
+    models: dict[str, ModelEntry] = Field(
+        default_factory=lambda: {
+            "anthropic:claude-sonnet-5-5": ModelEntry(),
+            "google:gemini-3.8-flash": ModelEntry(),
+            "openrouter:qwen/qwen3.7-plus": ModelEntry(),
+        },
+        title=_MODELS.title,
+        description=_MODELS.description,
+    )
+```
+
+The user's and the project's entries are added to these, field by field, as
+above. An app with no list still works: the pickers then offer the newest
+fast, default and strong model of each built-in provider with a key.
+
+### Roles
 
 A role names a model by what it is for:
 
@@ -611,10 +790,19 @@ A role names a model by what it is for:
 - A role maps to a model, never to another role, and `model_roles` cannot map
   `default`.
 
-A built-in role nobody mapped takes the newest model of its tier from the first
-provider with a key, in the order Google, Anthropic, OpenAI. With only a Google
-key and no `default_model`, that is Gemini Flash, as in 0.6. OpenRouter models
-and your endpoints never fill a role on their own: map them.
+A built-in role nobody mapped (`default`, `fast`, `strong`) is computed from
+the model's tier:
+
+1. The newest of its tier among the `models` entries the list offers, of
+   the provider the list names first among those with one of that tier: with
+   `google:gemini-3.5-flash` listed before `anthropic:claude-sonnet-5-5`,
+   `default` is the Gemini model.
+2. Else the newest model of its tier from the first provider with a key, in
+   the order Google, Anthropic, OpenAI. With only a Google key, no list and no
+   `default_model`, that is Gemini Flash, as in 0.6.
+3. Else the workflow does not start, and the error asks for `default_model`
+   or `model_roles[<role>]`. Without a Google, Anthropic or OpenAI key that is
+   known before any listing, so `validate_settings` says it, once.
 
 | Provider | `fast` | `default` | `strong` |
 |----------|--------|-----------|----------|
@@ -622,16 +810,20 @@ and your endpoints never fill a role on their own: map them.
 | Anthropic | Haiku | Sonnet | Opus |
 | OpenAI | mini | standard | pro |
 
+Only Google's, Anthropic's and OpenAI's models have a tier. A configured
+provider's model never fills a role on its own: an app or a user that runs on
+configured providers alone sets `default_model`, and maps the roles its
+agents name.
+
 A project chooses its models in `./.my_app/settings.json`:
 
 ```json
 {
-  "default_model": "anthropic:claude-sonnet-4-6",
+  "default_model": "anthropic:claude-sonnet-5-5",
   "model_roles": {
-    "fast": "google:gemini-2.5-flash-lite",
-    "strong": "openrouter:qwen/qwen3-235b-a22b"
-  },
-  "pinned_models": ["openrouter:meta-llama/llama-3.3-70b-instruct"]
+    "fast": "google:gemini-3.5-flash-lite",
+    "strong": "openrouter:deepseek/deepseek-v4-pro"
+  }
 }
 ```
 
@@ -647,74 +839,99 @@ AGENTS = [
 ]
 ```
 
-The coordinator runs on Claude Sonnet 4.6, the drafter on Gemini 2.5
-Flash-Lite, and the checker on Qwen3 through OpenRouter. Every model is checked
-when the workflow starts: a reference to an endpoint you did not define, a
-provider without its key, or a model its provider's listing lacks fails with
-one error that names each agent concerned.
+The coordinator runs on Claude Sonnet 5.5, the drafter on Gemini 3.5
+Flash-Lite, and the checker on DeepSeek V4 Pro through OpenRouter. A model a
+setting, a role or an agent names joins the list. Every model is checked when
+the workflow starts: a reference to a provider that is neither built in nor
+defined in `model_providers`, a provider that cannot be called (it names its
+key variable and where it is read), or a model its provider's fresh listing
+lacks fails with one error that names each agent concerned.
 
-### Provider keys
+### The model pickers and `/models`
 
-| Provider | Setting | Environment variable |
-|----------|---------|----------------------|
-| Google (the Gemini API) | `google_api_key` | `GOOGLE_API_KEY` |
-| Anthropic | `anthropic_api_key` | `ANTHROPIC_API_KEY` |
-| OpenAI | `openai_api_key` | `OPENAI_API_KEY` |
-| OpenRouter | `openrouter_api_key` | `OPENROUTER_API_KEY` |
+`/settings` has a model picker for the default model and one for each of the
+`fast` and `strong` roles. Each offers exactly the list:
 
-Keys are never saved and never shown (not in `repr`, not by `/models`), and a
-project settings file or a cwd `.env` cannot set them: put them in the
-environment or a user-level dotenv file (see
-[Precedence and the trust boundary](#precedence-and-the-trust-boundary)). Each
-model's client is given its key. Google, Anthropic and OpenAI models go to
-their SDK's default host; Vertex AI is not supported.
+1. The `models` entries that can run: the app's, then the user's, the
+   project's and the environment's.
+2. Each model `default_model`, `model_roles`, an agent or the manager's own
+   `model` names, and the model each of `default`, `fast` and `strong`
+   resolves to (see [Roles](#roles)), that can run and is not already listed.
+3. Only when the list offers no entry: each built-in provider with a key,
+   its newest fast, default and strong model (at most three each), from its
+   listing or the shipped table.
 
-### Your own servers: vLLM and other OpenAI-compatible endpoints
+A model can run when its provider can be called: a built-in provider with
+its key, or a configured provider whose `api_key_env` is set (or that names
+none). An entry is not offered when its provider is not defined, cannot be
+called, or does not serve it (its fresh listing lacks the model); the first
+and the last are warned of once at startup. Listings never add to the list.
+Each model appears once. Picking writes `default_model`, or the role's
+`model_roles` entry, to the project settings file and restarts the workflow
+on it, keeping the conversation. Before the workflow is ready, the pickers
+offer the list from the entries and the shipped table. An app adds a
+picker for a role of its own with the key `model_role:<role>` in
+`get_ui_setting_keys()`.
 
-Define an endpoint in your user settings, `~/.my_app/settings.json`:
+- **`/models`** shows the list, then each entry it leaves out with why ("no
+  key: set TOGETHER_API_KEY", "provider 'together' is not defined in
+  model_providers", "not served by together"). Per model: the context window,
+  max output, thinking, tools, cache, where each value came from (`config`,
+  `listing`, `table`, `default`) and the roles that use it. Below, each
+  provider in use: whether it has a key (or needs none), whether its listing
+  is fresh, stale, failed or not listed, when it was fetched, how many models
+  it lists, and the last error. Before the workflow is initialized it reads
+  the model cache, and lists a provider in use the cache holds nothing for.
+- **`/models <text>`** searches the full listing of each provider that can be
+  called (and is listed), ignoring case, by reference, and marks the models
+  already in the list: how to find an exact id to copy into `models`
+  (`/models llama`, or `/models together:` for one provider's models). A
+  provider not in use is listed the first time it is searched, and any whose
+  listing is not fresh is listed again.
+- **`/models refresh`** lists again now every provider in use or searched,
+  and says which providers' models changed. Run it after a key change to an
+  account with other models.
+- In code, an initialized manager's `manager.catalog` gives
+  `catalog.offered()` (the entries and the models the settings and the
+  agents name), `catalog.not_offered()`, `catalog.records("google")`,
+  `catalog.status()`, `await catalog.search(text)` and
+  `await catalog.refresh()`, and `manager.model` is the default model's
+  reference. The pickers' list adds the roles' models:
+  `catalog.offered(extra=model_services.role_models(settings, catalog, providers))`,
+  with `providers = model_services.providers_from_settings(settings)`.
 
-```json
-{
-  "model_endpoints": {
-    "local-vllm": {
-      "base_url": "http://localhost:8000/v1",
-      "api_key_env": "LOCAL_VLLM_KEY",
-      "models": {
-        "Qwen/Qwen3-32B": {
-          "context_window": 32768,
-          "max_output": 8192,
-          "thinking": "chat_template"
-        }
-      }
-    }
-  }
-}
-```
+### Listings and the model cache
 
-`local-vllm:Qwen/Qwen3-32B` is then a reference like any other, for a role or
-an agent.
+A model's facts come from, highest precedence first: its `models` entry, its
+provider's listing, and the shipped table (model families, tiers, thinking
+rules, and the numbers used without a listing); otherwise a conservative
+record that takes tools and does not think, and whose unknown window counts
+as 128,000 tokens.
 
-- **Only your user settings (or the environment) can define an endpoint.**
-  `model_endpoints` holds the addresses a key is sent to. A project settings
-  file, which a cloned repository can ship, or a cwd `.env` that sets it is
-  ignored with a warning, and `/settings` never writes it there. A project
-  chooses among the endpoints you defined (`default_model`, `model_roles`,
-  `pinned_models`); a reference to one you did not define fails at startup.
-- The key comes only from the environment variable `api_key_env` names, and is
-  never stored. If that variable is not set, startup fails for a model that
-  runs on the endpoint, naming the variable (a `.env` file does not set it). Without `api_key_env` the client sends the
-  placeholder key `EMPTY`.
-- An endpoint's name is lowercase letters, digits, `_` and `-`, starting with a
-  letter, and cannot be a built-in provider's. `base_url` is `http` or
-  `https`, with no user name, password, query or fragment.
-- What you can declare about a model: `context_window`, `max_output`, `tools`
-  (default `true`), `image_input` (`false`), `reasoning_text` (`true`) and
-  `thinking`: `none` (the default), `chat_template` (vLLM's
-  `chat_template_kwargs.enable_thinking`), or `effort` (`reasoning_effort`,
-  with the model's `effort_levels`, by default `low`, `medium` and `high`).
-- A model the server serves but you did not declare is assumed to take tools,
-  with the server's `max_model_len` as its context window.
-- Reasoning text shows only when the server runs with a reasoning parser.
+- **Only the providers in use are listed**: those of the entries that can
+  run, those of the models a setting, a role or an agent names, and the
+  built-in providers with a key when the list offers no entry, or when a
+  role the agents run on is computed and the list has no model of its tier.
+  A provider with `list_models: false` is in use but never listed.
+- **Listings are cached** in `~/.my_app/model_cache.json` (private,
+  versioned, holding no key) for 24 hours, one entry per provider with its
+  address and kind: a change to either lists it again. Startup waits only to
+  list a provider in use that can be called and has no cache entry yet: all
+  of them at once, each for at most 10 seconds. An older entry is used while
+  it is listed again in the background.
+- **Checking ids**: a model a provider does not list is rejected only when
+  that provider's listing is fresh; a failed, untried or older listing
+  accepts any id. A rejection read from the cache is confirmed by one new
+  listing first, since the cache can predate a model. A model a setting, a
+  role or an agent names that the provider does not serve fails at startup,
+  listing the provider's models. An entry only in `models` is left out of
+  the list instead, with one warning: an app's list does not stop it starting
+  because a host retired one model, and the cache records the absence, so it
+  costs one listing, not one at every start.
+- **An OpenAI-compatible host's listing** may be `{"data": [...]}` or a bare
+  array, and a model's window is read from its `context_length`,
+  `context_window` or `max_model_len`, the first present. Its thinking comes
+  only from its `models` entry.
 
 ### Thinking
 
@@ -742,8 +959,8 @@ What a level means depends on how the model thinks:
 | Levels: Gemini 3 | Its lowest level | Its `low` / `medium` / `high` (3 Pro: `medium` is `high`) | Error |
 | Adaptive thinking: Claude 4.6 and later | Off; on the models that cannot stop (below), effort `low` | Effort `low` / `medium` / `high` | Error |
 | A budget: Claude up to 4.5 | Off | 4096 / 10000 / 32000 tokens | N, at least 1024 |
-| Reasoning effort: GPT and OpenRouter reasoning models, endpoints that declare `effort` | The lowest effort the model has | Effort `low` / `medium` / `high` | Error |
-| A chat template: endpoints that declare `chat_template` | `enable_thinking: false` | `enable_thinking: true` | Error |
+| Reasoning effort: GPT, OpenRouter's reasoning models, and `models` entries that say `effort` | The lowest effort the model has | Effort `low` / `medium` / `high` | Error |
+| A chat template: `models` entries that say `chat_template` | `enable_thinking: false` | `enable_thinking: true` | Error |
 
 - Some Claude models cannot turn thinking off: Opus 5.5, Sonnet 5.5, Fable 5
   and Fable 5.1 answer thinking `disabled` with HTTP 400. On them `none` runs
@@ -792,8 +1009,8 @@ What it does depends on the backend and the model:
   too. Gemini gets no explicit cache, only its implicit caching.
 - **On LangGraph**, it marks the system prompt of Claude on Anthropic's API:
   one cache breakpoint. LangGraph creates no Gemini cache.
-- GPT, OpenRouter and endpoint models get nothing from it on any backend.
-  OpenAI caches long prompts on its own.
+- GPT and the configured providers' models (OpenRouter's among them) get
+  nothing from it on any backend. OpenAI caches long prompts on its own.
 
 What it costs:
 
@@ -820,53 +1037,20 @@ To turn caching off, set `"prompt_caching_enabled": false` in
 Agents, `/status` shows the cached tokens read so far. A system prompt that
 changes every turn (a timestamp, say) defeats both caches.
 
-### The model catalog and `/models`
-
-The catalog merges three sources, highest precedence first: your endpoint
-declarations, each provider's live model list, and the shipped table (model
-families, tiers, thinking rules, and the numbers used when a listing fails).
-
-- Listings are cached in `~/.my_app/model_cache.json` (private, versioned,
-  holding no key) for 24 hours. Startup waits only to list a provider with a
-  key, or an endpoint, that has no cache entry yet: all of them at once, each
-  for at most 10 seconds. An older entry is used while it is listed again in
-  the background.
-- A model a provider does not list is rejected only when that provider's
-  listing is fresh. A failed, untried or older listing accepts any id.
-- `/models` shows each provider's status (credentials, whether its listing is
-  fresh, stale, failed or not tried, when it was fetched, how many models, and
-  the last error), then the models of each provider with a key: reference,
-  context window, max output, thinking, tools, cache, where the values came
-  from, and the roles that use the model. It works before the workflow is
-  initialized, from the cache.
-- `/models <text>` shows only the models whose reference contains the text,
-  ignoring case: `/models qwen` among OpenRouter's hundreds.
-- `/models refresh` lists every provider again now, and says which providers'
-  models changed. Run it after a key change to an account with other models.
-- `/settings` has a model picker for the default model and one for each of
-  the `fast` and `strong` roles. Each offers the models that can run: those of
-  each provider with a key, your endpoints' models, and the OpenRouter models a
-  role maps or `pinned_models` lists. Picking a role writes `model_roles` to
-  the project settings file and restarts the workflow on it, keeping the
-  conversation. An app adds a picker for a role of its own with the key
-  `model_role:<role>` in `get_ui_setting_keys()`.
-- In code, an initialized manager's `manager.catalog` gives
-  `catalog.records("google")`, `catalog.status()` and `await catalog.refresh()`,
-  and `manager.model` is the default model's reference.
-
 ### How each backend runs them
 
 - Every backend runs every provider and builds each agent's model once, when
   the workflow starts: ADK with `workflow.adk.model_factory.build_adk_model`,
   Deep Agents and LangGraph with `workflow.langchain_models.build_chat_model`.
 - GPT runs on OpenAI's Responses API on all of them, without storing responses
-  (`store=False`). OpenRouter and endpoints run on Chat Completions.
+  (`store=False`). A configured provider's models run on Chat Completions.
 - Each agent's `model_settings` apply on every backend, and thinking text
   reaches the thinking box for every provider.
 - The `[deepagents]` and `[langgraph]` extras pin `pydantic` below 2.13 and
   bring `anthropic` 1.x (see [Installation](#with-deep-agents)).
 - On ADK, GPT's reasoning is not passed back across tool calls, and neither is
-  OpenRouter's `reasoning_details`; Deep Agents and LangGraph pass both back.
+  an `openrouter` provider's `reasoning_details`; Deep Agents and LangGraph
+  pass both back.
 - After a switch to another provider's model, no backend sends the new model
   the old one's reasoning.
 
@@ -1574,7 +1758,7 @@ Built-in slash commands available in all apps:
 | `/clear` | | Clear the screen |
 | `/exit` | `/quit` | Exit the application |
 | `/settings` | `/set`, `/config` | Interactive settings editor: the default model, the `fast` and `strong` roles' models, thinking effort (saved to the project file) |
-| `/models` | | Each provider's listing status and models (`/models <text>` filters, `/models refresh` lists again) |
+| `/models` | | The list the model pickers offer, each model's facts and why an entry is left out, and the providers in use (`/models <text>` searches the full listings, `/models refresh` lists again) |
 | `/sandbox` | `/sb` | List / reset stateful sandbox sessions |
 | `/jobs` | | List and manage long-running background jobs (`/jobs all`, `/jobs <id>`, `/jobs cancel <id>`, `/jobs clean`; `/jobs resume` tells the agent this conversation's finished jobs) |
 | `/papers` | `/docs` | List knowledge-base documents (filter by source, query, --global) |
@@ -1689,7 +1873,7 @@ See the `examples/` directory for complete working examples:
 - `websearch_demo.py` — Web search with multiple backends
 
 **Full Applications**
-- `research_demo/` — Full-featured research assistant with KB ingest + concept pages, semantic memory, sandbox execution, and durable sessions. Installed as the `research-demo` console script.
+- `research_demo/` — Full-featured research assistant with KB ingest + concept pages, semantic memory, sandbox execution, and durable sessions. Installed as the `research-demo` console script. It ships a model list of Gemini, Claude and OpenRouter models, and the `openrouter` provider: put the keys you have (`GOOGLE_API_KEY`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`) in `~/.research_demo/.env`. An OpenRouter model has no tier, so with an OpenRouter key alone also choose the default model: pick one in `/settings`, which works while the workflow is down, or put `"default_model": "openrouter:qwen/qwen3.7-plus"` in `~/.research_demo/settings.json`.
 
 Run examples:
 
@@ -1770,9 +1954,9 @@ agentic-cli/
 │   │   ├── retry.py              # Exponential-backoff retry
 │   │   ├── tool_summaries.py     # Tool result one-liner summaries
 │   │   ├── memory_services.py    # Settings → agentic_cli.memory arguments
-│   │   ├── model_services.py     # Settings → agentic_cli.models arguments; build_catalog
+│   │   ├── model_services.py     # Settings → agentic_cli.models arguments: keys, providers, entries; build_catalog
 │   │   ├── model_settings.py     # ModelSettings, ThinkingSettings (per agent)
-│   │   ├── model_wire.py         # What both adapters send to OpenAI-compatible servers
+│   │   ├── model_wire.py         # What both adapters send to OpenRouter and OpenAI-compatible hosts
 │   │   ├── langchain_models.py   # build_chat_model: a resolved model → LangChain chat model
 │   │   ├── checkpointers.py      # open_checkpointer: memory / sqlite / Postgres (Deep Agents, LangGraph)
 │   │   ├── llm_log.py            # LLMLogWriter: the raw_llm_logging JSONL file, redact_secrets
@@ -1788,7 +1972,7 @@ agentic-cli/
 │   │   │   ├── fit_guard_plugin.py       # FitGuardPlugin: a request over its budget trimmed to fit
 │   │   │   ├── overflow_plugin.py        # OverflowPlugin: a provider's overflow retried once, or one clear error
 │   │   │   ├── model_factory.py          # build_adk_model: a resolved model → ADK model + config
-│   │   │   ├── openai_compatible.py      # OpenAICompatibleLlm (OpenRouter, endpoints)
+│   │   │   ├── openai_compatible.py      # OpenAICompatibleLlm (the model_providers: OpenRouter, OpenAI-compatible hosts)
 │   │   │   ├── anthropic_llm.py          # DirectAnthropicLlm (bare claude-* in ADK YAML)
 │   │   │   ├── event_processor.py
 │   │   │   ├── plugins.py                # LLMLoggingPlugin
@@ -1871,12 +2055,13 @@ agentic-cli/
 │   │       └── _mock_vector_store.py, _mock_bm25.py
 │   ├── models/                   # Model knowledge (provisional); no provider SDK
 │   │   ├── refs.py                   # provider:model references, bare ids, role names
-│   │   ├── endpoints.py              # ProviderKind, EndpointSpec, Endpoint, build_endpoints
+│   │   ├── providers.py              # ProviderKind, ProviderSpec (model_providers), Provider, build_providers
+│   │   ├── entries.py                # ModelEntry (the models setting), parse_entry_key
 │   │   ├── records.py                # ModelRecord, ThinkingRule
 │   │   ├── table.py, data/table.json # The shipped table: families, tiers, numbers, fallbacks
-│   │   ├── roles.py                  # RoleMap: roles → references
+│   │   ├── roles.py                  # RoleMap: roles → references (unmapped: the list first)
 │   │   ├── resolve.py                # resolve_model → ResolvedModel
-│   │   ├── catalog.py                # ModelCatalog: listings, validation, the listing cache
+│   │   ├── catalog.py                # ModelCatalog: entries, listings, validation; the list (offered), search; the listing cache
 │   │   └── discovery/                # One lister per provider, over httpx
 │   └── persistence/              # (sessions are persisted natively by each
 │                                 #  orchestrator's store; the legacy JSON

@@ -30,10 +30,13 @@ def test_report_writer_wired():
     assert "report_writer" in coord.sub_agents
 
 
-def test_report_writer_skills_dir_configured():
-    from research_demo.settings import ResearchDemoSettings
+def test_report_writer_skills_dir_configured(tmp_path, monkeypatch):
+    from tests.demo_isolation import make_isolated_settings
 
-    s = ResearchDemoSettings()
+    # Read none of the developer's settings files or ~/.research_demo/.env.
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.chdir(tmp_path)
+    s = make_isolated_settings(home=tmp_path / "home", workspace=tmp_path / "ws")
     assert any(str(p).rstrip("/").endswith("skills") for p in s.skills_dirs)
 
 
