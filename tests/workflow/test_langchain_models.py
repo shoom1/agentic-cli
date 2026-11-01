@@ -400,7 +400,7 @@ class TestClaude:
         (body,) = api.bodies
         assert body["thinking"] == {"type": "adaptive", "display": "summarized"}
         assert body["output_config"] == {"effort": "high"}
-        assert api.requests[0].headers["x-api-key"] == KEYS["anthropic"]
+        assert api.sent_key() == KEYS["anthropic"]
 
     async def test_budget_claude_with_a_small_max_tokens_leaves_room_for_the_budget(
         self, settings, monkeypatch

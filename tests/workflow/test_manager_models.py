@@ -444,7 +444,7 @@ class TestGenerateSimple:
         assert body["max_tokens"] == 123
         assert body["thinking"] == {"type": "disabled"}
         assert body["messages"][0]["content"][0]["text"] == "Summarize this."
-        assert api.requests[0].headers["x-api-key"] == KEYS["ANTHROPIC_API_KEY"]
+        assert api.sent_key() == KEYS["ANTHROPIC_API_KEY"]
 
     async def test_gpt(self, providers, monkeypatch):
         keys(monkeypatch, "openai")
@@ -777,7 +777,7 @@ class TestLangGraphModels:
         (body,) = api.bodies
         assert body["thinking"] == {"type": "adaptive", "display": "summarized"}
         assert body["output_config"] == {"effort": "high"}
-        assert api.requests[0].headers["x-api-key"] == KEYS["ANTHROPIC_API_KEY"]
+        assert api.sent_key() == KEYS["ANTHROPIC_API_KEY"]
         assert texts(events, EventType.THINKING) == ["Let me think."]
         assert texts(events, EventType.TEXT) == ["Hi."]
 

@@ -444,7 +444,7 @@ class TestClaude:
         body = api.bodies[0]
         assert body["thinking"] == {"type": "adaptive", "display": "summarized"}
         assert body["output_config"] == {"effort": "high"}
-        assert api.requests[0].headers["x-api-key"] == "a-test-key"
+        assert api.sent_key() == "a-test-key"
 
     async def test_adk_has_no_sampling_warning_to_print(self, settings):
         """ADK warns when it drops sampling settings for a thinking Claude; it
