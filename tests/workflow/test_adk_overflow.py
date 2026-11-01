@@ -48,6 +48,7 @@ from agentic_cli.workflow.config import AgentConfig  # noqa: E402
 from agentic_cli.workflow.context import OVERFLOW_ERROR_CODE, overflow_message  # noqa: E402
 from agentic_cli.workflow.events import EventType  # noqa: E402
 from agentic_cli.workflow.summary_prompt import SUMMARY_PREFIX  # noqa: E402
+from tests.models.fakes import openrouter_spec  # noqa: E402
 from tests.workflow.adk.fakes import (  # noqa: E402
     FakeAPI,
     anthropic_message,
@@ -134,6 +135,7 @@ def on(monkeypatch, provider: str, *script) -> tuple[Scripted, GoogleADKWorkflow
     manager = GoogleADKWorkflowManager(
         agent_configs=[AgentConfig(name="solo", prompt="You help.", include_state_tools=False)],
         settings=BaseSettings(session_store="memory", default_model=model,
+                              model_providers={"openrouter": openrouter_spec()},
                               prompt_caching_enabled=False),
     )
     return api, manager
@@ -411,7 +413,7 @@ class TestAnOverflowTheSummaryCanFix:
             agent_configs=[AgentConfig(name="solo", prompt="You help.",
                                        include_state_tools=False)],
             settings=BaseSettings(session_store="memory", default_model="local:unknown",
-                                  model_endpoints={"local": {
+                                  model_providers={"local": {
                                       "base_url": "http://localhost:8000/v1"}}),
         )
         try:

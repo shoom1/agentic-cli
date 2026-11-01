@@ -13,13 +13,13 @@ import time
 import pytest
 
 from agentic_cli.models import (
-    EndpointSpec,
     ModelCatalog,
     ModelEntry,
     ModelRef,
     ModelResolutionError,
     NativeThinking,
     ProviderKind,
+    ProviderSpec,
     ProviderState,
     ProviderStatus,
     RoleMap,
@@ -28,10 +28,10 @@ from agentic_cli.models import (
     load_table,
     resolve_model,
 )
-from tests.models.fakes import Clock, ProviderAPI, hang, providers, recorded, refuse
+from tests.models.fakes import OPENROUTER_URL, Clock, ProviderAPI, hang, providers, recorded, refuse
 
 KEYS = {"google": "g-test-key", "anthropic": "a-test-key", "openai": "o-test-key"}
-VLLM = EndpointSpec(base_url="http://gpu-box:8000/v1")
+VLLM = ProviderSpec(base_url="http://gpu-box:8000/v1")
 #: What the user says about two of the server's models: one it serves, one it does not list.
 ENTRIES = {
     ModelRef("local-vllm", "Qwen/Qwen3-32B"): ModelEntry(
@@ -44,10 +44,10 @@ ENTRIES = {
 
 
 def catalog_for(
-    api: ProviderAPI | None = None, *, specs=None, entries=None, clock=None, **keys
+    api: ProviderAPI | None = None, *, specs=None, env=None, entries=None, clock=None, **keys
 ) -> ModelCatalog:
     return ModelCatalog(
-        providers=providers(specs=specs or {}, **keys),
+        providers=providers(specs=specs or {}, env=env, **keys),
         entries=entries,
         transport=(api or ProviderAPI()).transport,
         clock=clock or Clock(),
@@ -317,6 +317,22 @@ class TestOpenRouter:
 
         assert catalog.records("openrouter") == []
 
+    async def test_a_provider_of_kind_openrouter_under_any_name(self):
+        """The kind, not the name, picks OpenRouter's lister and its records."""
+        spec = ProviderSpec(kind="openrouter", base_url=OPENROUTER_URL, api_key_env="OR_KEY")
+        api = ProviderAPI()
+
+        catalog = await loaded(api, specs={"or": spec}, env={"OR_KEY": "or-test-key"})
+
+        qwen = catalog.record(ModelRef("or", "qwen/qwen3-235b-a22b"))
+        assert (qwen.provider, qwen.kind) == ("or", ProviderKind.OPENROUTER)
+        assert qwen.thinking == ThinkingRule(
+            ThinkingMechanism.EFFORT, levels=("none", "minimal", "low", "medium", "high", "xhigh")
+        )
+        assert (qwen.tools, qwen.sources["tools"]) == (True, "listing")
+        assert api.calls == ["openrouter"]
+        assert catalog.is_authoritative("or")
+
 
 class TestEntries:
     async def test_an_endpoint_s_entries_and_listed_models(self):
@@ -487,11 +503,16 @@ class TestValidation:
         with pytest.raises(ModelResolutionError, match=r"and 40 more"):
             catalog.record(ModelRef("openrouter", "vendor/unknown"))
 
-    async def test_an_undefined_endpoint_is_an_error(self):
+    async def test_an_undefined_provider_is_an_error(self):
         catalog = await loaded()
 
-        with pytest.raises(ModelResolutionError, match="nowhere"):
-            catalog.record(ModelRef("nowhere", "model"))
+        with pytest.raises(ModelResolutionError) as caught:
+            catalog.record(ModelRef("openrouter", "qwen/qwen3-235b-a22b"))
+
+        assert str(caught.value) == (
+            "Model openrouter:qwen/qwen3-235b-a22b names 'openrouter', which is neither a "
+            "built-in provider nor defined in model_providers."
+        )
 
 
 # --- status and authority ------------------------------------------------------
@@ -507,7 +528,7 @@ class TestStatus:
 
         status = {s.provider: s for s in catalog.status()}
 
-        assert list(status) == ["google", "anthropic", "openai", "openrouter", "local-vllm"]
+        assert list(status) == ["google", "anthropic", "openai", "local-vllm"]
         assert status["google"] == ProviderStatus("google", True, ProviderState.FRESH, 5000.0, 6)
         assert status["anthropic"].state is ProviderState.DEGRADED
         assert status["anthropic"].error == "HTTP 500 Internal Server Error"
@@ -516,7 +537,7 @@ class TestStatus:
             "openai", False, ProviderState.UNATTEMPTED, None, len(load_table().curated_openai())
         )
         assert status["local-vllm"].state is ProviderState.FRESH
-        assert [catalog.is_authoritative(p) for p in status] == [True, False, False, False, True]
+        assert [catalog.is_authoritative(p) for p in status] == [True, False, False, True]
 
     async def test_before_load_nothing_is_authoritative(self):
         catalog = catalog_for(google=KEYS["google"])
@@ -597,7 +618,7 @@ class TestPickerRefs:
         ]
 
     async def test_openrouter_needs_a_reference_and_a_key(self):
-        keyless = await loaded(google=KEYS["google"])
+        keyless = await loaded(google=KEYS["google"], openrouter=None)
         keyed = await loaded(openrouter="r-test-key")
 
         assert keyless.picker_refs(entries=["openrouter:qwen/qwen3-235b-a22b"]) == [
@@ -672,7 +693,6 @@ class TestRefresh:
             ("google", ProviderState.FRESH),
             ("anthropic", ProviderState.UNATTEMPTED),
             ("openai", ProviderState.UNATTEMPTED),
-            ("openrouter", ProviderState.UNATTEMPTED),
         ]
         assert catalog.is_authoritative("google")
 

@@ -4,9 +4,9 @@ This module provides a BaseWorkflowManager implementation using LangGraph for
 agent orchestration. It offers:
 - Cyclical workflows (self-validation, iterative refinement)
 - Native HITL support with interrupt mechanism
-- Every model agentic_cli.models resolves (Gemini, Claude, GPT, OpenRouter and
-  the user's OpenAI-compatible endpoints), each agent on its own LangChain chat
-  model (workflow/langchain_models.py)
+- Every model agentic_cli.models resolves (Gemini, Claude, GPT and the
+  configured providers: OpenRouter and OpenAI-compatible hosts), each agent on
+  its own LangChain chat model (workflow/langchain_models.py)
 - State checkpointing for long-running tasks
 
 Deprecated in 0.7.0 and removed in 0.8.0: the ``deepagents`` orchestrator

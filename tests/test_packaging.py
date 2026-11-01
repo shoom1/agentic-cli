@@ -39,6 +39,16 @@ def test_html2text_is_declared():
     )
 
 
+def test_python_dotenv_is_declared():
+    """workflow/model_services.py imports ``dotenv`` to read a configured
+    provider's key from the app's user-level env files; it must not rely on
+    arriving with pydantic-settings."""
+    assert "python-dotenv" in _dep_names(), (
+        "python-dotenv is imported by workflow/model_services.py but is not declared "
+        "in pyproject.toml [project.dependencies]."
+    )
+
+
 def test_openai_is_declared():
     """The ADK model factory builds GPT, OpenRouter and endpoint models on ADK's
     OpenAI classes, which import ``openai``; google-adk pulls it only through

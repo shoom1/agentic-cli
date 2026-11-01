@@ -274,7 +274,7 @@ class ShippedTable:
     def fallback_models(self, kind: ProviderKind) -> tuple[str, ...]:
         """The models assumed to exist before (or without) a listing.
 
-        OpenAI's is its curated list; OpenRouter and endpoints have none.
+        OpenAI's is its curated list; a configured provider has none.
         """
         table = self._providers.get(kind)
         if table is None:

@@ -51,7 +51,7 @@ agentic-cli/
 │   │   ├── retry.py          # Rate-limit retry helpers
 │   │   ├── tool_summaries.py
 │   │   ├── memory_services.py # Settings → agentic_cli.memory arguments (KBs, memory store)
-│   │   ├── model_services.py # Settings → agentic_cli.models arguments (keys, endpoints, roles); build_catalog
+│   │   ├── model_services.py # Settings → agentic_cli.models arguments (keys, model_providers, entries, roles); a configured provider's key: the environment, then user_env_files (absolute env_file entries; provider_env); build_catalog
 │   │   ├── model_wire.py     # What both adapters send: timeouts, placeholder key, OpenRouter headers, reasoning_body
 │   │   ├── langchain_models.py # build_chat_model: ResolvedModel → LangChain chat model (profile=); OpenAICompatibleChat
 │   │   ├── checkpointers.py  # open_checkpointer (memory/sqlite/postgres) for the LangChain backends; deepagents_sqlite_path
@@ -148,7 +148,7 @@ agentic-cli/
 │   │       └── _mock_vector_store.py, _mock_bm25.py
 │   ├── models/               # Model knowledge (provisional); imports nothing else from agentic_cli, no provider SDK
 │   │   ├── refs.py           # parse_spec/parse_ref: provider:model, bare ids, role names
-│   │   ├── providers.py      # ProviderKind, EndpointSpec (settings), Provider, build_providers
+│   │   ├── providers.py      # ProviderKind, ProviderSpec (model_providers: openai_compatible or openrouter), Provider (built-ins: Google, Anthropic, OpenAI; key_env, has_credentials), build_providers
 │   │   ├── entries.py        # ModelEntry (the models setting), parse_entry_key, check_entries
 │   │   ├── records.py        # ModelRecord, ThinkingRule
 │   │   ├── table.py          # ShippedTable, load_table() (data/table.json: family rules, numbers, fallbacks)

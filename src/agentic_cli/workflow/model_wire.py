@@ -17,7 +17,7 @@ from agentic_cli.models import ProviderKind, ResolvedModel, ThinkingMechanism
 #: hung Gemini connection would otherwise hang the turn.
 REQUEST_TIMEOUT = 600.0
 CONNECT_TIMEOUT = 5.0
-#: The key an endpoint without one is sent: a local server without
+#: The key a provider that names none is sent: a local server without
 #: authentication expects some key, and the client must never fall back to
 #: OPENAI_API_KEY and send the user's OpenAI key to it.
 PLACEHOLDER_KEY = "EMPTY"
@@ -31,8 +31,9 @@ def openrouter_headers(app_name: str) -> dict[str, str]:
 def reasoning_body(resolved: ResolvedModel) -> dict[str, Any]:
     """The request fields that set an OpenAI-compatible model's thinking.
 
-    OpenRouter takes ``reasoning.effort``; a user's endpoint takes what it
-    declares: ``chat_template_kwargs.enable_thinking`` or ``reasoning_effort``.
+    A provider of kind ``openrouter`` takes ``reasoning.effort``; an
+    OpenAI-compatible one takes what its model's ``models`` entry declares:
+    ``chat_template_kwargs.enable_thinking`` or ``reasoning_effort``.
     Empty for a model without a thinking knob.
     """
     thinking = resolved.thinking
@@ -42,4 +43,4 @@ def reasoning_body(resolved: ResolvedModel) -> dict[str, Any]:
         return {"chat_template_kwargs": {"enable_thinking": thinking.enabled}}
     if resolved.provider.kind is ProviderKind.OPENROUTER:
         return {"reasoning": {"effort": thinking.level}}
-    return {"reasoning_effort": thinking.level}  # an endpoint that declares effort
+    return {"reasoning_effort": thinking.level}  # a models entry that declares effort

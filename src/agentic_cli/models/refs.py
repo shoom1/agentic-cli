@@ -5,8 +5,8 @@ and role values:
 
 - ``provider:model``, split on the first colon only, so
   ``openrouter:qwen/qwen3-235b-a22b:free`` keeps its ``:free``. The provider
-  is a built-in (``google``, ``anthropic``, ``openai``, ``openrouter``) or the
-  name of an endpoint the user defined.
+  is a built-in (``google``, ``anthropic``, ``openai``) or the name of one
+  defined in ``model_providers``.
 - A bare ``gemini-…``, ``claude-…``, ``gpt-…`` or ``o<digit>…`` id maps to its
   provider, as model ids did before references existed.
 - Any other bare string is a role name (``default``, ``fast``, ``strong``, or
@@ -19,10 +19,10 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-BUILTIN_PROVIDERS: tuple[str, ...] = ("google", "anthropic", "openai", "openrouter")
+BUILTIN_PROVIDERS: tuple[str, ...] = ("google", "anthropic", "openai")
 BUILTIN_ROLES: tuple[str, ...] = ("default", "fast", "strong")
 
-# Provider, endpoint and role names share one shape.
+# Provider and role names share one shape.
 _NAME = re.compile(r"[a-z][a-z0-9_-]{0,63}")
 # What a bare model id starts with, and the provider it belongs to.
 _BARE_ID_PREFIXES: tuple[tuple[re.Pattern[str], str], ...] = (
@@ -40,12 +40,12 @@ _DIGIT = re.compile(r"\d")
 
 
 class ModelSpecError(ValueError):
-    """A model reference, role name or endpoint name is malformed."""
+    """A model reference, role name or provider name is malformed."""
 
 
 @dataclass(frozen=True)
 class ModelRef:
-    """One model of one provider (a built-in provider or a user endpoint)."""
+    """One model of one provider (a built-in or a configured one)."""
 
     provider: str
     model: str
@@ -79,7 +79,7 @@ def parse_spec(spec: str) -> ModelRef | RoleRef:
     if sep:
         if not _NAME.fullmatch(provider):
             raise ModelSpecError(
-                f"Model {spec!r}: {provider!r} is not a provider or endpoint name "
+                f"Model {spec!r}: {provider!r} is not a provider name "
                 "(lowercase letters, digits, '_' and '-', starting with a letter)."
             )
         if not model:
@@ -93,8 +93,7 @@ def parse_spec(spec: str) -> ModelRef | RoleRef:
     if _DIGIT.search(spec):
         raise ModelSpecError(
             f"Model {spec!r} has no provider: write it as provider:model, such as "
-            f"openrouter:{spec}, or <endpoint>:{spec} for one of your model_endpoints. "
-            "(A role name has no digits.)"
+            f"<provider>:{spec} for one of your model_providers. (A role name has no digits.)"
         )
     try:
         return RoleRef(validate_role_name(spec))
@@ -142,18 +141,18 @@ def validate_role_name(name: str) -> str:
 
 
 def validate_provider_name(name: str) -> str:
-    """Return ``name`` if it can name a user endpoint.
+    """Return ``name`` if it can name a provider in ``model_providers``.
 
     Raises:
-        ModelSpecError: If it is malformed or reuses a built-in provider name.
+        ModelSpecError: If it is malformed or is a built-in provider's name.
     """
     if not isinstance(name, str) or not _NAME.fullmatch(name):
         raise ModelSpecError(
-            f"Endpoint {name!r} is not an endpoint name (lowercase letters, digits, '_' and '-', "
+            f"Provider {name!r} is not a provider name (lowercase letters, digits, '_' and '-', "
             "starting with a letter, at most 64 characters)."
         )
     if name in BUILTIN_PROVIDERS:
         raise ModelSpecError(
-            f"Endpoint {name!r} reuses a built-in provider name ({', '.join(BUILTIN_PROVIDERS)})."
+            f"Provider {name!r} reuses a built-in provider name ({', '.join(BUILTIN_PROVIDERS)})."
         )
     return name

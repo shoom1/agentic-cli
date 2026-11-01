@@ -127,7 +127,7 @@ async def test_chat_completions_pass_their_whole_prompt_count_on(monkeypatch):
     route(monkeypatch, openai, "AsyncOpenAI", FakeAPI(reply))
 
     usage, tracker = await usage_of_a_turn(
-        "local:small", model_endpoints=ENDPOINTS, models=MODELS
+        "local:small", model_providers=ENDPOINTS, models=MODELS
     )
 
     assert (usage["prompt_tokens"], usage["cached_tokens"]) == (1_550, 1_200)

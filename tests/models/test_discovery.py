@@ -15,9 +15,9 @@ from pathlib import Path
 import httpx
 import pytest
 
-from agentic_cli.models import EndpointSpec
+from agentic_cli.models import ProviderSpec
 from agentic_cli.models.discovery import ListedModel, Listing, list_models
-from tests.models.fakes import providers
+from tests.models.fakes import openrouter_spec, providers
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "model_listings"
 
@@ -28,7 +28,7 @@ KEYS = {
     "openrouter": "sk-or-test-OPENROUTER-SECRET",
     "local-vllm": "vllm-test-ENDPOINT-SECRET",
 }
-VLLM_SPEC = EndpointSpec(base_url="http://gpu-box:8000/v1", api_key_env="VLLM_KEY")
+VLLM_SPEC = ProviderSpec(base_url="http://gpu-box:8000/v1", api_key_env="VLLM_KEY")
 
 
 def payload(name: str) -> dict:
@@ -36,11 +36,14 @@ def payload(name: str) -> dict:
 
 
 def provider_for(name: str, *, keyed: bool = True):
-    """The provider ``name`` (a built-in, or ``local-vllm``), with its test key."""
-    builtins = ("google", "anthropic", "openai", "openrouter")
+    """The provider ``name`` (a built-in, ``openrouter`` or ``local-vllm``), with its test key."""
+    builtins = ("google", "anthropic", "openai")
     keys = {name: KEYS[name] for name in builtins} if keyed else {}
-    env = {"VLLM_KEY": KEYS["local-vllm"]} if keyed else {}
-    return providers(specs={"local-vllm": VLLM_SPEC}, env=env, **keys)[name]
+    env = (
+        {"OPENROUTER_API_KEY": KEYS["openrouter"], "VLLM_KEY": KEYS["local-vllm"]} if keyed else {}
+    )
+    specs = {"openrouter": openrouter_spec(), "local-vllm": VLLM_SPEC}
+    return providers(specs=specs, env=env, **keys)[name]
 
 
 class Server:
@@ -361,6 +364,22 @@ async def test_openrouter_fields():
     assert (free.tools, free.reasoning, free.max_output) == (False, True, None)
     assert models["anthropic/claude-sonnet-4.5"].image_input is True
     assert models["meta-llama/llama-3.3-70b-instruct"].reasoning is False
+
+
+async def test_a_provider_of_kind_openrouter_is_listed_at_its_own_address():
+    """The kind picks the lister; the provider's name and URL are its own."""
+    spec = ProviderSpec(
+        kind="openrouter", base_url="https://or-gateway.example/api/v1", api_key_env="OR_KEY"
+    )
+    gateway = providers(specs={"or": spec}, env={"OR_KEY": "or-test-key"})["or"]
+    server = serving(payload("openrouter"))
+
+    listing = await list_models(gateway, transport=server.transport)
+
+    assert [str(r.url) for r in server.requests] == ["https://or-gateway.example/api/v1/models"]
+    assert server.requests[0].headers["authorization"] == "Bearer or-test-key"
+    assert listing.provider == "or"
+    assert by_id(listing)["qwen/qwen3-235b-a22b"].reasoning is True
 
 
 async def test_openrouter_without_supported_parameters_knows_nothing_of_tools():

@@ -35,8 +35,8 @@ class Settings(BaseSettings):
     """Settings for the Hello Deep Agents example.
 
     API keys are read from standard environment variables (GOOGLE_API_KEY,
-    ANTHROPIC_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY) or from
-    ``~/.hello_deepagents/.env``.
+    ANTHROPIC_API_KEY, OPENAI_API_KEY) or from ``~/.hello_deepagents/.env``,
+    as is the key of a provider defined in ``model_providers``.
     """
 
     model_config = SettingsConfigDict(

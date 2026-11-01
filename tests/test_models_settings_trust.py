@@ -1,15 +1,15 @@
 """The model settings and the trust model.
 
-``model_endpoints`` holds base URLs, so it is user-only: a project
+``model_providers`` holds base URLs, so it is user-only: a project
 ``./.{app}/settings.json`` could otherwise send the user's key to its own
-server. ``model_roles`` and ``models`` only choose among providers and
-endpoints the user defined (an entry's numbers are hints), so a project may
-set them. ``models`` is the app's list (its settings class default) with the
-user's, the project's and the environment's entries merged in, field by
-field, and no save writes it: each file keeps its own entries as they are. The
-two new provider keys are secrets like the others: never persisted, never in
-``repr``, and (R5) never exported to the process environment, since the
-adapters pass every key explicitly.
+server. ``model_roles`` and ``models`` only choose among the providers the
+app and the user defined (an entry's numbers are hints), so a project may set
+them. ``models`` and ``model_providers`` are the app's (its settings class
+defaults) with the other sources' entries merged in, field by field, and no
+save writes either: each file keeps its own entries as they are. The OpenAI
+key is a secret like the others: never persisted, never in ``repr``, and (R5)
+never exported to the process environment, since the adapters pass every key
+explicitly. OpenRouter is a configured provider: it has no key setting.
 """
 
 from __future__ import annotations
@@ -24,12 +24,16 @@ import structlog
 from pydantic import Field, ValidationError
 
 from agentic_cli.config import BaseSettings
-from agentic_cli.models import EndpointSpec, ModelEntry
-from agentic_cli.settings_persistence import SettingsPersistence
+from agentic_cli.models import ModelEntry, ProviderSpec
+from agentic_cli.settings_persistence import (
+    PROJECT_PRESERVED_KEYS,
+    PROJECT_SETTABLE_KEYS,
+    SettingsPersistence,
+)
 from agentic_cli.workflow.model_settings import ThinkingSettings
 
 APP = "agentic_cli"
-ENDPOINTS = {
+PROVIDERS = {
     "local-vllm": {
         "kind": "openai_compatible",
         "base_url": "http://localhost:8000/v1",
@@ -42,6 +46,10 @@ SHIPPED = {
     "anthropic:claude-sonnet-4-6": ModelEntry(context_window=1_000_000, max_output=64_000),
     "local-vllm:Qwen/Qwen3-32B": {"thinking": "chat_template"},
 }
+#: The provider ``_app_providers()``'s class ships, as the research demo ships OpenRouter.
+OPENROUTER = ProviderSpec(
+    kind="openrouter", base_url="https://openrouter.ai/api/v1", api_key_env="OPENROUTER_API_KEY"
+)
 
 
 @pytest.fixture(autouse=True)
@@ -51,7 +59,7 @@ def isolated(tmp_path, monkeypatch):
     (tmp_path / "project").mkdir()
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.chdir(tmp_path / "project")
-    for var in (*_KEY_VARS, "AGENTIC_MODEL_ENDPOINTS", "AGENTIC_MODEL_ROLES", "AGENTIC_MODELS"):
+    for var in (*_KEY_VARS, "AGENTIC_MODEL_PROVIDERS", "AGENTIC_MODEL_ROLES", "AGENTIC_MODELS"):
         monkeypatch.delenv(var, raising=False)
     return tmp_path
 
@@ -87,57 +95,197 @@ def _set(models: dict[str, ModelEntry]) -> dict[str, dict]:
     return {key: entry.model_dump(exclude_unset=True) for key, entry in models.items()}
 
 
-class TestModelEndpointsAreUserOnly:
-    def test_a_project_file_cannot_define_an_endpoint(self, isolated):
+def _app_providers() -> type[BaseSettings]:
+    """A settings class that ships the ``openrouter`` provider (``OPENROUTER``)."""
+
+    class AppSettings(BaseSettings):
+        model_providers: dict[str, ProviderSpec] = Field(
+            default_factory=lambda: {"openrouter": OPENROUTER}
+        )
+
+    return AppSettings
+
+
+def _specs(providers: dict[str, ProviderSpec]) -> dict[str, dict]:
+    """Each provider's fields, as validated."""
+    return {name: spec.model_dump() for name, spec in providers.items()}
+
+
+class TestModelProvidersAreUserOnly:
+    def test_a_project_file_cannot_define_a_provider(self, isolated):
         _write(
             _project_file(isolated),
-            {"model_endpoints": ENDPOINTS, "default_model": "gemini-2.5-flash"},
+            {"model_providers": PROVIDERS, "default_model": "gemini-2.5-flash"},
         )
 
         with structlog.testing.capture_logs() as logs:
             settings = BaseSettings()
 
-        assert settings.model_endpoints == {}
+        assert settings.model_providers == {}
         assert settings.default_model == "gemini-2.5-flash"
         assert any(
-            e.get("event") == "untrusted_project_setting_ignored" and e.get("key") == "model_endpoints"
+            e.get("event") == "untrusted_project_setting_ignored" and e.get("key") == "model_providers"
             for e in logs
         )
 
-    def test_a_cwd_dotenv_cannot_define_an_endpoint(self, isolated):
-        (isolated / "project" / ".env").write_text(f"AGENTIC_MODEL_ENDPOINTS={json.dumps(ENDPOINTS)}\n")
+    def test_a_project_file_cannot_redirect_the_app_s_provider(self, isolated):
+        """Nor change one field of a shipped provider: its key would go to the repo's server."""
+        _write(
+            _project_file(isolated),
+            {"model_providers": {"openrouter": {"base_url": "https://evil.example/v1"}}},
+        )
+
+        settings = _app_providers()()
+
+        assert _specs(settings.model_providers) == {"openrouter": OPENROUTER.model_dump()}
+
+    def test_a_project_models_entry_cannot_define_a_provider(self, isolated):
+        """An entry has no field that says where a model is served; its
+        provider must be one the app or the user defined."""
+        _write(
+            _project_file(isolated),
+            {"models": {"together:deepseek-ai/DeepSeek-V3.1": {"base_url": "https://evil.example/v1"}}},
+        )
+
+        with pytest.raises(ValidationError, match="base_url"):
+            BaseSettings()
+
+    def test_a_cwd_dotenv_cannot_define_a_provider(self, isolated):
+        (isolated / "project" / ".env").write_text(
+            f"AGENTIC_MODEL_PROVIDERS={json.dumps(PROVIDERS)}\n"
+        )
 
         class _Settings(BaseSettings):
             model_config = {**BaseSettings.model_config, "env_file": ".env"}
 
-        assert _Settings().model_endpoints == {}
+        assert _Settings().model_providers == {}
 
-    def test_the_user_file_defines_endpoints(self, isolated):
-        _write(_user_file(isolated), {"model_endpoints": ENDPOINTS})
+    def test_a_cwd_dotenv_given_to_the_constructor_cannot_either(self, isolated):
+        """The trust filter judges the env files the settings read, the
+        constructor's ``_env_file`` included, not only the class's."""
+        (isolated / "project" / ".env").write_text(
+            f"AGENTIC_MODEL_PROVIDERS={json.dumps(PROVIDERS)}\n"
+        )
 
-        endpoints = BaseSettings().model_endpoints
+        class _Settings(BaseSettings):
+            model_config = {
+                **BaseSettings.model_config, "env_file": str(isolated / "home" / ".env"),
+            }
 
-        assert isinstance(endpoints["local-vllm"], EndpointSpec)
-        assert endpoints["local-vllm"].base_url == "http://localhost:8000/v1"
+        with structlog.testing.capture_logs() as logs:
+            settings = _Settings(_env_file=".env")
 
-    def test_a_save_never_writes_endpoints_to_the_project_file(self, isolated):
-        settings = BaseSettings(model_endpoints=ENDPOINTS)
+        assert settings.model_providers == {}
+        assert [
+            (e.get("key"), e.get("source")) for e in logs
+            if e.get("event") == "untrusted_project_setting_ignored"
+        ] == [("model_providers", "cwd .env")]
+
+    def test_the_user_file_defines_providers(self, isolated):
+        _write(_user_file(isolated), {"model_providers": PROVIDERS})
+
+        providers = BaseSettings().model_providers
+
+        assert isinstance(providers["local-vllm"], ProviderSpec)
+        assert providers["local-vllm"].base_url == "http://localhost:8000/v1"
+
+    def test_the_environment_defines_providers(self, isolated, monkeypatch):
+        monkeypatch.setenv("AGENTIC_MODEL_PROVIDERS", json.dumps(PROVIDERS))
+
+        assert BaseSettings().model_providers["local-vllm"].api_key_env == "LOCAL_VLLM_KEY"
+
+
+class TestTheProviders:
+    """The app's providers, then the user file's and the environment's,
+    merged field by field before validation, so an override of one field of
+    the app's provider validates."""
+
+    def test_a_user_override_of_one_field_keeps_the_apps_others(self, isolated):
+        _write(_user_file(isolated), {"model_providers": {"openrouter": {"api_key_env": "MY_OR_KEY"}}})
+
+        settings = _app_providers()()
+
+        assert _specs(settings.model_providers) == {
+            "openrouter": {
+                "kind": "openrouter",
+                "base_url": "https://openrouter.ai/api/v1",
+                "api_key_env": "MY_OR_KEY",
+            },
+        }
+
+    def test_the_user_s_providers_follow_the_app_s_then_the_environment_s(
+        self, isolated, monkeypatch
+    ):
+        _write(_user_file(isolated), {"model_providers": PROVIDERS})
+        monkeypatch.setenv(
+            "AGENTIC_MODEL_PROVIDERS",
+            json.dumps({"together": {"base_url": "https://api.together.xyz/v1"}}),
+        )
+
+        settings = _app_providers()()
+
+        assert list(settings.model_providers) == ["openrouter", "local-vllm", "together"]
+        assert all(isinstance(spec, ProviderSpec) for spec in settings.model_providers.values())
+
+    def test_a_merged_provider_is_validated(self, isolated):
+        _write(_user_file(isolated), {"model_providers": {"openrouter": {"api_key_env": None}}})
+
+        with pytest.raises(ValidationError, match="kind 'openrouter' needs api_key_env"):
+            _app_providers()()
+
+
+class TestProvidersAreHandEdited:
+    """No save writes ``model_providers``: it would copy the app's providers
+    into the user's file."""
+
+    def test_a_full_save_leaves_the_user_file_s_providers_as_they_are(self, isolated):
+        user_providers = {"openrouter": {"api_key_env": "MY_OR_KEY"}}
+        _write(_user_file(isolated), {"model_providers": user_providers})
+        settings = _app_providers()(model_roles={"fast": "google:gemini-2.5-flash"})
 
         SettingsPersistence(APP).save(settings)
 
-        assert "model_endpoints" not in _read(_project_file(isolated))
-        saved = _read(_user_file(isolated))["model_endpoints"]
-        assert saved["local-vllm"]["base_url"] == "http://localhost:8000/v1"
-        assert BaseSettings().model_endpoints["local-vllm"].api_key_env == "LOCAL_VLLM_KEY"
+        assert _read(_user_file(isolated))["model_providers"] == user_providers
+        assert "model_providers" not in _read(_project_file(isolated))
 
-    def test_a_keyed_save_never_writes_endpoints_to_the_project_file(self, isolated):
-        settings = BaseSettings(model_endpoints=ENDPOINTS)
+    def test_a_full_save_drops_a_project_file_s_providers(self, isolated):
+        """The loader never reads them there, so a save heals them away (as a
+        keyed save does) and keeps the project's own models."""
+        _write(
+            _project_file(isolated),
+            {"model_providers": PROVIDERS, "models": {"openai:gpt-5.5": {}}},
+        )
 
-        result = SettingsPersistence(APP).save(settings, keys=["model_endpoints"])
+        SettingsPersistence(APP).save(BaseSettings())
 
-        assert result.project_keys == ()
-        assert "model_endpoints" not in _read(_project_file(isolated))
-        assert "local-vllm" in _read(_user_file(isolated))["model_endpoints"]
+        project = _read(_project_file(isolated))
+        assert "model_providers" not in project
+        assert project["models"] == {"openai:gpt-5.5": {}}
+        assert set(project) <= PROJECT_SETTABLE_KEYS | PROJECT_PRESERVED_KEYS
+
+    def test_a_full_save_adds_providers_to_no_file(self, isolated):
+        SettingsPersistence(APP).save(_app_providers()(model_providers=PROVIDERS))
+
+        assert "model_providers" not in _read(_project_file(isolated))
+        assert "model_providers" not in _read(_user_file(isolated))
+
+    def test_a_keyed_save_never_writes_providers(self, isolated):
+        settings = BaseSettings(model_providers=PROVIDERS)
+
+        result = SettingsPersistence(APP).save(
+            settings, keys=["model_providers", "model_providers.local-vllm"]
+        )
+
+        assert result.project_keys == () and result.user_scoped_keys == ()
+        assert "model_providers" not in _read(_project_file(isolated))
+        assert "model_providers" not in _read(_user_file(isolated))
+
+    def test_an_explicit_path_dump_leaves_providers_out(self, isolated):
+        legacy = isolated / "legacy.json"
+
+        SettingsPersistence(APP).save(_app_providers()(), path=legacy)
+
+        assert "model_providers" not in json.loads(legacy.read_text())
 
 
 class TestRolesAndModelsAreProjectSettable:
@@ -253,11 +401,15 @@ class TestTheModelsList:
                 model_roles: dict[str, str] = Field(
                     default_factory=lambda: {"fast": "google:gemini-2.5-flash"}
                 )
+                model_providers: dict[str, ProviderSpec] = Field(
+                    default_factory=lambda: {"openrouter": OPENROUTER}
+                )
 
         assert [str(warning.message) for warning in caught] == []
         settings = AppSettings()
         assert list(settings.models) == list(SHIPPED)
         assert settings.model_roles == {"fast": "google:gemini-2.5-flash"}
+        assert _specs(settings.model_providers) == {"openrouter": OPENROUTER.model_dump()}
 
     def test_an_assigned_list_is_validated_and_set_as_given(self):
         settings = _app_settings()()
@@ -348,9 +500,21 @@ class TestValidation:
         with pytest.raises(ValidationError, match="only for a model on a model_providers provider"):
             BaseSettings()
 
-    def test_an_endpoint_cannot_reuse_a_builtin_name(self):
+    @pytest.mark.parametrize("name", ["google", "anthropic", "openai"])
+    def test_a_provider_cannot_reuse_a_builtin_name(self, name):
         with pytest.raises(ValidationError, match="built-in"):
-            BaseSettings(model_endpoints={"openai": {"base_url": "http://x:1/v1"}})
+            BaseSettings(model_providers={name: {"base_url": "http://x:1/v1"}})
+
+    def test_openrouter_is_an_ordinary_provider_name(self):
+        settings = BaseSettings(model_providers={"openrouter": OPENROUTER})
+
+        assert settings.model_providers["openrouter"].kind == "openrouter"
+
+    def test_an_openrouter_provider_names_its_key_variable(self):
+        with pytest.raises(ValidationError, match="kind 'openrouter' needs api_key_env"):
+            BaseSettings(model_providers={
+                "or": {"kind": "openrouter", "base_url": "https://openrouter.ai/api/v1"},
+            })
 
     def test_update_setting_validates_the_roles(self):
         settings = BaseSettings()
@@ -361,71 +525,87 @@ class TestValidation:
 
         assert settings.model_roles == {"fast": "google:gemini-3.5-flash-lite"}
 
-    def test_an_endpoint_error_never_echoes_a_secret(self):
+    def test_a_provider_error_never_echoes_a_secret(self):
         """A key written inline, or a password in the URL, stays out of the error."""
         for entry in (
             {"base_url": "http://x:1/v1", "api_key": "sk-inline-secret"},
             {"base_url": "http://user:sk-inline-secret@x:1/v1"},
         ):
             with pytest.raises(ValidationError) as exc:
-                BaseSettings(model_endpoints={"lab": entry})
+                BaseSettings(model_providers={"lab": entry})
             assert "sk-inline-secret" not in str(exc.value)
 
 
-class TestTheNewKeys:
-    def test_they_bind_by_field_name_and_by_environment_variable(self, monkeypatch):
-        assert BaseSettings(openai_api_key="k-o", openrouter_api_key="k-r").openai_api_key == "k-o"
-        monkeypatch.setenv("OPENROUTER_API_KEY", "k-env")
-        assert BaseSettings().openrouter_api_key == "k-env"
+class TestTheOpenAIKey:
+    def test_it_binds_by_field_name_and_by_environment_variable(self, monkeypatch):
+        assert BaseSettings(openai_api_key="k-o").openai_api_key == "k-o"
+        monkeypatch.setenv("OPENAI_API_KEY", "k-env")
+        assert BaseSettings().openai_api_key == "k-env"
 
-    def test_they_never_reach_a_persisted_file(self, isolated):
+    def test_it_never_reaches_a_persisted_file(self, isolated):
         settings = BaseSettings(
             openai_api_key="k-secret-openai",
-            openrouter_api_key="k-secret-openrouter",
-            model_endpoints=ENDPOINTS,
             model_roles={"fast": "gpt-5.4-mini"},
+            ui_theme="light",  # user-scoped: the user file is written too
         )
         persistence = SettingsPersistence(APP)
 
         persistence.save(settings)
-        persistence.save(settings, keys=["openai_api_key", "openrouter_api_key", "model_roles"])
+        persistence.save(settings, keys=["openai_api_key", "model_roles"])
         legacy = isolated / "legacy.json"
         persistence.save(settings, path=legacy)
 
         for path in (_project_file(isolated), _user_file(isolated), legacy):
             text = path.read_text()
             assert "k-secret" not in text, path
-            assert "openai_api_key" not in text and "openrouter_api_key" not in text, path
+            assert "openai_api_key" not in text, path
 
-    def test_they_never_appear_in_repr(self):
-        settings = BaseSettings(openai_api_key="k-secret-openai", openrouter_api_key="k-secret-openrouter")
+    def test_it_never_appears_in_repr(self):
+        settings = BaseSettings(openai_api_key="k-secret-openai")
 
         assert "k-secret" not in repr(settings)
         assert "k-secret" not in str(settings)
 
-    def test_a_project_file_cannot_inject_them(self, isolated):
-        _write(
-            _project_file(isolated),
-            {"openai_api_key": "from-repo", "OPENAI_API_KEY": "from-repo", "openrouter_api_key": "from-repo"},
-        )
+    def test_a_project_file_cannot_inject_it(self, isolated):
+        _write(_project_file(isolated), {"openai_api_key": "from-repo", "OPENAI_API_KEY": "from-repo"})
 
-        settings = BaseSettings()
+        assert BaseSettings().openai_api_key is None
 
-        assert settings.openai_api_key is None
-        assert settings.openrouter_api_key is None
-
-    def test_they_are_not_exported_to_the_environment(self, monkeypatch):
-        """R5: the adapters pass these keys explicitly; nothing reads them from the env."""
-        settings = BaseSettings(
-            google_api_key="k-google", openai_api_key="k-openai", openrouter_api_key="k-openrouter"
-        )
+    def test_it_is_not_exported_to_the_environment(self, monkeypatch):
+        """R5: the adapters pass the key explicitly; nothing reads it from the env."""
+        settings = BaseSettings(google_api_key="k-google", openai_api_key="k-openai")
         monkeypatch.setenv("GOOGLE_API_KEY", "")  # restored by monkeypatch after the export
 
         settings.export_api_keys_to_env()
 
         assert os.environ.get("GOOGLE_API_KEY") == "k-google"
         assert "OPENAI_API_KEY" not in os.environ
-        assert "OPENROUTER_API_KEY" not in os.environ
+
+
+class TestOpenRouterHasNoKeySetting:
+    """OpenRouter's key is read where its provider's api_key_env says, like
+    any configured provider's: no setting holds it."""
+
+    def test_the_setting_is_gone(self, monkeypatch):
+        monkeypatch.setenv("OPENROUTER_API_KEY", "k-env")
+
+        settings = BaseSettings()
+
+        assert "openrouter_api_key" not in type(settings).model_fields
+        assert not hasattr(settings, "openrouter_api_key")
+
+    def test_a_constructor_argument_naming_it_is_refused(self):
+        with pytest.raises(ValueError, match="Unknown credential setting.*openrouter_api_key"):
+            BaseSettings(openrouter_api_key="k-secret-openrouter")
+
+    def test_a_file_still_setting_it_loads(self, isolated):
+        _write(_user_file(isolated), {"openrouter_api_key": "k-secret-openrouter"})
+        _write(_project_file(isolated), {"model_endpoints": PROVIDERS, "pinned_models": ["x:y"]})
+
+        settings = BaseSettings()
+
+        assert "k-secret" not in repr(settings)
+        assert settings.model_providers == {}
 
 
 class TestThinkingModes:

@@ -324,10 +324,10 @@ class TestSettingsContext:
 class TestSettingsValidation:
     """``validate_settings``: the static check, before any network call (R11).
 
-    Every reference parses, every endpoint referenced exists, every provider a
-    model will run on has a key, and some provider has one. Whether a model
-    exists, and its thinking modes, are checked when the workflow resolves its
-    agents against the model catalog.
+    Every reference parses, every provider referenced is built in or defined,
+    every provider a model will run on can be called, and some provider can.
+    Whether a model exists, and its thinking modes, are checked when the
+    workflow resolves its agents against the model catalog.
     """
 
     @staticmethod
@@ -335,64 +335,187 @@ class TestSettingsValidation:
         with patch.dict(os.environ, env or {}, clear=True):
             return BaseSettings(workspace_dir=temp_workspace, **values)
 
-    def test_no_provider_is_an_error_naming_every_variable(self, temp_workspace: Path):
-        settings = self._settings(temp_workspace)
-
+    @staticmethod
+    def _problems(settings: BaseSettings, agents=None) -> list[str]:
         with pytest.raises(SettingsValidationError) as caught:
-            validate_settings(settings)
+            validate_settings(settings, agents)
+        return str(caught.value).splitlines()
 
-        message = str(caught.value)
-        for variable in ("GOOGLE_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY",
-                         "OPENROUTER_API_KEY", "model_endpoints"):
-            assert variable in message
+    NO_PROVIDER = (
+        "No model provider is configured: set GOOGLE_API_KEY, ANTHROPIC_API_KEY or "
+        "OPENAI_API_KEY, or define a provider in model_providers (user settings)."
+    )
 
-    @pytest.mark.parametrize("variable", ["GOOGLE_API_KEY", "ANTHROPIC_API_KEY",
-                                          "OPENAI_API_KEY", "OPENROUTER_API_KEY"])
+    def test_no_provider_is_an_error_naming_every_variable(self, temp_workspace: Path):
+        assert self._problems(self._settings(temp_workspace)) == [self.NO_PROVIDER]
+
+    @pytest.mark.parametrize("variable", ["GOOGLE_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"])
     def test_any_one_provider_key_is_enough(self, temp_workspace: Path, variable: str):
         validate_settings(self._settings(temp_workspace, {variable: "test-key"}))
 
-    def test_an_endpoint_is_a_provider(self, temp_workspace: Path):
+    def test_openrouter_s_key_alone_is_no_provider(self, temp_workspace: Path, monkeypatch):
+        """Unless a provider in model_providers reads it."""
+        monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+
+        assert self._problems(self._settings(temp_workspace)) == [self.NO_PROVIDER]
+
+    def test_a_configured_provider_that_needs_no_key_is_a_provider(self, temp_workspace: Path):
         settings = self._settings(
             temp_workspace,
-            model_endpoints={"local-vllm": {"base_url": "http://localhost:8000/v1"}},
+            model_providers={"local-vllm": {"base_url": "http://localhost:8000/v1"}},
             default_model="local-vllm:Qwen/Qwen3-32B",
         )
 
         validate_settings(settings)
 
     LAB = {"lab": {"base_url": "http://gpu-box:8000/v1", "api_key_env": "LAB_KEY"}}
+    OPENROUTER = {
+        "openrouter": {
+            "kind": "openrouter",
+            "base_url": "https://openrouter.ai/api/v1",
+            "api_key_env": "OPENROUTER_API_KEY",
+        }
+    }
 
-    def test_an_endpoint_s_unset_key_variable_is_an_error_naming_it(
+    def test_a_configured_provider_without_its_key_is_no_provider_and_names_its_variable(
+        self, temp_workspace: Path, monkeypatch
+    ):
+        monkeypatch.delenv("LAB_KEY", raising=False)
+
+        settings = self._settings(temp_workspace, model_providers=self.LAB)
+
+        assert self._problems(settings) == [
+            "No model provider is configured: set GOOGLE_API_KEY, ANTHROPIC_API_KEY or "
+            "OPENAI_API_KEY, or LAB_KEY for 'lab' (model_providers), in the environment."
+        ]
+
+    def test_with_no_key_at_all_each_configured_variable_is_named_with_where_it_is_read(
+        self, temp_workspace: Path, tmp_path: Path, monkeypatch
+    ):
+        """An app that ships OpenRouter, run by a user with no key yet."""
+        for variable in ("OPENROUTER_API_KEY", "TOGETHER_API_KEY", "LAB_KEY"):
+            monkeypatch.delenv(variable, raising=False)
+        env_file = tmp_path / "home" / ".app" / ".env"
+
+        class AppSettings(BaseSettings):
+            model_config = {**BaseSettings.model_config, "env_file": str(env_file)}
+
+        with patch.dict(os.environ, {}, clear=True):
+            settings = AppSettings(
+                workspace_dir=temp_workspace,
+                model_providers={
+                    **self.OPENROUTER,
+                    "together": {
+                        "base_url": "https://api.together.xyz/v1",
+                        "api_key_env": "TOGETHER_API_KEY",
+                    },
+                    "local": {"base_url": "http://localhost:8000/v1", "api_key_env": "LAB_KEY"},
+                },
+            )
+
+        assert self._problems(settings) == [
+            "No model provider is configured: set GOOGLE_API_KEY, ANTHROPIC_API_KEY or "
+            "OPENAI_API_KEY, or OPENROUTER_API_KEY for 'openrouter' or TOGETHER_API_KEY for "
+            f"'together' or LAB_KEY for 'local' (model_providers), in the environment or in "
+            f"{env_file}."
+        ]
+
+    def test_a_configured_provider_s_unset_key_variable_is_an_error_naming_it(
         self, temp_workspace: Path, monkeypatch
     ):
         """Its requests would carry a placeholder key and fail with a bare 401."""
         monkeypatch.delenv("LAB_KEY", raising=False)
-        settings = self._settings(temp_workspace, model_endpoints=self.LAB)
+        settings = self._settings(
+            temp_workspace, {"GOOGLE_API_KEY": "test-key"}, model_providers=self.LAB
+        )
         agents = [AgentConfig(name="writer", prompt="p", model="lab:Qwen/Qwen3-32B")]
 
-        with pytest.raises(SettingsValidationError) as caught:
-            validate_settings(settings, agents)
+        assert self._problems(settings, agents) == [
+            "Agent 'writer': model 'lab:Qwen/Qwen3-32B' runs on 'lab', which reads its key "
+            "from LAB_KEY; set LAB_KEY in the environment."
+        ]
 
-        message = str(caught.value)
-        assert "Agent 'writer'" in message and "'lab'" in message
-        assert "LAB_KEY is not set" in message
+    def test_the_message_names_the_user_level_env_files(
+        self, temp_workspace: Path, tmp_path: Path, monkeypatch
+    ):
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+        home_env, shared_env = tmp_path / "home.env", tmp_path / "shared.env"
 
-    def test_an_endpoint_whose_key_variable_is_set_runs(self, temp_workspace: Path, monkeypatch):
+        class AppSettings(BaseSettings):
+            model_config = {
+                **BaseSettings.model_config,
+                "env_file": (str(home_env), ".env", str(shared_env)),
+            }
+
+        with patch.dict(os.environ, {"GOOGLE_API_KEY": "test-key"}, clear=True):
+            settings = AppSettings(
+                workspace_dir=temp_workspace,
+                model_providers=self.OPENROUTER,
+                default_model="openrouter:qwen/qwen3-235b-a22b",
+            )
+
+        assert self._problems(settings) == [
+            "default_model: model 'openrouter:qwen/qwen3-235b-a22b' runs on 'openrouter', which "
+            "reads its key from OPENROUTER_API_KEY; set OPENROUTER_API_KEY in the environment "
+            f"or in {home_env} or {shared_env}."
+        ]
+
+    def test_a_key_in_the_user_level_env_file_counts(
+        self, temp_workspace: Path, tmp_path: Path, monkeypatch
+    ):
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+        env_file = tmp_path / "home.env"
+        env_file.write_text("OPENROUTER_API_KEY=test-openrouter-key\n")
+
+        class AppSettings(BaseSettings):
+            model_config = {**BaseSettings.model_config, "env_file": str(env_file)}
+
+        with patch.dict(os.environ, {}, clear=True):
+            settings = AppSettings(
+                workspace_dir=temp_workspace,
+                model_providers=self.OPENROUTER,
+                default_model="openrouter:qwen/qwen3-235b-a22b",
+            )
+
+        validate_settings(settings)
+
+    def test_a_configured_provider_whose_key_variable_is_set_runs(
+        self, temp_workspace: Path, monkeypatch
+    ):
         monkeypatch.setenv("LAB_KEY", "lab-test-key")
-        settings = self._settings(temp_workspace, model_endpoints=self.LAB)
+        settings = self._settings(temp_workspace, model_providers=self.LAB)
         agents = [AgentConfig(name="writer", prompt="p", model="lab:Qwen/Qwen3-32B")]
 
         validate_settings(settings, agents)
 
-    def test_an_unused_endpoint_s_unset_key_variable_is_no_error(
+    def test_an_unused_provider_s_unset_key_variable_is_no_error(
         self, temp_workspace: Path, monkeypatch
     ):
         monkeypatch.delenv("LAB_KEY", raising=False)
         settings = self._settings(
-            temp_workspace, {"GOOGLE_API_KEY": "test-key"}, model_endpoints=self.LAB
+            temp_workspace, {"GOOGLE_API_KEY": "test-key"}, model_providers=self.LAB
         )
 
         validate_settings(settings)
+
+    def test_chat_template_thinking_on_an_openrouter_model_is_an_error(
+        self, temp_workspace: Path, monkeypatch
+    ):
+        monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+        settings = self._settings(
+            temp_workspace,
+            model_providers={**self.OPENROUTER, **self.LAB},
+            models={
+                "openrouter:qwen/qwen3-235b-a22b": {"thinking": "chat_template"},
+                "openrouter:qwen/qwen3-32b": {"thinking": "effort"},
+                "lab:Qwen/Qwen3-32B": {"thinking": "chat_template"},
+            },
+        )
+
+        assert self._problems(settings) == [
+            "models['openrouter:qwen/qwen3-235b-a22b']: thinking 'chat_template' is not "
+            "available on an openrouter provider; use 'none' or 'effort'."
+        ]
 
     def test_a_valid_model(self, temp_workspace: Path):
         settings = self._settings(
@@ -414,8 +537,10 @@ class TestSettingsValidation:
             temp_workspace, {"GOOGLE_API_KEY": "test-key"}, default_model="claude-sonnet-4"
         )
 
-        with pytest.raises(SettingsValidationError, match="default_model.*set ANTHROPIC_API_KEY"):
-            validate_settings(settings)
+        assert self._problems(settings) == [
+            "default_model: model 'anthropic:claude-sonnet-4' needs the anthropic API key; "
+            "set ANTHROPIC_API_KEY."
+        ]
 
     def test_an_agent_model_needs_its_provider_s_key(self, temp_workspace: Path):
         """A per-agent override fails as hard as a bad default, only later."""
@@ -446,21 +571,37 @@ class TestSettingsValidation:
         with pytest.raises(SettingsValidationError, match="Agent 'writer'.*'gemini'"):
             validate_settings(settings, agents)
 
-    def test_an_undefined_endpoint_is_an_error_naming_the_setting(self, temp_workspace: Path):
+    def test_an_undefined_provider_is_an_error_naming_the_setting(self, temp_workspace: Path):
         settings = self._settings(
             temp_workspace, {"GOOGLE_API_KEY": "test-key"}, model_roles={"fast": "local-vllm:qwen"}
         )
         agents = [AgentConfig(name="writer", prompt="p", model="third-box:mistral")]
 
-        with pytest.raises(SettingsValidationError) as caught:
-            validate_settings(settings, agents)
+        assert self._problems(settings, agents) == [
+            "model_roles['fast']: model 'local-vllm:qwen' names provider 'local-vllm', which is "
+            "neither a built-in provider (google, anthropic, openai) nor defined in "
+            "model_providers (user settings); defined: none.",
+            "Agent 'writer': model 'third-box:mistral' names provider 'third-box', which is "
+            "neither a built-in provider (google, anthropic, openai) nor defined in "
+            "model_providers (user settings); defined: none.",
+        ]
 
-        message = str(caught.value)
-        assert "model_roles['fast']" in message and "'local-vllm'" in message
-        assert "Agent 'writer'" in message and "'third-box'" in message
+    def test_an_undefined_provider_s_message_names_the_defined_ones(
+        self, temp_workspace: Path, monkeypatch
+    ):
+        monkeypatch.setenv("LAB_KEY", "lab-test-key")
+        settings = self._settings(
+            temp_workspace,
+            model_providers={**self.LAB, "local": {"base_url": "http://localhost:8000/v1"}},
+            default_model="together:deepseek-ai/DeepSeek-V3.1",
+        )
 
-    def test_a_models_entry_on_an_undefined_endpoint_is_no_error(self, temp_workspace: Path):
-        """A project file's list is shared by users who define different endpoints."""
+        (problem,) = self._problems(settings)
+        assert problem.startswith("default_model: model 'together:deepseek-ai/DeepSeek-V3.1' ")
+        assert problem.endswith("model_providers (user settings); defined: lab, local.")
+
+    def test_a_models_entry_on_an_undefined_provider_is_no_error(self, temp_workspace: Path):
+        """A project file's list is shared by users who define different providers."""
         settings = self._settings(
             temp_workspace, {"GOOGLE_API_KEY": "test-key"}, models={"other-box:llama": {}}
         )

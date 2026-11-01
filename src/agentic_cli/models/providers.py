@@ -1,16 +1,20 @@
-"""Provider kinds, the built-in providers and the user's named endpoints.
+"""Provider kinds, the built-in providers and the configured ones.
 
-Four providers are built in: Google, Anthropic and OpenAI on their SDK's
-default host, and OpenRouter. A user adds OpenAI-compatible servers (vLLM and
-the like) as named endpoints in their *user* settings (``model_endpoints``):
-an endpoint holds a base URL, so a project file that could define one could
-send the user's key to its own server.
+Three providers are built in: Google, Anthropic and OpenAI, on their SDK's
+default host, each with its key setting. Every other provider is configured
+by name in ``model_providers``: an OpenAI-compatible host (Together,
+Fireworks, a local vLLM and the like) or OpenRouter (``kind: openrouter``,
+which adds OpenRouter's listing, attribution headers and reasoning
+parameter). An app ships its providers in its settings class and a user adds
+to them in their *user* settings: a provider holds a base URL, so a project
+file that could define one could send the user's key to its own server.
 
-An endpoint's key is read from the environment variable its ``api_key_env``
-names, never stored. Without one the client sends a placeholder key, which is
-what a local server without authentication expects. What the user says about
-the models an endpoint serves is a ``models`` entry (``entries.ModelEntry``),
-keyed ``<endpoint>:<model>``.
+A configured provider's key is read from the environment variable its
+``api_key_env`` names (the workflow also looks in the app's user-level env
+files), never stored. Without one the client sends a placeholder key, which
+is what a local server without authentication expects. What is said about a
+provider's models is a ``models`` entry (``entries.ModelEntry``), keyed
+``<provider>:<model>``.
 """
 
 from __future__ import annotations
@@ -22,9 +26,9 @@ from types import MappingProxyType
 from typing import Literal
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from agentic_cli.models.refs import validate_provider_name
+from agentic_cli.models.refs import BUILTIN_PROVIDERS, ModelRef, validate_provider_name
 
 
 class ProviderKind(str, Enum):
@@ -37,16 +41,14 @@ class ProviderKind(str, Enum):
     OPENAI_COMPATIBLE = "openai_compatible"
 
 
-OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-
-#: The environment variable each provider's SDK and documentation name for its
-#: key, for messages that tell the user what to set (never to read a key).
+#: The environment variable each built-in provider's SDK and documentation
+#: name for its key, for messages that tell the user what to set (the key
+#: itself comes from its setting).
 PROVIDER_KEY_ENV: Mapping[str, str] = MappingProxyType(
     {
         "google": "GOOGLE_API_KEY",
         "anthropic": "ANTHROPIC_API_KEY",
         "openai": "OPENAI_API_KEY",
-        "openrouter": "OPENROUTER_API_KEY",
     }
 )
 
@@ -55,20 +57,18 @@ _BUILTIN_KINDS: tuple[ProviderKind, ...] = (
     ProviderKind.GOOGLE,
     ProviderKind.ANTHROPIC,
     ProviderKind.OPENAI,
-    ProviderKind.OPENROUTER,
 )
-_BUILTIN_BASE_URLS: Mapping[ProviderKind, str] = {ProviderKind.OPENROUTER: OPENROUTER_BASE_URL}
 
 _ENV_VAR = r"^[A-Z_][A-Z0-9_]*$"
 
 
-class EndpointSpec(BaseModel):
-    """One ``model_endpoints`` entry, as the user writes it in settings."""
+class ProviderSpec(BaseModel):
+    """One ``model_providers`` entry, as an app or a user writes it in settings."""
 
     # A rejected base_url may hold a password: keep input values out of errors.
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
 
-    kind: Literal["openai_compatible"] = "openai_compatible"
+    kind: Literal["openai_compatible", "openrouter"] = "openai_compatible"
     base_url: str
     api_key_env: str | None = Field(default=None, pattern=_ENV_VAR)
 
@@ -101,10 +101,20 @@ class EndpointSpec(BaseModel):
             raise ValueError("base_url must not have a fragment")
         return url.rstrip("/")
 
+    @model_validator(mode="after")
+    def _check_openrouter_key(self) -> ProviderSpec:
+        """OpenRouter takes no request but its model list without a key, so the
+        provider names the variable that holds it."""
+        if self.kind == "openrouter" and self.api_key_env is None:
+            raise ValueError(
+                "kind 'openrouter' needs api_key_env, the variable holding the OpenRouter key"
+            )
+        return self
+
 
 @dataclass(frozen=True)
 class Provider:
-    """A provider the workflow can send requests to: a built-in or a user endpoint.
+    """A provider the workflow can send requests to: a built-in or a configured one.
 
     ``base_url`` is None for Google, Anthropic and OpenAI (the SDK's default
     host). ``api_key`` never appears in ``repr``.
@@ -114,46 +124,66 @@ class Provider:
     kind: ProviderKind
     base_url: str | None
     api_key: str | None = field(default=None, repr=False)
+    #: The variable the key is read from: PROVIDER_KEY_ENV's for a built-in,
+    #: the spec's api_key_env for a configured provider (None: no key needed).
+    key_env: str | None = None
+
+    @property
+    def builtin(self) -> bool:
+        """Whether this is Google, Anthropic or OpenAI."""
+        return self.kind in _BUILTIN_KINDS
 
     @property
     def has_credentials(self) -> bool:
-        """Whether requests can be sent: a key, or an endpoint (which may need none)."""
-        if self.kind is ProviderKind.OPENAI_COMPATIBLE:
-            return True
-        return bool(self.api_key)
+        """Whether requests can be sent: a key, or a configured provider that
+        names no key variable (the client sends a placeholder key)."""
+        return bool(self.api_key) or (not self.builtin and self.key_env is None)
 
 
 def build_providers(
-    *, keys: Mapping[str, str | None], specs: Mapping[str, EndpointSpec], env: Mapping[str, str]
+    *, keys: Mapping[str, str | None], specs: Mapping[str, ProviderSpec], env: Mapping[str, str]
 ) -> dict[str, Provider]:
-    """The four built-in providers plus one provider per endpoint spec.
+    """The three built-in providers, then one provider per spec, in order.
 
     Args:
         keys: Each built-in provider's key (``google``, ``anthropic``,
-            ``openai``, ``openrouter``); a missing or empty one means none.
-        specs: The user's endpoints, by name.
-        env: Where an endpoint's ``api_key_env`` is looked up (the process
-            environment, in the workflow). Nothing else supplies an endpoint
-            key.
+            ``openai``); a missing or empty one means none.
+        specs: The configured providers, by name.
+        env: Where a configured provider's ``api_key_env`` is looked up (the
+            process environment and the app's user-level env files, in the
+            workflow). Nothing else supplies a configured provider's key.
 
     Raises:
-        ModelSpecError: If an endpoint name is malformed or reuses a built-in
-            provider name.
+        ModelSpecError: If a provider name is malformed or is a built-in
+            provider's.
     """
     providers: dict[str, Provider] = {}
     for kind in _BUILTIN_KINDS:
         providers[kind.value] = Provider(
             name=kind.value,
             kind=kind,
-            base_url=_BUILTIN_BASE_URLS.get(kind),
+            base_url=None,
             api_key=keys.get(kind.value) or None,
+            key_env=PROVIDER_KEY_ENV[kind.value],
         )
     for name, spec in specs.items():
         validate_provider_name(name)
         providers[name] = Provider(
             name=name,
-            kind=ProviderKind.OPENAI_COMPATIBLE,
+            kind=ProviderKind(spec.kind),
             base_url=spec.base_url,
             api_key=(env.get(spec.api_key_env) or None) if spec.api_key_env else None,
+            key_env=spec.api_key_env,
         )
     return providers
+
+
+def undefined_provider_message(who: str, ref: ModelRef, providers: Mapping[str, Provider]) -> str:
+    """What to say when ``ref`` names a provider ``providers`` lacks: which
+    providers exist, and where one is defined."""
+    defined = ", ".join(sorted(name for name, p in providers.items() if not p.builtin))
+    return (
+        f"{who}: model {str(ref)!r} names provider {ref.provider!r}, which is neither a "
+        f"built-in provider ({', '.join(BUILTIN_PROVIDERS)}) nor defined in model_providers "
+        f"(user settings); defined: {defined or 'none'}."
+    )

@@ -1,6 +1,6 @@
-"""A user endpoint (vLLM and other OpenAI-compatible servers): ``GET {base_url}/models``.
+"""An OpenAI-compatible provider (vLLM, Together and the like): ``GET {base_url}/models``.
 
-The bearer key is the one the endpoint's ``api_key_env`` names, or the
+The bearer key is the one the provider's ``api_key_env`` names, or the
 placeholder ``EMPTY`` that servers without authentication accept. vLLM adds
 ``max_model_len``, the served context length; other servers send ids only.
 """
@@ -12,7 +12,7 @@ import httpx
 from agentic_cli.models.discovery import ListedModel, count, entries, get_json, text
 from agentic_cli.models.providers import Provider
 
-#: The key sent to an endpoint that names none.
+#: The key sent to a provider that names none.
 PLACEHOLDER_KEY = "EMPTY"
 
 

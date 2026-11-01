@@ -404,7 +404,7 @@ class TestAsOnADK:
         call = ("load_skill_resource", {"skill_name": "pdf-tools", "file_path": "assets/logo.png"})
         models = scripted(monkeypatch, writer=_steps(call))
         with MockContext(
-            session_store="memory", skills_dirs=[str(skills_dir)], model_endpoints=endpoints,
+            session_store="memory", skills_dirs=[str(skills_dir)], model_providers=endpoints,
             models={"local:small": {"context_window": 32_000}},
         ) as context:
             manager = DeepAgentsWorkflowManager(

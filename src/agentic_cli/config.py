@@ -29,18 +29,20 @@ Settings Loading Priority (highest to lowest):
     5. Default values
 """
 
+import os
 import re
 from contextvars import ContextVar, Token
 from pathlib import Path
 from typing import Generator, Any, Tuple, Type
 from contextlib import contextmanager
 
-from pydantic import AliasChoices
+from pydantic import AliasChoices, PrivateAttr
 from pydantic_settings import (
     BaseSettings as PydanticBaseSettings,
     SettingsConfigDict,
     PydanticBaseSettingsSource,
 )
+from pydantic_settings.sources import ENV_FILE_SENTINEL
 
 from agentic_cli.workflow.settings import WorkflowSettingsMixin
 from agentic_cli.settings_mixins import AppSettingsMixin, CLISettingsMixin
@@ -238,12 +240,15 @@ class BaseSettings(WorkflowSettingsMixin, AppSettingsMixin, CLISettingsMixin, Py
         env_nested_delimiter="__",
         extra="ignore",
         # Settings hold credentials, and a rejected value can be one: a key
-        # written inline in a model_endpoints entry, or a password in its
+        # written inline in a model_providers entry, or a password in its
         # base_url. Pydantic honours this only on the outermost model, so the
-        # nested EndpointSpec's own setting does not cover it here. Errors
+        # nested ProviderSpec's own setting does not cover it here. Errors
         # still name the setting and say what was expected.
         hide_input_in_errors=True,
     )
+
+    # The env_file the dotenv source was given (see env_files).
+    _env_file_used: Any = PrivateAttr(default=None)
 
     def __init__(self, **values: Any) -> None:
         """Construct settings, rejecting credential kwargs that would be dropped.
@@ -256,13 +261,36 @@ class BaseSettings(WorkflowSettingsMixin, AppSettingsMixin, CLISettingsMixin, Py
         """
         _reject_unknown_credential_kwargs(type(self), values)
         super().__init__(**values)
+        # As pydantic-settings decides which env files the dotenv source reads.
+        given = values.get("_env_file", ENV_FILE_SENTINEL)
+        self._env_file_used = (
+            given if given != ENV_FILE_SENTINEL else type(self).model_config.get("env_file")
+        )
+
+    @property
+    def env_files(self) -> tuple[str | os.PathLike[str], ...]:
+        """The env files these settings were read from, as configured, in order.
+
+        The constructor's ``_env_file`` when it was given one (None: none),
+        else the class's ``env_file``. Entries are as written: ``~`` not
+        expanded, cwd-relative ones included. A configured model provider's
+        key is also looked up in the user-level ones
+        (``workflow.model_services.user_env_files``).
+        """
+        env_file = self._env_file_used
+        if env_file is None:
+            return ()
+        if isinstance(env_file, (str, os.PathLike)):
+            return (env_file,)
+        return tuple(env_file)
 
     def update_setting(self, key: str, value: Any) -> None:
         """Update a single setting, using dedicated setters where required.
 
         A hand-edited setting (``settings_persistence.HAND_EDITED_KEYS``:
-        ``models``) takes the value as given, for this session only: the
-        app's shipped entries are not merged in, and no save writes it.
+        ``models``, ``model_providers``) takes the value as given, for this
+        session only: the app's shipped entries are not merged in, and no
+        save writes it.
 
         Args:
             key: Setting name. ``model`` sets ``default_model``, and
@@ -352,8 +380,12 @@ class BaseSettings(WorkflowSettingsMixin, AppSettingsMixin, CLISettingsMixin, Py
         # absolute/user-level env_file (including a "~/..." path) and real
         # environment variables stay trusted. Consequence: secrets/keys placed
         # in a cwd .env are dropped — put them in real env vars or an
-        # absolute/user-level file.
-        env_file = settings_cls.model_config.get("env_file")
+        # absolute/user-level file. The files judged are those the dotenv
+        # source reads: the constructor's _env_file when given, else the
+        # class's.
+        env_file = getattr(
+            dotenv_settings, "env_file", settings_cls.model_config.get("env_file")
+        )
         if env_file is None:
             _env_entries: list = []
         elif isinstance(env_file, (list, tuple)):
@@ -508,10 +540,16 @@ def validate_settings(
     - every reference parses: ``default_model``, ``model_roles`` and each
       agent's ``model`` (a role must map to a model, never another role);
       ``models`` keys are checked when the settings load;
-    - every endpoint a reference names is defined in ``model_endpoints``;
-    - every provider a model will run on has a key: the default model's,
-      each agent's, and that of each role an agent names;
-    - some provider has a key (or an endpoint is defined).
+    - every provider a reference names is built in or defined in
+      ``model_providers``;
+    - every provider a model will run on can be called: the default model's,
+      each agent's, and that of each role an agent names (a built-in has its
+      key; a configured provider's ``api_key_env`` is set, in the environment
+      or the app's user-level env files, or it names none);
+    - no ``models`` entry asks an ``openrouter`` provider for chat-template
+      thinking;
+    - some provider can be called (else the message names the built-ins'
+      key variables and each configured provider's, with where it is read).
 
     Whether a model exists, and which thinking modes it takes, need the
     provider's listing: a workflow manager checks them when it resolves its
@@ -547,19 +585,37 @@ def _model_settings_problems(
         ModelSpecError,
         ProviderKind,
         RoleRef,
+        parse_entry_key,
         parse_ref,
         parse_spec,
     )
+    from agentic_cli.models.providers import undefined_provider_message
     from agentic_cli.workflow import model_services
 
     errors: list[str] = []
     providers = model_services.providers_from_settings(settings)
+    # Where a configured provider's key is read, for the messages naming one.
+    files = " or ".join(str(path) for path in model_services.user_env_files(settings))
+    where = f"the environment or in {files}" if files else "the environment"
     if not any(provider.has_credentials for provider in providers.values()):
         variables = list(PROVIDER_KEY_ENV.values())
-        errors.append(
-            f"No model provider is configured: set {', '.join(variables[:-1])} or "
-            f"{variables[-1]}, or define an endpoint in model_endpoints (user settings)."
+        builtin = f"set {', '.join(variables[:-1])} or {variables[-1]}"
+        # None can be called, so each configured one names a key it lacks.
+        configured = " or ".join(
+            f"{provider.key_env} for {name!r}"
+            for name, provider in providers.items()
+            if not provider.builtin
         )
+        if configured:
+            errors.append(
+                f"No model provider is configured: {builtin}, or {configured} "
+                f"(model_providers), in {where}."
+            )
+        else:
+            errors.append(
+                f"No model provider is configured: {builtin}, or define a provider in "
+                "model_providers (user settings)."
+            )
 
     # Every reference a setting or an agent names, and those a model runs on.
     named: list[tuple[str, ModelRef]] = []
@@ -612,35 +668,37 @@ def _model_settings_problems(
         named.append((who, parsed))
         runs.append((who, parsed))
 
-    defined = ", ".join(
-        sorted(n for n, p in providers.items() if p.kind is ProviderKind.OPENAI_COMPATIBLE)
-    )
     for who, ref in named:
         if ref.provider not in providers:
-            errors.append(
-                f"{who}: model {str(ref)!r} names endpoint {ref.provider!r}, which is not "
-                f"defined in model_endpoints (user settings); defined endpoints: "
-                f"{defined or 'none'}."
-            )
+            errors.append(undefined_provider_message(who, ref, providers))
     for who, ref in runs:
         provider = providers.get(ref.provider)
-        if provider is not None and not provider.has_credentials:
-            variable = PROVIDER_KEY_ENV.get(ref.provider, "the provider's API key")
+        if provider is None or provider.has_credentials:
+            continue
+        if provider.builtin:
             errors.append(
-                f"{who}: model {str(ref)!r} needs the {ref.provider} API key; set {variable}."
+                f"{who}: model {str(ref)!r} needs the {ref.provider} API key; "
+                f"set {provider.key_env}."
             )
-        spec = settings.model_endpoints.get(ref.provider)
+        else:
+            # Otherwise its requests would carry a placeholder key: a bare 401.
+            errors.append(
+                f"{who}: model {str(ref)!r} runs on {ref.provider!r}, which reads its key "
+                f"from {provider.key_env}; set {provider.key_env} in {where}."
+            )
+
+    # OpenRouter switches thinking by its reasoning parameter, never by the
+    # chat template. Checked here, not when the settings load: an entry's
+    # provider kind is known only with the providers.
+    for key, entry in settings.models.items():
+        provider = providers.get(parse_entry_key(key).provider)
         if (
             provider is not None
-            and provider.kind is ProviderKind.OPENAI_COMPATIBLE
-            and spec is not None
-            and spec.api_key_env
-            and not provider.api_key
+            and provider.kind is ProviderKind.OPENROUTER
+            and entry.thinking == "chat_template"
         ):
-            # Otherwise its requests carry a placeholder key: a bare 401.
             errors.append(
-                f"{who}: model {str(ref)!r} runs on endpoint {ref.provider!r}, which reads "
-                f"its key from {spec.api_key_env}; {spec.api_key_env} is not set (an "
-                "endpoint's key is read from the environment only, not from a .env file)."
+                f"models[{key!r}]: thinking 'chat_template' is not available on an "
+                "openrouter provider; use 'none' or 'effort'."
             )
     return errors

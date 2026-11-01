@@ -812,8 +812,8 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         app builds no agent from a resolved model, so its default model
         decides. ADK then marks cache breakpoints on every Claude request, and
         keeps a server-side cache per Gemini agent from its second turn
-        (Google bills its storage while it lives); GPT, OpenRouter and
-        endpoint models are untouched.
+        (Google bills its storage while it lives); GPT and the configured
+        providers' models are untouched.
 
         ADK's defaults stand: a 1800-second TTL, which keeps Claude on its
         cheaper 5-minute cache, and a Gemini cache replaced after 10

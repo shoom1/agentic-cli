@@ -146,7 +146,8 @@ _DECLARATIONS: dict[str, tuple[str, dict[str, Any]]] = {
 _IMAGE_TYPES = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
 
 #: The providers whose tool results may carry an image. Chat Completions
-#: (OpenRouter, OpenAI-compatible endpoints) carries text only.
+#: (the configured providers: OpenRouter, OpenAI-compatible servers) carries
+#: text only.
 _IMAGE_PROVIDERS = frozenset({ProviderKind.ANTHROPIC, ProviderKind.GOOGLE, ProviderKind.OPENAI})
 
 #: ADK's status for a binary resource.

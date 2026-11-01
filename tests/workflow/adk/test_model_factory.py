@@ -10,6 +10,7 @@ against a fake provider API.
 
 from __future__ import annotations
 
+import dataclasses
 import warnings
 
 import httpx
@@ -35,12 +36,12 @@ from google.genai import types  # noqa: E402
 from openai import AsyncOpenAI  # noqa: E402
 
 from agentic_cli.models import (  # noqa: E402
-    EndpointSpec,
     ModelCatalog,
     ModelEntry,
     ModelRecord,
     ModelRef,
     ProviderKind,
+    ProviderSpec,
     ResolvedModel,
     RoleMap,
     ThinkingMechanism,
@@ -96,10 +97,15 @@ OPENROUTER_REASONER = ModelRecord(
     ),
     reasoning_text=True,
 )
+#: Another provider of kind openrouter, under another name and address.
+GATEWAY_REASONER = dataclasses.replace(OPENROUTER_REASONER, provider="or")
 #: A user's vLLM server, its key in LOCAL_KEY, and a server that needs none.
 LOCAL = {
-    "local": EndpointSpec(base_url="http://localhost:8000/v1", api_key_env="LOCAL_KEY"),
-    "keyless": EndpointSpec(base_url="http://localhost:9000/v1"),
+    "local": ProviderSpec(base_url="http://localhost:8000/v1", api_key_env="LOCAL_KEY"),
+    "keyless": ProviderSpec(base_url="http://localhost:9000/v1"),
+    "or": ProviderSpec(
+        kind="openrouter", base_url="https://or-gateway.example/api/v1", api_key_env="OR_KEY"
+    ),
 }
 #: What the user says about their models (``models`` entries).
 LOCAL_ENTRIES = {
@@ -129,10 +135,12 @@ def resolved(
     """
     if thinking is not None:
         generation["thinking"] = ThinkingSettings(mode=thinking, budget_tokens=budget)
-    every = providers(**KEYS, specs=LOCAL, env={"LOCAL_KEY": "l-test-key"})
+    every = providers(**KEYS, specs=LOCAL, env={"LOCAL_KEY": "l-test-key", "OR_KEY": "or-test-key"})
     # Never loaded: the entries and the table.
     configured = ModelCatalog(providers=every, entries=LOCAL_ENTRIES)
-    catalog = FakeCatalog([OPENROUTER_REASONER, *map(configured.record, LOCAL_ENTRIES)])
+    catalog = FakeCatalog(
+        [OPENROUTER_REASONER, GATEWAY_REASONER, *map(configured.record, LOCAL_ENTRIES)]
+    )
     return resolve_model(
         agent="writer",
         spec=spec,
@@ -623,6 +631,24 @@ class TestOpenRouter:
         assert sent.headers["authorization"] == "Bearer r-test-key"
         assert sent.headers["http-referer"] == "factory-test"
         assert sent.headers["x-title"] == "factory-test"
+        assert api.bodies[0]["reasoning"] == {"effort": "high"}
+
+    async def test_a_provider_of_kind_openrouter_under_any_name(self, settings):
+        """The kind, not the name, makes a provider OpenRouter: its attribution
+        headers and its reasoning parameter, at its own address."""
+        built = build("or:qwen/qwen3-235b-a22b", settings, effort="high")
+        api = FakeAPI(chat_completion())
+        serve(built.model, api)
+
+        await generate(built)
+
+        assert type(built.model) is OpenAICompatibleLlm
+        sent = api.requests[0]
+        assert sent.url == "https://or-gateway.example/api/v1/chat/completions"
+        assert sent.headers["authorization"] == "Bearer or-test-key"
+        assert (sent.headers["http-referer"], sent.headers["x-title"]) == (
+            "factory-test", "factory-test",
+        )
         assert api.bodies[0]["reasoning"] == {"effort": "high"}
 
 

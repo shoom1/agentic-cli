@@ -641,9 +641,9 @@ class BaseCLIApp:
             # preferences (USER_PREFERENCE_KEYS), which are meant to apply in
             # every project. Any other user-scoped key would save to the user
             # ~/.{app}/settings.json and leak the change across all projects
-            # of the app. model_endpoints is one: it holds the addresses a key
-            # is sent to. Nor does it expose a hand-edited key
-            # (HAND_EDITED_KEYS: models): no save writes one, so an edit
+            # of the app. Nor does it expose a hand-edited key
+            # (HAND_EDITED_KEYS: models, and model_providers, which holds the
+            # addresses a key is sent to): no save writes one, so an edit
             # would be gone at the next start.
             target = _ui_key_target_field(key)
             if target not in shown:

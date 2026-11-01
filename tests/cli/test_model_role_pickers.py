@@ -9,8 +9,8 @@ reinitializes the workflow with its sessions kept; a role the workflow cannot
 run is rolled back like any other setting. The thinking-effort picker's
 description says what the effort means for the default model.
 
-``model_endpoints`` stays out of the dialog: it holds the addresses a key is
-sent to, and the dialog may only edit what a project file may set.
+``model_providers`` stays out of the dialog: it holds the addresses a key is
+sent to, and no save writes it.
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ from agentic_cli.models import ModelCatalog, ModelRef, ProviderKind, load_table
 from agentic_cli.workflow import model_services
 from agentic_cli.workflow.config import AgentConfig
 from tests.cli.dialog_fakes import autospec_session, edited_dialog
-from tests.models.fakes import ProviderAPI
+from tests.models.fakes import ProviderAPI, openrouter_spec
 
 PICKERS = ["model", "model_role:fast", "model_role:strong"]
 KEY_VARIABLES = ("GOOGLE_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY")
@@ -83,13 +83,14 @@ def test_the_dialog_has_a_model_picker_per_role():
     assert [items[key].label for key in PICKERS] == ["Default Model", "Fast Model", "Strong Model"]
 
 
-def test_every_model_picker_offers_exactly_the_runnable_models():
+def test_every_model_picker_offers_exactly_the_runnable_models(monkeypatch):
     """The keyed providers' models, plus the OpenRouter models a role maps or
     ``models`` lists; nothing of a provider without a key."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k-r")
     settings = BaseSettings(
         google_api_key="k-g",
         anthropic_api_key="k-a",
-        openrouter_api_key="k-r",
+        model_providers={"openrouter": openrouter_spec()},
         model_roles={"strong": "openrouter:qwen/qwen3-235b-a22b"},
         models={"openrouter:meta-llama/llama-3.3-70b-instruct": {}},
     )
@@ -205,19 +206,19 @@ def test_without_any_provider_there_are_no_model_pickers():
     assert not set(PICKERS) & set(items)
 
 
-def test_the_role_pickers_pass_the_project_scope_guard_and_model_endpoints_does_not():
+def test_the_role_pickers_pass_the_project_scope_guard_and_model_providers_does_not():
     app = _app(
         BaseSettings(google_api_key="k-g"),
-        keys=["model_role:fast", "model_role:strong", "model_endpoints"],
+        keys=["model_role:fast", "model_role:strong", "model_providers"],
     )
 
     with structlog.testing.capture_logs() as logs:
         items = _items(app)
 
     assert list(items) == ["model_role:fast", "model_role:strong"]
-    excluded = [e["key"] for e in logs if e.get("event") == "user_scoped_setting_excluded_from_ui"]
-    assert excluded == ["model_endpoints"]
-    assert "model_endpoints" not in BaseCLIApp.get_ui_setting_keys(app)
+    excluded = [e["key"] for e in logs if e.get("event") == "hand_edited_setting_excluded_from_ui"]
+    assert excluded == ["model_providers"]
+    assert "model_providers" not in BaseCLIApp.get_ui_setting_keys(app)
 
 
 # --- the thinking effort's description ------------------------------------------------
@@ -255,7 +256,7 @@ def test_the_role_pickers_pass_the_project_scope_guard_and_model_endpoints_does_
         (
             # Before the workflow starts too, a model's entry says how it thinks.
             {
-                "model_endpoints": {"lab": {"base_url": "http://gpu-box:8000/v1"}},
+                "model_providers": {"lab": {"base_url": "http://gpu-box:8000/v1"}},
                 "models": {"lab:Qwen/Qwen3-32B": {"thinking": "chat_template"}},
                 "default_model": "lab:Qwen/Qwen3-32B",
             },
@@ -411,7 +412,7 @@ def _write(path: Path, data: dict) -> None:
 
 async def test_a_pick_saves_only_that_role_to_the_project_file(home, monkeypatch):
     _write(_user_file(home), {
-        "model_endpoints": {"local-vllm": {"base_url": "http://gpu-box:8000/v1"}},
+        "model_providers": {"local-vllm": {"base_url": "http://gpu-box:8000/v1"}},
         "model_roles": {"strong": "local-vllm:Qwen/Qwen3-32B"},
     })
     _write(_project_file(home), {"model_roles": {"fast": "google:gemini-2.5-flash-lite"}})
@@ -430,7 +431,7 @@ async def test_a_pick_saves_only_that_role_to_the_project_file(home, monkeypatch
         "model_roles": {"fast": "google:gemini-2.5-pro"}
     }
     assert settings.model_roles["strong"] == "local-vllm:Qwen/Qwen3-32B"  # still in use here
-    # A teammate who pulls the project file, without the user's endpoint, starts.
+    # A teammate who pulls the project file, without the user's provider, starts.
     _user_file(home).unlink()
     validate_settings(BaseSettings())
 

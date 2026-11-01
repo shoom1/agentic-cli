@@ -7,8 +7,8 @@ agentic-cli and no provider SDK (``tests/models/test_boundary.py`` checks
 both); each backend's adapter turns what it resolves into SDK objects.
 
 - ``refs``: ``provider:model`` references, bare model ids and role names.
-- ``providers``: provider kinds, the built-in providers and the user's
-  OpenAI-compatible endpoints.
+- ``providers``: provider kinds, the built-in providers (Google, Anthropic,
+  OpenAI) and the configured ones (``model_providers``).
 - ``entries``: ``ModelEntry``, what the ``models`` setting says about one
   model, keyed by its ``provider:model`` reference.
 - ``records``: ``ModelRecord``, what is known about one model, and its
@@ -28,11 +28,10 @@ both); each backend's adapter turns what it resolves into SDK objects.
 from agentic_cli.models.catalog import ModelCatalog, ProviderState, ProviderStatus
 from agentic_cli.models.entries import ModelEntry, parse_entry_key
 from agentic_cli.models.providers import (
-    OPENROUTER_BASE_URL,
     PROVIDER_KEY_ENV,
-    EndpointSpec,
     Provider,
     ProviderKind,
+    ProviderSpec,
     build_providers,
 )
 from agentic_cli.models.records import (
@@ -69,7 +68,6 @@ __all__ = [
     "BUILTIN_ROLES",
     "CacheMechanism",
     "CatalogView",
-    "EndpointSpec",
     "GenerationSettings",
     "ModelCatalog",
     "ModelEntry",
@@ -78,10 +76,10 @@ __all__ = [
     "ModelResolutionError",
     "ModelSpecError",
     "NativeThinking",
-    "OPENROUTER_BASE_URL",
     "PROVIDER_KEY_ENV",
     "Provider",
     "ProviderKind",
+    "ProviderSpec",
     "ProviderState",
     "ProviderStatus",
     "ResolvedModel",

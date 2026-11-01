@@ -75,6 +75,7 @@ from agentic_cli.workflow.deepagents import DeepAgentsWorkflowManager  # noqa: E
 from agentic_cli.workflow.events import EventType  # noqa: E402
 from agentic_cli.workflow.permissions import EXEMPT  # noqa: E402
 from tests.integration.conftest import collect_events  # noqa: E402
+from tests.models.fakes import openrouter_spec  # noqa: E402
 from tests.workflow.compacting import compact_now  # noqa: E402
 from tests.integration.helpers import (  # noqa: E402
     assert_no_errors,
@@ -117,6 +118,8 @@ def listed(monkeypatch):
 
 
 def _settings(tmp_path, **values) -> BaseSettings:
+    """Settings with OpenRouter defined, its key in OPENROUTER_API_KEY."""
+    values.setdefault("model_providers", {"openrouter": openrouter_spec()})
     return BaseSettings(workspace_dir=tmp_path, session_store="memory", **values)
 
 

@@ -19,15 +19,13 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from agentic_cli.models.refs import ModelRef, ModelSpecError, parse_spec
+from agentic_cli.models.refs import BUILTIN_PROVIDERS, ModelRef, ModelSpecError, parse_spec
 
 #: The fields only a model on a configured provider may set.
 THINKING_FIELDS: tuple[str, ...] = ("thinking", "effort_levels", "reasoning_text")
 #: Effort levels when an entry says thinking "effort" and names none.
 DEFAULT_EFFORT_LEVELS: tuple[str, ...] = ("low", "medium", "high")
 
-# The providers whose models' thinking comes from their listings and the table.
-_LISTED_THINKING = ("google", "anthropic", "openai")
 _LEVEL = re.compile(r"[a-z][a-z0-9_]*")
 
 
@@ -100,7 +98,7 @@ def check_entries(entries: Mapping[str, ModelEntry]) -> dict[str, ModelEntry]:
     """
     for key, entry in entries.items():
         ref = parse_entry_key(key)
-        if ref.provider in _LISTED_THINKING and entry.model_fields_set & set(THINKING_FIELDS):
+        if ref.provider in BUILTIN_PROVIDERS and entry.model_fields_set & set(THINKING_FIELDS):
             raise ValueError(
                 f"models[{key!r}]: thinking, effort_levels and reasoning_text are only for a "
                 "model on a model_providers provider; the built-in providers' thinking comes "

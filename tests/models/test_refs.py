@@ -20,7 +20,7 @@ from agentic_cli.models import (
 
 
 def test_the_builtin_names():
-    assert BUILTIN_PROVIDERS == ("google", "anthropic", "openai", "openrouter")
+    assert BUILTIN_PROVIDERS == ("google", "anthropic", "openai")
     assert BUILTIN_ROLES == ("default", "fast", "strong")
 
 
@@ -30,7 +30,7 @@ def test_the_builtin_names():
         ("anthropic:claude-opus-5-5", "anthropic", "claude-opus-5-5"),
         ("google:gemini-3.5-flash", "google", "gemini-3.5-flash"),
         ("local-vllm:Qwen/Qwen3-32B", "local-vllm", "Qwen/Qwen3-32B"),
-        ("my_endpoint:some-model", "my_endpoint", "some-model"),
+        ("my_provider:some-model", "my_provider", "some-model"),
     ],
 )
 def test_a_provider_reference(spec, provider, model):
@@ -66,8 +66,13 @@ def test_any_other_bare_name_is_a_role(spec):
 def test_a_bare_name_with_a_digit_is_a_model_id_missing_its_provider(spec):
     # As a role it would run on the default model, perhaps another provider's,
     # so a local model's prompts could go to the cloud.
-    with pytest.raises(ModelSpecError, match=f"<endpoint>:{spec}"):
+    with pytest.raises(ModelSpecError) as exc:
         parse_spec(spec)
+
+    assert str(exc.value) == (
+        f"Model '{spec}' has no provider: write it as provider:model, such as "
+        f"<provider>:{spec} for one of your model_providers. (A role name has no digits.)"
+    )
 
 
 @pytest.mark.parametrize(
@@ -134,19 +139,19 @@ def test_a_role_name_has_no_digits(name):
         validate_role_name(name)
 
 
-@pytest.mark.parametrize("name", ["local-vllm", "lab_server", "vllm2"])
-def test_a_valid_endpoint_name(name):
+@pytest.mark.parametrize("name", ["local-vllm", "lab_server", "vllm2", "openrouter", "together"])
+def test_a_valid_provider_name(name):
     assert validate_provider_name(name) == name
 
 
 @pytest.mark.parametrize("name", list(BUILTIN_PROVIDERS))
-def test_an_endpoint_cannot_reuse_a_builtin_provider_name(name):
+def test_a_provider_cannot_reuse_a_builtin_provider_name(name):
     with pytest.raises(ModelSpecError, match="built-in"):
         validate_provider_name(name)
 
 
 @pytest.mark.parametrize("name", ["Local", "local vllm", "", "-x", "x" * 65])
-def test_a_malformed_endpoint_name(name):
+def test_a_malformed_provider_name(name):
     with pytest.raises(ModelSpecError):
         validate_provider_name(name)
 

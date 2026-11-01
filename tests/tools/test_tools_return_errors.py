@@ -198,7 +198,7 @@ class TestLangGraphTurnSurvivesARaisingTool:
             """Always fails."""
             raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
 
-        keys = {"google": None, "anthropic": None, "openai": "o-test-key", "openrouter": None}
+        keys = {"google": None, "anthropic": None, "openai": "o-test-key"}
         providers = build_providers(keys=keys, specs={}, env={})
         model = resolve_model(
             agent="a", spec="openai:gpt-4o-mini", generation=None, thinking_effort="none",

@@ -22,9 +22,9 @@ from pydantic import (
 
 from agentic_cli.logging import Loggers
 from agentic_cli.models import (
-    EndpointSpec,
     ModelEntry,
     ModelSpecError,
+    ProviderSpec,
     RoleMap,
     parse_ref,
     validate_provider_name,
@@ -38,7 +38,7 @@ logger = Loggers.config()
 _ThinkingEffort = Literal["none", "low", "medium", "high"]
 #: The settings an app's settings class ships entries in, merged with the
 #: sources' entries rather than replaced by them (``_merge_shipped_entries``).
-_SHIPPED_ENTRY_FIELDS = ("models",)
+_SHIPPED_ENTRY_FIELDS = ("models", "model_providers")
 
 
 class PermissionRuleConfig(BaseModel):
@@ -68,8 +68,8 @@ class WorkflowSettingsMixin:
 
     Mixin class that provides workflow-specific settings including:
     - Model selection: the default model, roles, the models list
-      (``models``) and the user's endpoints (read through
-      ``workflow.model_services``)
+      (``models``) and the configured providers (``model_providers``), read
+      through ``workflow.model_services``
     - Provider API keys
     - Orchestrator and retry settings
     - Tool configuration (web search/fetch, KB, shell, executor)
@@ -100,22 +100,32 @@ class WorkflowSettingsMixin:
     )
     # Models and providers (agentic_cli.models). Provisional in 0.7.0.
     #
-    # model_endpoints is user-only (not in PROJECT_SETTABLE_KEYS): it holds base
-    # URLs, so a project file that could set it could send the user's key to
-    # its own server. model_roles and models only choose among providers and
-    # endpoints the user defined (an entry's numbers are hints), so a project
-    # may set them.
-    model_endpoints: dict[str, EndpointSpec] = Field(
-        default_factory=dict,
-        title="Model Endpoints",
-        description=(
-            "OpenAI-compatible servers (vLLM and the like) by name: base_url and the "
-            "environment variable holding the key (api_key_env). User settings only."
+    # model_roles, model_providers and models are declared in Annotated form,
+    # with no class attribute: an app's settings class overrides their
+    # defaults, and pydantic warns when a field shadows an attribute of a
+    # parent class.
+    #
+    # model_providers is user-only (not in PROJECT_SETTABLE_KEYS): it holds
+    # base URLs, so a project file that could set it could send the user's key
+    # to its own server. An app ships its providers by overriding this default
+    # in its settings class; the user file's and the environment's are merged
+    # into it field by field (_merge_shipped_entries). No save writes it
+    # (settings_persistence.HAND_EDITED_KEYS), nor does the /settings dialog
+    # show it.
+    model_providers: Annotated[
+        dict[str, ProviderSpec],
+        Field(
+            default_factory=dict,
+            title="Model Providers",
+            description=(
+                "OpenAI-compatible hosts (OpenRouter, Together, Fireworks, a local vLLM) by "
+                "name: kind, base_url, the environment variable holding the key "
+                "(api_key_env). User settings only."
+            ),
         ),
-    )
-    # model_roles and models are declared in Annotated form, with no class
-    # attribute: an app's settings class overrides their defaults, and pydantic
-    # warns when a field shadows an attribute of a parent class.
+    ]
+    # model_roles and models only choose among the providers the app and the
+    # user defined (an entry's numbers are hints), so a project may set them.
     model_roles: Annotated[
         dict[str, str],
         Field(
@@ -207,19 +217,14 @@ class WorkflowSettingsMixin:
         validation_alias=AliasChoices("ANTHROPIC_API_KEY", "anthropic_api_key"),
         repr=False,
     )
-    # The OpenAI and OpenRouter keys are never exported to the process
-    # environment (see export_api_keys_to_env): the model adapters pass every
-    # key to its client explicitly.
+    # The OpenAI key is never exported to the process environment (see
+    # export_api_keys_to_env): the model adapters pass every key to its client
+    # explicitly. A configured provider's key (OpenRouter's among them) has no
+    # setting: it is read where its api_key_env says (model_services).
     openai_api_key: str | None = Field(
         default=None,
         description="OpenAI API key for GPT models",
         validation_alias=AliasChoices("OPENAI_API_KEY", "openai_api_key"),
-        repr=False,
-    )
-    openrouter_api_key: str | None = Field(
-        default=None,
-        description="OpenRouter API key for the models OpenRouter serves",
-        validation_alias=AliasChoices("OPENROUTER_API_KEY", "openrouter_api_key"),
         repr=False,
     )
     tavily_api_key: str | None = Field(
@@ -507,10 +512,10 @@ class WorkflowSettingsMixin:
             )
         return v
 
-    @field_validator("model_endpoints")
+    @field_validator("model_providers")
     @classmethod
-    def _validate_endpoint_names(cls, v: dict[str, EndpointSpec]) -> dict[str, EndpointSpec]:
-        """Endpoint names are provider names in references: no built-in's name."""
+    def _validate_provider_names(cls, v: dict[str, ProviderSpec]) -> dict[str, ProviderSpec]:
+        """A provider's name is the provider in its references: no built-in's name."""
         for name in v:
             validate_provider_name(name)
         return v
@@ -822,9 +827,9 @@ class WorkflowSettingsMixin:
         untouched. Credentials are process-global; SettingsContext does not
         isolate them.
 
-        Only the Google and Anthropic keys are exported. ``openai_api_key`` and
-        ``openrouter_api_key`` never are: the model adapters pass every key to
-        its client explicitly, so nothing needs them in the environment.
+        Only the Google and Anthropic keys are exported. ``openai_api_key``
+        never is: the model adapters pass every key to its client explicitly,
+        so nothing needs it in the environment.
         """
         import os
 
