@@ -74,6 +74,9 @@ def user_env_files(settings: "BaseSettings") -> tuple[Path, ...]:
 
     Settings composed from the mixins over pydantic-settings' own
     ``BaseSettings`` have no ``env_files``; their class's ``env_file`` is used.
+    Such a class has no cwd-``.env`` filter (``agentic_cli.BaseSettings`` has
+    it), so a cwd-relative entry of its ``env_file`` can still define a
+    provider; keys are read only from the absolute entries.
     """
     entries = getattr(settings, "env_files", None)
     if entries is None:
