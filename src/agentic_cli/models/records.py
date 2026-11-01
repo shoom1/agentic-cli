@@ -35,7 +35,8 @@ class ThinkingMechanism(str, Enum):
     ANTHROPIC_BUDGET = "anthropic_budget"
     #: OpenAI and OpenRouter reasoning models, models whose entry says effort.
     EFFORT = "effort"
-    #: Endpoint models switched by ``chat_template_kwargs.enable_thinking``.
+    #: Models whose entry says chat_template: switched by
+    #: ``chat_template_kwargs.enable_thinking``.
     CHAT_TEMPLATE = "chat_template"
 
 

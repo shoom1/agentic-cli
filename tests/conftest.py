@@ -147,9 +147,9 @@ def settings_double(**attributes: Any) -> MagicMock:
     settings = MagicMock()
     settings.app_name = "test-app"
     settings.google_api_key = "test-key"
-    for name in ("anthropic_api_key", "openai_api_key", "openrouter_api_key", "default_model"):
+    for name in ("anthropic_api_key", "openai_api_key", "default_model"):
         setattr(settings, name, None)
-    settings.model_roles, settings.model_endpoints, settings.models = {}, {}, {}
+    settings.model_roles, settings.model_providers, settings.models = {}, {}, {}
     settings.thinking_effort = "medium"
     settings.configure_mock(**attributes)
     return settings

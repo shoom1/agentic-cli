@@ -28,7 +28,7 @@ from agentic_cli.cli.commands import CommandRegistry
 from agentic_cli.config import BaseSettings
 from agentic_cli.models import ModelCatalog
 from agentic_cli.workflow import model_services
-from tests.models.fakes import ProviderAPI, recorded
+from tests.models.fakes import ProviderAPI, openrouter_spec, recorded
 
 KEYS = {
     "GOOGLE_API_KEY": "g-secret-key-1",
@@ -38,6 +38,7 @@ KEYS = {
 }
 ENDPOINT_KEY = "v-secret-key-5"
 LAB = {"lab": {"base_url": "http://localhost:8000/v1", "api_key_env": "LAB_KEY"}}
+OPENROUTER = {"openrouter": openrouter_spec()}
 LAB_MODELS = {"lab:Qwen/Qwen3-32B": {"context_window": 32768, "thinking": "chat_template"}}
 
 
@@ -197,7 +198,7 @@ async def test_before_the_workflow_is_ready_it_shows_the_cached_listings(api, mo
 async def test_each_provider_s_status(api, monkeypatch):
     keys(monkeypatch, "google", "openai")
     api.answers["openai"] = 401
-    settings = BaseSettings()
+    settings = BaseSettings(model_providers=OPENROUTER)
     workflow = await _ready(settings, api, "google:gemini-2.5-flash")
 
     screen = await models(App(settings, workflow))
@@ -233,10 +234,10 @@ async def test_the_table_shows_each_model_s_record_and_roles(api, monkeypatch):
     assert "anthropic:" not in screen.text
 
 
-async def test_an_endpoint_s_models_show_their_entries(api, monkeypatch):
+async def test_a_configured_provider_s_models_show_their_entries(api, monkeypatch):
     monkeypatch.setenv("LAB_KEY", ENDPOINT_KEY)
     settings = BaseSettings(
-        model_endpoints=LAB, models=LAB_MODELS, default_model="lab:Qwen/Qwen3-32B"
+        model_providers=LAB, models=LAB_MODELS, default_model="lab:Qwen/Qwen3-32B"
     )
     workflow = await _ready(settings, api, "lab:Qwen/Qwen3-32B")
 
@@ -244,7 +245,25 @@ async def test_an_endpoint_s_models_show_their_entries(api, monkeypatch):
 
     qwen = _row(screen, "lab:Qwen/Qwen3-32B")
     assert "32,768" in qwen and "on/off" in qwen and "config" in qwen and "default" in qwen
-    assert "endpoint" in _row(screen, "lab")
+    assert "│ key " in _row(screen, "lab")
+
+
+async def test_a_configured_provider_s_credentials(api, monkeypatch):
+    """A key, no key (its variable is unset), or none needed (it names none)."""
+    keys(monkeypatch, "google")
+    providers = {
+        **LAB,
+        **OPENROUTER,
+        "local": {"base_url": "http://localhost:9000/v1"},
+    }
+    settings = BaseSettings(model_providers=providers)
+    workflow = await _ready(settings, api, "google:gemini-2.5-flash")
+
+    screen = await models(App(settings, workflow))
+
+    assert "│ no key " in _row(screen, "lab")
+    assert "│ no key " in _row(screen, "openrouter")
+    assert "│ none needed " in _row(screen, "local")
 
 
 @pytest.mark.parametrize("text", ["FLASH-LITE", "flash-lite", "Flash-Lite"])
@@ -273,7 +292,9 @@ async def test_a_filter_that_matches_nothing_says_so(api, monkeypatch):
 
 async def test_openrouter_s_models_are_all_shown_and_filterable(api, monkeypatch):
     keys(monkeypatch, "openrouter")
-    settings = BaseSettings(default_model="openrouter:qwen/qwen3-235b-a22b")
+    settings = BaseSettings(
+        model_providers=OPENROUTER, default_model="openrouter:qwen/qwen3-235b-a22b"
+    )
     workflow = await _ready(settings, api, "openrouter:qwen/qwen3-235b-a22b")
 
     everything = (await models(App(settings, workflow))).text
@@ -340,7 +361,7 @@ async def test_it_never_prints_a_key(api, monkeypatch):
     monkeypatch.setenv("LAB_KEY", ENDPOINT_KEY)
     api.answers["anthropic"] = 401
     api.answers["endpoint"] = 403
-    settings = BaseSettings(model_endpoints=LAB)
+    settings = BaseSettings(model_providers={**LAB, **OPENROUTER})
     workflow = await _ready(settings, api, "google:gemini-2.5-flash")
 
     printed = []

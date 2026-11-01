@@ -15,10 +15,10 @@ import time
 import pytest
 
 from agentic_cli.models import (
-    EndpointSpec,
     ModelCatalog,
     ModelRef,
     ModelResolutionError,
+    ProviderSpec,
     ProviderState,
 )
 from tests.models.fakes import Clock, ProviderAPI, hang, providers, recorded, refuse
@@ -31,7 +31,7 @@ KEYS = {
     "openrouter": "r-SECRET-test-key",
 }
 ENDPOINT_KEY = "v-SECRET-endpoint-key"
-VLLM = EndpointSpec(base_url="http://gpu-box:8000/v1", api_key_env="VLLM_KEY")
+VLLM = ProviderSpec(base_url="http://gpu-box:8000/v1", api_key_env="VLLM_KEY")
 
 
 def make(cache, api=None, *, clock=None, specs=None, **keys) -> ModelCatalog:
@@ -295,7 +295,7 @@ async def test_a_broken_cache_file_is_ignored(cache, damage):
 async def test_an_endpoint_whose_base_url_changed_is_listed_again(cache):
     clock = Clock()
     await make(cache, specs={"local-vllm": VLLM}, google=KEYS["google"], clock=clock).load()
-    moved = EndpointSpec(base_url="http://other-box:8000/v1", api_key_env="VLLM_KEY")
+    moved = ProviderSpec(base_url="http://other-box:8000/v1", api_key_env="VLLM_KEY")
     api = ProviderAPI()
 
     catalog = make(cache, api, specs={"local-vllm": moved}, google=KEYS["google"], clock=clock)

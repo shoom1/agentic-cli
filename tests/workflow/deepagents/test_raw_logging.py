@@ -99,7 +99,7 @@ def home(tmp_path, monkeypatch):
 
 
 def _settings(**values) -> BaseSettings:
-    values.setdefault("model_endpoints", SMALL)
+    values.setdefault("model_providers", SMALL)
     values.setdefault("models", SMALL_MODELS)
     values.setdefault("default_model", "local:small")
     return BaseSettings(session_store="memory", **values)

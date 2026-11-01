@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import json
+import logging
 import stat
 from pathlib import Path
 
 import httpx
 import pytest
+from pydantic import Field
 
 from agentic_cli.config import BaseSettings
-from agentic_cli.models import ModelRef, ModelSpecError, ProviderKind, RoleMap
+from agentic_cli.models import ModelRef, ModelSpecError, ProviderKind, ProviderSpec, RoleMap
 from agentic_cli.workflow import model_services
 
 # Bound before the test-suite guard (conftest ``_no_model_listings``) replaces
@@ -18,6 +20,7 @@ from agentic_cli.workflow import model_services
 from agentic_cli.workflow.model_services import build_catalog
 
 _KEY_VARS = ("GOOGLE_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY")
+LAB = ProviderSpec(base_url="http://gpu-box:8000/v1", api_key_env="LAB_KEY")
 
 
 @pytest.fixture(autouse=True)
@@ -27,7 +30,9 @@ def isolated(tmp_path, monkeypatch):
     (tmp_path / "project").mkdir()
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.chdir(tmp_path / "project")
-    for var in (*_KEY_VARS, "LAB_KEY", "AGENTIC_DEFAULT_MODEL", "AGENTIC_MODELS"):
+    for var in (
+        *_KEY_VARS, "LAB_KEY", "AGENTIC_DEFAULT_MODEL", "AGENTIC_MODELS", "AGENTIC_MODEL_PROVIDERS"
+    ):
         monkeypatch.delenv(var, raising=False)
 
 
@@ -35,43 +40,148 @@ def _lab(**extra) -> dict:
     return {"lab": {"base_url": "http://gpu-box:8000/v1", "api_key_env": "LAB_KEY", **extra}}
 
 
-def test_provider_keys_reads_the_four_key_settings():
-    settings = BaseSettings(
-        google_api_key="k-g", anthropic_api_key="k-a", openai_api_key="k-o", openrouter_api_key="k-r"
-    )
+def _app_with_env_files(env_file) -> type[BaseSettings]:
+    """An app whose settings class reads ``env_file`` and defines the ``lab`` provider."""
+
+    class AppSettings(BaseSettings):
+        model_config = {**BaseSettings.model_config, "env_file": env_file}
+        model_providers: dict[str, ProviderSpec] = Field(default_factory=lambda: {"lab": LAB})
+
+    return AppSettings
+
+
+def test_provider_keys_reads_the_three_key_settings():
+    settings = BaseSettings(google_api_key="k-g", anthropic_api_key="k-a", openai_api_key="k-o")
 
     assert model_services.provider_keys(settings) == {
-        "google": "k-g", "anthropic": "k-a", "openai": "k-o", "openrouter": "k-r",
+        "google": "k-g", "anthropic": "k-a", "openai": "k-o",
     }
 
 
 def test_provider_keys_without_keys():
     assert model_services.provider_keys(BaseSettings()) == dict.fromkeys(
-        ("google", "anthropic", "openai", "openrouter")
+        ("google", "anthropic", "openai")
     )
 
 
 def test_providers_from_settings():
-    settings = BaseSettings(anthropic_api_key="k-a", model_endpoints=_lab())
+    settings = BaseSettings(anthropic_api_key="k-a", model_providers=_lab())
 
     providers = model_services.providers_from_settings(settings, env={"LAB_KEY": "k-lab"})
 
-    assert set(providers) == {"google", "anthropic", "openai", "openrouter", "lab"}
+    assert list(providers) == ["google", "anthropic", "openai", "lab"]
     assert providers["anthropic"].api_key == "k-a"
     assert not providers["google"].has_credentials
     assert providers["lab"].kind is ProviderKind.OPENAI_COMPATIBLE
     assert providers["lab"].base_url == "http://gpu-box:8000/v1"
-    assert providers["lab"].api_key == "k-lab"
+    assert (providers["lab"].api_key, providers["lab"].key_env) == ("k-lab", "LAB_KEY")
 
 
-def test_an_endpoint_key_comes_from_the_process_environment_by_default(monkeypatch):
+def test_a_configured_key_comes_from_the_process_environment_by_default(monkeypatch):
     monkeypatch.setenv("LAB_KEY", "k-from-env")
-    settings = BaseSettings(openai_api_key="k-o", model_endpoints=_lab())
+    settings = BaseSettings(openai_api_key="k-o", model_providers=_lab())
 
     providers = model_services.providers_from_settings(settings)
 
     assert providers["lab"].api_key == "k-from-env"
     assert providers["openai"].api_key == "k-o"
+
+
+class TestUserLevelEnvFiles:
+    """A configured provider's key is read from the environment, then from the
+    settings class's user-level env files (absolute once ``~`` is expanded),
+    never from one relative to the working directory, which a cloned
+    repository can ship."""
+
+    def test_the_key_is_read_from_the_user_level_env_file(self, tmp_path):
+        env_file = tmp_path / "home" / ".app" / ".env"
+        env_file.parent.mkdir()
+        env_file.write_text("LAB_KEY=k-from-file\n")
+
+        settings = _app_with_env_files(str(env_file))()
+
+        lab = model_services.providers_from_settings(settings)["lab"]
+        assert (lab.api_key, lab.has_credentials) == ("k-from-file", True)
+
+    def test_the_environment_wins_over_the_file(self, tmp_path, monkeypatch):
+        env_file = tmp_path / "home" / ".env"
+        env_file.write_text("LAB_KEY=k-from-file\n")
+        monkeypatch.setenv("LAB_KEY", "k-from-env")
+
+        settings = _app_with_env_files(str(env_file))()
+
+        assert model_services.providers_from_settings(settings)["lab"].api_key == "k-from-env"
+
+    def test_a_cwd_env_file_never_supplies_a_provider_key(self, tmp_path):
+        (tmp_path / "project" / ".env").write_text("LAB_KEY=k-from-the-repo\n")
+
+        for env_file in (".env", ["./.env"], (".env",)):
+            settings = _app_with_env_files(env_file)()
+
+            assert model_services.user_env_files(settings) == ()
+            lab = model_services.providers_from_settings(settings)["lab"]
+            assert (lab.api_key, lab.has_credentials) == (None, False)
+
+    def test_the_absolute_entries_in_order_with_home_expanded(self, tmp_path):
+        home = tmp_path / "home"
+        settings = _app_with_env_files(
+            ["~/.app/.env", ".env", str(tmp_path / "shared.env"), Path("~/.app/more.env")]
+        )()
+
+        assert model_services.user_env_files(settings) == (
+            home / ".app" / ".env", tmp_path / "shared.env", home / ".app" / "more.env",
+        )
+        assert model_services.user_env_files(BaseSettings()) == ()
+
+    def test_a_later_file_wins_and_the_environment_wins_over_all(self, tmp_path, monkeypatch):
+        first, second = tmp_path / "first.env", tmp_path / "second.env"
+        first.write_text("A_KEY=first\nB_KEY=first\nC_KEY=first\nNO_VALUE\n")
+        second.write_text("B_KEY=second\nC_KEY=second\n")
+        monkeypatch.setenv("C_KEY", "environment")
+
+        env = model_services.provider_env(
+            _app_with_env_files([str(first), str(tmp_path / "missing.env"), str(second)])()
+        )
+
+        assert (env["A_KEY"], env["B_KEY"], env["C_KEY"]) == ("first", "second", "environment")
+        assert "NO_VALUE" not in env
+        assert env["HOME"] == str(tmp_path / "home")  # the whole process environment
+
+    def test_an_explicit_env_file_replaces_the_class_s(self, tmp_path):
+        """As it does for the settings themselves: a test that isolates an app's
+        dotenv with ``_env_file`` isolates its provider keys too."""
+        class_file, given = tmp_path / "class.env", tmp_path / "given.env"
+        class_file.write_text("LAB_KEY=k-class\n")
+        given.write_text("LAB_KEY=k-given\n")
+        app = _app_with_env_files(str(class_file))
+
+        assert model_services.user_env_files(app(_env_file=str(given))) == (given,)
+        assert model_services.providers_from_settings(app(_env_file=None))["lab"].api_key is None
+        assert model_services.providers_from_settings(app())["lab"].api_key == "k-class"
+
+    def test_a_malformed_line_is_not_reported_again(self, tmp_path, caplog):
+        """The settings' own load reported it once, before the UI; the keys are
+        read again at every validation, /settings and /models."""
+        env_file = tmp_path / "app.env"
+        env_file.write_text("LAB_KEY=k-from-file\nthis is not a statement\n")
+        settings = _app_with_env_files(str(env_file))()
+
+        with caplog.at_level(logging.WARNING, logger="dotenv.main"):
+            caplog.clear()
+            first = model_services.provider_env(settings)
+            model_services.provider_env(settings)
+
+        assert first["LAB_KEY"] == "k-from-file"
+        assert [record.getMessage() for record in caplog.records] == []
+
+    def test_an_explicit_env_overrides_every_file(self, tmp_path):
+        env_file = tmp_path / "app.env"
+        env_file.write_text("LAB_KEY=k-from-file\n")
+        settings = _app_with_env_files(str(env_file))()
+
+        providers = model_services.providers_from_settings(settings, env={})
+
+        assert providers["lab"].api_key is None
 
 
 def test_entries_from_settings_by_reference_in_their_order():

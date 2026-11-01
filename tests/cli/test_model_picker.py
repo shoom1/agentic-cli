@@ -16,7 +16,7 @@ from agentic_cli.cli.app import BaseCLIApp
 from agentic_cli.config import BaseSettings
 from agentic_cli.models import ModelCatalog, ProviderKind, load_table
 from agentic_cli.workflow import model_services
-from tests.models.fakes import ProviderAPI
+from tests.models.fakes import ProviderAPI, openrouter_spec
 
 
 @pytest.fixture(autouse=True)
@@ -70,13 +70,25 @@ def test_the_current_model_shows_as_its_reference():
     assert _model_item(_app(settings)).default == "google:gemini-2.5-pro"
 
 
-def test_a_models_entry_is_offered():
+def test_a_models_entry_is_offered(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k-r")
     settings = BaseSettings(
-        google_api_key="k-g", openrouter_api_key="k-r",
+        google_api_key="k-g",
+        model_providers={"openrouter": openrouter_spec()},
         models={"openrouter:qwen/qwen3-235b-a22b": {}},
     )
 
     assert "openrouter:qwen/qwen3-235b-a22b" in _model_item(_app(settings)).options
+
+
+def test_a_models_entry_on_a_provider_without_its_key_is_not_offered():
+    settings = BaseSettings(
+        google_api_key="k-g",
+        model_providers={"openrouter": openrouter_spec()},
+        models={"openrouter:qwen/qwen3-235b-a22b": {}},
+    )
+
+    assert "openrouter:qwen/qwen3-235b-a22b" not in _model_item(_app(settings)).options
 
 
 def test_without_any_provider_there_is_no_model_picker():

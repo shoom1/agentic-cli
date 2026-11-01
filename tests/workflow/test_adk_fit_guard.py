@@ -88,7 +88,7 @@ def solo(model: str = "local:unknown", **values) -> GoogleADKWorkflowManager:
     return GoogleADKWorkflowManager(
         agent_configs=[AgentConfig(name="solo", prompt="You help.",
                                    include_state_tools=values.pop("state_tools", False))],
-        settings=BaseSettings(session_store="memory", model_endpoints=ENDPOINTS,
+        settings=BaseSettings(session_store="memory", model_providers=ENDPOINTS,
                               models=MODELS, default_model=model, **values),
     )
 
@@ -206,7 +206,7 @@ class TestASmallerSubAgent:
                 AgentConfig(name="researcher", prompt="You research.", description="Finds.",
                             model="local:small", context="inherit", include_state_tools=False),
             ],
-            settings=BaseSettings(session_store="memory", model_endpoints=ENDPOINTS,
+            settings=BaseSettings(session_store="memory", model_providers=ENDPOINTS,
                                   models=MODELS, default_model="claude-sonnet-4-6"),
         )
         try:

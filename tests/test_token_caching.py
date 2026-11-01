@@ -138,7 +138,7 @@ class TestClaudeCacheControl:
         route(monkeypatch, openai, "AsyncOpenAI", api)
         manager = _langgraph_manager(
             agent_config,
-            model_endpoints={"proxy": {"base_url": "http://localhost:8000/v1"}},
+            model_providers={"proxy": {"base_url": "http://localhost:8000/v1"}},
             models={"proxy:claude-sonnet-4-5": {}},
             default_model="proxy:claude-sonnet-4-5",
             prompt_caching_enabled=True,

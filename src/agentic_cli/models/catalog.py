@@ -7,23 +7,24 @@ of its source (``ModelRecord.sources``):
    about a model, field by field;
 2. live listings (``listing``): Google's token limits and thinking flag,
    Anthropic's limits, thinking types, effort levels and whether thinking
-   can be turned off, OpenAI's ids, OpenRouter's limits and tool and
-   reasoning support, an endpoint's served names and context length;
+   can be turned off, OpenAI's ids, an OpenRouter provider's limits and
+   tool and reasoning support, an OpenAI-compatible provider's served names
+   and context length;
 3. the shipped table (``table``): family rules, tiers, the curated OpenAI
    list and the fallback models used without a listing.
 
 **Validation.** An unknown id is rejected only when its provider's listing is
 fresh (``ProviderState.FRESH``); a stale, failed or untried listing cannot
 prove a model does not exist, so the id is accepted with the table's record.
-A model with an entry on a user endpoint is always accepted.
+A model with an entry on an OpenAI-compatible provider is always accepted.
 
 **Cache.** Listings are kept in a JSON file (``~/.<app>/model_cache.json`` in
-the workflow), one entry per provider or endpoint: fetch time, outcome and
-models, never a key. Startup reads it and waits on the network only for a
-provider that has credentials and no entry; a fresh entry needs no listing,
-and an older one (or a cached failure) is used while
-``start_background_refresh`` lists it again. A broken file, or an endpoint
-entry for another ``base_url``, is ignored and listed again.
+the workflow), one entry per provider: fetch time, outcome and models,
+never a key. Startup reads it and waits on the network only for a provider
+that has credentials and no entry; a fresh entry needs no listing, and an
+older one (or a cached failure) is used while ``start_background_refresh``
+lists it again. A broken file, or an entry for another ``base_url``, is
+ignored and listed again.
 """
 
 from __future__ import annotations
@@ -100,8 +101,9 @@ class ProviderStatus:
     """One provider's listing, for the UI.
 
     Attributes:
-        provider: The provider or endpoint name.
-        has_credentials: Whether requests can be sent (a key, or an endpoint).
+        provider: The provider's name.
+        has_credentials: Whether requests can be sent (a key, or a configured
+            provider that needs none).
         state: How much is known (see ``ProviderState``).
         fetched_at: When the listing in use was fetched, else when the last
             attempt failed; None when never listed.
@@ -138,7 +140,7 @@ class ModelCatalog:
     """Records for every provider's models, from entries, listings and the table.
 
     Args:
-        providers: Every provider and user endpoint, by name
+        providers: Every provider, built in and configured, by name
             (``build_providers``).
         entries: The ``models`` entries, by reference: each wins, field by
             field, over its model's listing and table values.
@@ -278,23 +280,23 @@ class ModelCatalog:
         """The model's record, with its ``models`` entry when it has one.
 
         Raises:
-            ModelResolutionError: If the provider is neither built in nor a
-                defined endpoint, or its fresh listing lacks the model and the
-                model has no entry on an endpoint (the message lists the
-                provider's models).
+            ModelResolutionError: If the provider is neither built in nor
+                configured, or its fresh listing lacks the model and the model
+                has no entry on an OpenAI-compatible provider (the message
+                lists the provider's models).
         """
         provider = self._providers.get(ref.provider)
         if provider is None:
             raise ModelResolutionError(
-                f"Model {ref} names {ref.provider!r}, which is neither a provider nor an "
-                "endpoint defined in model_endpoints."
+                f"Model {ref} names {ref.provider!r}, which is neither a built-in provider "
+                "nor defined in model_providers."
             )
         found = provider.accepted.get(ref.model)
         if found is not None:
             return found
         entry = self._entries.get(ref)
-        # A model with an entry on an endpoint is taken at its word: a
-        # server's listing can leave out a model it serves.
+        # A model with an entry on an OpenAI-compatible provider is taken at
+        # its word: a server's listing can leave out a model it serves.
         vouched = entry is not None and provider.provider.kind is ProviderKind.OPENAI_COMPATIBLE
         if provider.state is ProviderState.FRESH and not vouched:
             if provider.from_cache:
@@ -320,7 +322,7 @@ class ModelCatalog:
         return found is not None and found.state is ProviderState.FRESH
 
     def status(self) -> list[ProviderStatus]:
-        """Every provider's status, built-ins first, then the user's endpoints."""
+        """Every provider's status, built-ins first, then the configured ones."""
         return [self._status(name) for name in self._providers]
 
     def picker_refs(
@@ -328,10 +330,10 @@ class ModelCatalog:
     ) -> list[str]:
         """The references a model picker offers: runnable models only.
 
-        The records of every provider with credentials except OpenRouter,
-        whose catalog runs to hundreds of models: an OpenRouter model (or any
-        other) is offered when it is ``referenced`` (by a role, the default
-        model or an agent) or has an entry in ``models`` (``entries``).
+        The records of every provider with credentials except one of kind
+        ``openrouter``, whose catalog runs to hundreds of models: its model
+        (or any other) is offered when it is ``referenced`` (by a role, the
+        default model or an agent) or has an entry in ``models`` (``entries``).
         Sorted by provider, then tier (fast, default, strong, none), then
         newest first.
         """

@@ -176,26 +176,28 @@ class TestUserPreferences:
     def test_a_hand_edited_key_is_refused_though_a_project_may_set_it(
         self, isolated_settings
     ):
-        """No save writes ``models``: an edit in the dialog would be gone at the
-        next start, and an assignment drops the app's shipped entries."""
-        app = _make_app(isolated_settings, ["ui_theme", "models"])
+        """No save writes ``models`` or ``model_providers``: an edit in the dialog
+        would be gone at the next start, and an assignment drops the app's
+        shipped entries."""
+        app = _make_app(isolated_settings, ["ui_theme", "models", "model_providers"])
 
         with structlog.testing.capture_logs() as logs:
             items = app._build_ui_items()
 
         assert _item_keys(items) == ["ui_theme"]
-        assert [e.get("key") for e in logs if e.get("event") == HAND_EDITED_EVENT] == ["models"]
+        hand_edited = [e.get("key") for e in logs if e.get("event") == HAND_EDITED_EVENT]
+        assert hand_edited == ["models", "model_providers"]
         assert not any(e.get("event") == EXCLUDED_EVENT for e in logs)
 
     def test_any_other_user_scoped_key_is_still_refused(self, isolated_settings):
-        app = _make_app(isolated_settings, ["ui_theme", "raw_llm_logging", "model_endpoints"])
+        app = _make_app(isolated_settings, ["ui_theme", "raw_llm_logging", "sandbox_image"])
 
         with structlog.testing.capture_logs() as logs:
             items = app._build_ui_items()
 
         assert _item_keys(items) == ["ui_theme"]
         excluded = {e.get("key") for e in logs if e.get("event") == EXCLUDED_EVENT}
-        assert excluded == {"raw_llm_logging", "model_endpoints"}
+        assert excluded == {"raw_llm_logging", "sandbox_image"}
 
 
 class TestSavingAPreference:

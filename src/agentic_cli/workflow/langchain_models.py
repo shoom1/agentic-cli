@@ -22,11 +22,12 @@ where its class reads it:
   reasoning model gets ``reasoning={"effort", "summary": "auto"}`` and its
   encrypted reasoning back (``include``), so the reasoning carries across
   tool calls without being stored.
-- OpenRouter: ``ChatOpenRouter`` on OpenRouter's URL, naming the app;
-  ``reasoning={"effort"}``. The class keeps OpenRouter's ``reasoning_details``
-  and sends them back with the next request.
-- The user's endpoints: ``OpenAICompatibleChat`` (Chat Completions) on their
-  base URL, with the endpoint's thinking parameter in ``extra_body``.
+- A provider of kind ``openrouter``: ``ChatOpenRouter`` on its base URL,
+  naming the app; ``reasoning={"effort"}``. The class keeps OpenRouter's
+  ``reasoning_details`` and sends them back with the next request.
+- An OpenAI-compatible provider: ``OpenAICompatibleChat`` (Chat Completions)
+  on its base URL, with the thinking parameter its model's ``models`` entry
+  declares in ``extra_body``.
 
 Every instance gets ``profile=`` from the model's record (``profile_for``), so
 whatever reads a model's profile (Deep Agents' summarization, for one) sees
@@ -106,7 +107,7 @@ def build_chat_model(
     elif kind is ProviderKind.OPENROUTER:
         cls, fields = _openrouter(resolved, settings, app_name)
     elif kind is ProviderKind.OPENAI_COMPATIBLE:
-        cls, fields = OpenAICompatibleChat, _endpoint(resolved, settings)
+        cls, fields = OpenAICompatibleChat, _compatible(resolved, settings)
     else:
         raise ValueError(f"No LangChain chat model for {resolved.ref} ({kind.value} models).")
     fields.update(_extra(resolved, cls))
@@ -235,7 +236,7 @@ def _openrouter(
     return ChatOpenRouter, fields
 
 
-def _endpoint(resolved: ResolvedModel, settings: "BaseSettings") -> dict[str, Any]:
+def _compatible(resolved: ResolvedModel, settings: "BaseSettings") -> dict[str, Any]:
     return {
         **_openai_fields(resolved, settings),
         "api_key": resolved.provider.api_key or PLACEHOLDER_KEY,
@@ -248,7 +249,7 @@ def _endpoint(resolved: ResolvedModel, settings: "BaseSettings") -> dict[str, An
 
 
 def _openai_fields(resolved: ResolvedModel, settings: "BaseSettings") -> dict[str, Any]:
-    """What ``ChatOpenAI`` takes for GPT and the user's endpoints alike."""
+    """What ``ChatOpenAI`` takes for GPT and the OpenAI-compatible providers alike."""
     _not_sent(resolved, "top_k")
     return {
         "model": resolved.record.model,
@@ -287,9 +288,9 @@ def _extra(resolved: ResolvedModel, cls: type) -> dict[str, Any]:
     return kept
 
 
-# --- the user's endpoints --------------------------------------------------------------
+# --- the OpenAI-compatible providers ---------------------------------------------------
 
-#: What an endpoint's messages are tagged with: no provider LangChain has a
+#: What such a provider's messages are tagged with: no provider LangChain has a
 #: translator for, so ``content_blocks`` reads their reasoning.
 _COMPATIBLE_PROVIDER = "openai_compatible"
 
@@ -364,7 +365,7 @@ def without_foreign_reasoning(
     providers, sends a model AI messages another provider wrote. Their
     reasoning belongs to that provider: Claude rejects a thinking block it did
     not sign, Gemini drops a foreign one with a warning on every call, and
-    OpenRouter would take an endpoint's reasoning as its own. Each such
+    OpenRouter would take a vLLM server's reasoning as its own. Each such
     message is copied without its reasoning blocks and fields; the answer,
     tool calls and the given messages themselves are left as they are, and a
     message of the model's own provider keeps its reasoning (Claude's signed

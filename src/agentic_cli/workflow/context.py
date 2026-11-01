@@ -12,10 +12,11 @@ resolved ``max_tokens``), with ``context_summarize_at`` f and
 - the trigger ``T = min(floor(f B), C)``, or ``floor(f B)`` when C is 0;
 - the tail kept word for word ``K = floor(0.12 T)``.
 
-A model whose window is unknown (an endpoint model whose ``models`` entry
-gives none, an OpenRouter id before a listing) counts as ``UNKNOWN_WINDOW``. A
-budget under ``MIN_BUDGET`` leaves no room to work in, so it fails where the
-agents are built, naming the model and its ``max_tokens``.
+A model whose window is unknown (an OpenAI-compatible provider's model whose
+``models`` entry gives none, an OpenRouter id before a listing) counts as
+``UNKNOWN_WINDOW``. A budget under ``MIN_BUDGET`` leaves no room to work in,
+so it fails where the agents are built, naming the model and its
+``max_tokens``.
 
 **Overflow errors.** Each provider says "too long" its own way:
 ``is_context_overflow`` reads the error's attributes (status, code, text) and

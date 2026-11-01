@@ -24,8 +24,9 @@ model (``minimal``, ``xhigh``, ``max``, …), checked against its ladder.
 - Effort (OpenAI and OpenRouter reasoning models, models entries declaring
   effort): ``none`` is the lowest effort on the ladder; low / medium / high
   are those efforts; ``budget`` is an error.
-- Chat template (endpoints): ``none`` is ``enable_thinking: false``,
-  low / medium / high ``enable_thinking: true``; ``budget`` is an error.
+- Chat template (a configured provider's model whose ``models`` entry says
+  so): ``none`` is ``enable_thinking: false``, low / medium / high
+  ``enable_thinking: true``; ``budget`` is an error.
 
 A model with no thinking knob ignores the setting (logged at debug).
 """
@@ -38,7 +39,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Protocol
 
-from agentic_cli.models.providers import PROVIDER_KEY_ENV, Provider, ProviderKind
+from agentic_cli.models.providers import Provider, ProviderKind, undefined_provider_message
 from agentic_cli.models.records import ModelRecord, ThinkingMechanism, ThinkingRule
 from agentic_cli.models.refs import ModelRef, ModelSpecError, RoleRef, parse_spec
 
@@ -180,11 +181,11 @@ def resolve_model(
             thinking of its own.
         roles: Maps a role to a reference.
         catalog: Gives the model's record.
-        providers: Every provider and endpoint, by name.
+        providers: Every provider, built in and configured, by name.
 
     Raises:
         ModelResolutionError: For a malformed spec, an unmapped role nothing
-            can fill, an undefined endpoint, a provider without a key, a model
+            can fill, an undefined provider, a provider without a key, a model
             an authoritative listing lacks, or a thinking mode the model does
             not have. The message names the agent (or the default model), the
             model and the allowed values.
@@ -202,17 +203,11 @@ def resolve_model(
 
     provider = providers.get(ref.provider)
     if provider is None:
-        defined = ", ".join(
-            sorted(n for n, p in providers.items() if p.kind is ProviderKind.OPENAI_COMPATIBLE)
-        )
-        raise ModelResolutionError(
-            f"{who}: model {str(ref)!r} names endpoint {ref.provider!r}, which is not defined in "
-            f"model_endpoints (user settings); defined endpoints: {defined or 'none'}."
-        )
+        raise ModelResolutionError(undefined_provider_message(who, ref, providers))
     if not provider.has_credentials:
-        variable = PROVIDER_KEY_ENV.get(ref.provider, "the provider's API key")
+        # Only a provider that names its key variable lacks credentials.
         raise ModelResolutionError(
-            f"{who}: model {str(ref)!r} needs the {ref.provider} API key; set {variable}."
+            f"{who}: model {str(ref)!r} needs the {ref.provider} API key; set {provider.key_env}."
         )
 
     try:

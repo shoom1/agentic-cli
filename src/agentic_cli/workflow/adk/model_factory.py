@@ -24,11 +24,12 @@ where its ADK class reads it:
 - OpenAI: ``OpenAIResponsesLlm`` (``store=False``) with an ``AsyncOpenAI``
   client; the effort in ``OpenAIGenerateContentConfig``, for which ADK
   requests a concise reasoning summary.
-- OpenRouter and the user's endpoints: ``OpenAICompatibleLlm`` (Chat
-  Completions) with an ``AsyncOpenAI`` client on their base URL (OpenRouter's
-  carries attribution headers naming the app). The reasoning parameter goes
-  in ``extra_body``: OpenRouter's ``reasoning.effort``, or what the endpoint
-  declares, ``chat_template_kwargs.enable_thinking`` or ``reasoning_effort``.
+- The configured providers (``model_providers``): ``OpenAICompatibleLlm``
+  (Chat Completions) with an ``AsyncOpenAI`` client on their base URL (one
+  of kind ``openrouter`` carries attribution headers naming the app). The
+  reasoning parameter goes in ``extra_body``: OpenRouter's
+  ``reasoning.effort``, or what the model's ``models`` entry declares,
+  ``chat_template_kwargs.enable_thinking`` or ``reasoning_effort``.
 
 The timeouts, the placeholder key, OpenRouter's headers and the reasoning
 parameter come from ``workflow/model_wire.py``, which the LangChain adapter

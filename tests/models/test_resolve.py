@@ -8,12 +8,12 @@ from typing import Any
 import pytest
 
 from agentic_cli.models import (
-    EndpointSpec,
     ModelRecord,
     ModelRef,
     ModelResolutionError,
     NativeThinking,
     ProviderKind,
+    ProviderSpec,
     ResolvedModel,
     RoleMap,
     ThinkingMechanism,
@@ -26,7 +26,7 @@ G, A, O = ProviderKind.GOOGLE, ProviderKind.ANTHROPIC, ProviderKind.OPENAI
 M = ThinkingMechanism
 
 ALL_KEYS = {"google": "k-g", "anthropic": "k-a", "openai": "k-o", "openrouter": "k-r"}
-LAB = EndpointSpec(base_url="http://gpu-box:8000/v1")
+LAB = ProviderSpec(base_url="http://gpu-box:8000/v1")
 
 OPENROUTER_REASONING = ModelRecord(
     provider="openrouter",
@@ -343,10 +343,10 @@ class TestSampling:
         assert dict(resolved.extra) == extra
 
 
-# --- the reference, the endpoint and the errors ------------------------------
+# --- the reference, the provider and the errors ------------------------------
 
 
-def test_the_resolved_model_carries_the_record_and_endpoint():
+def test_the_resolved_model_carries_the_record_and_provider():
     resolved = _resolve("anthropic:claude-sonnet-4-5")
 
     assert resolved.agent == "writer"
@@ -371,16 +371,34 @@ def test_a_role_spec_resolves_through_the_role_map():
     assert resolved.provider.kind is ProviderKind.OPENAI_COMPATIBLE
 
 
-def test_an_unknown_endpoint_is_an_error_naming_agent_and_endpoint():
-    with pytest.raises(ModelResolutionError, match=r"^Agent 'writer': .*'gpu'.*model_endpoints"):
+def test_an_unknown_provider_is_an_error_naming_agent_and_provider():
+    with pytest.raises(ModelResolutionError) as exc:
         _resolve("gpu:llama-3")
+
+    assert str(exc.value) == (
+        "Agent 'writer': model 'gpu:llama-3' names provider 'gpu', which is neither a built-in "
+        "provider (google, anthropic, openai) nor defined in model_providers (user settings); "
+        "defined: lab, openrouter."
+    )
 
 
 def test_a_provider_without_a_key_is_an_error_naming_the_variable():
-    with pytest.raises(ModelResolutionError, match="OPENAI_API_KEY") as exc:
+    with pytest.raises(ModelResolutionError) as exc:
         _resolve("gpt-5.5", keys={"google": "k"})
 
-    assert "Agent 'writer'" in str(exc.value)
+    assert str(exc.value) == (
+        "Agent 'writer': model 'openai:gpt-5.5' needs the openai API key; set OPENAI_API_KEY."
+    )
+
+
+def test_a_configured_provider_without_its_key_is_an_error_naming_its_variable():
+    with pytest.raises(ModelResolutionError) as exc:
+        _resolve("openrouter:qwen/qwen3-235b-a22b", keys={"google": "k", "openrouter": None})
+
+    assert str(exc.value) == (
+        "Agent 'writer': model 'openrouter:qwen/qwen3-235b-a22b' needs the openrouter API key; "
+        "set OPENROUTER_API_KEY."
+    )
 
 
 def test_an_unknown_id_on_an_authoritative_provider_is_an_error():

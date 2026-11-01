@@ -9,10 +9,10 @@ never a provider SDK (only the backend adapters touch those):
   thinking types and effort levels, and whether thinking can be turned off;
   dated ids become their alias;
 - ``openai``: ``GET /v1/models`` (bearer key), ids only;
-- ``openrouter``: the public ``GET /api/v1/models`` (the key is sent when
-  there is one), with tool and reasoning support;
-- ``openai_compatible``: ``GET {base_url}/models`` on a user endpoint, the
-  served names and ``max_model_len``.
+- ``openrouter``: OpenRouter's public ``GET {base_url}/models`` (the key
+  is sent when there is one), with tool and reasoning support;
+- ``openai_compatible``: ``GET {base_url}/models`` on a configured provider,
+  the served names and ``max_model_len``.
 
 ``list_models`` never raises for an HTTP or network failure: it returns a
 failed ``Listing`` whose ``error`` is a short reason that never contains the
@@ -68,7 +68,7 @@ class Listing:
     """The outcome of listing one provider's models.
 
     Attributes:
-        provider: The provider or endpoint name.
+        provider: The provider's name.
         ok: Whether the provider answered with a model list.
         models: The models listed (empty when ``ok`` is False).
         fetched_at: When the listing finished (``clock()`` seconds).
@@ -96,7 +96,7 @@ async def list_models(
     """List the models ``provider`` serves.
 
     Args:
-        provider: The provider or user endpoint to ask.
+        provider: The provider to ask, built in or configured.
         transport: The HTTP transport (a fake one in tests). The caller keeps
             ownership: it is not closed here, so one transport can serve
             several listings at once.

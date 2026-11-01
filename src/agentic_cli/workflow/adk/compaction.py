@@ -263,9 +263,10 @@ class AgentCliSummarizer(BaseEventsSummarizer):
                 settings=self._settings, app_name=self._app_name,
             )
         except Exception as error:
-            # Refused as too long: the window was assumed (an endpoint model
-            # declared without one counts as 128,000) or is wrong. Once more,
-            # sized to the limit the provider stated, else to half the window.
+            # Refused as too long: the window was assumed (a configured
+            # provider's model without one counts as 128,000) or is wrong.
+            # Once more, sized to the limit the provider stated, else to half
+            # the window.
             if not _is_overflow(error):
                 raise
             self._sized_to = _summary_window(str(error), self.budget.window)

@@ -51,11 +51,11 @@ from pydantic import PrivateAttr  # noqa: E402
 
 from agentic_cli.config import BaseSettings  # noqa: E402
 from agentic_cli.models import (  # noqa: E402
-    EndpointSpec,
     ModelCatalog,
     ModelEntry,
     ModelRef,
     ProviderKind,
+    ProviderSpec,
     RoleMap,
     resolve_model,
 )
@@ -157,7 +157,7 @@ def hermetic(tmp_path, monkeypatch):
 def resolved(spec: str, agent: str = "a", *, effort: str = "none"):
     """``spec`` resolved for ``agent`` as a manager would, without listings."""
     providers = fake_providers(
-        specs={"local": EndpointSpec(**SMALL["local"])},
+        specs={"local": ProviderSpec(**SMALL["local"])},
         anthropic="a-test-key", google="g-test-key", openai="o-test-key",
     )
     entries = {ModelRef("local", "small"): ModelEntry(context_window=20_000)}
@@ -568,7 +568,7 @@ class EndpointAPI:
 @pytest.fixture
 def small(hermetic, monkeypatch):
     """Settings on the small-window endpoint model."""
-    return _settings(model_endpoints=SMALL, models=SMALL_MODELS, default_model="local:small")
+    return _settings(model_providers=SMALL, models=SMALL_MODELS, default_model="local:small")
 
 
 class _Recorder:
@@ -681,7 +681,7 @@ class TestSummarizationInATurn:
         server = EndpointAPI()
         route(monkeypatch, openai, "AsyncOpenAI", server.api)
         manager = _manager(
-            _settings(model_endpoints=SMALL, models=tiny, default_model="local:small"),
+            _settings(model_providers=SMALL, models=tiny, default_model="local:small"),
             [_agent("solo", "Answer.")],
         )
         try:
@@ -700,7 +700,7 @@ class TestSummarizationInATurn:
         server = EndpointAPI(**{"Answer.": [_call("huge_report", {}, "c1")]})
         route(monkeypatch, openai, "AsyncOpenAI", server.api)
         uncut = _settings(
-            model_endpoints=SMALL, models=SMALL_MODELS, default_model="local:small",
+            model_providers=SMALL, models=SMALL_MODELS, default_model="local:small",
             tool_result_max_chars=1_000_000,
         )
         manager = _manager(uncut, [AgentConfig(name="solo", prompt="Answer.", tools=[huge_report])])
@@ -969,7 +969,7 @@ class TestSettingsChange:
 
         monkeypatch.setattr(agent_builder, "build_summarization", recorded)
         settings = _settings(
-            model_endpoints=SMALL, models=SMALL_MODELS, default_model="local:small",
+            model_providers=SMALL, models=SMALL_MODELS, default_model="local:small",
             orchestrator="deepagents",
         )
         manager = _manager(settings, [_agent("solo", "Answer.")])

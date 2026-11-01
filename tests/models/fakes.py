@@ -12,23 +12,45 @@ from typing import Any
 import httpx
 
 from agentic_cli.models import (
-    EndpointSpec,
     ModelRecord,
     ModelRef,
     ModelResolutionError,
     Provider,
     ProviderKind,
+    ProviderSpec,
     build_providers,
     load_table,
 )
 
+#: Where the OpenRouter provider the tests define (``openrouter_spec``) lives.
+OPENROUTER_URL = "https://openrouter.ai/api/v1"
+
+
+def openrouter_spec(api_key_env: str = "OPENROUTER_API_KEY") -> ProviderSpec:
+    """OpenRouter as an app or a user defines it in ``model_providers``."""
+    return ProviderSpec(kind="openrouter", base_url=OPENROUTER_URL, api_key_env=api_key_env)
+
 
 def providers(
-    *, specs: Mapping[str, EndpointSpec] | None = None, env: Mapping[str, str] | None = None, **keys: str
+    *,
+    specs: Mapping[str, ProviderSpec] | None = None,
+    env: Mapping[str, str] | None = None,
+    **keys: str | None,
 ) -> dict[str, Provider]:
-    """The built-in providers with the given keys (``google="k"``), plus ``specs``."""
-    all_keys = {"google": None, "anthropic": None, "openai": None, "openrouter": None, **keys}
-    return build_providers(keys=all_keys, specs=specs or {}, env=env or {})
+    """The built-in providers with the given keys (``google="k"``), plus ``specs``.
+
+    ``openrouter="k"`` defines the OpenRouter provider (``openrouter_spec()``,
+    before ``specs``) with ``k`` in its key variable; ``openrouter=None``
+    defines it without a key.
+    """
+    specs, env = dict(specs or {}), dict(env or {})
+    if "openrouter" in keys:
+        key = keys.pop("openrouter")
+        specs = {"openrouter": openrouter_spec(), **specs}
+        if key:
+            env["OPENROUTER_API_KEY"] = key
+    all_keys = {"google": None, "anthropic": None, "openai": None, **keys}
+    return build_providers(keys=all_keys, specs=specs, env=env)
 
 
 def table_records(kind: ProviderKind, *models: str, provider: str | None = None) -> list[ModelRecord]:

@@ -44,6 +44,7 @@ from tests.workflow.adk.fakes import FakeAPI, anthropic_message  # noqa: E402
 from tests.workflow.test_manager_models import (  # noqa: E402
     KEYS,
     LOCAL,
+    OPENROUTER,
     adk,
     keys,
     route,
@@ -105,7 +106,10 @@ async def test_the_app_caches_when_a_model_does(
     monkeypatch, providers, default_model, writer_model, caches
 ):
     keys(monkeypatch, *providers)
-    manager = adk(team(writer_model), settings(default_model=default_model, model_endpoints=LOCAL))
+    manager = adk(
+        team(writer_model),
+        settings(default_model=default_model, model_providers={**LOCAL, **OPENROUTER}),
+    )
 
     await manager.initialize_services()
     try:

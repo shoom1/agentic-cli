@@ -44,6 +44,7 @@ from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager  # noqa: E
 from agentic_cli.workflow.config import AgentConfig  # noqa: E402
 from agentic_cli.workflow.events import EventType  # noqa: E402
 from tests.integration.conftest import collect_events  # noqa: E402
+from tests.models.fakes import openrouter_spec  # noqa: E402
 from tests.integration.helpers import (  # noqa: E402
     assert_no_errors,
     find_events,
@@ -126,11 +127,13 @@ def listed(monkeypatch):
     monkeypatch.setattr(model_services, "build_catalog", build_catalog)
 
 
-def _endpoints(model: str) -> dict:
-    """The live vLLM server, when the case runs on it."""
-    if not model.startswith(f"{VLLM_ENDPOINT}:"):
-        return {}
-    return {VLLM_ENDPOINT: {"base_url": os.environ["LIVE_VLLM_BASE_URL"]}}
+def _providers(model: str) -> dict:
+    """OpenRouter (its key in OPENROUTER_API_KEY), and the live vLLM server
+    when the case runs on it."""
+    providers = {"openrouter": openrouter_spec()}
+    if model.startswith(f"{VLLM_ENDPOINT}:"):
+        providers[VLLM_ENDPOINT] = {"base_url": os.environ["LIVE_VLLM_BASE_URL"]}
+    return providers
 
 
 def _entries(model: str) -> dict:
@@ -146,7 +149,7 @@ async def test_a_tool_call_with_thinking(model, shows_thinking, listed, tmp_path
         workspace_dir=tmp_path,
         session_store="memory",
         thinking_effort="low",
-        model_endpoints=_endpoints(model),
+        model_providers=_providers(model),
         models=_entries(model),
     )
     manager = GoogleADKWorkflowManager(

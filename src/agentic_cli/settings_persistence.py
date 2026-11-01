@@ -35,7 +35,6 @@ SECRET_FIELDS = frozenset({
     "google_api_key",
     "anthropic_api_key",
     "openai_api_key",
-    "openrouter_api_key",
     "tavily_api_key",
     "brave_api_key",
     "postgres_uri",  # connection string embeds user:password@host
@@ -55,8 +54,8 @@ SECRET_FIELDS = frozenset({
 # (config._AllowlistFilterSource) and the save-side split
 # (SettingsPersistence.save), so writer and reader cannot drift apart.
 PROJECT_SETTABLE_KEYS = frozenset({
-    # model / behavior. model_roles and models choose among the providers and
-    # endpoints the user defined (an entry's numbers are hints); model_endpoints
+    # model / behavior. model_roles and models choose among the providers the
+    # app and the user defined (an entry's numbers are hints); model_providers
     # (base URLs a key is sent to) is deliberately absent.
     "default_model", "model_roles", "models", "thinking_effort", "orchestrator",
     # when a conversation is summarized (workflow/context.py)
@@ -94,8 +93,9 @@ PROJECT_PRESERVED_KEYS = frozenset({"permissions"})
 # never by save(): their live value merges the app's entries with every
 # file's, so a save would copy the app's shipped entries (and the other
 # file's) into the file it writes. Every save leaves each file's own section
-# as it is, and a dump (path=) leaves them out.
-HAND_EDITED_KEYS = frozenset({"models"})
+# as it is (a project file's only where the loader reads it: models), and a
+# dump (path=) leaves them out.
+HAND_EDITED_KEYS = frozenset({"models", "model_providers"})
 
 # Identity fields set by the application, not the user
 IDENTITY_FIELDS = frozenset({
@@ -228,8 +228,9 @@ class SettingsPersistence:
           defaults. The file is fully rewritten, which also heals stale
           pre-P0-1 files holding keys the loader now ignores; its
           ``PROJECT_PRESERVED_KEYS`` sections (the project's deny rules) and
-          its own ``HAND_EDITED_KEYS`` sections are kept as they are, so a
-          malformed project file raises rather than being clobbered.
+          its own project-settable ``HAND_EDITED_KEYS`` sections (``models``)
+          are kept as they are, so a malformed project file raises rather
+          than being clobbered.
         - User config (~/.{app_name}/settings.json) receives the remaining
           user-scoped fields, but only those differing from the settings
           class default (so code-default changes keep applying for untouched
@@ -239,8 +240,8 @@ class SettingsPersistence:
           verbatim; a malformed user file raises rather than being clobbered.
 
         Secrets and identity fields are never written anywhere: see
-        ``is_secret_field``. Nor are ``HAND_EDITED_KEYS`` (``models``): each
-        file keeps its own section of them as it is.
+        ``is_secret_field``. Nor are ``HAND_EDITED_KEYS`` (``models``,
+        ``model_providers``): each file keeps its own section of them as it is.
         With an explicit ``path=``, the legacy behavior is kept: one full
         dump (minus secrets/identity and ``HAND_EDITED_KEYS``) to that file,
         no split.
@@ -282,11 +283,10 @@ class SettingsPersistence:
 
         project_path = self.project_config_path
         existing = self._read_object(project_path)
-        project_data.update({
-            k: existing[k]
-            for k in sorted(PROJECT_PRESERVED_KEYS | HAND_EDITED_KEYS)
-            if k in existing
-        })
+        # The file's own sections something reads: its deny rules and models
+        # (a stray model_providers is healed away, as a keyed save does).
+        kept = PROJECT_PRESERVED_KEYS | (HAND_EDITED_KEYS & PROJECT_SETTABLE_KEYS)
+        project_data.update({k: existing[k] for k in sorted(kept) if k in existing})
         project_path.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_text(
             project_path, json.dumps(project_data, indent=2, default=str)

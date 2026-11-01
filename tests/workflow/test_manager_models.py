@@ -40,7 +40,7 @@ from agentic_cli.workflow.adk.openai_compatible import OpenAICompatibleLlm  # no
 from agentic_cli.workflow.config import AgentConfig  # noqa: E402
 from agentic_cli.workflow.events import EventType  # noqa: E402
 from agentic_cli.workflow.model_settings import ModelSettings, ThinkingSettings  # noqa: E402
-from tests.models.fakes import ProviderAPI, hang, recorded, refuse  # noqa: E402
+from tests.models.fakes import ProviderAPI, hang, openrouter_spec, recorded, refuse  # noqa: E402
 from tests.workflow.adk.fakes import (  # noqa: E402
     FakeAPI,
     anthropic_message,
@@ -116,6 +116,8 @@ def refreshing() -> list[asyncio.Task]:
 #: user says about one of its models.
 LOCAL = {"local": {"base_url": "http://localhost:8000/v1"}}
 LOCAL_MODELS = {"local:Qwen/Qwen3-32B": {"thinking": "chat_template"}}
+#: OpenRouter, as an app or a user configures it; its key in OPENROUTER_API_KEY.
+OPENROUTER = {"openrouter": openrouter_spec()}
 
 
 def route(monkeypatch, sdk, client_class: str, api: FakeAPI) -> None:
@@ -383,7 +385,7 @@ class TestAdkModels:
             AgentConfig(name="researcher", prompt="Research.", model="gemini-3-flash-preview"),
             AgentConfig(name="drafter", prompt="Draft.", model="local:Qwen/Qwen3-32B"),
         ]
-        manager = adk(configs, settings(model_endpoints=LOCAL, models=LOCAL_MODELS,
+        manager = adk(configs, settings(model_providers=LOCAL, models=LOCAL_MODELS,
                                          thinking_effort="high", default_model="gemini-2.5-flash"))
 
         await manager.initialize_services()
@@ -465,7 +467,7 @@ class TestGenerateSimple:
         api = FakeAPI(chat_completion("A summary."))
         route(monkeypatch, openai, "AsyncOpenAI", api)
         manager = adk(team(), settings(
-            model_endpoints=LOCAL, models=LOCAL_MODELS, default_model="local:Qwen/Qwen3-32B",
+            model_providers=LOCAL, models=LOCAL_MODELS, default_model="local:Qwen/Qwen3-32B",
             thinking_effort="high",
         ))
         try:
@@ -554,7 +556,7 @@ class TestBackendGates:
         keys(monkeypatch, "openrouter")
         manager = adk(
             [AgentConfig(name="solo", prompt="p", model="openrouter:qwen/qwen3-235b-a22b")],
-            settings(default_model="openrouter:qwen/qwen3-235b-a22b"),
+            settings(model_providers=OPENROUTER, default_model="openrouter:qwen/qwen3-235b-a22b"),
         )
 
         await manager.initialize_services()
@@ -582,7 +584,9 @@ class TestBackendGates:
 
     async def test_langgraph_builds_every_provider(self, providers, monkeypatch):
         keys(monkeypatch, "google", "openrouter")
-        manager = _langgraph(team("openrouter:qwen/qwen3-235b-a22b"), settings())
+        manager = _langgraph(
+            team("openrouter:qwen/qwen3-235b-a22b"), settings(model_providers=OPENROUTER)
+        )
 
         await manager.initialize_services()
         try:
@@ -602,7 +606,7 @@ class TestBackendGates:
         keys(monkeypatch, "openrouter")
         manager = _langgraph(
             [AgentConfig(name="solo", prompt="p")],
-            settings(default_model="openrouter:qwen/qwen3-235b-a22b"),
+            settings(model_providers=OPENROUTER, default_model="openrouter:qwen/qwen3-235b-a22b"),
         )
 
         await manager.initialize_services()
@@ -677,7 +681,7 @@ class TestLangGraphModels:
             AgentConfig(name="researcher", prompt="Research.", model="gemini-3-flash-preview"),
             AgentConfig(name="drafter", prompt="Draft.", model="local:Qwen/Qwen3-32B"),
         ]
-        manager = _langgraph(configs, settings(model_endpoints=LOCAL, models=LOCAL_MODELS,
+        manager = _langgraph(configs, settings(model_providers=LOCAL, models=LOCAL_MODELS,
                                                thinking_effort="high",
                                                default_model="gemini-2.5-flash"))
 
@@ -816,7 +820,7 @@ class TestLangGraphModels:
         lc.route(monkeypatch, openai, "AsyncOpenAI", FakeAPI(server._handle))
         manager = _langgraph(
             [AgentConfig(name="solo", prompt="Answer.")],
-            settings(model_endpoints=LOCAL, models=LOCAL_MODELS,
+            settings(model_providers=LOCAL, models=LOCAL_MODELS,
                      default_model="local:Qwen/Qwen3-32B", thinking_effort="high"),
         )
         try:
@@ -891,7 +895,7 @@ class TestLangGraphGenerateSimple:
         api = FakeAPI(chat_completion("A summary."))
         lc.route(monkeypatch, openai, "AsyncOpenAI", api)
         manager = _langgraph(team(), settings(
-            model_endpoints=LOCAL, models=LOCAL_MODELS, default_model="local:Qwen/Qwen3-32B",
+            model_providers=LOCAL, models=LOCAL_MODELS, default_model="local:Qwen/Qwen3-32B",
             thinking_effort="high",
         ))
         try:

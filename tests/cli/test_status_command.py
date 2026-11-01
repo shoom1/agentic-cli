@@ -100,7 +100,7 @@ async def test_the_main_agents_context_on_a_known_window():
 async def test_an_unknown_window_says_the_floor_is_in_use():
     manager = GoogleADKWorkflowManager(
         agent_configs=team(),
-        settings=BaseSettings(session_store="memory", model_endpoints=ENDPOINTS,
+        settings=BaseSettings(session_store="memory", model_providers=ENDPOINTS,
                               default_model="local:unknown"),
     )
     await manager.initialize_services()

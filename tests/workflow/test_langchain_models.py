@@ -11,6 +11,7 @@ timeout and retries the adapter gave it. Nothing reaches the network.
 
 from __future__ import annotations
 
+import dataclasses
 from typing import Any
 
 import httpx
@@ -30,13 +31,12 @@ from langchain_openai import ChatOpenAI  # noqa: E402
 from langchain_openrouter import ChatOpenRouter  # noqa: E402
 
 from agentic_cli.models import (  # noqa: E402
-    OPENROUTER_BASE_URL,
-    EndpointSpec,
     ModelCatalog,
     ModelEntry,
     ModelRecord,
     ModelRef,
     ProviderKind,
+    ProviderSpec,
     ResolvedModel,
     RoleMap,
     ThinkingMechanism,
@@ -50,7 +50,7 @@ from agentic_cli.workflow.langchain_models import (  # noqa: E402
     profile_for,
 )
 from agentic_cli.workflow.model_settings import ModelSettings, ThinkingSettings  # noqa: E402
-from tests.models.fakes import FakeCatalog, providers  # noqa: E402
+from tests.models.fakes import OPENROUTER_URL, FakeCatalog, providers  # noqa: E402
 from tests.workflow.adk.fakes import (  # noqa: E402
     FakeAPI,
     anthropic_message,
@@ -101,10 +101,14 @@ OPENROUTER_REASONER = ModelRecord(
 OPENROUTER_PLAIN = ModelRecord(
     provider="openrouter", kind=ProviderKind.OPENROUTER, model="meta-llama/llama-3.3-70b"
 )
+#: Another provider of kind openrouter, under another name and address.
+GATEWAY_URL = "https://or-gateway.example/api/v1"
+GATEWAY_REASONER = dataclasses.replace(OPENROUTER_REASONER, provider="or")
 #: A user's vLLM server, its key in LOCAL_KEY, and a server that needs none.
 LOCAL = {
-    "local": EndpointSpec(base_url="http://localhost:8000/v1", api_key_env="LOCAL_KEY"),
-    "keyless": EndpointSpec(base_url="http://localhost:9000/v1"),
+    "local": ProviderSpec(base_url="http://localhost:8000/v1", api_key_env="LOCAL_KEY"),
+    "keyless": ProviderSpec(base_url="http://localhost:9000/v1"),
+    "or": ProviderSpec(kind="openrouter", base_url=GATEWAY_URL, api_key_env="OR_KEY"),
 }
 #: What the user says about their models (``models`` entries).
 LOCAL_ENTRIES = {
@@ -136,12 +140,13 @@ def resolved(
     """
     if thinking is not None:
         generation["thinking"] = ThinkingSettings(mode=thinking, budget_tokens=budget)
-    every = providers(**KEYS, specs=LOCAL, env={"LOCAL_KEY": "l-test-key"})
+    every = providers(**KEYS, specs=LOCAL, env={"LOCAL_KEY": "l-test-key", "OR_KEY": "or-test-key"})
     # Never loaded: the entries and the table.
     configured = ModelCatalog(providers=every, entries=LOCAL_ENTRIES)
     catalog = FakeCatalog([
         OPENROUTER_REASONER,
         OPENROUTER_PLAIN,
+        GATEWAY_REASONER,
         *map(configured.record, LOCAL_ENTRIES),
     ])
     return resolve_model(
@@ -483,7 +488,7 @@ class TestOpenRouter:
 
         assert chat.model_name == "qwen/qwen3-235b-a22b"
         assert chat.openrouter_api_key.get_secret_value() == KEYS["openrouter"]
-        assert chat.openrouter_api_base == OPENROUTER_BASE_URL
+        assert chat.openrouter_api_base == OPENROUTER_URL
         assert (chat.app_url, chat.app_title) == (APP, APP)
         assert chat.request_timeout == 600_000  # milliseconds
         assert chat.max_retries == 4
@@ -507,7 +512,7 @@ class TestOpenRouter:
 
         chat = build("openrouter:qwen/qwen3-235b-a22b", settings)
 
-        assert chat.openrouter_api_base == OPENROUTER_BASE_URL
+        assert chat.openrouter_api_base == OPENROUTER_URL
         assert chat.app_title == APP
 
     async def test_the_request_names_the_app_and_carries_the_effort(self, settings, monkeypatch):
@@ -518,7 +523,7 @@ class TestOpenRouter:
         await chat.ainvoke([HumanMessage("Hello")])
 
         (request,) = api.requests
-        assert request.url == f"{OPENROUTER_BASE_URL}/chat/completions"
+        assert request.url == f"{OPENROUTER_URL}/chat/completions"
         assert request.headers["authorization"] == f"Bearer {KEYS['openrouter']}"
         assert (request.headers["http-referer"], request.headers["x-title"]) == (APP, APP)
         assert api.bodies[0]["reasoning"] == {"effort": "high"}
@@ -557,6 +562,18 @@ class TestOpenRouter:
         assert replayed["role"] == "assistant"
         assert replayed["reasoning_details"] == details
         assert replayed["tool_calls"][0]["id"] == "call_1"
+
+    @pytest.mark.parametrize("effort", ["none", "high"])
+    def test_a_provider_of_kind_openrouter_under_any_name(self, settings, effort):
+        """The kind, not the name, makes a provider OpenRouter: its class, its
+        attribution headers and its reasoning parameter, at its own address."""
+        chat = build("or:qwen/qwen3-235b-a22b", settings, effort=effort)
+
+        assert type(chat) is ChatOpenRouter
+        assert chat.openrouter_api_key.get_secret_value() == "or-test-key"
+        assert chat.openrouter_api_base == GATEWAY_URL
+        assert (chat.app_url, chat.app_title) == (APP, APP)
+        assert chat.reasoning == {"effort": effort}
 
 
 # --- the user's endpoints --------------------------------------------------------------
@@ -708,3 +725,16 @@ class TestOneWireForBothBackends:
         headers = adk.client.default_headers
         assert (chat.app_url, chat.app_title) == (headers["HTTP-Referer"], headers["X-Title"])
         assert chat.request_timeout == adk.client.timeout.read * 1000
+
+    def test_a_provider_of_kind_openrouter_under_any_name(self, settings):
+        pytest.importorskip("google.adk")
+        from agentic_cli.workflow.adk.model_factory import build_adk_model
+
+        model = resolved("or:qwen/qwen3-235b-a22b", effort="high")
+        adk = build_adk_model(model, settings=settings, app_name=APP).model
+        chat = build_chat_model(model, settings=settings, app_name=APP)
+
+        assert chat.reasoning == adk.extra_body["reasoning"] == {"effort": "high"}
+        headers = adk.client.default_headers
+        assert (chat.app_url, chat.app_title) == (headers["HTTP-Referer"], headers["X-Title"])
+        assert chat.openrouter_api_base == str(adk.client.base_url).rstrip("/") == GATEWAY_URL

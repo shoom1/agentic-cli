@@ -71,7 +71,7 @@ async def test_after_a_switch_to_a_small_undeclared_window_the_conversation_goes
         agent_configs=[AgentConfig(name="solo", prompt="You help.", include_state_tools=False)],
         settings=BaseSettings(
             session_store="memory", default_model="local:big",
-            model_endpoints={"local": {"base_url": "http://localhost:8000/v1"}},
+            model_providers={"local": {"base_url": "http://localhost:8000/v1"}},
             models={"local:big": {"context_window": 1_000_000}, "local:small": {}},
         ),
     )

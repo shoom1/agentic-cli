@@ -738,7 +738,7 @@ async def _refresh_models(app: Any, catalog: "ModelCatalog", providers: Any) -> 
 
 
 def _status_table(statuses: "list[ProviderStatus]", providers: Any) -> Table:
-    """One row per provider and endpoint. Never a key: only whether there is one."""
+    """One row per provider. Never a key: only whether there is one, or none is needed."""
     now = time.time()
     table = Table(title="Providers", show_lines=False, padding=(0, 1))
     table.add_column("Provider", style="bold cyan", no_wrap=True)
@@ -749,8 +749,8 @@ def _status_table(statuses: "list[ProviderStatus]", providers: Any) -> Table:
     table.add_column("Error", style="red")
     for status in statuses:
         provider = providers.get(status.provider)
-        if provider is not None and provider.kind.value == "openai_compatible":
-            credentials = "endpoint"
+        if provider is not None and not provider.builtin and provider.key_env is None:
+            credentials = "none needed"
         else:
             credentials = "key" if status.has_credentials else "no key"
         fetched = "—" if status.fetched_at is None else _ago(now - status.fetched_at)

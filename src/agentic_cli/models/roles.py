@@ -7,9 +7,10 @@ mapping by overriding the ``model_roles`` default in its settings class.
 
 A built-in role nobody mapped takes the newest model of its tier from the
 first provider with a key, in the order Google, Anthropic, OpenAI: Flash-Lite /
-Flash / Pro, Haiku / Sonnet / Opus, mini / standard / pro. OpenRouter and the
-user's endpoints never fill a role on their own; the user maps them. An app
-role nobody mapped falls back to ``default``, with a warning once per process.
+Flash / Pro, Haiku / Sonnet / Opus, mini / standard / pro. A configured
+provider's models (``model_providers``) never fill a role on their own; the
+user maps them. An app role nobody mapped falls back to ``default``, with a
+warning once per process.
 
 A role's value is always a model, never another role.
 """
