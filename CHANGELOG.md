@@ -717,8 +717,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and Kimi K3. The pickers offer those whose provider has a key (and each
   role's model): put the keys in `~/.research_demo/.env`. An OpenRouter
   model has no tier, so with an OpenRouter key alone also choose the
-  default model: `RESEARCH_DEMO_DEFAULT_MODEL=openrouter:qwen/qwen3.7-plus`,
-  or pick one in `/settings`, which works while the workflow is down.
+  default model: pick one in `/settings`, which works while the workflow is
+  down, or put `"default_model": "openrouter:qwen/qwen3.7-plus"` in
+  `~/.research_demo/settings.json`.
 - **A context overflow on ADK is recovered once, or ends in one clear
   error.** A model call the provider refused as too long raised its raw
   error ("Workflow error: prompt is too long: …"), and the next turn failed

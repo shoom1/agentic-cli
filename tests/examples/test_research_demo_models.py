@@ -11,6 +11,8 @@ no catalog is loaded, so nothing reaches a provider.
 
 from __future__ import annotations
 
+import json
+import os
 import runpy
 import warnings
 from pathlib import Path
@@ -56,8 +58,9 @@ KEY_VARIABLES = {
 
 @pytest.fixture
 def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """A temp HOME and cwd, and no provider key in the environment, whatever
-    keys the process holds (the live-test conftest may have exported some)."""
+    """A temp HOME and cwd, and no provider key or demo setting in the
+    environment, whatever the process holds (the live-test conftest exports
+    every line of ~/.research_demo/.env, such as RESEARCH_DEMO_DEFAULT_MODEL)."""
     home, project = tmp_path / "home", tmp_path / "project"
     for folder in (home, project):
         folder.mkdir()
@@ -65,6 +68,8 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.chdir(project)
     for variable in ("OPENAI_API_KEY", *KEY_VARIABLES.values()):
         monkeypatch.delenv(variable, raising=False)
+    for variable in [name for name in os.environ if name.startswith("RESEARCH_DEMO_")]:
+        monkeypatch.delenv(variable)
     return home
 
 
@@ -213,5 +218,7 @@ def test_with_an_openrouter_key_alone_the_default_model_is_chosen(home, monkeypa
     with pytest.raises(SettingsValidationError, match="No model for role 'default'"):
         validate_settings(_settings(home), AGENT_CONFIGS)
 
-    monkeypatch.setenv("RESEARCH_DEMO_DEFAULT_MODEL", "openrouter:qwen/qwen3.7-plus")
+    user_file = home / ".research_demo" / "settings.json"
+    user_file.parent.mkdir(parents=True, exist_ok=True)
+    user_file.write_text(json.dumps({"default_model": "openrouter:qwen/qwen3.7-plus"}))
     validate_settings(_settings(home), AGENT_CONFIGS)

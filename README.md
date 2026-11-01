@@ -1873,7 +1873,7 @@ See the `examples/` directory for complete working examples:
 - `websearch_demo.py` — Web search with multiple backends
 
 **Full Applications**
-- `research_demo/` — Full-featured research assistant with KB ingest + concept pages, semantic memory, sandbox execution, and durable sessions. Installed as the `research-demo` console script. It ships a model list of Gemini, Claude and OpenRouter models, and the `openrouter` provider: put the keys you have (`GOOGLE_API_KEY`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`) in `~/.research_demo/.env`. An OpenRouter model has no tier, so with an OpenRouter key alone also choose the default model: `RESEARCH_DEMO_DEFAULT_MODEL=openrouter:qwen/qwen3.7-plus`, or pick one in `/settings`, which works while the workflow is down.
+- `research_demo/` — Full-featured research assistant with KB ingest + concept pages, semantic memory, sandbox execution, and durable sessions. Installed as the `research-demo` console script. It ships a model list of Gemini, Claude and OpenRouter models, and the `openrouter` provider: put the keys you have (`GOOGLE_API_KEY`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`) in `~/.research_demo/.env`. An OpenRouter model has no tier, so with an OpenRouter key alone also choose the default model: pick one in `/settings`, which works while the workflow is down, or put `"default_model": "openrouter:qwen/qwen3.7-plus"` in `~/.research_demo/settings.json`.
 
 Run examples:
 

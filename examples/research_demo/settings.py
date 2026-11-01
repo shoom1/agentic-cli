@@ -32,10 +32,9 @@ offered; ``/models <text>`` searches every provider's full listing, such as
 Without a ``default_model``, the demo runs on the list's default-tier model:
 Gemini 3.8 Flash with a Google key, else Claude Sonnet 5.5. An OpenRouter
 model has no tier, so with an OpenRouter key alone, choose the default model
-too: ``RESEARCH_DEMO_DEFAULT_MODEL=openrouter:qwen/qwen3.7-plus`` (in the
-environment or ``~/.research_demo/.env``), ``"default_model":
-"openrouter:qwen/qwen3.7-plus"`` in ``~/.research_demo/settings.json``, or a
-pick in ``/settings``, which works while the workflow is down.
+too: pick one in ``/settings``, which works while the workflow is down, or put
+``"default_model": "openrouter:qwen/qwen3.7-plus"`` in
+``~/.research_demo/settings.json``.
 """
 
 from pathlib import Path
