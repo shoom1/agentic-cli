@@ -13,11 +13,13 @@ it wait too.
 
 import asyncio
 import email.utils
+import io
 import math
 import re
 import time
 import weakref
 from dataclasses import dataclass
+from datetime import timezone
 from typing import Any
 from urllib.parse import quote, urlsplit
 
@@ -60,8 +62,17 @@ _RETRY_DELAYS = (3.0, 6.0, 12.0)
 _MAX_RETRY_AFTER = 60.0
 #: How long, after a call's retries ran out, a call fails without a request.
 _REFUSED_FOR = 60.0
-#: An API request's timeout, in seconds.
+#: How long, after arXiv did not answer (or could not be reached), a call
+#: fails without a request, so the calls queued behind do not each wait out
+#: the timeout.
+_UNANSWERED_FOR = 30.0
+#: The longest a call is refused for, whatever ``Retry-After`` asks.
+_MAX_REFUSAL = 3600.0
+#: An API request's timeout, in seconds (httpx's: each of connecting, sending
+#: and every read).
 _TIMEOUT = 30.0
+#: How the requests name their client, as arXiv asks an API client to.
+_USER_AGENT = "agentic-cli (arXiv tools; +https://github.com/shoom1/agentic-cli)"
 
 
 class ArxivRequestError(RuntimeError):
@@ -70,19 +81,22 @@ class ArxivRequestError(RuntimeError):
 
 def _retry_after(response: httpx.Response) -> float | None:
     """The wait a ``Retry-After`` header asks for, in seconds (it gives a
-    number of seconds or an HTTP date), or None without a readable one."""
+    number of seconds or an HTTP date, ``-0000`` read as UTC), or None
+    without a readable, finite one."""
     value = response.headers.get("Retry-After")
     if value is None:
         return None
     try:
-        return max(0.0, float(value))
+        seconds = float(value)
     except ValueError:
-        pass
-    try:
-        when = email.utils.parsedate_to_datetime(value)
-    except (TypeError, ValueError):
-        return None
-    return max(0.0, when.timestamp() - time.time())
+        try:
+            when = email.utils.parsedate_to_datetime(value)
+        except (TypeError, ValueError):
+            return None
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        seconds = when.timestamp() - time.time()
+    return max(0.0, seconds) if math.isfinite(seconds) else None
 
 _VERSION_SUFFIX_RE = re.compile(r"v\d+$")
 _NEW_FORMAT_ID_RE = re.compile(r"(\d{4}\.\d{4,5})")
@@ -148,7 +162,13 @@ class CachedEntry:
 
 
 class ArxivSearchSource(SearchSource):
-    """ArXiv paper search source with rate limiting and caching."""
+    """ArXiv paper search source with rate limiting and caching.
+
+    Its requests are paced together within one event loop: a manager has one
+    source, and its tools run on one loop. Two sources, or a synchronous
+    ``search()`` in another thread while a loop runs ``asearch``, pace
+    their requests apart.
+    """
 
     def __init__(
         self,
@@ -181,9 +201,11 @@ class ArxivSearchSource(SearchSource):
             weakref.WeakKeyDictionary()
         )
         # When the next request may start (time.monotonic()), and until when
-        # a call fails without one, its retries spent.
+        # a call fails without one (arXiv's refusals ran out a call's retries,
+        # or it did not answer), and why.
         self._next_start = 0.0
         self._refused_until = 0.0
+        self._refused_why = ""
 
     @property
     def last_error(self) -> str | None:
@@ -273,19 +295,23 @@ class ArxivSearchSource(SearchSource):
         Called holding the gate, so requests go one at a time."""
         remaining = self._refused_until - time.monotonic()
         if remaining > 0:
-            raise ArxivRequestError(
-                f"ArXiv is rate limiting requests; try again in {math.ceil(remaining)} s"
-            )
+            raise ArxivRequestError(f"{self._refused_why}; try again in {math.ceil(remaining)} s")
         wait = self._next_start - time.monotonic()
         if wait > 0:
             await asyncio.sleep(wait)
         self._next_start = time.monotonic() + self.rate_limit
 
-    async def _get(self, url: str) -> bytes:
+    def _refuse(self, seconds: float, why: str) -> None:
+        """Fail every call for ``seconds`` (an hour at most), saying ``why``."""
+        self._refused_until = time.monotonic() + min(seconds, _MAX_REFUSAL)
+        self._refused_why = why
+
+    async def _get(self, url: str) -> httpx.Response:
         """GET ``url`` from arXiv's API, in turn: a request refused for the
         rate (HTTP 429 or 503) is retried after the wait arXiv asks for
         (``Retry-After``), else after 3, 6 and 12 s, all while holding the
-        turn, so the calls queued behind it wait too.
+        turn, so the calls queued behind it wait too. Once the retries run
+        out, or arXiv did not answer, the calls queued behind fail at once.
 
         Raises:
             ArxivRequestError: arXiv refused the request (its retries spent,
@@ -293,15 +319,20 @@ class ArxivSearchSource(SearchSource):
                 another error, failed or did not answer within 30 s.
         """
         async with self._gate():
-            async with httpx.AsyncClient(transport=self._transport, timeout=_TIMEOUT) as client:
+            async with httpx.AsyncClient(
+                transport=self._transport, timeout=_TIMEOUT, headers={"User-Agent": _USER_AGENT}
+            ) as client:
                 for delay in (*_RETRY_DELAYS, None):
                     await self._take_turn()
                     try:
                         response = await client.get(url)
                     except httpx.TimeoutException:
-                        raise ArxivRequestError(
-                            f"ArXiv did not answer within {_TIMEOUT:g} s"
-                        ) from None
+                        why = f"ArXiv did not answer within {_TIMEOUT:g} s"
+                        self._refuse(_UNANSWERED_FOR, why)
+                        raise ArxivRequestError(why) from None
+                    except httpx.TransportError as exc:
+                        self._refuse(_UNANSWERED_FOR, "ArXiv could not be reached")
+                        raise ArxivRequestError(f"ArXiv request failed: {exc}") from None
                     except httpx.HTTPError as exc:
                         raise ArxivRequestError(f"ArXiv request failed: {exc}") from None
                     status = response.status_code
@@ -309,12 +340,12 @@ class ArxivSearchSource(SearchSource):
                         break
                     asked = _retry_after(response)
                     if asked is not None and asked > _MAX_RETRY_AFTER:
-                        self._refused_until = time.monotonic() + asked
+                        self._refuse(asked, "ArXiv is rate limiting requests")
                         raise ArxivRequestError(
                             f"ArXiv rate limited (HTTP {status}); it asks to wait {asked:.0f} s"
                         )
                     if delay is None:
-                        self._refused_until = time.monotonic() + _REFUSED_FOR
+                        self._refuse(_REFUSED_FOR, "ArXiv is rate limiting requests")
                         raise ArxivRequestError(
                             f"ArXiv rate limited (HTTP {status}), "
                             f"still after {len(_RETRY_DELAYS)} retries"
@@ -326,7 +357,21 @@ class ArxivSearchSource(SearchSource):
             raise ArxivRequestError("ArXiv refused the request (HTTP 403)")
         if status != 200:
             raise ArxivRequestError(f"ArXiv answered HTTP {status}")
-        return response.content
+        return response
+
+    async def _get_feed(self, url: str) -> Any:
+        """``_get`` ``url``, and parse the reply, off the event loop (a long
+        feed takes feedparser a while). Parsed from the bytes as a stream:
+        feedparser opens a string naming a file, which a reply must not make
+        it do."""
+        import feedparser
+
+        response = await self._get(url)
+        return await asyncio.to_thread(
+            feedparser.parse,
+            io.BytesIO(response.content),
+            response_headers={"content-type": response.headers.get("content-type", "")},
+        )
 
     async def download_pdf(self, pdf_url: str, timeout: float = 60.0) -> bytes:
         """Download a paper PDF, in turn with every other arXiv request.
@@ -484,12 +529,11 @@ class ArxivSearchSource(SearchSource):
             return cached
 
         try:
-            import feedparser
+            import feedparser  # noqa: F401 - missing: fail before the request
         except ImportError as exc:
             raise RuntimeError("feedparser not installed") from exc
 
-        content = await self._get(f"{self._API_BASE_URL}?id_list={normalized_id}")
-        feed = feedparser.parse(content)
+        feed = await self._get_feed(f"{self._API_BASE_URL}?id_list={normalized_id}")
 
         if not feed.entries:
             raise LookupError(f"Paper with ID '{normalized_id}' not found")
@@ -531,7 +575,7 @@ class ArxivSearchSource(SearchSource):
             return cached_results
 
         try:
-            import feedparser
+            import feedparser  # noqa: F401 - missing: fail before the request
         except ImportError:
             raise ArxivRequestError("feedparser not installed") from None
 
@@ -555,7 +599,7 @@ class ArxivSearchSource(SearchSource):
         url = f"{ARXIV_API_URL}?{search_query}&start=0&max_results={max_results}"
         url += f"&sortBy={sort_by}&sortOrder={sort_order}"
 
-        feed = feedparser.parse(await self._get(url))
+        feed = await self._get_feed(url)
         if feed.bozo and not feed.entries:
             raise ArxivRequestError(f"ArXiv feed error: {feed.bozo_exception}")
 

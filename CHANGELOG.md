@@ -1431,14 +1431,17 @@ step; each entry says what to use instead.
   refusal. Now every arXiv request waits its turn, one at a time and at least
   3 s apart; a 429 or 503 is retried after its `Retry-After` (else 3, 6 and
   12 s) while the others wait; once the retries run out, the next calls fail
-  at once for a minute, saying when to try again. Requests have a 30 s
-  timeout (feedparser fetched with none), each call reports its own error
-  (the shared `last_error` let one search report another's), and
+  at once for a minute, saying when to try again. A request times out after
+  30 s without an answer (feedparser fetched with no timeout), and the calls
+  queued behind it then fail at once for 30 s rather than each wait the
+  timeout out. Each call reports its own error (the shared `last_error` let
+  one search report another's), the feed is parsed off the event loop, and
   `search_arxiv` is a coroutine, so on ADK, which runs a synchronous tool on
   the event loop, a search no longer freezes the UI for seconds. Code that
   called `search_arxiv` directly awaits it; `ArxivSearchSource` gains
-  `asearch` and `transport=`, keeps `search` as its synchronous form, and
-  loses `wait_for_rate_limit`.
+  `asearch` and `transport=`, keeps `search` as its synchronous form (which
+  now raises inside a running event loop, rather than block it), and loses
+  `wait_for_rate_limit`.
 - **A warning logged during a turn prints above the prompt.** structlog's and
   the standard library's log lines, and Python's warnings, were written
   straight to stderr, so one logged mid-turn (an arXiv rate limit, say)

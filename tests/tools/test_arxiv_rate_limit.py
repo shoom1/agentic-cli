@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import email.utils
 import inspect
+import threading
 import time
 from unittest.mock import AsyncMock, MagicMock
 
@@ -24,7 +25,7 @@ import pytest
 
 from agentic_cli.tools import arxiv_source
 from agentic_cli.tools.arxiv_source import ArxivSearchSource
-from tests.tools.arxiv_fakes import ArxivAPI, Paper
+from tests.tools.arxiv_fakes import ArxivAPI, Paper, atom_feed
 
 #: The shortened gap between two requests' starts.
 GAP = 0.05
@@ -36,7 +37,7 @@ SLACK = 0.01
 def fast(monkeypatch):
     """Short waits: GAP between requests, retries after 0.02, 0.04, 0.08 s."""
     monkeypatch.setattr(ArxivSearchSource, "rate_limit", property(lambda self: GAP))
-    monkeypatch.setattr(arxiv_source, "_RETRY_DELAYS", (0.02, 0.04, 0.08), raising=False)
+    monkeypatch.setattr(arxiv_source, "_RETRY_DELAYS", (0.02, 0.04, 0.08))
 
 
 @pytest.fixture
@@ -112,12 +113,13 @@ async def test_calls_queued_behind_a_refusal_wait_for_its_retry(api, source):
     assert _queries(api) == ["all:alpha", "all:alpha", "all:beta"]
 
 
+@pytest.mark.parametrize("status", [429, 503])
 async def test_once_the_retries_run_out_the_call_fails_and_the_next_fails_at_once(
-    api, source
+    api, source, status
 ):
-    api.refuse(429, times=4)
+    api.refuse(status, times=4)
 
-    with pytest.raises(arxiv_source.ArxivRequestError, match="rate limit.*HTTP 429"):
+    with pytest.raises(arxiv_source.ArxivRequestError, match=f"rate limit.*HTTP {status}"):
         await source.asearch("alpha")
     assert len(api.requests) == 4
 
@@ -132,6 +134,20 @@ async def test_a_wait_longer_than_the_tool_can_give_fails_at_once_naming_it(api,
     with pytest.raises(arxiv_source.ArxivRequestError, match="3600"):
         await source.asearch("alpha")
     assert len(api.requests) == 1
+
+    with pytest.raises(arxiv_source.ArxivRequestError, match="try again in 3600 s"):
+        await source.asearch("beta")
+    assert len(api.requests) == 1
+
+
+async def test_a_wait_of_days_refuses_calls_for_an_hour_at_most(api, source):
+    api.refuse(429, retry_after="900000")
+
+    with pytest.raises(arxiv_source.ArxivRequestError):
+        await source.asearch("alpha")
+
+    with pytest.raises(arxiv_source.ArxivRequestError, match="try again in 3600 s"):
+        await source.asearch("beta")
 
 
 async def test_a_refusal_that_is_not_a_rate_limit_is_not_retried(api, source):
@@ -149,19 +165,37 @@ async def test_a_request_arxiv_does_not_answer_in_time_fails_naming_the_timeout(
         await source.asearch("alpha")
 
 
+@pytest.mark.parametrize(
+    "error", [httpx.ReadTimeout("no answer"), httpx.ConnectError("unreachable")], ids=type
+)
+async def test_calls_queued_behind_an_unanswered_request_fail_at_once(api, source, error):
+    """Five calls queued behind an arXiv that does not answer would each
+    wait out the timeout in turn: 150 s for the fifth."""
+    api.fail(error)
+
+    outcomes = await asyncio.gather(
+        *(source.asearch(query) for query in ("alpha", "beta", "gamma")),
+        return_exceptions=True,
+    )
+
+    assert len(api.requests) == 1
+    assert all(isinstance(o, arxiv_source.ArxivRequestError) for o in outcomes)
+    assert all("try again in" in str(o) for o in outcomes[1:])
+
+
 async def test_each_of_two_parallel_searches_reports_its_own_outcome(api, source):
     """A failure belongs to its call: the shared last_error let one search
     report another's error, or success with no papers."""
     from agentic_cli.tools.arxiv_tools import _search_arxiv_with_source
 
-    api.fail(httpx.ReadTimeout("no answer"))
+    api.refuse(403)
 
     failed, found = await asyncio.gather(
         _search_arxiv_with_source(source, query="alpha"),
         _search_arxiv_with_source(source, query="beta"),
     )
 
-    assert failed["success"] is False and "did not answer" in failed["error"]
+    assert failed["success"] is False and "HTTP 403" in failed["error"]
     assert failed["query"] == "alpha"
     assert found["success"] is True and found["total_found"] == 2
 
@@ -240,6 +274,51 @@ async def test_a_pdf_download_waits_its_turn_too(api, source, monkeypatch):
     assert pdf_end <= search_start + SLACK or search_end <= pdf_start + SLACK
 
 
+async def test_a_reply_that_names_a_local_file_is_not_read(api, source, tmp_path):
+    """feedparser opens a string that names a file: a reply (from a proxy in
+    the middle, say) must not make the source read one of the user's files."""
+    local = tmp_path / "local.xml"
+    local.write_text(atom_feed([Paper("9999.99999", title="FROM LOCAL FILE")]))
+    api.garble(body=str(local))
+
+    with pytest.raises(arxiv_source.ArxivRequestError, match="feed error"):
+        await source.asearch("alpha")
+
+
+async def test_a_feed_is_parsed_off_the_event_loop(api, source, monkeypatch):
+    """A long feed takes feedparser a noticeable time (0.2 s for 2,000
+    entries): not on the loop, where it stalls the UI."""
+    import feedparser
+
+    threads: list[int] = []
+    parse = feedparser.parse
+
+    def recording(*args, **kwargs):
+        threads.append(threading.get_ident())
+        return parse(*args, **kwargs)
+
+    monkeypatch.setattr(feedparser, "parse", recording)
+
+    await source.asearch("alpha")
+    source.clear_cache()  # so the fetch asks arXiv
+    await source.fetch_by_id("2401.00002")
+
+    assert len(threads) == 2
+    assert threading.get_ident() not in threads
+
+
+async def test_requests_name_the_client(api, source):
+    """arXiv asks an API client to identify itself."""
+    await source.asearch("alpha")
+
+    assert api.user_agents[0].startswith("agentic-cli")
+
+
+async def test_the_synchronous_search_refuses_to_block_a_running_loop(source):
+    with pytest.raises(RuntimeError, match="await asearch"):
+        source.search("alpha")
+
+
 def test_the_synchronous_search_still_works_outside_an_event_loop(api, source):
     """``SearchSource.search`` stays synchronous (examples/arxiv_demo.py)."""
     assert [r.title for r in source.search("alpha")] == ["First", "A paper"]
@@ -252,7 +331,10 @@ def test_the_synchronous_search_still_works_outside_an_event_loop(api, source):
 
 @pytest.mark.parametrize(
     "header, wait",
-    [("5", 5.0), ("0", 0.0), ("-3", 0.0), ("soon", None), (None, None)],
+    [
+        ("5", 5.0), ("0", 0.0), ("-3", 0.0), ("soon", None), (None, None),
+        ("inf", None), ("1e400", None), ("nan", None),
+    ],
 )
 def test_retry_after_is_read_in_seconds(header, wait):
     headers = {} if header is None else {"Retry-After": header}
@@ -260,8 +342,10 @@ def test_retry_after_is_read_in_seconds(header, wait):
     assert arxiv_source._retry_after(httpx.Response(429, headers=headers)) == wait
 
 
-def test_retry_after_is_read_as_a_date():
-    when = email.utils.formatdate(time.time() + 30, usegmt=True)
+@pytest.mark.parametrize("zone", ["GMT", "-0000", "+0000"])
+def test_retry_after_is_read_as_a_date(zone):
+    """``-0000`` (no zone) is still UTC, not the machine's local time."""
+    when = email.utils.formatdate(time.time() + 30, usegmt=True).replace("GMT", zone)
 
     wait = arxiv_source._retry_after(httpx.Response(429, headers={"Retry-After": when}))
 

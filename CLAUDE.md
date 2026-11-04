@@ -109,7 +109,7 @@ agentic-cli/
 │   │   ├── _knowledge_base.py # current_knowledge_base(): the knowledge_base key
 │   │   ├── knowledge_tools.py # kb_* tools: adapters over KnowledgeBase
 │   │   ├── arxiv_tools.py    # search_arxiv, fetch_arxiv_paper, ingest_arxiv_paper
-│   │   ├── arxiv_source.py   # ArxivSearchSource (asearch, fetch_by_id, download_pdf; search: the synchronous form): one request at a time, 3 s apart, a 429/503 retried after Retry-After (else 3, 6, 12 s) holding the turn; ArxivRequestError
+│   │   ├── arxiv_source.py   # ArxivSearchSource (asearch, fetch_by_id, download_pdf; search: the synchronous form): one request at a time per event loop, 3 s apart, a 429/503 retried after Retry-After (else 3, 6, 12 s) holding the turn, queued calls failing at once after the retries ran out or no answer; the reply parsed from bytes (a string can name a file to feedparser), off the loop; ArxivRequestError
 │   │   ├── search_sources.py # SearchSource, SearchSourceResult
 │   │   ├── pdf_utils.py      # extract_pdf_text
 │   │   ├── interaction_tools.py # ask_clarification

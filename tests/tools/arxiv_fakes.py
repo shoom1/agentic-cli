@@ -6,9 +6,10 @@ papers it holds, after ``delay`` seconds, and records each request: when it
 started (``starts``, ``time.monotonic()``), its URL (``requests``) and the
 most that were in flight at once (``max_in_flight``). ``refuse(status, n,
 retry_after=)`` makes the next ``n`` requests answer ``status`` (429, say),
-with a ``Retry-After`` header when given; ``garble(n)`` makes them answer
-200 with a body that is no feed; ``fail(exc, n)`` makes them raise (an
-``httpx.ReadTimeout``, say).
+with a ``Retry-After`` header when given; ``garble(n, body=)`` makes them
+answer 200 with a body that is no feed; ``fail(exc, n)`` makes them raise
+(an ``httpx.ReadTimeout``, say). ``user_agents`` holds each request's
+User-Agent.
 """
 
 from __future__ import annotations
@@ -20,6 +21,9 @@ from urllib.parse import parse_qs, urlsplit
 from xml.sax.saxutils import escape
 
 import httpx
+
+#: The Content-Type arXiv's API answers with.
+ATOM = {"Content-Type": "application/atom+xml; charset=UTF-8"}
 
 
 @dataclass
@@ -69,6 +73,7 @@ class ArxivAPI:
     papers: list[Paper] = field(default_factory=list)
     delay: float = 0.0
     requests: list[str] = field(default_factory=list)
+    user_agents: list[str] = field(default_factory=list)
     starts: list[float] = field(default_factory=list)
     max_in_flight: int = 0
     _in_flight: int = 0
@@ -78,8 +83,8 @@ class ArxivAPI:
         headers = {"Retry-After": retry_after} if retry_after is not None else {}
         self._script.extend(httpx.Response(status, headers=headers) for _ in range(times))
 
-    def garble(self, times: int = 1) -> None:
-        self._script.extend(httpx.Response(200, text="not a feed") for _ in range(times))
+    def garble(self, times: int = 1, *, body: str = "not a feed") -> None:
+        self._script.extend(httpx.Response(200, text=body) for _ in range(times))
 
     def fail(self, error: Exception, times: int = 1) -> None:
         self._script.extend(error for _ in range(times))
@@ -90,6 +95,7 @@ class ArxivAPI:
 
     async def _handle(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(str(request.url))
+        self.user_agents.append(request.headers.get("user-agent", ""))
         self.starts.append(time.monotonic())
         self._in_flight += 1
         self.max_in_flight = max(self.max_in_flight, self._in_flight)
@@ -101,7 +107,7 @@ class ArxivAPI:
                 if isinstance(scripted, Exception):
                     raise scripted
                 return scripted
-            return httpx.Response(200, text=atom_feed(self._answer(request)))
+            return httpx.Response(200, text=atom_feed(self._answer(request)), headers=ATOM)
         finally:
             self._in_flight -= 1
 
