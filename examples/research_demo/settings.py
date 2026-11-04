@@ -43,8 +43,9 @@ An OpenAI-compatible service (Together, Fireworks, a local vLLM) takes no
 To pick a model, open ``/settings``: Default Model offers the list, and the
 pick is saved to the project's ``./.research_demo/settings.json``. ``/models``
 shows the list, with what is known about each model and why one is not
-offered; ``/models <text>`` searches every provider's full listing, such as
-``/models llama``, to find an id to add to ``models``.
+offered; ``/models <text>`` searches the full listing of each provider with
+a key, such as ``/models llama`` once OpenRouter is defined, to find an id to
+add to ``models`` in ``~/.research_demo/settings.json``.
 
 Without a ``default_model``, the demo runs on the list's default-tier model:
 Gemini 3.8 Flash with a Google key, else Claude Sonnet 5.5 with an Anthropic

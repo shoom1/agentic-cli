@@ -46,7 +46,7 @@ SHIPPED = {
     "anthropic:claude-sonnet-4-6": ModelEntry(context_window=1_000_000, max_output=64_000),
     "local-vllm:Qwen/Qwen3-32B": {"thinking": "chat_template"},
 }
-#: The provider ``_app_providers()``'s class ships, as the research demo ships OpenRouter.
+#: The provider ``_app_providers()``'s class ships, as an app's settings class may.
 OPENROUTER = ProviderSpec(
     kind="openrouter", base_url="https://openrouter.ai/api/v1", api_key_env="OPENROUTER_API_KEY"
 )

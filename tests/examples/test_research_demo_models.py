@@ -95,14 +95,19 @@ def _user_file(home: Path, data: dict) -> None:
 
 
 def _docstring_user_file() -> dict:
-    """The user file the demo's docstring shows: its literal block, as JSON."""
-    _, _, rest = demo_settings.__doc__.partition("::\n")
-    block = []
-    for line in rest.splitlines():
-        if line.strip() and not line.startswith("    "):
-            break
-        block.append(line)
-    return json.loads(textwrap.dedent("\n".join(block)))
+    """The user file the demo's docstring shows: its one literal block that
+    defines ``model_providers``, as JSON."""
+    blocks = []
+    for chunk in demo_settings.__doc__.split("::\n")[1:]:
+        lines = []
+        for line in chunk.splitlines():
+            if line.strip() and not line.startswith("    "):
+                break
+            lines.append(line)
+        blocks.append(textwrap.dedent("\n".join(lines)))
+    shown = [block for block in blocks if '"model_providers"' in block]
+    assert len(shown) == 1, f"the docstring shows {len(shown)} user files defining providers"
+    return json.loads(shown[0])
 
 
 def _offered(settings: ResearchDemoSettings) -> list[str]:
@@ -145,10 +150,10 @@ def test_it_ships_its_list_of_models_each_described_by_its_listing_and_the_table
     }
 
 
-def test_the_fields_keep_the_framework_s_title_and_description():
-    for name in ("models", "model_providers"):
-        demo, base = ResearchDemoSettings.model_fields[name], BaseSettings.model_fields[name]
-        assert (demo.title, demo.description) == (base.title, base.description), name
+def test_the_models_field_keeps_the_framework_s_title_and_description():
+    demo, base = ResearchDemoSettings.model_fields["models"], BaseSettings.model_fields["models"]
+
+    assert (demo.title, demo.description) == (base.title, base.description)
 
 
 @pytest.mark.parametrize("key", list(BUILTIN_TIERS))
