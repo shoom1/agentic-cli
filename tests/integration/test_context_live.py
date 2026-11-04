@@ -45,9 +45,12 @@ Override the models with LIVE_CONTEXT_CLAUDE_MODEL (default
 ``anthropic:claude-sonnet-4-6``), LIVE_CONTEXT_GEMINI_MODEL (default
 ``google:gemini-2.5-flash``), LIVE_CONTEXT_OPENAI_MODEL (default
 ``openai:gpt-5-mini``), LIVE_CONTEXT_HAIKU_MODEL (default
-``anthropic:claude-haiku-4-5``) and LIVE_CONTEXT_SMALL_MODEL (an ``openrouter:`` id;
-by default the cheapest tool-calling model OpenRouter lists with a 32k to 64k
-window).
+``anthropic:claude-haiku-4-5``), LIVE_CONTEXT_OPENROUTER_MODEL (default
+``openrouter:qwen/qwen3.7-plus``), LIVE_CONTEXT_OPUS_MODEL (default
+``anthropic:claude-opus-4-7``), LIVE_CONTEXT_GEMINI_3_MODEL (default
+``google:gemini-3-flash-preview``) and LIVE_CONTEXT_SMALL_MODEL (an
+``openrouter:`` id; by default the cheapest tool-calling model OpenRouter lists
+with a 32k to 64k window).
 """
 
 from __future__ import annotations

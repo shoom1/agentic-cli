@@ -266,6 +266,23 @@ async def test_a_request_sends_no_null_fields(stream):
 
 
 @pytest.mark.parametrize("stream", [True, False])
+async def test_a_request_s_tools_are_still_sent(stream):
+    server = Server(deltas=[{"content": "ok"}])
+    tool = types.Tool(function_declarations=[
+        types.FunctionDeclaration(name="lookup", description="Look a word up.")
+    ])
+    asked = LlmRequest(
+        model=MODEL, contents=[user("Hi")], config=types.GenerateContentConfig(tools=[tool])
+    )
+
+    _ = [r async for r in compatible(server).generate_content_async(asked, stream=stream)]
+
+    (body,) = server.bodies
+    assert [t["function"]["name"] for t in body["tools"]] == ["lookup"]
+    assert body["tool_choice"] == "auto"
+
+
+@pytest.mark.parametrize("stream", [True, False])
 async def test_a_response_format_is_still_sent(stream):
     server = Server(deltas=[{"content": "{}"}], message={"role": "assistant", "content": "{}"})
     asked = LlmRequest(

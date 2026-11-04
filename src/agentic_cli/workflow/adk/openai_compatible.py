@@ -94,7 +94,9 @@ class OpenAICompatibleLlm(OpenAILlm):
     ) -> AsyncGenerator[LlmResponse, None]:
         """Send the request ADK built: streamed or not, as the caller asked."""
         # An unset max_tokens, and the tools, tool_choice and response_format
-        # of a request without them: left out, never sent as null.
+        # of a request without them: left out, never sent as null. ADK passes
+        # only body fields here, no request option such as timeout (where None
+        # means no timeout at all).
         for field in [name for name, value in kwargs.items() if value is None]:
             del kwargs[field]
         if self.extra_body:

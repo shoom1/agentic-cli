@@ -1436,11 +1436,12 @@ step; each entry says what to use instead.
   model is checked against its provider's listing); they default to
   `qwen/qwen3.7-plus`. `claude-sonnet-4-5` reaches end of life on
   2026-11-30: the cases for a thinking budget, which the framework sends
-  only to Claude before 4.6, default to `claude-haiku-4-5`, and the other
-  Claude defaults to `claude-sonnet-4-6`. A new case runs each backend on Synthetic, an
-  OpenAI-compatible service that needs a key (`SYNTHETIC_API_KEY`; its model:
-  `LIVE_SYNTHETIC_MODEL`, by default `hf:deepseek-ai/DeepSeek-V4.1-Flash-1017`,
-  which reasons at low effort); the vLLM case sends no key.
+  only to Claude before 4.6, and the ADK cache test default to
+  `claude-haiku-4-5`, the other Claude cases to `claude-sonnet-4-6`. A new
+  case runs each backend on Synthetic, an OpenAI-compatible service that
+  needs a key (`SYNTHETIC_API_KEY`; its model: `LIVE_SYNTHETIC_MODEL`, by
+  default `hf:deepseek-ai/DeepSeek-V4.1-Flash-1017`, which reasons at low
+  effort); the vLLM case sends no key.
 - **arXiv requests are paced as arXiv asks, and a rate limit is waited out**
   (breaking for direct callers). Parallel `search_arxiv` calls all failed
   with "ArXiv rate limited (HTTP 429)": a search and a metadata or PDF
