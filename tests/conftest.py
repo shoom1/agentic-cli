@@ -242,6 +242,26 @@ def _no_model_warnings_from_other_tests(monkeypatch: pytest.MonkeyPatch) -> None
 
 
 @pytest.fixture
+def logging_configured() -> Generator[None, None, None]:
+    """``configure_logging()`` for one test, with structlog's configuration
+    put back afterwards, its processors list included.
+
+    ``configure_logging()`` gives structlog a new processors list, and a
+    logger cached before keeps the old one, so a later test's
+    ``structlog.testing.capture_logs()`` (which edits the current list) would
+    see nothing from that logger.
+    """
+    import structlog
+
+    from agentic_cli.logging import configure_logging
+
+    saved = structlog.get_config()
+    configure_logging()
+    yield
+    structlog.configure(**saved)
+
+
+@pytest.fixture
 def mock_context() -> Generator[MockContext, None, None]:
     """Fixture providing an isolated test context."""
     with MockContext() as ctx:

@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import re
+import select
 import sys
 from pathlib import Path
 
@@ -41,20 +43,33 @@ class Console:
     ``env`` is the child's whole environment, ``child_env(home)`` when
     omitted; a test that needs one more variable starts from ``child_env``.
     ``args`` are the app's command-line arguments; ``prompt`` False skips
-    waiting for the prompt, for a start that never draws one.
+    waiting for the prompt, for a start that never draws one. ``stderr``
+    sends the child's stderr elsewhere than the screen: to that file, or,
+    with ``"terminal"``, to a second terminal (``stderr_text``), so what
+    reaches the screen through the UI is told apart from what was written
+    straight to stderr.
     """
 
     def __init__(
         self, cwd: Path, home: Path, env: dict[str, str] | None = None,
-        *, args: tuple[str, ...] = (), prompt: bool = True,
+        *, args: tuple[str, ...] = (), prompt: bool = True, stderr: Path | str | None = None,
     ) -> None:
         import pexpect
 
         self.cwd = cwd
         self._log = io.StringIO()
+        self._stderr_file = stderr if isinstance(stderr, Path) else None
+        self._stderr_terminal: tuple[int, int] | None = None
+        self._stderr_read = ""
+        command = [sys.executable, str(CONSOLE_APP), *args]
+        if stderr is not None:
+            if stderr == "terminal":
+                self._stderr_terminal = os.openpty()
+                stderr = os.ttyname(self._stderr_terminal[1])
+            command = ["/bin/sh", "-c", 'exec "$@" 2>"$0"', str(stderr), *command]
         self.child = pexpect.spawn(
-            sys.executable,
-            [str(CONSOLE_APP), *args],
+            command[0],
+            command[1:],
             cwd=str(cwd),
             env=child_env(home) if env is None else env,
             encoding="utf-8",
@@ -81,6 +96,30 @@ class Console:
         """Everything printed so far, as a human reads it."""
         return strip_ansi(self._log.getvalue())
 
+    def stderr_text(self) -> str:
+        """What the child wrote to its stderr, when that is not the screen."""
+        if self._stderr_file is not None:
+            return self._stderr_file.read_text() if self._stderr_file.exists() else ""
+        if self._stderr_terminal is not None:
+            master = self._stderr_terminal[0]
+            while select.select([master], [], [], 0)[0]:
+                try:
+                    chunk = os.read(master, 65536)
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                self._stderr_read += chunk.decode("utf-8", "replace")
+            return strip_ansi(self._stderr_read)
+        return ""
+
+    def close(self) -> None:
+        self.child.close(force=True)
+        if self._stderr_terminal is not None:
+            for fd in self._stderr_terminal:
+                os.close(fd)
+            self._stderr_terminal = None
+
     def exit(self) -> None:
         """``/exit``, and the process ends cleanly."""
         import pexpect
@@ -90,6 +129,7 @@ class Console:
         self.child.expect(pexpect.EOF, timeout=STEP_TIMEOUT)
         self.child.close()
         assert "Traceback (most recent call last)" not in self.transcript
+        assert "Traceback (most recent call last)" not in self.stderr_text()
         assert (self.child.exitstatus, self.child.signalstatus) == (0, None)
 
 
@@ -335,6 +375,51 @@ def test_ctrl_c_during_compact_says_so_once_and_the_next_turn_runs(console):
     for never in ("Context summarized", "Could not summarize", "Nothing to summarize yet.",
                   "Handler error"):
         assert never not in transcript
+
+
+#: What the console app's ``warn`` turn logs and warns.
+WARNED = (
+    "console_warning_on_the_loop",
+    "console_warning_in_a_thread",
+    "console_stdlib_warning",
+    "console_python_warning",
+)
+
+
+def _warn_turn(tmp_path: Path, stderr: Path | str) -> Console:
+    """The ``warn`` turn, then ``/exit``, with the child's stderr at ``stderr``."""
+    home, cwd = tmp_path / "home", tmp_path / "cwd"
+    home.mkdir()
+    cwd.mkdir()
+    console = Console(cwd, home, stderr=stderr)
+    try:
+        console.type_line("warn")
+        console.expect("Warned.")
+        console.exit()
+    finally:
+        console.stderr_text()  # read before the terminal is closed
+        console.close()
+    return console
+
+
+def test_log_lines_and_warnings_during_a_turn_print_through_the_ui(tmp_path):
+    """With stderr on the terminal, a warning logged mid-turn, from the loop
+    or any thread, and a Python warning, print above the prompt as the UI's
+    own output does: written straight to stderr, they landed on the prompt
+    line and broke the screen. (stderr is a second terminal here, so a line
+    written to it is told apart from one the UI drew.)"""
+    console = _warn_turn(tmp_path, "terminal")
+
+    assert [line for line in WARNED if line not in console.transcript] == []
+    assert [line for line in WARNED if line in console.stderr_text()] == []
+
+
+def test_with_stderr_redirected_log_lines_stay_in_the_file(tmp_path):
+    """``app 2>run.log`` keeps its log in the file, and off the screen."""
+    console = _warn_turn(tmp_path, tmp_path / "run.log")
+
+    assert [line for line in WARNED if line not in console.stderr_text()] == []
+    assert [line for line in WARNED if line in console.transcript] == []
 
 
 def test_the_status_bar_shows_how_full_the_context_is(console):

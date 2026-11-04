@@ -323,3 +323,23 @@ def test_their_other_records_pass(logged, caplog, name, message):
 
     assert [r.name for r in caplog.records] == [name]
     assert logged == []
+
+
+def test_another_hook_gets_the_warning_as_it_was_given(monkeypatch):
+    """Only Python's own hook is given the log stream: another (logging's
+    captureWarnings, say) gets ``file`` unchanged, or it would print the
+    warning instead of handling it. (That Python's own hook writes where log
+    lines go is checked on a real console, outside pytest's warning capture:
+    test_console_turns.py's ``console_python_warning``.)"""
+    seen: list[object] = []
+
+    def showwarning(message, category, filename, lineno, file=None, line=None):
+        seen.append(file)
+
+    monkeypatch.setattr(warnings, "showwarning", showwarning)
+    _install_adk_notice_hook()
+
+    _warn("an ordinary warning")
+
+    assert seen == [None]
+
