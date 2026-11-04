@@ -1,159 +1,101 @@
 """Tests for ArXiv tools — error reporting and metadata fetching.
 
 Covers:
-- search_arxiv error propagation from ArxivSearchSource.last_error
+- search_arxiv's result, and its error from ArxivSearchSource.asearch
 - fetch_arxiv_paper (metadata only)
-- ArxivSearchSource.last_error lifecycle
+- the synchronous ArxivSearchSource.search's last_error lifecycle
+
+arXiv is faked (``tests/tools/arxiv_fakes.py``, the ``arxiv_api`` fixture);
+how requests are paced is ``tests/tools/test_arxiv_rate_limit.py``.
 """
 
 from unittest.mock import patch, MagicMock, AsyncMock
 
+import httpx
 import pytest
+
+from tests.tools.arxiv_fakes import ArxivAPI, Paper
+
+
+@pytest.fixture(autouse=True)
+def no_waits(monkeypatch):
+    """No gap between requests and no wait before a retry: these tests are not
+    about pacing (tests/tools/test_arxiv_rate_limit.py is)."""
+    from agentic_cli.tools import arxiv_source
+
+    monkeypatch.setattr(arxiv_source.ArxivSearchSource, "rate_limit", property(lambda self: 0.0))
+    monkeypatch.setattr(arxiv_source, "_RETRY_DELAYS", (0.0, 0.0, 0.0))
+
+
+def _source(api: ArxivAPI):
+    from agentic_cli.tools.arxiv_source import ArxivSearchSource
+
+    return ArxivSearchSource(transport=api.transport)
 
 
 # ---------------------------------------------------------------------------
-# ArxivSearchSource.last_error tests
+# ArxivSearchSource.last_error tests (the synchronous search)
 # ---------------------------------------------------------------------------
 
 
 class TestArxivSearchSourceLastError:
     """Tests for last_error on ArxivSearchSource."""
 
-    def test_last_error_initially_none(self):
+    def test_last_error_initially_none(self, arxiv_api):
         """last_error is None before any search."""
-        from agentic_cli.tools.arxiv_source import ArxivSearchSource
+        assert _source(arxiv_api).last_error is None
 
-        source = ArxivSearchSource()
-        assert source.last_error is None
-
-    @patch("feedparser.parse")
-    @patch("agentic_cli.tools.arxiv_source.time")
-    def test_last_error_set_on_http_403(self, mock_time, mock_parse):
+    def test_last_error_set_on_http_403(self, arxiv_api):
         """last_error is set when ArXiv returns HTTP 403."""
-        mock_time.time.return_value = 100.0
-        mock_time.sleep = MagicMock()
+        arxiv_api.refuse(403)
+        source = _source(arxiv_api)
 
-        mock_feed = MagicMock()
-        mock_feed.status = 403
-        mock_feed.entries = []
-        mock_feed.bozo = False
-        mock_parse.return_value = mock_feed
-
-        from agentic_cli.tools.arxiv_source import ArxivSearchSource
-
-        source = ArxivSearchSource()
-        source.search("test")
-
-        assert source.last_error is not None
+        assert source.search("test") == []
         assert "403" in source.last_error
 
-    @patch("feedparser.parse")
-    @patch("agentic_cli.tools.arxiv_source.time")
-    def test_last_error_set_on_http_429(self, mock_time, mock_parse):
-        """last_error is set when ArXiv returns HTTP 429."""
-        mock_time.time.return_value = 100.0
-        mock_time.sleep = MagicMock()
+    def test_last_error_set_on_http_429(self, arxiv_api):
+        """last_error is set when ArXiv still refuses with HTTP 429 after its retries."""
+        arxiv_api.refuse(429, times=4)
+        source = _source(arxiv_api)
 
-        mock_feed = MagicMock()
-        mock_feed.status = 429
-        mock_feed.entries = []
-        mock_feed.bozo = False
-        mock_parse.return_value = mock_feed
-
-        from agentic_cli.tools.arxiv_source import ArxivSearchSource
-
-        source = ArxivSearchSource()
-        source.search("test")
-
-        assert source.last_error is not None
+        assert source.search("test") == []
         assert "429" in source.last_error
 
-    @patch("feedparser.parse")
-    @patch("agentic_cli.tools.arxiv_source.time")
-    def test_last_error_set_on_bozo(self, mock_time, mock_parse):
-        """last_error is set on feed bozo error with no entries."""
-        mock_time.time.return_value = 100.0
-        mock_time.sleep = MagicMock()
+    def test_last_error_set_on_bozo(self, arxiv_api):
+        """last_error is set on a feed that does not parse and has no entries."""
+        arxiv_api.garble()
+        source = _source(arxiv_api)
 
-        mock_feed = MagicMock()
-        mock_feed.status = 200
-        mock_feed.bozo = True
-        mock_feed.bozo_exception = Exception("XML parsing error")
-        mock_feed.entries = []
-        mock_parse.return_value = mock_feed
-
-        from agentic_cli.tools.arxiv_source import ArxivSearchSource
-
-        source = ArxivSearchSource()
-        source.search("test")
-
-        assert source.last_error is not None
+        assert source.search("test") == []
         assert "feed error" in source.last_error.lower()
 
-    @patch("feedparser.parse")
-    @patch("agentic_cli.tools.arxiv_source.time")
-    def test_last_error_set_on_parse_exception(self, mock_time, mock_parse):
-        """last_error is set when feedparser.parse() raises."""
-        mock_time.time.return_value = 100.0
-        mock_time.sleep = MagicMock()
-        mock_parse.side_effect = Exception("Connection timeout")
+    def test_last_error_set_on_a_failed_request(self, arxiv_api):
+        """last_error is set when the request fails."""
+        arxiv_api.fail(httpx.ConnectError("Connection refused"))
+        source = _source(arxiv_api)
 
-        from agentic_cli.tools.arxiv_source import ArxivSearchSource
+        assert source.search("test") == []
+        assert "Connection refused" in source.last_error
 
-        source = ArxivSearchSource()
-        source.search("test")
-
-        assert source.last_error is not None
-        assert "Connection timeout" in source.last_error
-
-    @patch("feedparser.parse")
-    @patch("agentic_cli.tools.arxiv_source.time")
-    def test_last_error_cleared_on_success(self, mock_time, mock_parse):
+    def test_last_error_cleared_on_success(self, arxiv_api):
         """last_error is cleared after a successful search."""
-        mock_time.time.return_value = 100.0
-        mock_time.sleep = MagicMock()
-
-        from agentic_cli.tools.arxiv_source import ArxivSearchSource
-
-        source = ArxivSearchSource()
-
-        # First: trigger an error
-        mock_feed_err = MagicMock()
-        mock_feed_err.status = 403
-        mock_feed_err.entries = []
-        mock_feed_err.bozo = False
-        mock_parse.return_value = mock_feed_err
+        arxiv_api.refuse(403)
+        source = _source(arxiv_api)
         source.search("error query")
         assert source.last_error is not None
 
-        # Second: successful search
-        mock_feed_ok = MagicMock()
-        mock_feed_ok.status = 200
-        mock_feed_ok.bozo = False
-        mock_feed_ok.entries = []
-        mock_parse.return_value = mock_feed_ok
         source.search("good query")
         assert source.last_error is None
 
-    def test_last_error_set_when_feedparser_missing(self):
+    def test_last_error_set_when_feedparser_missing(self, arxiv_api):
         """last_error is set when feedparser is not installed."""
-        from agentic_cli.tools.arxiv_source import ArxivSearchSource
-
-        source = ArxivSearchSource()
+        source = _source(arxiv_api)
 
         with patch.dict("sys.modules", {"feedparser": None}):
-            original_import = __builtins__.__import__ if hasattr(__builtins__, '__import__') else __import__
+            source.search("test")
 
-            def mock_import(name, *args, **kwargs):
-                if name == "feedparser":
-                    raise ImportError("No module named 'feedparser'")
-                return original_import(name, *args, **kwargs)
-
-            with patch("builtins.__import__", side_effect=mock_import):
-                source.search("test")
-
-        assert source.last_error is not None
         assert "feedparser" in source.last_error.lower()
+        assert arxiv_api.requests == []
 
 
 # ---------------------------------------------------------------------------
@@ -164,20 +106,20 @@ class TestArxivSearchSourceLastError:
 class TestSearchArxivValidation:
     """Tests for search_arxiv input validation returning error dicts."""
 
-    def test_search_arxiv_invalid_sort_by_returns_error(self):
+    async def test_search_arxiv_invalid_sort_by_returns_error(self):
         """Invalid sort_by returns {success: False} instead of raising."""
         from agentic_cli.tools.arxiv_tools import search_arxiv
 
-        result = search_arxiv("test", sort_by="invalid")
+        result = await search_arxiv("test", sort_by="invalid")
         assert result["success"] is False
         assert "sort_by" in result["error"]
         assert "invalid" in result["error"]
 
-    def test_search_arxiv_invalid_sort_order_returns_error(self):
+    async def test_search_arxiv_invalid_sort_order_returns_error(self):
         """Invalid sort_order returns {success: False} instead of raising."""
         from agentic_cli.tools.arxiv_tools import search_arxiv
 
-        result = search_arxiv("test", sort_order="invalid")
+        result = await search_arxiv("test", sort_order="invalid")
         assert result["success"] is False
         assert "sort_order" in result["error"]
         assert "invalid" in result["error"]
@@ -191,99 +133,51 @@ class TestSearchArxivValidation:
 class TestSearchArxivErrorReporting:
     """Tests for search_arxiv error propagation."""
 
-    @patch("feedparser.parse")
-    @patch("agentic_cli.tools.arxiv_source.time")
-    def test_search_arxiv_returns_success_true_on_results(self, mock_time, mock_parse, arxiv_source_ctx):
+    async def test_search_arxiv_returns_success_true_on_results(self, arxiv_api, arxiv_source_ctx):
         """search_arxiv includes success=True when results are found."""
-        mock_time.time.return_value = 100.0
-        mock_time.sleep = MagicMock()
-
-        mock_parse.return_value = MagicMock(
-            entries=[
-                {
-                    "title": "Test Paper",
-                    "link": "https://arxiv.org/abs/1234.5678",
-                    "summary": "Abstract",
-                    "authors": [{"name": "Author"}],
-                    "published": "2024-01-01",
-                    "tags": [{"term": "cs.AI"}],
-                    "id": "http://arxiv.org/abs/1234.5678v1",
-                }
-            ]
-        )
+        arxiv_api.papers.append(Paper("1234.5678", title="Test Paper"))
 
         from agentic_cli.tools.arxiv_tools import search_arxiv
 
-        result = search_arxiv("test")
+        result = await search_arxiv("test")
 
         assert result["success"] is True
         assert result["total_found"] == 1
-        assert len(result["papers"]) == 1
+        assert [paper["title"] for paper in result["papers"]] == ["Test Paper"]
 
-    @patch("feedparser.parse")
-    @patch("agentic_cli.tools.arxiv_source.time")
-    def test_search_arxiv_returns_success_true_on_empty(self, mock_time, mock_parse, arxiv_source_ctx):
+    async def test_search_arxiv_returns_success_true_on_empty(self, arxiv_source_ctx):
         """search_arxiv returns success=True for genuine empty results."""
-        mock_time.time.return_value = 100.0
-        mock_time.sleep = MagicMock()
-
-        mock_feed = MagicMock()
-        mock_feed.status = 200
-        mock_feed.bozo = False
-        mock_feed.entries = []
-        mock_parse.return_value = mock_feed
-
         from agentic_cli.tools.arxiv_tools import search_arxiv
 
-        result = search_arxiv("nonexistent_gibberish_query")
+        result = await search_arxiv("nonexistent_gibberish_query")
 
         assert result["success"] is True
         assert result["total_found"] == 0
         assert result["papers"] == []
 
-    @patch("feedparser.parse")
-    @patch("agentic_cli.tools.arxiv_source.time")
-    def test_search_arxiv_returns_error_on_rate_limit(self, mock_time, mock_parse, arxiv_source_ctx):
-        """search_arxiv returns success=False on rate limiting."""
-        mock_time.time.return_value = 100.0
-        mock_time.sleep = MagicMock()
-
-        mock_feed = MagicMock()
-        mock_feed.status = 403
-        mock_feed.entries = []
-        mock_feed.bozo = False
-        mock_parse.return_value = mock_feed
+    async def test_search_arxiv_returns_error_on_a_refusal(self, arxiv_api, arxiv_source_ctx):
+        """search_arxiv returns success=False when arXiv refuses the request."""
+        arxiv_api.refuse(403)
 
         from agentic_cli.tools.arxiv_tools import search_arxiv
 
-        result = search_arxiv("test query")
+        result = await search_arxiv("test query")
 
         assert result["success"] is False
-        assert "error" in result
         assert "403" in result["error"]
         assert result["query"] == "test query"
         assert "papers" not in result
 
-    @patch("feedparser.parse")
-    @patch("agentic_cli.tools.arxiv_source.time")
-    def test_search_arxiv_returns_error_on_feed_error(self, mock_time, mock_parse, arxiv_source_ctx):
-        """search_arxiv returns success=False on feed parse error."""
-        mock_time.time.return_value = 100.0
-        mock_time.sleep = MagicMock()
-
-        mock_feed = MagicMock()
-        mock_feed.status = 200
-        mock_feed.bozo = True
-        mock_feed.bozo_exception = Exception("Malformed XML")
-        mock_feed.entries = []
-        mock_parse.return_value = mock_feed
+    async def test_search_arxiv_returns_error_on_feed_error(self, arxiv_api, arxiv_source_ctx):
+        """search_arxiv returns success=False on a feed that does not parse."""
+        arxiv_api.garble()
 
         from agentic_cli.tools.arxiv_tools import search_arxiv
 
-        result = search_arxiv("test query")
+        result = await search_arxiv("test query")
 
         assert result["success"] is False
-        assert "error" in result
+        assert "feed error" in result["error"].lower()
 
 
 # ---------------------------------------------------------------------------
@@ -294,76 +188,53 @@ class TestSearchArxivErrorReporting:
 class TestFetchArxivPaperMetadata:
     """Tests for fetch_arxiv_paper (metadata only)."""
 
-    @pytest.mark.asyncio
-    async def test_fetch_returns_metadata(self, arxiv_source_ctx):
+    async def test_fetch_returns_metadata(self, arxiv_api, arxiv_source_ctx):
         """fetch_arxiv_paper returns paper metadata."""
         from agentic_cli.tools.arxiv_tools import fetch_arxiv_paper
 
-        mock_entry = {
-            "title": "Test Paper",
-            "link": "https://arxiv.org/abs/1234.5678",
-            "summary": "Abstract text",
-            "authors": [{"name": "Author"}],
-            "published": "2024-01-01",
-            "updated": "2024-01-02",
-            "tags": [{"term": "cs.AI"}],
-            "id": "http://arxiv.org/abs/1234.5678v1",
-            "arxiv_primary_category": {"term": "cs.AI"},
-        }
+        arxiv_api.papers.append(Paper("1234.5678", title="Test Paper"))
 
-        with patch("feedparser.parse") as mock_parse:
-            mock_parse.return_value = MagicMock(entries=[mock_entry])
-            result = await fetch_arxiv_paper("1234.5678")
+        result = await fetch_arxiv_paper("1234.5678")
 
         assert result["success"] is True
         assert result["paper"]["title"] == "Test Paper"
         assert result["paper"]["arxiv_id"] == "1234.5678"
-        assert result["paper"]["pdf_url"] == "https://arxiv.org/pdf/1234.5678"
-        assert result["paper"]["abs_url"] == "https://arxiv.org/abs/1234.5678"
+        assert result["paper"]["pdf_url"] == "https://arxiv.org/pdf/1234.5678v1"
+        assert result["paper"]["abs_url"] == "https://arxiv.org/abs/1234.5678v1"
         assert result["paper"]["src_url"] == "https://arxiv.org/e-print/1234.5678"
 
-    @pytest.mark.asyncio
     async def test_fetch_not_found(self, arxiv_source_ctx):
         """fetch_arxiv_paper handles missing paper."""
         from agentic_cli.tools.arxiv_tools import fetch_arxiv_paper
 
-        with patch("feedparser.parse") as mock_parse:
-            mock_parse.return_value = MagicMock(entries=[])
-            result = await fetch_arxiv_paper("9999.99999")
+        result = await fetch_arxiv_paper("9999.99999")
 
         assert result["success"] is False
         assert "not found" in result["error"].lower()
 
-    @pytest.mark.asyncio
-    async def test_fetch_cleans_id(self, arxiv_source_ctx):
+    async def test_fetch_reports_a_failed_request(self, arxiv_api, arxiv_source_ctx):
+        """fetch_arxiv_paper reports arXiv's refusal as its error."""
+        from agentic_cli.tools.arxiv_tools import fetch_arxiv_paper
+
+        arxiv_api.refuse(403)
+
+        result = await fetch_arxiv_paper("1234.5678")
+
+        assert result["success"] is False
+        assert "403" in result["error"]
+
+    async def test_fetch_cleans_id(self, arxiv_api, arxiv_source_ctx):
         """fetch_arxiv_paper handles various ID formats."""
         from agentic_cli.tools.arxiv_tools import fetch_arxiv_paper
 
-        mock_entry = {
-            "title": "Test",
-            "link": "https://arxiv.org/abs/1234.5678",
-            "summary": "Abstract",
-            "authors": [],
-            "published": "",
-            "updated": "",
-            "tags": [],
-            "id": "http://arxiv.org/abs/1234.5678v1",
-            "arxiv_primary_category": {"term": "cs.AI"},
-        }
+        arxiv_api.papers.append(Paper("1234.5678"))
 
-        with patch("feedparser.parse") as mock_parse:
-            mock_parse.return_value = MagicMock(entries=[mock_entry])
+        await fetch_arxiv_paper("https://arxiv.org/abs/1234.5678")
+        arxiv_source_ctx.clear_cache()
+        await fetch_arxiv_paper("1234.5678v2")
 
-            # Test with URL format
-            await fetch_arxiv_paper("https://arxiv.org/abs/1234.5678")
-            call_url = mock_parse.call_args[0][0]
-            assert "1234.5678" in call_url
-
-            # Test with version suffix
-            await fetch_arxiv_paper("1234.5678v2")
-            call_url = mock_parse.call_args[0][0]
-            assert "1234.5678" in call_url
-            assert "v2" not in call_url
+        ids = [httpx.URL(url).params["id_list"] for url in arxiv_api.requests]
+        assert ids == ["1234.5678", "1234.5678"]
 
 
 # ---------------------------------------------------------------------------
@@ -470,41 +341,19 @@ class TestArxivParseEntry:
         assert paper["arxiv_id"] == "math/0607733"
         assert paper["pdf_url"] == "https://arxiv.org/pdf/math/0607733"
 
-    def test_search_metadata_includes_link_fields(self, arxiv_source_ctx):
-        """search() writes abs_url/pdf_url/src_url into SearchSourceResult metadata."""
-        from unittest.mock import patch, MagicMock
+    async def test_search_metadata_includes_link_fields(self, arxiv_api, arxiv_source_ctx):
+        """search writes abs_url/pdf_url/src_url into SearchSourceResult metadata."""
         from agentic_cli.tools.arxiv_tools import search_arxiv
 
-        with patch("agentic_cli.tools.arxiv_source.time") as mock_time, \
-             patch("feedparser.parse") as mock_parse:
-            mock_time.time.return_value = 100.0
-            mock_time.sleep = MagicMock()
-            mock_parse.return_value = MagicMock(
-                status=200,
-                bozo=False,
-                entries=[
-                    {
-                        "title": "Attention",
-                        "summary": "abs",
-                        "authors": [{"name": "Vaswani"}],
-                        "published": "2017-06-12",
-                        "tags": [{"term": "cs.CL"}],
-                        "id": "http://arxiv.org/abs/1706.03762v5",
-                        "links": [
-                            {"rel": "alternate", "type": "text/html", "href": "http://arxiv.org/abs/1706.03762v5"},
-                            {"rel": "related", "type": "application/pdf", "href": "http://arxiv.org/pdf/1706.03762v5", "title": "pdf"},
-                        ],
-                    }
-                ],
-            )
+        arxiv_api.papers.append(Paper("1706.03762", title="Attention"))
 
-            result = search_arxiv("attention")
+        result = await search_arxiv("attention")
 
         assert result["success"] is True
         paper = result["papers"][0]
         assert paper["arxiv_id"] == "1706.03762"
-        assert paper["abs_url"] == "https://arxiv.org/abs/1706.03762v5"
-        assert paper["pdf_url"] == "https://arxiv.org/pdf/1706.03762v5"
+        assert paper["abs_url"] == "https://arxiv.org/abs/1706.03762v1"
+        assert paper["pdf_url"] == "https://arxiv.org/pdf/1706.03762v1"
         assert paper["src_url"] == "https://arxiv.org/e-print/1706.03762"
 
 
@@ -514,190 +363,79 @@ class TestArxivParseEntry:
 
 
 class TestArxivEntryCache:
-    """Tests for ArxivSearchSource._entry_cache populated via search()."""
+    """Tests for ArxivSearchSource._entry_cache populated via search."""
 
-    def _make_search_feed(self, arxiv_id: str = "1706.03762"):
-        from unittest.mock import MagicMock
-        return MagicMock(
-            status=200,
-            bozo=False,
-            entries=[
-                {
-                    "title": "Attention",
-                    "summary": "abs",
-                    "authors": [{"name": "Vaswani"}],
-                    "published": "2017-06-12",
-                    "tags": [{"term": "cs.CL"}],
-                    "id": f"http://arxiv.org/abs/{arxiv_id}v5",
-                    "links": [
-                        {"rel": "alternate", "type": "text/html", "href": f"http://arxiv.org/abs/{arxiv_id}v5"},
-                        {"rel": "related", "type": "application/pdf", "href": f"http://arxiv.org/pdf/{arxiv_id}v5", "title": "pdf"},
-                    ],
-                }
-            ],
-        )
+    @pytest.fixture
+    def api(self, arxiv_api) -> ArxivAPI:
+        arxiv_api.papers[:] = [Paper("1706.03762", title="Attention"), Paper("2301.07041")]
+        return arxiv_api
 
-    @pytest.mark.asyncio
-    async def test_fetch_by_id_hits_entry_cache_after_search(self):
-        """search() populates entry cache; subsequent fetch_by_id is free."""
-        from agentic_cli.tools.arxiv_source import ArxivSearchSource
+    async def test_fetch_by_id_hits_entry_cache_after_search(self, api):
+        """A search fills the entry cache; a later fetch_by_id is free."""
+        source = _source(api)
+        api.papers[:] = api.papers[:1]
 
-        source = ArxivSearchSource()
+        await source.asearch("attention")
+        paper = await source.fetch_by_id("1706.03762")
 
-        with patch("feedparser.parse") as mock_parse, \
-             patch("agentic_cli.tools.arxiv_source.time") as mock_time:
-            mock_time.time.return_value = 100.0
-            mock_time.sleep = MagicMock()
-            mock_parse.return_value = self._make_search_feed("1706.03762")
-
-            source.search("attention")
-            assert mock_parse.call_count == 1
-
-            paper = await source.fetch_by_id("1706.03762")
-
-        # Second feedparser call did not happen — cache hit
-        assert mock_parse.call_count == 1
+        assert len(api.requests) == 1  # the search's
         assert paper["arxiv_id"] == "1706.03762"
-        assert paper["pdf_url"] == "https://arxiv.org/pdf/1706.03762v5"
+        assert paper["pdf_url"] == "https://arxiv.org/pdf/1706.03762v1"
 
-    @pytest.mark.asyncio
-    async def test_fetch_by_id_normalizes_version_for_cache_lookup(self):
-        """fetch_by_id('Xv2') hits cache populated by search returning X."""
-        from agentic_cli.tools.arxiv_source import ArxivSearchSource
+    async def test_fetch_by_id_normalizes_version_for_cache_lookup(self, api):
+        """fetch_by_id('Xv3') hits the cache a search returning X filled."""
+        source = _source(api)
 
-        source = ArxivSearchSource()
+        await source.asearch("attention")
+        paper = await source.fetch_by_id("1706.03762v3")
 
-        with patch("feedparser.parse") as mock_parse, \
-             patch("agentic_cli.tools.arxiv_source.time") as mock_time:
-            mock_time.time.return_value = 100.0
-            mock_time.sleep = MagicMock()
-            mock_parse.return_value = self._make_search_feed("1706.03762")
-
-            source.search("attention")
-
-            # User asks for a different version — should still cache hit
-            paper = await source.fetch_by_id("1706.03762v3")
-
-        assert mock_parse.call_count == 1
+        assert len(api.requests) == 1
         assert paper["arxiv_id"] == "1706.03762"
 
-    @pytest.mark.asyncio
-    async def test_fetch_by_id_misses_when_id_not_seen(self):
-        """fetch_by_id for an id that no search returned still hits the API."""
-        from agentic_cli.tools.arxiv_source import ArxivSearchSource
+    async def test_fetch_by_id_misses_when_id_not_seen(self, api):
+        """fetch_by_id for an id no search returned still asks arXiv."""
+        source = _source(api)
+        api.papers[:] = api.papers[:1]
+        await source.asearch("attention")
 
-        source = ArxivSearchSource()
+        api.papers.append(Paper("2301.07041", title="Other"))
+        paper = await source.fetch_by_id("2301.07041")
 
-        with patch("feedparser.parse") as mock_parse, \
-             patch("agentic_cli.tools.arxiv_source.time") as mock_time, \
-             patch("agentic_cli.tools.arxiv_source.asyncio.sleep", new=AsyncMock()):
-            mock_time.time.return_value = 100.0
-            mock_time.sleep = MagicMock()
-
-            # First populate cache with one paper via search
-            mock_parse.return_value = self._make_search_feed("1706.03762")
-            source.search("attention")
-            assert mock_parse.call_count == 1
-
-            # Now fetch a different id — feed mock is reused but the call should fire
-            mock_parse.return_value = MagicMock(
-                entries=[
-                    {
-                        "title": "Other",
-                        "summary": "x",
-                        "authors": [],
-                        "published": "",
-                        "updated": "",
-                        "tags": [],
-                        "id": "http://arxiv.org/abs/2301.07041v1",
-                        "links": [],
-                        "arxiv_primary_category": {"term": ""},
-                    }
-                ]
-            )
-            paper = await source.fetch_by_id("2301.07041")
-
-        assert mock_parse.call_count == 2  # search + fetch_by_id miss
+        assert len(api.requests) == 2  # the search, then the miss
         assert paper["arxiv_id"] == "2301.07041"
 
-    @pytest.mark.asyncio
-    async def test_fetch_by_id_caches_its_own_result_on_miss(self):
+    async def test_fetch_by_id_caches_its_own_result_on_miss(self, api):
         """A second fetch_by_id for the same id is a cache hit."""
-        from agentic_cli.tools.arxiv_source import ArxivSearchSource
+        source = _source(api)
 
-        source = ArxivSearchSource()
+        await source.fetch_by_id("2301.07041")
+        await source.fetch_by_id("2301.07041")
 
-        with patch("feedparser.parse") as mock_parse, \
-             patch("agentic_cli.tools.arxiv_source.time") as mock_time, \
-             patch("agentic_cli.tools.arxiv_source.asyncio.sleep", new=AsyncMock()):
-            mock_time.time.return_value = 100.0
-            mock_time.sleep = MagicMock()
-            mock_parse.return_value = MagicMock(
-                entries=[
-                    {
-                        "title": "Test",
-                        "summary": "",
-                        "authors": [],
-                        "published": "",
-                        "updated": "",
-                        "tags": [],
-                        "id": "http://arxiv.org/abs/1234.5678v1",
-                        "links": [],
-                        "arxiv_primary_category": {"term": ""},
-                    }
-                ]
-            )
+        assert len(api.requests) == 1
 
-            await source.fetch_by_id("1234.5678")
-            assert mock_parse.call_count == 1
-
-            await source.fetch_by_id("1234.5678")
-
-        assert mock_parse.call_count == 1  # second call was cached
-
-    def test_clear_cache_clears_entry_cache(self):
+    def test_clear_cache_clears_entry_cache(self, api):
         """clear_cache() empties both query and entry caches."""
-        from agentic_cli.tools.arxiv_source import ArxivSearchSource
+        source = _source(api)
+        source.search("attention")
+        assert "1706.03762" in source._entry_cache
+        assert len(source._cache) == 1
 
-        source = ArxivSearchSource()
+        source.clear_cache()
 
-        with patch("feedparser.parse") as mock_parse, \
-             patch("agentic_cli.tools.arxiv_source.time") as mock_time:
-            mock_time.time.return_value = 100.0
-            mock_time.sleep = MagicMock()
-            mock_parse.return_value = self._make_search_feed("1706.03762")
+        assert source._entry_cache == {}
+        assert source._cache == {}
 
-            source.search("attention")
-            assert "1706.03762" in source._entry_cache
-            assert len(source._cache) == 1
-
-            source.clear_cache()
-            assert source._entry_cache == {}
-            assert source._cache == {}
-
-    @pytest.mark.asyncio
-    async def test_entry_cache_respects_ttl(self):
+    async def test_entry_cache_respects_ttl(self, api):
         """Entry cache entries expire after cache_ttl_seconds."""
         from agentic_cli.tools.arxiv_source import ArxivSearchSource
 
-        source = ArxivSearchSource(cache_ttl_seconds=60)
+        source = ArxivSearchSource(cache_ttl_seconds=60, transport=api.transport)
+        await source.asearch("attention")
+        source._entry_cache["1706.03762"].timestamp -= 120  # past the TTL
 
-        with patch("feedparser.parse") as mock_parse, \
-             patch("agentic_cli.tools.arxiv_source.time") as mock_time, \
-             patch("agentic_cli.tools.arxiv_source.asyncio.sleep", new=AsyncMock()):
-            # Initial population at t=100
-            mock_time.time.return_value = 100.0
-            mock_time.sleep = MagicMock()
-            mock_parse.return_value = self._make_search_feed("1706.03762")
-            source.search("attention")
-            assert mock_parse.call_count == 1
+        await source.fetch_by_id("1706.03762")
 
-            # Jump past TTL
-            mock_time.time.return_value = 200.0
-            await source.fetch_by_id("1706.03762")
-
-        # Cache expired, second call hit the API again
-        assert mock_parse.call_count == 2
+        assert len(api.requests) == 2  # expired: asked again
 
 
 # ---------------------------------------------------------------------------
@@ -755,27 +493,8 @@ class TestArxivDownloadPdf:
             with pytest.raises(RuntimeError, match="blocked or failed"):
                 await source.download_pdf("https://arxiv.org/pdf/1706.03762")
 
-    @pytest.mark.asyncio
-    async def test_waits_for_rate_limit(self):
-        """download_pdf calls _wait_for_rate_limit_async before fetching."""
-        from agentic_cli.tools.arxiv_source import ArxivSearchSource
-        from agentic_cli.tools.webfetch.fetcher import FetchResult
-
-        source = ArxivSearchSource()
-        rate_wait = AsyncMock()
-        fake_fetcher = MagicMock()
-        fake_fetcher.fetch = AsyncMock(
-            return_value=FetchResult(success=True, content=b"x")
-        )
-
-        with patch.object(source, "_wait_for_rate_limit_async", rate_wait), \
-             patch(
-                 "agentic_cli.tools.webfetch_tool.get_or_create_fetcher",
-                 return_value=fake_fetcher,
-             ):
-            await source.download_pdf("https://arxiv.org/pdf/1706.03762")
-
-        rate_wait.assert_awaited_once()
+    # That a download waits its turn with every other arXiv request:
+    # tests/tools/test_arxiv_rate_limit.py::test_a_pdf_download_waits_its_turn_too
 
 
 # ---------------------------------------------------------------------------
@@ -784,8 +503,9 @@ class TestArxivDownloadPdf:
 
 
 @pytest.fixture
-def ingest_ctx(tmp_path):
-    """Publish ArxivSearchSource and a mock-backed knowledge base into the registry."""
+def ingest_ctx(tmp_path, arxiv_api):
+    """Publish ArxivSearchSource (on ``arxiv_api``) and a mock-backed knowledge
+    base into the registry."""
     from agentic_cli.memory.kb import KnowledgeBase, KnowledgeBaseManager
     from agentic_cli.tools.arxiv_source import ArxivSearchSource
     from agentic_cli.workflow.service_registry import (
@@ -794,7 +514,7 @@ def ingest_ctx(tmp_path):
         set_service_registry,
     )
 
-    source = ArxivSearchSource()
+    source = ArxivSearchSource(transport=arxiv_api.transport)
     kb = KnowledgeBaseManager(tmp_path / "kb", use_mock=True)
     token = set_service_registry({ARXIV_SOURCE: source, KNOWLEDGE_BASE: KnowledgeBase({"project": kb})})
     try:

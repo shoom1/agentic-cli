@@ -1422,6 +1422,23 @@ step; each entry says what to use instead.
 
 ### Fixed
 
+- **arXiv requests are paced as arXiv asks, and a rate limit is waited out**
+  (breaking for direct callers). Parallel `search_arxiv` calls all failed
+  with "ArXiv rate limited (HTTP 429)": a search and a metadata or PDF
+  request took two separate locks, the lock spaced out only the starts (so
+  several requests ran at once, where arXiv asks for one connection), and a
+  429 failed at once while the calls queued behind it went out into the same
+  refusal. Now every arXiv request waits its turn, one at a time and at least
+  3 s apart; a 429 or 503 is retried after its `Retry-After` (else 3, 6 and
+  12 s) while the others wait; once the retries run out, the next calls fail
+  at once for a minute, saying when to try again. Requests have a 30 s
+  timeout (feedparser fetched with none), each call reports its own error
+  (the shared `last_error` let one search report another's), and
+  `search_arxiv` is a coroutine, so on ADK, which runs a synchronous tool on
+  the event loop, a search no longer freezes the UI for seconds. Code that
+  called `search_arxiv` directly awaits it; `ArxivSearchSource` gains
+  `asearch` and `transport=`, keeps `search` as its synchronous form, and
+  loses `wait_for_rate_limit`.
 - **A memory edited without an embedding service is embedded again.** Where
   no service runs (no `kb` extra, say), `MemoryStore.update` clears an edited
   memory's vector, which was of its old text; when that was the only vector,

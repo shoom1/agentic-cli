@@ -470,7 +470,27 @@ class TestSearchSourceWithApiKey:
 
 
 class TestArxivSearchSource:
-    """Tests for ArxivSearchSource."""
+    """Tests for ArxivSearchSource's synchronous search, its query and its
+    cache. arXiv is faked (``arxiv_api``); how requests are paced is
+    tests/tools/test_arxiv_rate_limit.py."""
+
+    @pytest.fixture(autouse=True)
+    def no_waits(self, monkeypatch):
+        from agentic_cli.tools import arxiv_source
+
+        monkeypatch.setattr(ArxivSearchSource, "rate_limit", property(lambda self: 0.0))
+        monkeypatch.setattr(arxiv_source, "_RETRY_DELAYS", (0.0, 0.0, 0.0))
+
+    @staticmethod
+    def _source(api, **kwargs) -> ArxivSearchSource:
+        return ArxivSearchSource(transport=api.transport, **kwargs)
+
+    @staticmethod
+    def _sent(api) -> list:
+        """Each request's query parameters."""
+        import httpx
+
+        return [httpx.URL(url).params for url in api.requests]
 
     def test_properties(self):
         """Test source properties."""
@@ -478,253 +498,128 @@ class TestArxivSearchSource:
 
         assert source.name == "arxiv"
         assert source.description == "Search arXiv for academic papers"
-        assert source.rate_limit == 3.0
         assert source.requires_api_key is None
+
+    def test_rate_limit_is_arxiv_s_three_seconds(self, monkeypatch):
+        monkeypatch.undo()  # no_waits' shorter gap
+        assert ArxivSearchSource().rate_limit == 3.0
 
     def test_is_available(self):
         """Test arxiv is always available (no API key needed)."""
         source = ArxivSearchSource()
         assert source.is_available() is True
 
-    def test_search_without_feedparser(self):
-        """Test search returns empty when feedparser not installed."""
-        source = ArxivSearchSource()
+    def test_search_without_feedparser(self, arxiv_api):
+        """Without feedparser, a search returns [] and sends nothing."""
+        source = self._source(arxiv_api)
 
         with patch.dict("sys.modules", {"feedparser": None}):
-            # Force reimport to trigger ImportError path
-            import importlib
-            import agentic_cli.tools.arxiv_source as arxiv_source_module
-            importlib.reload(arxiv_source_module)
+            assert source.search("test") == []
 
-        # Even if feedparser exists, we can test the return type
-        # by checking it returns a list
-        assert isinstance(source.search("test"), list)
+        assert "feedparser" in source.last_error
+        assert arxiv_api.requests == []
 
-    @patch("feedparser.parse")
-    def test_search_with_results(self, mock_parse):
+    def test_search_with_results(self, arxiv_api):
         """Test search parses arxiv results."""
-        mock_parse.return_value = MagicMock(
-            entries=[
-                {
-                    "title": "Test Paper\nWith Newline",
-                    "link": "https://arxiv.org/abs/1234.5678",
-                    "summary": "Paper abstract text",
-                    "authors": [{"name": "Alice"}, {"name": "Bob"}],
-                    "published": "2024-01-15",
-                    "tags": [{"term": "cs.AI"}, {"term": "cs.LG"}],
-                    "id": "http://arxiv.org/abs/1234.5678v1",
-                }
-            ]
-        )
+        from tests.tools.arxiv_fakes import Paper
 
-        source = ArxivSearchSource()
-        results = source.search("machine learning", max_results=5)
+        arxiv_api.papers.append(Paper(
+            "1234.5678", title="Test Paper\nWith Newline", abstract="Paper abstract text",
+            authors=("Alice", "Bob"), categories=("cs.AI", "cs.LG"),
+        ))
+
+        results = self._source(arxiv_api).search("test")
 
         assert len(results) == 1
         assert results[0].title == "Test Paper With Newline"
-        assert results[0].url == "https://arxiv.org/abs/1234.5678"
-        assert results[0].source_name == "arxiv"
+        assert results[0].snippet == "Paper abstract text"
         assert results[0].metadata["authors"] == ["Alice", "Bob"]
         assert results[0].metadata["categories"] == ["cs.AI", "cs.LG"]
-        # arxiv_id is now normalized (version suffix stripped)
         assert results[0].metadata["arxiv_id"] == "1234.5678"
-        # Link fields are populated from the feed/synthesized
-        assert results[0].metadata["abs_url"] == "https://arxiv.org/abs/1234.5678"
-        assert results[0].metadata["pdf_url"] == "https://arxiv.org/pdf/1234.5678"
-        assert results[0].metadata["src_url"] == "https://arxiv.org/e-print/1234.5678"
 
-    @patch("feedparser.parse")
-    def test_search_with_categories(self, mock_parse):
-        """Test search with category filter."""
-        mock_parse.return_value = MagicMock(entries=[], bozo=False, status=200)
+    def test_search_with_categories(self, arxiv_api):
+        """Test search includes category filter."""
+        self._source(arxiv_api).search("test", categories=["cs.AI", "cs.LG"])
 
-        source = ArxivSearchSource()
-        source.search("test", categories=["cs.AI", "cs.LG"])
+        query = self._sent(arxiv_api)[0]["search_query"]
+        assert "cat:cs.AI" in query
+        assert "cat:cs.LG" in query
 
-        # Check the URL includes category filter (URL-encoded)
-        from urllib.parse import unquote
-        call_url = unquote(mock_parse.call_args[0][0])
-        assert "cat:cs.AI" in call_url
-        assert "cat:cs.LG" in call_url
+    def test_search_handles_parse_error(self, arxiv_api):
+        """Test search handles a feed that does not parse."""
+        arxiv_api.garble()
 
-    @patch("feedparser.parse")
-    def test_search_handles_parse_error(self, mock_parse):
-        """Test search handles parse errors gracefully."""
-        mock_parse.side_effect = Exception("Parse error")
+        assert self._source(arxiv_api).search("test") == []
 
-        source = ArxivSearchSource()
-        results = source.search("test")
+    # How searches are paced (one at a time, a gap between starts):
+    # tests/tools/test_arxiv_rate_limit.py.
 
-        assert results == []
+    def test_caching_returns_cached_results(self, arxiv_api):
+        """Test caching returns cached results on second call."""
+        source = self._source(arxiv_api)
 
-    @patch("feedparser.parse")
-    @patch("agentic_cli.tools.arxiv_source.time")
-    def test_rate_limiting_enforced(self, mock_time_module, mock_parse):
-        """Test rate limiting is enforced between requests."""
-        mock_parse.return_value = MagicMock(entries=[], bozo=False, status=200)
+        first = source.search("test query")
+        second = source.search("test query")
 
-        # First call: time()=1.0 for check, time()=1.0 to record
-        # Second call: time()=1.0 for check (elapsed=0, needs sleep), time()=1.0 to record
-        mock_time_module.time.return_value = 1.0
-        mock_time_module.sleep = MagicMock()
+        assert second == first
+        assert len(arxiv_api.requests) == 1
 
-        source = ArxivSearchSource()
-
-        # First request - should not sleep (no previous request, _last_request_time=0)
-        source.search("first query")
-        mock_time_module.sleep.assert_not_called()
-
-        # Second request immediately after - should sleep
-        # _last_request_time is now 1.0, current is 1.0, elapsed=0 < rate_limit
-        source.search("second query")
-        mock_time_module.sleep.assert_called_once()
-        # Should sleep for approximately rate_limit seconds
-        sleep_time = mock_time_module.sleep.call_args[0][0]
-        assert 0 < sleep_time <= source.rate_limit
-
-    @patch("feedparser.parse")
-    @patch("agentic_cli.tools.arxiv_source.time")
-    def test_rate_limiting_respects_elapsed_time(self, mock_time_module, mock_parse):
-        """Test rate limiting accounts for time already elapsed."""
-        mock_parse.return_value = MagicMock(entries=[], bozo=False, status=200)
-
-        # First call (3 time() calls): cache check, rate limit check, cache store
-        # Second call (3 time() calls): cache check, rate limit check (elapsed=1s), cache store
-        # Times: cache=1.0, rate=1.0, store=1.0, cache=2.0, rate=2.0, store=2.0
-        mock_time_module.time.side_effect = [1.0, 1.0, 1.0, 2.0, 2.0, 2.0]
-        mock_time_module.sleep = MagicMock()
-
-        source = ArxivSearchSource()
-        source.search("first query")
-        source.search("second query")  # Different query, not cached
-
-        # Should only sleep for remaining time (3.0 - 1.0 = 2.0 seconds)
-        mock_time_module.sleep.assert_called_once()
-        sleep_time = mock_time_module.sleep.call_args[0][0]
-        assert 1.9 <= sleep_time <= 2.1  # Allow small tolerance
-
-    @patch("feedparser.parse")
-    @patch("agentic_cli.tools.arxiv_source.time")
-    def test_caching_returns_cached_results(self, mock_time_module, mock_parse):
-        """Test that repeated queries return cached results without API call."""
-        mock_time_module.time.return_value = 100.0
-        mock_time_module.sleep = MagicMock()
-
-        mock_parse.return_value = MagicMock(
-            entries=[{"title": "Paper 1", "link": "http://arxiv.org/1", "summary": "Abstract"}]
-        )
-
-        source = ArxivSearchSource()
-
-        # First search - calls API
-        results1 = source.search("machine learning")
-        assert mock_parse.call_count == 1
-
-        # Second search with same query - should use cache
-        results2 = source.search("machine learning")
-        assert mock_parse.call_count == 1  # Still 1, no new API call
-
-        # Results should be the same
-        assert len(results1) == len(results2)
-        assert results1[0].title == results2[0].title
-
-    @patch("feedparser.parse")
-    @patch("agentic_cli.tools.arxiv_source.time")
-    def test_cache_expires_after_ttl(self, mock_time_module, mock_parse):
-        """Test that cache expires after TTL."""
-        # First call at t=100
-        mock_time_module.time.return_value = 100.0
-        mock_time_module.sleep = MagicMock()
-
-        mock_parse.return_value = MagicMock(
-            entries=[{"title": "Paper 1", "link": "http://arxiv.org/1", "summary": "Abstract"}]
-        )
-
-        source = ArxivSearchSource(cache_ttl_seconds=60)
-
-        # First search
+    def test_cache_expires_after_ttl(self, arxiv_api):
+        """Test cache expires after TTL."""
+        source = self._source(arxiv_api, cache_ttl_seconds=60)
         source.search("test query")
-        assert mock_parse.call_count == 1
+        for cached in source._cache.values():
+            cached.timestamp -= 120  # past the TTL
 
-        # Time advances past TTL (100 + 61 = 161)
-        mock_time_module.time.return_value = 161.0
-
-        # Should call API again since cache expired
         source.search("test query")
-        assert mock_parse.call_count == 2
 
-    @patch("feedparser.parse")
-    @patch("agentic_cli.tools.arxiv_source.time")
-    def test_different_queries_not_cached(self, mock_time_module, mock_parse):
-        """Test that different queries are not served from cache."""
-        mock_time_module.time.return_value = 100.0
-        mock_time_module.sleep = MagicMock()
+        assert len(arxiv_api.requests) == 2
 
-        mock_parse.return_value = MagicMock(entries=[], bozo=False, status=200)
+    def test_different_queries_not_cached(self, arxiv_api):
+        """Test different queries are not served from each other's cache."""
+        source = self._source(arxiv_api)
 
-        source = ArxivSearchSource()
+        source.search("query1")
+        source.search("query2")
 
-        source.search("query one")
-        source.search("query two")
-
-        # Both should hit API
-        assert mock_parse.call_count == 2
+        assert len(arxiv_api.requests) == 2
 
     def test_cache_ttl_default(self):
-        """Test default cache TTL is set."""
+        """Test default cache TTL is 15 minutes."""
         source = ArxivSearchSource()
-        assert source.cache_ttl_seconds == 900  # 15 minutes default
+        assert source.cache_ttl_seconds == 900
 
     def test_cache_ttl_custom(self):
-        """Test custom cache TTL can be set."""
+        """Test custom cache TTL."""
         source = ArxivSearchSource(cache_ttl_seconds=300)
         assert source.cache_ttl_seconds == 300
 
     def test_cache_max_size_default(self):
-        """Test default max cache size is set."""
+        """Test default max cache size."""
         source = ArxivSearchSource()
         assert source.max_cache_size == 100
 
     def test_cache_max_size_custom(self):
-        """Test custom max cache size can be set."""
+        """Test custom max cache size."""
         source = ArxivSearchSource(max_cache_size=50)
         assert source.max_cache_size == 50
 
-    @patch("feedparser.parse")
-    @patch("agentic_cli.tools.arxiv_source.time")
-    def test_cache_evicts_oldest_when_full(self, mock_time_module, mock_parse):
+    def test_cache_evicts_oldest_when_full(self, arxiv_api):
         """Test that oldest cache entries are evicted when max size is reached."""
-        mock_time_module.sleep = MagicMock()
-        # Return incrementing time for proper ordering
-        time_counter = [0]
-        def get_time():
-            time_counter[0] += 1
-            return float(time_counter[0])
-        mock_time_module.time.side_effect = get_time
+        source = self._source(arxiv_api, max_cache_size=3)
 
-        mock_parse.return_value = MagicMock(entries=[], bozo=False, status=200)
-
-        source = ArxivSearchSource(max_cache_size=3)
-
-        # Fill cache with 3 queries
-        source.search("query1")
-        source.search("query2")
-        source.search("query3")
+        for query in ("query1", "query2", "query3"):
+            source.search(query)
         assert len(source._cache) == 3
-        assert mock_parse.call_count == 3
 
-        # Add 4th query - should evict oldest (query1)
-        source.search("query4")
+        source.search("query4")  # evicts query1, the oldest
         assert len(source._cache) == 3
-        assert mock_parse.call_count == 4
+        assert len(arxiv_api.requests) == 4
 
-        # query1 should be evicted, so searching again should hit API
-        source.search("query1")
-        assert mock_parse.call_count == 5
-
-        # query4 should still be cached (most recent before query1 was re-added)
-        source.search("query4")
-        assert mock_parse.call_count == 5  # No new API call - still cached
+        source.search("query1")  # evicted: asked again
+        assert len(arxiv_api.requests) == 5
+        source.search("query4")  # still cached
+        assert len(arxiv_api.requests) == 5
 
     def test_clear_cache(self):
         """Test cache can be manually cleared."""
@@ -736,67 +631,35 @@ class TestArxivSearchSource:
         source.clear_cache()
         assert len(source._cache) == 0
 
-    @patch("feedparser.parse")
-    @patch("agentic_cli.tools.arxiv_source.time")
-    def test_search_with_sort_by(self, mock_time_module, mock_parse):
+    def test_search_with_sort_by(self, arxiv_api):
         """Test search with sort_by parameter."""
-        mock_time_module.time.return_value = 100.0
-        mock_time_module.sleep = MagicMock()
-        mock_parse.return_value = MagicMock(entries=[], bozo=False, status=200)
+        self._source(arxiv_api).search("test", sort_by="lastUpdatedDate")
 
-        source = ArxivSearchSource()
-        source.search("test", sort_by="lastUpdatedDate")
+        assert self._sent(arxiv_api)[0]["sortBy"] == "lastUpdatedDate"
 
-        call_url = mock_parse.call_args[0][0]
-        assert "sortBy=lastUpdatedDate" in call_url
-
-    @patch("feedparser.parse")
-    @patch("agentic_cli.tools.arxiv_source.time")
-    def test_search_with_sort_order(self, mock_time_module, mock_parse):
+    def test_search_with_sort_order(self, arxiv_api):
         """Test search with sort_order parameter."""
-        mock_time_module.time.return_value = 100.0
-        mock_time_module.sleep = MagicMock()
-        mock_parse.return_value = MagicMock(entries=[], bozo=False, status=200)
+        self._source(arxiv_api).search("test", sort_by="submittedDate", sort_order="ascending")
 
-        source = ArxivSearchSource()
-        source.search("test", sort_by="submittedDate", sort_order="ascending")
+        sent = self._sent(arxiv_api)[0]
+        assert (sent["sortBy"], sent["sortOrder"]) == ("submittedDate", "ascending")
 
-        call_url = mock_parse.call_args[0][0]
-        assert "sortBy=submittedDate" in call_url
-        assert "sortOrder=ascending" in call_url
-
-    @patch("feedparser.parse")
-    @patch("agentic_cli.tools.arxiv_source.time")
-    def test_search_with_date_range(self, mock_time_module, mock_parse):
+    def test_search_with_date_range(self, arxiv_api):
         """Test search with date range filter."""
-        mock_time_module.time.return_value = 100.0
-        mock_time_module.sleep = MagicMock()
-        mock_parse.return_value = MagicMock(entries=[], bozo=False, status=200)
+        self._source(arxiv_api).search("test", date_from="2024-01-01", date_to="2024-12-31")
 
-        source = ArxivSearchSource()
-        source.search("test", date_from="2024-01-01", date_to="2024-12-31")
-
-        call_url = mock_parse.call_args[0][0]
         # ArXiv uses submittedDate:[YYYYMMDD TO YYYYMMDD] format
-        assert "submittedDate" in call_url
-        assert "20240101" in call_url
-        assert "20241231" in call_url
+        assert "submittedDate:[20240101 TO 20241231]" in self._sent(arxiv_api)[0]["search_query"]
 
-    @patch("feedparser.parse")
-    @patch("agentic_cli.tools.arxiv_source.time")
-    def test_search_sort_and_date_in_cache_key(self, mock_time_module, mock_parse):
+    def test_search_sort_and_date_in_cache_key(self, arxiv_api):
         """Test that sort and date params are included in cache key."""
-        mock_time_module.time.return_value = 100.0
-        mock_time_module.sleep = MagicMock()
-        mock_parse.return_value = MagicMock(entries=[], bozo=False, status=200)
-
-        source = ArxivSearchSource()
+        source = self._source(arxiv_api)
 
         # Same query with different sort should hit API twice
         source.search("test", sort_by="relevance")
         source.search("test", sort_by="lastUpdatedDate")
 
-        assert mock_parse.call_count == 2
+        assert len(arxiv_api.requests) == 2
 
     def test_sort_by_default(self):
         """Test sort_by defaults to relevance."""
@@ -805,82 +668,29 @@ class TestArxivSearchSource:
         cache_key = source._make_cache_key("test", 10, None, "relevance", "descending", None, None)
         assert "relevance" in cache_key
 
-    @patch("feedparser.parse")
-    @patch("agentic_cli.tools.arxiv_source.time")
-    def test_http_403_returns_empty_and_not_cached(self, mock_time_module, mock_parse):
-        """Test that HTTP 403 (rate limited) returns empty and is NOT cached."""
-        mock_time_module.time.return_value = 100.0
-        mock_time_module.sleep = MagicMock()
+    @pytest.mark.parametrize("status", [403, 429])
+    def test_a_refusal_returns_empty_and_is_not_cached(self, arxiv_api, status):
+        """A refusal (403, or 429 after its retries) returns empty, NOT cached."""
+        arxiv_api.refuse(status, times=4)
+        source = self._source(arxiv_api)
 
-        mock_feed = MagicMock()
-        mock_feed.status = 403
-        mock_feed.entries = []
-        mock_feed.bozo = False
-        mock_parse.return_value = mock_feed
+        assert source.search("test query") == []
+        assert len(source._cache) == 0
 
-        source = ArxivSearchSource()
-        results = source.search("test query")
+    def test_bozo_feed_error_returns_empty_and_not_cached(self, arxiv_api):
+        """A feed that does not parse returns empty and is NOT cached."""
+        arxiv_api.garble()
+        source = self._source(arxiv_api)
 
-        assert results == []
-        assert len(source._cache) == 0  # Should NOT be cached
+        assert source.search("test query") == []
+        assert len(source._cache) == 0
 
-    @patch("feedparser.parse")
-    @patch("agentic_cli.tools.arxiv_source.time")
-    def test_http_429_returns_empty_and_not_cached(self, mock_time_module, mock_parse):
-        """Test that HTTP 429 (too many requests) returns empty and is NOT cached."""
-        mock_time_module.time.return_value = 100.0
-        mock_time_module.sleep = MagicMock()
+    def test_successful_empty_results_are_cached(self, arxiv_api):
+        """Legitimate empty results (HTTP 200, a feed) ARE cached."""
+        source = self._source(arxiv_api)
 
-        mock_feed = MagicMock()
-        mock_feed.status = 429
-        mock_feed.entries = []
-        mock_feed.bozo = False
-        mock_parse.return_value = mock_feed
-
-        source = ArxivSearchSource()
-        results = source.search("test query")
-
-        assert results == []
-        assert len(source._cache) == 0  # Should NOT be cached
-
-    @patch("feedparser.parse")
-    @patch("agentic_cli.tools.arxiv_source.time")
-    def test_bozo_feed_error_returns_empty_and_not_cached(self, mock_time_module, mock_parse):
-        """Test that bozo feed errors with no entries return empty and are NOT cached."""
-        mock_time_module.time.return_value = 100.0
-        mock_time_module.sleep = MagicMock()
-
-        mock_feed = MagicMock()
-        mock_feed.status = 200
-        mock_feed.bozo = True
-        mock_feed.bozo_exception = Exception("XML parsing error")
-        mock_feed.entries = []
-        mock_parse.return_value = mock_feed
-
-        source = ArxivSearchSource()
-        results = source.search("test query")
-
-        assert results == []
-        assert len(source._cache) == 0  # Should NOT be cached
-
-    @patch("feedparser.parse")
-    @patch("agentic_cli.tools.arxiv_source.time")
-    def test_successful_empty_results_are_cached(self, mock_time_module, mock_parse):
-        """Test that legitimate empty results (HTTP 200, no bozo) ARE cached."""
-        mock_time_module.time.return_value = 100.0
-        mock_time_module.sleep = MagicMock()
-
-        mock_feed = MagicMock()
-        mock_feed.status = 200
-        mock_feed.bozo = False
-        mock_feed.entries = []
-        mock_parse.return_value = mock_feed
-
-        source = ArxivSearchSource()
-        results = source.search("test query")
-
-        assert results == []
-        assert len(source._cache) == 1  # SHOULD be cached (legitimate empty result)
+        assert source.search("test query") == []
+        assert len(source._cache) == 1
 
 
 # ============================================================================

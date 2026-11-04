@@ -107,8 +107,7 @@ class TestArxivPdfDownloadIsPinned:
         result = MagicMock(success=True, content=b"%PDF-1.4", error=None)
         fetcher.fetch = AsyncMock(return_value=result)
         monkeypatch.setattr(webfetch_tool, "get_or_create_fetcher", lambda: fetcher)
-        src = arxiv_source.ArxivSearchSource()
-        monkeypatch.setattr(src, "_wait_for_rate_limit_async", AsyncMock())
+        src = arxiv_source.ArxivSearchSource()  # its first request waits for nothing
         return src, fetcher
 
     @pytest.mark.parametrize(

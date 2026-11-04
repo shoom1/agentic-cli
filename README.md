@@ -1427,11 +1427,13 @@ Search and fetch academic papers:
 ```python
 from agentic_cli.tools import search_arxiv, fetch_arxiv_paper
 
-results = search_arxiv("transformer attention", max_results=10, categories=["cs.CL"])
-paper = fetch_arxiv_paper("1706.03762")  # "Attention Is All You Need"
+results = await search_arxiv("transformer attention", max_results=10, categories=["cs.CL"])
+paper = await fetch_arxiv_paper("1706.03762")  # "Attention Is All You Need"
 ```
 
 The `ArxivSearchSource` (in `tools/arxiv_source.py`) is cached via the service registry and reused across tools. To pull a paper into the KB, use `ingest_arxiv_paper(arxiv_id)` — it composes the arxiv source with the knowledge base.
+
+arXiv asks for one request every three seconds, on one connection at a time, so the source sends its requests (searches, metadata, PDFs) one at a time, each at least 3 s after the last, with a 30 s timeout. A request arXiv refuses for going too fast (HTTP 429 or 503) is retried after the wait arXiv asks for (`Retry-After`), else after 3, 6 and 12 s, and the calls queued behind it wait too. When the retries run out, or arXiv asks for more than a minute, the call fails and, for that long (at least a minute), so does any other at once, saying when to try again. A search is a coroutine (`await source.asearch(...)`); `source.search(...)` is its synchronous form, for code outside an event loop.
 
 #### File Operations
 
