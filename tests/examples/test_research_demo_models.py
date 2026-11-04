@@ -1,12 +1,16 @@
-"""The research demo ships its model list and the OpenRouter provider.
+"""The research demo ships its model list; any other provider is the user's.
 
 What an app built on agentic-cli does to offer a short list of models: it
-overrides the defaults of ``models`` and ``model_providers`` in its settings
-class. These tests pin the demo's list, that its settings class loads without
-a warning, and that the list offers exactly the entries whose providers have
-a key. Every key is fake, set in the environment (or written into the temp
-home's ``.research_demo/.env``); none is read from the developer's files, and
-no catalog is loaded, so nothing reaches a provider.
+overrides the default of ``models`` in its settings class. The demo's list
+holds Google's and Anthropic's models, and the demo defines no provider:
+OpenRouter, or an OpenAI-compatible service, is defined in the user's
+``~/.research_demo/settings.json``, as the demo's docstring shows. These tests
+pin the demo's list, that its settings class loads without a warning, that
+the list offers exactly the entries whose providers have a key, and that the
+docstring's user file adds OpenRouter. Every key is fake, set in the
+environment (or written into the temp home's ``.research_demo/.env``); none
+is read from the developer's files, and no catalog is loaded, so nothing
+reaches a provider.
 """
 
 from __future__ import annotations
@@ -14,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 import runpy
+import textwrap
 import warnings
 from pathlib import Path
 
@@ -23,6 +28,7 @@ from agentic_cli import BaseSettings
 from agentic_cli.config import SettingsValidationError, validate_settings
 from agentic_cli.models import ModelEntry, ProviderKind, ProviderSpec, load_table, parse_entry_key
 from agentic_cli.workflow import model_services
+from examples.research_demo import settings as demo_settings
 from tests.demo_isolation import ResearchDemoSettings, isolated_env_file, make_isolated_settings
 
 SETTINGS_MODULE = (
@@ -36,6 +42,9 @@ DEMO_MODELS = [
     "anthropic:claude-haiku-5-5",
     "anthropic:claude-sonnet-5-5",
     "anthropic:claude-opus-5-5",
+]
+#: The OpenRouter models the docstring's user file adds, in its order.
+USER_MODELS = [
     "openrouter:qwen/qwen3.7-plus",
     "openrouter:deepseek/deepseek-v4-pro",
     "openrouter:moonshotai/kimi-k3",
@@ -48,7 +57,7 @@ BUILTIN_TIERS = {
     "anthropic:claude-sonnet-5-5": "default",
     "anthropic:claude-opus-5-5": "strong",
 }
-#: Each provider of the list and the variable its key is read from.
+#: Each provider of the lists and the variable its key is read from.
 KEY_VARIABLES = {
     "google": "GOOGLE_API_KEY",
     "anthropic": "ANTHROPIC_API_KEY",
@@ -78,6 +87,29 @@ def _settings(home: Path) -> ResearchDemoSettings:
     return make_isolated_settings(home=home, workspace=home / "ws")
 
 
+def _user_file(home: Path, data: dict) -> None:
+    """Write the temp home's ``~/.research_demo/settings.json``."""
+    path = home / ".research_demo" / "settings.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data))
+
+
+def _docstring_user_file() -> dict:
+    """The user file the demo's docstring shows: its one literal block that
+    defines ``model_providers``, as JSON."""
+    blocks = []
+    for chunk in demo_settings.__doc__.split("::\n")[1:]:
+        lines = []
+        for line in chunk.splitlines():
+            if line.strip() and not line.startswith("    "):
+                break
+            lines.append(line)
+        blocks.append(textwrap.dedent("\n".join(lines)))
+    shown = [block for block in blocks if '"model_providers"' in block]
+    assert len(shown) == 1, f"the docstring shows {len(shown)} user files defining providers"
+    return json.loads(shown[0])
+
+
 def _offered(settings: ResearchDemoSettings) -> list[str]:
     """The list the model pickers offer, before any listing: the demo's
     agents name no model, so it is the entries that can run."""
@@ -102,14 +134,10 @@ def test_the_settings_class_is_defined_and_loaded_without_a_warning(home):
     assert [str(warning.message) for warning in caught] == []
 
 
-def test_it_ships_the_openrouter_provider(home):
-    assert _settings(home).model_providers == {
-        "openrouter": ProviderSpec(
-            kind="openrouter",
-            base_url="https://openrouter.ai/api/v1",
-            api_key_env="OPENROUTER_API_KEY",
-        ),
-    }
+def test_it_defines_no_provider(home):
+    """OpenRouter, like any provider beyond the built-in ones, is the user's
+    to define."""
+    assert _settings(home).model_providers == {}
 
 
 def test_it_ships_its_list_of_models_each_described_by_its_listing_and_the_table(home):
@@ -122,10 +150,10 @@ def test_it_ships_its_list_of_models_each_described_by_its_listing_and_the_table
     }
 
 
-def test_the_fields_keep_the_framework_s_title_and_description():
-    for name in ("models", "model_providers"):
-        demo, base = ResearchDemoSettings.model_fields[name], BaseSettings.model_fields[name]
-        assert (demo.title, demo.description) == (base.title, base.description), name
+def test_the_models_field_keeps_the_framework_s_title_and_description():
+    demo, base = ResearchDemoSettings.model_fields["models"], BaseSettings.model_fields["models"]
+
+    assert (demo.title, demo.description) == (base.title, base.description)
 
 
 @pytest.mark.parametrize("key", list(BUILTIN_TIERS))
@@ -148,12 +176,7 @@ def test_another_source_adds_to_the_list_and_removes_nothing(home, monkeypatch):
 
 @pytest.mark.parametrize(
     "keyed",
-    [
-        ("google",),
-        ("anthropic", "openrouter"),
-        ("openrouter",),
-        ("google", "anthropic", "openrouter"),
-    ],
+    [("google",), ("anthropic",), ("google", "anthropic")],
     ids="+".join,
 )
 def test_the_list_is_the_entries_whose_providers_have_a_key(home, monkeypatch, keyed):
@@ -173,16 +196,45 @@ def test_the_list_is_the_entries_whose_providers_have_a_key(home, monkeypatch, k
     }
 
 
+def test_an_openrouter_key_alone_offers_nothing_until_the_user_defines_openrouter(
+    home, monkeypatch
+):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "fake-openrouter-key")
+    settings = _settings(home)
+
+    assert "openrouter" not in model_services.providers_from_settings(settings)
+    assert _offered(settings) == []
+
+
+def test_the_docstring_s_user_file_adds_openrouter_and_its_models(home, monkeypatch):
+    """The user's providers and models join the demo's, after its list."""
+    _user_file(home, _docstring_user_file())
+    monkeypatch.setenv("GOOGLE_API_KEY", "fake-google-key")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "fake-openrouter-key")
+    settings = _settings(home)
+
+    assert settings.model_providers == {
+        "openrouter": ProviderSpec(
+            kind="openrouter",
+            base_url="https://openrouter.ai/api/v1",
+            api_key_env="OPENROUTER_API_KEY",
+        ),
+    }
+    assert list(settings.models) == [*DEMO_MODELS, *USER_MODELS]
+    assert _offered(settings) == [
+        *(key for key in DEMO_MODELS if key.startswith("google:")),
+        *USER_MODELS,
+    ]
+
+
 def test_the_openrouter_key_is_read_from_the_demo_s_env_file(home):
-    """The demo's docstring says to put OPENROUTER_API_KEY in
-    ~/.research_demo/.env (here, the temp home's)."""
+    """The demo's docstring says to put the keys in ~/.research_demo/.env
+    (here, the temp home's)."""
+    _user_file(home, _docstring_user_file())
     env_file = isolated_env_file(home)
-    env_file.parent.mkdir(parents=True)
     env_file.write_text("OPENROUTER_API_KEY=fake-openrouter-key\n")
 
-    assert _offered(_settings(home)) == [
-        key for key in DEMO_MODELS if key.startswith("openrouter:")
-    ]
+    assert _offered(_settings(home)) == USER_MODELS
 
 
 def test_without_a_key_nothing_is_offered(home):
@@ -214,11 +266,11 @@ def test_with_an_openrouter_key_alone_the_default_model_is_chosen(home, monkeypa
     model has no tier, so the default model is set by hand."""
     from examples.research_demo.agents import AGENT_CONFIGS
 
+    user_file = _docstring_user_file()
+    _user_file(home, user_file)
     monkeypatch.setenv("OPENROUTER_API_KEY", "fake-openrouter-key")
     with pytest.raises(SettingsValidationError, match="No model for role 'default'"):
         validate_settings(_settings(home), AGENT_CONFIGS)
 
-    user_file = home / ".research_demo" / "settings.json"
-    user_file.parent.mkdir(parents=True, exist_ok=True)
-    user_file.write_text(json.dumps({"default_model": "openrouter:qwen/qwen3.7-plus"}))
+    _user_file(home, {**user_file, "default_model": "openrouter:qwen/qwen3.7-plus"})
     validate_settings(_settings(home), AGENT_CONFIGS)
