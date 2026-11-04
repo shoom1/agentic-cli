@@ -17,7 +17,8 @@ import shlex
 import shutil
 import sys
 import warnings
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, NoReturn, Self
@@ -47,7 +48,7 @@ from agentic_cli.cli.session_resume import (
 from agentic_cli.cli.usage_tracker import UsageTracker
 from agentic_cli.cli.workflow_controller import WorkflowController
 from agentic_cli.config import MODEL_ROLE_KEY_PREFIX, BaseSettings
-from agentic_cli.logging import Loggers, configure_logging
+from agentic_cli.logging import LOG_STREAM, Loggers, configure_logging, log_lines_to
 from agentic_cli.settings_persistence import (
     HAND_EDITED_KEYS,
     PROJECT_SETTABLE_KEYS,
@@ -239,13 +240,43 @@ class _AdkFailureFilter(logging.Filter):
         return False
 
 
+@contextmanager
+def _log_lines_above_prompt(session: ThinkingPromptSession) -> Iterator[None]:
+    """While the prompt runs, print each log line above it, as the session's
+    own output.
+
+    Written to stderr, a line landed wherever the cursor was (on the prompt
+    line), and the next redraw did not know it was there. A line may come
+    from any thread (a tool's worker thread, an executor's), so it is handed
+    to the event loop, which adds it to the session. Python's warnings go
+    the same way (``_install_adk_notice_hook``).
+    """
+    from rich.text import Text
+
+    loop = asyncio.get_running_loop()
+
+    def show(line: str) -> None:
+        try:
+            session.add_rich(Text.from_ansi(line))
+        except Exception:
+            # Not logged: the log line would come back here.
+            sys.stderr.write(line + "\n")
+
+    def sink(line: str) -> None:
+        loop.call_soon_threadsafe(show, line)
+
+    with log_lines_to(sink):
+        yield
+
+
 def _install_adk_notice_hook() -> None:
     """Log ADK's notices instead of printing them.
 
-    Python prints warnings, and the stdlib logging ``configure_logging`` sets
-    up, to stderr, which in the CLI lands over the terminal UI. The hook logs
-    ADK's experimental-feature notices at debug and passes every other warning
-    to the hook it replaced; a filter on ADK's runner logger does the same for
+    While the prompt runs, the log lines ``configure_logging`` sets up print
+    above it (``_log_lines_above_prompt``), and so do Python's warnings: this
+    hook writes them to the same stream. The hook logs ADK's
+    experimental-feature notices at debug and passes every other warning to
+    the hook it replaced; a filter on ADK's runner logger does the same for
     its context-cache advice, one on its context-cache logger for a cache it
     could not create or delete, one each on its compaction, node, runner
     and plugin-manager loggers for the traceback of a summary, a model call or
@@ -276,7 +307,7 @@ def _install_adk_notice_hook() -> None:
             feature = (notice["feature"] or notice["name"]).removeprefix("FeatureName.")
             logger.debug("adk_experimental_feature", feature=feature)
             return
-        previous(message, category, filename, lineno, file, line)
+        previous(message, category, filename, lineno, LOG_STREAM if file is None else file, line)
 
     showwarning._logs_adk_notices = True
     warnings.showwarning = showwarning
@@ -1816,7 +1847,8 @@ class BaseCLIApp:
                 opening = asyncio.create_task(self._open_on_startup())
                 try:
                     # Run the session - user sees prompt immediately!
-                    await self.session.run_async()
+                    with _log_lines_above_prompt(self.session):
+                        await self.session.run_async()
                 finally:
                     opening.cancel()
                     await asyncio.gather(opening, return_exceptions=True)

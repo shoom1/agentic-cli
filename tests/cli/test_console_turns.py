@@ -41,20 +41,26 @@ class Console:
     ``env`` is the child's whole environment, ``child_env(home)`` when
     omitted; a test that needs one more variable starts from ``child_env``.
     ``args`` are the app's command-line arguments; ``prompt`` False skips
-    waiting for the prompt, for a start that never draws one.
+    waiting for the prompt, for a start that never draws one. With
+    ``stderr``, the child's stderr goes to that file rather than the pty, so
+    what reaches the screen through the UI is told apart from what is
+    written straight to stderr, over it.
     """
 
     def __init__(
         self, cwd: Path, home: Path, env: dict[str, str] | None = None,
-        *, args: tuple[str, ...] = (), prompt: bool = True,
+        *, args: tuple[str, ...] = (), prompt: bool = True, stderr: Path | None = None,
     ) -> None:
         import pexpect
 
         self.cwd = cwd
         self._log = io.StringIO()
+        command = [sys.executable, str(CONSOLE_APP), *args]
+        if stderr is not None:
+            command = ["/bin/sh", "-c", 'exec "$@" 2>"$0"', str(stderr), *command]
         self.child = pexpect.spawn(
-            sys.executable,
-            [str(CONSOLE_APP), *args],
+            command[0],
+            command[1:],
             cwd=str(cwd),
             env=child_env(home) if env is None else env,
             encoding="utf-8",
@@ -335,6 +341,34 @@ def test_ctrl_c_during_compact_says_so_once_and_the_next_turn_runs(console):
     for never in ("Context summarized", "Could not summarize", "Nothing to summarize yet.",
                   "Handler error"):
         assert never not in transcript
+
+
+def test_log_lines_and_warnings_during_a_turn_print_through_the_ui(tmp_path):
+    """A warning logged mid-turn, from the loop or any thread, and a Python
+    warning, print above the prompt as the UI's own output does; written
+    straight to stderr they landed on the prompt line and broke the screen."""
+    home, cwd = tmp_path / "home", tmp_path / "cwd"
+    home.mkdir()
+    cwd.mkdir()
+    stderr = tmp_path / "stderr.txt"
+    console = Console(cwd, home, stderr=stderr)
+    try:
+        console.type_line("warn")
+        console.expect("Warned.")
+        console.exit()
+    finally:
+        console.child.close(force=True)
+
+    lines = (
+        "console_warning_on_the_loop",
+        "console_warning_in_a_thread",
+        "console_stdlib_warning",
+        "console_python_warning",
+    )
+    shown = console.transcript
+    assert [line for line in lines if line not in shown] == []
+    written = stderr.read_text()
+    assert [line for line in lines if line in written] == []
 
 
 def test_the_status_bar_shows_how_full_the_context_is(console):

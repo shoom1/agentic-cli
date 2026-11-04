@@ -18,6 +18,13 @@ What the workflow answers:
   appears in the working directory, and says ``Released.``; the test creates
   the file, so the turn ends on its own while the test watches the prompt.
 - ``which``: ``Session: <the turn's session id>``.
+- ``warn``: four lines the framework does not print itself, then
+  ``Warned.``: a structlog warning on the event loop
+  (``console_warning_on_the_loop``), one from ``asyncio.to_thread``
+  (``console_warning_in_a_thread``), a standard-library one from a thread
+  started without the loop's context, as an executor's is
+  (``console_stdlib_warning``), and a Python warning
+  (``console_python_warning``).
 - anything else: ``Echo: <message>``, at once, and the call's usage: a
   4,000-token prompt against a 16,000-token trigger (``ctx 4k/16k (25%)``).
 
@@ -39,9 +46,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import threading
+import warnings
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+
+import structlog
 
 import agentic_cli.cli.workflow_controller as workflow_controller
 from agentic_cli.cli import AppInfo, BaseCLIApp
@@ -170,6 +182,18 @@ class ScriptedManager:
             yield WorkflowEvent.text("Released.")
         elif message == "which":
             yield WorkflowEvent.text(f"Session: {session_id}")
+        elif message == "warn":
+            log = structlog.get_logger("console_app")
+            log.warning("console_warning_on_the_loop")
+            await asyncio.to_thread(log.warning, "console_warning_in_a_thread")
+            thread = threading.Thread(
+                target=logging.getLogger("console_app.library").warning,
+                args=("console_stdlib_warning",),
+            )
+            thread.start()
+            thread.join()
+            warnings.warn("console_python_warning", UserWarning, stacklevel=1)
+            yield WorkflowEvent.text("Warned.")
         else:
             self._said(session_id, "assistant", f"Echo: {message}")
             yield WorkflowEvent.text(f"Echo: {message}")

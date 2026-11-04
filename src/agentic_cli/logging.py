@@ -6,6 +6,9 @@ both human-readable console output and machine-readable JSON format.
 
 import logging
 import sys
+import threading
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 import structlog
@@ -13,6 +16,59 @@ from structlog.types import Processor
 
 if TYPE_CHECKING:
     from agentic_cli.config import BaseSettings
+
+
+class _LogStream:
+    """What structlog and the standard library's logging write to
+    (``configure_logging``): ``sys.stderr``, or, while ``log_lines_to`` has
+    set one, a sink, one complete line a call.
+
+    Writes come from any thread, so each thread's unfinished line is kept
+    apart until its newline. A sink that raises costs the line its place,
+    never the caller its call: the line goes to stderr.
+    """
+
+    def __init__(self) -> None:
+        self.sink: Callable[[str], None] | None = None
+        self._pending = threading.local()
+
+    def write(self, text: str) -> int:
+        sink = self.sink
+        if sink is None:
+            return sys.stderr.write(text)
+        *lines, rest = (getattr(self._pending, "text", "") + text).split("\n")
+        self._pending.text = rest
+        for line in lines:
+            try:
+                sink(line)
+            except Exception:
+                sys.stderr.write(line + "\n")
+        return len(text)
+
+    def flush(self) -> None:
+        if self.sink is None:
+            sys.stderr.flush()
+
+
+#: The stream every logger writes to. structlog keeps a logger's stream from
+#: its first use, so the stream stays the same and only its sink changes.
+LOG_STREAM = _LogStream()
+
+
+@contextmanager
+def log_lines_to(sink: Callable[[str], None]) -> Iterator[None]:
+    """Send each log line, structlog's and the standard library's, to
+    ``sink`` (one call a line, without its newline) rather than stderr.
+
+    A CLI sets one while its prompt runs, so that a line prints above the
+    prompt instead of over it (``cli/app.py::_log_lines_above_prompt``). The
+    previous sink is back on exit.
+    """
+    previous, LOG_STREAM.sink = LOG_STREAM.sink, sink
+    try:
+        yield
+    finally:
+        LOG_STREAM.sink = previous
 
 
 def configure_logging(settings: "BaseSettings | None" = None) -> None:
@@ -60,7 +116,7 @@ def configure_logging(settings: "BaseSettings | None" = None) -> None:
         processors=processors,
         wrapper_class=structlog.make_filtering_bound_logger(log_level),
         context_class=dict,
-        logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
+        logger_factory=structlog.PrintLoggerFactory(file=LOG_STREAM),
         cache_logger_on_first_use=True,
     )
 
@@ -68,7 +124,7 @@ def configure_logging(settings: "BaseSettings | None" = None) -> None:
     logging.basicConfig(
         format="%(message)s",
         level=log_level,
-        handlers=[logging.StreamHandler(sys.stderr)],
+        handlers=[logging.StreamHandler(LOG_STREAM)],
     )
 
     # Reduce noise from third-party libraries
