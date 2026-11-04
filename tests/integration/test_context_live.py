@@ -42,7 +42,7 @@ What only a real provider can answer:
   trigger is not followed by a second summary on the next call.
 
 Override the models with LIVE_CONTEXT_CLAUDE_MODEL (default
-``anthropic:claude-sonnet-4-5``), LIVE_CONTEXT_GEMINI_MODEL (default
+``anthropic:claude-sonnet-4-6``), LIVE_CONTEXT_GEMINI_MODEL (default
 ``google:gemini-2.5-flash``), LIVE_CONTEXT_OPENAI_MODEL (default
 ``openai:gpt-5-mini``), LIVE_CONTEXT_HAIKU_MODEL (default
 ``anthropic:claude-haiku-4-5``) and LIVE_CONTEXT_SMALL_MODEL (an ``openrouter:`` id;
@@ -85,13 +85,13 @@ from tests.integration.helpers import (  # noqa: E402
 
 pytestmark = pytest.mark.llm
 
-CLAUDE = os.getenv("LIVE_CONTEXT_CLAUDE_MODEL", "anthropic:claude-sonnet-4-5")
+CLAUDE = os.getenv("LIVE_CONTEXT_CLAUDE_MODEL", "anthropic:claude-sonnet-4-6")
 GEMINI = os.getenv("LIVE_CONTEXT_GEMINI_MODEL", "google:gemini-2.5-flash")
 OPENAI = os.getenv("LIVE_CONTEXT_OPENAI_MODEL", "openai:gpt-5-mini")
 HAIKU = os.getenv("LIVE_CONTEXT_HAIKU_MODEL", "anthropic:claude-haiku-4-5")
 OPUS = os.getenv("LIVE_CONTEXT_OPUS_MODEL", "anthropic:claude-opus-4-7")
 GEMINI_3 = os.getenv("LIVE_CONTEXT_GEMINI_3_MODEL", "google:gemini-3-flash-preview")
-OPENROUTER = os.getenv("LIVE_CONTEXT_OPENROUTER_MODEL", "openrouter:qwen/qwen3-235b-a22b")
+OPENROUTER = os.getenv("LIVE_CONTEXT_OPENROUTER_MODEL", "openrouter:qwen/qwen3.7-plus")
 
 _KEYS = {"google": "GOOGLE_API_KEY", "anthropic": "ANTHROPIC_API_KEY",
          "openai": "OPENAI_API_KEY", "openrouter": "OPENROUTER_API_KEY"}
@@ -689,8 +689,9 @@ async def test_a_job_resumed_after_its_call_was_summarized(listed, tmp_path, mon
 
 
 
-#: A system prompt long enough to be cached by every provider (Claude's
-#: minimum is 1,024 tokens, Gemini's explicit cache's a few thousand).
+#: A system prompt long enough to be cached by every provider: about 13,000
+#: tokens, where Claude's minimum is at most 4,096 and Gemini's explicit
+#: cache's a few thousand.
 _HANDBOOK = " ".join(
     f"Rule {n}: answer briefly, state facts plainly, and never invent a source."
     for n in range(1, 700)

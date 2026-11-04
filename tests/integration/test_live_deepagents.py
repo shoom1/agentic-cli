@@ -15,7 +15,7 @@ Marked ``llm``; each case skips without the keys it needs (the integration
 
 Override the models with LIVE_DEEPAGENTS_MODEL (delegation; default
 ``google:gemini-2.5-flash``), LIVE_DEEPAGENTS_CLAUDE_MODEL (default
-``anthropic:claude-sonnet-4-5``) and LIVE_DEEPAGENTS_GEMINI_MODEL (default
+``anthropic:claude-sonnet-4-6``) and LIVE_DEEPAGENTS_GEMINI_MODEL (default
 ``google:gemini-2.5-flash``).
 """
 
@@ -44,7 +44,7 @@ from tests.integration.helpers import (  # noqa: E402
 pytestmark = pytest.mark.llm
 
 MODEL = os.getenv("LIVE_DEEPAGENTS_MODEL", "google:gemini-2.5-flash")
-CLAUDE = os.getenv("LIVE_DEEPAGENTS_CLAUDE_MODEL", "anthropic:claude-sonnet-4-5")
+CLAUDE = os.getenv("LIVE_DEEPAGENTS_CLAUDE_MODEL", "anthropic:claude-sonnet-4-6")
 GEMINI = os.getenv("LIVE_DEEPAGENTS_GEMINI_MODEL", "google:gemini-2.5-flash")
 
 
@@ -110,8 +110,8 @@ async def test_delegation_and_its_answer(listed, tmp_path):
     assert "42" in _text(events)
 
 
-#: Long enough to clear Claude's minimum cacheable prompt (1,024 tokens on
-#: Sonnet), with room to spare.
+#: About 3,000 tokens, over Claude Sonnet's minimum cacheable prompt, before
+#: the tools and Deep Agents' own instructions are added.
 _HANDBOOK = " ".join(
     f"Rule {n}: answer briefly, state facts plainly, and never invent a source."
     for n in range(1, 160)

@@ -18,6 +18,11 @@ LIVE_ADK_CLAUDE_BUDGET_MODEL, LIVE_ADK_GPT_MODEL or LIVE_ADK_OPENROUTER_MODEL
 LIVE_VLLM_BASE_URL names a server (its model: LIVE_VLLM_MODEL, a Qwen3-style
 model whose chat template switches thinking).
 
+The Synthetic case runs when SYNTHETIC_API_KEY is set: Synthetic
+(synthetic.new) is an OpenAI-compatible service that needs a key, defined as
+a ``model_providers`` entry, and its model takes a reasoning effort (its
+model: LIVE_SYNTHETIC_MODEL, an id from Synthetic's listing).
+
 A last case runs two Claude turns in one session with prompt caching on (the
 default): the second reads the prompt the first cached. Its model:
 LIVE_ADK_CLAUDE_CACHE_MODEL.
@@ -57,6 +62,12 @@ PROMPT = (
     "Then answer: what is 6 times 7? Reply with the number only."
 )
 VLLM_ENDPOINT = "live-vllm"
+#: Synthetic (synthetic.new): an OpenAI-compatible service that needs a key.
+SYNTHETIC = "synthetic"
+SYNTHETIC_PROVIDER = {
+    "base_url": "https://api.synthetic.new/openai/v1",
+    "api_key_env": "SYNTHETIC_API_KEY",
+}
 
 
 def _case(case_id: str, model: str, needs: str, *, shows_thinking: bool):
@@ -86,7 +97,7 @@ CASES = [
     ),
     _case(
         "claude-budget",
-        os.getenv("LIVE_ADK_CLAUDE_BUDGET_MODEL", "anthropic:claude-sonnet-4-5"),
+        os.getenv("LIVE_ADK_CLAUDE_BUDGET_MODEL", "anthropic:claude-haiku-4-5"),
         "ANTHROPIC_API_KEY",
         shows_thinking=True,
     ),
@@ -98,8 +109,14 @@ CASES = [
     ),
     _case(
         "openrouter",
-        os.getenv("LIVE_ADK_OPENROUTER_MODEL", "openrouter:qwen/qwen3-235b-a22b"),
+        os.getenv("LIVE_ADK_OPENROUTER_MODEL", "openrouter:qwen/qwen3.7-plus"),
         "OPENROUTER_API_KEY",
+        shows_thinking=True,
+    ),
+    _case(
+        "synthetic",
+        f"{SYNTHETIC}:{os.getenv('LIVE_SYNTHETIC_MODEL', 'hf:deepseek-ai/DeepSeek-V4.1-Flash-1017')}",
+        "SYNTHETIC_API_KEY",
         shows_thinking=True,
     ),
     _case(
@@ -122,19 +139,24 @@ def listed(monkeypatch):
 
 
 def _providers(model: str) -> dict:
-    """OpenRouter (its key in OPENROUTER_API_KEY), and the live vLLM server
-    when the case runs on it."""
+    """OpenRouter (its key in OPENROUTER_API_KEY), and Synthetic or the live
+    vLLM server when the case runs on it."""
     providers = {"openrouter": openrouter_spec()}
+    if model.startswith(f"{SYNTHETIC}:"):
+        providers[SYNTHETIC] = SYNTHETIC_PROVIDER
     if model.startswith(f"{VLLM_ENDPOINT}:"):
         providers[VLLM_ENDPOINT] = {"base_url": os.environ["LIVE_VLLM_BASE_URL"]}
     return providers
 
 
 def _entries(model: str) -> dict:
-    """What the case says about the vLLM server's model, when it runs on it."""
-    if not model.startswith(f"{VLLM_ENDPOINT}:"):
-        return {}
-    return {model: {"thinking": "chat_template"}}
+    """What the case says about its model on Synthetic (a reasoning effort)
+    or on the vLLM server (thinking switched by its chat template)."""
+    if model.startswith(f"{SYNTHETIC}:"):
+        return {model: {"thinking": "effort"}}
+    if model.startswith(f"{VLLM_ENDPOINT}:"):
+        return {model: {"thinking": "chat_template"}}
+    return {}
 
 
 @pytest.mark.parametrize("model, shows_thinking", CASES)
@@ -186,7 +208,7 @@ async def test_a_second_claude_turn_reads_the_cache(listed, tmp_path):
             )
         ],
         settings=settings,
-        model=os.getenv("LIVE_ADK_CLAUDE_CACHE_MODEL", "anthropic:claude-sonnet-4-5"),
+        model=os.getenv("LIVE_ADK_CLAUDE_CACHE_MODEL", "anthropic:claude-haiku-4-5"),
     )
     try:
         first = await collect_events(manager, "Reply with the word ready.", session_id="cached")
@@ -211,7 +233,7 @@ _BOTH_KEYS = pytest.mark.skipif(
 _GEMINI_25 = os.getenv("LIVE_ADK_GEMINI_MODEL", "google:gemini-2.5-flash")
 _GEMINI_3 = os.getenv("LIVE_ADK_GEMINI_3_MODEL", "google:gemini-3-flash-preview")
 # A budget Claude thinks at every effort but none, so its thoughts are in the session.
-_CLAUDE = os.getenv("LIVE_ADK_CLAUDE_BUDGET_MODEL", "anthropic:claude-sonnet-4-5")
+_CLAUDE = os.getenv("LIVE_ADK_CLAUDE_BUDGET_MODEL", "anthropic:claude-haiku-4-5")
 
 
 async def _switch(before: str, after: str, tmp_path) -> tuple[list, list]:
