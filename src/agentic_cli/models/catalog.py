@@ -709,7 +709,7 @@ class ModelCatalog:
         if kind is not ProviderKind.OPENAI:
             return accepted, list(accepted.values())
         # R15: the curated ids the account has, then any other reasoning
-        # model it lists. Ids no rule knows (embeddings, TTS) are accepted by
+        # model it lists. Other ids (embeddings, TTS, gpt-4.1) are accepted by
         # record() but never offered.
         curated = self._table.curated_openai()
         offered = [accepted[model] for model in curated if model in accepted]

@@ -664,7 +664,10 @@
           "image_input": true,
           "reasoning_text": true,
           "sampling": "never",
-          "source": "langchain-openai 1.7.2 bundled profiles (models.dev, MIT), 2026-10"
+          "thinking": {
+            "levels": ["low", "medium", "high", "xhigh", "max"]
+          },
+          "source": "langchain-openai 1.7.2 bundled profiles (models.dev, MIT), 2026-10; the effort ladder, which the profile lacks, from OpenAI's GPT-6 guide (https://developers.openai.com/api/docs/guides/latest-model), 2026-11-04: Sol takes no none"
         },
         "gpt-6.1-terra": {
           "display_name": "GPT-6.1 Terra",
@@ -674,7 +677,10 @@
           "image_input": true,
           "reasoning_text": true,
           "sampling": "never",
-          "source": "OpenRouter's public model listing (openai/gpt-6.1-terra), 2026-11-04: no bundled profile has it yet"
+          "thinking": {
+            "levels": ["none", "low", "medium", "high", "xhigh", "max"]
+          },
+          "source": "OpenRouter's public model listing (openai/gpt-6.1-terra), 2026-11-04: no bundled profile has it yet; the effort ladder from OpenAI's GPT-6 guide (https://developers.openai.com/api/docs/guides/latest-model), 2026-11-04"
         },
         "gpt-6-sol": {
           "display_name": "GPT-6 Sol",

@@ -809,7 +809,8 @@ the model's tier:
    `default` is the Gemini model.
 2. Else the newest model of its tier from the first provider with a key, in
    the order Google, Anthropic, OpenAI. With only a Google key, no list and no
-   `default_model`, that is Gemini Flash, as in 0.6.
+   `default_model`, that is the newest Gemini Flash (`gemini-3.8-flash` before
+   any listing; 0.6 ran `gemini-2.5-flash`).
 3. Else the workflow does not start, and the error asks for `default_model`
    or `model_roles[<role>]`. Without a Google, Anthropic or OpenAI key that is
    known before any listing, so `validate_settings` says it, once.
@@ -818,9 +819,11 @@ the model's tier:
 |----------|--------|-----------|----------|
 | Google | Flash-Lite | Flash | Pro |
 | Anthropic | Haiku | Sonnet | Opus |
-| OpenAI | Luna (also mini) | Terra (also the plain model) | Sol, Astra (also pro) |
+| OpenAI | Luna, mini, nano | Terra, a plain id (`gpt-5.5`) | Sol, Astra, a plain id's `-pro` (`gpt-5.5-pro`) |
 
-Only Google's, Anthropic's and OpenAI's models have a tier. A configured
+A tier's `-pro` id (`gpt-6-sol-pro`), the same model in a costlier reasoning
+mode, has no tier, so a role never picks it. Only Google's, Anthropic's and
+OpenAI's models have a tier. A configured
 provider's model never fills a role on its own: an app or a user that runs on
 configured providers alone sets `default_model`, and maps the roles its
 agents name.

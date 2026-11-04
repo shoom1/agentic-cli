@@ -200,6 +200,13 @@ class TestOpenAI:
     def test_a_capability_tier_name_gives_the_tier(self, model, tier):
         assert _record(O, model).tier == tier
 
+    def test_gpt_6_1_takes_openai_s_ladders(self):
+        """From OpenAI's GPT-6 guide: Terra can stop reasoning, Sol cannot."""
+        assert _record(O, "gpt-6.1-terra").thinking.levels == (
+            "none", "low", "medium", "high", "xhigh", "max",
+        )
+        assert _record(O, "gpt-6.1-sol").thinking.levels == ("low", "medium", "high", "xhigh", "max")
+
     @pytest.mark.parametrize("model", ["gpt-6-sol-pro", "gpt-6.1-terra-pro", "gpt-5.6-luna-pro"])
     def test_a_tier_s_pro_mode_has_no_tier(self, model):
         """The same model at several times the cost: a role never picks it."""
