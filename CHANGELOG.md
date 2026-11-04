@@ -147,9 +147,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     variable holding its key (`api_key_env`; without one the client sends
     the placeholder key `EMPTY`), and `list_models` (`false`: never listed,
     any id accepted). No other provider is built in: an app ships
-    OpenRouter's entry, as the research demo does, or a user adds it. The
-    key is read from the environment, then from the app's user-level env
-    files (each `env_file` that is absolute, such as
+    OpenRouter's entry, or a user adds it (the research demo leaves it to
+    the user). The key is read from the environment, then from the app's
+    user-level env files (each `env_file` that is absolute, such as
     `~/.research_demo/.env`), never from a cwd `.env`; a model on a provider
     whose variable is not set fails at startup, naming the variable and
     where it is read, rather than with a bare 401. `model_providers` is
@@ -713,12 +713,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   --continue` or `--resume <id>`; its own `--session <id>` is gone.
 - **The research demo offers a short list of models**: Gemini 3.5
   Flash-Lite and Gemini 3.8 Flash, Claude Haiku 5.5, Sonnet 5.5 and Opus
-  5.5, and, through its `openrouter` provider, Qwen3.7 Plus, DeepSeek V4 Pro
-  and Kimi K3. The pickers offer those whose provider has a key (and each
-  role's model): put the keys in `~/.research_demo/.env`. An OpenRouter
-  model has no tier, so with an OpenRouter key alone also choose the
-  default model: pick one in `/settings`, which works while the workflow is
-  down, or put `"default_model": "openrouter:qwen/qwen3.7-plus"` in
+  5.5. The pickers offer those whose provider has a key (and each role's
+  model): put the keys in `~/.research_demo/.env`. The demo defines no
+  other provider: OpenRouter, or an OpenAI-compatible service, is the
+  user's to define in `~/.research_demo/settings.json`, with its models
+  (the demo's settings module shows OpenRouter's entry). A configured
+  provider's model has no tier, so with only such a provider's key also
+  choose the default model: pick one in `/settings`, which works while the
+  workflow is down, or set `default_model` in
   `~/.research_demo/settings.json`.
 - **A context overflow on ADK is recovered once, or ends in one clear
   error.** A model call the provider refused as too long raised its raw

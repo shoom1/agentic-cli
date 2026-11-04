@@ -1,39 +1,57 @@
 """Settings for the Research Demo application.
 
-The demo ships a short list of models (``models``) and the OpenRouter
-provider (``model_providers``), the way an app built on agentic-cli offers
-its users a choice of models. The ``/settings`` model pickers offer the
-models of the list whose provider has a key (and the model each role
-resolves to):
+The demo ships a short list of models (``models``), the way an app built on
+agentic-cli offers its users a choice of models. The ``/settings`` model
+pickers offer the models of the list whose provider has a key (and the model
+each role resolves to):
 
 - Google: ``GOOGLE_API_KEY``, for Gemini 3.5 Flash-Lite and Gemini 3.8 Flash.
 - Anthropic: ``ANTHROPIC_API_KEY``, for Claude Haiku 5.5, Claude Sonnet 5.5
   and Claude Opus 5.5.
-- OpenRouter: ``OPENROUTER_API_KEY``, for Qwen3.7 Plus, DeepSeek V4 Pro and
-  Kimi K3.
 
 The list holds no Gemini Pro (Google's is a preview, which a later release
 retires), so with only a Google key the Strong Model picker shows the
 newest Pro the workflow computes for the ``strong`` role.
 
-Put the keys in ``~/.research_demo/.env`` (``OPENROUTER_API_KEY=...``, one per
+Put the keys in ``~/.research_demo/.env`` (``GOOGLE_API_KEY=...``, one per
 line) or in the environment; a ``.env`` in the working directory is never
 read for them.
+
+The demo defines no other provider: OpenRouter, or an OpenAI-compatible
+service, is yours to define in ``~/.research_demo/settings.json`` (a
+project's settings file cannot), with the models you want from it. OpenRouter
+and three of its models, the key in ``OPENROUTER_API_KEY``::
+
+    {
+      "model_providers": {
+        "openrouter": {
+          "kind": "openrouter",
+          "base_url": "https://openrouter.ai/api/v1",
+          "api_key_env": "OPENROUTER_API_KEY"
+        }
+      },
+      "models": {
+        "openrouter:qwen/qwen3.7-plus": {},
+        "openrouter:deepseek/deepseek-v4-pro": {},
+        "openrouter:moonshotai/kimi-k3": {}
+      }
+    }
+
+An OpenAI-compatible service (Together, Fireworks, a local vLLM) takes no
+``kind``: the README's "Configured providers" has examples.
 
 To pick a model, open ``/settings``: Default Model offers the list, and the
 pick is saved to the project's ``./.research_demo/settings.json``. ``/models``
 shows the list, with what is known about each model and why one is not
 offered; ``/models <text>`` searches every provider's full listing, such as
-``/models llama``, to find an id to add to the list in
-``~/.research_demo/settings.json``::
-
-    {"models": {"openrouter:meta-llama/llama-3.3-70b-instruct": {}}}
+``/models llama``, to find an id to add to ``models``.
 
 Without a ``default_model``, the demo runs on the list's default-tier model:
-Gemini 3.8 Flash with a Google key, else Claude Sonnet 5.5. An OpenRouter
-model has no tier, so with an OpenRouter key alone, choose the default model
-too: pick one in ``/settings``, which works while the workflow is down, or put
-``"default_model": "openrouter:qwen/qwen3.7-plus"`` in
+Gemini 3.8 Flash with a Google key, else Claude Sonnet 5.5 with an Anthropic
+key. A configured provider's model has no tier, so with only such a
+provider's key, choose the default model too: pick one in ``/settings``,
+which works while the workflow is down, or add
+``"default_model": "openrouter:qwen/qwen3.7-plus"`` to
 ``~/.research_demo/settings.json``.
 """
 
@@ -43,12 +61,11 @@ from pydantic import Field
 from pydantic_settings import SettingsConfigDict
 
 from agentic_cli import BaseSettings
-from agentic_cli.models import ModelEntry, ProviderSpec
+from agentic_cli.models import ModelEntry
 
-# The framework's fields whose defaults the demo overrides. A field declared
+# The framework's field whose default the demo overrides. A field declared
 # again replaces its title and description, so they are carried over.
 _MODELS = BaseSettings.model_fields["models"]
-_PROVIDERS = BaseSettings.model_fields["model_providers"]
 
 
 class ResearchDemoSettings(BaseSettings):
@@ -72,8 +89,8 @@ class ResearchDemoSettings(BaseSettings):
     JSON sources are only consulted when the file exists. ``models`` and
     ``model_providers`` are the exception to "highest precedence wins": the
     sources' entries are added to the demo's, field by field, and none is
-    removed (``model_providers`` from the user config and the environment
-    only).
+    removed (``model_providers``, which the demo leaves empty, from the user
+    config and the environment only).
     """
 
     model_config = SettingsConfigDict(
@@ -82,22 +99,9 @@ class ResearchDemoSettings(BaseSettings):
         extra="ignore",
     )
 
-    # OpenRouter's key is read from OPENROUTER_API_KEY, in the environment or
-    # in ~/.research_demo/.env.
-    model_providers: dict[str, ProviderSpec] = Field(
-        default_factory=lambda: {
-            "openrouter": ProviderSpec(
-                kind="openrouter",
-                base_url="https://openrouter.ai/api/v1",
-                api_key_env="OPENROUTER_API_KEY",
-            ),
-        },
-        title=_PROVIDERS.title,
-        description=_PROVIDERS.description,
-    )
-    # Two Gemini models (fast, default tier), three Claude models (fast,
-    # default, strong), and three open models on OpenRouter. Each entry is
-    # empty: the listings and the shipped table say what each model takes.
+    # Two Gemini models (fast, default tier) and three Claude models (fast,
+    # default, strong). Each entry is empty: the listings and the shipped
+    # table say what each model takes.
     models: dict[str, ModelEntry] = Field(
         default_factory=lambda: {
             "google:gemini-3.5-flash-lite": ModelEntry(),
@@ -105,9 +109,6 @@ class ResearchDemoSettings(BaseSettings):
             "anthropic:claude-haiku-5-5": ModelEntry(),
             "anthropic:claude-sonnet-5-5": ModelEntry(),
             "anthropic:claude-opus-5-5": ModelEntry(),
-            "openrouter:qwen/qwen3.7-plus": ModelEntry(),
-            "openrouter:deepseek/deepseek-v4-pro": ModelEntry(),
-            "openrouter:moonshotai/kimi-k3": ModelEntry(),
         },
         title=_MODELS.title,
         description=_MODELS.description,

@@ -744,8 +744,10 @@ Each key is a model the model pickers offer; every field is optional:
 - `/settings` never shows `models`, and no save writes it, so the app's
   entries are never copied into a user's or a project's file. Edit it by hand.
 
-An app ships its providers and its list by overriding the two fields'
-defaults in its settings class, as `examples/research_demo/settings.py` does:
+An app ships its list, and any providers of its own, by overriding the two
+fields' defaults in its settings class (`examples/research_demo/settings.py`
+ships a list of Google's and Anthropic's models, and leaves every other
+provider to the user):
 
 ```python
 from pydantic import Field
@@ -1881,7 +1883,7 @@ See the `examples/` directory for complete working examples:
 - `websearch_demo.py` — Web search with multiple backends
 
 **Full Applications**
-- `research_demo/` — Full-featured research assistant with KB ingest + concept pages, semantic memory, sandbox execution, and durable sessions. Installed as the `research-demo` console script. It ships a model list of Gemini, Claude and OpenRouter models, and the `openrouter` provider: put the keys you have (`GOOGLE_API_KEY`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`) in `~/.research_demo/.env`. An OpenRouter model has no tier, so with an OpenRouter key alone also choose the default model: pick one in `/settings`, which works while the workflow is down, or put `"default_model": "openrouter:qwen/qwen3.7-plus"` in `~/.research_demo/settings.json`.
+- `research_demo/` — Full-featured research assistant with KB ingest + concept pages, semantic memory, sandbox execution, and durable sessions. Installed as the `research-demo` console script. It ships a model list of Gemini and Claude models: put the keys you have (`GOOGLE_API_KEY`, `ANTHROPIC_API_KEY`) in `~/.research_demo/.env`. It defines no other provider: OpenRouter, or an OpenAI-compatible service, is yours to define in `~/.research_demo/settings.json`, with its models, and its key goes in the same `.env` (the module docstring of `examples/research_demo/settings.py` shows OpenRouter's entry). A configured provider's model has no tier, so with only such a provider's key also choose the default model: pick one in `/settings`, which works while the workflow is down, or set `default_model` in `~/.research_demo/settings.json`.
 
 Run examples:
 
