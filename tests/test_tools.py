@@ -1089,73 +1089,52 @@ class TestDiffCompare:
 class TestStandardTools:
     """Tests for standard tool functions."""
 
-    @pytest.mark.asyncio
-    async def test_fetch_arxiv_paper_returns_paper_details(self, arxiv_source_ctx):
+    async def test_fetch_arxiv_paper_returns_paper_details(self, arxiv_api, arxiv_source_ctx):
         """Test fetch_arxiv_paper returns paper details for valid ID."""
-        from unittest.mock import patch, MagicMock
         from agentic_cli.tools.arxiv_tools import fetch_arxiv_paper
+        from tests.tools.arxiv_fakes import Paper
 
-        with patch("feedparser.parse") as mock_parse:
-            mock_parse.return_value = MagicMock(
-                entries=[
-                    {
-                        "title": "Attention Is All You Need",
-                        "link": "https://arxiv.org/abs/1706.03762",
-                        "summary": "The dominant sequence transduction models...",
-                        "authors": [{"name": "Vaswani"}, {"name": "Shazeer"}],
-                        "published": "2017-06-12",
-                        "updated": "2017-12-06",
-                        "tags": [{"term": "cs.CL"}, {"term": "cs.LG"}],
-                        "id": "http://arxiv.org/abs/1706.03762v5",
-                        "arxiv_primary_category": {"term": "cs.CL"},
-                    }
-                ]
-            )
+        arxiv_api.papers.append(Paper(
+            "1706.03762", title="Attention Is All You Need",
+            authors=("Vaswani", "Shazeer"), categories=("cs.CL", "cs.LG"),
+        ))
 
-            result = await fetch_arxiv_paper("1706.03762")
+        result = await fetch_arxiv_paper("1706.03762")
 
-            assert result["success"] is True
-            assert result["paper"]["title"] == "Attention Is All You Need"
-            assert result["paper"]["arxiv_id"] == "1706.03762"
-            assert "Vaswani" in result["paper"]["authors"]
-            assert "cs.CL" in result["paper"]["categories"]
-            assert result["paper"]["pdf_url"] == "https://arxiv.org/pdf/1706.03762"
+        assert result["success"] is True
+        assert result["paper"]["title"] == "Attention Is All You Need"
+        assert result["paper"]["arxiv_id"] == "1706.03762"
+        assert "Vaswani" in result["paper"]["authors"]
+        assert "cs.CL" in result["paper"]["categories"]
+        assert result["paper"]["pdf_url"] == "https://arxiv.org/pdf/1706.03762v1"
 
-    @pytest.mark.asyncio
     async def test_fetch_arxiv_paper_not_found(self, arxiv_source_ctx):
         """Test fetch_arxiv_paper handles missing paper."""
-        from unittest.mock import patch, MagicMock
         from agentic_cli.tools.arxiv_tools import fetch_arxiv_paper
 
-        with patch("feedparser.parse") as mock_parse:
-            mock_parse.return_value = MagicMock(entries=[])
+        result = await fetch_arxiv_paper("9999.99999")
 
-            result = await fetch_arxiv_paper("9999.99999")
+        assert result["success"] is False
+        assert "not found" in result["error"].lower()
 
-            assert result["success"] is False
-            assert "not found" in result["error"].lower()
-
-    @pytest.mark.asyncio
-    async def test_fetch_arxiv_paper_cleans_id(self, arxiv_source_ctx):
+    async def test_fetch_arxiv_paper_cleans_id(self, arxiv_api, arxiv_source_ctx, monkeypatch):
         """Test fetch_arxiv_paper handles various ID formats."""
-        from unittest.mock import patch, MagicMock
+        import httpx
+
+        from agentic_cli.tools import arxiv_source
         from agentic_cli.tools.arxiv_tools import fetch_arxiv_paper
+        from tests.tools.arxiv_fakes import Paper
 
-        with patch("feedparser.parse") as mock_parse:
-            mock_parse.return_value = MagicMock(
-                entries=[{"title": "Test", "link": "", "summary": "", "authors": [],
-                         "published": "", "tags": [], "id": "http://arxiv.org/abs/1234.5678v1"}]
-            )
+        monkeypatch.setattr(arxiv_source.ArxivSearchSource, "rate_limit", property(lambda self: 0.0))
+        arxiv_api.papers.append(Paper("1234.5678"))
 
-            # Test with full URL
-            await fetch_arxiv_paper("https://arxiv.org/abs/1234.5678")
-            call_url = mock_parse.call_args[0][0]
-            assert "id_list=1234.5678" in call_url
+        await fetch_arxiv_paper("https://arxiv.org/abs/1234.5678")
+        arxiv_source_ctx.clear_cache()
+        await fetch_arxiv_paper("1234.5678v2")
 
-            # Test with version suffix
-            await fetch_arxiv_paper("1234.5678v2")
-            call_url = mock_parse.call_args[0][0]
-            assert "id_list=1234.5678" in call_url
+        assert [httpx.URL(url).params["id_list"] for url in arxiv_api.requests] == [
+            "1234.5678", "1234.5678",
+        ]
 
 
 
@@ -1215,68 +1194,48 @@ class TestArxivHelpers:
         assert _clean_arxiv_id("https://arxiv.org/abs/hep-th/9901001") == "hep-th/9901001"
 
 
-class TestFetchArxivPaperRateLimiting:
-    """Tests for fetch_arxiv_paper rate limiting."""
-
-    @pytest.mark.asyncio
-    async def test_fetch_arxiv_paper_respects_rate_limit(self, arxiv_source_ctx):
-        """Test fetch_arxiv_paper uses asyncio.sleep to honor rate limiting."""
-        from unittest.mock import patch, MagicMock, AsyncMock
-        from agentic_cli.tools.arxiv_tools import fetch_arxiv_paper
-
-        mock_entry = {
-            "title": "Test", "link": "", "summary": "", "authors": [],
-            "published": "", "updated": "", "tags": [],
-            "id": "http://arxiv.org/abs/1234.5678v1",
-            "arxiv_primary_category": {"term": ""},
-        }
-
-        with patch("agentic_cli.tools.arxiv_source.time") as mock_time, \
-             patch("agentic_cli.tools.arxiv_source.asyncio.sleep", new=AsyncMock()) as mock_sleep, \
-             patch("feedparser.parse") as mock_parse:
-            mock_time.time.return_value = 100.0
-            mock_parse.return_value = MagicMock(entries=[mock_entry])
-
-            # First call — no sleep (last_request_time == 0)
-            await fetch_arxiv_paper("1234.5678")
-            # Second call immediately — elapsed = 0, triggers async sleep
-            await fetch_arxiv_paper("5678.1234")
-
-            assert mock_sleep.await_count >= 1
+# How fetch_arxiv_paper and the other arXiv requests are paced:
+# tests/tools/test_arxiv_rate_limit.py.
 
 
 class TestArxivSortValidation:
     """Tests for arXiv sort option validation."""
 
-    def test_search_arxiv_invalid_sort_by_returns_error(self):
+    async def test_search_arxiv_invalid_sort_by_returns_error(self):
         """Test search_arxiv returns error dict for invalid sort_by."""
         from agentic_cli.tools.arxiv_tools import search_arxiv
 
-        result = search_arxiv("test query", sort_by="invalid_sort")
+        result = await search_arxiv("test query", sort_by="invalid_sort")
         assert result["success"] is False
         assert "sort_by" in result["error"]
 
-    def test_search_arxiv_invalid_sort_order_returns_error(self):
+    async def test_search_arxiv_invalid_sort_order_returns_error(self):
         """Test search_arxiv returns error dict for invalid sort_order."""
         from agentic_cli.tools.arxiv_tools import search_arxiv
 
-        result = search_arxiv("test query", sort_order="invalid_order")
+        result = await search_arxiv("test query", sort_order="invalid_order")
         assert result["success"] is False
         assert "sort_order" in result["error"]
 
-    def test_search_arxiv_valid_sort_options(self, arxiv_source_ctx):
-        """Test search_arxiv accepts valid sort options."""
-        from unittest.mock import patch, MagicMock
+    async def test_search_arxiv_valid_sort_options(self, arxiv_api, arxiv_source_ctx, monkeypatch):
+        """Test search_arxiv accepts valid sort options, and sends them."""
+        import httpx
+
+        from agentic_cli.tools import arxiv_source
         from agentic_cli.tools.arxiv_tools import search_arxiv
 
-        # Mock feedparser to avoid real API calls
-        with patch("feedparser.parse") as mock_parse:
-            mock_parse.return_value = MagicMock(entries=[])
+        monkeypatch.setattr(arxiv_source.ArxivSearchSource, "rate_limit", property(lambda self: 0.0))
+        options = [
+            ("relevance", "ascending"),
+            ("lastUpdatedDate", "descending"),
+            ("submittedDate", "ascending"),
+        ]
+        for sort_by, sort_order in options:
+            result = await search_arxiv("test", sort_by=sort_by, sort_order=sort_order)
+            assert result["success"] is True
 
-            # These should not raise
-            search_arxiv("test", sort_by="relevance", sort_order="ascending")
-            search_arxiv("test", sort_by="lastUpdatedDate", sort_order="descending")
-            search_arxiv("test", sort_by="submittedDate", sort_order="ascending")
+        sent = [httpx.URL(url).params for url in arxiv_api.requests]
+        assert [(p["sortBy"], p["sortOrder"]) for p in sent] == options
 
 
 class TestToolRegistryConsistency:

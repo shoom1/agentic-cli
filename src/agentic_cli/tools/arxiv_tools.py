@@ -15,7 +15,7 @@ capture it in a closure.
 
 from typing import Any
 
-from agentic_cli.tools.arxiv_source import ARXIV_API_URL, ARXIV_PDF_URL
+from agentic_cli.tools.arxiv_source import ARXIV_API_URL, ARXIV_PDF_URL, ArxivRequestError
 from agentic_cli.tools.arxiv_source import _clean_arxiv_id  # re-exported for tests/back-compat
 from agentic_cli.tools.registry import (
     register_tool,
@@ -39,7 +39,7 @@ def _validate_sort_options(sort_by: str, sort_order: str) -> dict[str, Any] | No
     return None
 
 
-def _search_arxiv_with_source(
+async def _search_arxiv_with_source(
     source,
     query: str,
     max_results: int = 10,
@@ -53,22 +53,23 @@ def _search_arxiv_with_source(
 
     Shared implementation used by both the module-level ``search_arxiv``
     and the factory-bound version. Callers must validate sort options
-    before reaching here.
+    before reaching here. A failure is this call's own: parallel searches
+    share the source, never an error.
     """
-    results = source.search(
-        query=query,
-        max_results=max_results,
-        categories=categories,
-        sort_by=sort_by,
-        sort_order=sort_order,
-        date_from=date_from,
-        date_to=date_to,
-    )
-
-    if source.last_error is not None:
+    try:
+        results = await source.asearch(
+            query=query,
+            max_results=max_results,
+            categories=categories,
+            sort_by=sort_by,
+            sort_order=sort_order,
+            date_from=date_from,
+            date_to=date_to,
+        )
+    except ArxivRequestError as exc:
         return {
             "success": False,
-            "error": source.last_error,
+            "error": str(exc),
             "query": query,
         }
 
@@ -124,7 +125,7 @@ async def _fetch_arxiv_paper_with_source(source, arxiv_id: str) -> dict[str, Any
     description="Search arXiv for academic papers by query, category, or date range. Use this to find research papers on a topic.",
     requires="arxiv_source",
 )
-def search_arxiv(
+async def search_arxiv(
     query: str,
     max_results: int = 10,
     categories: list[str] | None = None,
@@ -155,7 +156,7 @@ def search_arxiv(
     if isinstance(source, dict):
         return source
 
-    return _search_arxiv_with_source(
+    return await _search_arxiv_with_source(
         source,
         query=query,
         max_results=max_results,

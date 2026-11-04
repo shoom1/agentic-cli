@@ -397,7 +397,7 @@ def make_arxiv_tools(arxiv_source) -> list[Callable]:
         _fetch_arxiv_paper_with_source,
     )
 
-    def search_arxiv(
+    async def search_arxiv(
         query: str,
         max_results: int = 10,
         categories: list[str] | None = None,
@@ -423,7 +423,7 @@ def make_arxiv_tools(arxiv_source) -> list[Callable]:
         err = _validate_sort_options(sort_by, sort_order)
         if err is not None:
             return err
-        return _search_arxiv_with_source(
+        return await _search_arxiv_with_source(
             arxiv_source,
             query=query,
             max_results=max_results,

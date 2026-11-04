@@ -320,8 +320,18 @@ def settings_both_keys(temp_workspace: Path) -> BaseSettings:
 
 
 @pytest.fixture
-def arxiv_source_ctx():
-    """Publish a fresh ArxivSearchSource into the service registry.
+def arxiv_api():
+    """arXiv's API, faked (``tests/tools/arxiv_fakes.py``): give it papers,
+    refusals or failures; ``arxiv_source_ctx``'s source talks to it."""
+    from tests.tools.arxiv_fakes import ArxivAPI
+
+    return ArxivAPI()
+
+
+@pytest.fixture
+def arxiv_source_ctx(arxiv_api):
+    """Publish a fresh ArxivSearchSource, on ``arxiv_api``, into the service
+    registry.
 
     Use this in tests that call ``search_arxiv`` / ``fetch_arxiv_paper``
     as module-level functions, which look up the source via
@@ -330,7 +340,7 @@ def arxiv_source_ctx():
     from agentic_cli.tools.arxiv_source import ArxivSearchSource
     from agentic_cli.workflow.service_registry import ARXIV_SOURCE, set_service_registry
 
-    source = ArxivSearchSource()
+    source = ArxivSearchSource(transport=arxiv_api.transport)
     token = set_service_registry({ARXIV_SOURCE: source})
     try:
         yield source
