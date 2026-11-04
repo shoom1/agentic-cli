@@ -1,6 +1,6 @@
 """OpenRouter and OpenAI-compatible servers (vLLM and the like) on ADK.
 
-``OpenAICompatibleLlm`` is ADK's Chat Completions ``OpenAILlm`` with three
+``OpenAICompatibleLlm`` is ADK's Chat Completions ``OpenAILlm`` with four
 additions:
 
 - Reasoning text. These servers send a model's reasoning beside its answer,
@@ -12,6 +12,10 @@ additions:
   parameter (``workflow/adk/model_factory.py`` decides it).
 - ``max_tokens`` may be None, which leaves the limit to the server; ADK's
   class always sends one (4096 by default).
+- No field is sent as null. ADK's class sets ``tools``, ``tool_choice`` and
+  ``response_format`` to None when a request has none, and the SDK writes
+  None as null, which a server that validates the request (Synthetic)
+  refuses.
 
 The factory gives each instance its client, with the base URL, the key, the
 timeout and retries and, for OpenRouter, the attribution headers.
@@ -89,9 +93,12 @@ class OpenAICompatibleLlm(OpenAILlm):
         self, kwargs: dict[str, Any]
     ) -> AsyncGenerator[LlmResponse, None]:
         """Send the request ADK built: streamed or not, as the caller asked."""
-        for limit in ("max_tokens", "max_completion_tokens"):
-            if kwargs.get(limit) is None:
-                kwargs.pop(limit, None)
+        # An unset max_tokens, and the tools, tool_choice and response_format
+        # of a request without them: left out, never sent as null. ADK passes
+        # only body fields here, no request option such as timeout (where None
+        # means no timeout at all).
+        for field in [name for name, value in kwargs.items() if value is None]:
+            del kwargs[field]
         if self.extra_body:
             kwargs["extra_body"] = {**kwargs.get("extra_body", {}), **self.extra_body}
         if self._streamed:

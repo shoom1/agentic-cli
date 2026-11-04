@@ -251,6 +251,52 @@ async def test_an_unset_max_tokens_is_left_to_the_server(stream):
     assert given["max_tokens"] == 1000
 
 
+@pytest.mark.parametrize("stream", [True, False])
+async def test_a_request_sends_no_null_fields(stream):
+    """ADK's class sets ``tools``, ``tool_choice`` and ``response_format`` to
+    None when the request has none, and the SDK writes None as JSON null: a
+    server that validates the request (Synthetic) refuses a null
+    ``response_format``."""
+    server = Server(deltas=[{"content": "ok"}])
+
+    await responses(compatible(server), stream=stream)
+
+    (body,) = server.bodies
+    assert sorted(key for key, value in body.items() if value is None) == []
+
+
+@pytest.mark.parametrize("stream", [True, False])
+async def test_a_request_s_tools_are_still_sent(stream):
+    server = Server(deltas=[{"content": "ok"}])
+    tool = types.Tool(function_declarations=[
+        types.FunctionDeclaration(name="lookup", description="Look a word up.")
+    ])
+    asked = LlmRequest(
+        model=MODEL, contents=[user("Hi")], config=types.GenerateContentConfig(tools=[tool])
+    )
+
+    _ = [r async for r in compatible(server).generate_content_async(asked, stream=stream)]
+
+    (body,) = server.bodies
+    assert [t["function"]["name"] for t in body["tools"]] == ["lookup"]
+    assert body["tool_choice"] == "auto"
+
+
+@pytest.mark.parametrize("stream", [True, False])
+async def test_a_response_format_is_still_sent(stream):
+    server = Server(deltas=[{"content": "{}"}], message={"role": "assistant", "content": "{}"})
+    asked = LlmRequest(
+        model=MODEL,
+        contents=[user("Hi")],
+        config=types.GenerateContentConfig(response_mime_type="application/json"),
+    )
+
+    _ = [r async for r in compatible(server).generate_content_async(asked, stream=stream)]
+
+    (body,) = server.bodies
+    assert body["response_format"] == {"type": "json_object"}
+
+
 async def test_concurrent_streamed_and_unstreamed_requests_keep_their_own_mode():
     import asyncio
 

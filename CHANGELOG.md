@@ -1422,6 +1422,26 @@ step; each entry says what to use instead.
 
 ### Fixed
 
+- **On ADK, an OpenAI-compatible provider that checks its requests, such as
+  Synthetic, answers.** ADK's Chat Completions class sets `tools`,
+  `tool_choice` and `response_format` to None when a request has none, and
+  the OpenAI SDK sends None as JSON null: Synthetic refused every request
+  (HTTP 400, "response_format is not undefined or an object"), where
+  OpenRouter accepts a null. `OpenAICompatibleLlm` now leaves out every
+  field that is None, as it already did an unset `max_tokens`. Deep Agents
+  and LangGraph sent no null fields.
+- **The live model tests run on models their providers still serve, and one
+  runs on a provider that needs a key.** OpenRouter no longer serves
+  `qwen/qwen3-235b-a22b`, so every OpenRouter case stopped at startup (a
+  model is checked against its provider's listing); they default to
+  `qwen/qwen3.7-plus`. `claude-sonnet-4-5` reaches end of life on
+  2026-11-30: the cases for a thinking budget, which the framework sends
+  only to Claude before 4.6, and the ADK cache test default to
+  `claude-haiku-4-5`, the other Claude cases to `claude-sonnet-4-6`. A new
+  case runs each backend on Synthetic, an OpenAI-compatible service that
+  needs a key (`SYNTHETIC_API_KEY`; its model: `LIVE_SYNTHETIC_MODEL`, by
+  default `hf:deepseek-ai/DeepSeek-V4.1-Flash-1017`, which reasons at low
+  effort); the vLLM case sends no key.
 - **arXiv requests are paced as arXiv asks, and a rate limit is waited out**
   (breaking for direct callers). Parallel `search_arxiv` calls all failed
   with "ArXiv rate limited (HTTP 429)": a search and a metadata or PDF
