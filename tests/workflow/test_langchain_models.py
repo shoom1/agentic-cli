@@ -413,7 +413,7 @@ class TestClaude:
         """The same rule as on ADK: a per-agent max_tokens below the budget is raised."""
         api = FakeAPI(anthropic_message())
         route(monkeypatch, anthropic, "AsyncClient", api)
-        chat = build("claude-sonnet-4-5", settings, effort="high", max_tokens=2000)
+        chat = build("claude-haiku-4-5", settings, effort="high", max_tokens=2000)
 
         await chat.ainvoke([HumanMessage("Hello")])
 

@@ -529,7 +529,7 @@ class TestGenerateSimple:
         keys(monkeypatch, "anthropic")
         api = FakeAPI(anthropic_message({"type": "text", "text": "A summary."}))
         route(monkeypatch, anthropic, "AsyncAnthropic", api)
-        manager = adk(team(), settings(default_model="claude-sonnet-4-5", thinking_effort="high"))
+        manager = adk(team(), settings(default_model="claude-haiku-4-5", thinking_effort="high"))
         try:
             summary = await manager.generate_simple("Summarize this.", max_tokens=123)
         finally:
@@ -537,7 +537,7 @@ class TestGenerateSimple:
 
         assert summary == "A summary."
         (body,) = api.bodies
-        assert body["model"] == "claude-sonnet-4-5"
+        assert body["model"] == "claude-haiku-4-5"
         assert body["max_tokens"] == 123
         assert body["thinking"] == {"type": "disabled"}
         assert body["messages"][0]["content"][0]["text"] == "Summarize this."
@@ -840,7 +840,7 @@ class TestLangGraphModels:
             return real(resolved, **kwargs)
 
         monkeypatch.setattr(langchain_models, "build_chat_model", counting)
-        manager = _langgraph(team(), settings(default_model="claude-sonnet-4-5"))
+        manager = _langgraph(team(), settings(default_model="claude-haiku-4-5"))
         try:
             await manager.initialize_services()
             assert sorted(built) == ["coordinator", "writer"]
@@ -889,7 +889,7 @@ class TestLangGraphModels:
         api = FakeAPI(lc.anthropic_reply({"type": "text", "text": "Hi."}))
         lc.route(monkeypatch, anthropic, "AsyncClient", api)
         manager = _langgraph(
-            [AgentConfig(name="solo", prompt="Answer.", model="claude-sonnet-4-5",
+            [AgentConfig(name="solo", prompt="Answer.", model="claude-haiku-4-5",
                          model_settings=ModelSettings(max_tokens=2000))],
             settings(thinking_effort="high"),
         )
@@ -954,7 +954,7 @@ class TestLangGraphGenerateSimple:
         keys(monkeypatch, "anthropic")
         api = FakeAPI(anthropic_message({"type": "text", "text": "A summary."}))
         lc.route(monkeypatch, anthropic, "AsyncClient", api)
-        manager = _langgraph(team(), settings(default_model="claude-sonnet-4-5",
+        manager = _langgraph(team(), settings(default_model="claude-haiku-4-5",
                                               thinking_effort="high"))
         try:
             summary = await manager.generate_simple("Summarize this.", max_tokens=123)
@@ -963,7 +963,7 @@ class TestLangGraphGenerateSimple:
 
         assert summary == "A summary."
         (body,) = api.bodies
-        assert (body["model"], body["max_tokens"]) == ("claude-sonnet-4-5", 123)
+        assert (body["model"], body["max_tokens"]) == ("claude-haiku-4-5", 123)
         assert body["thinking"] == {"type": "disabled"}
         assert body["messages"] == [{"role": "user", "content": "Summarize this."}]
 

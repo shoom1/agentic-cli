@@ -283,7 +283,7 @@ class TestClaudeOnTheWire:
         keys(monkeypatch, "anthropic")
         api = FakeAPI(anthropic_message())
         route(monkeypatch, anthropic, "AsyncAnthropic", api)
-        manager = adk(team(), settings(default_model="claude-sonnet-4-5"))
+        manager = adk(team(), settings(default_model="claude-haiku-4-5"))
         try:
             await turn(manager, "Hello")
         finally:
@@ -306,7 +306,7 @@ class TestClaudeOnTheWire:
         keys(monkeypatch, "anthropic")
         api = FakeAPI(anthropic_message())
         route(monkeypatch, anthropic, "AsyncAnthropic", api)
-        manager = adk(team(), settings(default_model="claude-sonnet-4-5",
+        manager = adk(team(), settings(default_model="claude-haiku-4-5",
                                        prompt_caching_enabled=False))
         try:
             await turn(manager, "Hello")

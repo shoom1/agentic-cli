@@ -83,7 +83,7 @@ class TestClaudeCacheControl:
 
     async def test_claude_system_message_has_cache_control(self, agent_config, claude):
         manager = _langgraph_manager(
-            agent_config, default_model="claude-sonnet-4-5", prompt_caching_enabled=True
+            agent_config, default_model="claude-haiku-4-5", prompt_caching_enabled=True
         )
 
         await _turn(manager)
@@ -97,7 +97,7 @@ class TestClaudeCacheControl:
 
     async def test_cache_control_disabled_when_setting_false(self, agent_config, claude):
         manager = _langgraph_manager(
-            agent_config, default_model="claude-sonnet-4-5", prompt_caching_enabled=False
+            agent_config, default_model="claude-haiku-4-5", prompt_caching_enabled=False
         )
 
         await _turn(manager)

@@ -77,7 +77,7 @@ async def test_a_switch_from_gemini_to_claude_sends_claude_no_gemini_thoughts(
     manager = _langgraph(SOLO, settings(default_model="gemini-3-flash-preview"))
     try:
         await lg_turn(manager, "Hello")
-        await manager.reinitialize(model="anthropic:claude-sonnet-4-5", preserve_sessions=True)
+        await manager.reinitialize(model="anthropic:claude-haiku-4-5", preserve_sessions=True)
         events = await lg_turn(manager, "And now?")
     finally:
         await manager.cleanup()
