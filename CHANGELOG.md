@@ -1422,6 +1422,14 @@ step; each entry says what to use instead.
 
 ### Fixed
 
+- **On ADK, an OpenAI-compatible provider that checks its requests, such as
+  Synthetic, answers.** ADK's Chat Completions class sets `tools`,
+  `tool_choice` and `response_format` to None when a request has none, and
+  the OpenAI SDK sends None as JSON null: Synthetic refused every request
+  (HTTP 400, "response_format is not undefined or an object"), where
+  OpenRouter accepts a null. `OpenAICompatibleLlm` now leaves out every
+  field that is None, as it already did an unset `max_tokens`. Deep Agents
+  and LangGraph sent no null fields.
 - **arXiv requests are paced as arXiv asks, and a rate limit is waited out**
   (breaking for direct callers). Parallel `search_arxiv` calls all failed
   with "ArXiv rate limited (HTTP 429)": a search and a metadata or PDF
