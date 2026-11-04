@@ -24,8 +24,10 @@ class _LogStream:
     set one, a sink, one complete line a call.
 
     Writes come from any thread, so each thread's unfinished line is kept
-    apart until its newline. A sink that raises costs the line its place,
-    never the caller its call: the line goes to stderr.
+    apart until its newline, and goes where its newline goes (``print()``
+    writes a line and its newline apart). A sink that raises costs the line
+    its place, never the caller its call: the line goes to stderr. Without a
+    stderr (``None``: pythonw, a daemon), a line is dropped.
     """
 
     def __init__(self) -> None:
@@ -34,20 +36,50 @@ class _LogStream:
 
     def write(self, text: str) -> int:
         sink = self.sink
+        pending = getattr(self._pending, "text", "")
         if sink is None:
-            return sys.stderr.write(text)
-        *lines, rest = (getattr(self._pending, "text", "") + text).split("\n")
+            self._pending.text = ""
+            _to_stderr(pending + text)
+            return len(text)
+        *lines, rest = (pending + text).split("\n")
         self._pending.text = rest
         for line in lines:
             try:
                 sink(line)
             except Exception:
-                sys.stderr.write(line + "\n")
+                _to_stderr(line + "\n")
         return len(text)
 
     def flush(self) -> None:
-        if self.sink is None:
+        if self.sink is None and sys.stderr is not None:
             sys.stderr.flush()
+
+
+def _to_stderr(text: str) -> None:
+    """Write ``text`` to stderr, if the process has one."""
+    if sys.stderr is not None:
+        sys.stderr.write(text)
+
+
+class _LineLogger:
+    """structlog's logger: each message is one write to ``LOG_STREAM``, its
+    newline included.
+
+    Not structlog's ``PrintLogger``, which holds a lock while it writes: a
+    line shown above the prompt is shown inside the logging call, and a log
+    call made meanwhile on that thread would wait on the lock forever.
+    ``LOG_STREAM`` keeps each thread's lines apart itself.
+    """
+
+    def __init__(self, *args: object) -> None:
+        pass
+
+    def msg(self, message: str) -> None:
+        LOG_STREAM.write(message + "\n")
+        LOG_STREAM.flush()
+
+    log = debug = info = warn = warning = msg
+    fatal = failure = err = error = critical = exception = msg
 
 
 #: The stream every logger writes to. structlog keeps a logger's stream from
@@ -116,7 +148,7 @@ def configure_logging(settings: "BaseSettings | None" = None) -> None:
         processors=processors,
         wrapper_class=structlog.make_filtering_bound_logger(log_level),
         context_class=dict,
-        logger_factory=structlog.PrintLoggerFactory(file=LOG_STREAM),
+        logger_factory=_LineLogger,
         cache_logger_on_first_use=True,
     )
 

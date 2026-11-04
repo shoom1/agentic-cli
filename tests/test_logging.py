@@ -6,10 +6,10 @@ import threading
 
 import structlog
 
-from agentic_cli.logging import configure_logging, log_lines_to
+from agentic_cli.logging import LOG_STREAM, log_lines_to
 
 
-def test_trafilatura_dependency_loggers_are_silenced():
+def test_trafilatura_dependency_loggers_are_silenced(logging_configured):
     """trafilatura's own stdlib loggers emit raw ERROR lines to stderr
     (e.g. "parsed tree length: 0, wrong data type or not valid HTML",
     "readability_lxml failed:") under the default logging setup.
@@ -18,8 +18,6 @@ def test_trafilatura_dependency_loggers_are_silenced():
     tools log kb_convert_failed, which already record what happened, so these
     must not print over the CLI.
     """
-    configure_logging()
-
     for name in ("trafilatura", "htmldate", "courlan", "justext"):
         assert logging.getLogger(name).level == logging.CRITICAL
 
@@ -48,3 +46,23 @@ def test_without_a_sink_log_lines_go_to_stderr(logging_configured, capsys):
 
     assert lines == []
     assert "after_the_sink" in capsys.readouterr().err
+
+
+def test_a_line_begun_under_a_sink_and_ended_without_one_is_written_whole(capsys):
+    """print() writes a line and its newline apart: a sink removed between
+    the two must not leave the newline alone on stderr."""
+    lines: list[str] = []
+    with log_lines_to(lines.append):
+        LOG_STREAM.write("unfinished")
+    LOG_STREAM.write("\n")
+
+    assert lines == []
+    assert capsys.readouterr().err == "unfinished\n"
+
+
+def test_without_a_stderr_a_log_line_is_dropped_not_raised(logging_configured, monkeypatch):
+    """A process with no stderr (pythonw, a daemon) still logs without failing."""
+    monkeypatch.setattr("sys.stderr", None)
+
+    structlog.get_logger("t").warning("nowhere_to_go")
+    LOG_STREAM.flush()

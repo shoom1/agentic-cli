@@ -16,6 +16,7 @@ import re
 import shlex
 import shutil
 import sys
+import threading
 import warnings
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
@@ -240,30 +241,61 @@ class _AdkFailureFilter(logging.Filter):
         return False
 
 
+def _stderr_is_terminal() -> bool:
+    """Whether stderr is a terminal (the one the prompt is drawn on): not
+    redirected to a file, as ``app 2>run.log`` does."""
+    try:
+        return sys.stderr is not None and sys.stderr.isatty()
+    except (AttributeError, ValueError):
+        return False
+
+
 @contextmanager
 def _log_lines_above_prompt(session: ThinkingPromptSession) -> Iterator[None]:
     """While the prompt runs, print each log line above it, as the session's
     own output.
 
     Written to stderr, a line landed wherever the cursor was (on the prompt
-    line), and the next redraw did not know it was there. A line may come
-    from any thread (a tool's worker thread, an executor's), so it is handed
-    to the event loop, which adds it to the session. Python's warnings go
-    the same way (``_install_adk_notice_hook``).
+    line), and the next redraw did not know it was there. A line logged on
+    the event loop's thread is shown at once, so it keeps its place among
+    the session's output (a turn's warning before the error that follows
+    it); one from another thread (a tool's worker thread, an executor's) is
+    handed to the loop. A line logged while one is being shown goes to
+    stderr, so showing never recurses. With stderr redirected (``2>file``),
+    the lines stay on it. Python's warnings go the same way
+    (``_install_adk_notice_hook``).
     """
+    if not _stderr_is_terminal():
+        yield
+        return
+
     from rich.text import Text
 
     loop = asyncio.get_running_loop()
+    loop_thread = threading.get_ident()
+    busy = threading.local()
 
     def show(line: str) -> None:
+        busy.now = True
         try:
             session.add_rich(Text.from_ansi(line))
         except Exception:
             # Not logged: the log line would come back here.
             sys.stderr.write(line + "\n")
+        finally:
+            busy.now = False
 
     def sink(line: str) -> None:
-        loop.call_soon_threadsafe(show, line)
+        if getattr(busy, "now", False):
+            sys.stderr.write(line + "\n")
+        elif threading.get_ident() == loop_thread:
+            show(line)
+        else:
+            busy.now = True
+            try:
+                loop.call_soon_threadsafe(show, line)
+            finally:
+                busy.now = False
 
     with log_lines_to(sink):
         yield
@@ -274,7 +306,8 @@ def _install_adk_notice_hook() -> None:
 
     While the prompt runs, the log lines ``configure_logging`` sets up print
     above it (``_log_lines_above_prompt``), and so do Python's warnings: this
-    hook writes them to the same stream. The hook logs ADK's
+    hook has Python's own hook write them to the same stream (another hook,
+    such as logging's ``captureWarnings``, gets them as given). The hook logs ADK's
     experimental-feature notices at debug and passes every other warning to
     the hook it replaced; a filter on ADK's runner logger does the same for
     its context-cache advice, one on its context-cache logger for a cache it
@@ -307,7 +340,9 @@ def _install_adk_notice_hook() -> None:
             feature = (notice["feature"] or notice["name"]).removeprefix("FeatureName.")
             logger.debug("adk_experimental_feature", feature=feature)
             return
-        previous(message, category, filename, lineno, LOG_STREAM if file is None else file, line)
+        if file is None and previous is warnings._showwarning_orig:
+            file = LOG_STREAM
+        previous(message, category, filename, lineno, file, line)
 
     showwarning._logs_adk_notices = True
     warnings.showwarning = showwarning

@@ -1426,8 +1426,10 @@ step; each entry says what to use instead.
   the standard library's log lines, and Python's warnings, were written
   straight to stderr, so one logged mid-turn (an arXiv rate limit, say)
   landed on the prompt line and left the screen garbled. While the prompt
-  runs they now go through the session, from whichever thread logged them;
-  their format and level are unchanged. `agentic_cli.logging.log_lines_to`
+  runs they now go through the session, from whichever thread logged them,
+  in order with its output; their format and level are unchanged, though a
+  line longer than the terminal is wrapped. With stderr redirected
+  (`app 2>run.log`), they stay in the file. `agentic_cli.logging.log_lines_to`
   sends them to any sink.
 - **A memory edited without an embedding service is embedded again.** Where
   no service runs (no `kb` extra, say), `MemoryStore.update` clears an edited
