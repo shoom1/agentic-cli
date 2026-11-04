@@ -84,7 +84,7 @@ def parse_entry_key(key: str) -> ModelRef:
         raise ModelSpecError(f"models key {key!r} needs its provider: write it as {parsed}.")
     raise ModelSpecError(
         f"models key {key!r} is not a provider:model reference, such as "
-        "anthropic:claude-sonnet-4-5."
+        "anthropic:claude-sonnet-5-5."
     )
 
 

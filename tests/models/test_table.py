@@ -57,7 +57,11 @@ def _record(kind: ProviderKind, model: str):
         (O, "gpt-5.4-mini", "fast", ThinkingMechanism.EFFORT, "none", "never"),
         (O, "gpt-5.5-pro", "strong", ThinkingMechanism.EFFORT, "none", "never"),
         (O, "gpt-5.5", "default", ThinkingMechanism.EFFORT, "none", "never"),
-        (O, "gpt-6-sol", None, ThinkingMechanism.EFFORT, "none", "never"),
+        (O, "gpt-6-luna", "fast", ThinkingMechanism.EFFORT, "none", "never"),
+        (O, "gpt-6.1-terra", "default", ThinkingMechanism.EFFORT, "none", "never"),
+        (O, "gpt-5.6-sol", "strong", ThinkingMechanism.EFFORT, "none", "never"),
+        (O, "gpt-6-astra", "strong", ThinkingMechanism.EFFORT, "none", "never"),
+        (O, "gpt-6.1-sol-pro", None, ThinkingMechanism.EFFORT, "none", "never"),
         (O, "gpt-4.1", None, ThinkingMechanism.NONE, "none", "always"),
     ],
 )
@@ -181,17 +185,47 @@ class TestOpenAI:
     def test_a_chat_alias_is_not_a_reasoning_model(self):
         assert _record(O, "gpt-5-chat-latest").thinking.mechanism is ThinkingMechanism.NONE
 
+    @pytest.mark.parametrize(
+        ("model", "tier"),
+        [
+            ("gpt-5.6-luna", "fast"),
+            ("gpt-6-luna", "fast"),
+            ("gpt-5.6-terra", "default"),
+            ("gpt-6.1-terra", "default"),
+            ("gpt-6-sol", "strong"),
+            ("gpt-6.1-sol", "strong"),
+            ("gpt-6-astra", "strong"),
+        ],
+    )
+    def test_a_capability_tier_name_gives_the_tier(self, model, tier):
+        assert _record(O, model).tier == tier
+
+    def test_gpt_6_1_takes_openai_s_ladders(self):
+        """From OpenAI's GPT-6 guide: Terra can stop reasoning, Sol cannot."""
+        assert _record(O, "gpt-6.1-terra").thinking.levels == (
+            "none", "low", "medium", "high", "xhigh", "max",
+        )
+        assert _record(O, "gpt-6.1-sol").thinking.levels == ("low", "medium", "high", "xhigh", "max")
+
+    @pytest.mark.parametrize("model", ["gpt-6-sol-pro", "gpt-6.1-terra-pro", "gpt-5.6-luna-pro"])
+    def test_a_tier_s_pro_mode_has_no_tier(self, model):
+        """The same model at several times the cost: a role never picks it."""
+        assert _record(O, model).tier is None
+        assert _record(O, model).thinking.mechanism is ThinkingMechanism.EFFORT
+
     def test_the_curated_list(self):
         curated = load_table().curated_openai()
 
-        assert "gpt-5.5" in curated and "o3" in curated and "gpt-4.1" in curated
-        assert len(curated) == len(set(curated))
+        assert curated == (
+            "gpt-6.1-sol", "gpt-6.1-terra",
+            "gpt-6-astra", "gpt-6-sol", "gpt-6-luna",
+            "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
+        )
         for model in curated:
             record = _record(O, model)
             assert record.tools, model
+            assert record.tier is not None, model
             assert record.sources["context_window"] == "table", model
-            assert version_key(model) != () or model.startswith("o"), model
-        assert not [m for m in curated if "latest" in m or "codex" in m or "-20" in m]
 
 
 def test_per_model_numbers_come_from_the_profiles():
@@ -253,11 +287,11 @@ def test_the_fallback_lists():
     table = load_table()
 
     assert table.fallback_models(G) == (
-        "gemini-3.1-pro-preview", "gemini-3.1-flash-lite-preview", "gemini-2.5-pro", "gemini-2.5-flash",
+        "gemini-3.1-pro-preview", "gemini-3.8-flash", "gemini-3.5-flash-lite",
     )
     assert table.fallback_models(A) == (
-        "claude-sonnet-4-6", "claude-opus-4-6", "claude-sonnet-4-5", "claude-sonnet-4",
-        "claude-haiku-4-5",
+        "claude-sonnet-5-5", "claude-opus-5-5", "claude-haiku-5-5", "claude-sonnet-5",
+        "claude-opus-5",
     )
     assert table.fallback_models(O) == table.curated_openai()
     assert table.fallback_models(ProviderKind.OPENROUTER) == ()

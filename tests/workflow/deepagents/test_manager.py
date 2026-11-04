@@ -401,7 +401,7 @@ class TestGenerateSimple:
         langchain_fakes.route(monkeypatch, anthropic, "AsyncClient", api)
         with MockContext(anthropic_api_key="a-test-key", session_store="memory",
                          thinking_effort="high") as context:
-            manager = _manager(context.settings, model="claude-sonnet-4-5")
+            manager = _manager(context.settings, model="claude-haiku-4-5")
             try:
                 summary = await manager.generate_simple("Summarize this.", max_tokens=123)
             finally:
@@ -409,7 +409,7 @@ class TestGenerateSimple:
 
         assert summary == "A summary."
         (body,) = api.bodies
-        assert (body["model"], body["max_tokens"]) == ("claude-sonnet-4-5", 123)
+        assert (body["model"], body["max_tokens"]) == ("claude-haiku-4-5", 123)
         assert body["thinking"] == {"type": "disabled"}
         assert body["messages"] == [{"role": "user", "content": "Summarize this."}]
 

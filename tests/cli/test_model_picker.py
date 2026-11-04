@@ -57,22 +57,22 @@ def test_before_the_workflow_starts_each_keyed_provider_s_tiers_from_the_table()
     item = _model_item(_app(settings))
 
     assert item.options == [
-        "google:gemini-2.5-flash",
-        "google:gemini-3.1-flash-lite-preview",
+        "google:gemini-3.8-flash",
+        "google:gemini-3.5-flash-lite",
         "google:gemini-3.1-pro-preview",
-        "anthropic:claude-haiku-4-5",
-        "anthropic:claude-sonnet-4-6",
-        "anthropic:claude-opus-4-6",
+        "anthropic:claude-haiku-5-5",
+        "anthropic:claude-sonnet-5-5",
+        "anthropic:claude-opus-5-5",
     ]
-    assert item.default == "google:gemini-2.5-flash"  # the default role, computed
+    assert item.default == "google:gemini-3.8-flash"  # the default role, computed
 
 
 def test_only_providers_with_a_key_are_offered():
     item = _model_item(_app(BaseSettings(google_api_key="k-g")))
 
     assert item.options == [
-        "google:gemini-2.5-flash",
-        "google:gemini-3.1-flash-lite-preview",
+        "google:gemini-3.8-flash",
+        "google:gemini-3.5-flash-lite",
         "google:gemini-3.1-pro-preview",
     ]
 
@@ -116,8 +116,8 @@ def test_every_role_s_model_is_offered_though_the_app_shows_one_picker():
 
     assert item.options == [
         "google:gemini-2.5-pro",  # the entry, and the strong role's
-        "google:gemini-2.5-flash",  # the default role's
-        "google:gemini-3.1-flash-lite-preview",  # the fast role's
+        "google:gemini-3.8-flash",  # the default role's
+        "google:gemini-3.5-flash-lite",  # the fast role's
     ]
 
 
@@ -137,7 +137,7 @@ def test_a_models_entry_on_a_provider_nobody_defined_is_not_offered():
     options = _model_item(_app(settings)).options
 
     assert "together:deepseek-ai/DeepSeek-V3.1" not in options
-    assert "google:gemini-2.5-flash" in options  # no entry can run: the tiers
+    assert "google:gemini-3.8-flash" in options  # no entry can run: the tiers
 
 
 def test_without_any_provider_there_is_no_model_picker():

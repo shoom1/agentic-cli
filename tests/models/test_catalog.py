@@ -278,11 +278,15 @@ class TestOpenAI:
     async def test_a_fresh_listing_offers_the_curated_and_reasoning_ids_it_has(self):
         """R15: curated ids the listing contains, then listed ids outside the
         curated list that a reasoning-family rule matches."""
-        catalog = await loaded(openai=KEYS["openai"])
+        listed = [
+            "gpt-4.1", "gpt-5.6-luna", "gpt-5.5", "gpt-6.1-sol", "gpt-6-sol-pro",
+            "text-embedding-3-small",
+        ]
+        api = ProviderAPI(openai={"object": "list", "data": [{"id": m, "object": "model"} for m in listed]})
+        catalog = await loaded(api, openai=KEYS["openai"])
 
         assert ids(catalog.records("openai")) == [
-            "gpt-5.5", "gpt-5.5-pro", "gpt-5.4-mini", "o3", "gpt-4.1",
-            "gpt-5.5-2026-03-05", "gpt-5-codex",
+            "gpt-6.1-sol", "gpt-5.6-luna", "gpt-5.5", "gpt-6-sol-pro",
         ]
 
     async def test_a_listed_id_no_rule_matches_is_accepted_but_not_offered(self):
@@ -587,8 +591,8 @@ class TestRoles:
             for role in ("default", "fast", "strong")
         }
         assert resolved == {
-            "default": "google:gemini-2.5-flash",
-            "fast": "google:gemini-3.1-flash-lite-preview",
+            "default": "google:gemini-3.8-flash",
+            "fast": "google:gemini-3.5-flash-lite",
             "strong": "google:gemini-3.1-pro-preview",
         }
 
@@ -828,15 +832,20 @@ class TestOffered:
         ]
 
     def test_before_any_listing_the_tiers_come_from_the_table_s_fallback_models(self):
-        catalog = catalog_for(google=KEYS["google"], anthropic=KEYS["anthropic"])
+        catalog = catalog_for(
+            google=KEYS["google"], anthropic=KEYS["anthropic"], openai=KEYS["openai"]
+        )
 
         assert catalog.offered() == [
-            "google:gemini-3.1-flash-lite-preview",
-            "google:gemini-2.5-flash",
+            "google:gemini-3.5-flash-lite",
+            "google:gemini-3.8-flash",
             "google:gemini-3.1-pro-preview",
-            "anthropic:claude-haiku-4-5",
-            "anthropic:claude-sonnet-4-6",
-            "anthropic:claude-opus-4-6",
+            "anthropic:claude-haiku-5-5",
+            "anthropic:claude-sonnet-5-5",
+            "anthropic:claude-opus-5-5",
+            "openai:gpt-6-luna",
+            "openai:gpt-6.1-terra",
+            "openai:gpt-6.1-sol",
         ]
 
     async def test_the_tiers_come_when_no_entry_can_run_not_only_when_there_is_none(self):

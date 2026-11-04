@@ -431,7 +431,7 @@ class TestClaude:
         ``max_tokens`` (2000) there, below the 32000-token thinking budget, and
         Anthropic answered HTTP 400.
         """
-        built = build("claude-sonnet-4-5", settings, thinking="high", max_tokens=2000)
+        built = build("claude-haiku-4-5", settings, thinking="high", max_tokens=2000)
         api = FakeAPI(anthropic_message())
         serve(built.model, api)
 

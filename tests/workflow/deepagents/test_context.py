@@ -1023,7 +1023,7 @@ class TestPromptCaching:
     ):
         api = FakeAPI(anthropic_reply({"type": "text", "text": "Hi."}))
         route(monkeypatch, anthropic, "AsyncClient", api)
-        manager = _manager(_settings(default_model="claude-sonnet-4-5"), [
+        manager = _manager(_settings(default_model="claude-haiku-4-5"), [
             AgentConfig(name="solo", prompt="Answer.", tools=[cache_probe]),
         ])
         try:
@@ -1039,7 +1039,7 @@ class TestPromptCaching:
     async def test_no_marks_when_prompt_caching_is_off(self, hermetic, monkeypatch):
         api = FakeAPI(anthropic_reply({"type": "text", "text": "Hi."}))
         route(monkeypatch, anthropic, "AsyncClient", api)
-        manager = _manager(_settings(default_model="claude-sonnet-4-5",
+        manager = _manager(_settings(default_model="claude-haiku-4-5",
                                      prompt_caching_enabled=False))
         try:
             await turn(manager, "Hello.")
@@ -1110,7 +1110,7 @@ class TestAcrossProviders:
         manager = _manager(_settings(default_model="gemini-3-flash-preview"))
         try:
             await turn(manager, "Hello")
-            await manager.reinitialize(model="anthropic:claude-sonnet-4-5", preserve_sessions=True)
+            await manager.reinitialize(model="anthropic:claude-haiku-4-5", preserve_sessions=True)
             await turn(manager, "And now?")
             recent = await manager.recent_messages("s", user_id="u")
         finally:

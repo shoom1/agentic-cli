@@ -100,8 +100,8 @@ def test_every_model_picker_offers_exactly_the_list(monkeypatch):
         assert items[key].options == [
             "openrouter:meta-llama/llama-3.3-70b-instruct",
             "openrouter:qwen/qwen3-235b-a22b",
-            "google:gemini-2.5-flash",
-            "google:gemini-3.1-flash-lite-preview",
+            "google:gemini-3.8-flash",
+            "google:gemini-3.5-flash-lite",
         ], key
 
 
@@ -117,11 +117,12 @@ def test_before_the_workflow_is_ready_an_agent_s_model_is_offered():
 
     assert options == [
         "anthropic:claude-opus-4-6",  # the agent's
-        "google:gemini-2.5-flash",  # the roles', computed
-        "google:gemini-3.1-flash-lite-preview",
+        "google:gemini-3.8-flash",  # the roles', computed
+        "google:gemini-3.5-flash-lite",
         "google:gemini-3.1-pro-preview",
-        "anthropic:claude-haiku-4-5",  # no entry: each provider's tiers
-        "anthropic:claude-sonnet-4-6",
+        "anthropic:claude-haiku-5-5",  # no entry: each provider's tiers
+        "anthropic:claude-sonnet-5-5",
+        "anthropic:claude-opus-5-5",
     ]
 
 
@@ -212,7 +213,7 @@ def test_a_mapped_role_shows_its_model():
 def test_an_unmapped_role_shows_the_model_it_resolves_to():
     items = _items(_app(BaseSettings(google_api_key="k-g")))
 
-    assert items["model_role:fast"].default == "google:gemini-3.1-flash-lite-preview"
+    assert items["model_role:fast"].default == "google:gemini-3.5-flash-lite"
     assert items["model_role:strong"].default == "google:gemini-3.1-pro-preview"
 
 

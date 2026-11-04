@@ -29,7 +29,7 @@ from tests.workflow.adk.fakes import FakeAPI, anthropic_message  # noqa: E402
 from tests.workflow.test_adk_context_cache import route_gemini  # noqa: E402
 from tests.workflow.test_manager_models import KEYS, adk, keys, route, settings  # noqa: E402
 
-CLAUDE = "anthropic:claude-sonnet-4-5"
+CLAUDE = "anthropic:claude-haiku-4-5"
 GEMINI = "google:gemini-2.5-flash"
 CLAUDE_SIGNATURE = "Q2xhdWRlIHNpZ25lZCB0aGlz"
 GEMINI_SIGNATURE = base64.b64encode(b"Gemini signed this").decode()

@@ -8,7 +8,8 @@ listings and the ``models`` entries. Per provider kind it holds:
   mechanism, the sampling rule and whether the model returns reasoning text;
 - **models**: per-model numbers (context window, max output, tools, image
   input) and effort ladders, copied from the LangChain partner packages'
-  bundled profiles (models.dev data);
+  bundled profiles (models.dev data), or for a model they lack from a
+  provider's listing or documentation (each entry's ``source`` says which);
 - the **fallback** model lists used before or without a listing, and OpenAI's
   curated list.
 
@@ -292,7 +293,8 @@ class ShippedTable:
         return tuple(table.curated or table.fallback_models)
 
     def curated_openai(self) -> tuple[str, ...]:
-        """OpenAI's chat and tool-calling models (its listing gives ids only)."""
+        """The OpenAI models offered first, in this order, and assumed without a
+        listing (OpenAI's listing gives ids only)."""
         table = self._providers.get(ProviderKind.OPENAI)
         return tuple(table.curated) if table is not None else ()
 

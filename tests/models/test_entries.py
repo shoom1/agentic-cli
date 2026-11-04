@@ -32,7 +32,7 @@ def test_a_key_that_is_not_a_reference_is_refused(key):
 
     assert str(caught.value) == (
         f"models key {key!r} is not a provider:model reference, such as "
-        "anthropic:claude-sonnet-4-5."
+        "anthropic:claude-sonnet-5-5."
     )
 
 
