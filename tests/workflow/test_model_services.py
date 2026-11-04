@@ -381,8 +381,8 @@ def test_role_models_names_each_role_s_model(real_catalogs):
     catalog = build_catalog(settings, providers)
 
     assert model_services.role_models(settings, catalog, providers) == {
-        "google:gemini-2.5-flash": ["default"],
-        "google:gemini-3.1-flash-lite-preview": ["fast"],
+        "google:gemini-3.8-flash": ["default"],
+        "google:gemini-3.5-flash-lite": ["fast"],
         "anthropic:claude-opus-4-6": ["strong", "critic"],
     }
     # A manager's own model is the default role's.

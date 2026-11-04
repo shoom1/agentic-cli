@@ -183,7 +183,7 @@ async def test_before_the_workflow_is_ready_it_says_so_and_shows_the_list(monkey
     screen = await models(App(BaseSettings()))
 
     assert any("not initialized" in message for message in screen.of("message"))
-    assert "google:gemini-2.5-flash" in screen.text
+    assert "google:gemini-3.8-flash" in screen.text
     assert "not listed" in _row(screen, "google")
     assert not screen.of("error")
 
@@ -199,7 +199,7 @@ async def test_before_the_workflow_is_ready_it_shows_the_cached_listings(api, mo
     assert api.calls == []  # a fresh cache entry needs no listing
     # The fast role's model is the listing's newest, not the table's.
     assert "google:gemini-2.5-flash-lite" in screen.text
-    assert "google:gemini-3.1-flash-lite-preview" not in screen.text
+    assert "google:gemini-3.5-flash-lite" not in screen.text
     assert "fresh" in _row(screen, "google")
 
 

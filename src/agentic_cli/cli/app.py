@@ -802,7 +802,7 @@ class BaseCLIApp:
     def _thinking_meaning(
         self, model: str | None, catalog: "CatalogView", providers: "Mapping[str, Provider]"
     ) -> str | None:
-        """``high → anthropic:claude-sonnet-4-6: adaptive, effort high``: the
+        """``high → anthropic:claude-sonnet-5-5: adaptive, effort high``: the
         thinking effort, resolved on ``model`` as the workflow resolves it."""
         from agentic_cli.models import ModelResolutionError, RoleMap, resolve_model
 

@@ -6,14 +6,14 @@ An app adds a role by naming it in an agent's model, and may ship a default
 mapping by overriding the ``model_roles`` default in its settings class.
 
 A built-in role nobody mapped takes a model of its tier (Flash-Lite / Flash /
-Pro, Haiku / Sonnet / Opus, mini / standard / pro): the newest in the list
-(the ``models`` entries it offers), of the provider the list names first among
-those with one; else the newest of the first provider with a key, in the
-order Google, Anthropic, OpenAI. Only a built-in provider's model has a tier:
-a configured provider's models (``model_providers``) never fill a role on
-their own, so an app or a user on configured providers only sets
-``default_model``. An app role nobody mapped falls back to ``default``, with
-a warning once per process.
+Pro, Haiku / Sonnet / Opus, Luna / Terra / Sol and Astra, also mini / plain /
+pro): the newest in the list (the ``models`` entries it offers), of the
+provider the list names first among those with one; else the newest of the
+first provider with a key, in the order Google, Anthropic, OpenAI. Only a
+built-in provider's model has a tier: a configured provider's models
+(``model_providers``) never fill a role on their own, so an app or a user on
+configured providers only sets ``default_model``. An app role nobody mapped
+falls back to ``default``, with a warning once per process.
 
 A role's value is always a model, never another role.
 """

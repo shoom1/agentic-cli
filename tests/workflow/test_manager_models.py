@@ -353,14 +353,14 @@ class TestManagerModel:
         self, providers, monkeypatch
     ):
         keys(monkeypatch, "google")
-        assert adk(team(), settings()).model == "google:gemini-2.5-flash"
+        assert adk(team(), settings()).model == "google:gemini-3.8-flash"
         assert adk(team(), settings(default_model="claude-opus-4-7")).model == (
             "anthropic:claude-opus-4-7"
         )
         keys(monkeypatch, "anthropic")
-        assert adk(team(), settings()).model == "google:gemini-2.5-flash"  # Google first
+        assert adk(team(), settings()).model == "google:gemini-3.8-flash"  # Google first
         monkeypatch.delenv("GOOGLE_API_KEY")
-        assert adk(team(), settings()).model == "anthropic:claude-sonnet-4-6"
+        assert adk(team(), settings()).model == "anthropic:claude-sonnet-5-5"
         assert providers.calls == []
 
     async def test_without_a_default_model_the_list_s_newest_default_tier_model(

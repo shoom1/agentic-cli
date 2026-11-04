@@ -807,8 +807,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   model among the `models` entries the list offers (of the provider the list
   names first among those with one), else the newest default-tier model of
   the first provider with a key, in the order Google, Anthropic, OpenAI
-  (with a Google key, no list and no listing yet, `gemini-2.5-flash`, as in
-  0.6); `fast` and `strong` are computed the same way, from their tiers.
+  (with a Google key, no list and no listing yet, `gemini-3.8-flash`, where
+  0.6 ran on `gemini-2.5-flash`); `fast` and `strong` are computed the same
+  way, from their tiers.
   `initialize_services()` resolves the default model and every agent before
   it builds anything, and raises one `SettingsValidationError` that lists
   every agent that cannot run (a provider neither built in nor defined in
@@ -826,6 +827,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that compared it to a bare id compares to the reference, or takes
   `manager.model.partition(":")[2]`. Before initialization it is computed
   from the settings without the network.
+- **Without a listing, the newest models are assumed.** Before a built-in
+  provider is first listed, or while its listing fails, the shipped table's
+  lists stand in: Gemini 3.1 Pro (a preview), 3.8 Flash and 3.5 Flash-Lite;
+  Claude Sonnet, Opus and Haiku 5.5, and Sonnet and Opus 5; and GPT-6.1 Sol
+  and Terra, GPT-6 Astra, Sol and Luna, and GPT-5.6 Sol, Terra and Luna.
+  0.6's lists named Claude Sonnet 4, which Anthropic retired on June 15,
+  2026, and Sonnet 4.5, which it retires on November 30. OpenAI's capability
+  tiers have a role tier: Luna is `fast`, Terra `default`, Sol and Astra
+  `strong` (a tier's `-pro` id, the same model in a costlier reasoning mode,
+  has none, so a role never picks it). So with only an OpenAI key and no
+  listing yet, `fast`, `default` and `strong` run on GPT-6 Luna, GPT-6.1
+  Terra and GPT-6.1 Sol. Once OpenAI is listed, those of these models it
+  serves come first, then any other reasoning model it lists; GPT-4.1 and
+  GPT-4o, which have no thinking knob, are no longer among them (a `models`
+  entry or an agent's `model` still runs them).
 - **Startup no longer lists models every time.** 0.6 listed the Google and
   Anthropic models at every start. Listings are now cached for 24 hours in
   `~/.<app>/model_cache.json` (private, versioned, holding no key, one entry

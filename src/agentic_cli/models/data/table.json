@@ -5,11 +5,10 @@
     "google": {
       "fallback_models": [
         "gemini-3.1-pro-preview",
-        "gemini-3.1-flash-lite-preview",
-        "gemini-2.5-pro",
-        "gemini-2.5-flash"
+        "gemini-3.8-flash",
+        "gemini-3.5-flash-lite"
       ],
-      "fallback_source": "agentic-cli 0.6.x ModelRegistry.FALLBACK_GOOGLE",
+      "fallback_source": "Google's model listing, 2026-11-04: the newest Pro, Flash and Flash-Lite (strong, default and fast)",
       "rules": [
         {
           "match": "^gemini-2\\.5-flash-lite(-preview(-[0-9-]+)?)?$",
@@ -258,13 +257,13 @@
     },
     "anthropic": {
       "fallback_models": [
-        "claude-sonnet-4-6",
-        "claude-opus-4-6",
-        "claude-sonnet-4-5",
-        "claude-sonnet-4",
-        "claude-haiku-4-5"
+        "claude-sonnet-5-5",
+        "claude-opus-5-5",
+        "claude-haiku-5-5",
+        "claude-sonnet-5",
+        "claude-opus-5"
       ],
-      "fallback_source": "agentic-cli 0.6.x ModelRegistry.FALLBACK_ANTHROPIC, plus claude-haiku-4-5 for the fast tier",
+      "fallback_source": "Anthropic's model listing, 2026-11-04: the Claude 5 and 5.5 Sonnet, Opus and Haiku models (Claude Fable has no tier)",
       "rules": [
         {
           "match": "^claude-fable-",
@@ -555,40 +554,52 @@
     "openai": {
       "curated": [
         "gpt-6.1-sol",
+        "gpt-6.1-terra",
+        "gpt-6-astra",
         "gpt-6-sol",
         "gpt-6-luna",
-        "gpt-6-astra",
-        "gpt-5.6",
         "gpt-5.6-sol",
-        "gpt-5.6-luna",
         "gpt-5.6-terra",
-        "gpt-5.5",
-        "gpt-5.5-pro",
-        "gpt-5.4",
-        "gpt-5.4-pro",
-        "gpt-5.4-mini",
-        "gpt-5.4-nano",
-        "gpt-5.2",
-        "gpt-5.2-pro",
-        "gpt-5.1",
-        "gpt-5",
-        "gpt-5-pro",
-        "gpt-5-mini",
-        "gpt-5-nano",
-        "o4-mini",
-        "o3",
-        "o3-pro",
-        "o3-mini",
-        "o1",
-        "o1-pro",
-        "gpt-4.1",
-        "gpt-4.1-mini",
-        "gpt-4.1-nano",
-        "gpt-4o",
-        "gpt-4o-mini"
+        "gpt-5.6-luna"
       ],
-      "curated_source": "langchain-openai 1.7.2 bundled profiles (models.dev, MIT), 2026-10: chat and tool-calling models with a full profile; no dated snapshots, -latest or -chat-latest aliases, codex, realtime, image, audio or embedding models, and not the pre-4o gpt-4, gpt-4-turbo or gpt-3.5-turbo",
+      "curated_source": "GPT-6.1, GPT-6 and GPT-5.6, each tier OpenAI serves (the API ids OpenRouter's public listing mirrors, 2026-11-04); not the -pro ids, the same models in a costlier reasoning mode",
       "rules": [
+        {
+          "match": "^gpt-[5-9](\\.\\d+)?-luna$",
+          "tier": "fast",
+          "thinking": {
+            "mechanism": "effort",
+            "levels": ["low", "medium", "high"]
+          },
+          "cache": "none",
+          "reasoning_text": true,
+          "sampling": "never",
+          "source": "Luna, OpenAI's fastest and cheapest capability tier (from GPT-5.6 on): fast. OpenAI reasoning models (gpt-5*, gpt-6*, o<digit>*): reasoning effort, and no sampling parameters; effort ladders from the langchain-openai 1.7.2 bundled profiles (models.dev, MIT), 2026-10; without one, the low/medium/high every reasoning model takes"
+        },
+        {
+          "match": "^gpt-[5-9](\\.\\d+)?-terra$",
+          "tier": "default",
+          "thinking": {
+            "mechanism": "effort",
+            "levels": ["low", "medium", "high"]
+          },
+          "cache": "none",
+          "reasoning_text": true,
+          "sampling": "never",
+          "source": "Terra, OpenAI's balanced everyday capability tier (from GPT-5.6 on): default. OpenAI reasoning models (gpt-5*, gpt-6*, o<digit>*): reasoning effort, and no sampling parameters; effort ladders from the langchain-openai 1.7.2 bundled profiles (models.dev, MIT), 2026-10; without one, the low/medium/high every reasoning model takes"
+        },
+        {
+          "match": "^gpt-[5-9](\\.\\d+)?-(sol|astra)$",
+          "tier": "strong",
+          "thinking": {
+            "mechanism": "effort",
+            "levels": ["low", "medium", "high"]
+          },
+          "cache": "none",
+          "reasoning_text": true,
+          "sampling": "never",
+          "source": "Sol and Astra, OpenAI's flagship capability tiers (from GPT-5.6 on; Astra above Sol where a generation has both): strong. OpenAI reasoning models (gpt-5*, gpt-6*, o<digit>*): reasoning effort, and no sampling parameters; effort ladders from the langchain-openai 1.7.2 bundled profiles (models.dev, MIT), 2026-10; without one, the low/medium/high every reasoning model takes"
+        },
         {
           "match": "^(gpt-[5-9](\\.\\d+)?|o\\d+)-(mini|nano)$",
           "tier": "fast",
@@ -634,7 +645,7 @@
           "cache": "none",
           "reasoning_text": true,
           "sampling": "never",
-          "source": "Other reasoning models: no tier. OpenAI reasoning models (gpt-5*, gpt-6*, o<digit>*): reasoning effort, and no sampling parameters; effort ladders from the langchain-openai 1.7.2 bundled profiles (models.dev, MIT), 2026-10; without one, the low/medium/high every reasoning model takes"
+          "source": "Other reasoning models (a tier's -pro mode too): no tier. OpenAI reasoning models (gpt-5*, gpt-6*, o<digit>*): reasoning effort, and no sampling parameters; effort ladders from the langchain-openai 1.7.2 bundled profiles (models.dev, MIT), 2026-10; without one, the low/medium/high every reasoning model takes"
         },
         {
           "match": "^gpt-",
@@ -654,6 +665,16 @@
           "reasoning_text": true,
           "sampling": "never",
           "source": "langchain-openai 1.7.2 bundled profiles (models.dev, MIT), 2026-10"
+        },
+        "gpt-6.1-terra": {
+          "display_name": "GPT-6.1 Terra",
+          "context_window": 1050000,
+          "max_output": 128000,
+          "tools": true,
+          "image_input": true,
+          "reasoning_text": true,
+          "sampling": "never",
+          "source": "OpenRouter's public model listing (openai/gpt-6.1-terra), 2026-11-04: no bundled profile has it yet"
         },
         "gpt-6-sol": {
           "display_name": "GPT-6 Sol",

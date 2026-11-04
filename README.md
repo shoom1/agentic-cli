@@ -280,7 +280,7 @@ from agentic_cli import GoogleADKWorkflowManager
 manager = GoogleADKWorkflowManager(
     agent_configs=AGENTS,
     settings=settings,
-    model="google:gemini-2.5-flash",  # Optional: the default model otherwise
+    model="google:gemini-3.8-flash",  # Optional: the default model otherwise
 )
 ```
 
@@ -325,7 +325,7 @@ from agentic_cli import DeepAgentsWorkflowManager
 manager = DeepAgentsWorkflowManager(
     agent_configs=AGENTS,
     settings=settings,
-    model="anthropic:claude-sonnet-4-6",  # Optional: the default model otherwise
+    model="anthropic:claude-sonnet-5-5",  # Optional: the default model otherwise
 )
 ```
 
@@ -611,7 +611,7 @@ A model is named the same way in `models`, `default_model`, `model_roles`,
 | `anthropic:claude-sonnet-5-5` | `provider:model`. The provider is `google`, `anthropic`, `openai`, or the name of one in `model_providers` |
 | `openrouter:qwen/qwen3.7-plus` | A configured provider's model, under the id its host gives it |
 | `openrouter:vendor/model:free` | Split on the first colon only, so a model id keeps its own colons |
-| `gemini-3.8-flash`, `claude-sonnet-5-5`, `gpt-5.5`, `o3` | A bare `gemini-`, `claude-`, `gpt-` or `o<digit>` id names its provider (not in `models`, whose keys are always `provider:model`) |
+| `gemini-3.8-flash`, `claude-sonnet-5-5`, `gpt-6.1-sol`, `o3` | A bare `gemini-`, `claude-`, `gpt-` or `o<digit>` id names its provider (not in `models`, whose keys are always `provider:model`) |
 | `fast` | Any other bare name is a role (see [Roles](#roles)). A role name has no digits, so a bare `qwen3-32b` is an error that asks for its provider (`local:qwen3-32b`) |
 
 ### Built-in providers and their keys
@@ -818,7 +818,7 @@ the model's tier:
 |----------|--------|-----------|----------|
 | Google | Flash-Lite | Flash | Pro |
 | Anthropic | Haiku | Sonnet | Opus |
-| OpenAI | mini | standard | pro |
+| OpenAI | Luna (also mini) | Terra (also the plain model) | Sol, Astra (also pro) |
 
 Only Google's, Anthropic's and OpenAI's models have a tier. A configured
 provider's model never fills a role on its own: an app or a user that runs on
@@ -956,7 +956,7 @@ from agentic_cli import AgentConfig, ModelSettings, ThinkingSettings
 reviewer = AgentConfig(
     name="reviewer",
     prompt="Review the draft.",
-    model="anthropic:claude-opus-4-7",
+    model="anthropic:claude-opus-5-5",
     model_settings=ModelSettings(thinking=ThinkingSettings(mode="xhigh")),
 )
 ```
@@ -985,7 +985,7 @@ What a level means depends on how the model thinks:
   it takes.
 - A model with no thinking knob ignores the setting.
 - `/settings` shows what the effort means for the default model, such as
-  `high → anthropic:claude-sonnet-4-6: adaptive, effort high`, or
+  `high → anthropic:claude-sonnet-5-5: adaptive, effort high`, or
   `none → anthropic:claude-sonnet-5-5: adaptive, effort low`.
 
 ### Other per-agent settings
@@ -1127,7 +1127,7 @@ configs = [coordinator, researcher, analyst]
 | `tools` | list[Callable] | Available tool functions |
 | `sub_agents` | list[str] | Names of agents this one can delegate to |
 | `description` | str | Short description for routing (defaults to `""`). On Deep Agents the coordinator's `task` tool lists it; without one the agent is "The <name> agent." |
-| `model` | str \| None | A model reference (`anthropic:claude-sonnet-4-6`), a bare model id, or a role (`fast`); without one, the `default` role (see [Models and providers](#models-and-providers)) |
+| `model` | str \| None | A model reference (`anthropic:claude-sonnet-5-5`), a bare model id, or a role (`fast`); without one, the `default` role (see [Models and providers](#models-and-providers)) |
 | `model_settings` | ModelSettings \| None | The agent's thinking, `max_tokens`, sampling settings and `extra` (see [Thinking](#thinking)) |
 | `mcp_servers` | list[MCPServerConfig] | MCP servers whose tools the agent gets (ADK and Deep Agents) |
 | `skills` | list[str] | Agent Skills: a skill folder's absolute path, or a name under `skills_dirs` (ADK and Deep Agents; never looked up in the working directory) |
