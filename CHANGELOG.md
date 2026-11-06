@@ -1754,6 +1754,12 @@ step; each entry says what to use instead.
 
 ### Fixed
 
+- **On ADK, an agent's MCP servers stop with the workflow.** The manager
+  dropped its runner without closing it, so each agent's MCP toolset stayed
+  open: a stdio server outlived `cleanup()`, and every `/settings` model
+  switch left one more running. The runner is now closed on every release,
+  which closes the toolsets; a session service a model switch keeps is only
+  flushed.
 - **Two tool questions asked at once are shown one after the other.** The
   calls of one model step run together (both backends gather them), so two
   of them could ask at once (two `ask_clarification` calls, or one beside a

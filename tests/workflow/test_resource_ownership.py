@@ -105,6 +105,63 @@ class TestSessionServiceClose:
         assert service.closes == 1
 
 
+class _Runner:
+    """Stand-in for ADK's Runner: ``close()`` closes the agents' toolsets
+    (their MCP servers) and plugins, and flushes the session service."""
+
+    def __init__(self, order: list[str] | None = None, fail: bool = False) -> None:
+        self.closes = 0
+        self.order = order
+        self.fail = fail
+
+    async def close(self) -> None:
+        self.closes += 1
+        if self.order is not None:
+            self.order.append("runner")
+        if self.fail:
+            raise RuntimeError("close blew up")
+
+
+class TestRunnerClose:
+    """The runner is closed on every release: dropped unclosed, each agent's
+    MCP toolset stayed open (``tests/workflow/test_adk_mcp_lifecycle.py``)."""
+
+    async def test_cleanup_closes_it_before_the_session_service(self):
+        order: list[str] = []
+
+        class Service:
+            async def close(self) -> None:
+                order.append("session_service")
+
+        mgr = _manager(Service())
+        runner = mgr._runner = _Runner(order)
+
+        await mgr.cleanup()
+        await mgr.cleanup()
+
+        assert runner.closes == 1
+        assert order == ["runner", "session_service"]
+
+    async def test_a_release_that_keeps_the_session_service_still_closes_it(self):
+        service = _AsyncClosable()
+        mgr = _manager(service)
+        runner = mgr._runner = _Runner()
+
+        await mgr._release_resources(keep_session_service=True)
+
+        assert (runner.closes, service.closes) == (1, 0)
+
+    async def test_a_failing_close_does_not_block_shutdown(self):
+        service = _AsyncClosable()
+        mgr = _manager(service)
+        mgr._runner = _Runner(fail=True)
+
+        await mgr.cleanup()
+
+        assert service.closes == 1
+        assert mgr._runner is None
+
+
 def _real_manager(monkeypatch=None):
     """A manager built through ``__init__`` with the network stubbed out.
 

@@ -291,7 +291,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         session_service = None
         if not (keep_session_service or self._session_service_pinned):
             session_service, self._session_service = self._session_service, None
-        self._runner = None
+        runner, self._runner = self._runner, None
         self._root_agent = None
         self._budgets = {}
         self._initialized = False
@@ -301,6 +301,10 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             self._llm_logging_plugin.clear()
             self._llm_logging_plugin = None
 
+        # The runner closes the agents' toolsets (an MCP server stops with
+        # its toolset) and plugins; the session service it only flushes, so
+        # one a model switch keeps stays open. Before the service closes.
+        await self._aclose_owned(runner, "runner")
         await self._aclose_owned(session_service, "session_service")
         await self._close_catalog()
 
