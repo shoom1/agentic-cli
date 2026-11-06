@@ -9,11 +9,21 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import AsyncGenerator, Any, Callable
 
+from google.genai import types
+
 from agentic_cli.workflow.context import OVERFLOW_ERROR_CODE, ContextBudget, usage_fields
 from agentic_cli.workflow.events import WorkflowEvent, EventType
 from agentic_cli.logging import Loggers
 
 logger = Loggers.workflow()
+
+#: The error codes of a reply that is no answer: a Gemini candidate's finish
+#: reason (any but STOP) or a prompt's block reason, which ADK records on a
+#: response with no content (``LlmResponse.create``). A failed call's error
+#: event carries an API status or an exception's class name instead.
+NO_ANSWER_CODES = frozenset(
+    {reason.value for reason in types.FinishReason} - {types.FinishReason.STOP.value}
+) | frozenset(reason.value for reason in types.BlockedReason)
 
 
 class ADKEventProcessor:
@@ -43,9 +53,13 @@ class ADKEventProcessor:
     A conversation the main agent's model no longer takes ends its turn with
     an error response from the overflow handler
     (``workflow/adk/overflow_plugin.py``), ``error_code="CONTEXT_OVERFLOW"``:
-    it becomes the turn's ``ERROR``, with the handler's clear text. No other
-    error code of the main agent is mapped: ADK records one for an exception
-    that then leaves the run, which reports it.
+    it becomes the turn's ``ERROR``, with the handler's clear text. A reply of
+    the main agent's that is no answer (``NO_ANSWER_CODES``: a safety stop, a
+    blocked prompt, a malformed function call, every token spent thinking)
+    ends the turn too, raising nothing: it becomes the turn's ``ERROR``,
+    "<model> returned no answer: <reason>". No other error code of the main
+    agent is mapped: ADK records one for an exception that then leaves the
+    run, which reports it.
 
     Args:
         model: The default model, which usage names for an agent ``models``
@@ -121,6 +135,14 @@ class ADKEventProcessor:
         elif error_code == OVERFLOW_ERROR_CODE:
             error = self._apply_hook(WorkflowEvent.error(
                 adk_event.error_message or error_code, error_code=OVERFLOW_ERROR_CODE
+            ))
+            if error:
+                yield error
+        elif error_code in NO_ANSWER_CODES and not _has_parts(adk_event):
+            model = self.models.get(self._agent(adk_event), self._model)
+            error = self._apply_hook(WorkflowEvent.error(
+                f"{model} returned no answer: {adk_event.error_message or error_code}",
+                error_code=error_code,
             ))
             if error:
                 yield error
@@ -241,3 +263,8 @@ class ADKEventProcessor:
         if self._on_event:
             return self._on_event(event)
         return event
+
+
+def _has_parts(adk_event: Any) -> bool:
+    content = getattr(adk_event, "content", None)
+    return bool(content is not None and content.parts)
