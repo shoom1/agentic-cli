@@ -958,6 +958,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **On ADK, an agent's prompt is sent as written.** ADK fills `{name}` in a
+  prompt from the session state and raises `KeyError` for a name the state
+  lacks, so a prompt quoting code (`f'{value}'`) or JSON failed every turn
+  before any request, and one naming `{plan}` or `{tasks}` had the session's
+  plan or task list spliced in once the state tools wrote it. An app built
+  from `AgentConfig`s now has every agent's prompt sent as written, as Deep
+  Agents sends it. A native ADK YAML app keeps ADK's templating; one
+  translated from ADK YAML (`adk_config_mode="translate"`) is built from
+  `AgentConfig`s, so it does not, and a warning
+  (`adk_translate_instruction_template_dropped`) names the templates.
 - **`app_name` comes only from the application.** It chooses the settings
   files, yet the environment (`AGENTIC_APP_NAME`, or an app's prefix) and the
   user file could set it too, after the files had been chosen by the class's
@@ -1768,6 +1778,20 @@ step; each entry says what to use instead.
   user, on its first listing. Sub-agents no longer store checkpoints of
   their own: nothing read them, and a forked one stored the whole
   conversation at every step.
+- **On ADK, a main agent's reply that is no answer ends the turn with an
+  error.** A reply with nothing but thoughts or blank text raises nothing on
+  ADK: Gemini's `SAFETY`, `MALFORMED_FUNCTION_CALL` or `MAX_TOKENS` (every
+  token spent thinking), a prompt Gemini blocked, an empty STOP reply
+  (`MODEL_RETURNED_NO_CONTENT`), a Claude refusal or a Claude reply cut at
+  its token limit. The turn ended with no text and no error. It now ends with
+  "<model> returned no answer", the reason as its code.
+- **On ADK, an agent's MCP servers stop with the workflow.** The manager
+  dropped its runner without closing it, so each agent's MCP toolset stayed
+  open: a stdio server outlived `cleanup()`, and every `/settings` model
+  switch left one more running. The runner is now closed on every release,
+  which closes the toolsets; a session service a model switch keeps is only
+  flushed. Ctrl+C during a model switch stops only the wait: the release
+  goes on to its end.
 - **Two tool questions asked at once are shown one after the other.** The
   calls of one model step run together (both backends gather them), so two
   of them could ask at once (two `ask_clarification` calls, or one beside a

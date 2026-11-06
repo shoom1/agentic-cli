@@ -119,6 +119,36 @@ class TestTranslate:
         cfg = translate_adk_yaml(path)[0]
         assert cfg.model_settings is None
 
+    def test_an_instruction_template_is_dropped_with_a_warning(self, tmp_path, monkeypatch):
+        """A translated agent's prompt is sent as written, as any
+        ``AgentConfig``'s is: ADK's ``{name}`` filling from the session state
+        is an ADK-only construct, dropped with a warning like the others."""
+        from agentic_cli.workflow import adk_config_bridge
+
+        logged: list[tuple[str, str, dict]] = []
+
+        class Recorder:
+            def __getattr__(self, level: str):
+                return lambda event, **fields: logged.append((level, event, fields))
+
+        monkeypatch.setattr(adk_config_bridge, "logger", Recorder())
+        path = _write(
+            tmp_path / "a.yaml",
+            """
+            name: solo
+            model: gemini-2.5-flash
+            instruction: 'Greet {user_name}, then {app:motto?}; JSON is {"a": 1}.'
+            """,
+        )
+
+        (cfg,) = translate_adk_yaml(path)
+
+        assert cfg.get_prompt() == 'Greet {user_name}, then {app:motto?}; JSON is {"a": 1}.'
+        assert logged == [(
+            "warning", "adk_translate_instruction_template_dropped",
+            {"name": "solo", "names": ["user_name", "app:motto?"]},
+        )]
+
 
 # ---------------------------------------------------------------------------
 # Factory integration
