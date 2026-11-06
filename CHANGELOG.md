@@ -1486,6 +1486,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `message_count` (every message, and always 0 on ADK) is `turns`. A
   backend of an application's own that keeps sessions implements
   `session_info` too, which `/resume` and the startup flags call.
+- **The local `sandbox_execute` backend restricts nothing, and neither
+  backend scans the code.** The `local` kernel started with an import
+  blocklist (since 0.4.4) that refused whole packages by their top-level
+  name (`urllib`, `http`, `socket`, `subprocess`, `shlex`, `ctypes`, `pip`,
+  `setuptools` and others), so `import urllib.parse`, `xml.sax.saxutils` and
+  `multiprocessing.pool` failed, and with them `scipy.stats`, scikit-learn,
+  pyarrow, pypdf and pandas: the libraries the tool is for. It never isolated
+  anything: `os.system`, a `%%bash` cell and `del sys.meta_path[0]` ran, as
+  CPython has no in-process sandbox. Both backends also refused a cell with a
+  line starting with `!`, or the `%pip`, `%system` and `%sx` magics, which
+  stopped none of that either and refused plain Python whose continuation
+  line starts with `!=`, as black formats a long comparison. Both are gone,
+  and code runs as written: `!pip install` and `%pip` run too, and on
+  `local` they install into the Python environment the app itself runs from
+  (jupyter_client starts the kernel with the app's interpreter), so they can
+  change or break the app's own dependencies. `local` runs the kernel on the
+  host as the user, with the user's files, network and privileges; `docker`
+  is the isolated backend (each session in its own container, with no
+  network, a read-only root filesystem and no capabilities). The
+  `sandbox_execute` docstrings, which are what ADK and Deep Agents send the
+  model (they called it "a stateful sandbox"), the setting's description and
+  the README now say so.
 
 ### Deprecated
 

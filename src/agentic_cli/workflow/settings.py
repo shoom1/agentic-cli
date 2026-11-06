@@ -426,9 +426,11 @@ class WorkflowSettingsMixin(SettingsSourcesMixin):
         title="Stateful Executor Backend",
         description=(
             "Backend for the stateful sandbox_execute tool. 'none' disables it; "
-            "'docker' runs in a network-isolated container (recommended); 'local' "
-            "runs a Jupyter kernel with host privileges (NOT OS-sandboxed). Future: "
-            "'modal', 'runpod'."
+            "'docker' runs each session in an isolated container (no network, "
+            "read-only root filesystem, capped memory/CPU/PIDs; recommended); "
+            "'local' runs a Jupyter kernel on the host as you, with your files, "
+            "network and privileges: it is NOT isolated and restricts nothing. "
+            "Future: 'modal', 'runpod'."
         ),
         json_schema_extra={"ui_order": 121},
     )

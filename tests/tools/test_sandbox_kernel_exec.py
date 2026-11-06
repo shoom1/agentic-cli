@@ -21,16 +21,6 @@ def kernel():
     km.shutdown_kernel(now=True)
 
 
-def test_validate_rejects_shell_bang():
-    ok, msg = kernel_exec.validate_code("!rm -rf /")
-    assert ok is False
-    assert "shell" in msg.lower()
-
-
-def test_validate_allows_plain_code():
-    assert kernel_exec.validate_code("x = 1\nprint(x)") == (True, "")
-
-
 def test_collect_captures_stdout(kernel, tmp_path):
     msg_id = kernel.execute("print('hello')")
     out = kernel_exec.collect_execution(kernel, msg_id, timeout=30, working_dir=tmp_path)

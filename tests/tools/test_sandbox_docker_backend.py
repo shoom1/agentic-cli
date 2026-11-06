@@ -155,6 +155,22 @@ def _feed_result(rt):
     rt.start = start_with_result
 
 
+def test_code_reaches_the_container_unscanned(tmp_path):
+    """The container is the boundary, so the host sends the code as it is: a
+    continuation line starting with `!=` (black's style) is not refused as a
+    shell escape."""
+    backend, rt, ctx = _backend()
+    try:
+        _feed_result(rt)
+        code = "differ = (1\n          != 2)\nprint(differ)"
+        result = backend.execute(code, "s1", timeout_seconds=5, working_dir=tmp_path)
+        assert result.success is True, result.error
+        sent = [json.loads(line) for line in rt._handles[0].stdin.getvalue().splitlines()]
+        assert sent[-1]["code"] == code
+    finally:
+        ctx.__exit__(None, None, None)
+
+
 # The non-root container must be able to write the /workspace bind mount. Rather
 # than make the host session dir world-writable (chmod 0777 — a multi-user-host
 # exposure), run the container AS the host uid so files it writes are host-owned.
