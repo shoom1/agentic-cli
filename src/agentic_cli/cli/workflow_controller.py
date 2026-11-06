@@ -428,9 +428,15 @@ class WorkflowController:
                 cleanup = self._spawn_cleanup(manager)
                 if cleanup is not None:
                     await asyncio.shield(cleanup)
+        await self._join_releases()
+
+    async def _join_releases(self) -> None:
+        """Wait for every release the controller owns (``_spawn_cleanup``).
+
+        Shielded: these are the controller's tasks, and gather() would
+        otherwise cancel them along with its awaiter.
+        """
         if self._orphan_cleanups:
-            # Shielded for the same reason: these are the controller's tasks,
-            # and gather() would otherwise cancel them along with its awaiter.
             await asyncio.shield(
                 asyncio.gather(*list(self._orphan_cleanups), return_exceptions=True)
             )
@@ -536,6 +542,9 @@ class WorkflowController:
         async with self._lifecycle_lock:
             if self._workflow is None:
                 raise RuntimeError("Cannot reinitialize - workflow not initialized")
+            # A release a cancelled swap left running ends first: a switch
+            # back would otherwise start a manager beside the one going.
+            await self._join_releases()
 
             if self._needs_orchestrator_swap(model):
                 await self._swap_orchestrator(model)

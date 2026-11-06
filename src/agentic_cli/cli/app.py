@@ -969,9 +969,9 @@ class BaseCLIApp:
         interrupted by Ctrl+C is undone the same way, without a word, and the
         cancel is re-raised. An orchestrator switch interrupted once the new
         backend runs (while the old one is released, which goes on) is too
-        late to undo: the change stays in memory, unsaved, and is reported as
-        usual before the cancel is re-raised, so the settings name the
-        backend that runs.
+        late to undo: the change stands and is reported as usual before the
+        cancel is re-raised (``/settings`` saves it), so the settings name
+        the backend that runs.
 
         Settings are applied in two ways:
         1. Special settings (model, a role's model, thinking_effort) use

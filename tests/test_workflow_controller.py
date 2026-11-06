@@ -450,6 +450,41 @@ class TestOrchestratorSwapLifecycle:
         await asyncio.wait_for(closing, timeout=5)
         assert finished == ["cleanup"], "the cancel aborted the old manager's cleanup"
 
+    async def test_the_next_reinitialize_waits_for_that_release(self):
+        """One lifecycle transition at a time: a switch back would otherwise
+        start a manager beside the old one still being released."""
+        import asyncio
+
+        controller, old = self._controller_needing_swap()
+        new = _FakeLangGraphWorkflow()
+        releasing, released = asyncio.Event(), asyncio.Event()
+
+        async def _slow_cleanup() -> None:
+            releasing.set()
+            await released.wait()
+
+        old.cleanup = AsyncMock(side_effect=_slow_cleanup)
+        with patch(
+            "agentic_cli.cli.workflow_controller.create_workflow_manager_from_settings",
+            return_value=new,
+        ):
+            swapping = asyncio.create_task(controller.reinitialize())
+            await asyncio.wait_for(releasing.wait(), timeout=5)
+            swapping.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await swapping
+
+            new.reinitialize = AsyncMock()
+            again = asyncio.create_task(controller.reinitialize(model="gemini-2.5-flash"))
+            await asyncio.sleep(0.05)
+            assert not again.done(), "it began while the old manager was released"
+            new.reinitialize.assert_not_awaited()
+            released.set()
+            await asyncio.wait_for(again, timeout=5)
+
+        new.reinitialize.assert_awaited_once()
+        await controller.close()
+
 
 class TestControllerClose:
     """close() releases the manager and is safe to call repeatedly."""

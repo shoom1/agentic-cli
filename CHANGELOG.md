@@ -1760,8 +1760,9 @@ step; each entry says what to use instead.
   orchestrator while the new one ran, and abandoned the release halfway: the
   old backend's MCP servers, sandbox kernels and store stayed open, and the
   next model change switched back without a word, leaving the conversation's
-  history behind. The release now runs to its end in the background, and the
-  switch, too late to undo, stands and is reported.
+  history behind. The release now runs to its end in the background (a later
+  restart or switch waits for it), and the switch, too late to undo, stands,
+  is saved and is reported.
 - **A finished job is no longer recorded FAILED with exit code 1 when it
   is polled as it ends.** A subprocess job's shell, and the in-process
   backend, truncated the `exit_code` sentinel before writing the code, and

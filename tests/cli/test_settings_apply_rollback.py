@@ -271,11 +271,14 @@ class TestTheSwitchIsInterruptedOnceMade:
     """Ctrl+C after an orchestrator switch published the new backend, while
     the old one is being released: too late to undo. The settings were
     restored to the old orchestrator while the new one ran, so the next model
-    change swapped back without a word. Now the Save stands, the conversation
-    continues on the new backend, the switch is reported as usual, and the
-    cancel goes on."""
+    change swapped back without a word. Now the Save stands, and is saved,
+    the conversation continues on the new backend, the switch is reported as
+    usual, and the cancel goes on."""
 
-    async def test_the_settings_name_the_backend_that_runs(self, settings):
+    @staticmethod
+    def _switching(settings, edits=None):
+        """An app on ADK whose old manager's release waits for ``released``;
+        ``releasing`` is set once it has begun."""
         manager = FakeManager(OLD_MODEL, backend="adk")
         releasing, released = asyncio.Event(), asyncio.Event()
 
@@ -284,10 +287,36 @@ class TestTheSwitchIsInterruptedOnceMade:
             await released.wait()
 
         manager.cleanup = AsyncMock(side_effect=cleanup)
-        app = _app(settings, manager)
+        app = _app(settings, manager, edits)
         app._open_here = AsyncMock(return_value="history stays behind")
         replacement = FakeManager(OLD_MODEL, backend="deepagents")
         replacement.initialize_services = AsyncMock()
+        return app, replacement, releasing, released
+
+    async def test_the_switch_is_saved(self, settings):
+        """Saved as any Save is: else the next start ran the old backend,
+        and the next /settings change saved only its own keys, never this."""
+        from agentic_cli.cli.settings_command import SettingsCommand
+
+        app, replacement, releasing, released = self._switching(
+            settings, {"orchestrator": "deepagents"}
+        )
+        try:
+            with patch(
+                "agentic_cli.cli.workflow_controller.create_workflow_manager_from_settings",
+                return_value=replacement,
+            ), patch("agentic_cli.cli.settings_command.Dialog", edited_dialog(app.edits)):
+                await _interrupt(
+                    asyncio.create_task(SettingsCommand().execute("", app)), releasing
+                )
+
+            app.save_settings.assert_awaited_once_with(keys={"orchestrator"})
+        finally:
+            released.set()
+            await app._workflow_controller.close()
+
+    async def test_the_settings_name_the_backend_that_runs(self, settings):
+        app, replacement, releasing, released = self._switching(settings)
         controller = app._workflow_controller
         try:
             with patch(
