@@ -16,6 +16,7 @@ Two strategies:
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,14 @@ from agentic_cli.logging import Loggers
 from agentic_cli.workflow.config import AgentConfig
 
 logger = Loggers.workflow()
+
+# What ADK fills in an instruction from the session state: ``{name}``, an
+# ``app:``/``user:``/``temp:`` or ``artifact.`` name, ``?`` for an optional one
+# (ADK's ``inject_session_state``). A translated agent's prompt is sent as
+# written, as every AgentConfig's is.
+_STATE_TEMPLATE = re.compile(
+    r"\{+((?:artifact\.)?(?:(?:app|user|temp):)?[A-Za-z_][A-Za-z0-9_]*\??)\}+"
+)
 
 # LlmAgentConfig fields with no framework equivalent — dropped during translate.
 _DROPPED_FIELDS = (
@@ -108,6 +117,11 @@ def _translate_node(
     for field in _DROPPED_FIELDS:
         if data.get(field):
             logger.warning("adk_translate_field_dropped", name=name, field=field)
+    templates = _STATE_TEMPLATE.findall(data.get("instruction") or "")
+    if templates:
+        logger.warning(
+            "adk_translate_instruction_template_dropped", name=name, names=templates
+        )
 
     config = AgentConfig(
         name=name,
