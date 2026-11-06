@@ -1754,6 +1754,18 @@ step; each entry says what to use instead.
 
 ### Fixed
 
+- **Two `sandbox_execute` calls on one session no longer break each
+  other.** Both backends run a model step's synchronous calls in worker
+  threads at once (Deep Agents always, ADK now too), and nothing kept two
+  calls on one session apart: on the local backend both read the kernel's
+  one output socket, so a call failed with `ValueError: b'<IDS|MSG>' is not
+  in list`, lost its output or timed out waiting for the end the other call
+  had read; on docker, two first calls each started a container under one
+  name. Calls on one session now run one at a time (a call waits up to its
+  timeout plus a minute, then is told the session is busy), two calls no
+  longer create two backends or pass `sandbox_max_sessions` together, and a
+  `/sandbox reset` or shutdown during a call no longer pulls the kernel out
+  from under it: the call shuts it down as it ends.
 - **Two tool questions asked at once are shown one after the other.** The
   calls of one model step run together (both backends gather them), so two
   of them could ask at once (two `ask_clarification` calls, or one beside a
