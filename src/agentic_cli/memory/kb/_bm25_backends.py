@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from agentic_cli.memory._core.io import atomic_write_json
+from agentic_cli.memory._core.io import atomic_write_json, read_if_regular
 from agentic_cli.memory.kb._tokenize import TOKENIZER
 from agentic_cli.memory.kb._tokenize import tokenize as _tokenize
 
@@ -68,10 +68,10 @@ class _BM25BackendBase:
         )
 
     def load(self, path: Path) -> None:
-        index_path = path / self._INDEX_FILE
-        if not index_path.exists():
+        raw = read_if_regular(path / self._INDEX_FILE)  # a symlink counts as none
+        if raw is None:
             return
-        data = json.loads(index_path.read_text())
+        data = json.loads(raw)
         if data.get("tokenizer") != TOKENIZER:
             return  # tokenized another way: the knowledge base re-indexes
         self._chunk_ids = data["chunk_ids"]

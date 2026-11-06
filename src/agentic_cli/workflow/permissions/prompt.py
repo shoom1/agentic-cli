@@ -58,7 +58,10 @@ def build_request(
     it is the site, shown next to the exact URL the call reads.
 
     When nothing in the request can be remembered (a resource capability whose
-    tool named no target), only "Allow once" and "Deny" are offered.
+    tool named no target, or a target whose rule would hold a wildcard
+    character, see ``is_storable_grant``), only "Allow once" and "Deny" are
+    offered, with a note saying why, and such a capability shows its exact
+    target: there is no wider scope to approve.
 
     For code-execution capabilities (``*.exec``) the pending ``code``/``command``
     payload is shown: the capability target is ``*`` (allow-any-code), so the
@@ -66,8 +69,11 @@ def build_request(
     """
     lines = [f"Tool `{tool_name}` wants:"]
     has_broadened_filesystem = False
+    unstorable = [cap for cap in capabilities if not is_storable_grant(cap, home=home)]
     for cap in capabilities:
-        display_target = broaden_target_for_grant(cap, home=home)
+        display_target = (
+            cap.target if cap in unstorable else broaden_target_for_grant(cap, home=home)
+        )
         if not display_target:
             display_target = "*"
         if cap.name.startswith("http.") and display_target != cap.target:
@@ -82,9 +88,13 @@ def build_request(
     lines.append("")
     if has_broadened_filesystem:
         lines.append("(Grant scope widened to cover the whole directory.)")
-    rememberable = all(is_storable_grant(cap) for cap in capabilities)
-    if not rememberable:
+    rememberable = not unstorable
+    if any(cap.target == "*" for cap in unstorable):
         lines.append("(This tool names no specific target, so approval applies to this call only.)")
+    if any(cap.target != "*" for cap in unstorable):
+        lines.append(
+            "(This target contains wildcard characters, so approval applies to this call only.)"
+        )
     code_preview = _code_preview(capabilities, args)
     if code_preview:
         lines.append("Code to execute:")

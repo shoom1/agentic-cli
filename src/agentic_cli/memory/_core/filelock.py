@@ -30,13 +30,15 @@ def folder_lock(path: Path) -> Iterator[None]:
     """Hold an exclusive lock on ``path`` (created private, 0600) for the block.
 
     ``flock`` belongs to the open file, so the lock is not re-entrant: a
-    holder must not take it again, even in the same process.
+    holder must not take it again, even in the same process. A symlink at
+    ``path`` is not followed (``OSError``): opening it would create, or
+    open for writing, the file it points to.
     """
     if fcntl is None:  # pragma: no cover - not POSIX
         yield
         return
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
         yield

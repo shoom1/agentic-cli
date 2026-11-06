@@ -9,13 +9,15 @@ from __future__ import annotations
 import atexit
 import os
 import re
-import stat
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
 from agentic_cli.logging import Loggers
-from agentic_cli.file_utils import copy_regular_file_no_follow, sanitize_filename
+from agentic_cli.file_utils import (
+    copy_regular_file_no_follow, open_dir_no_follow, sanitize_filename,
+)
 from agentic_cli.tools.sandbox.models import ExecutionResult
 
 #: A session ID names a directory and a container, so it is validated rather
@@ -30,33 +32,101 @@ if TYPE_CHECKING:
 logger = Loggers.tools()
 
 
-def stage_inputs(session_dir: Path, inputs: list[str]) -> None:
+def _folded_parts(path: Path) -> tuple[str, ...]:
+    return tuple(unicodedata.normalize("NFC", part).casefold() for part in path.parts)
+
+
+def sandbox_root_for(settings) -> Path:
+    """The directory that holds every sandbox session's directory."""
+    return Path(settings.workspace_dir) / "sandbox"
+
+
+def _runs_through(spellings: set[tuple[str, ...]], directory: Path) -> bool:
+    for form in {Path(directory).absolute(), Path(os.path.realpath(directory))}:
+        prefix = _folded_parts(form)
+        if any(spelled[: len(prefix)] == prefix for spelled in spellings):
+            return True
+    return False
+
+
+def _refuse_a_path_through_a_session(
+    src: str, path: Path, session_dir: Path, sandbox_root: Path | None
+) -> None:
+    """Refuse an input whose path runs through a session directory: this
+    session's, or, given ``sandbox_root``, any session's.
+
+    Below a session directory every folder belongs to that session's kernel:
+    it can swap one for a symlink between the permission check and the copy,
+    and the host would stage the host file the kernel chose. This session
+    already sees its own files; another session's outputs reach the
+    artifacts directory, a host-only copy, after each successful call. The
+    paths are compared as spelled (``..`` kept, since the OS walks it through
+    the folder) and as resolved now, case-insensitively (APFS's default),
+    against each directory's spelling and its real path."""
+    spellings = {
+        _folded_parts(Path(os.getcwd()) / path),
+        _folded_parts(Path(os.path.realpath(path))),
+    }
+    if _runs_through(spellings, session_dir):
+        raise ValueError(
+            "input is inside this sandbox session's directory, which code in the "
+            f"sandbox controls, and the sandbox already sees it: {src}"
+        )
+    if sandbox_root is not None and _runs_through(spellings, sandbox_root):
+        raise ValueError(
+            "input is inside another sandbox session's directory, which code in "
+            f"that sandbox controls: {src}. Stage its copy from the artifacts "
+            "directory instead: the files a session writes to outputs/ are copied "
+            "there after each successful call."
+        )
+
+
+def stage_inputs(
+    session_dir: Path, inputs: list[str], *, sandbox_root: Path | None = None
+) -> None:
     """Copy each host path into session_dir/inputs/<basename> (the in-sandbox
-    'inputs/<name>' contract). Raises ValueError on a missing file or a
-    basename collision (v1 does not support renaming)."""
+    'inputs/<name>' contract). Raises ValueError on a missing file, a
+    basename collision (v1 does not support renaming), or an input inside
+    this session's directory or, given ``sandbox_root`` (see
+    :func:`sandbox_root_for`), any session's."""
     if session_dir is None:
         raise ValueError("session_dir is required for staging inputs")
     if not inputs:
         return
-    inputs_dir = Path(session_dir) / "inputs"
-    inputs_dir.mkdir(parents=True, exist_ok=True)
-    if not stat.S_ISDIR(os.lstat(inputs_dir).st_mode):
-        # 'inputs' is a symlink / not a real dir (kernel-plantable) — O_NOFOLLOW
-        # and os.replace only guard the final component, not this parent.
-        raise ValueError("inputs staging directory is not a real directory (symlink?)")
-    seen: set[str] = set()
-    for src in inputs:
-        p = Path(src).expanduser()
-        name = p.name
-        if name in seen:
-            raise ValueError(f"duplicate input basename {name!r}; rename one of the source files")
-        seen.add(name)
+    # The kernel can swap 'inputs' for a symlink to any host directory at any
+    # moment, and O_NOFOLLOW guards only a file's own name. So 'inputs' is
+    # opened once, without following a link, and every write goes through
+    # that descriptor. The session directory itself is the container's
+    # /workspace mount point, which the kernel cannot rename.
+    Path(session_dir).mkdir(parents=True, exist_ok=True)
+    session_fd = os.open(session_dir, os.O_RDONLY | os.O_DIRECTORY)
+    try:
         try:
-            copy_regular_file_no_follow(p, inputs_dir / name)
-        except FileNotFoundError as exc:
-            raise ValueError(f"input file not found: {src}") from exc
-        except (OSError, ValueError) as exc:
-            raise ValueError(f"input must be a regular file: {src}") from exc
+            inputs_fd = open_dir_no_follow("inputs", dir_fd=session_fd, create=True)
+        except OSError as exc:
+            # 'inputs' is a symlink / not a real dir (kernel-plantable).
+            raise ValueError(
+                "inputs staging directory is not a real directory (symlink?)"
+            ) from exc
+    finally:
+        os.close(session_fd)
+    try:
+        seen: set[str] = set()
+        for src in inputs:
+            p = Path(src).expanduser()
+            _refuse_a_path_through_a_session(src, p, session_dir, sandbox_root)
+            name = p.name
+            if name in seen:
+                raise ValueError(f"duplicate input basename {name!r}; rename one of the source files")
+            seen.add(name)
+            try:
+                copy_regular_file_no_follow(p, name, dst_dir_fd=inputs_fd)
+            except FileNotFoundError as exc:
+                raise ValueError(f"input file not found: {src}") from exc
+            except (OSError, ValueError) as exc:
+                raise ValueError(f"input must be a regular file: {src}") from exc
+    finally:
+        os.close(inputs_fd)
 
 
 def sandbox_disabled_reason(settings) -> str:
@@ -122,9 +192,8 @@ class SandboxManager:
 
     def _get_session_dir(self, session_id: str) -> Path:
         """Get or create the working directory for a session."""
-        base = Path(self._settings.workspace_dir)
         safe_id = sanitize_filename(session_id)
-        session_dir = base / "sandbox" / safe_id
+        session_dir = sandbox_root_for(self._settings) / safe_id
         session_dir.mkdir(parents=True, exist_ok=True)
         return session_dir
 
