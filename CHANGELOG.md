@@ -144,6 +144,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the executor backend, sandbox mounts and API keys included. The filter now
   judges the env files the settings actually read: the constructor's
   `_env_file` when one is given.
+- **`execute_python` runs code only inside the OS sandbox, unless you turn it
+  off.** Where no sandbox backend existed (a Linux host without `bwrap`, with
+  `os_sandbox_strict` off by default), when the sandbox could not be set up,
+  or with `os_sandbox_enabled` off, the code ran in a plain subprocess with
+  your privileges (since 0.6.0), behind checks the tool and the settings
+  described as containment. They are not one: CPython has no in-process
+  sandbox, and the standard modules the executor allows reach the host
+  themselves (`re.enum.sys.modules["os"].popen(…)` and
+  `json.codecs.open(path, "w")` passed every check). Yet "Allow for this
+  session" was offered and remembered for it, the prompt showed only the
+  code's first 1,000 characters, and a failed wrap kept numpy, pandas and
+  sympy importable. `os_sandbox_strict` now defaults to true (and so does
+  `OSSandboxPolicy.strict`): with the sandbox enabled, the default, the code
+  runs inside it or is refused, with an error that says how to get one
+  (sandbox-exec ships with macOS; install bubblewrap on Linux) and how to opt
+  out (`os_sandbox_enabled: false`, which runs the code with your
+  privileges). The modules a call may import are chosen from where it runs:
+  inside the sandbox all of them, anywhere else the standard ones only.
+  Code that may run on your machine without a sandbox (`execute_python` with
+  the sandbox off or not strict, `sandbox_execute` on the `local` backend) is
+  approved call by call: the prompt offers only "Allow once" and "Deny" and
+  says why, and no grant stored earlier approves it, though an allow rule you
+  write in your own settings still does. A code prompt shows all of the code.
+  The tool's description, the settings' and the executor's docstring say
+  this, and `SafePythonExecutor.effective_allowed_modules` is gone (the set
+  is chosen per call). **Breaking:** on a host with no sandbox backend (a
+  Linux host without bubblewrap), `execute_python` is refused until one is
+  installed or `os_sandbox_enabled` is set to false.
 
 ### Added
 

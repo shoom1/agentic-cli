@@ -1075,3 +1075,181 @@ class TestStartUpFilesAreNotWritable:
         assert result.allowed is False, result.reason
         assert "builtin/deny" in result.reason
 
+
+
+# ---------------------------------------------------------------------------
+# Code that may run on the host is approved per call
+# ---------------------------------------------------------------------------
+
+#: The note a prompt carries for code that runs without a sandbox.
+UNCONTAINED_NOTE = (
+    "(This code runs on your machine without a sandbox, so approval applies to this call only.)"
+)
+_PY = [Capability("python.exec")]
+_STATEFUL = [Capability("python.exec.stateful")]
+_ALL_FOUR = [ALLOW_ONCE_CHOICE, ALLOW_SESSION_CHOICE, ALLOW_ALWAYS_CHOICE, DENY_CHOICE]
+_ONCE_OR_DENY = [ALLOW_ONCE_CHOICE, DENY_CHOICE]
+
+
+def _exec_engine(layout, approver: _Approver, **settings) -> PermissionEngine:
+    """An engine whose owner tells it, from real settings, which code runs on
+    the host (as ``BaseWorkflowManager`` does)."""
+    from agentic_cli.config import BaseSettings
+    from agentic_cli.tools.exec_policy import uncontained_exec_capabilities
+
+    ctx = PermissionContext(workdir=layout.work, home=layout.home, app_name=APP)
+    return PermissionEngine(
+        settings=BaseSettings(app_name=APP, **settings),
+        workflow=approver,
+        ctx=ctx,
+        uncontained=uncontained_exec_capabilities,
+    )
+
+
+class TestCodeThatMayRunOnTheHostIsApprovedPerCall:
+    """``execute_python`` runs on the host when the OS sandbox is off, or when
+    it may fall back to running without one (``os_sandbox_strict`` off);
+    ``sandbox_execute`` on the ``local`` backend always does. CPython has no
+    in-process sandbox, so such code is approved call by call: the prompt
+    offers no grant, and a grant stored earlier does not approve it."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "settings",
+        [
+            {"os_sandbox_enabled": False},
+            {"os_sandbox_strict": False},
+            {"os_sandbox_enabled": False, "os_sandbox_strict": False},
+        ],
+        ids=["sandbox-off", "may-fall-back", "both"],
+    )
+    async def test_uncontained_python_is_offered_once_or_deny(self, layout, settings):
+        # A client answering with a choice it was not offered stores nothing.
+        approver = _Approver(ALLOW_SESSION_CHOICE)
+        engine = _exec_engine(layout, approver, **settings)
+
+        assert (await engine.check("execute_python", _PY, {"code": "1"})).allowed
+        [request] = approver.requests
+        assert request.choices == _ONCE_OR_DENY
+        assert UNCONTAINED_NOTE in request.prompt
+        assert "names no specific target" not in request.prompt
+        assert [r for r in engine.rules if r.source is RuleSource.SESSION] == []
+
+        await engine.check("execute_python", _PY, {"code": "2"})
+        assert len(approver.requests) == 2
+
+    @pytest.mark.asyncio
+    async def test_contained_python_is_offered_all_four(self, layout):
+        """The defaults: the OS sandbox on and strict, so the code runs in it
+        or not at all, and a session grant covers the next call."""
+        approver = _Approver(ALLOW_SESSION_CHOICE)
+        engine = _exec_engine(layout, approver)
+
+        assert (await engine.check("execute_python", _PY, {"code": "1"})).allowed
+        assert (await engine.check("execute_python", _PY, {"code": "2"})).allowed
+        [request] = approver.requests
+        assert request.choices == _ALL_FOUR
+        assert UNCONTAINED_NOTE not in request.prompt
+
+    @pytest.mark.asyncio
+    async def test_a_session_grant_does_not_cover_uncontained_code(self, layout):
+        approver = _Approver(DENY_CHOICE)
+        engine = _exec_engine(layout, approver, os_sandbox_enabled=False)
+        engine._session_rules.append(
+            Rule("python.exec", "*", Effect.ALLOW, RuleSource.SESSION)
+        )
+
+        result = await engine.check("execute_python", _PY, {"code": "1"})
+
+        assert result.allowed is False
+        assert result.reason == "no rule + user denied"
+        assert approver.requests[0].choices == _ONCE_OR_DENY
+
+    @pytest.mark.asyncio
+    async def test_a_saved_grant_does_not_cover_uncontained_code(self, layout):
+        """An "always" grant saved while the code ran contained (in the user's
+        ``project_grants.json``) does not approve it once it runs on the host."""
+        from agentic_cli.workflow.permissions.store import append_project_rule
+
+        append_project_rule(
+            APP, Rule("python.exec", "*", Effect.ALLOW, RuleSource.PROJECT), layout.work
+        )
+        contained = _exec_engine(layout, _Approver(DENY_CHOICE))
+        assert (await contained.check("execute_python", _PY, {"code": "1"})).allowed
+
+        approver = _Approver(DENY_CHOICE)
+        engine = _exec_engine(layout, approver, os_sandbox_enabled=False)
+        result = await engine.check("execute_python", _PY, {"code": "1"})
+
+        assert result.allowed is False
+        assert len(approver.requests) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_rule_the_user_wrote_still_applies(self, layout):
+        """An allow rule in the user's own settings is their policy, not a
+        grant: it approves the code without a prompt."""
+        import json
+
+        user_cfg = layout.home / f".{APP}"
+        user_cfg.mkdir()
+        (user_cfg / "settings.json").write_text(json.dumps({"permissions": {"allow": [
+            {"capability": "python.exec", "target": "*"},
+        ]}}))
+        approver = _Approver(DENY_CHOICE)
+        engine = _exec_engine(layout, approver, os_sandbox_enabled=False)
+
+        result = await engine.check("execute_python", _PY, {"code": "1"})
+
+        assert result.allowed is True
+        assert "user/allow" in result.reason
+        assert approver.requests == []
+
+    @pytest.mark.asyncio
+    async def test_a_settings_change_applies_at_the_next_check(self, layout):
+        approver = _Approver(ALLOW_SESSION_CHOICE)
+        engine = _exec_engine(layout, approver)
+        assert (await engine.check("execute_python", _PY, {"code": "1"})).allowed
+        assert (await engine.check("execute_python", _PY, {"code": "2"})).allowed
+        assert len(approver.requests) == 1
+
+        engine._settings.update_setting("os_sandbox_enabled", False)
+        approver.answer = DENY_CHOICE
+        result = await engine.check("execute_python", _PY, {"code": "3"})
+
+        assert result.allowed is False
+        assert len(approver.requests) == 2
+        assert approver.requests[1].choices == _ONCE_OR_DENY
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("backend, contained", [("local", False), ("docker", True)])
+    async def test_stateful_code_on_the_local_backend_is_approved_per_call(
+        self, layout, backend, contained
+    ):
+        approver = _Approver(ALLOW_SESSION_CHOICE)
+        engine = _exec_engine(layout, approver, stateful_executor_backend=backend)
+
+        await engine.check("sandbox_execute", _STATEFUL, {"code": "1"})
+        await engine.check("sandbox_execute", _STATEFUL, {"code": "2"})
+
+        if contained:
+            [request] = approver.requests
+            assert request.choices == _ALL_FOUR
+        else:
+            assert len(approver.requests) == 2
+            assert approver.requests[0].choices == _ONCE_OR_DENY
+            assert UNCONTAINED_NOTE in approver.requests[0].prompt
+
+    def test_is_storable_grant_is_the_one_decision(self, layout):
+        """The engine (storing) and the prompt (offering) ask the same function."""
+        from agentic_cli.workflow.permissions.capabilities import ResolvedCapability
+        from agentic_cli.workflow.permissions.engine import is_storable_grant
+
+        python = ResolvedCapability("python.exec", "*")
+        stateful = ResolvedCapability("python.exec.stateful", "*")
+        assert is_storable_grant(python, home=layout.home) is True
+        assert is_storable_grant(python, home=layout.home, uncontained={"python.exec"}) is False
+        assert is_storable_grant(stateful, home=layout.home, uncontained={"python.exec"}) is True
+        assert (
+            is_storable_grant(stateful, home=layout.home, uncontained={"python.exec.stateful"})
+            is False
+        )

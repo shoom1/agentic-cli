@@ -2,17 +2,20 @@
 
 File/network/pickle-capable libraries (numpy, pandas, ...) re-expose the very
 capabilities the restricted builtins remove (e.g. numpy.DataSource().open(),
-pandas.read_pickle(url)). Without a real OS sandbox they are an escape from the
-in-process restrictions, so they must be unavailable unless os_sandbox is on.
+pandas.read_pickle(url)). Outside the OS sandbox they hand the code the host in
+one call, so a run gets them only when it runs inside the sandbox: the set is
+chosen from where the call actually runs, when it runs.
 """
 
 import shlex
+import subprocess
 from types import SimpleNamespace
 
 import pytest
 
 from agentic_cli.tools.executor import SafePythonExecutor
 from agentic_cli.tools.shell.os_sandbox.policy import OSSandboxPolicy
+from tests.tools.test_executor_security import _runner_modules
 
 
 class _FakeSandbox:
@@ -21,6 +24,7 @@ class _FakeSandbox:
 
     def __init__(self, sandbox_type: str = "seatbelt") -> None:
         self._type = sandbox_type
+        self.wrapped: list[list[str]] = []
 
     @property
     def sandbox_type(self) -> str:
@@ -29,14 +33,31 @@ class _FakeSandbox:
     def wrap_python_command(self, argv, working_dir, policy):
         from agentic_cli.tools.shell.os_sandbox.base import OSSandboxResult
 
+        self.wrapped.append(list(argv))
         return OSSandboxResult(command=shlex.join(argv), sandbox_type=self._type)
 
 
-def _patch_sandbox(monkeypatch, sandbox_type: str) -> None:
+def _patch_sandbox(monkeypatch, sandbox_type: str) -> _FakeSandbox:
+    sandbox = _FakeSandbox(sandbox_type)
     monkeypatch.setattr(
         "agentic_cli.tools.shell.os_sandbox.get_os_sandbox",
-        lambda *a, **k: _FakeSandbox(sandbox_type),
+        lambda *a, **k: sandbox,
     )
+    return sandbox
+
+
+def _scripts_run(monkeypatch) -> list[str]:
+    """The runner script of each unwrapped subprocess the executor starts."""
+    scripts: list[str] = []
+    real_run = subprocess.run
+
+    def _run(*args, **kwargs):
+        if not kwargs.get("shell"):
+            scripts.append(args[0][2])
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", _run)
+    return scripts
 
 
 class TestModuleGatingWithoutSandbox:
@@ -45,10 +66,10 @@ class TestModuleGatingWithoutSandbox:
     def setup_method(self):
         self.executor = SafePythonExecutor()  # os_sandbox_policy=None
 
-    def test_effective_set_is_core_only(self):
-        assert self.executor.effective_allowed_modules == self.executor.CORE_MODULES
-        assert "numpy" not in self.executor.effective_allowed_modules
-        assert "pandas" not in self.executor.effective_allowed_modules
+    def test_the_run_allows_core_modules_only(self, monkeypatch):
+        scripts = _scripts_run(monkeypatch)
+        assert self.executor.execute("1 + 1")["success"] is True
+        assert _runner_modules(scripts[0]) == self.executor.CORE_MODULES
 
     def test_numpy_import_rejected(self):
         ok, err = self.executor.validate_code("import numpy")
@@ -83,33 +104,38 @@ class TestModuleGatingWithoutSandbox:
 class TestModuleGatingWithSandbox:
     """OS sandbox enabled AND available -> the heavy libraries are permitted."""
 
-    def test_effective_set_is_full_when_sandbox_available(self, monkeypatch):
-        _patch_sandbox(monkeypatch, "seatbelt")
+    def test_a_sandboxed_run_allows_every_module(self, monkeypatch):
+        sandbox = _patch_sandbox(monkeypatch, "seatbelt")
         executor = SafePythonExecutor(os_sandbox_policy=OSSandboxPolicy(enabled=True))
-        assert executor.effective_allowed_modules == executor.ALLOWED_MODULES
-        assert "numpy" in executor.effective_allowed_modules
+        assert executor.execute("1 + 1")["success"] is True
+        assert _runner_modules(sandbox.wrapped[0][2]) == executor.ALLOWED_MODULES
 
     def test_numpy_import_allowed_when_sandbox_available(self, monkeypatch):
         _patch_sandbox(monkeypatch, "seatbelt")
         executor = SafePythonExecutor(os_sandbox_policy=OSSandboxPolicy(enabled=True))
-        ok, _ = executor.validate_code("import numpy")
-        assert ok is True
+        result = executor.execute("import numpy\n'ok'")
+        assert "not allowed" not in (result["error"] or ""), result
 
-    def test_disabled_policy_is_treated_as_no_sandbox(self):
-        policy = SimpleNamespace(enabled=False)
-        executor = SafePythonExecutor(os_sandbox_policy=policy)
-        assert executor.effective_allowed_modules == executor.CORE_MODULES
+    def test_disabled_policy_is_treated_as_no_sandbox(self, monkeypatch):
+        sandbox = _patch_sandbox(monkeypatch, "seatbelt")
+        executor = SafePythonExecutor(os_sandbox_policy=SimpleNamespace(enabled=False))
+        result = executor.execute("import numpy")
+        assert result["success"] is False and "not allowed" in result["error"]
+        assert sandbox.wrapped == []
 
 
 class TestOsSandboxAvailabilityAware:
     """Enabling the sandbox but having no real backend must NOT re-enable the
     heavy modules — availability, not the flag, gates SANDBOXED_MODULES (5b)."""
 
-    def test_enabled_but_unavailable_is_core_only(self, monkeypatch):
+    def test_enabled_but_unavailable_falls_back_core_only(self, monkeypatch):
         _patch_sandbox(monkeypatch, "none")
-        ex = SafePythonExecutor(os_sandbox_policy=OSSandboxPolicy(enabled=True))
-        assert ex.effective_allowed_modules == ex.CORE_MODULES
-        assert "numpy" not in ex.effective_allowed_modules
+        scripts = _scripts_run(monkeypatch)
+        ex = SafePythonExecutor(
+            os_sandbox_policy=OSSandboxPolicy(enabled=True, strict=False)
+        )
+        assert ex.execute("1 + 1")["success"] is True
+        assert _runner_modules(scripts[0]) == ex.CORE_MODULES
 
     def test_unavailable_non_strict_falls_back_and_runs(self, monkeypatch):
         """Default (non-strict): no backend -> hardened in-process, not refusal."""
@@ -147,8 +173,52 @@ class TestOsSandboxSettingsDefaults:
         settings = BaseSettings()
         assert settings.os_sandbox_enabled is True
 
-    def test_os_sandbox_strict_defaults_false(self):
+    def test_os_sandbox_strict_defaults_true(self):
+        """With no sandbox backend, or a wrap that fails, code is refused rather
+        than run as the user: falling back is an opt-in."""
         from agentic_cli.config import BaseSettings
 
         settings = BaseSettings()
-        assert settings.os_sandbox_strict is False
+        assert settings.os_sandbox_strict is True
+
+    def test_a_policy_is_strict_unless_told_otherwise(self, monkeypatch):
+        """``OSSandboxPolicy`` has the settings' default: an executor given an
+        enabled policy never falls back without one, unless it says so."""
+        assert OSSandboxPolicy().strict is True
+        _patch_sandbox(monkeypatch, "none")
+        ex = SafePythonExecutor(os_sandbox_policy=OSSandboxPolicy(enabled=True))
+        result = ex.execute("1 + 1")
+        assert result["success"] is False
+        assert "sandbox" in result["error"].lower()
+
+
+class TestExecPolicy:
+    """Which code-execution capabilities may run on the host, by settings."""
+
+    @pytest.mark.parametrize(
+        "settings, uncontained",
+        [
+            ({}, set()),
+            ({"os_sandbox_enabled": False}, {"python.exec"}),
+            ({"os_sandbox_strict": False}, {"python.exec"}),
+            ({"stateful_executor_backend": "local"}, {"python.exec.stateful"}),
+            ({"stateful_executor_backend": "docker"}, set()),
+            (
+                {"os_sandbox_enabled": False, "stateful_executor_backend": "local"},
+                {"python.exec", "python.exec.stateful"},
+            ),
+        ],
+    )
+    def test_uncontained_exec_capabilities(self, settings, uncontained):
+        from agentic_cli.config import BaseSettings
+        from agentic_cli.tools.exec_policy import uncontained_exec_capabilities
+
+        assert uncontained_exec_capabilities(BaseSettings(**settings)) == uncontained
+
+    def test_the_tool_s_policy_follows_the_same_settings(self):
+        from agentic_cli.config import BaseSettings
+        from agentic_cli.tools.exec_policy import python_sandbox_policy
+
+        assert python_sandbox_policy(BaseSettings(os_sandbox_enabled=False)) is None
+        assert python_sandbox_policy(BaseSettings()).strict is True
+        assert python_sandbox_policy(BaseSettings(os_sandbox_strict=False)).strict is False

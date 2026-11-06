@@ -533,6 +533,9 @@ class TestSyncToolsOnTheWorkerThread:
             ])],
             stateful_executor_backend="local",
             knowledge_base_use_mock=True,
+            # Not about the OS sandbox, which a host may lack (strict, the
+            # default, would refuse execute_python there): run it without one.
+            os_sandbox_enabled=False,
         )
         _LOOP["loop"] = asyncio.get_running_loop()
         asked: list[str] = []

@@ -1,7 +1,10 @@
-"""Safe Python code execution via subprocess isolation.
+"""Python code execution in a subprocess, inside the OS sandbox when asked.
 
-Provides a sandboxed environment for executing Python code
-with restricted capabilities, memory limits, and cross-platform timeout.
+Where each call runs is decided when it runs: inside the OS sandbox
+(sandbox-exec on macOS, bwrap on Linux) when the policy asks for it and a
+backend wraps the command; refused when the policy is strict (the default)
+and that fails; otherwise as the user. Outside the sandbox the executor's
+checks are not a security boundary: CPython has no in-process sandbox.
 """
 
 from __future__ import annotations
@@ -12,6 +15,7 @@ import subprocess
 import sys
 import textwrap
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
@@ -37,33 +41,63 @@ class ExecutionTimeoutError(Exception):
 # Backward-compatible alias
 TimeoutError = ExecutionTimeoutError
 
+#: What a refusal tells the model and the user: how to get a sandbox, and how
+#: to opt out of one, and what that means.
+_HOW_TO_RUN = (
+    "To run it, install a sandbox tool (sandbox-exec ships with macOS; on Linux "
+    "install bubblewrap, `bwrap`), or set `os_sandbox_enabled` to false in your "
+    "settings to run code without a sandbox, with your privileges."
+)
+
+
+@dataclass(frozen=True)
+class _Run:
+    """Where one call's code runs, decided before it is validated.
+
+    ``command`` is what ``subprocess.run`` gets (a shell string when the
+    sandbox wrapped it), ``modules`` what the code may import there, and
+    ``refusal`` the error when it runs nowhere.
+    """
+
+    command: str | list[str] = ""
+    shell: bool = False
+    modules: frozenset[str] = frozenset()
+    sandboxed: bool = False
+    refusal: str | None = None
+
 
 class SafePythonExecutor:
-    """Executes Python code in an isolated subprocess.
+    """Runs Python code in a fresh subprocess, inside the OS sandbox when asked.
 
-    Provides safety through:
-    - AST validation (blocks dangerous patterns, runs in-process for fast feedback)
-    - Subprocess isolation (code never runs in the agent process)
-    - Execution timeout (cross-platform via subprocess.run)
-    - Memory limits (resource.setrlimit on Unix)
-    - Output capture with sentinel protocol
+    Where the code runs is decided at each call, before it is validated:
 
-    The AST validation and restricted builtins are defense-in-depth, not a hard
-    security boundary: a determined caller can still reach the host through
-    library I/O or string-format tricks. The OS sandbox (``os_sandbox_policy``)
-    is the real isolation layer. Without it, only the pure-computation
-    ``CORE_MODULES`` are importable; file/network/pickle-capable libraries
-    (``SANDBOXED_MODULES``) are disabled to avoid trivial escapes.
+    * The policy is enabled and a backend (sandbox-exec on macOS, bwrap on
+      Linux) wraps the command: the code runs inside the OS sandbox, which is
+      the security boundary (it writes only to the working directory and the
+      configured paths, reads no credential store, and has no network unless
+      the policy allows it). ``CORE_MODULES`` and ``SANDBOXED_MODULES`` are
+      importable.
+    * The policy is enabled but there is no backend, or the wrap fails: the
+      code is refused when the policy is strict (the default), and otherwise
+      runs as below.
+    * No policy (or a disabled one), or a non-strict fallback: the code runs
+      with the user's privileges, and only ``CORE_MODULES`` are importable.
+      The AST checks and the restricted builtins still apply, but they are not
+      a security boundary: CPython has no in-process sandbox, and the allowed
+      standard modules reach the host themselves
+      (``re.enum.sys.modules["os"]``, ``json.codecs.open``). Code that runs
+      this way must be approved call by call (``tools/exec_policy.py``).
+
+    Every run also has a timeout, an address-space limit (``RLIMIT_AS``,
+    which macOS does not enforce), the sentinel output protocol, and an
+    environment without the provider keys.
     """
 
     # Modules that expose file, network, or pickle I/O through public,
     # non-underscore APIs (e.g. numpy.DataSource().open(), numpy.load(...,
-    # allow_pickle=True), pandas.read_pickle(url)). The AST/name allow-list
-    # cannot neutralize these — they re-expose exactly the capabilities the
-    # restricted builtins remove — so they are an escape from the in-process
-    # restrictions (arbitrary file read, pickle-based code execution) unless a
-    # real OS sandbox contains them. They are therefore permitted only when
-    # os_sandbox_policy is enabled.
+    # allow_pickle=True), pandas.read_pickle(url)). Importable only by code
+    # that runs inside the OS sandbox: outside it they would hand the code
+    # the host in one call.
     SANDBOXED_MODULES = {
         "numpy",
         "pandas",
@@ -75,8 +109,10 @@ class SafePythonExecutor:
         "sympy",
     }
 
-    # Modules safe to import without OS isolation: pure computation and stdlib
-    # data handling with no file/network/deserialization surface.
+    # The modules importable wherever the code runs. Not a boundary: they are
+    # standard modules for computation and data handling, but some re-export
+    # the host (re.enum.sys, json.codecs), so code that runs outside the OS
+    # sandbox is approved per call.
     #
     # NOTE: ``operator`` and ``functools`` are deliberately excluded. Their
     # attrgetter/methodcaller (and reduce) take attribute names as *runtime
@@ -101,9 +137,8 @@ class SafePythonExecutor:
         "random",
     }
 
-    # Upper bound of importable modules. The effective set actually enforced is
-    # computed per-instance in __init__ (CORE_MODULES only, unless the OS
-    # sandbox is enabled — see effective_allowed_modules).
+    # Every module a run may import: a run inside the OS sandbox gets all of
+    # them, any other run CORE_MODULES only (see _choose_run).
     ALLOWED_MODULES = CORE_MODULES | SANDBOXED_MODULES
 
     # Builtins that are blocked
@@ -154,39 +189,29 @@ class SafePythonExecutor:
         Args:
             default_timeout: Default execution timeout in seconds.
             max_memory_mb: Maximum memory for subprocess (MB, Unix only).
-            os_sandbox_policy: OS-level sandbox policy. If provided and enabled,
-                Python execution is wrapped with OS-native sandboxing.
+            os_sandbox_policy: OS-level sandbox policy. Enabled, the code runs
+                inside the OS sandbox, or (strict, the default) not at all.
+                None or disabled, it runs with the user's privileges.
         """
         self.default_timeout = default_timeout
         self.max_memory_mb = max_memory_mb
         self.os_sandbox_policy = os_sandbox_policy
 
-        # File/network/pickle-capable libraries are only safe behind real OS
-        # isolation. They are gated on *actual* sandbox availability, not just
-        # the setting: if the sandbox is requested but no backend exists (so
-        # execution falls back in-process), these must stay unavailable.
-        sandbox_on = bool(os_sandbox_policy and os_sandbox_policy.enabled)
-        real_sandbox = sandbox_on and self._real_os_sandbox_available()
-        self.effective_allowed_modules = (
-            self.ALLOWED_MODULES if real_sandbox else self.CORE_MODULES
-        )
-
-    @staticmethod
-    def _real_os_sandbox_available() -> bool:
-        """True if a real OS sandbox backend (not the no-op) is present."""
-        from agentic_cli.tools.shell.os_sandbox import get_os_sandbox
-
-        return get_os_sandbox().sandbox_type != "none"
-
-    def validate_code(self, code: str) -> tuple[bool, str]:
-        """Validate code for safety.
+    def validate_code(
+        self, code: str, allowed_modules: frozenset[str] | set[str] | None = None
+    ) -> tuple[bool, str]:
+        """Check code against the executor's rules (not a security boundary).
 
         Args:
             code: Python code to validate.
+            allowed_modules: The modules the code may import: those of the
+                place it will run. Default: ``CORE_MODULES``, which every run
+                allows.
 
         Returns:
             Tuple of (is_valid, error_message).
         """
+        modules = self.CORE_MODULES if allowed_modules is None else allowed_modules
         try:
             tree = ast.parse(code)
         except SyntaxError as e:
@@ -200,7 +225,7 @@ class SafePythonExecutor:
                     # Check if importing allowed modules
                     if isinstance(node, ast.Import):
                         for alias in node.names:
-                            if alias.name.split(".")[0] not in self.effective_allowed_modules:
+                            if alias.name.split(".")[0] not in modules:
                                 return (
                                     False,
                                     f"Import of '{alias.name}' is not allowed",
@@ -208,7 +233,7 @@ class SafePythonExecutor:
                     elif isinstance(node, ast.ImportFrom):
                         if (
                             node.module
-                            and node.module.split(".")[0] not in self.effective_allowed_modules
+                            and node.module.split(".")[0] not in modules
                         ):
                             return (
                                 False,
@@ -289,7 +314,7 @@ class SafePythonExecutor:
         context: dict[str, Any] | None = None,
         timeout_seconds: int | None = None,
     ) -> dict[str, Any]:
-        """Execute Python code safely in an isolated subprocess.
+        """Execute Python code in a fresh subprocess.
 
         Args:
             code: Python code to execute.
@@ -312,19 +337,6 @@ class SafePythonExecutor:
                 "execution_time_ms": 0,
             }
         timeout = self.default_timeout if timeout_seconds is None else timeout_seconds
-
-        # Validate code in-process for fast feedback
-        logger.debug("python_executor.validation", code_length=len(code))
-        is_valid, error = self.validate_code(code)
-        if not is_valid:
-            return {
-                "success": False,
-                "output": "",
-                "result": None,
-                "error": f"Validation error: {error}",
-                "execution_time_ms": 0,
-            }
-
         return self._execute_in_subprocess(code, context, timeout)
 
     def _sandbox_refused(self, message: str, start_time: float) -> dict[str, Any]:
@@ -339,16 +351,63 @@ class SafePythonExecutor:
             "execution_time_ms": round(elapsed, 2),
         }
 
+    def _choose_run(self, context: dict[str, Any] | None) -> _Run:
+        """Decide where this call's code runs: inside the OS sandbox, refused,
+        or with the user's privileges (see the class docstring)."""
+        policy = self.os_sandbox_policy
+        if not (policy and policy.enabled):
+            # No sandbox asked for: the caller's choice to run as the user.
+            return self._unsandboxed_run(context)
+
+        from agentic_cli.tools.shell.os_sandbox import get_os_sandbox
+
+        strict = bool(getattr(policy, "strict", True))
+        sandbox = get_os_sandbox()
+        if sandbox.sandbox_type == "none":
+            if strict:
+                return _Run(refusal=(
+                    "Refusing to run Python without the OS sandbox: no sandbox "
+                    f"tool is available on this system. {_HOW_TO_RUN}"
+                ))
+            logger.warning(
+                "python_executor.os_sandbox_unavailable_fallback",
+                sandbox_type=sandbox.sandbox_type,
+            )
+            return self._unsandboxed_run(context)
+
+        modules = frozenset(self.ALLOWED_MODULES)
+        wrap = sandbox.wrap_python_command(
+            [sys.executable, "-c", self._build_runner_script(context, modules)],
+            Path.cwd(),
+            policy,
+        )
+        if wrap.success:
+            logger.debug("python_executor.os_sandbox_wrapped", sandbox_type=wrap.sandbox_type)
+            return _Run(command=wrap.command, shell=True, modules=modules, sandboxed=True)
+        if strict:
+            return _Run(refusal=(
+                "Refusing to run Python without the OS sandbox: it could not be "
+                f"set up ({wrap.sandbox_type}: {wrap.error}). {_HOW_TO_RUN}"
+            ))
+        logger.warning("python_executor.os_sandbox_wrap_failed_fallback", error=wrap.error)
+        return self._unsandboxed_run(context)
+
+    def _unsandboxed_run(self, context: dict[str, Any] | None) -> _Run:
+        """A run with the user's privileges: ``CORE_MODULES`` only."""
+        modules = frozenset(self.CORE_MODULES)
+        script = self._build_runner_script(context, modules)
+        return _Run(command=[sys.executable, "-c", script], modules=modules)
+
     def _execute_in_subprocess(
         self,
         code: str,
         context: dict[str, Any] | None,
         timeout: int,
     ) -> dict[str, Any]:
-        """Run validated code in a subprocess.
+        """Choose where the code runs, validate it for there, and run it.
 
         Args:
-            code: Pre-validated Python code.
+            code: Python code to execute.
             context: Optional variables to inject.
             timeout: Execution timeout in seconds.
 
@@ -356,82 +415,38 @@ class SafePythonExecutor:
             Dict with execution results.
         """
         start_time = time.time()
-        script = self._build_runner_script(context)
+        run = self._choose_run(context)
+        if run.refusal is not None:
+            return self._sandbox_refused(run.refusal, start_time)
+
+        # The modules the code may import are those of the place it runs.
+        logger.debug("python_executor.validation", code_length=len(code))
+        is_valid, error = self.validate_code(code, allowed_modules=run.modules)
+        if not is_valid:
+            return {
+                "success": False,
+                "output": "",
+                "result": None,
+                "error": f"Validation error: {error}",
+                "execution_time_ms": 0,
+            }
 
         logger.debug(
             "python_executor.subprocess_start",
             timeout=timeout,
             max_memory_mb=self.max_memory_mb,
+            sandboxed=run.sandboxed,
         )
-
-        strict = bool(
-            self.os_sandbox_policy and getattr(self.os_sandbox_policy, "strict", False)
-        )
-        proc = None
         try:
-            if self.os_sandbox_policy and self.os_sandbox_policy.enabled:
-                from agentic_cli.tools.shell.os_sandbox import get_os_sandbox
-
-                sandbox = get_os_sandbox()
-                if sandbox.sandbox_type == "none":
-                    # Requested but no backend. Strict -> refuse; otherwise fall
-                    # back to the in-process executor (already restricted to the
-                    # pure-computation CORE_MODULES) with a warning.
-                    if strict:
-                        return self._sandbox_refused(
-                            "OS sandbox is required (os_sandbox_strict=True) but "
-                            "no supported sandbox tool is available (install "
-                            "sandbox-exec on macOS or bwrap on Linux). Refusing "
-                            "to execute without isolation.",
-                            start_time,
-                        )
-                    logger.warning(
-                        "python_executor.os_sandbox_unavailable_fallback",
-                        sandbox_type=sandbox.sandbox_type,
-                    )
-                else:
-                    wrap_result = sandbox.wrap_python_command(
-                        [sys.executable, "-c", script],
-                        Path.cwd(),
-                        self.os_sandbox_policy,
-                    )
-                    if wrap_result.success:
-                        logger.debug(
-                            "python_executor.os_sandbox_wrapped",
-                            sandbox_type=wrap_result.sandbox_type,
-                        )
-                        proc = subprocess.run(
-                            wrap_result.command,
-                            shell=True,
-                            input=code,
-                            capture_output=True,
-                            text=True,
-                            timeout=timeout,
-                            env=self._subprocess_env(),
-                        )
-                    elif strict:
-                        return self._sandbox_refused(
-                            f"OS sandbox wrap failed "
-                            f"({wrap_result.sandbox_type}): {wrap_result.error}. "
-                            f"Refusing to execute without isolation.",
-                            start_time,
-                        )
-                    else:
-                        logger.warning(
-                            "python_executor.os_sandbox_wrap_failed_fallback",
-                            error=wrap_result.error,
-                        )
-
-            if proc is None:
-                # No sandbox policy, or a non-strict fallback from above.
-                proc = subprocess.run(
-                    [sys.executable, "-c", script],
-                    input=code,
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout,
-                    env=self._subprocess_env(),
-                )
+            proc = subprocess.run(
+                run.command,
+                shell=run.shell,
+                input=code,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                env=self._subprocess_env(),
+            )
         except subprocess.TimeoutExpired:
             elapsed = (time.time() - start_time) * 1000
             logger.warning("python_executor.timeout", timeout=timeout)
@@ -494,7 +509,9 @@ class SafePythonExecutor:
             "execution_time_ms": round(elapsed, 2),
         }
 
-    def _build_runner_script(self, context: dict[str, Any] | None) -> str:
+    def _build_runner_script(
+        self, context: dict[str, Any] | None, allowed_modules: frozenset[str]
+    ) -> str:
         """Build the self-contained runner script for the subprocess.
 
         The script:
@@ -506,12 +523,14 @@ class SafePythonExecutor:
 
         Args:
             context: Optional variables to inject into the execution namespace.
+            allowed_modules: The modules the run may import (its own import
+                gate, and which of numpy/pandas are pre-bound).
 
         Returns:
             Python source code string for the runner script.
         """
         context_repr = repr(context) if context else "None"
-        allowed_modules_repr = repr(self.effective_allowed_modules)
+        allowed_modules_repr = repr(set(allowed_modules))
         blocked_builtins_repr = repr(self.BLOCKED_BUILTINS)
         max_memory_bytes = self.max_memory_mb * 1024 * 1024
 
