@@ -51,7 +51,10 @@ from agentic_cli.workflow.interrupts import (  # noqa: E402
 )
 from agentic_cli.workflow.permissions import EXEMPT  # noqa: E402
 from agentic_cli.workflow.service_registry import JOB_MANAGER, get_service  # noqa: E402
-from tests.integration.test_deepagents_turns import unanswered_tool_uses  # noqa: E402
+from tests.integration.test_deepagents_turns import (  # noqa: E402
+    bad_request,
+    unanswered_tool_uses,
+)
 from tests.workflow.adk.fakes import FakeAPI  # noqa: E402
 from tests.workflow.langchain_fakes import anthropic_reply, route  # noqa: E402
 from tests.workflow.test_manager_models import route as route_adk  # noqa: E402
@@ -513,6 +516,85 @@ async def test_a_finished_state_tool_keeps_its_change(hermetic, monkeypatch, bac
     finally:
         await manager.cleanup()
 
+    assert [t["description"] for t in saved] == ["Brew tea"]
+
+
+async def saved_tasks(manager, backend: str, session_id: str = "s") -> list:
+    """The task list stored in conversation ``session_id``."""
+    if backend == "adk":
+        session = await manager._session_service.get_session(
+            app_name=manager.app_name, user_id="u", session_id=session_id)
+        return session.state.get("tasks") or []
+    from agentic_cli.workflow.deepagents.sessions import run_config
+
+    state = await manager._root.aget_state(run_config(manager.session_ref(session_id, "u")))
+    return state.values.get("tasks") or []
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+async def test_a_failed_delegation_keeps_its_siblings_results(hermetic, monkeypatch, backend):
+    """The sub-agent's model fails beside a save_tasks that returned: on Deep
+    Agents the turn fails (on ADK the coordinator is told and goes on). The
+    next turn sends save_tasks' own result, and its tasks are saved."""
+    tasks = [{"description": "Brew tea", "status": "in_progress"}]
+    delegation = ("researcher", {"request": "Look."}) if backend == "adk" else (
+        "task", {"description": "Look.", "subagent_type": "researcher"})
+    coordinate = [calls(("save_tasks", {"tasks": tasks}, "toolu_t"), (*delegation, "toolu_d"))]
+    if backend == "adk":
+        coordinate.append(say("The research failed."))
+    claude = serve(monkeypatch, Claude(
+        Coordinate=[*coordinate, say("Back again.")],
+        Research=[bad_request("The worker's model failed.")],
+    ), backend)
+    manager = manager_for(backend, [
+        AgentConfig(name="coordinator", prompt="Coordinate.", sub_agents=["researcher"],
+                    include_state_tools=True),
+        AgentConfig(name="researcher", prompt="Research.", description="Looks things up.",
+                    include_state_tools=False),
+    ])
+    try:
+        await turn(manager, "Plan and find out.")
+        await turn(manager, "Hello again.")
+        saved = await saved_tasks(manager, backend)
+    finally:
+        await manager.cleanup()
+
+    sent = results(claude.last("Coordinate"))
+    assert claude.refused == []
+    assert "1 tasks saved" in sent["toolu_t"]
+    assert [t["description"] for t in saved] == ["Brew tea"]
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+async def test_a_turn_elsewhere_keeps_a_cancelled_turns_results(hermetic, monkeypatch, backend):
+    """Stopped in one conversation, a turn in another, then back: the call
+    that returned before the stop keeps its result and its change there."""
+    tasks = [{"description": "Brew tea", "status": "in_progress"}]
+    claude = serve(monkeypatch, Claude(Answer=[
+        calls(("save_tasks", {"tasks": tasks}, "toolu_t"), ("ic_wait", {}, "toolu_w")),
+        say("Meanwhile."),
+        say("Back again."),
+    ]), backend)
+    manager = manager_for(backend, [AgentConfig(
+        name="solo", prompt="Answer.", tools=[ic_wait], include_state_tools=True,
+    )])
+    try:
+        running = asyncio.create_task(turn(manager, "Plan and wait."))
+        await asyncio.wait_for(SIGNALS["started"].wait(), timeout=5)
+        await asyncio.sleep(0.1)
+        running.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await running
+        [event async for event in manager.process("Elsewhere.", "u", session_id="other")]
+        await turn(manager, "Hello again.")
+        saved = await saved_tasks(manager, backend)
+    finally:
+        await manager.cleanup()
+
+    sent = results(claude.last("Answer"))
+    assert claude.refused == []
+    assert "1 tasks saved" in sent["toolu_t"]
+    assert INTERRUPTED_BY_USER in sent["toolu_w"]
     assert [t["description"] for t in saved] == ["Brew tea"]
 
 

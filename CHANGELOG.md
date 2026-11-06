@@ -1754,6 +1754,20 @@ step; each entry says what to use instead.
 
 ### Fixed
 
+- **A tool call that returned before its request stopped keeps its result,
+  whatever ran since.** On Deep Agents a stopped request's calls are
+  answered when its conversation runs next, and a call that had returned was
+  kept for that in one record for the whole app, emptied by every request
+  that ended: a request in another conversation in between, or the request
+  failing (a sub-agent's model error beside a `save_tasks` that returned),
+  turned that call's result into "Interrupted … it may have partly run.
+  Check before running it again." and lost what it changed (the saved
+  tasks), so the model could run a side effect such as `write_file` again.
+  The record is now kept by conversation: a request clears its own
+  conversation's calls only when it ends normally, and a failed one keeps
+  those that returned. A call is answered with a background job's state
+  only when the job is its conversation's (a provider that numbers its call
+  ids, `call_0`, …, repeats them in every conversation).
 - **Two tool questions asked at once are shown one after the other.** The
   calls of one model step run together (both backends gather them), so two
   of them could ask at once (two `ask_clarification` calls, or one beside a

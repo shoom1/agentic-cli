@@ -22,9 +22,10 @@ Background jobs a long-running tool started are not part of the turn: they
 go on, and their results arrive later. A call whose job was submitted is
 answered with the job's state (``job_started``), so the model knows it runs.
 
-``OpenCalls`` is a manager's record of what became of its calls: the
-backends answer from it (ADK as the cancelled turn stops, through its
-``abort_signal``; Deep Agents before the next turn's first model call).
+``OpenCalls`` is a manager's record of what became of its calls, kept by
+conversation: the backends answer from it (ADK as the cancelled turn stops,
+through its ``abort_signal``; Deep Agents before that conversation's next
+run's first model call, however many turns ran in others since).
 """
 
 from __future__ import annotations
@@ -34,6 +35,7 @@ from contextlib import contextmanager
 from typing import Any, Iterator
 
 from agentic_cli.workflow.service_registry import JOB_MANAGER, get_service
+from agentic_cli.workflow.sessions import get_active_turn
 
 #: A call that was running when the user pressed Ctrl+C.
 INTERRUPTED_BY_USER = (
@@ -67,11 +69,23 @@ def job_started(record: Any) -> dict[str, Any]:
 
 
 def job_for_call(call_id: str | None) -> Any | None:
-    """The background job the call ``call_id`` submitted, if there is one."""
+    """The background job the call ``call_id`` submitted, if there is one.
+
+    Only a job of the active turn's conversation (its session and user), and
+    none outside a turn: the job store holds all the user's jobs, from every
+    run, and a provider that numbers its call ids (``call_0``, ...) repeats
+    them in every conversation.
+    """
     jobs = get_service(JOB_MANAGER)
-    if jobs is None or not call_id:
+    turn = get_active_turn()
+    if jobs is None or turn is None or not call_id:
         return None
-    return next((record for record in jobs.list() if record.call_id == call_id), None)
+    return next((
+        record for record in jobs.list()
+        if record.call_id == call_id
+        and record.session_id == turn.session_id
+        and record.user_id == turn.user_id
+    ), None)
 
 
 class OpenCalls:
@@ -79,18 +93,23 @@ class OpenCalls:
 
     A call is recorded ``finished`` with its result, or ``asking`` while it
     waits at its permission prompt; a conversation is recorded ``cancelled``
-    when the user stops its turn. A turn that ends without a cancel has every
-    call answered, so ``clear`` forgets its calls.
+    when the user stops its turn. Calls are kept by conversation, the active
+    turn's (``workflow.sessions.get_active_turn``), which ``answer`` reads:
+    Deep Agents answers a stopped turn's calls at that conversation's next
+    run, after turns in others. ``answer`` forgets the call it answers. A
+    turn that ends without a cancel has every call answered, so ``clear``
+    forgets its conversation's calls; one that fails keeps those that
+    finished (``failed``).
     """
 
     def __init__(self) -> None:
-        self._finished: dict[str, Any] = {}
-        self._asking: set[str] = set()
+        self._finished: dict[Any, dict[str, Any]] = {}
+        self._asking: dict[Any, set[str]] = {}
         self._cancelled: set[Any] = set()
 
     def finished(self, call_id: str | None, result: Any) -> None:
         if call_id:
-            self._finished[call_id] = result
+            self._finished.setdefault(get_active_turn(), {})[call_id] = result
 
     @contextmanager
     def asking(self, call_id: str | None) -> Iterator[None]:
@@ -101,27 +120,37 @@ class OpenCalls:
         if not call_id:
             yield
             return
-        self._asking.add(call_id)
+        key = get_active_turn()
+        self._asking.setdefault(key, set()).add(call_id)
         try:
             yield
         except asyncio.CancelledError:
             raise
         except BaseException:
-            self._asking.discard(call_id)
+            self._unmark(key, call_id)
             raise
-        self._asking.discard(call_id)
+        self._unmark(key, call_id)
 
     def answer(self, call_id: str | None, *, by_user: bool) -> Any:
         """An open call's result: what it returned if it finished, else why it has none.
+
+        The call is the active turn's conversation's, and the record forgets
+        it: its answer is in the history now.
 
         Args:
             call_id: The call.
             by_user: Whether the user stopped its turn (else a crash did, or
                 a cancel this process did not see).
         """
-        if call_id in self._finished:
-            return self._finished[call_id]
-        if call_id in self._asking:
+        key = get_active_turn()
+        finished = self._finished.get(key, {})
+        if call_id in finished:
+            result = finished.pop(call_id)
+            if not finished:
+                del self._finished[key]
+            return result
+        if call_id in self._asking.get(key, ()):
+            self._unmark(key, call_id)
             return interrupted(NOT_RUN)
         record = job_for_call(call_id)
         if record is not None:
@@ -139,7 +168,24 @@ class OpenCalls:
             return True
         return False
 
-    def clear(self) -> None:
-        """Forget the calls: the turn that made them ended with every one answered."""
-        self._finished.clear()
-        self._asking.clear()
+    def clear(self, key: Any) -> None:
+        """Forget conversation ``key``'s calls: its turn ended with every one answered."""
+        self._finished.pop(key, None)
+        self._asking.pop(key, None)
+
+    def failed(self, key: Any) -> None:
+        """The turn of conversation ``key`` failed: its next run answers its calls.
+
+        The finished ones keep their results; the others are answered
+        ``INTERRUPTED``, one that waited at its prompt too, since the user
+        did not cancel it.
+        """
+        self._asking.pop(key, None)
+
+    def _unmark(self, key: Any, call_id: str) -> None:
+        marks = self._asking.get(key)
+        if marks is None:
+            return
+        marks.discard(call_id)
+        if not marks:
+            del self._asking[key]
