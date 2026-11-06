@@ -1755,11 +1755,12 @@ step; each entry says what to use instead.
 ### Fixed
 
 - **Two tool questions asked at once are shown one after the other.** The
-  calls of one model step run together (ADK gathers them), so a question
-  (`ask_clarification`) beside a call that needed an approval asked twice at
-  once, and thinking-prompt, which shows one dialog at a time, raised on the
-  second: the tool got an error or, for a permission prompt, the call was
-  denied without the user seeing it. The CLI now asks them in turn.
+  calls of one model step run together (both backends gather them), so two
+  of them could ask at once (two `ask_clarification` calls, or one beside a
+  call that needed an approval), and thinking-prompt, which shows one dialog
+  at a time, raised on the second: the tool got an error or, for a
+  permission prompt, the call was denied without the user seeing it. The CLI
+  now asks them in turn.
 - **A finished job is no longer recorded FAILED with exit code 1 when it
   is polled as it ends.** A subprocess job's shell, and the in-process
   backend, truncated the `exit_code` sentinel before writing the code, and

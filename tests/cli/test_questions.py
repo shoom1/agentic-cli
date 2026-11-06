@@ -291,8 +291,11 @@ async def test_questions_asked_at_once_are_shown_one_after_the_other():
 
         running = asyncio.create_task(ui.run_async(handler))
         try:
-            while not ui.app.is_running:
+            for _ in range(500):  # a session that fails to start ends the wait
+                if ui.app.is_running or running.done():
+                    break
                 await asyncio.sleep(0.01)
+            assert ui.app.is_running, "the session did not start"
             keys.send_text("go\r")
             for _ in range(50):  # Esc closes whichever dialog is open
                 keys.send_text("\x1b")
