@@ -9,11 +9,30 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import AsyncGenerator, Any, Callable
 
+from google.genai import types
+
 from agentic_cli.workflow.context import OVERFLOW_ERROR_CODE, ContextBudget, usage_fields
 from agentic_cli.workflow.events import WorkflowEvent, EventType
 from agentic_cli.logging import Loggers
 
 logger = Loggers.workflow()
+
+#: The error codes of a reply that is no answer: a Gemini candidate's finish
+#: reason (any but STOP) or a prompt's block reason, which ADK records on a
+#: response with no content (``LlmResponse.create``), and the code ADK gives a
+#: STOP reply with no parts, or only thoughts or blank text
+#: (``apply_empty_response_policy``). A failed call's error event carries an
+#: API status or an exception's class name instead.
+NO_ANSWER_CODES = (
+    frozenset({reason.value for reason in types.FinishReason} - {types.FinishReason.STOP.value})
+    | frozenset(reason.value for reason in types.BlockedReason)
+    | {"MODEL_RETURNED_NO_CONTENT"}
+)
+
+#: Finish reasons that are no reason: the reply ended as it should.
+_NORMAL_FINISH = frozenset(
+    {types.FinishReason.STOP.value, types.FinishReason.FINISH_REASON_UNSPECIFIED.value}
+)
 
 
 class ADKEventProcessor:
@@ -43,9 +62,16 @@ class ADKEventProcessor:
     A conversation the main agent's model no longer takes ends its turn with
     an error response from the overflow handler
     (``workflow/adk/overflow_plugin.py``), ``error_code="CONTEXT_OVERFLOW"``:
-    it becomes the turn's ``ERROR``, with the handler's clear text. No other
-    error code of the main agent is mapped: ADK records one for an exception
-    that then leaves the run, which reports it.
+    it becomes the turn's ``ERROR``, with the handler's clear text. A reply of
+    the main agent's that is no answer (nothing but thoughts or blank text,
+    and an error code of ``NO_ANSWER_CODES``: a safety stop, a blocked prompt,
+    a malformed function call, every token spent thinking, nothing at all; or,
+    with no error code, a finish reason other than STOP: a Claude refusal, a
+    reply cut at its token limit) ends the turn too, raising nothing: it
+    becomes the turn's ``ERROR``, "<model> returned no answer", its code
+    the error code or finish reason. No other error code of the main agent
+    is mapped: ADK records one for an exception that then leaves the run,
+    which reports it.
 
     Args:
         model: The default model, which usage names for an agent ``models``
@@ -121,6 +147,16 @@ class ADKEventProcessor:
         elif error_code == OVERFLOW_ERROR_CODE:
             error = self._apply_hook(WorkflowEvent.error(
                 adk_event.error_message or error_code, error_code=OVERFLOW_ERROR_CODE
+            ))
+            if error:
+                yield error
+        elif subagent is None and (code := _no_answer(adk_event)) is not None:
+            model = self.models.get(self._agent(adk_event), self._model)
+            message = adk_event.error_message
+            # ADK's own message for an empty reply says no more than the code.
+            said = f": {message}" if message and code != "MODEL_RETURNED_NO_CONTENT" else ""
+            error = self._apply_hook(WorkflowEvent.error(
+                f"{model} returned no answer{said}", error_code=code
             ))
             if error:
                 yield error
@@ -241,3 +277,26 @@ class ADKEventProcessor:
         if self._on_event:
             return self._on_event(event)
         return event
+
+
+def _no_answer(adk_event: Any) -> str | None:
+    """Why a whole reply is no answer (its error code or finish reason), or None.
+
+    A part counts unless it is a thought or blank text (a function call
+    counts); a streamed fragment (``partial``) is never judged.
+    """
+    if getattr(adk_event, "partial", False):
+        return None
+    content = getattr(adk_event, "content", None)
+    for part in (content.parts if content is not None else None) or []:
+        if not part.thought and (part.text is None or part.text.strip()):
+            return None
+    error_code = getattr(adk_event, "error_code", None)
+    if error_code is not None:
+        code = getattr(error_code, "value", error_code)
+        return code if code in NO_ANSWER_CODES else None
+    finish = getattr(adk_event, "finish_reason", None)
+    if finish is None:
+        return None
+    reason = getattr(finish, "value", finish)
+    return None if reason in _NORMAL_FINISH else reason

@@ -1764,6 +1764,13 @@ step; each entry says what to use instead.
 
 ### Fixed
 
+- **On ADK, a main agent's reply that is no answer ends the turn with an
+  error.** A reply with nothing but thoughts or blank text raises nothing on
+  ADK: Gemini's `SAFETY`, `MALFORMED_FUNCTION_CALL` or `MAX_TOKENS` (every
+  token spent thinking), a prompt Gemini blocked, an empty STOP reply
+  (`MODEL_RETURNED_NO_CONTENT`), a Claude refusal or a Claude reply cut at
+  its token limit. The turn ended with no text and no error. It now ends with
+  "<model> returned no answer", the reason as its code.
 - **Two tool questions asked at once are shown one after the other.** The
   calls of one model step run together (both backends gather them), so two
   of them could ask at once (two `ask_clarification` calls, or one beside a

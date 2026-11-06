@@ -221,11 +221,13 @@ class TestAContextOverflow:
         )
         assert event.metadata == {"recoverable": False, "error_code": "CONTEXT_OVERFLOW"}
 
-    async def test_no_other_error_code_of_the_main_agent(self):
-        # ADK records those for an exception that then leaves the run, which
-        # reports it: mapping them would report it twice.
+    async def test_no_failed_calls_error_code(self):
+        # ADK records one (an API status, an exception's class name) for an
+        # exception that then leaves the run, which reports it: mapping it
+        # would report it twice. A reply that is no answer is another matter
+        # (tests/workflow/test_adk_model_errors.py).
         failed = Event(author="coordinator", invocation_id="i1",
-                       error_code="MODEL_RETURNED_NO_CONTENT", error_message="empty")
+                       error_code="INVALID_ARGUMENT", error_message="bad request")
 
         assert [e async for e in ADKEventProcessor(model="m", root="coordinator")
                 .process_event(failed, "s1")] == []
