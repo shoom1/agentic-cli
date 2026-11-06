@@ -109,7 +109,7 @@ class MCPSessions:
         )
         tools: list[BaseTool] = []
         notices: list[str] = []
-        for server, outcome in zip(servers, outcomes):
+        for owner, server, outcome in zip(owners, servers, outcomes):
             if isinstance(outcome, str):
                 logger.warning(
                     "mcp_server_unavailable",
@@ -122,7 +122,7 @@ class MCPSessions:
                     f"runs without its tools: {outcome}"
                 )
                 continue
-            loaded = [self._ours(server, tool) for tool in _selected(server, outcome)]
+            loaded = [self._ours(owner, server, tool) for tool in _selected(server, outcome)]
             logger.info(
                 "mcp_tools_loaded",
                 agent=agent,
@@ -229,7 +229,7 @@ class MCPSessions:
 
     # -- the tools -------------------------------------------------------------
 
-    def _ours(self, server: MCPServerConfig, loaded: BaseTool) -> BaseTool:
+    def _ours(self, owner: _Owner, server: MCPServerConfig, loaded: BaseTool) -> BaseTool:
         """``loaded`` under its final name, with our results, bound under ``mcp``."""
         prefix = server.tool_name_prefix
         name = f"{prefix}_{loaded.name}" if prefix else loaded.name
@@ -237,7 +237,7 @@ class MCPSessions:
             name=name,
             description=loaded.description,
             args_schema=loaded.args_schema,
-            coroutine=_text_results(loaded.coroutine),
+            coroutine=_text_results(_while_open(owner, loaded.coroutine)),
             response_format="content_and_artifact",
             metadata={**(loaded.metadata or {}), SERVER_KEY: server.name},
             handle_tool_error=_error_result,
@@ -291,6 +291,33 @@ def _selected(server: MCPServerConfig, tools: list[BaseTool]) -> list[BaseTool]:
     if not server.tool_filter:
         return tools
     return [tool for tool in tools if tool.name in server.tool_filter]
+
+
+def _while_open(
+    owner: _Owner, call: Callable[..., Awaitable[tuple[Any, Any]]]
+) -> Callable[..., Awaitable[tuple[Any, Any]]]:
+    """``call``, failed once ``owner``'s session has ended without answering it.
+
+    mcp's stdio client can strand a call: a request written to a server that
+    has just died breaks the transport's writer, whose error cancels the
+    session's receive loop before that loop fails the calls in flight, so the
+    call would wait forever. A call cancelled from outside cancels its request.
+    """
+
+    async def run(**arguments: Any) -> tuple[Any, Any]:
+        assert owner.task is not None
+        request = asyncio.ensure_future(call(**arguments))
+        try:
+            await asyncio.wait({request, owner.task}, return_when=asyncio.FIRST_COMPLETED)
+        except BaseException:
+            request.cancel()
+            raise
+        if request.done():
+            return request.result()
+        request.cancel()
+        raise ConnectionError(f"MCP server '{owner.server}' went away without answering")
+
+    return run
 
 
 def _text_results(
