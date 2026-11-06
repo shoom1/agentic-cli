@@ -1754,6 +1754,12 @@ step; each entry says what to use instead.
 
 ### Fixed
 
+- **`/sessions --delete` no longer deletes a conversation open in another
+  terminal.** It refused only the conversation of the process it ran in, so
+  one another CLI had open was deleted, and on ADK that CLI's next turn
+  recreated it empty, losing the whole history without a word. The
+  conversation is now held while it is deleted, and one open elsewhere is
+  refused: "Could not delete '<id>': it is open in another process (<pid>)."
 - **A finished job is no longer recorded FAILED with exit code 1 when it
   is polled as it ends.** A subprocess job's shell, and the in-process
   backend, truncated the `exit_code` sentinel before writing the code, and
