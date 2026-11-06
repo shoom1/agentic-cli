@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from agentic_cli.file_utils import atomic_write_text
+from agentic_cli.paths import resolve_path
 
 if TYPE_CHECKING:
     from agentic_cli.tools.jobs.manager import JobRecord
@@ -119,6 +120,17 @@ class JobBackend(ABC):
     # outcome without being remotely controllable.
     cancels_foreign_jobs: bool = False
 
+    def pin(self, spec: dict) -> dict:
+        """The spec as the job must run, fixed when it is submitted.
+
+        A queued job may be launched later by another manager (the next CLI
+        to open the jobs directory, perhaps started elsewhere): what the
+        spec would otherwise take from the launching process, such as the
+        working directory, is settled here. The environment is not: it is
+        the launching process's. Default: unchanged.
+        """
+        return spec
+
     @abstractmethod
     def start(self, record: "JobRecord", job_dir: Path) -> None:
         """Begin executing the job. Non-blocking. Sets handle/pid on ``record``."""
@@ -170,6 +182,11 @@ class SubprocessBackend(JobBackend):
     def __init__(self) -> None:
         # job_id -> Popen, kept so cancel() can signal the process group.
         self._procs: dict[str, subprocess.Popen] = {}
+
+    def pin(self, spec: dict) -> dict:
+        """The working directory, absolute: the one the job was submitted in,
+        or its ``cwd`` taken from there, not the launching CLI's."""
+        return {**spec, "cwd": str(resolve_path(spec.get("cwd") or os.getcwd()))}
 
     def start(self, record: "JobRecord", job_dir: Path) -> None:
         command = record.spec.get("command")

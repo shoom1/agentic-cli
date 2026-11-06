@@ -133,7 +133,7 @@ agentic-cli/
 │   │   ├── langgraph/state_tools.py # LangGraph-library plan/task tools (Command/InjectedState): Deep Agents and LangGraph
 │   │   ├── skills/          # Agent Skills: SkillStore, the ADK toolset (toolset.py)
 │   │   │   └── langchain_tools.py # make_skill_tools: list_skills/load_skill/load_skill_resource for Deep Agents
-│   │   ├── jobs/            # Long-running jobs: JobManager, backends, job_* tools
+│   │   ├── jobs/            # Long-running jobs: JobManager, backends (a spec pinned at submit: a subprocess job runs where it was submitted), job_* tools
 │   │   │   └── resume.py    # job_result_payload, JOB_NOTICE_HEADER: what a finished job tells the agent
 │   │   ├── sandbox/         # Stateful code-execution sandbox (sandbox_execute); stage_inputs and the docker backend's _collect_outputs copy through descriptors of inputs/ and outputs/ (the kernel can swap either for a symlink); an input whose path runs through the session's directory is refused, on docker any session's (sandbox_root_for(settings): <workspace_dir>/sandbox)
 │   │   ├── os_sandbox/      # The OS sandbox execute_python runs in: seatbelt (macOS), bubblewrap (Linux), else NoOpSandbox; policy.py builds its lists from protected_paths
