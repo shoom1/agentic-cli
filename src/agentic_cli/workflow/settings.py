@@ -79,7 +79,7 @@ class WorkflowSettingsMixin(SettingsSourcesMixin):
       through ``workflow.model_services``
     - Provider API keys
     - Orchestrator and retry settings
-    - Tool configuration (web search/fetch, KB, shell, executor)
+    - Tool configuration (web search/fetch, KB, executor)
     - HITL and persistence settings
 
     Should be composed with BaseSettings via multiple inheritance, before
@@ -763,26 +763,6 @@ class WorkflowSettingsMixin(SettingsSourcesMixin):
             return f"sqlite+aiosqlite:///{sqlite_file(self.sqlite_uri)}"
         path = self.sessions_dir / "sessions.db"
         return f"sqlite+aiosqlite:///{path}"
-
-    # Shell execution settings (for shell middleware)
-    shell_sandbox_type: Literal["host", "docker"] = Field(
-        default="host",
-        title="Shell Sandbox Type",
-        description="Execution environment for shell commands",
-        json_schema_extra={"ui_order": 149},
-    )
-    shell_docker_image: str = Field(
-        default="python:3.12-slim",
-        title="Shell Docker Image",
-        description="Docker image to use for sandboxed shell execution",
-        json_schema_extra={"ui_order": 150},
-    )
-    shell_timeout: int = Field(
-        default=60,
-        title="Shell Timeout",
-        description="Default timeout in seconds for shell commands",
-        json_schema_extra={"ui_order": 151},
-    )
 
     # LLM debugging settings
     raw_llm_logging: bool = Field(

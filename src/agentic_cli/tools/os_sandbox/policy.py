@@ -68,7 +68,8 @@ class OSSandboxPolicy:
         writable_paths: Additional paths the sandboxed process can write to.
             The working directory is always writable regardless of this list.
         deny_write_paths: Paths denied for writing even within writable dirs.
-            Always includes MANDATORY_DENY_WRITE entries.
+            Defaults to MANDATORY_DENY_WRITE; a caller that passes its own
+            list replaces it (the framework never passes one).
         deny_read_paths: Paths to hide entirely from the sandboxed process.
         allow_network: Whether network access is allowed (Phase 2).
         strict: When True (the default), refuse to execute if sandboxing was

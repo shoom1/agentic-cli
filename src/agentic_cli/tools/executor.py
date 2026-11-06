@@ -22,7 +22,7 @@ from typing import Any, TYPE_CHECKING
 import structlog
 
 if TYPE_CHECKING:
-    from agentic_cli.tools.shell.os_sandbox.policy import OSSandboxPolicy
+    from agentic_cli.tools.os_sandbox.policy import OSSandboxPolicy
 
 logger = structlog.get_logger(__name__)
 
@@ -385,7 +385,7 @@ class SafePythonExecutor:
             # No sandbox asked for: the caller's choice to run as the user.
             return self._unsandboxed_run(context)
 
-        from agentic_cli.tools.shell.os_sandbox import get_os_sandbox
+        from agentic_cli.tools.os_sandbox import get_os_sandbox
 
         strict = self._strict
         sandbox = get_os_sandbox()

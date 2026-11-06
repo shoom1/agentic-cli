@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 from agentic_cli.tools.executor import SafePythonExecutor
-from agentic_cli.tools.shell.os_sandbox.policy import OSSandboxPolicy
+from agentic_cli.tools.os_sandbox.policy import OSSandboxPolicy
 from tests.tools.test_executor_security import _runner_modules
 
 
@@ -31,7 +31,7 @@ class _FakeSandbox:
         return self._type
 
     def wrap_python_command(self, argv, working_dir, policy):
-        from agentic_cli.tools.shell.os_sandbox.base import OSSandboxResult
+        from agentic_cli.tools.os_sandbox.base import OSSandboxResult
 
         self.wrapped.append(list(argv))
         return OSSandboxResult(command=shlex.join(argv), sandbox_type=self._type)
@@ -40,7 +40,7 @@ class _FakeSandbox:
 def _patch_sandbox(monkeypatch, sandbox_type: str) -> _FakeSandbox:
     sandbox = _FakeSandbox(sandbox_type)
     monkeypatch.setattr(
-        "agentic_cli.tools.shell.os_sandbox.get_os_sandbox",
+        "agentic_cli.tools.os_sandbox.get_os_sandbox",
         lambda *a, **k: sandbox,
     )
     return sandbox

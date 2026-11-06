@@ -25,7 +25,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from agentic_cli.tools.shell.os_sandbox.policy import OSSandboxPolicy
+    from agentic_cli.tools.os_sandbox.policy import OSSandboxPolicy
 
 #: ``execute_python``'s capability.
 PYTHON_EXEC = "python.exec"
@@ -46,7 +46,7 @@ def python_sandbox_policy(settings: Any) -> "OSSandboxPolicy | None":
     sandbox is off (``os_sandbox_enabled`` false: the code runs as the user)."""
     if not _sandbox_enabled(settings):
         return None
-    from agentic_cli.tools.shell.os_sandbox import OSSandboxPolicy
+    from agentic_cli.tools.os_sandbox import OSSandboxPolicy
 
     return OSSandboxPolicy(
         enabled=True,

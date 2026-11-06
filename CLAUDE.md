@@ -136,7 +136,7 @@ agentic-cli/
 │   │   ├── jobs/            # Long-running jobs: JobManager, backends, job_* tools
 │   │   │   └── resume.py    # job_result_payload, JOB_NOTICE_HEADER: what a finished job tells the agent
 │   │   ├── sandbox/         # Stateful code-execution sandbox (sandbox_execute); stage_inputs and the docker backend's _collect_outputs copy through descriptors of inputs/ and outputs/ (the kernel can swap either for a symlink); an input whose path runs through the session's directory is refused, on docker any session's (sandbox_root_for(settings): <workspace_dir>/sandbox)
-│   │   ├── shell/           # 8-layer shell security (+ os_sandbox/)
+│   │   ├── os_sandbox/      # The OS sandbox execute_python runs in: seatbelt (macOS), bubblewrap (Linux), else NoOpSandbox; policy.py builds its lists from protected_paths
 │   │   └── webfetch/        # Fetcher, converter, validator, robots, summarizer, saved pages
 │   ├── memory/               # Knowledge base + memory store; imports nothing else from agentic_cli
 │   │   ├── __init__.py       # MemoryStore, MemoryItem, ForgettingPolicy, EmbeddingService, EmbeddingConfig, MockEmbeddingService

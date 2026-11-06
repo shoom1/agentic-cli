@@ -22,7 +22,6 @@ For resilience patterns, use tenacity, pybreaker, aiolimiter directly.
 from agentic_cli.tools._core import delegation as _delegation  # noqa: F401
 
 from agentic_cli.tools.executor import SafePythonExecutor, MockPythonExecutor, ExecutionTimeoutError
-from agentic_cli.tools.shell import shell_executor, is_shell_enabled
 
 # File operation tools - READ (safe)
 from agentic_cli.tools.file_read import read_file, diff_compare
@@ -98,9 +97,6 @@ __all__ = [
     "SafePythonExecutor",
     "MockPythonExecutor",
     "ExecutionTimeoutError",
-    # Shell executor
-    "shell_executor",
-    "is_shell_enabled",
     # File operations - READ tools (safe)
     "read_file",
     "diff_compare",

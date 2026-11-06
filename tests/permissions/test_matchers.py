@@ -257,7 +257,7 @@ class TestShellMatcher:
         assert not m.matches("git *", "svn up")
 
     def test_matches_does_not_tokenize(self, ctx):
-        """Shell matcher is intentionally naive; risk assessor handles semantics."""
+        """Shell matcher is intentionally naive: a glob over the command text."""
         from agentic_cli.workflow.permissions.matchers import ShellMatcher
         m = ShellMatcher()
         assert m.matches("git *", "git rm -rf /")  # permission matcher allows

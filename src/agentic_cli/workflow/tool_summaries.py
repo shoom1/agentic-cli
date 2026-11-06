@@ -66,16 +66,6 @@ def _execute_python(r: dict) -> str:
     return f"No output ({dur:.0f}ms)"
 
 
-def _shell_executor(r: dict) -> str:
-    stdout = r.get("stdout", "")
-    if stdout and stdout.strip():
-        first_line = stdout.strip().splitlines()[0]
-        return truncate(first_line, TOOL_SUMMARY_MAX_LENGTH)
-    code = r.get("return_code", 0)
-    dur = r.get("duration", 0)
-    return f"Exit {code} ({dur:.1f}s)"
-
-
 def _sandbox_execute(r: dict) -> str:
     stdout = r.get("stdout", "")
     if stdout and stdout.strip():
@@ -166,7 +156,6 @@ _TOOL_FORMATTERS: dict[str, Callable[[dict[str, Any]], str]] = {
     "write_file": _write_file,
     "edit_file": _edit_file,
     "execute_python": _execute_python,
-    "shell_executor": _shell_executor,
     "sandbox_execute": _sandbox_execute,
     "save_tasks": _save_tasks,
     "get_tasks": _get_tasks,

@@ -1725,6 +1725,29 @@ step; each entry says what to use instead.
   loses its `default_model` argument. It now takes every agent's resolved
   model by name, `build(agent_configs, models, tool_overrides=None)`, and
   keeps the chat models it built in `builder.chat_models`.
+- **The shell toolset, `agentic_cli.tools.shell`.** It arrived disabled in
+  0.3.3 and stayed so in every release (`_SHELL_TOOL_ENABLED = False`, which
+  no setting changed), yet `agentic_cli.tools` imported and registered its
+  `shell_executor` for every app, with about 3,900 lines of command analysis
+  that could only answer "disabled"; `examples/shell_demo.py` printed its
+  refusals, and its tests were the suite's expected failures. Gone with it:
+  `shell_executor` and `is_shell_enabled` from `agentic_cli.tools`, every
+  other name the package exported (`analyze_command`,
+  `execute_with_approval`, `ShellSecurityConfig`, `CommandClassifier`,
+  `RiskAssessor`, `ExecutionSandbox`, `AuditLogger` and the rest, but the
+  OS-sandbox names it re-exported, now in `agentic_cli.tools.os_sandbox`), the tool's
+  summary, the demo, and the `shell_sandbox_type`, `shell_docker_image` and
+  `shell_timeout` settings, which nothing read (`"docker"` isolated nothing).
+  A settings file or environment variable that still sets one loads as
+  before, the key ignored. A future shell tool is an application's tool that
+  declares `shell.exec` on its command, so the permission engine judges it
+  and its prompt is the approval, and that runs the command inside the OS
+  sandbox; not a second classifier with an approval path of its own. The
+  `shell.*` capabilities and `ShellMatcher` stay. The OS sandbox, which
+  `execute_python` runs in, moved to `agentic_cli.tools.os_sandbox`.
+  **Breaking:** an import of `agentic_cli.tools.shell` or of any name above
+  fails, and `agentic_cli.tools.shell.os_sandbox` has no forwarder: import
+  `agentic_cli.tools.os_sandbox`.
 
 ### Fixed
 

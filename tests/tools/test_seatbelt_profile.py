@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from agentic_cli.tools.shell.os_sandbox.seatbelt_profile import (
+from agentic_cli.tools.os_sandbox.seatbelt_profile import (
     _escape_sbpl_path,
     generate_seatbelt_profile,
 )

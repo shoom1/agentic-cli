@@ -15,8 +15,8 @@ return a ``job_id`` (declaring ``long_running=True`` and a
 the framework. Such a tool decides *what* runs and *how* (which execution
 backend, and any safety checks on its input), so it belongs to the application.
 A subprocess-backed ``run_shell_job`` lives in ``examples/jobs_demo.py`` as a
-reference: note it runs the command via ``sh -c`` and does **not** go through
-the hardened shell tool (``tools/shell/``), so it is a demo, not a built-in.
+reference: note it runs the command via ``sh -c`` on the host, with no sandbox
+and no check of the command, so it is a demo, not a built-in.
 
 ``JobManager`` itself is never exposed to the LLM — tools reach it via the
 service registry.

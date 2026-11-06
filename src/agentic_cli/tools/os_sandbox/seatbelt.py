@@ -12,13 +12,13 @@ import shlex
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from agentic_cli.tools.shell.os_sandbox.base import OSSandbox, OSSandboxResult
-from agentic_cli.tools.shell.os_sandbox.seatbelt_profile import (
+from agentic_cli.tools.os_sandbox.base import OSSandbox, OSSandboxResult
+from agentic_cli.tools.os_sandbox.seatbelt_profile import (
     generate_seatbelt_profile,
 )
 
 if TYPE_CHECKING:
-    from agentic_cli.tools.shell.os_sandbox.policy import OSSandboxPolicy
+    from agentic_cli.tools.os_sandbox.policy import OSSandboxPolicy
 
 
 def _escape_single_quotes(s: str) -> str:
@@ -128,7 +128,7 @@ class SeatbeltSandbox(OSSandbox):
         )
 
     def is_available(self) -> bool:
-        from agentic_cli.tools.shell.os_sandbox.detect import (
+        from agentic_cli.tools.os_sandbox.detect import (
             detect_sandbox_capabilities,
         )
 

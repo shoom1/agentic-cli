@@ -43,8 +43,8 @@ SECRET_FIELDS = frozenset({
 # Deny-by-default allowlist: the ONLY keys a project ./.{app}/settings.json (or
 # a cwd-relative .env) may set. A cloned/untrusted repo must not be able to flip
 # a security boundary — executor backend, container image/user, bind mounts,
-# outputs dir, OS-sandbox policy, shell backend, raw LLM logging, workspace dir,
-# permission rules, or secrets. Every entry below is a benign field that cannot
+# outputs dir, OS-sandbox policy, raw LLM logging, workspace dir, permission
+# rules, or secrets. Every entry below is a benign field that cannot
 # select code execution, filesystem/mount scope, container identity/image,
 # network policy, secrets, or sensitive logging. Anything not clearly benign —
 # and any new field — is excluded automatically. Real environment variables and
