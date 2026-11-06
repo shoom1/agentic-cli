@@ -59,6 +59,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import inspect
 import logging
 import warnings
 from collections.abc import Awaitable, Callable, Sequence
@@ -223,9 +224,9 @@ class ReportingSummarizationMiddleware(SummarizationMiddleware):
 
     The report is a custom run event, so it reaches the turn's run callback
     wherever the agent runs (a sub-agent included). Only the public model-call
-    hooks are wrapped; what a summary did is read from Deep Agents' documented
-    summary event (``SummarizationEvent.cutoff_index``) in the update it
-    returns.
+    hooks are wrapped; what a summary did is read from Deep Agents' summary
+    event in the update it returns, applied as Deep Agents applies it
+    (``_apply_event_to_messages``).
 
     Its helper's summary model is ``OverflowMapped``, inside LangChain's
     retry, so a summary refused as too long is cut and sent again, whatever
@@ -319,10 +320,11 @@ class ReportingSummarizationMiddleware(SummarizationMiddleware):
     def _report(self, request: "ModelRequest", response: Any) -> dict[str, Any] | None:
         """What a summary did to the request, if this call applied a new one.
 
-        Counts are of the conversation the model is sent: before, the state's
-        messages (from the previous summary on, which stands for the rest);
-        after, the new summary and the messages it kept. Tokens are the
-        middleware's own count of those two conversations.
+        Counts are of the conversation the model is sent, each summary
+        applied as Deep Agents applies it: before, the state's messages (from
+        the previous summary on, which stands for the rest); after, the new
+        summary and the messages it kept. Tokens are the middleware's own
+        count of those two conversations.
         """
         update = getattr(getattr(response, "command", None), "update", None)
         event = update.get(SUMMARIZATION_EVENT_KEY) if isinstance(update, dict) else None
@@ -330,17 +332,15 @@ class ReportingSummarizationMiddleware(SummarizationMiddleware):
             return None
         messages = list(request.messages)
         previous = (request.state or {}).get(SUMMARIZATION_EVENT_KEY)
-        before = messages
-        if isinstance(previous, dict):
-            before = [previous["summary_message"], *messages[previous["cutoff_index"]:]]
-        after = [event["summary_message"], *messages[event["cutoff_index"]:]]
-        start = previous["cutoff_index"] if isinstance(previous, dict) else 0
-        carried = 1 if isinstance(previous, dict) else 0  # the previous summary
+        before = self._apply_event_to_messages(messages, previous)
+        after = self._apply_event_to_messages(messages, event)
         return {
             "agent": self.agent,
             "messages_before": len(before),
             "messages_after": len(after),
-            "messages_summarized": event["cutoff_index"] - start + carried,
+            # What the new summary stands for: all that went before what it
+            # kept, the previous summary included.
+            "messages_summarized": len(before) - len(after) + 1,
             "tokens_before": self.token_counter(before),
             "tokens_after": self.token_counter(after),
         }
@@ -541,7 +541,7 @@ def summary_event(
     summary: str,
     *,
     after: str | None = None,
-    written_on: int | None = None,
+    messages: Sequence["AnyMessage"] | None = None,
 ) -> SummarizationEvent:
     """The event Deep Agents stores for ``summary``, of the sent messages before ``cut``.
 
@@ -551,22 +551,49 @@ def summary_event(
     and the summary. With ``after`` (the id of the newest answer in the
     messages sent), the message is marked ``{"kind": "compact", "after":
     after}`` in its ``response_metadata``, which ``_should_summarize`` reads.
-    With ``written_on`` (how many messages the state holds), the event says
-    so as Deep Agents' own do since 0.7.30 (``created_at_index``): the
-    messages it kept from before it then lose their reasoning, which Claude
-    binds to the conversation before them. An older Deep Agents ignores it.
+
+    With ``messages`` (the state's), the event is as Deep Agents' own are:
+    it says how many messages it was written on (``created_at_index``,
+    0.7.30), so the messages it kept from before it lose their reasoning,
+    which Claude binds to the conversation before them; and it names the
+    message at its cut (``cutoff_message_id``, 0.7.34), by whose id Deep
+    Agents finds the cut when messages before it move. Where Deep Agents
+    finds the summary so far that way, its cut is found so here too, as
+    ``_apply_event_to_messages`` found it for the messages sent. An older
+    Deep Agents ignores the keys it does not know.
     """
     (message,) = middleware._build_new_messages_with_path(summary, None)
     if after is not None:
         message.response_metadata[_MARK] = {"kind": COMPACTED, "after": after}
+    state_cut = _state_cutoff(middleware, previous, cut, messages)
     event: SummarizationEvent = {
-        "cutoff_index": middleware._compute_state_cutoff(previous, cut),
+        "cutoff_index": state_cut,
         "summary_message": message,
         "file_path": None,
     }
-    if written_on is not None:
-        event["created_at_index"] = written_on  # type: ignore[typeddict-unknown-key]
+    if messages is not None:
+        event["created_at_index"] = len(messages)  # type: ignore[typeddict-unknown-key]
+        event["cutoff_message_id"] = (  # type: ignore[typeddict-unknown-key]
+            messages[state_cut].id if 0 <= state_cut < len(messages) else None
+        )
     return event
+
+
+def _state_cutoff(
+    middleware: SummarizationMiddleware,
+    previous: SummarizationEvent | None,
+    cut: int,
+    messages: Sequence["AnyMessage"] | None,
+) -> int:
+    """``cut``, in the messages sent, as an index in the state's ``messages``.
+
+    Deep Agents 0.7.34 finds the summary so far by the id of the message at
+    its cut, given the state's messages; an older one by its index alone.
+    """
+    compute = middleware._compute_state_cutoff
+    if messages is not None and "messages" in inspect.signature(compute).parameters:
+        return compute(previous, cut, list(messages))
+    return compute(previous, cut)
 
 
 def newest_answer(messages: Sequence["AnyMessage"]) -> AIMessage | None:

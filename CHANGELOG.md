@@ -181,6 +181,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the executor backend, sandbox mounts and API keys included. The filter now
   judges the env files the settings actually read: the constructor's
   `_env_file` when one is given.
+- **The knowledge base never follows a symlink in its folder.** The project
+  knowledge base (`./.{app_name}/knowledge_base`) can arrive with a cloned
+  repository, and git keeps symlinks, but its files were opened by path
+  (since 0.5.0): a summary file `documents/<id>.md` linked elsewhere made
+  `kb_read` return that file verbatim (a link to `~/.aws/credentials`, say),
+  an `ingest_log.md` linked to a shell rc got a line per ingest and delete
+  holding the title (a web page's `<title>` or the model's argument), so
+  `$(…)` in it ran at the next shell start, a linked `files` folder let
+  deleting a document remove the file `metadata.json` named there, a
+  link to `/dev/zero` made opening the knowledge base read forever, and a
+  linked `./.{app_name}` or `knowledge_base` folder made the knowledge base
+  create and replace its files in the folder linked to (another
+  repository's `index.md`, say) or read another project's knowledge base.
+  The `kb.*` tools need no approval, so nothing asked. Every file the knowledge
+  base reads or appends to (metadata, texts, summaries, concept pages, the
+  vector and keyword indexes, the lock) is now opened only when it is a
+  regular file, never through a symlink; one that is not counts as missing,
+  with a warning (`memory_file_refused`), and the next write replaces it,
+  except the ingest log, which is left alone (`kb_ingest_log_not_written`).
+  The log's title and arXiv ID are written on one line, control characters
+  removed. A knowledge base whose `documents`, `embeddings`, `files` or
+  `concepts` folder, or `.lock` file, is a symlink does not open
+  (`UnsafeKnowledgeBase`, exported from `agentic_cli.memory.kb`), nor does
+  one reached through a symlink from the folder it is opened `within`
+  (`KnowledgeBaseManager(within=)`, `KnowledgeBase.open(within=)`; the
+  workflow passes the working directory for the project scope, so
+  `./.{app_name}` and its `knowledge_base` must be real folders, and a file
+  there no longer fails the start); it stops working if one becomes a
+  symlink while a session runs (a `git pull`, say). `KnowledgeBase.open`
+  leaves that scope out with a warning (`kb_scope_refused`), so the
+  workflow keeps the other scope, which takes the writes. **Breaking:** a
+  knowledge base with a subfolder linked to another disk no longer opens,
+  and the project knowledge base can no longer be a link; the user
+  knowledge base's whole directory still can.
+- **A settings class composed from the mixins has `BaseSettings`' trust
+  boundary.** The project file's allowlist and the cwd `.env` filter were
+  `agentic_cli.BaseSettings`' own (since 0.6.0), so a class composed from the
+  exported `WorkflowSettingsMixin`, `AppSettingsMixin` and `CLISettingsMixin`
+  over pydantic-settings' own `BaseSettings` read a cwd `.env` in full: a
+  cloned repository's `.env` could turn `permissions_enabled` off, choose the
+  `local` executor, turn raw LLM logging on, or define a provider that sends
+  the user's key to its own server. Such a class read neither settings file
+  either, so what `/settings` saved for it was never read back. The sources
+  now come with the mixins (`settings_sources.SettingsSourcesMixin`): such a
+  class reads the constructor, the environment, the project file
+  (allowlisted), the user file and its env files (a cwd-relative one
+  allowlisted), in that order, as `BaseSettings` does. It no longer reads
+  pydantic-settings' `secrets_dir`, which `BaseSettings` never read either: a
+  configured one (the class's or the constructor's `_secrets_dir`) is now
+  reported, `settings_secrets_dir_ignored`. The mixins must come before
+  pydantic-settings' class, or that class's own sources win: a settings class
+  that lists it first, or between the mixins, is refused with a `TypeError`
+  when it is defined, unless it defines `settings_customise_sources` itself.
 
 ### Added
 
@@ -817,6 +870,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`app_name` comes only from the application.** It chooses the settings
+  files, yet the environment (`AGENTIC_APP_NAME`, or an app's prefix) and the
+  user file could set it too, after the files had been chosen by the class's
+  name: the settings were read from `~/.agentic_cli/`, `/settings` saved to
+  `~/.myapp/`, and the permission engine read `./.myapp/settings.json`'s deny
+  rules. Only the constructor or the settings class sets it now; an `app_name`
+  in the environment, either settings file or an env file is ignored, and one
+  that differs is reported (`settings_app_name_ignored`, naming the source; in
+  the project file or a cwd `.env` it replaces
+  `untrusted_project_setting_ignored`). The one exception is the app's own:
+  enabling pydantic-settings' `cli_parse_args` adds a command-line source
+  above all of these, which can set it.
+  **Breaking:** an app run under another name through `AGENTIC_APP_NAME` (or
+  `"app_name"` in a settings file) needs the name in its settings class or
+  constructor.
 - **`/resume` reopens conversations; finished jobs resume with `/jobs
   resume`** (breaking). The old `ResumeCommand` is gone, and `/jobs`
   gains `resume`: it runs the resumes of finished, resume-flagged jobs, as
@@ -1558,6 +1626,17 @@ step; each entry says what to use instead.
   and made httpx raise `InvalidURL`, which is no `RequestError`, so the tool
   raised instead of returning `{"success": false, ...}`. The check now parses
   the URL as httpx does and returns `Invalid URL: …`.
+- **A Claude request over the API's size limit is summarized and retried
+  with anthropic 2 too.** anthropic 2.0 renamed the error it raises for an
+  HTTP 413 (`request_too_large`) from `RequestTooLargeError` to
+  `ContentTooLargeError`, keeping the old name as an alias, and the overflow
+  check (`workflow/context.py::is_context_overflow`) knew the 413 by the old
+  class name: on either backend such a request ended the turn with the
+  provider's error instead of being summarized and retried once. A 413 is
+  now Claude's size limit by its status and the SDK that raised it, whatever
+  the class is called (a subclass that names the cause included) and
+  whatever the body says; another provider's 413 still has to name the
+  context.
 - **On ADK, an OpenAI-compatible provider that checks its requests, such as
   Synthetic, answers.** ADK's Chat Completions class sets `tools`,
   `tool_choice` and `response_format` to None when a request has none, and

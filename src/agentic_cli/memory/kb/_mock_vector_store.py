@@ -5,7 +5,7 @@ from pathlib import Path
 
 import numpy as np
 
-from agentic_cli.memory._core.io import atomic_write_json
+from agentic_cli.memory._core.io import atomic_write_json, read_if_regular
 from agentic_cli.memory._core.log import get_logger
 
 logger = get_logger("agentic_cli.memory.kb")
@@ -88,10 +88,11 @@ class MockVectorStore:
         atomic_write_json(self.index_path, data)
 
     def load(self) -> None:
-        if not self.index_path.exists():
-            return
         try:
-            data = json.loads(self.index_path.read_text())
+            raw = read_if_regular(self.index_path)  # a symlink counts as none
+            if raw is None:
+                return
+            data = json.loads(raw)
             self._vectors = data["vectors"]
             self.embedding_dim = data["embedding_dim"]
         except (OSError, ValueError, KeyError, TypeError) as e:

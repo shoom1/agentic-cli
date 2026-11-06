@@ -62,6 +62,7 @@ SIGNATURES = {
     ("KnowledgeBaseManager", "__init__"): [
         ("self", P, R), ("base_dir", P, R), ("embedding", K, None), ("summarizer", K, None),
         ("use_mock", K, False), ("embedding_service", K, None), ("vector_store", K, None),
+        ("within", K, None),
     ],
     ("KnowledgeBaseManager", "backfill_sidecars"): [("self", P, R), ("progress_cb", P, None)],
     ("KnowledgeBaseManager", "clear"): [("self", P, R)],

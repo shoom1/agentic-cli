@@ -76,6 +76,9 @@ from tests.workflow.deepagents.test_context import (  # noqa: E402,F401
     turn,
 )
 
+#: Whether Deep Agents finds a summary's cut by the id of the message there (0.7.34).
+CUT_BY_ID = "cutoff_message_id" in SummarizationEvent.__annotations__
+
 #: Three long questions, each under the trigger: nothing is summarized on its own.
 THREE = [f"Turn {n}: {USER_TURN}" for n in (1, 2, 3)]
 SUMMARY = f"{SUMMARY_PREFIX}\n\nA summary."
@@ -168,6 +171,62 @@ class TestCompactNow:
             await manager.cleanup()
 
         assert state[SUMMARIZATION_EVENT_KEY]["created_at_index"] == len(state["messages"]) == 6
+
+    async def test_the_event_names_the_message_at_its_cut(self, small, monkeypatch):
+        # Deep Agents 0.7.34's cutoff_message_id: the cut is found by that
+        # message's id, so it stays on it when messages before it move. An
+        # older Deep Agents ignores the key.
+        manager, _ = solo(monkeypatch, small, [*answers(3), ai("A summary.")])
+        try:
+            for text in THREE:
+                await turn(manager, text)
+            await compact_now(manager)
+            state = await state_of(manager)
+        finally:
+            await manager.cleanup()
+
+        event = state[SUMMARIZATION_EVENT_KEY]
+        assert event["cutoff_index"] == 4
+        assert event["cutoff_message_id"] is not None
+        assert event["cutoff_message_id"] == state["messages"][4].id
+
+    async def test_a_summary_whose_cut_moved_is_replaced_from_the_message_sent_there(
+        self, small, monkeypatch
+    ):
+        """The summary so far names the message at its cut (the third
+        question) but stores an index two messages short of it, as when two
+        messages were added before it. Deep Agents (0.7.34) sends the
+        conversation from that message; ``compact`` cuts what is sent, so the
+        new summary's cut is the message sent at the cut, the fourth
+        question, however the old cut is found."""
+        manager, chat = solo(monkeypatch, small, [
+            *answers(4), ai("A summary."), ai("Answer 5."),
+        ])
+        try:
+            for text in [*THREE, f"Turn 4: {USER_TURN}"]:
+                await turn(manager, text)
+            config = run_config(manager.session_ref("s", "u"))
+            messages = (await state_of(manager))["messages"]
+            assert messages[4].text.startswith("Turn 3:")
+            await manager._root.aupdate_state(config, {SUMMARIZATION_EVENT_KEY: {
+                "cutoff_index": 2,
+                "cutoff_message_id": messages[4].id,
+                "summary_message": _summary("Turns 1 and 2."),
+                "file_path": None,
+            }}, as_node="model")
+            await compact_now(manager)
+            state = await state_of(manager)
+            await turn(manager, "Turn 5?")
+        finally:
+            await manager.cleanup()
+
+        event = state[SUMMARIZATION_EVENT_KEY]
+        assert state["messages"][event["cutoff_index"]].text.startswith("Turn 4:")
+        assert event["cutoff_message_id"] == state["messages"][event["cutoff_index"]].id
+        # The next request: the new summary, once, then the fourth turn and the fifth.
+        fifth = chat.conversation(5)
+        assert [m.text[:9] for m in fifth] == [SUMMARY[:9], "Turn 4: w", "Answer 4.", "Turn 5?"]
+        assert fifth[0].text == SUMMARY
 
     async def test_the_focus_reaches_the_summary_prompt(self, small, monkeypatch):
         """Braces in the focus reach the model as written (the helper fills
@@ -795,30 +854,47 @@ class TestTheDeepAgentsItRestsOn:
 
     def test_the_event_lives_in_state_under_its_key(self):
         assert SUMMARIZATION_EVENT_KEY == "_summarization_event"
-        # Deep Agents 0.7.30 added created_at_index, which an event may lack.
+        # Deep Agents 0.7.30 added created_at_index and 0.7.34
+        # cutoff_message_id; an event may lack either.
         assert set(SummarizationEvent.__annotations__) in (
             {"cutoff_index", "summary_message", "file_path"},
             {"cutoff_index", "summary_message", "file_path", "created_at_index"},
+            {"cutoff_index", "summary_message", "file_path", "created_at_index",
+             "cutoff_message_id"},
         )
 
     def test_an_event_is_applied_as_the_summary_and_the_messages_after_its_cut(self):
         apply = SummarizationMiddleware._apply_event_to_messages
-        messages = [_human("One?"), AIMessage("A1"), _human("Two?"), AIMessage("A2")]
+        messages = [HumanMessage("One?", id="h1"), AIMessage("A1", id="a1"),
+                    HumanMessage("Two?", id="h2"), AIMessage("A2", id="a2")]
         summary = _summary()
+        event = {"cutoff_index": 2, "summary_message": summary, "file_path": None}
 
         assert list(inspect.signature(apply).parameters) == ["messages", "event"]
         assert apply(messages, None) == messages
-        assert apply(messages, {"cutoff_index": 2, "summary_message": summary,
-                                "file_path": None}) == [summary, *messages[2:]]
+        assert apply(messages, event) == [summary, *messages[2:]]
+        if CUT_BY_ID:
+            # The cut is its message's, wherever that message now stands.
+            moved = {**event, "cutoff_index": 1, "cutoff_message_id": "h2"}
+            assert apply(messages, moved) == [summary, *messages[2:]]
 
     def test_a_cut_of_the_applied_messages_is_moved_to_the_states(self):
         cutoff = SummarizationMiddleware._compute_state_cutoff
+        event = {"cutoff_index": 4, "summary_message": _summary(), "file_path": None}
 
-        assert list(inspect.signature(cutoff).parameters) == ["event", "effective_cutoff"]
+        # 0.7.34 reads the state's messages, to find the summary's cut as
+        # _apply_event_to_messages finds it.
+        assert list(inspect.signature(cutoff).parameters) == (
+            ["event", "effective_cutoff", "messages"] if CUT_BY_ID
+            else ["event", "effective_cutoff"]
+        )
         assert cutoff(None, 4) == 4
         # The summary stands at 0 in the applied messages.
-        assert cutoff({"cutoff_index": 4, "summary_message": _summary(),
-                       "file_path": None}, 3) == 6
+        assert cutoff(event, 3) == 6
+        if CUT_BY_ID:
+            messages = [HumanMessage(f"M{n}", id=f"m{n}") for n in range(8)]
+            assert cutoff(event, 3, messages) == 6
+            assert cutoff({**event, "cutoff_message_id": "m5"}, 3, messages) == 7
 
     def test_the_summary_message_without_an_archive(self):
         middleware = _middleware()
@@ -903,6 +979,37 @@ class TestTheDeepAgentsItRestsOn:
         assert summary == "A summary."
         assert "One?" in chat.requests[0][0].text
         assert reported == [EventType.CONTEXT_SUMMARIZING, EventType.LLM_USAGE]
+
+
+class TestASummaryInATurnIsReported:
+    def test_with_the_conversation_deep_agents_sent(self):
+        """The summary so far names the message at its cut (the third
+        question) but stores an index two messages short of it. The report
+        counts the conversation as Deep Agents applies the summary: from that
+        message on 0.7.34, which finds the cut by its id; from the index on
+        an older one."""
+        from types import SimpleNamespace
+
+        messages = [
+            message
+            for n in range(1, 5)
+            for message in (HumanMessage(f"Turn {n}?", id=f"h{n}"), AIMessage(f"A{n}", id=f"a{n}"))
+        ]
+        previous = {"cutoff_index": 2, "cutoff_message_id": "h3",
+                    "summary_message": _summary("Turns 1 and 2."), "file_path": None}
+        event = {"cutoff_index": 6, "cutoff_message_id": "h4",
+                 "summary_message": _summary("Turns 1 to 3."), "file_path": None}
+        request = SimpleNamespace(messages=messages, state={SUMMARIZATION_EVENT_KEY: previous})
+        response = SimpleNamespace(command=SimpleNamespace(update={SUMMARIZATION_EVENT_KEY: event}))
+
+        report = _middleware()._report(request, response)
+
+        # Sent before: the summary so far, then Turn 3 on (0.7.34) or Turn 2 on;
+        # after: the new summary, Turn 4 and A4.
+        sent_before = 5 if CUT_BY_ID else 7
+        assert (report["messages_before"], report["messages_after"]) == (sent_before, 3)
+        assert report["messages_summarized"] == sent_before - 2
+        assert report["tokens_before"] > report["tokens_after"]
 
 
 def _middleware(chat: ScriptedChat | None = None) -> ReportingSummarizationMiddleware:

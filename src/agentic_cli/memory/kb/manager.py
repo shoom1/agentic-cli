@@ -18,6 +18,7 @@ import asyncio
 import json
 import os
 import re
+import stat
 import threading
 import time
 from collections.abc import Iterator
@@ -37,7 +38,14 @@ from agentic_cli.memory.kb.models import (
 )
 from agentic_cli.memory.kb.vector_store import VectorStore
 from agentic_cli.memory._core.filelock import file_stamp, folder_lock
-from agentic_cli.memory._core.io import atomic_write_json, atomic_write_text
+from agentic_cli.memory._core.io import (
+    append_text,
+    atomic_write_bytes,
+    atomic_write_json,
+    atomic_write_text,
+    is_regular_file,
+    read_if_regular,
+)
 from agentic_cli.memory._core.model_record import ModelRecord, read_model_record, write_model_record
 from agentic_cli.memory._core.log import get_logger
 
@@ -48,6 +56,17 @@ _PLAIN_DOC_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
 # Current persistence format version
 _FORMAT_VERSION = 3
+
+
+class UnsafeKnowledgeBase(OSError):
+    """A knowledge base's folder holds a symlink, or something else, where one
+    of its own folders (``documents``, ``embeddings``, ``files``, ``concepts``)
+    or its lock file belongs.
+
+    A project can ship its knowledge base, and through a link the knowledge
+    base would read, write and delete files elsewhere, so it does not work
+    there: ``KnowledgeBase.open`` leaves that scope out, with a warning.
+    """
 
 
 class Summarizer(Protocol):
@@ -65,6 +84,35 @@ def _utc_iso_now() -> str:
     """Return current UTC time as ISO-8601 with a trailing 'Z'."""
     from datetime import timezone
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _printable(text: str) -> str:
+    """``text`` with control characters as spaces and whitespace runs collapsed."""
+    return " ".join("".join(ch if ch.isprintable() else " " for ch in text).split())
+
+
+def _folders_below(within: Path, base_dir: Path) -> tuple[Path, ...]:
+    """Each folder from just below ``within`` down to ``base_dir``, in order.
+
+    Raises:
+        ValueError: ``base_dir`` is not inside ``within`` (a ``..`` counts as
+            leaving it).
+    """
+    try:
+        parts = base_dir.relative_to(within).parts
+    except ValueError:
+        raise ValueError(f"{base_dir} is not inside {within}") from None
+    if ".." in parts:
+        raise ValueError(f"{base_dir} is not inside {within}")
+    folders: list[Path] = []
+    for part in parts:
+        folders.append((folders[-1] if folders else within) / part)
+    return tuple(folders)
+
+
+def _refuse(path: Path, mode: int, kind: str) -> UnsafeKnowledgeBase:
+    found = "a symbolic link" if stat.S_ISLNK(mode) else f"not {kind}"
+    return UnsafeKnowledgeBase(f"{path} is {found}: a knowledge base works only in its own folders")
 
 
 def _truncate(text: str, max_length: int = 200) -> str:
@@ -160,6 +208,7 @@ class KnowledgeBaseManager:
         use_mock: bool = False,
         embedding_service: Any = None,
         vector_store: Any = None,
+        within: Path | str | None = None,
     ) -> None:
         """Open (or create) the knowledge base kept in ``base_dir``.
 
@@ -177,8 +226,20 @@ class KnowledgeBaseManager:
                 the knowledge base builds its vector store at the service's
                 dimension.
             vector_store: A ready vector store (with ``embedding_service``).
+            within: A folder the caller trusts, which ``base_dir`` lies in
+                (for a project's knowledge base, the working directory).
+                Every folder from it down to ``base_dir`` must then be a real
+                folder, never a symlink: a repository can ship
+                ``.{app}/knowledge_base`` linked to a folder elsewhere.
+                Without it, ``base_dir`` itself may be a link (a knowledge
+                base kept on another disk).
+
+        Raises:
+            ValueError: ``base_dir`` is not inside ``within``.
+            UnsafeKnowledgeBase: see :meth:`_check_layout`.
         """
         base_dir = Path(base_dir)
+        self._root_folders = () if within is None else _folders_below(Path(within), base_dir)
 
         self._lock = threading.Lock()
         self._sidecar_locks: dict[str, asyncio.Lock] = {}
@@ -196,7 +257,10 @@ class KnowledgeBaseManager:
 
         self.metadata_path = self.kb_dir / "metadata.json"
         self.files_dir = self.kb_dir / "files"
+        self.concepts_dir = self.kb_dir / "concepts"
         self._model_record_path = self.embeddings_dir / "model.json"
+        self._lock_path = self.kb_dir / ".lock"
+        self._check_layout()
 
         # Ensure directories exist
         self.kb_dir.mkdir(parents=True, exist_ok=True)
@@ -220,7 +284,6 @@ class KnowledgeBaseManager:
         # so the state is read, and each read or change made, holding the
         # folder's lock (see _transaction). metadata.json as this knowledge
         # base last read or wrote it:
-        self._lock_path = self.kb_dir / ".lock"
         self._stamp: tuple[int, int, int] | None = None
         with self._lock, folder_lock(self._lock_path):
             self._read_state()
@@ -267,6 +330,52 @@ class KnowledgeBaseManager:
         except Exception:
             logger.debug("bm25_init_skipped")
 
+    def _check_layout(self) -> None:
+        """Refuse a knowledge base whose own folders or lock file are not what they should be.
+
+        A subfolder or the lock file that is a symlink would put its reads,
+        writes and deletes in a folder elsewhere (or create the file a
+        dangling link names). The knowledge base's folder itself may be a
+        symlink, unless it was opened ``within`` a folder: then each folder
+        from there down to it must be a real one, so a repository cannot
+        point ``.{app}`` or ``.{app}/knowledge_base`` elsewhere. Checked when
+        the knowledge base opens and before each read or change, since a
+        ``git pull`` can replace a folder while a session runs.
+
+        Each check is an ``lstat`` and the open comes after it. That holds
+        while nothing swaps these folders in between: a repository's files
+        are static, and the model's code cannot write under ``.{app}`` (the
+        permission rules and the sandboxes deny it). A sandbox that mounted
+        the project read-write would need opens anchored on directory
+        descriptors instead (``O_DIRECTORY|O_NOFOLLOW`` and ``dir_fd=``).
+
+        Raises:
+            UnsafeKnowledgeBase: one of them is a symlink, or the wrong kind of file.
+        """
+        for folder in self._root_folders:
+            try:
+                mode = os.lstat(folder).st_mode
+            except FileNotFoundError:
+                break  # created when the knowledge base opens, and all below it
+            except NotADirectoryError:
+                raise UnsafeKnowledgeBase(
+                    f"{folder} is not in a folder: a knowledge base works only in its own folders"
+                ) from None
+            if not stat.S_ISDIR(mode):
+                raise _refuse(folder, mode, "a folder")
+        expected = [
+            (folder, stat.S_ISDIR, "a folder")
+            for folder in (self.documents_dir, self.embeddings_dir, self.files_dir, self.concepts_dir)
+        ]
+        expected.append((self._lock_path, stat.S_ISREG, "a regular file"))
+        for path, is_expected, kind in expected:
+            try:
+                mode = os.lstat(path).st_mode
+            except FileNotFoundError:
+                continue
+            if not is_expected(mode):
+                raise _refuse(path, mode, kind)
+
     @contextmanager
     def _transaction(self) -> Iterator[None]:
         """Hold the knowledge base for one read or change, as every process sees it.
@@ -278,21 +387,32 @@ class KnowledgeBaseManager:
         included, so a change applies to the knowledge base as it is now:
         each kept its documents from when it opened and rewrote the index
         from them, dropping what another session had added since.
+
+        Raises:
+            UnsafeKnowledgeBase: a folder of the knowledge base has become a
+                symlink since it opened (see :meth:`_check_layout`).
         """
-        with self._lock, folder_lock(self._lock_path):
-            if file_stamp(self.metadata_path) != self._stamp:
-                self._vector_store.clear()
-                self._vector_store.load()
-                self._read_state()
-                self._stamp = file_stamp(self.metadata_path)
-            yield
+        with self._lock:
+            self._check_layout()
+            with folder_lock(self._lock_path):
+                if file_stamp(self.metadata_path) != self._stamp:
+                    self._vector_store.clear()
+                    self._vector_store.load()
+                    self._read_state()
+                    self._stamp = file_stamp(self.metadata_path)
+                yield
 
     @property
     def concepts(self) -> "ConceptStore":
-        """Lazy-loaded ConceptStore pointed at ``<kb_dir>/concepts/``."""
+        """Lazy-loaded ConceptStore pointed at ``<kb_dir>/concepts/``.
+
+        Raises:
+            UnsafeKnowledgeBase: see :meth:`_check_layout`, checked on each use.
+        """
+        self._check_layout()
         if self._concepts_store is None:
             from agentic_cli.memory.kb.concepts import ConceptStore
-            self._concepts_store = ConceptStore(self.kb_dir / "concepts")
+            self._concepts_store = ConceptStore(self.concepts_dir)
         return self._concepts_store
 
     def _create_services(
@@ -376,7 +496,7 @@ class KnowledgeBaseManager:
         """
         current = self._current_record()
         store = self._vector_store
-        if not store.index_path.exists():
+        if not is_regular_file(store.index_path):  # a symlink counts as no index
             if self._chunks:
                 self._reembed(current, "no_index")
             return
@@ -502,11 +622,9 @@ class KnowledgeBaseManager:
         Returns:
             Dict with 'content' and 'chunks' keys, or None if not found.
         """
-        path = self._document_content_path(doc_id)
-        if not path.exists():
-            return None
         try:
-            return json.loads(path.read_text())
+            data = read_if_regular(self._document_content_path(doc_id))
+            return None if data is None else json.loads(data)
         except (json.JSONDecodeError, OSError) as e:
             logger.warning(
                 "failed_to_load_document_content",
@@ -524,10 +642,27 @@ class KnowledgeBaseManager:
     def sidecar_path(self, doc_id: str) -> Path:
         """Path to a document's markdown sidecar, whether or not it exists.
 
-        Public so a host can check for a sidecar (and read it) without
-        generating one — the lazy-sidecar pattern ``kb_read`` uses.
+        To read it, use :meth:`read_sidecar`, which never follows a symlink.
         """
         return self.documents_dir / f"{doc_id}.md"
+
+    def read_sidecar(self, doc_id: str) -> str | None:
+        """A document's sidecar, or None when it has none.
+
+        Public so a host can read a sidecar without generating one, the
+        lazy-sidecar pattern ``kb_read`` uses. A sidecar that is a symlink, or
+        not a regular file, counts as none (with a warning): writing the
+        sidecar replaces it.
+
+        Raises:
+            UnsafeKnowledgeBase: see :meth:`_check_layout`.
+        """
+        self._check_layout()
+        data = read_if_regular(self.sidecar_path(doc_id))
+        return None if data is None else data.decode("utf-8")
+
+    def _has_sidecar(self, doc_id: str) -> bool:
+        return is_regular_file(self.sidecar_path(doc_id))
 
     def _write_sidecar(
         self, doc: Document, payload: dict[str, Any] | None = None
@@ -616,10 +751,17 @@ class KnowledgeBaseManager:
         return self.kb_dir / "ingest_log.md"
 
     def _append_ingest_log(self, action: str, doc: Document) -> None:
-        """Append one audit line to ingest_log.md."""
+        """Append one audit line to ingest_log.md.
+
+        The title (a web page's ``<title>``, or the model's argument) and the
+        arXiv ID are written on one line, without control characters. A log
+        that is a symlink, or not a regular file, is not written to (a
+        warning instead): a project can ship one linked to a shell rc. Nor
+        does any other failure to write it fail the change it records.
+        """
         ts = _utc_iso_now()
         ident = doc.metadata.get("arxiv_id") if doc.metadata else None
-        title_quoted = f'"{doc.title}"'
+        title_quoted = f'"{_printable(doc.title)}"'
         parts = [
             "-",
             ts,
@@ -629,14 +771,16 @@ class KnowledgeBaseManager:
             doc.source_type.value,
         ]
         if ident:
-            parts += ["·", ident]
+            parts += ["·", _printable(str(ident))]
         parts += ["·", title_quoted]
         if action == "ingest":
             parts += ["·", f"{len(doc.chunks)} chunks"]
         line = " ".join(parts) + "\n"
         path = self._ingest_log_path()
-        with path.open("a", encoding="utf-8") as f:
-            f.write(line)
+        try:
+            append_text(path, line)
+        except OSError as e:
+            logger.warning("kb_ingest_log_not_written", path=str(path), error=str(e))
 
     def _load_metadata(self) -> None:
         """Load document metadata from disk.
@@ -645,11 +789,12 @@ class KnowledgeBaseManager:
         files, no summary), and v3 (content in per-document files, with
         summary) formats. Auto-migrates older formats to v3.
         """
-        if not self.metadata_path.exists():
+        raw = read_if_regular(self.metadata_path)  # a symlink counts as none
+        if raw is None:
             return
 
         try:
-            data = json.loads(self.metadata_path.read_text())
+            data = json.loads(raw)
             version = data.get("version", 1)
 
             for doc_data in data.get("documents", []):
@@ -736,11 +881,14 @@ class KnowledgeBaseManager:
 
         Returns:
             Relative path within files_dir.
+
+        Raises:
+            UnsafeKnowledgeBase: see :meth:`_check_layout`.
         """
+        self._check_layout()
         self.files_dir.mkdir(parents=True, exist_ok=True)
         filename = f"{doc_id}{extension}"
-        dest = self.files_dir / filename
-        dest.write_bytes(file_bytes)
+        atomic_write_bytes(self.files_dir / filename, file_bytes)
         return Path(filename)
 
     def _stored_file_name(self, doc: Document) -> str | None:
@@ -1268,7 +1416,7 @@ class KnowledgeBaseManager:
             todo = [
                 doc
                 for doc in self._documents.values()
-                if not self.sidecar_path(doc.id).exists()
+                if not self._has_sidecar(doc.id)
             ]
         try:
             written = 0
@@ -1285,7 +1433,7 @@ class KnowledgeBaseManager:
                 async with lock:
                     # Double-check inside the lock — another task may
                     # have written it (e.g. lazy kb_read fallback).
-                    if self.sidecar_path(doc.id).exists():
+                    if self._has_sidecar(doc.id):
                         continue
                     with self._transaction():
                         if doc.id not in self._documents:
