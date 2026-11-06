@@ -1710,7 +1710,8 @@ step; each entry says what to use instead.
   `shell_executor` and `is_shell_enabled` from `agentic_cli.tools`, every
   other name the package exported (`analyze_command`,
   `execute_with_approval`, `ShellSecurityConfig`, `CommandClassifier`,
-  `RiskAssessor`, `ExecutionSandbox`, `AuditLogger` and the rest), the tool's
+  `RiskAssessor`, `ExecutionSandbox`, `AuditLogger` and the rest, but the
+  OS-sandbox names it re-exported, now in `agentic_cli.tools.os_sandbox`), the tool's
   summary, the demo, and the `shell_sandbox_type`, `shell_docker_image` and
   `shell_timeout` settings, which nothing read (`"docker"` isolated nothing).
   A settings file or environment variable that still sets one loads as

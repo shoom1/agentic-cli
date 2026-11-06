@@ -9,25 +9,27 @@ package, its exports, its registration and its three settings are removed, and
 
 from __future__ import annotations
 
-import importlib
 import importlib.util
+from pathlib import Path
 
 import pytest
 
 
-def _importable(name: str) -> bool:
-    try:
-        return importlib.util.find_spec(name) is not None
-    except ModuleNotFoundError:  # a parent package is missing
-        return False
+def test_the_shell_package_is_gone():
+    """No ``agentic_cli.tools.shell`` package, and no source of one.
 
-
-def test_the_shell_package_does_not_import():
-    # find_spec also sees a namespace package, which is what a folder left
-    # with only __pycache__ in it would import as.
-    assert not _importable("agentic_cli.tools.shell")
-    with pytest.raises(ModuleNotFoundError):
-        importlib.import_module("agentic_cli.tools.shell")
+    A checkout that ran the old code keeps ``tools/shell/__pycache__/`` (git
+    ignores it), and that folder imports as an empty namespace package. That
+    is not the package: what must be gone is every module of it.
+    """
+    spec = importlib.util.find_spec("agentic_cli.tools.shell")
+    if spec is None:
+        return
+    assert spec.origin is None, f"agentic_cli.tools.shell is a package again: {spec.origin}"
+    sources = [
+        p for loc in spec.submodule_search_locations or [] for p in Path(loc).rglob("*.py")
+    ]
+    assert sources == [], f"shell sources are back: {sources}"
 
 
 def test_no_tool_named_shell_executor_is_registered():
