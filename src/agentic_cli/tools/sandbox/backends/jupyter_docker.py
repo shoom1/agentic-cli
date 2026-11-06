@@ -2,18 +2,20 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import queue
 import secrets
-import stat
 import threading
 import time
 from pathlib import Path
 
 from agentic_cli.logging import Loggers
 from agentic_cli.tools.sandbox.models import ExecutionResult, SessionStatus
-from agentic_cli.file_utils import copy_regular_file_no_follow, sanitize_filename
+from agentic_cli.file_utils import (
+    copy_regular_file_no_follow, open_dir_no_follow, sanitize_filename,
+)
 from agentic_cli.tools.sandbox.backends.base import SandboxBackend
 from agentic_cli.tools.sandbox.backends import kernel_exec
 from agentic_cli.tools.sandbox.backends.container_runtime import (
@@ -238,28 +240,42 @@ class JupyterDockerBackend(SandboxBackend):
         """Copy regular files from <working_dir>/outputs into the shared outputs
         dir without following symlinks. Skips symlinks / special files (a kernel
         could plant `outputs/x -> /host/secret`) and a symlinked `outputs` dir.
-        Never raises — best-effort contract so execute() is not disrupted."""
+        Never raises — best-effort contract so execute() is not disrupted.
+
+        The kernel can swap 'outputs' for a symlink to any host directory at
+        any moment, and O_NOFOLLOW guards only a file's own name. So 'outputs'
+        is opened once, without following a link, and listed and read through
+        that descriptor: a later swap changes the path, not the directory read.
+        The session directory itself is the container's /workspace mount
+        point, which the kernel cannot rename."""
         session_outs = Path(working_dir) / "outputs"
-        try:
-            if not stat.S_ISDIR(os.lstat(session_outs).st_mode):
-                return []  # 'outputs' is a symlink or not a directory
-        except OSError:
-            return []
         collected: list[str] = []
-        try:
-            shared = self._outputs_dir()
-            entries = sorted(session_outs.iterdir())
-        except OSError:
-            logger.warning("sandbox_outputs_unreadable", path=str(session_outs))
-            return collected
-        for src in entries:
-            dst = shared / src.name
+        with contextlib.ExitStack() as fds:
             try:
-                copy_regular_file_no_follow(src, dst)
-            except (OSError, ValueError):
-                logger.warning("sandbox_output_skipped", entry=str(src))
-                continue
-            collected.append(str(dst))
+                session_fd = os.open(working_dir, os.O_RDONLY | os.O_DIRECTORY)
+                fds.callback(os.close, session_fd)
+                outs_fd = open_dir_no_follow("outputs", dir_fd=session_fd)
+                fds.callback(os.close, outs_fd)
+            except OSError:
+                return collected  # 'outputs' is a symlink, not a directory, or missing
+            try:
+                shared = self._outputs_dir()
+                shared_fd = os.open(shared, os.O_RDONLY | os.O_DIRECTORY)
+                fds.callback(os.close, shared_fd)
+                with os.scandir(outs_fd) as listing:
+                    names = sorted(entry.name for entry in listing)
+            except OSError:
+                logger.warning("sandbox_outputs_unreadable", path=str(session_outs))
+                return collected
+            for name in names:
+                try:
+                    copy_regular_file_no_follow(
+                        name, name, src_dir_fd=outs_fd, dst_dir_fd=shared_fd,
+                    )
+                except (OSError, ValueError):
+                    logger.warning("sandbox_output_skipped", entry=str(session_outs / name))
+                    continue
+                collected.append(str(shared / name))
         return collected
 
     def _parse_data_mounts(self) -> list[tuple[str, str]]:
@@ -360,9 +376,11 @@ class JupyterDockerBackend(SandboxBackend):
         if not ok:
             return ExecutionResult(success=False, error=msg)
         if inputs:
-            from agentic_cli.tools.sandbox.manager import stage_inputs
+            from agentic_cli.tools.sandbox.manager import sandbox_root_for, stage_inputs
             try:
-                stage_inputs(working_dir, inputs)
+                # Every session's kernel controls its own directory, so an
+                # input inside any of them is refused, not only this one.
+                stage_inputs(working_dir, inputs, sandbox_root=sandbox_root_for(self._settings))
             except ValueError as exc:
                 return ExecutionResult(success=False, error=f"input staging failed: {exc}")
         session = self._sessions.get(session_id)

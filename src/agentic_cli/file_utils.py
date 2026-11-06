@@ -46,7 +46,33 @@ def path_is_within(path: Path, root: Path) -> bool:
         return False
 
 
-def copy_regular_file_no_follow(src: Path, dst: Path) -> None:
+def open_dir_no_follow(name: str, *, dir_fd: int, create: bool = False) -> int:
+    """Open the directory ``name`` inside ``dir_fd`` without following a symlink.
+
+    For a directory another party can replace with a symlink at any moment
+    (a sandbox kernel's ``inputs``/``outputs``): open it once with this and do
+    every later step relative to the descriptor, so a swap changes the path,
+    not the directory being read or written. ``create`` makes it (default
+    mode) when it is missing.
+
+    Raises OSError when ``name`` is a symlink (dangling or not), not a
+    directory, or missing (without ``create``).
+    """
+    if create:
+        try:
+            os.mkdir(name, dir_fd=dir_fd)
+        except FileExistsError:
+            pass
+    return os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dir_fd)
+
+
+def copy_regular_file_no_follow(
+    src: str | os.PathLike[str],
+    dst: str | os.PathLike[str],
+    *,
+    src_dir_fd: int | None = None,
+    dst_dir_fd: int | None = None,
+) -> None:
     """Copy a regular file src -> dst without following symlinks at either end.
 
     Source: opened O_RDONLY | O_NOFOLLOW | O_NONBLOCK (final component); fstat
@@ -54,20 +80,32 @@ def copy_regular_file_no_follow(src: Path, dst: Path) -> None:
     O_NOFOLLOW closes the check->open TOCTOU on the final component; O_NONBLOCK
     ensures a FIFO/device source fails fast instead of blocking the open
     (regular files ignore O_NONBLOCK for reads).
-    Dest: written to a private temp file in dst.parent, fsync'd, then
+    Dest: written to a private (0600) temp file beside dst, fsync'd, then
     os.replace()'d over dst — a pre-planted symlink at dst is replaced, not
     written through.
 
+    O_NOFOLLOW guards only the final component, so a directory another
+    party can swap for a symlink (a sandbox's ``inputs``/``outputs``) must be
+    opened first and passed as a descriptor: ``src_dir_fd`` makes ``src``
+    relative to it, and ``dst_dir_fd`` makes ``dst`` a file name in it (a
+    bare name, no separator), where the temp file is created and replaced.
+    The copy then reads and writes the directories that were opened, whatever
+    their paths have become since.
+
     Raises OSError (source open incl. ELOOP for a final-component symlink) or
-    ValueError (source not a regular file). POSIX (macOS/Linux).
+    ValueError (source not a regular file; with ``dst_dir_fd``, a ``dst``
+    that is not a file name). POSIX (macOS/Linux).
     """
-    fd = os.open(src, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    dst = Path(dst)
+    if dst_dir_fd is not None and (str(dst) != dst.name or dst.name in ("", ".", "..")):
+        raise ValueError(f"not a file name: {str(dst)!r}")
+    fd = os.open(src, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=src_dir_fd)
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise ValueError(f"not a regular file: {src}")
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        tfd, tmp = tempfile.mkstemp(dir=str(dst.parent), prefix=f".{dst.name}.", suffix=".tmp")
-        tmp_path = Path(tmp)
+        if dst_dir_fd is None:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+        tfd, tmp_path = _open_temp_beside(dst, mode=0o600, dir_fd=dst_dir_fd)
         try:
             with os.fdopen(tfd, "wb") as out:
                 while True:
@@ -77,23 +115,30 @@ def copy_regular_file_no_follow(src: Path, dst: Path) -> None:
                     out.write(chunk)
                 out.flush()
                 os.fsync(out.fileno())
-            os.replace(tmp_path, dst)
+            os.replace(tmp_path, dst, src_dir_fd=dst_dir_fd, dst_dir_fd=dst_dir_fd)
         except BaseException:
-            tmp_path.unlink(missing_ok=True)
+            try:
+                os.unlink(tmp_path, dir_fd=dst_dir_fd)
+            except FileNotFoundError:
+                pass
             raise
     finally:
         os.close(fd)
 
 
-def _open_temp_like_a_new_file(path: Path) -> tuple[int, Path]:
-    """Create a uniquely-named temp file beside ``path``, opened for writing,
-    with the mode a plain ``open()`` would give a new file (0666 minus the
-    umask: the kernel applies it). ``mkstemp`` would force 0600."""
+def _open_temp_beside(
+    path: Path, *, mode: int = 0o666, dir_fd: int | None = None
+) -> tuple[int, Path]:
+    """Create a uniquely-named temp file beside ``path``, opened for writing.
+
+    ``mode`` less the umask (the kernel applies it): the default 0o666 is
+    what a plain ``open()`` gives a new file, where ``mkstemp`` would force
+    0600. With ``dir_fd``, ``path`` is relative to that directory."""
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
     for _ in range(100):
         tmp_path = path.parent / f".{path.name}.{secrets.token_hex(6)}.tmp"
         try:
-            return os.open(tmp_path, flags, 0o666), tmp_path
+            return os.open(tmp_path, flags, mode, dir_fd=dir_fd), tmp_path
         except FileExistsError:
             continue
     raise FileExistsError(f"could not create a temp file beside {path}")
@@ -124,7 +169,7 @@ def _atomic_write(path: Path, content: str | bytes, *, preserve_mode: bool = Fal
             existing = stat.S_IMODE(os.stat(path).st_mode) & 0o777
         except FileNotFoundError:
             pass
-        fd, tmp_path = _open_temp_like_a_new_file(path)
+        fd, tmp_path = _open_temp_beside(path)
     else:
         fd, tmp_name = tempfile.mkstemp(
             dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp"

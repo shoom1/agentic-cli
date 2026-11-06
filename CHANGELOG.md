@@ -36,6 +36,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   says the approval applies to this call only. A saved allow in
   `~/.{app_name}/project_grants.json` whose literal part holds one is dropped
   at startup with a `permission_glob_grant_dropped` warning.
+- **The sandbox's file transfer holds `inputs/` and `outputs/` open while it
+  copies.** Staging an input and the docker backend's collection of
+  `outputs/` checked once that the session's folder was a real folder, then
+  copied each file by a path through it (since 0.6.0). Code in the kernel can
+  rename and link inside its `/workspace` at any moment, so it could swap the
+  folder for a symlink in between: the host then copied a host file of the
+  kernel's choosing (named like an output) into the shared artifacts folder
+  and reported it to the model, or wrote a staged input into a host folder of
+  the kernel's choosing. Each folder is now opened once, without following a
+  link, and every listing, read, temporary file and rename goes through that
+  descriptor, so a later swap changes the path, not the folder the host reads
+  or writes. In `agentic_cli.file_utils`, `copy_regular_file_no_follow` takes
+  `src_dir_fd`/`dst_dir_fd` and `open_dir_no_follow` is new. A dangling
+  `inputs` link now fails the call with the usual "not a real directory"
+  error instead of an uncaught `FileExistsError`. An input whose path runs
+  through any of the sandbox's session directories (an `outputs/` or plot
+  path the tool reported, staged into another session, say) is refused:
+  below each, every folder is that session's kernel's, so it could redirect
+  the copy to a host file too. The error says to stage the copy collected in
+  the artifacts directory instead. `stage_inputs` takes `sandbox_root=` (the
+  docker backend passes `<workspace_dir>/sandbox`); the local backend, whose
+  kernel runs with host privileges and collects nothing, refuses only the
+  session's own directory.
+  **Breaking:** staging a file from inside a session fails the call, naming
+  it.
 - **The default permission rules protect what the OS sandbox protects.** The
   engine allowed reading anything in the project and denied only writes to a
   short list (since 0.5.1), so `read_file(".env")` returned the project's keys
