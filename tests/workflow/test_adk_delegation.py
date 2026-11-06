@@ -498,6 +498,44 @@ class TestDelegation:
             await manager.cleanup()
 
 
+class TestThePromptsAreSentAsWritten:
+    """ADK fills ``{name}`` in a string instruction from the session state and
+    raises ``KeyError`` for a name the state lacks, so a prompt quoting code
+    (``f'{value}'``) failed every turn before any request, and one naming
+    ``{plan}`` had the session's plan spliced in once the state held one. A
+    config-built agent's prompt, the root's and a sub-agent's, is sent as
+    written, as Deep Agents sends it."""
+
+    BRACES = " An f-string looks like f'{value}'; the plan is {plan}; JSON is {\"a\": 1}."
+
+    async def test_braces_reach_every_agent_as_written(self, project, monkeypatch):
+        configs = [
+            AgentConfig(
+                name="coordinator", prompt=PROMPTS["coordinator"] + self.BRACES,
+                sub_agents=["researcher"], description="Leads.", include_state_tools=False,
+            ),
+            AgentConfig(
+                name="researcher", prompt=PROMPTS["researcher"] + self.BRACES,
+                description="Finds facts.", include_state_tools=False,
+            ),
+        ]
+        answers = delegating()
+
+        await three_turns(monkeypatch, configs, answers)
+
+        assert answers.agents.count("researcher") == 1  # delegated once, on turn 2
+        for agent in ("coordinator", "researcher"):
+            for body in answers.bodies(agent):
+                assert system_text(body).startswith(PROMPTS[agent] + self.BRACES)
+
+    async def test_an_empty_prompt_sends_no_system_instruction(self, project):
+        """As before: ADK adds an instruction only when there is one (Gemini
+        would be sent an empty system text)."""
+        agent = await built([AgentConfig(name="solo", prompt="")])
+
+        assert agent.instruction == ""
+
+
 class TestTheStream:
     """Only the root replies: a sub-agent's text is activity, and its calls'
     prompts are its brief, not the conversation's context."""

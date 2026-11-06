@@ -70,13 +70,13 @@ agentic-cli/
 │   │   │   ├── matchers.py   # PathMatcher, URLMatcher, ShellMatcher, StringGlobMatcher
 │   │   │   └── rules.py, store.py, prompt.py
 │   │   ├── adk/              # ADK orchestrator
-│   │   │   ├── manager.py    # GoogleADKWorkflowManager (compact: ADK's compaction once, under turn admission; supports_compact False for a native ADK YAML app)
+│   │   │   ├── manager.py    # GoogleADKWorkflowManager (a config-built agent's prompt as an instruction provider, sent as written: no `{name}` state injection; compact: ADK's compaction once, under turn admission; supports_compact False for a native ADK YAML app)
 │   │   │   ├── delegation.py # Sub-agents as single_turn tools of their parent; binding those tools to task
 │   │   │   ├── compaction.py # AgentCliSummarizer (main agent only; summary_range, render_events), MainAgentPlugin, NoAfterTurnCompactionRunner, compact_session
 │   │   │   ├── fit_guard_plugin.py # FitGuardPlugin: a request over its agent's budget has its oldest turns left out (drop_turns); a leading summary folded into the next user text (fold_summary); request_as_seen
 │   │   │   ├── overflow_plugin.py # OverflowPlugin: a provider's overflow summarized (the retry: the summary and the turns it kept) or trimmed, retried once, then CONTEXT_OVERFLOW
 │   │   │   ├── sessions.py   # A conversation's row in its session state (agentic_cli.title, agentic_cli.turns), saved with each user turn (run_async(state_delta=)); typed_prompts
-│   │   │   ├── event_processor.py  # ADKEventProcessor (a sub-agent's text marked as activity)
+│   │   │   ├── event_processor.py  # ADKEventProcessor (a sub-agent's text marked as activity; a main-agent reply that is no answer, NO_ANSWER_CODES, → the turn's ERROR)
 │   │   │   ├── model_factory.py # build_adk_model: ResolvedModel → ADK model, config, planner
 │   │   │   ├── openai_compatible.py # OpenAICompatibleLlm (the configured providers: openrouter and openai_compatible kinds; reasoning text; no field sent as null)
 │   │   │   ├── anthropic_llm.py # DirectAnthropicLlm: bare claude-* strings → direct API

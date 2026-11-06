@@ -958,6 +958,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **On ADK, an agent's prompt is sent as written.** ADK fills `{name}` in a
+  prompt from the session state and raises `KeyError` for a name the state
+  lacks, so a prompt quoting code (`f'{value}'`) or JSON failed every turn
+  before any request, and one naming `{plan}` or `{tasks}` had the session's
+  plan or task list spliced in once the state tools wrote it. An app built
+  from `AgentConfig`s now has every agent's prompt sent as written, as Deep
+  Agents sends it. A native ADK YAML app keeps ADK's templating; one
+  translated from ADK YAML (`adk_config_mode="translate"`) is built from
+  `AgentConfig`s, so it does not, and a warning
+  (`adk_translate_instruction_template_dropped`) names the templates.
 - **`app_name` comes only from the application.** It chooses the settings
   files, yet the environment (`AGENTIC_APP_NAME`, or an app's prefix) and the
   user file could set it too, after the files had been chosen by the class's
@@ -1766,6 +1776,13 @@ step; each entry says what to use instead.
   summary written since starts it elsewhere; the next turn tries again. The
   warning is still one a turn, and the turn still goes on without a summary.
   A summary asked for (`/compact`, an overflow's) is never skipped.
+- **On ADK, a main agent's reply that is no answer ends the turn with an
+  error.** A reply with nothing but thoughts or blank text raises nothing on
+  ADK: Gemini's `SAFETY`, `MALFORMED_FUNCTION_CALL` or `MAX_TOKENS` (every
+  token spent thinking), a prompt Gemini blocked, an empty STOP reply
+  (`MODEL_RETURNED_NO_CONTENT`), a Claude refusal or a Claude reply cut at
+  its token limit. The turn ended with no text and no error. It now ends with
+  "<model> returned no answer", the reason as its code.
 - **Two tool questions asked at once are shown one after the other.** The
   calls of one model step run together (both backends gather them), so two
   of them could ask at once (two `ask_clarification` calls, or one beside a

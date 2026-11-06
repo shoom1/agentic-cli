@@ -156,7 +156,8 @@ class TestPromptSettingsScope:
             root = await _built(mgr)
 
         assert received == [ctx.settings]
-        assert root.instruction == "app=manager-app"
+        # An instruction provider, so ADK sends it as written.
+        assert root.instruction(None) == "app=manager-app"
 
     def test_plain_string_prompt_is_unchanged(self):
         config = AgentConfig(name="a", prompt="literal")
