@@ -17,7 +17,7 @@ which capabilities that is from here: ``BaseWorkflowManager`` passes
 
 ``python_sandbox_policy`` builds the OS-sandbox policy ``execute_python``
 runs under from the same settings, so the tool and the engine read them
-alike.
+alike, and ``sandbox_opt_out`` names where the user turns the sandbox off.
 """
 
 from __future__ import annotations
@@ -55,6 +55,23 @@ def python_sandbox_policy(settings: Any) -> "OSSandboxPolicy | None":
         strict=_sandbox_strict(settings),
         app_name=getattr(settings, "app_name", None),
     )
+
+
+def sandbox_opt_out(settings: Any) -> str:
+    """Where the user turns the OS sandbox off, for a refusal to name.
+
+    ``os_sandbox_enabled`` is the user's setting: a project file cannot set it,
+    nor can ``/settings``. So: the user settings file, or the app's
+    environment variable.
+    """
+    from agentic_cli.tools.executor import default_opt_out
+
+    text = default_opt_out(getattr(settings, "app_name", None))
+    config = getattr(type(settings), "model_config", None)
+    prefix = config.get("env_prefix") if isinstance(config, dict) else None
+    if prefix:
+        text += f", or {prefix.upper()}OS_SANDBOX_ENABLED=false in the environment"
+    return text
 
 
 def uncontained_exec_capabilities(settings: Any) -> frozenset[str]:

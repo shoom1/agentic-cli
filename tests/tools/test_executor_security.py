@@ -186,11 +186,19 @@ ESCAPES = {
 
 class _Backend:
     """A stand-in OS sandbox: ``"none"`` is no backend; ``wrap_error`` makes
-    the wrap fail; otherwise the "wrap" is the plain command."""
+    the wrap fail; ``command(argv)``, when given, is the wrapped command (one
+    that fails before Python starts, say); otherwise the "wrap" is the plain
+    command."""
 
-    def __init__(self, sandbox_type: str = "seatbelt", wrap_error: str | None = None) -> None:
+    def __init__(
+        self,
+        sandbox_type: str = "seatbelt",
+        wrap_error: str | None = None,
+        command=None,
+    ) -> None:
         self.sandbox_type = sandbox_type
         self.wrap_error = wrap_error
+        self.command = command
         self.wrapped: list[list[str]] = []
 
     def wrap_python_command(self, argv, working_dir, policy):
@@ -203,7 +211,16 @@ class _Backend:
             return OSSandboxResult(
                 command="", success=False, error=self.wrap_error, sandbox_type=self.sandbox_type
             )
-        return OSSandboxResult(command=shlex.join(argv), sandbox_type=self.sandbox_type)
+        command = self.command(argv) if self.command else shlex.join(argv)
+        return OSSandboxResult(command=command, sandbox_type=self.sandbox_type)
+
+
+def _fails_at_start(message: str, status: int):
+    """A wrapped command that fails as a sandbox tool does when it cannot set
+    the sandbox up: its message on stderr, Python never started."""
+    import shlex
+
+    return lambda argv: "sh -c " + shlex.quote(f"echo {shlex.quote(message)} >&2; exit {status}")
 
 
 def _use_backend(monkeypatch: pytest.MonkeyPatch, backend: _Backend) -> _Backend:
@@ -277,32 +294,145 @@ def test_a_failed_wrap_is_refused_by_default(monkeypatch: pytest.MonkeyPatch) ->
     assert runs == []
 
 
-@pytest.mark.parametrize(
-    "backend",
-    [_Backend("none"), _Backend("bubblewrap", wrap_error="bwrap: setting up uid map")],
-    ids=["no-backend", "failed-wrap"],
-)
-def test_the_refusal_says_how_to_get_a_sandbox_or_opt_out(
-    backend: _Backend, monkeypatch: pytest.MonkeyPatch
-) -> None:
+#: Each way the sandbox can be missing, and the cause its refusal must keep.
+#: ``bwrap`` on PATH but blocked from user namespaces (Ubuntu 24.04's default
+#: AppArmor policy), and a seatbelt profile the kernel rejects, fail only when
+#: the wrapped command starts.
+REFUSALS = {
+    "no-backend": (lambda: _Backend("none"), "no sandbox tool is available"),
+    "failed-wrap": (
+        lambda: _Backend("bubblewrap", wrap_error="bwrap: profile failed"),
+        "bwrap: profile failed",
+    ),
+    "bwrap-blocked-at-start": (
+        lambda: _Backend(
+            "bubblewrap",
+            command=_fails_at_start("bwrap: setting up uid map: Permission denied", 1),
+        ),
+        "bwrap: setting up uid map: Permission denied",
+    ),
+    "seatbelt-rejected-at-start": (
+        lambda: _Backend(
+            "seatbelt",
+            command=_fails_at_start("sandbox-exec: sandbox_apply: Operation not permitted", 65),
+        ),
+        "sandbox-exec: sandbox_apply: Operation not permitted",
+    ),
+}
+REFUSAL_APP = "refusalapp"
+
+
+def test_every_refusal_says_how_to_run_the_code(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No backend, a failed wrap, or a sandbox tool that fails when it starts:
+    each refusal keeps its cause and ends with the same remedy, how to get a
+    working sandbox and where to turn it off (the setting is the user's: not
+    the project file's, nor ``/settings``'s)."""
     from agentic_cli.tools.execution_tools import execute_python
     from tests.conftest import MockContext
 
-    _use_backend(monkeypatch, backend)
-    with MockContext():
-        error = execute_python("1 + 1")["error"]
+    errors = {}
+    for path, (make_backend, cause) in REFUSALS.items():
+        _use_backend(monkeypatch, make_backend())
+        runs = _record_runs(monkeypatch)
+        with MockContext(app_name=REFUSAL_APP):
+            result = execute_python('re.enum.sys.modules["os"].getpid()')
+        assert result["success"] is False, (path, result)
+        assert cause in result["error"], (path, result["error"])
+        assert "To run it" in result["error"], (path, result["error"])
+        # Refused; never retried without the sandbox.
+        assert len(runs) == (1 if path.endswith("-at-start") else 0), path
+        errors[path] = result["error"]
 
-    assert "sandbox-exec" in error and "bwrap" in error  # how to get one
-    assert "os_sandbox_enabled" in error  # how to opt out
-    assert "your privileges" in error  # and what opting out means
+    tails = {error[error.index("To run it"):] for error in errors.values()}
+    assert len(tails) == 1, errors
+    [tail] = tails
+    assert all(error.endswith(tail) for error in errors.values())
+    # How to get a working sandbox, on each platform.
+    assert "sandbox-exec" in tail and "macOS" in tail
+    assert "bwrap" in tail and "Ubuntu 24.04" in tail and "user namespaces" in tail
+    assert "Windows" in tail
+    # How to opt out, where, and what that means.
+    assert '"os_sandbox_enabled": false' in tail
+    assert f"~/.{REFUSAL_APP}/settings.json" in tail
+    assert "AGENTIC_OS_SANDBOX_ENABLED=false" in tail
+    assert "your privileges" in tail
+
+
+@pytest.mark.skipif(
+    __import__("shutil").which("sandbox-exec") is None, reason="needs macOS's sandbox-exec"
+)
+def test_a_real_sandbox_that_will_not_start_python_is_a_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The real sandbox-exec, with a profile that denies Python its start."""
+    import shlex
+
+    from agentic_cli.tools.execution_tools import execute_python
+    from tests.conftest import MockContext
+
+    _use_backend(monkeypatch, _Backend(
+        "seatbelt",
+        command=lambda argv: shlex.join(["sandbox-exec", "-p", "(version 1)(deny default)", *argv]),
+    ))
+    with MockContext():
+        result = execute_python("1 + 1")
+
+    assert result["success"] is False
+    assert "sandbox-exec" in result["error"] and "Operation not permitted" in result["error"]
+    assert "os_sandbox_enabled" in result["error"]
+
+
+def test_without_strict_a_sandbox_that_fails_to_start_falls_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``os_sandbox_strict`` off: a sandbox tool that fails as it starts is one
+    more way the sandbox is unavailable, so the call falls back, as for a
+    failed wrap: run as the user, with the unsandboxed module set (checked
+    again, since the code was first checked for the sandbox)."""
+    from agentic_cli.tools.execution_tools import execute_python
+    from tests.conftest import MockContext
+
+    _use_backend(monkeypatch, _Backend(
+        "bubblewrap", command=_fails_at_start("bwrap: setting up uid map: Permission denied", 1)
+    ))
+    runs = _record_runs(monkeypatch)
+
+    with MockContext(os_sandbox_strict=False):
+        numpy = execute_python("import numpy\n'ran'")
+        sqrt = execute_python("import math\nmath.sqrt(16)")
+
+    assert numpy["success"] is False
+    assert numpy["error"].startswith("Validation error"), numpy
+    assert sqrt["success"] is True, sqrt
+    assert sqrt["result"] == "4.0"
+    # Each call tried the sandbox first; only the valid one then ran unwrapped.
+    assert [kwargs.get("shell") is True for _, kwargs in runs] == [True, True, False]
+    assert _runner_modules(runs[2][0][0][2]) == SafePythonExecutor.CORE_MODULES
+
+
+def test_code_that_exits_in_the_sandbox_is_no_sandbox_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Code that exits before the result is written ran: its failure is its
+    own, not a sandbox that did not start."""
+    from agentic_cli.tools.execution_tools import execute_python
+    from tests.conftest import MockContext
+
+    _use_backend(monkeypatch, _Backend("seatbelt"))
+    with MockContext():
+        result = execute_python("re.enum.sys.exit(3)")
+
+    assert result["success"] is False
+    assert "os_sandbox_enabled" not in result["error"], result
+    assert "exited with code 3" in result["error"], result
 
 
 def test_a_failed_wrap_without_strict_runs_core_modules_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """``os_sandbox_strict`` off: a failed wrap falls back to running without
-    the sandbox, so with the unsandboxed module set, whatever was available
-    when the executor was built."""
+    the sandbox, so with the unsandboxed module set: the set is chosen from
+    where the call runs, not from what was available before the wrap."""
     from agentic_cli.tools.execution_tools import execute_python
     from tests.conftest import MockContext
 

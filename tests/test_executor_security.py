@@ -138,7 +138,8 @@ class TestOsSandboxAvailabilityAware:
         assert _runner_modules(scripts[0]) == ex.CORE_MODULES
 
     def test_unavailable_non_strict_falls_back_and_runs(self, monkeypatch):
-        """Default (non-strict): no backend -> hardened in-process, not refusal."""
+        """Strict off (the opt-in fallback): no backend -> runs without the
+        sandbox, standard modules only, rather than refusing."""
         _patch_sandbox(monkeypatch, "none")
         ex = SafePythonExecutor(
             os_sandbox_policy=OSSandboxPolicy(enabled=True, strict=False)

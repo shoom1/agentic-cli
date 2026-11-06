@@ -1381,11 +1381,16 @@ The `/sandbox` CLI command lists and resets sandbox sessions.
 `execute_python` runs its code only inside the OS sandbox: it writes only to
 the working directory (and `os_sandbox_writable_paths`), reads no credential
 store, no `~/.{app_name}` and not the project's `.env`, and has no network
-unless `os_sandbox_allow_network` is on. On a host with no sandbox backend, or when
-the sandbox cannot be set up, the call is refused with an error that says how
-to get one. Setting `os_sandbox_enabled` to false runs the code without a
-sandbox, with your privileges, and so does `os_sandbox_strict: false` when the
-sandbox is unavailable: the executor then allows only standard modules (math,
+unless `os_sandbox_allow_network` is on. On a host with no sandbox backend
+(Windows has none), when the sandbox cannot be set up, or when the sandbox tool
+fails as it starts (on Ubuntu 24.04 and later, `bwrap` needs unprivileged user
+namespaces, which AppArmor restricts by default), the call is refused with an
+error that keeps the cause and says how to get a working sandbox. Setting
+`os_sandbox_enabled` to false (a user setting: in `~/.{app_name}/settings.json`
+or the app's environment variable, not the project file or `/settings`) runs
+the code without a sandbox, with your privileges, and so does
+`os_sandbox_strict: false` when the sandbox is unavailable: the executor then
+allows only standard modules (math,
 statistics, json, re, datetime, collections, ...) and checks the code, but
 those checks are no security boundary (CPython has no in-process sandbox, and
 those modules reach the host themselves), so every such call is approved on

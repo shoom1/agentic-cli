@@ -48,7 +48,7 @@ def execute_python(
         Dictionary with execution results
     """
     import json as _json
-    from agentic_cli.tools.exec_policy import python_sandbox_policy
+    from agentic_cli.tools.exec_policy import python_sandbox_policy, sandbox_opt_out
     from agentic_cli.tools.executor import SafePythonExecutor
 
     parsed_context = None
@@ -65,5 +65,6 @@ def execute_python(
         # None when the settings turn the sandbox off: the code runs as the
         # user, which the permission engine approves call by call.
         os_sandbox_policy=python_sandbox_policy(settings),
+        opt_out=sandbox_opt_out(settings),
     )
     return executor.execute(code, context=parsed_context, timeout_seconds=timeout_seconds)

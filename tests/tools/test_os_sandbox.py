@@ -580,8 +580,8 @@ class TestSafePythonExecutorIntegration:
         mock_run.assert_not_called()
 
     def test_enabled_policy_no_real_sandbox_non_strict_falls_back(self):
-        # Default (non-strict): no backend falls back to the in-process executor
-        # (which is restricted to CORE_MODULES) rather than refusing.
+        # Strict off (an opt-in; strict is the default): no backend falls back
+        # to running without the sandbox (CORE_MODULES only) rather than refusing.
         policy = OSSandboxPolicy(enabled=True, strict=False)
         executor = SafePythonExecutor(os_sandbox_policy=policy)
 
