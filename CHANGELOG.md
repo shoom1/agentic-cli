@@ -206,6 +206,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the executor backend, sandbox mounts and API keys included. The filter now
   judges the env files the settings actually read: the constructor's
   `_env_file` when one is given.
+- **`execute_python` runs code only inside the OS sandbox, unless you turn it
+  off.** Where no sandbox backend existed (a Linux host without `bwrap`, with
+  `os_sandbox_strict` off by default), when the sandbox could not be set up,
+  or with `os_sandbox_enabled` off, the code ran in a plain subprocess with
+  your privileges (since 0.6.0), behind checks the tool and the settings
+  described as containment. They are not one: CPython has no in-process
+  sandbox, and the standard modules the executor allows reach the host
+  themselves (`re.enum.sys.modules["os"].popen(…)` and
+  `json.codecs.open(path, "w")` passed every check). Yet "Allow for this
+  session" was offered and remembered for it, the prompt showed only the
+  code's first 1,000 characters, and a failed wrap kept numpy, pandas and
+  sympy importable. `os_sandbox_strict` now defaults to true (and so does
+  `OSSandboxPolicy.strict`): with the sandbox enabled, the default, the code
+  runs inside it or is refused. The refusal, when there is no backend, when
+  the wrap fails, or when the sandbox tool fails as it starts (a `bwrap` that
+  Ubuntu 24.04's AppArmor keeps from user namespaces, a seatbelt profile the
+  kernel rejects: before, the call failed with the tool's message alone),
+  keeps its cause and says how to get a working sandbox (sandbox-exec ships
+  with macOS; on Linux install bubblewrap, and on Ubuntu 24.04 or later allow
+  it unprivileged user namespaces) and how to opt out: `"os_sandbox_enabled":
+  false` in `~/.{app_name}/settings.json` or the app's environment variable
+  (the project file and `/settings` cannot set it), which runs the code with
+  your privileges. The modules a call may import are chosen from where it runs:
+  inside the sandbox all of them, anywhere else the standard ones only.
+  Code that may run on your machine without a sandbox (`execute_python` with
+  the sandbox off or not strict, `sandbox_execute` on the `local` backend) is
+  approved call by call: the prompt offers only "Allow once" and "Deny" and
+  says why, and no grant stored earlier approves it, though an allow rule you
+  write in your own settings still does. A code prompt shows all of the code.
+  The tool's description, the settings' and the executor's docstring say
+  this, and `SafePythonExecutor.effective_allowed_modules` is gone (the set
+  is chosen per call). **Breaking:** on a host with no working sandbox (a
+  Linux host without bubblewrap, or whose bubblewrap may not create user
+  namespaces, as on Ubuntu 24.04 by default; Windows, which has none),
+  `execute_python` is refused until one works or `os_sandbox_enabled` is set
+  to false.
 - **The knowledge base never follows a symlink in its folder.** The project
   knowledge base (`./.{app_name}/knowledge_base`) can arrive with a cloned
   repository, and git keeps symlinks, but its files were opened by path

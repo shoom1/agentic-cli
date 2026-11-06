@@ -245,3 +245,24 @@ class TestLiveSandbox:
                    OSSandboxPolicy(app_name=APP))
         assert out == "blocked"
         assert not (home / "note.txt").exists()
+
+    def test_execute_python_runs_its_code_inside_the_sandbox(self, home, project, monkeypatch):
+        """With the default settings the code runs inside the real sandbox, so
+        a standard module that reaches the host (``json.codecs.open``) writes
+        only where the sandbox lets it: the project, not beside it."""
+        from agentic_cli.tools.execution_tools import execute_python
+        from tests.conftest import MockContext
+
+        _sandbox()  # skips without a backend
+        monkeypatch.chdir(project)
+        outside = home / "outside.txt"
+        write = 'f = json.codecs.open({!r}, "w")\nf.write("x")\nf.close()\n"written"'
+
+        with MockContext():
+            escaped = execute_python(write.format(str(outside)))
+            inside = execute_python(write.format("inside.txt"))
+
+        assert escaped["success"] is False, escaped
+        assert not outside.exists()
+        assert inside["success"] is True, inside
+        assert (project / "inside.txt").read_text() == "x"

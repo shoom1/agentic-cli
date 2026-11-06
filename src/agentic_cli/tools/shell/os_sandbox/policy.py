@@ -71,6 +71,10 @@ class OSSandboxPolicy:
             Always includes MANDATORY_DENY_WRITE entries.
         deny_read_paths: Paths to hide entirely from the sandboxed process.
         allow_network: Whether network access is allowed (Phase 2).
+        strict: When True (the default), refuse to execute if sandboxing was
+            requested but no real backend is available or the wrap fails. When
+            False, Python execution then falls back to running without a
+            sandbox, with the user's privileges.
         app_name: The application's name. Its config dir (``~/.{app_name}``,
             holding settings, permission grants and ``.env``) is hidden and
             write-protected, and ``{working_dir}/.{app_name}`` is
@@ -79,9 +83,6 @@ class OSSandboxPolicy:
     Whatever the configured lists hold, the resolved deny lists always include
     ``PROTECTED_HOME_PATHS``, the app's config dir, the whole ``.git``
     directory and ``.env`` of the working directory.
-        strict: When True, refuse to execute if sandboxing was requested but no
-            real backend is available (instead of falling back to the restricted
-            in-process executor).
     """
 
     enabled: bool = True
@@ -91,7 +92,7 @@ class OSSandboxPolicy:
     )
     deny_read_paths: list[str] = field(default_factory=list)
     allow_network: bool = False
-    strict: bool = False
+    strict: bool = True
     app_name: str | None = None
 
     def resolved_writable_paths(self, working_dir: Path) -> list[Path]:

@@ -1,6 +1,9 @@
 """Python execution tools for agentic workflows.
 
-Provides sandboxed Python code execution via SafePythonExecutor.
+``execute_python`` runs code through ``SafePythonExecutor``: inside the OS
+sandbox by default, refused when there is none, and with the user's
+privileges only when the settings turn the sandbox off or let it fall back
+(``tools/exec_policy.py``).
 """
 
 from typing import Any
@@ -16,14 +19,24 @@ from agentic_cli.workflow.permissions import Capability
 @register_tool(
     category=ToolCategory.EXECUTION,
     capabilities=[Capability("python.exec")],
-    description="Stateless Python scratchpad for quick calculations, formula checks, and mathematical reasoning. Each call starts fresh — no state persists. Only whitelisted modules (math, numpy, pandas, json, etc.) are available. Use sandbox_execute instead for stateful work.",
+    description=(
+        "Stateless Python scratchpad for quick calculations, formula checks, and "
+        "mathematical reasoning. Each call starts fresh — no state persists. The "
+        "code runs inside the OS sandbox, where numpy, scipy, sklearn, sympy, "
+        "pandas and matplotlib can be imported besides math, statistics, "
+        "cmath, collections, itertools, json, re, datetime, decimal, fractions "
+        "and random; with no sandbox it is refused, unless the user turned the "
+        "sandbox off: then it runs with the user's privileges, only those "
+        "standard modules import, and the user approves each call. Use "
+        "sandbox_execute instead for stateful work."
+    ),
 )
 def execute_python(
     code: str,
     context: str = "",
     timeout_seconds: int | None = None,
 ) -> dict[str, Any]:
-    """Execute Python code safely.
+    """Run Python code in a fresh subprocess, inside the OS sandbox by default.
 
     Args:
         code: Python code to execute
@@ -35,6 +48,7 @@ def execute_python(
         Dictionary with execution results
     """
     import json as _json
+    from agentic_cli.tools.exec_policy import python_sandbox_policy, sandbox_opt_out
     from agentic_cli.tools.executor import SafePythonExecutor
 
     parsed_context = None
@@ -45,23 +59,12 @@ def execute_python(
             return {"success": False, "error": f"Invalid JSON in context: {context}"}
 
     settings = get_settings()
-
-    # Build OS sandbox policy from settings
-    os_sandbox_policy = None
-    if getattr(settings, "os_sandbox_enabled", False):
-        from agentic_cli.tools.shell.os_sandbox import OSSandboxPolicy
-
-        os_sandbox_policy = OSSandboxPolicy(
-            enabled=True,
-            writable_paths=getattr(settings, "os_sandbox_writable_paths", []),
-            allow_network=getattr(settings, "os_sandbox_allow_network", False),
-            strict=getattr(settings, "os_sandbox_strict", False),
-            app_name=getattr(settings, "app_name", None),
-        )
-
     executor = SafePythonExecutor(
         default_timeout=settings.python_executor_timeout,
         max_memory_mb=settings.python_executor_max_memory_mb,
-        os_sandbox_policy=os_sandbox_policy,
+        # None when the settings turn the sandbox off: the code runs as the
+        # user, which the permission engine approves call by call.
+        os_sandbox_policy=python_sandbox_policy(settings),
+        opt_out=sandbox_opt_out(settings),
     )
     return executor.execute(code, context=parsed_context, timeout_seconds=timeout_seconds)

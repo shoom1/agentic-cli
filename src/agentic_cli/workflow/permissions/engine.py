@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+from collections.abc import Callable, Collection
+from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
@@ -144,34 +146,75 @@ _PATH_WILDCARDS = "*?"
 _GLOB_WILDCARDS = "*?["
 
 
-def is_storable_grant(cap: ResolvedCapability, home: Path | None = None) -> bool:
-    """Whether approving ``cap`` may be remembered as a rule.
+class Unstorable(str, Enum):
+    """Why an approval may not be remembered (see ``unstorable_reason``)."""
 
-    A resource capability (``filesystem``/``http``/``shell``) whose target is
-    the wildcard can only come from a declaration that names no target. Storing
-    it would approve that capability for every resource and every tool that
-    declares it, so such an approval applies to the current call only.
+    #: A resource capability whose tool named no target: ``"*"``.
+    TARGETLESS = "targetless"
+    #: A target whose rule would hold one of its matcher's wildcard characters.
+    WILDCARD = "wildcard"
+    #: Code that would run on the host without a sandbox.
+    UNCONTAINED = "uncontained"
 
-    Nor is a grant remembered when the rule it becomes would match more than
-    the prompt showed: a target is a literal argument, but the stored rule is
-    matched as a pattern, so a ``*`` in an approved ``ls *.py`` or
-    ``/x/**/notes.txt`` would become a wildcard. The literal part of the rule
-    (see ``broaden_target_for_grant``) must hold none of its matcher's
-    wildcard characters:
 
-    * ``filesystem.*``: the scope directory when the grant widens, else the
-      exact target; ``*`` and ``?``.
-    * ``http.*``: a site scope ``https://host[:port]/**`` is literal (hosts are
-      compared exactly); an exact URL must have no ``*``, no ``[`` in its path
-      or query, and no ``?`` in its query.
-    * anything else (``shell.*``, the string fallback): the whole target;
-      ``*``, ``?`` and ``[``.
+def unstorable_reason(
+    cap: ResolvedCapability,
+    home: Path | None = None,
+    uncontained: Collection[str] = (),
+) -> Unstorable | None:
+    """Why approving ``cap`` may not be remembered as a rule, or None when it may.
+
+    The one decision: the engine asks it before storing a grant, and the prompt
+    builder before offering one (``is_storable_grant`` is its yes/no).
+
+    * ``UNCONTAINED``: ``cap`` is one of ``uncontained``, the code-execution
+      capabilities its owner says would run on the host with the user's
+      privileges (``tools/exec_policy.py``). CPython has no in-process
+      sandbox, so such code is approved call by call: whatever approved the
+      last call says nothing about the next one's code.
+    * ``TARGETLESS``: a resource capability (``filesystem``/``http``/``shell``)
+      whose target is the wildcard can only come from a declaration that names
+      no target. Storing it would approve that capability for every resource
+      and every tool that declares it.
+    * ``WILDCARD``: the rule the grant would become matches more than the
+      prompt showed. A target is a literal argument, but the stored rule is
+      matched as a pattern, so a ``*`` in an approved ``ls *.py`` or
+      ``/x/**/notes.txt`` would become a wildcard. The literal part of the
+      rule (see ``broaden_target_for_grant``) must hold none of its matcher's
+      wildcard characters:
+
+      * ``filesystem.*``: the scope directory when the grant widens, else the
+        exact target; ``*`` and ``?``.
+      * ``http.*``: a site scope ``https://host[:port]/**`` is literal (hosts
+        are compared exactly); an exact URL must have no ``*``, no ``[`` in
+        its path or query, and no ``?`` in its query.
+      * anything else (``shell.*``, the string fallback): the whole target;
+        ``*``, ``?`` and ``[``.
 
     ``home`` is the home directory the grant scope is judged against (the
     process's by default), as in ``broaden_target_for_grant``.
     """
+    if cap.name in uncontained:
+        return Unstorable.UNCONTAINED
     if cap.target == "*":
-        return not is_resource_capability(cap.name)
+        return Unstorable.TARGETLESS if is_resource_capability(cap.name) else None
+    return None if _rule_is_literal(cap, home) else Unstorable.WILDCARD
+
+
+def is_storable_grant(
+    cap: ResolvedCapability,
+    home: Path | None = None,
+    uncontained: Collection[str] = (),
+) -> bool:
+    """Whether approving ``cap`` may be remembered as a rule: no
+    ``unstorable_reason``."""
+    return unstorable_reason(cap, home, uncontained) is None
+
+
+def _rule_is_literal(cap: ResolvedCapability, home: Path | None) -> bool:
+    """Whether the literal part of the rule a grant of ``cap`` would become
+    holds none of its matcher's wildcard characters (see
+    ``unstorable_reason``)."""
     if cap.name.startswith("filesystem."):
         scope = _grant_scope(cap, home)
         return _is_literal(cap.target if scope is None else str(scope), _PATH_WILDCARDS)
@@ -238,11 +281,35 @@ def _is_literal_url(url: str) -> bool:
     )
 
 
+#: The warning logged when a client answers "for this session" or "always"
+#: (which the prompt did not offer) for an approval that may not be stored.
+_NOT_STORED_EVENTS = {
+    Unstorable.TARGETLESS: "permission_wildcard_grant_not_stored",
+    Unstorable.WILDCARD: "permission_glob_grant_not_stored",
+    Unstorable.UNCONTAINED: "permission_uncontained_grant_not_stored",
+}
+
+#: The sources of a grant's allow rule: an interactive "Allow for this
+#: session", and "Allow always", loaded from the user's
+#: ``project_grants.json`` (a project file's allow rules are never loaded).
+_GRANT_SOURCES = frozenset({RuleSource.SESSION, RuleSource.PROJECT})
+
+
 class PermissionEngine:
     """Evaluate tool invocations against rules from four sources.
 
     Concurrency: one ``asyncio.Lock`` around the ask prompt only (rule
     matching is pure). See spec §4.4.
+
+    ``uncontained`` is the owner's say on which code-execution capabilities
+    would run on the host without a sandbox: called with the settings at each
+    check, so a settings change applies at once (``BaseWorkflowManager``
+    passes ``tools.exec_policy.uncontained_exec_capabilities``; the engine
+    imports nothing from ``tools/``). Such a capability is approved call by
+    call: the prompt offers no grant, and no grant's allow rule covers it,
+    though one stored earlier, while the code ran contained, still exists. A
+    rule the user wrote in their own settings still applies: that is their
+    policy. None (the default): no capability is uncontained.
     """
 
     def __init__(
@@ -250,10 +317,13 @@ class PermissionEngine:
         settings: "BaseSettings",
         workflow: "BaseWorkflowManager",
         ctx: PermissionContext,
+        *,
+        uncontained: "Callable[[BaseSettings], Collection[str]] | None" = None,
     ) -> None:
         self._settings = settings
         self._workflow = workflow
         self._ctx = ctx
+        self._uncontained = uncontained
         self._session_rules: list[Rule] = []
         self._ask_lock = asyncio.Lock()
         self._base_rules: list[Rule] = self._load_all_rules()
@@ -326,7 +396,8 @@ class PermissionEngine:
             # user: there is nothing meaningful to approve.
             logger.warning("permission_invalid_target", tool=tool_name, error=str(exc))
             return CheckResult(False, f"invalid target: {exc}")
-        outcomes = self._evaluate(resolved)
+        uncontained = self._uncontained_now()
+        outcomes = self._evaluate(resolved, uncontained)
 
         # No capabilities to evaluate (e.g. every cap is optional and its target
         # arg was absent) → nothing to gate, allow.
@@ -345,7 +416,7 @@ class PermissionEngine:
             return CheckResult(True, self._fmt_rule_reason(any_r, any_c))
 
         # Ask flow lands in Task 16.
-        return await self._ask_and_apply(tool_name, resolved, outcomes, args)
+        return await self._ask_and_apply(tool_name, resolved, outcomes, args, uncontained)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -387,20 +458,35 @@ class PermissionEngine:
                 )
         return resolved
 
+    def _uncontained_now(self) -> frozenset[str]:
+        """The capabilities whose code would run on the host, by the settings
+        as they are now (see the class docstring)."""
+        if self._uncontained is None:
+            return frozenset()
+        return frozenset(self._uncontained(self._settings))
+
     def _evaluate(
-        self, resolved: list[ResolvedCapability]
+        self,
+        resolved: list[ResolvedCapability],
+        uncontained: Collection[str] = frozenset(),
     ) -> list[tuple[ResolvedCapability, Rule | None]]:
-        """For each resolved capability, return the strongest matched rule or None."""
+        """For each resolved capability, return the strongest matched rule or None.
+
+        A grant's allow rule does not cover a capability in ``uncontained``:
+        that code is approved per call.
+        """
         from agentic_cli.workflow.permissions.matchers import _cap_matches
         all_rules = self.rules
         out: list[tuple[ResolvedCapability, Rule | None]] = []
         for cap in resolved:
             matcher = get_matcher(cap.name)
+            per_call = cap.name in uncontained
             # A deny is matched by its own method: a filesystem deny ignores
             # case, so another spelling of a denied file is denied too.
             matched: list[Rule] = [
                 r for r in all_rules
                 if _cap_matches(r.capability, cap.name)
+                and not (per_call and r.effect is Effect.ALLOW and r.source in _GRANT_SOURCES)
                 and (
                     matcher.matches_deny(r.target, cap.target)
                     if r.effect is Effect.DENY
@@ -426,13 +512,16 @@ class PermissionEngine:
         resolved: list[ResolvedCapability],
         outcomes: list[tuple[ResolvedCapability, Rule | None]],
         args: dict | None = None,
+        uncontained: Collection[str] = frozenset(),
     ) -> CheckResult:
         from agentic_cli.workflow.permissions.prompt import build_request, parse_response
         from agentic_cli.workflow.permissions.store import append_project_rule
 
         unmatched = [cap for cap, r in outcomes if r is None]
         async with self._ask_lock:
-            request = build_request(tool_name, resolved, args, home=self._ctx.home)
+            request = build_request(
+                tool_name, resolved, args, home=self._ctx.home, uncontained=uncontained
+            )
             # Fail closed: a prompt nobody can answer is a denial the model can
             # read, not an exception that aborts the turn. Cancellation is not
             # an answer and propagates (it is not an Exception).
@@ -462,13 +551,10 @@ class PermissionEngine:
         source = RuleSource.SESSION if scope is AskScope.SESSION else RuleSource.PROJECT
         stored = 0
         for cap in unmatched:
-            if not is_storable_grant(cap, home=self._ctx.home):
+            reason = unstorable_reason(cap, home=self._ctx.home, uncontained=uncontained)
+            if reason is not None:
                 logger.warning(
-                    "permission_wildcard_grant_not_stored"
-                    if cap.target == "*"
-                    else "permission_glob_grant_not_stored",
-                    tool=tool_name,
-                    capability=cap.name,
+                    _NOT_STORED_EVENTS[reason], tool=tool_name, capability=cap.name
                 )
                 continue
             target = broaden_target_for_grant(cap, home=self._ctx.home)
