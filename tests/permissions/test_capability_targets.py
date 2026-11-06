@@ -36,8 +36,9 @@ from agentic_cli.workflow.permissions.rules import RuleSource
 from agentic_cli.workflow.permissions.store import (
     PermissionContext,
     load_project_grants,
-    load_rules,
+    settings_rules,
 )
+from agentic_cli.workflow.settings import PermissionsConfig
 
 APP = "captargets"
 
@@ -290,13 +291,12 @@ class TestSavedWildcardGrantsAreDropped:
         ]
 
     def test_explicit_user_rule_with_a_wildcard_is_kept(self, env):
-        cfg = env["home"] / f".{APP}" / "settings.json"
-        cfg.parent.mkdir(parents=True, exist_ok=True)
-        cfg.write_text(json.dumps({
-            "permissions": {"allow": [{"capability": "http.read", "target": "*"}]},
-        }))
+        settings = _settings()
+        settings.permissions = PermissionsConfig.model_validate(
+            {"allow": [{"capability": "http.read", "target": "*"}]}
+        )
         ctx = PermissionContext(workdir=env["work"], home=env["home"], app_name=APP)
-        rules = load_rules(cfg, RuleSource.USER, ctx)
+        rules = settings_rules(settings, ctx)
         assert [(r.capability, r.target) for r in rules] == [("http.read", "*")]
 
 

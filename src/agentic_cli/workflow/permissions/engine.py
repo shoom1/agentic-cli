@@ -4,7 +4,8 @@
 See docs/superpowers/specs/2026-04-18-permissions-system-design.md §4 for
 the full decision flow. This file implements:
 
-1. Rule loading from builtin + user + project JSON + in-memory session.
+1. Rule loading from builtin + ``settings.permissions`` + the project
+   file's deny rules + saved grants + in-memory session.
 2. ``permissions_enabled=False`` short-circuit.
 3. Full check() flow (Tasks 15–17).
 """
@@ -41,9 +42,10 @@ from agentic_cli.workflow.permissions.store import (
     BUILTIN_RULES,
     WORKDIR_READ_ALLOW,
     PermissionContext,
+    load_project_denies,
     load_project_grants,
-    load_rules,
     settings_env_file_denies,
+    settings_rules,
 )
 
 if TYPE_CHECKING:
@@ -238,8 +240,18 @@ def _is_literal_url(url: str) -> bool:
     )
 
 
+def _same_file(a: Path, b: Path) -> bool:
+    """Whether both paths name one existing file (another spelling, a link)."""
+    try:
+        return a.samefile(b)
+    except OSError:
+        return False
+
+
 class PermissionEngine:
-    """Evaluate tool invocations against rules from four sources.
+    """Evaluate tool invocations against rules from four sources: the
+    builtin rules, the user's (``settings.permissions``), the project's (the
+    project file's deny rules and the saved grants) and the session's.
 
     Concurrency: one ``asyncio.Lock`` around the ask prompt only (rule
     matching is pure). See spec §4.4.
@@ -282,16 +294,18 @@ class PermissionEngine:
             )
         # The keys the app was given, wherever its env_file puts them.
         rules += settings_env_file_denies(self._settings, self._ctx)
+        # The trusted rules, allow and deny: settings.permissions, from the
+        # constructor, the environment, the user file or the app's class
+        # default (the settings' own priority). The user file is read once,
+        # by the settings.
+        rules += settings_rules(self._settings, self._ctx)
         app = self._settings.app_name
-        rules += load_rules(get_user_config_path(app), RuleSource.USER, self._ctx)
         # PROJECT settings.json is untrusted (a cloned repo can ship it): honor
         # only deny-rules so a workspace can tighten but never loosen policy.
-        rules += load_rules(
-            get_project_config_path(app),
-            RuleSource.PROJECT,
-            self._ctx,
-            allowed_effects=frozenset({Effect.DENY}),
-        )
+        # Started from home it is the user file, whose rules are the settings'.
+        project_file = get_project_config_path(app)
+        if not _same_file(project_file, get_user_config_path(app)):
+            rules += load_project_denies(project_file, self._ctx)
         # Interactive "Allow always" grants live in USER config, keyed by the
         # resolved project path — trusted (allow+deny). A cloned repo carries
         # none (its path won't match), and a repo-shipped permissions.local.json

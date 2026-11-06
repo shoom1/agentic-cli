@@ -169,7 +169,11 @@ class TestRulePatternsStillExpand:
                 {"capability": "filesystem.write", "target": "${workdir}/build/**"},
             ]},
         }))
-        engine = _engine(layout)
+        # The settings read the user file; the engine takes its rules from them.
+        from agentic_cli.config import BaseSettings
+
+        ctx = PermissionContext(workdir=layout["project"], home=layout["home"], app_name=APP)
+        engine = PermissionEngine(settings=BaseSettings(app_name=APP), workflow=_workflow(), ctx=ctx)
         user = [r for r in engine.rules if r.source is RuleSource.USER]
         assert [r.target for r in user] == [f"{layout['project']}/build/**"]
 

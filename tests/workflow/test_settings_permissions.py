@@ -35,3 +35,30 @@ class TestPermissionsSettings:
         s = BaseSettings()
         from agentic_cli.workflow.settings import PermissionsConfig
         assert isinstance(s.permissions, PermissionsConfig)
+
+    def test_an_app_ships_rules_as_its_class_default_without_a_warning(self):
+        """The engine enforces an app's default rules, so overriding the
+        field must not print pydantic's "shadows an attribute in parent"
+        warning over the UI at every start."""
+        import warnings
+
+        from pydantic import Field
+
+        from agentic_cli.workflow.settings import (
+            PermissionRuleConfig,
+            PermissionsConfig,
+        )
+
+        deny = PermissionRuleConfig(capability="filesystem.read", target="/srv/keys/**")
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+
+            class AppSettings(BaseSettings):
+                permissions: PermissionsConfig = Field(
+                    default_factory=lambda: PermissionsConfig(deny=[deny])
+                )
+
+            settings = AppSettings()
+
+        assert [str(w.message) for w in caught] == []
+        assert settings.permissions.deny == [deny]

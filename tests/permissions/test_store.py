@@ -73,59 +73,154 @@ class TestBuiltinRules:
             assert rule.source is RuleSource.BUILTIN
 
 
-class TestLoadRules:
-    def test_missing_file_returns_empty(self, tmp_path: Path):
-        from agentic_cli.workflow.permissions.rules import RuleSource
-        from agentic_cli.workflow.permissions.store import PermissionContext, load_rules
+#: A directory where the project file should be.
+_DIRECTORY = object()
+
+
+class TestSettingsRules:
+    """The trusted rules are ``settings.permissions``, whatever source set it."""
+
+    def test_allow_and_deny_are_user_rules_with_their_patterns_expanded(self, tmp_path: Path):
+        from agentic_cli.workflow.permissions.rules import Effect, Rule, RuleSource
+        from agentic_cli.workflow.permissions.store import settings_rules
+        from agentic_cli.workflow.settings import PermissionsConfig
+
+        class Settings:
+            permissions = PermissionsConfig.model_validate({
+                "allow": [{"capability": "filesystem.write", "target": "${workdir}/build/**"}],
+                "deny": [{"capability": "http.read", "target": "https://Tracker.example.net./**"}],
+            })
 
         ctx = PermissionContext(workdir=tmp_path, home=Path("/fake/home"))
-        rules = load_rules(tmp_path / "missing.json", RuleSource.USER, ctx)
-        assert rules == []
+        assert settings_rules(Settings(), ctx) == [
+            Rule("filesystem.write", f"{tmp_path}/build/**", Effect.ALLOW, RuleSource.USER),
+            Rule("http.read", "https://tracker.example.net/**", Effect.DENY, RuleSource.USER),
+        ]
+
+    def test_settings_without_the_field_give_none(self, tmp_path: Path):
+        from agentic_cli.workflow.permissions.store import settings_rules
+
+        ctx = PermissionContext(workdir=tmp_path, home=Path("/fake/home"))
+        assert settings_rules(object(), ctx) == []
+
+    def test_a_rule_that_names_no_url_is_skipped_with_a_warning(self, tmp_path: Path):
+        import structlog
+
+        from agentic_cli.workflow.permissions.store import settings_rules
+        from agentic_cli.workflow.settings import PermissionsConfig
+
+        class Settings:
+            permissions = PermissionsConfig.model_validate({"deny": [
+                {"capability": "http.read", "target": "https://i\u2764.ws/**"},
+                {"capability": "http.read", "target": "https://tracker.example.net/**"},
+            ]})
+
+        ctx = PermissionContext(workdir=tmp_path, home=Path("/fake/home"))
+        with structlog.testing.capture_logs() as logs:
+            rules = settings_rules(Settings(), ctx)
+
+        assert [r.target for r in rules] == ["https://tracker.example.net/**"]
+        [skipped] = [e for e in logs if e["event"] == "permission_rule_skipped"]
+        assert skipped["setting"] == "permissions"
+        assert skipped["target"] == "https://i\u2764.ws/**"
+
+
+class TestLoadProjectDenies:
+    """The untrusted project file's deny rules, each entry checked on its own."""
+
+    def _load(self, tmp_path: Path, body: object):
+        """Load ``body`` (JSON, or the file's bytes) as a project file."""
+        import json
+
+        import structlog
+
+        from agentic_cli.workflow.permissions.store import load_project_denies
+
+        path = tmp_path / "settings.json"
+        if isinstance(body, bytes):
+            path.write_bytes(body)
+        elif body is not _DIRECTORY:
+            path.write_text(json.dumps(body))
+        else:
+            path.mkdir()
+        ctx = PermissionContext(workdir=tmp_path, home=Path("/fake/home"))
+        with structlog.testing.capture_logs() as logs:
+            rules = load_project_denies(path, ctx)
+        return path, rules, [e for e in logs if e["event"].startswith("permission_")]
+
+    def test_missing_file_returns_empty(self, tmp_path: Path):
+        from agentic_cli.workflow.permissions.store import load_project_denies
+
+        ctx = PermissionContext(workdir=tmp_path, home=Path("/fake/home"))
+        assert load_project_denies(tmp_path / "missing.json", ctx) == []
 
     def test_missing_permissions_section_returns_empty(self, tmp_path: Path):
-        import json
-        from agentic_cli.workflow.permissions.rules import RuleSource
-        from agentic_cli.workflow.permissions.store import PermissionContext, load_rules
+        _, rules, logs = self._load(tmp_path, {"default_model": "gpt-4"})
+        assert rules == []
+        assert logs == []
 
-        path = tmp_path / "settings.json"
-        path.write_text(json.dumps({"default_model": "gpt-4"}))
-        ctx = PermissionContext(workdir=tmp_path, home=Path("/fake/home"))
-        assert load_rules(path, RuleSource.USER, ctx) == []
+    def test_reads_deny_rules_and_never_allow_rules(self, tmp_path: Path):
+        from agentic_cli.workflow.permissions.rules import Effect, Rule, RuleSource
 
-    def test_parses_allow_and_deny(self, tmp_path: Path):
-        import json
-        from agentic_cli.workflow.permissions.rules import Effect, RuleSource
-        from agentic_cli.workflow.permissions.store import PermissionContext, load_rules
+        _, rules, logs = self._load(tmp_path, {"permissions": {
+            "allow": [{"capability": "filesystem.read", "target": "${workdir}/**"}],
+            "deny":  [{"capability": "filesystem.write", "target": "/etc/**"}],
+        }})
 
-        path = tmp_path / "settings.json"
-        path.write_text(json.dumps({
-            "permissions": {
-                "allow": [{"capability": "filesystem.read", "target": "${workdir}/**"}],
-                "deny":  [{"capability": "filesystem.write", "target": "/etc/**"}],
-            }
-        }))
-        ctx = PermissionContext(workdir=tmp_path, home=Path("/fake/home"))
-        rules = load_rules(path, RuleSource.PROJECT, ctx)
+        # PathMatcher resolves the path (on macOS /etc is /private/etc).
+        etc = str(Path("/etc/**").resolve(strict=False))
+        assert rules == [Rule("filesystem.write", etc, Effect.DENY, RuleSource.PROJECT)]
+        assert logs == []
 
-        assert len(rules) == 2
-        allow = next(r for r in rules if r.effect is Effect.ALLOW)
-        deny = next(r for r in rules if r.effect is Effect.DENY)
-        assert allow.capability == "filesystem.read"
-        # PathMatcher canonicalises ${workdir} to the absolute path + /**
-        assert str(tmp_path) in allow.target and allow.target.endswith("/**")
-        assert allow.source is RuleSource.PROJECT
-        # PathMatcher resolves the path (resolves symlinks on macOS /etc -> /private/etc)
-        assert deny.target == str(Path("/etc/**").resolve(strict=False))
+    def test_malformed_entries_are_reported(self, tmp_path: Path):
+        """Each malformed entry is skipped with one warning naming the file and
+        the entry; the valid ones still load, and nothing raises."""
+        path, rules, logs = self._load(tmp_path, {"permissions": {"deny": [
+            {"capability": "filesystem.read"},
+            "filesystem.read ./secrets",
+            {"capability": "filesystem.read", "target": ["a", "b"]},
+            None,
+            {"capability": "filesystem.read", "target": "${workdir}/secrets/**"},
+        ]}})
 
-    def test_malformed_json_raises(self, tmp_path: Path):
-        from agentic_cli.workflow.permissions.rules import RuleSource
-        from agentic_cli.workflow.permissions.store import PermissionContext, load_rules
+        assert [r.target for r in rules] == [f"{tmp_path}/secrets/**"]
+        assert [(e["event"], e["path"], e["entry"]) for e in logs] == [
+            ("permission_project_rule_invalid", str(path), f"permissions.deny[{i}]")
+            for i in range(4)
+        ]
+        assert logs[0]["error"] == "target: Field required"
+        assert all(e["log_level"] == "warning" for e in logs)
 
-        path = tmp_path / "settings.json"
-        path.write_text("{not json")
-        ctx = PermissionContext(workdir=tmp_path, home=Path("/fake/home"))
-        with pytest.raises(ValueError):
-            load_rules(path, RuleSource.USER, ctx)
+    @pytest.mark.parametrize(
+        "section, entry",
+        [
+            (["oops"], "permissions"),
+            ("deny", "permissions"),
+            (7, "permissions"),
+            ({"deny": "filesystem.read /x"}, "permissions.deny"),
+            ({"deny": {"capability": "filesystem.read", "target": "/x"}}, "permissions.deny"),
+        ],
+    )
+    def test_a_section_of_the_wrong_shape_is_reported(self, tmp_path: Path, section, entry):
+        path, rules, logs = self._load(tmp_path, {"permissions": section})
+
+        assert rules == []
+        assert [(e["event"], e["path"], e["entry"]) for e in logs] == [
+            ("permission_project_rule_invalid", str(path), entry),
+        ]
+
+    @pytest.mark.parametrize(
+        "body",
+        [b"{not json", b"[]", b"null", b'"text"', b'{"permissions": "\xff"}', _DIRECTORY],
+        ids=["not-json", "list", "null", "string", "not-utf8", "directory"],
+    )
+    def test_a_file_that_is_not_a_json_object_is_reported(self, tmp_path: Path, body):
+        path, rules, logs = self._load(tmp_path, body)
+
+        assert rules == []
+        assert [(e["event"], e["path"]) for e in logs] == [
+            ("permission_project_file_invalid", str(path)),
+        ]
 
 
 class TestAppendProjectRule:

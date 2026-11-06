@@ -42,14 +42,20 @@ _SHIPPED_ENTRY_FIELDS = ("models", "model_providers")
 
 
 class PermissionRuleConfig(BaseModel):
-    """A single permission rule — serialised to settings.json as JSON."""
+    """A single permission rule — serialised to settings.json as JSON.
+
+    The one schema of a rule: ``settings.permissions`` holds these, and the
+    permission engine checks each entry of a project file's ``permissions``
+    section with it.
+    """
 
     capability: str
     target: str
 
 
 class PermissionsConfig(BaseModel):
-    """Nested settings section holding user-editable permission rules."""
+    """The ``permissions`` setting: the allow and deny rules the permission
+    engine enforces (``workflow/permissions/store.py::settings_rules``)."""
 
     allow: list[PermissionRuleConfig] = []
     deny: list[PermissionRuleConfig] = []
@@ -609,13 +615,24 @@ class WorkflowSettingsMixin:
         json_schema_extra={"ui_order": 136},
     )
 
-    # Permissions
-    permissions: PermissionsConfig = Field(
-        default_factory=PermissionsConfig,
-        title="Permissions",
-        description="Declarative allow/deny rules for tool capabilities.",
-        json_schema_extra={"ui_order": 138},
-    )
+    # Permissions. The permission engine enforces these rules (store.py,
+    # settings_rules), whichever source set them: the constructor, the
+    # environment, the user file or the app's class default. Annotated form,
+    # with no class attribute, so an app overriding the default gets no
+    # pydantic warning. The project file's section sets no setting
+    # (PROJECT_PRESERVED_KEYS): the engine reads its deny rules itself.
+    permissions: Annotated[
+        PermissionsConfig,
+        Field(
+            default_factory=PermissionsConfig,
+            title="Permissions",
+            description=(
+                "Allow and deny rules the permission engine enforces for tool "
+                "capabilities. A project settings file may add deny rules only."
+            ),
+            json_schema_extra={"ui_order": 138},
+        ),
+    ]
     permissions_enabled: bool = Field(
         default=True,
         title="Permissions Enabled",
