@@ -434,10 +434,12 @@ class TestATurn:
         user_config.write_text(json.dumps({
             "permissions": {"allow": [{"capability": "mcp", "target": "atlas_*"}]},
         }))
+        # The settings read the user file; the engine takes its rules from them.
+        settings = BaseSettings(workspace_dir=ctx.workspace_dir, session_store="memory")
         scripted(monkeypatch, researcher=[
             ai(calls=[("atlas_add", {"a": 2, "b": 3}, "c1")]), ai("Five."),
         ])
-        manager = _manager(ctx.settings, [_researcher(servers(tool_name_prefix="atlas"))])
+        manager = _manager(settings, [_researcher(servers(tool_name_prefix="atlas"))])
         answers = Answers()
         manager.set_input_callback(answers)
         try:

@@ -79,12 +79,16 @@ class TestProjectRuleTrust:
 
     def test_user_allow_rules_still_honored(self, tmp_path, monkeypatch):
         """User config is trusted — it CAN grant allow-rules."""
+        from agentic_cli.config import BaseSettings
+
         proj, home = self._dirs(tmp_path, monkeypatch)
         (home / ".myapp").mkdir()
         (home / ".myapp/settings.json").write_text(json.dumps({
             "permissions": {"allow": [{"capability": "http.read", "target": "*"}]},
         }))
-        engine = _engine(proj, home)
+        # The settings read the user file; the engine takes its rules from them.
+        ctx = PermissionContext(workdir=proj, home=home, app_name="myapp")
+        engine = PermissionEngine(BaseSettings(app_name="myapp"), _stub_workflow(), ctx)
         user_allows = [
             r for r in engine.rules
             if r.source is RuleSource.USER and r.effect is Effect.ALLOW
