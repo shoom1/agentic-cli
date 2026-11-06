@@ -18,10 +18,6 @@ import agentic_cli.tools.memory_tools  # noqa: F401  (lazy module)
 import agentic_cli.tools.sandbox  # noqa: F401  (lazy module)
 from agentic_cli.tools.registry import get_registry
 
-# shell_executor is registered but hard-disabled (never given to an agent), and
-# its ShellSecurityConfig parameter is not declarable.
-NOT_OFFERED = {"shell_executor"}
-
 
 def _framework_tools():
     return sorted(
@@ -29,7 +25,6 @@ def _framework_tools():
         for d in get_registry().list_tools()
         if d.func is not None
         and getattr(d.func, "__module__", "").startswith("agentic_cli.")
-        and d.name not in NOT_OFFERED
     )
 
 

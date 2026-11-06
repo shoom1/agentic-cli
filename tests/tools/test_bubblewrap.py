@@ -20,8 +20,8 @@ from unittest.mock import patch
 
 import pytest
 
-from agentic_cli.tools.shell.os_sandbox.bubblewrap import BubblewrapSandbox
-from agentic_cli.tools.shell.os_sandbox.policy import OSSandboxPolicy
+from agentic_cli.tools.os_sandbox.bubblewrap import BubblewrapSandbox
+from agentic_cli.tools.os_sandbox.policy import OSSandboxPolicy
 
 
 # ---------------------------------------------------------------------------

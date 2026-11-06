@@ -157,44 +157,6 @@ class TestExecutePython:
         assert format_tool_summary("execute_python", result) == "No output (5ms)"
 
 
-class TestShellExecutor:
-    def test_with_stdout(self):
-        result = {
-            "success": True,
-            "stdout": "v3.12.1\nmore info",
-            "stderr": "",
-            "return_code": 0,
-            "duration": 0.5,
-            "error": None,
-            "truncated": False,
-        }
-        assert format_tool_summary("shell_executor", result) == "v3.12.1"
-
-    def test_no_stdout(self):
-        result = {
-            "success": True,
-            "stdout": "",
-            "stderr": "",
-            "return_code": 0,
-            "duration": 1.234,
-            "error": None,
-            "truncated": False,
-        }
-        assert format_tool_summary("shell_executor", result) == "Exit 0 (1.2s)"
-
-    def test_nonzero_exit(self):
-        result = {
-            "success": False,
-            "stdout": "",
-            "stderr": "not found",
-            "return_code": 127,
-            "duration": 0.1,
-            "error": "Command not found",
-            "truncated": False,
-        }
-        assert format_tool_summary("shell_executor", result) == "Exit 127 (0.1s)"
-
-
 class TestSaveTasks:
     def test_with_message(self):
         result = {"success": True, "count": 3, "message": "Saved 3 tasks"}

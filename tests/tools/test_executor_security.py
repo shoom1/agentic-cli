@@ -204,7 +204,7 @@ class _Backend:
     def wrap_python_command(self, argv, working_dir, policy):
         import shlex
 
-        from agentic_cli.tools.shell.os_sandbox.base import OSSandboxResult
+        from agentic_cli.tools.os_sandbox.base import OSSandboxResult
 
         self.wrapped.append(list(argv))
         if self.wrap_error:
@@ -225,7 +225,7 @@ def _fails_at_start(message: str, status: int):
 
 def _use_backend(monkeypatch: pytest.MonkeyPatch, backend: _Backend) -> _Backend:
     monkeypatch.setattr(
-        "agentic_cli.tools.shell.os_sandbox.get_os_sandbox", lambda *a, **k: backend
+        "agentic_cli.tools.os_sandbox.get_os_sandbox", lambda *a, **k: backend
     )
     return backend
 

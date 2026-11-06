@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from agentic_cli.tools.shell.os_sandbox.policy import PROTECTED_HOME_PATHS, OSSandboxPolicy
+from agentic_cli.tools.os_sandbox.policy import PROTECTED_HOME_PATHS, OSSandboxPolicy
 
 APP = "demoapp"
 
@@ -123,7 +123,7 @@ class TestTheSharedLists:
 
     def test_the_public_lists_are_the_shared_ones(self, home, project):
         from agentic_cli import protected_paths as pp
-        from agentic_cli.tools.shell.os_sandbox.policy import MANDATORY_DENY_WRITE
+        from agentic_cli.tools.os_sandbox.policy import MANDATORY_DENY_WRITE
 
         def resolved(entries):
             return [Path(e).expanduser().resolve() for e in entries]
@@ -186,7 +186,7 @@ class TestExecutePythonPassesTheAppName:
 
 
 def _sandbox():
-    from agentic_cli.tools.shell.os_sandbox import get_os_sandbox, reset_cached_sandbox
+    from agentic_cli.tools.os_sandbox import get_os_sandbox, reset_cached_sandbox
 
     reset_cached_sandbox()
     sandbox = get_os_sandbox()

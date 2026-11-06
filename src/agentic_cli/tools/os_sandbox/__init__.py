@@ -6,7 +6,7 @@ Provides platform-specific sandbox wrappers:
 - Fallback: NoOpSandbox when tools are unavailable
 
 Usage:
-    from agentic_cli.tools.shell.os_sandbox import get_os_sandbox, OSSandboxPolicy
+    from agentic_cli.tools.os_sandbox import get_os_sandbox, OSSandboxPolicy
 
     sandbox = get_os_sandbox()
     policy = OSSandboxPolicy(writable_paths=["/tmp"])
@@ -18,16 +18,16 @@ from __future__ import annotations
 
 import structlog
 
-from agentic_cli.tools.shell.os_sandbox.base import (
+from agentic_cli.tools.os_sandbox.base import (
     NoOpSandbox,
     OSSandbox,
     OSSandboxResult,
 )
-from agentic_cli.tools.shell.os_sandbox.detect import (
+from agentic_cli.tools.os_sandbox.detect import (
     SandboxCapabilities,
     detect_sandbox_capabilities,
 )
-from agentic_cli.tools.shell.os_sandbox.policy import OSSandboxPolicy
+from agentic_cli.tools.os_sandbox.policy import OSSandboxPolicy
 
 logger = structlog.get_logger(__name__)
 
@@ -61,13 +61,13 @@ def get_os_sandbox(force_noop: bool = False) -> OSSandbox:
     caps = detect_sandbox_capabilities()
 
     if caps.seatbelt_available:
-        from agentic_cli.tools.shell.os_sandbox.seatbelt import SeatbeltSandbox
+        from agentic_cli.tools.os_sandbox.seatbelt import SeatbeltSandbox
 
         _cached_sandbox = SeatbeltSandbox()
         logger.info("os_sandbox.initialized", sandbox_type="seatbelt")
 
     elif caps.bubblewrap_available:
-        from agentic_cli.tools.shell.os_sandbox.bubblewrap import BubblewrapSandbox
+        from agentic_cli.tools.os_sandbox.bubblewrap import BubblewrapSandbox
 
         _cached_sandbox = BubblewrapSandbox()
         logger.info("os_sandbox.initialized", sandbox_type="bubblewrap")

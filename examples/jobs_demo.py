@@ -50,12 +50,13 @@ from agentic_cli.workflow.service_registry import JOB_MANAGER, get_service
 # generic JobManager + observe-only job_* tools, but NOT a starter like this —
 # a starter decides what runs and how, which is an application concern.
 #
-# SECURITY: this runs the command via the subprocess backend (``sh -c``) and
-# does NOT go through the hardened shell tool (``tools/shell/``) — no command
-# classifier, no blocked-pattern checks. It is gated only by its default-ASK
-# ``longrunning.run_shell_job`` capability. That's acceptable for a local demo
-# but is why it is NOT a framework built-in. A production shell-job tool should
-# route through the shell security layers (or an OS sandbox) first.
+# SECURITY: this runs the command on the host via the subprocess backend
+# (``sh -c``), with no sandbox and no check of the command. It is gated only by
+# its default-ASK ``longrunning.run_shell_job`` capability. That's acceptable
+# for a local demo but is why it is NOT a framework built-in. A production
+# shell-job tool should declare a ``shell.exec`` capability on the command (so
+# the permission engine judges it) and run it inside the OS sandbox
+# (``agentic_cli.tools.os_sandbox``).
 
 
 @register_tool(

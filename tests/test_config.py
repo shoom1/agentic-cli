@@ -726,8 +726,9 @@ class TestSettingsJsonLoading:
         assert settings.log_level == "debug"
 
     def test_a_settings_file_naming_removed_settings_still_loads(self, tmp_path):
-        """webfetch_model and sandbox_packages were removed; a file or env var
-        that still sets them is ignored, not an error."""
+        """webfetch_model, sandbox_packages and the shell tool's three settings
+        were removed; a file or env var that still sets them is ignored, not
+        an error."""
         import json
 
         home = tmp_path / "home"
@@ -735,16 +736,24 @@ class TestSettingsJsonLoading:
         (home / ".my_app" / "settings.json").write_text(json.dumps({
             "webfetch_model": "gemini-2.5-flash",
             "sandbox_packages": ["numpy"],
+            "shell_sandbox_type": "docker",
+            "shell_docker_image": "python:3.12-slim",
             "log_level": "debug",
         }))
 
-        env = {"HOME": str(home), "AGENTIC_WEBFETCH_MODEL": "gemini-2.5-flash"}
+        env = {
+            "HOME": str(home),
+            "AGENTIC_WEBFETCH_MODEL": "gemini-2.5-flash",
+            "AGENTIC_SHELL_TIMEOUT": "60",
+        }
         with patch.dict(os.environ, env, clear=True):
             settings = BaseSettings(app_name="my_app", workspace_dir=tmp_path / "workspace")
 
         assert settings.log_level == "debug"
         assert not hasattr(settings, "webfetch_model")
         assert not hasattr(settings, "sandbox_packages")
+        for name in ("shell_sandbox_type", "shell_docker_image", "shell_timeout"):
+            assert not hasattr(settings, name)
 
 
 def test_package_exports_new_modules():
@@ -753,12 +762,12 @@ def test_package_exports_new_modules():
     from agentic_cli.memory import MemoryItem, MemoryStore
 
     # Tools
-    from agentic_cli.tools import shell_executor, read_file, write_file, diff_compare
+    from agentic_cli.tools import read_file, write_file, diff_compare
 
     # All imports should succeed
     assert MemoryStore is not None
     assert MemoryItem is not None
-    assert shell_executor is not None
+    assert read_file is not None
 
 
 def test_a_06_project_file_prints_nothing_at_startup(tmp_path):

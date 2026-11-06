@@ -489,7 +489,7 @@ Levels 1, 2 and 4 are trusted; **level 3 is not**, and neither is a
 filtered down to an explicit allowlist of benign keys (model and behaviour
 settings, timeouts, sandbox *resource* limits, `session_store`, log verbosity).
 Security-relevant keys set from an untrusted source — executor backend, sandbox
-image/mounts/user, OS-sandbox policy, `skills_dirs`, shell sandbox settings,
+image/mounts/user, OS-sandbox policy, `skills_dirs`,
 `workspace_dir`, `raw_llm_logging`, permission rules, `model_providers` (the
 addresses a key is sent to), and any credential — are dropped with a logged
 warning rather than applied. A key that names no setting at all (one an
@@ -1496,24 +1496,6 @@ edit_file("config.py", old_text="DEBUG = True", new_text="DEBUG = False")
 
 Writes are atomic (temp file + rename) via `agentic_cli.file_utils`.
 
-#### Shell Executor
-
-> **Note**: Shell execution is **disabled by default** (`_SHELL_TOOL_ENABLED = False` in `tools/shell/executor.py`) while security safeguards are being validated.
-
-The shell tool provides layered security:
-- Input preprocessing (encoding/obfuscation detection)
-- Command tokenization and classification
-- Path analysis and OS-native sandboxing (macOS seatbelt / Linux namespaces)
-- Risk assessment with approval workflows
-- Audit logging
-
-```python
-from agentic_cli.tools import shell_executor, is_shell_enabled
-
-if is_shell_enabled():
-    result = shell_executor("ls -la", working_dir="/project")
-```
-
 #### Knowledge Base Tools
 
 Renamed tools and a new concept-pages subsystem:
@@ -1925,7 +1907,6 @@ See the `examples/` directory for complete working examples:
 - `fileops_demo.py` — File operation tools (read, write, grep, glob)
 - `jobs_demo.py` — Long-running background jobs with a live status-bar monitor; a finished job resumes the agent (ADK, or Deep Agents with `AGENTIC_ORCHESTRATOR=deepagents`)
 - `memory_demo.py` — Memory persistence system (save/search/update/delete)
-- `shell_demo.py` — Shell security pattern detection
 - `webfetch_demo.py` — Web fetching and summarization
 - `websearch_demo.py` — Web search with multiple backends
 
@@ -1940,7 +1921,6 @@ python examples/hello_agent.py
 
 # Feature demos
 python examples/fileops_demo.py
-python examples/shell_demo.py
 
 # Or with Deep Agents
 pip install 'agentic-cli[deepagents]'
@@ -2090,15 +2070,12 @@ agentic-cli/
 │   │   ├── langgraph/state_tools.py # LangGraph-library planning/task tools (Deep Agents, LangGraph)
 │   │   ├── skills/               # Agent Skills: SkillStore, ADK toolset, LangChain tools (langchain_tools.py)
 │   │   ├── jobs/                 # Long-running jobs: JobManager, backends, job_* tools, resume.py
+│   │   ├── os_sandbox/           # OS sandbox for execute_python: macOS seatbelt, Linux bubblewrap
 │   │   ├── sandbox/
 │   │   │   ├── __init__.py       # sandbox_execute tool
 │   │   │   ├── manager.py        # SandboxManager + session lifecycle
 │   │   │   ├── models.py
 │   │   │   └── backends/         # Jupyter local backend
-│   │   ├── shell/                # Layered shell executor (disabled by default)
-│   │   │   ├── executor.py
-│   │   │   ├── os_sandbox/       # macOS seatbelt / Linux namespace sandboxes
-│   │   │   └── ...               # tokenizer, classifier, sandbox, audit
 │   │   └── webfetch/             # Fetcher, converter, validator, robots, summarizer, saved pages
 │   ├── memory/                   # Knowledge base + memory store; imports nothing else from agentic_cli
 │   │   ├── __init__.py           # MemoryStore, MemoryItem, ForgettingPolicy, EmbeddingService, EmbeddingConfig, MockEmbeddingService

@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from agentic_cli.tools.shell.os_sandbox.policy import OSSandboxPolicy
+    from agentic_cli.tools.os_sandbox.policy import OSSandboxPolicy
 
 
 @dataclass

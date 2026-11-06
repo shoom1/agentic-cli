@@ -2,7 +2,7 @@
 
 One set of lists for both enforcers: the permission engine's builtin deny rules
 (``workflow/permissions/store.py::BUILTIN_RULES``) and the OS sandbox's policy
-(``tools/shell/os_sandbox/policy.py``) are built from them, so a file the
+(``tools/os_sandbox/policy.py``) are built from them, so a file the
 sandbox protects from code is one the engine refuses a tool, and the reverse,
 with two differences. Of ``~/.{app_name}`` the sandbox hides everything, the
 engine denies reading only the keys and the settings (see ``APP_CONFIG_DIR``).

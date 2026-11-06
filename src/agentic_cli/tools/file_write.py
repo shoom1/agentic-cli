@@ -4,7 +4,7 @@ Provides tools for file system modifications:
 - write_file: Write content to a file (creates or overwrites)
 - edit_file: Replace text in a file (sed-like operation)
 
-Delete, move, and copy operations should use the shell tool.
+The framework ships no delete, move or copy tool.
 """
 
 import re
