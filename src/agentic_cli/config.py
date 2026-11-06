@@ -178,8 +178,9 @@ class BaseSettings(WorkflowSettingsMixin, AppSettingsMixin, CLISettingsMixin, Py
         """Update a single setting, using dedicated setters where required.
 
         A hand-edited setting (``settings_persistence.HAND_EDITED_KEYS``:
-        ``models``, ``model_providers``) takes the value as given, for this
-        session only: the app's shipped entries are not merged in, and no
+        ``models``, ``model_providers``, ``permissions``) takes the value as
+        given, for this session only: the app's shipped entries (and, for
+        ``permissions``, the other sources' rules) are not merged in, and no
         save writes it.
 
         Args:

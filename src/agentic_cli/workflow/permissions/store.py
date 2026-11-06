@@ -8,11 +8,14 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from pydantic import ValidationError
+
 from agentic_cli import protected_paths
 from agentic_cli.file_utils import atomic_write_text
 from agentic_cli.logging import Loggers
 from agentic_cli.settings_persistence import get_user_project_grants_path
 from agentic_cli.workflow.permissions.rules import Effect, Rule, RuleSource
+from agentic_cli.workflow.settings import PermissionRuleConfig, PermissionsConfig
 
 
 @dataclass(frozen=True)
@@ -141,59 +144,145 @@ def settings_env_file_denies(settings: object, ctx: PermissionContext) -> list[R
     return rules
 
 
-def load_rules(
-    path: Path,
-    source: RuleSource,
-    ctx: PermissionContext,
-    allowed_effects: frozenset[Effect] | None = None,
-) -> list[Rule]:
-    """Load rules from a settings.json file's ``permissions`` section.
+def settings_rules(settings: object, ctx: PermissionContext) -> list[Rule]:
+    """The trusted rules: ``settings.permissions``, allow and deny.
 
-    Returns an empty list when the file is absent or has no ``permissions``
-    key. Raises ``ValueError`` if the file is not valid JSON. A rule whose
-    target cannot be canonicalized (a URL the HTTP client cannot send) is
-    skipped with a warning (``permission_rule_skipped``).
-
-    ``allowed_effects`` restricts which effects are honored from this source.
-    The engine passes ``{Effect.DENY}`` for the untrusted PROJECT file so a
-    cloned repo can tighten (deny) but never loosen (allow) the policy.
+    The setting holds every trusted source's rules together: the app's class
+    default, the user's ``~/.{app}/settings.json``, the environment and the
+    constructor (``WorkflowSettingsMixin._merge_shipped_entries``). The
+    project file is not among them (its section sets no setting:
+    ``load_project_denies`` reads it). The rules are
+    ``RuleSource.USER``. A rule whose target cannot be canonicalized (a URL
+    the HTTP client cannot send) is skipped with a warning
+    (``permission_rule_skipped``). Settings without the field give none.
     """
-    # Local import to avoid circular dependency: matchers.py imports PermissionContext from here.
-    from agentic_cli.workflow.permissions.matchers import get_matcher  # noqa: PLC0415
+    config = getattr(settings, "permissions", None)
+    if not isinstance(config, PermissionsConfig):
+        return []
+    return _rules(
+        ((Effect.ALLOW, config.allow), (Effect.DENY, config.deny)),
+        RuleSource.USER,
+        ctx,
+        origin={"setting": "permissions"},
+    )
 
+
+def load_project_denies(path: Path, ctx: PermissionContext) -> list[Rule]:
+    """The deny rules of the project file's ``permissions`` section.
+
+    The project file (``./.{app}/settings.json``) is untrusted: a cloned
+    repository can ship it, so it can tighten the policy but never loosen it,
+    and its allow entries are not read. The settings pass the section over
+    (``PROJECT_PRESERVED_KEYS``), so each deny entry is checked here with the
+    settings' own schema (``PermissionRuleConfig``). Nothing here raises, so
+    a typo in a cloned repository cannot stop the app from starting there:
+
+    - an entry that is not a rule, or a section or ``deny`` list of the wrong
+      shape, is skipped with one warning naming the file and the entry
+      (``permission_project_rule_invalid``); the other entries still apply;
+    - a file that is not a JSON object gives one warning
+      (``permission_project_file_invalid``) and no rules;
+    - a rule whose target cannot be canonicalized is skipped with a warning
+      (``permission_rule_skipped``).
+
+    Returns ``[]`` when the file is absent or has no ``permissions`` section.
+    """
     if not path.exists():
         return []
     try:
-        data = json.loads(path.read_text())
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"Malformed JSON in {path}: {exc}") from exc
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:  # JSONDecodeError, UnicodeDecodeError
+        _warn_project_file(path, f"not readable as JSON: {exc}")
+        return []
+    if not isinstance(data, dict):
+        _warn_project_file(path, f"expected a JSON object, got {_json_type(data)}")
+        return []
 
-    section = data.get("permissions") or {}
+    section = data.get("permissions")
+    if section is None:
+        return []
+    if not isinstance(section, dict):
+        _warn_invalid(path, "permissions", f"expected an object, got {_json_type(section)}")
+        return []
+    entries = section.get("deny")
+    if entries is None:
+        return []
+    if not isinstance(entries, list):
+        _warn_invalid(path, "permissions.deny", f"expected a list, got {_json_type(entries)}")
+        return []
+
+    denies: list[PermissionRuleConfig] = []
+    for index, entry in enumerate(entries):
+        try:
+            denies.append(PermissionRuleConfig.model_validate(entry))
+        except ValidationError as exc:
+            _warn_invalid(path, f"permissions.deny[{index}]", _summary(exc))
+    return _rules(((Effect.DENY, denies),), RuleSource.PROJECT, ctx, origin={"path": str(path)})
+
+
+def _rules(
+    entries: tuple[tuple[Effect, list[PermissionRuleConfig]], ...],
+    source: RuleSource,
+    ctx: PermissionContext,
+    origin: dict[str, str],
+) -> list[Rule]:
+    """Rules from checked entries, each target canonicalized as a pattern."""
+    # Local import to avoid circular dependency: matchers.py imports PermissionContext from here.
+    from agentic_cli.workflow.permissions.matchers import get_matcher  # noqa: PLC0415
+
     rules: list[Rule] = []
-    for effect_name, effect in (("allow", Effect.ALLOW), ("deny", Effect.DENY)):
-        if allowed_effects is not None and effect not in allowed_effects:
-            continue
-        for entry in section.get(effect_name) or []:
-            cap = entry["capability"]
-            target_raw = entry["target"]
+    for effect, configs in entries:
+        for entry in configs:
             try:
-                target = get_matcher(cap).canonicalize_pattern(target_raw, ctx)
+                target = get_matcher(entry.capability).canonicalize_pattern(entry.target, ctx)
             except ValueError as exc:
                 # A URL the HTTP client cannot send (an invalid IDNA host, a
                 # port past 65535), a path with a NUL: no target can match
                 # it, since such a target is itself denied as invalid.
-                _warn_skipped(path, cap, target_raw, exc)
+                _log_skipped(entry.capability, entry.target, exc, origin)
                 continue
-            rules.append(Rule(cap, target, effect, source))
+            rules.append(Rule(entry.capability, target, effect, source))
     return rules
 
 
+_JSON_TYPES = {
+    dict: "an object", list: "a list", str: "a string", bool: "a boolean",
+    int: "a number", float: "a number", type(None): "null",
+}
+
+
+def _json_type(value: object) -> str:
+    return _JSON_TYPES.get(type(value), type(value).__name__)
+
+
+def _summary(exc: ValidationError) -> str:
+    """A rule's validation errors on one line, without the entry's value."""
+    return "; ".join(
+        f"{'.'.join(str(part) for part in error['loc']) or 'entry'}: {error['msg']}"
+        for error in exc.errors()
+    )
+
+
+def _warn_project_file(path: Path, error: str) -> None:
+    Loggers.workflow().warning("permission_project_file_invalid", path=str(path), error=error)
+
+
+def _warn_invalid(path: Path, entry: str, error: str) -> None:
+    Loggers.workflow().warning(
+        "permission_project_rule_invalid", path=str(path), entry=entry, error=error
+    )
+
+
 def _warn_skipped(path: Path, capability: str, target: str, exc: ValueError) -> None:
+    _log_skipped(capability, target, exc, {"path": str(path)})
+
+
+def _log_skipped(capability: str, target: str, exc: ValueError, origin: dict[str, str]) -> None:
     Loggers.workflow().warning(
         "permission_rule_skipped",
         capability=capability,
         target=target,
-        path=str(path),
+        **origin,
         error=str(exc),
     )
 

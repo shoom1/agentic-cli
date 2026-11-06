@@ -7,7 +7,7 @@ HITL (human-in-the-loop), memory management, API keys, and tool configuration.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from enum import Enum
 from typing import Annotated, Any, Literal, get_args
 
@@ -30,7 +30,7 @@ from agentic_cli.models import (
     validate_provider_name,
 )
 from agentic_cli.models.entries import check_entries
-from agentic_cli.settings_sources import SettingsSourcesMixin
+from agentic_cli.settings_sources import RULES_BY_SOURCE, SettingsSourcesMixin
 from agentic_cli.workflow.context import MIN_BUDGET
 
 logger = Loggers.config()
@@ -43,14 +43,20 @@ _SHIPPED_ENTRY_FIELDS = ("models", "model_providers")
 
 
 class PermissionRuleConfig(BaseModel):
-    """A single permission rule — serialised to settings.json as JSON."""
+    """A single permission rule — serialised to settings.json as JSON.
+
+    The one schema of a rule: ``settings.permissions`` holds these, and the
+    permission engine checks each entry of a project file's ``permissions``
+    section with it.
+    """
 
     capability: str
     target: str
 
 
 class PermissionsConfig(BaseModel):
-    """Nested settings section holding user-editable permission rules."""
+    """The ``permissions`` setting: the allow and deny rules the permission
+    engine enforces (``workflow/permissions/store.py::settings_rules``)."""
 
     allow: list[PermissionRuleConfig] = []
     deny: list[PermissionRuleConfig] = []
@@ -563,6 +569,15 @@ class WorkflowSettingsMixin(SettingsSourcesMixin):
             given = data.get(name, {})
             if (shipped or name in data) and isinstance(given, Mapping):
                 merged[name] = _merged_entries(shipped, given)
+        # The rules: the app's, then every source's, lowest priority first
+        # (each filed apart by the sources hook: _source_sections), each rule
+        # once.
+        if "permissions" in data:
+            shipped = cls.model_fields["permissions"].get_default(call_default_factory=True)
+            sections = _source_sections(data["permissions"])
+            merged["permissions"] = _union_rules(
+                sections if shipped is None else [shipped, *sections]
+            )
         return merged
 
     @field_validator("sandbox_network")
@@ -616,13 +631,26 @@ class WorkflowSettingsMixin(SettingsSourcesMixin):
         json_schema_extra={"ui_order": 136},
     )
 
-    # Permissions
-    permissions: PermissionsConfig = Field(
-        default_factory=PermissionsConfig,
-        title="Permissions",
-        description="Declarative allow/deny rules for tool capabilities.",
-        json_schema_extra={"ui_order": 138},
-    )
+    # Permissions. The permission engine enforces these rules (store.py,
+    # settings_rules): the union of the app's class default, the user file,
+    # the environment and the constructor (each source's rules filed apart by
+    # SettingsSourcesMixin's sources hook, joined by _merge_shipped_entries).
+    # No save writes it (HAND_EDITED_KEYS).
+    # Annotated form, with no class attribute, so an app overriding the
+    # default gets no pydantic warning. The project file's section sets no
+    # setting (PROJECT_PRESERVED_KEYS): the engine reads its deny rules itself.
+    permissions: Annotated[
+        PermissionsConfig,
+        Field(
+            default_factory=PermissionsConfig,
+            title="Permissions",
+            description=(
+                "Allow and deny rules the permission engine enforces for tool "
+                "capabilities. A project settings file may add deny rules only."
+            ),
+            json_schema_extra={"ui_order": 138},
+        ),
+    ]
     permissions_enabled: bool = Field(
         default=True,
         title="Permissions Enabled",
@@ -825,6 +853,69 @@ class WorkflowSettingsMixin(SettingsSourcesMixin):
 
         if self.anthropic_api_key:
             os.environ["ANTHROPIC_API_KEY"] = self.anthropic_api_key
+
+
+def _source_sections(value: Any) -> list[Any]:
+    """A ``permissions`` value as each source gave it, lowest priority first.
+
+    The sources hook files each source's value under its rank
+    (``settings_sources.RULES_BY_SOURCE``, 0 the highest priority), so
+    pydantic-settings' merge, which replaces the lists inside a dict, keeps
+    every one. A value given outside the hook (a command-line source that
+    pydantic-settings adds above them, a class with its own sources, a value
+    validated directly) is taken as it is, after the filed ones.
+    """
+    if not isinstance(value, Mapping) or RULES_BY_SOURCE not in value:
+        return [value]
+    filed = value[RULES_BY_SOURCE]
+    if not isinstance(filed, Mapping):
+        return [filed]  # for validation to refuse
+    ranks = sorted(filed, key=lambda rank: int(rank) if str(rank).isdigit() else -1, reverse=True)
+    rest = {key: given for key, given in value.items() if key != RULES_BY_SOURCE}
+    return [filed[rank] for rank in ranks] + ([rest] if rest else [])
+
+
+def _union_rules(sections: Iterable[Any]) -> Any:
+    """``permissions`` values as one: ``allow`` and ``deny`` each
+    concatenated in order, a rule already there (the same capability and
+    target) left out.
+
+    A value that is not a section (an object whose ``allow`` and ``deny`` are
+    lists) is returned as it is, for validation to refuse: one source's bad
+    value is not hidden behind another's.
+    """
+    merged: dict[str, list[Any]] = {"allow": [], "deny": []}
+    seen: dict[str, set[tuple[str, str]]] = {"allow": set(), "deny": set()}
+    for section in sections:
+        if isinstance(section, PermissionsConfig):
+            section = {"allow": section.allow, "deny": section.deny}
+        if not isinstance(section, Mapping):
+            return section
+        for effect, rules in merged.items():
+            entries = section.get(effect)
+            if entries is None:
+                continue
+            if not isinstance(entries, (list, tuple)):
+                return section
+            for entry in entries:
+                key = _rule_key(entry)
+                if key is not None:
+                    if key in seen[effect]:
+                        continue
+                    seen[effect].add(key)
+                rules.append(entry)
+    return merged
+
+
+def _rule_key(entry: Any) -> tuple[str, str] | None:
+    """A rule's capability and target, or None for an entry that is no rule."""
+    if isinstance(entry, PermissionRuleConfig):
+        return entry.capability, entry.target
+    if isinstance(entry, Mapping):
+        capability, target = entry.get("capability"), entry.get("target")
+        if isinstance(capability, str) and isinstance(target, str):
+            return capability, target
+    return None
 
 
 def _merged_entries(shipped: Mapping[str, Any], given: Mapping[str, Any]) -> dict[str, Any]:

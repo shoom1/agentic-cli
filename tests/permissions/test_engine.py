@@ -43,24 +43,50 @@ class TestEngineInit:
         builtin = [r for r in engine.rules if r.source is RuleSource.BUILTIN]
         assert any(r.capability == "filesystem.read" for r in builtin)
 
-    def test_loads_user_and_project_from_files(self, ctx, tmp_path, monkeypatch):
+    def test_trusted_rules_come_from_the_settings_and_the_project_file_only_denies(
+        self, tmp_path, monkeypatch
+    ):
+        """``settings.permissions`` holds the trusted rules (the settings read
+        the user file, so the engine does not read it again), and the project
+        file adds its deny rules, never its allow rules."""
         import json
-        # Prepare user + project files at their canonical locations.
-        monkeypatch.chdir(tmp_path)
-        monkeypatch.setenv("HOME", str(tmp_path))
-        (tmp_path / ".agentic").mkdir()
-        (tmp_path / ".agentic/settings.json").write_text(json.dumps({
-            "permissions": {"allow": [{"capability": "http.read", "target": "https://x.test/**"}]},
-        }))
-        # User file lives at ~/.agentic/settings.json (which is tmp_path/.agentic/...)
-        # — same path since HOME == tmp_path; test merging via overlap
+
+        from agentic_cli.workflow.settings import PermissionsConfig
+
+        home, project = tmp_path / "home", tmp_path / "project"
+        monkeypatch.setenv("HOME", str(home))
+        project.mkdir()
+        monkeypatch.chdir(project)
+
+        def http(effect: str, host: str) -> dict:
+            return {effect: [{"capability": "http.read", "target": f"https://{host}/**"}]}
+
+        for root, rules in (
+            (home, http("allow", "user-file.test")),
+            (project, {**http("allow", "project-allow.test"), **http("deny", "project-deny.test")}),
+        ):
+            (root / ".agentic").mkdir(parents=True)
+            (root / ".agentic/settings.json").write_text(json.dumps({"permissions": rules}))
+        settings = _stub_settings()
+        settings.permissions = PermissionsConfig.model_validate(
+            {**http("allow", "settings-allow.test"), **http("deny", "settings-deny.test")}
+        )
 
         engine = PermissionEngine(
-            settings=_stub_settings(), workflow=_stub_workflow(), ctx=ctx,
+            settings=settings,
+            workflow=_stub_workflow(),
+            ctx=PermissionContext(workdir=project, home=home, app_name="agentic"),
         )
-        # Exactly one http.read allow should be loaded
-        http = [r for r in engine.rules if r.capability == "http.read"]
-        assert len(http) >= 1
+
+        assert [
+            (r.source, r.effect, r.target)
+            for r in engine.rules
+            if r.source is not RuleSource.BUILTIN
+        ] == [
+            (RuleSource.USER, Effect.ALLOW, "https://settings-allow.test/**"),
+            (RuleSource.USER, Effect.DENY, "https://settings-deny.test/**"),
+            (RuleSource.PROJECT, Effect.DENY, "https://project-deny.test/**"),
+        ]
 
 
 class TestEngineDisabled:
