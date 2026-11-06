@@ -15,7 +15,6 @@ from agentic_cli.logging import Loggers
 from agentic_cli.tools.sandbox.models import ExecutionResult, SessionStatus
 from agentic_cli.file_utils import copy_regular_file_no_follow, sanitize_filename
 from agentic_cli.tools.sandbox.backends.base import SandboxBackend
-from agentic_cli.tools.sandbox.backends import kernel_exec
 from agentic_cli.tools.sandbox.backends.container_runtime import (
     ContainerSpec, Mount, DockerContainerRuntime,
 )
@@ -356,9 +355,6 @@ class JupyterDockerBackend(SandboxBackend):
                 error=(f"Docker sandbox backend unavailable ({avail.detail}). "
                        "Refusing to fall back to an unsandboxed kernel."),
             )
-        ok, msg = kernel_exec.validate_code(code)
-        if not ok:
-            return ExecutionResult(success=False, error=msg)
         if inputs:
             from agentic_cli.tools.sandbox.manager import stage_inputs
             try:

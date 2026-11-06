@@ -277,7 +277,9 @@ Tests that hit real provider APIs use the existing framework — **don't invent 
 
 ### Live docker sandbox tests (real container runtime)
 
-The `jupyter_docker` backend's isolation boundary is verified against a real daemon.
+The `jupyter_docker` backend's isolation boundary is verified against a real daemon. The
+`jupyter_local` backend has none to verify: its kernel runs on the host as the user, and neither
+backend blocks imports or scans the code (the container is the boundary).
 
 - **Marker**: `@pytest.mark.docker`; skipped unless docker/podman is available. The bulk of the
   backend is tested offline via the faked `ContainerRuntime` seam (incl. an end-to-end run of the

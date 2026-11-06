@@ -609,104 +609,40 @@ class TestManagerAutoDetection:
 # JupyterLocalBackend integration tests
 # ---------------------------------------------------------------------------
 
-class TestSandboxRestrictions:
-    """Tests for sandbox network and shell restrictions."""
+class TestLocalBackendRestrictsNothing:
+    """The local kernel is the user's own Python and isolates nothing, so it
+    restricts nothing either: an import blocklist there broke ordinary
+    libraries (scipy.stats, sklearn, pyarrow and pandas import modules it
+    refused) while os.system, %%bash and `del sys.meta_path[0]` ran."""
 
-    def test_blocked_import_requests(self, tmp_path):
-        """Sandbox blocks import of requests module."""
+    def test_stdlib_modules_import(self, tmp_path):
         from agentic_cli.tools.sandbox.backends.jupyter_local import JupyterLocalBackend
 
         backend = JupyterLocalBackend()
         try:
             result = backend.execute(
-                "import requests", session_id="test", working_dir=tmp_path,
+                "import urllib.parse, xml.sax.saxutils, multiprocessing.pool\n"
+                "print(urllib.parse.quote('a b'))",
+                session_id="test", working_dir=tmp_path,
             )
-            assert result.success is False
-            assert "not available in the sandbox" in result.error
+            assert result.success is True, result.error
+            assert "a%20b" in result.stdout
         finally:
             backend.cleanup()
 
-    def test_blocked_import_urllib(self, tmp_path):
-        """Sandbox blocks import of urllib module."""
+    def test_a_line_starting_with_an_operator_runs(self, tmp_path):
+        """Code is not scanned line by line: a continuation line starting with
+        `!=`, as black formats a long comparison, is Python, not a shell escape."""
         from agentic_cli.tools.sandbox.backends.jupyter_local import JupyterLocalBackend
 
         backend = JupyterLocalBackend()
         try:
             result = backend.execute(
-                "import urllib.request", session_id="test", working_dir=tmp_path,
+                "differ = (1\n          != 2)\nprint(differ)",
+                session_id="test", working_dir=tmp_path,
             )
-            assert result.success is False
-            assert "not available in the sandbox" in result.error
-        finally:
-            backend.cleanup()
-
-    def test_blocked_import_socket(self, tmp_path):
-        """Sandbox blocks import of socket module."""
-        from agentic_cli.tools.sandbox.backends.jupyter_local import JupyterLocalBackend
-
-        backend = JupyterLocalBackend()
-        try:
-            result = backend.execute(
-                "import socket", session_id="test", working_dir=tmp_path,
-            )
-            assert result.success is False
-            assert "not available in the sandbox" in result.error
-        finally:
-            backend.cleanup()
-
-    def test_blocked_import_subprocess(self, tmp_path):
-        """Sandbox blocks import of subprocess module."""
-        from agentic_cli.tools.sandbox.backends.jupyter_local import JupyterLocalBackend
-
-        backend = JupyterLocalBackend()
-        try:
-            result = backend.execute(
-                "import subprocess", session_id="test", working_dir=tmp_path,
-            )
-            assert result.success is False
-            assert "not available in the sandbox" in result.error
-        finally:
-            backend.cleanup()
-
-    def test_shell_escape_blocked(self, tmp_path):
-        """Sandbox blocks ! shell escape syntax."""
-        from agentic_cli.tools.sandbox.backends.jupyter_local import JupyterLocalBackend
-
-        backend = JupyterLocalBackend()
-        try:
-            result = backend.execute(
-                "!pip install evil-package", session_id="test", working_dir=tmp_path,
-            )
-            assert result.success is False
-            assert "not allowed" in result.error.lower()
-        finally:
-            backend.cleanup()
-
-    def test_pip_magic_blocked(self, tmp_path):
-        """Sandbox blocks %pip magic command."""
-        from agentic_cli.tools.sandbox.backends.jupyter_local import JupyterLocalBackend
-
-        backend = JupyterLocalBackend()
-        try:
-            result = backend.execute(
-                "%pip install evil-package", session_id="test", working_dir=tmp_path,
-            )
-            assert result.success is False
-            assert "not allowed" in result.error.lower()
-        finally:
-            backend.cleanup()
-
-    def test_safe_math_still_works(self, tmp_path):
-        """Sandbox still allows normal math/data operations."""
-        from agentic_cli.tools.sandbox.backends.jupyter_local import JupyterLocalBackend
-
-        backend = JupyterLocalBackend()
-        try:
-            result = backend.execute(
-                "import math; print(math.pi)", session_id="test", working_dir=tmp_path,
-            )
-            assert result.success is True
-            assert "3.14" in result.stdout
+            assert result.success is True, result.error
+            assert "True" in result.stdout
         finally:
             backend.cleanup()
 
