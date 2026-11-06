@@ -214,7 +214,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   was validated and silently not enforced: a deny rule an app shipped denied
   nothing. The engine's trusted rules, allow and deny, are now
   `settings.permissions`, and the setting holds every trusted source's rules
-  together: the app's class default, the user file, the environment and the
+  together: the app's class default, the user file, an env file the
+  settings read that is not cwd-relative, the environment and the
   constructor, each list concatenated in that order with a duplicate kept
   once. No source's section replaces another's, so an allow rule added to
   the user file keeps the app's deny rules (pydantic-settings would replace
@@ -227,7 +228,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   constructor or the environment now applies, beside the user file's rules;
   a malformed `permissions` value in any trusted source stops the settings
   from loading, even where another source also sets the field; and a full
-  settings save no longer writes `permissions` into the user file.
+  settings save no longer writes `permissions` into the user file, nor does
+  a `SettingsPersistence.save(path=…)` dump.
 - **`execute_python` runs code only inside the OS sandbox, unless you turn it
   off.** Where no sandbox backend existed (a Linux host without `bwrap`, with
   `os_sandbox_strict` off by default), when the sandbox could not be set up,
