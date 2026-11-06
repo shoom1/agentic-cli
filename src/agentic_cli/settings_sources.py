@@ -39,6 +39,10 @@ logger = Loggers.config()
 #: class names one (``AppSettingsMixin.app_name``'s default).
 DEFAULT_APP_NAME = "agentic_cli"
 
+#: The key each source files its ``permissions`` value under, by its rank
+#: among the sources (0 is the highest priority): ``_RulesBySource``.
+RULES_BY_SOURCE = "__by_source__"
+
 
 class SettingsSourcesMixin:
     """The settings' sources, highest priority first.
@@ -71,6 +75,12 @@ class SettingsSourcesMixin:
     every filter here, would be pydantic-settings' own. A class that defines
     ``settings_customise_sources`` itself is its author's choice and is
     accepted in any order.
+
+    Each source's ``permissions`` is filed under its rank
+    (``_RulesBySource``): pydantic-settings merges a dict setting across the
+    sources key by key but replaces a list inside it, which would leave only
+    one source's ``allow`` and ``deny`` lists. Filed apart, every source's
+    rules reach ``WorkflowSettingsMixin``, which joins them.
     """
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
@@ -159,7 +169,9 @@ class SettingsSourcesMixin:
         else:
             sources.append(without_app_name(dotenv_settings, "env file"))
 
-        return tuple(sources)
+        return tuple(
+            _RulesBySource(settings_cls, source, rank) for rank, source in enumerate(sources)
+        )
 
 
 def _files_app_name(
@@ -209,6 +221,30 @@ class _FilterSource(PydanticBaseSettingsSource):
     def get_field_value(self, field: Any, field_name: str) -> tuple[Any, str, bool]:
         # Unused: __call__ is overridden to filter the inner source's output.
         return None, field_name, False
+
+
+class _RulesBySource(_FilterSource):
+    """Pass a source's values on, its ``permissions`` filed under its rank.
+
+    As ``{RULES_BY_SOURCE: {"<rank>": value}}``, the value survives
+    pydantic-settings' merge beside every other source's (the ranks differ),
+    where its lists would replace theirs. The source keeps its own name, the
+    one pydantic-settings files its values under for the other sources.
+    """
+
+    def __init__(
+        self, settings_cls: type[PydanticBaseSettings], inner: PydanticBaseSettingsSource, rank: int
+    ) -> None:
+        super().__init__(settings_cls, inner)
+        self._rank = rank
+        self.__name__ = getattr(inner, "__name__", type(inner).__name__)
+
+    def __call__(self) -> dict[str, Any]:
+        values = self._inner()
+        if "permissions" not in values:
+            return values
+        filed = {RULES_BY_SOURCE: {str(self._rank): values["permissions"]}}
+        return {**values, "permissions": filed}
 
 
 class _AppNameFilterSource(_FilterSource):

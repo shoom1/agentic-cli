@@ -149,7 +149,7 @@ def settings_rules(settings: object, ctx: PermissionContext) -> list[Rule]:
 
     The setting holds every trusted source's rules together: the app's class
     default, the user's ``~/.{app}/settings.json``, the environment and the
-    constructor (``WorkflowSettingsMixin._settings_build_values``). The
+    constructor (``WorkflowSettingsMixin._merge_shipped_entries``). The
     project file is not among them (its section sets no setting:
     ``load_project_denies`` reads it). The rules are
     ``RuleSource.USER``. A rule whose target cannot be canonicalized (a URL

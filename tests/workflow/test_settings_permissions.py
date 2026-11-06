@@ -166,29 +166,61 @@ class TestPermissionsAreTheUnionOfTheSources:
             BaseSettings(app_name=self.APP)
 
 
-class TestPydanticSettingsContract:
-    """``WorkflowSettingsMixin._settings_build_values`` overrides a private
-    pydantic-settings method and wraps each source; a release that changes
-    either breaks the union of the rules."""
+class TestTheUnionUsesThePublicSourcesHook:
+    """Each source's rules are filed by the framework's own sources hook
+    (``SettingsSourcesMixin.settings_customise_sources``), never by
+    overriding pydantic-settings' private methods, so a pydantic-settings
+    release cannot silently change which rules apply."""
 
-    def test_the_private_merge_it_overrides(self):
-        import inspect
-
+    def test_no_settings_class_of_the_framework_overrides_a_private_method(self):
         from pydantic_settings import BaseSettings as PydanticBaseSettings
-        from pydantic_settings import PydanticBaseSettingsSource
-        from pydantic_settings.sources import DefaultSettingsSource
 
-        method = inspect.getattr_static(PydanticBaseSettings, "_settings_build_values")
-        assert isinstance(method, classmethod)
-        parameters = inspect.signature(PydanticBaseSettings._settings_build_values).parameters
-        assert list(parameters) == ["sources", "init_kwargs"]
-        for hook in ("_set_current_state", "_set_settings_sources_data", "__call__"):
-            assert callable(getattr(PydanticBaseSettingsSource, hook))
-        assert issubclass(DefaultSettingsSource, PydanticBaseSettingsSource)
+        private = {
+            name for name in vars(PydanticBaseSettings)
+            if name.startswith("_settings_") or name.startswith("_PydanticBaseSettings")
+        }
+        overridden = {
+            (cls.__qualname__, name)
+            for cls in BaseSettings.__mro__
+            if cls.__module__.startswith("agentic_cli")
+            for name in vars(cls)
+            if name in private
+        }
+        assert overridden == set()
+
+    def test_a_class_composed_from_the_mixins_gets_the_union(self, tmp_path, monkeypatch):
+        from pydantic_settings import BaseSettings as PydanticBaseSettings
+        from pydantic_settings import SettingsConfigDict
+
+        from agentic_cli.settings_mixins import AppSettingsMixin, CLISettingsMixin
+        from agentic_cli.workflow.settings import WorkflowSettingsMixin
+
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        monkeypatch.chdir(tmp_path)
+        user_file = tmp_path / "home" / ".composedapp" / "settings.json"
+        user_file.parent.mkdir(parents=True)
+        user_file.write_text(json.dumps({"permissions": {"allow": [_rule("user-allow")]}}))
+        monkeypatch.setenv("APP_PERMISSIONS", json.dumps({"deny": [_rule("env-deny")]}))
+
+        class Composed(
+            WorkflowSettingsMixin, AppSettingsMixin, CLISettingsMixin, PydanticBaseSettings
+        ):
+            model_config = SettingsConfigDict(env_prefix="APP_", extra="ignore")
+            permissions: PermissionsConfig = Field(
+                default_factory=lambda: PermissionsConfig.model_validate(
+                    {"deny": [_rule("app-deny")]}
+                )
+            )
+
+        settings = Composed(app_name="composedapp", permissions={"deny": [_rule("ctor-deny")]})
+
+        hosts = TestPermissionsAreTheUnionOfTheSources._hosts
+        assert hosts(settings.permissions.allow) == ["user-allow"]
+        assert hosts(settings.permissions.deny) == ["app-deny", "env-deny", "ctor-deny"]
 
     def test_the_sources_are_filed_under_their_own_names(self, tmp_path, monkeypatch):
         """A source that reads the others' values (``settings_sources_data``)
-        finds them where it would unwrapped."""
+        finds them under the names it would without the filing."""
         from pydantic_settings import PydanticBaseSettingsSource
 
         monkeypatch.setenv("HOME", str(tmp_path))
@@ -209,6 +241,6 @@ class TestPydanticSettingsContract:
                 return (*super().settings_customise_sources(settings_cls, **sources),
                         Peek(settings_cls))
 
-        PeekingSettings(permissions={"deny": [_rule("ctor-deny")]})
+        PeekingSettings(thinking_effort="high", permissions={"deny": [_rule("ctor-deny")]})
 
-        assert seen["InitSettingsSource"]["permissions"] == {"deny": [_rule("ctor-deny")]}
+        assert seen["InitSettingsSource"]["thinking_effort"] == "high"

@@ -19,8 +19,6 @@ from pydantic import (
     field_validator,
     model_validator,
 )
-from pydantic_settings import PydanticBaseSettingsSource
-from pydantic_settings.sources import DefaultSettingsSource
 
 from agentic_cli.logging import Loggers
 from agentic_cli.models import (
@@ -32,7 +30,7 @@ from agentic_cli.models import (
     validate_provider_name,
 )
 from agentic_cli.models.entries import check_entries
-from agentic_cli.settings_sources import SettingsSourcesMixin
+from agentic_cli.settings_sources import RULES_BY_SOURCE, SettingsSourcesMixin
 from agentic_cli.workflow.context import MIN_BUDGET
 
 logger = Loggers.config()
@@ -569,43 +567,16 @@ class WorkflowSettingsMixin(SettingsSourcesMixin):
             given = data.get(name, {})
             if (shipped or name in data) and isinstance(given, Mapping):
                 merged[name] = _merged_entries(shipped, given)
-        # The rules: the app's, then the sources' (already their union,
-        # _settings_build_values), each rule once.
+        # The rules: the app's, then every source's, lowest priority first
+        # (each filed apart by the sources hook: _source_sections), each rule
+        # once.
         if "permissions" in data:
             shipped = cls.model_fields["permissions"].get_default(call_default_factory=True)
-            sections = (data["permissions"],) if shipped is None else (shipped, data["permissions"])
-            merged["permissions"] = _union_rules(sections)
+            sections = _source_sections(data["permissions"])
+            merged["permissions"] = _union_rules(
+                sections if shipped is None else [shipped, *sections]
+            )
         return merged
-
-    @classmethod
-    def _settings_build_values(
-        cls, sources: tuple[Any, ...], init_kwargs: dict[str, Any]
-    ) -> dict[str, Any]:
-        """pydantic-settings' merge of the sources, with ``permissions`` the
-        union of every source's rules.
-
-        pydantic-settings merges a dict setting across the sources key by key
-        but replaces a list inside it, so a ``deny`` list from the environment
-        would drop the user file's, and the constructor's the environment's.
-        Each source's ``permissions`` is kept as it is read
-        (``_RecordingSource``), and their union, lowest priority first
-        (``_union_rules``), is the value validated; ``_merge_shipped_entries``
-        puts the app's class default before it. The project file's section
-        sets no setting (its source passes it over), so it is none of them.
-
-        Overrides pydantic-settings' private ``BaseSettings._settings_build_values``
-        (``tests/workflow/test_settings_permissions.py`` pins its contract).
-        """
-        given: list[Any] = []
-        recording = tuple(
-            source if isinstance(source, DefaultSettingsSource)
-            else _RecordingSource(cls, source, given)
-            for source in sources
-        )
-        state = super()._settings_build_values(recording, init_kwargs)  # type: ignore[misc]
-        if given:
-            state["permissions"] = _union_rules(reversed(given))
-        return state
 
     @field_validator("sandbox_network")
     @classmethod
@@ -658,8 +629,9 @@ class WorkflowSettingsMixin(SettingsSourcesMixin):
 
     # Permissions. The permission engine enforces these rules (store.py,
     # settings_rules): the union of the app's class default, the user file,
-    # the environment and the constructor (_merge_shipped_entries,
-    # _settings_build_values). No save writes it (HAND_EDITED_KEYS).
+    # the environment and the constructor (each source's rules filed apart by
+    # SettingsSourcesMixin's sources hook, joined by _merge_shipped_entries).
+    # No save writes it (HAND_EDITED_KEYS).
     # Annotated form, with no class attribute, so an app overriding the
     # default gets no pydantic warning. The project file's section sets no
     # setting (PROJECT_PRESERVED_KEYS): the engine reads its deny rules itself.
@@ -899,36 +871,24 @@ class WorkflowSettingsMixin(SettingsSourcesMixin):
             os.environ["ANTHROPIC_API_KEY"] = self.anthropic_api_key
 
 
-class _RecordingSource(PydanticBaseSettingsSource):
-    """Another settings source, its values passed on as read, its
-    ``permissions`` added to ``record`` (``_settings_build_values``)."""
+def _source_sections(value: Any) -> list[Any]:
+    """A ``permissions`` value as each source gave it, lowest priority first.
 
-    def __init__(self, settings_cls: Any, inner: Any, record: list[Any]) -> None:
-        super().__init__(settings_cls)
-        self._inner = inner
-        self._record = record
-        # The name pydantic-settings files the source's values under.
-        self.__name__ = getattr(inner, "__name__", type(inner).__name__)
-
-    def _set_current_state(self, state: dict[str, Any]) -> None:
-        super()._set_current_state(state)
-        if isinstance(self._inner, PydanticBaseSettingsSource):
-            self._inner._set_current_state(state)
-
-    def _set_settings_sources_data(self, states: dict[str, dict[str, Any]]) -> None:
-        super()._set_settings_sources_data(states)
-        if isinstance(self._inner, PydanticBaseSettingsSource):
-            self._inner._set_settings_sources_data(states)
-
-    def get_field_value(self, field: Any, field_name: str) -> tuple[Any, str, bool]:
-        # Unused: __call__ passes on what the inner source read.
-        return None, field_name, False
-
-    def __call__(self) -> dict[str, Any]:
-        values = self._inner()
-        if "permissions" in values:
-            self._record.append(values["permissions"])
-        return values
+    The sources hook files each source's value under its rank
+    (``settings_sources.RULES_BY_SOURCE``, 0 the highest priority), so
+    pydantic-settings' merge, which replaces the lists inside a dict, keeps
+    every one. A value given outside the hook (a command-line source that
+    pydantic-settings adds above them, a class with its own sources, a value
+    validated directly) is taken as it is, after the filed ones.
+    """
+    if not isinstance(value, Mapping) or RULES_BY_SOURCE not in value:
+        return [value]
+    filed = value[RULES_BY_SOURCE]
+    if not isinstance(filed, Mapping):
+        return [filed]  # for validation to refuse
+    ranks = sorted(filed, key=lambda rank: int(rank) if str(rank).isdigit() else -1, reverse=True)
+    rest = {key: given for key, given in value.items() if key != RULES_BY_SOURCE}
+    return [filed[rank] for rank in ranks] + ([rest] if rest else [])
 
 
 def _union_rules(sections: Iterable[Any]) -> Any:
