@@ -69,14 +69,13 @@ def user_env_files(settings: "BaseSettings") -> tuple[Path, ...]:
     as the research demo's ``~/.research_demo/.env``.
 
     A cwd-relative one (``.env``) is never among them: a cloned repository can
-    ship it, so it supplies no key (``BaseSettings.settings_customise_sources``
-    filters it the same way).
+    ship it, so it supplies no key (the settings' sources,
+    ``settings_sources.SettingsSourcesMixin``, filter it the same way).
 
     Settings composed from the mixins over pydantic-settings' own
     ``BaseSettings`` have no ``env_files``; their class's ``env_file`` is used.
-    Such a class has no cwd-``.env`` filter (``agentic_cli.BaseSettings`` has
-    it), so a cwd-relative entry of its ``env_file`` can still define a
-    provider; keys are read only from the absolute entries.
+    The mixins bring the same sources and filters, so a cwd-relative entry
+    defines no provider there either.
     """
     entries = getattr(settings, "env_files", None)
     if entries is None:

@@ -3,7 +3,7 @@
 Provides functionality to save settings to JSON files for layered configuration.
 
 Saving splits by trust (mirroring the P0-1 load-side allowlist in
-``agentic_cli.config``): allowlisted keys go to the project
+``agentic_cli.settings_sources``): allowlisted keys go to the project
 ``./.{app_name}/settings.json``; every other (user-scoped) key goes to the
 trusted user ``~/.{app_name}/settings.json``. Without the split, a key the
 loader refuses to read from the project file would be written there and
@@ -51,7 +51,7 @@ SECRET_FIELDS = frozenset({
 # the user ~/.{app}/settings.json remain fully trusted.
 #
 # Used by BOTH sides of persistence: the load-side filter
-# (config._AllowlistFilterSource) and the save-side split
+# (settings_sources._AllowlistFilterSource) and the save-side split
 # (SettingsPersistence.save), so writer and reader cannot drift apart.
 PROJECT_SETTABLE_KEYS = frozenset({
     # model / behavior. model_roles and models choose among the providers the
@@ -97,7 +97,9 @@ PROJECT_PRESERVED_KEYS = frozenset({"permissions"})
 # dump (path=) leaves them out.
 HAND_EDITED_KEYS = frozenset({"models", "model_providers"})
 
-# Identity fields set by the application, not the user
+# Identity fields set by the application, not the user. No save writes them;
+# app_name chooses the files, so no source but the constructor and the class
+# sets it either (settings_sources.SettingsSourcesMixin).
 IDENTITY_FIELDS = frozenset({
     "app_name",
     "workspace_dir",

@@ -291,12 +291,12 @@ class TestTheOldSettingsAreGone:
         # 0.6.0 and 0.6.1's /settings saved every project-settable field, the
         # two context_window_* counts included, into the project file. A key
         # that is no setting can set nothing: no "untrusted" warning for it.
-        from agentic_cli import config
+        from agentic_cli import settings_sources
 
         # A logger that filters no level: an earlier test's configure_logging
         # leaves the module's own logger dropping debug records before
         # capture_logs could see them.
-        monkeypatch.setattr(config, "logger", structlog.wrap_logger(
+        monkeypatch.setattr(settings_sources, "logger", structlog.wrap_logger(
             None, wrapper_class=structlog.make_filtering_bound_logger(0)
         ))
         project = hermetic / "project" / ".agentic_cli" / "settings.json"

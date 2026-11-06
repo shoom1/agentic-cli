@@ -130,6 +130,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   knowledge base with a subfolder linked to another disk no longer opens,
   and the project knowledge base can no longer be a link; the user
   knowledge base's whole directory still can.
+- **A settings class composed from the mixins has `BaseSettings`' trust
+  boundary.** The project file's allowlist and the cwd `.env` filter were
+  `agentic_cli.BaseSettings`' own (since 0.6.0), so a class composed from the
+  exported `WorkflowSettingsMixin`, `AppSettingsMixin` and `CLISettingsMixin`
+  over pydantic-settings' own `BaseSettings` read a cwd `.env` in full: a
+  cloned repository's `.env` could turn `permissions_enabled` off, choose the
+  `local` executor, turn raw LLM logging on, or define a provider that sends
+  the user's key to its own server. Such a class read neither settings file
+  either, so what `/settings` saved for it was never read back. The sources
+  now come with the mixins (`settings_sources.SettingsSourcesMixin`): such a
+  class reads the constructor, the environment, the project file
+  (allowlisted), the user file and its env files (a cwd-relative one
+  allowlisted), in that order, as `BaseSettings` does. It no longer reads
+  pydantic-settings' `secrets_dir`, which `BaseSettings` never read either: a
+  configured one (the class's or the constructor's `_secrets_dir`) is now
+  reported, `settings_secrets_dir_ignored`. The mixins must come before
+  pydantic-settings' class, or that class's own sources win: a settings class
+  that lists it first, or between the mixins, is refused with a `TypeError`
+  when it is defined, unless it defines `settings_customise_sources` itself.
 
 ### Added
 
@@ -766,6 +785,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`app_name` comes only from the application.** It chooses the settings
+  files, yet the environment (`AGENTIC_APP_NAME`, or an app's prefix) and the
+  user file could set it too, after the files had been chosen by the class's
+  name: the settings were read from `~/.agentic_cli/`, `/settings` saved to
+  `~/.myapp/`, and the permission engine read `./.myapp/settings.json`'s deny
+  rules. Only the constructor or the settings class sets it now; an `app_name`
+  in the environment, either settings file or an env file is ignored, and one
+  that differs is reported (`settings_app_name_ignored`, naming the source; in
+  the project file or a cwd `.env` it replaces
+  `untrusted_project_setting_ignored`). The one exception is the app's own:
+  enabling pydantic-settings' `cli_parse_args` adds a command-line source
+  above all of these, which can set it.
+  **Breaking:** an app run under another name through `AGENTIC_APP_NAME` (or
+  `"app_name"` in a settings file) needs the name in its settings class or
+  constructor.
 - **`/resume` reopens conversations; finished jobs resume with `/jobs
   resume`** (breaking). The old `ResumeCommand` is gone, and `/jobs`
   gains `resume`: it runs the resumes of finished, resume-flagged jobs, as

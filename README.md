@@ -498,13 +498,25 @@ older version had, say) is dropped silently.
 **Consequence:** put API keys in real environment variables or an
 absolute/user-level file. A key placed in a cwd `.env` is deliberately ignored.
 
-The JSON sources and this filtering are `agentic_cli.BaseSettings`'s. A class
-composed from the mixins over pydantic-settings' own `BaseSettings` reads the
-constructor, the environment and its `env_file` as pydantic-settings does, with
-no filtering: give such a class no cwd-relative `env_file`, or a cloned
-repository's `.env` can set any setting, `model_providers` included. Its
-configured providers' keys are read from the environment and the absolute
-entries of its class's `env_file`.
+`app_name` names the files above, and the ones settings are saved to, so only
+the constructor or the settings class sets it: an `app_name` in the environment
+(`AGENTIC_APP_NAME`, or your prefix's), in either settings file or in an env
+file is ignored, with a warning (`settings_app_name_ignored`). The one
+exception is the app's own: one that enables pydantic-settings'
+`cli_parse_args` gets a command-line source above all of these, which can set
+it.
+
+These sources and their filtering come with the settings mixins
+(`WorkflowSettingsMixin`, `AppSettingsMixin`): a class composed from them over
+pydantic-settings' own `BaseSettings` reads the same sources, in the same
+order, filtered the same way. The mixins must come before pydantic-settings'
+class, as in `BaseSettings`: a settings class that lists that class first, or
+between the mixins, is refused with a `TypeError` when it is defined (its
+sources would be pydantic-settings' own), unless it defines
+`settings_customise_sources` itself. Its configured providers' keys are read
+from the environment and the absolute entries of its class's `env_file`.
+pydantic-settings' `secrets_dir` is not read by any of these classes; one
+configured is reported (`settings_secrets_dir_ignored`).
 
 ### Key Settings
 
