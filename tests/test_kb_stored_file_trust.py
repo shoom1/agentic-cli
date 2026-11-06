@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 
 from agentic_cli.memory._core.mock_embeddings import MockEmbeddingService
+from agentic_cli.memory.kb import UnsafeKnowledgeBase
 from agentic_cli.memory.kb._mock_vector_store import MockVectorStore
 from agentic_cli.memory.kb.manager import KnowledgeBaseManager
 from agentic_cli.memory.kb.models import SourceType
@@ -134,12 +135,18 @@ async def test_an_absolute_file_path_is_not_read(kb_dir, outside):
 
 
 async def test_a_files_directory_that_links_elsewhere_is_not_followed(kb_dir, outside):
+    """A knowledge base whose ``files`` is a symlink does not open (see
+    test_kb_document_id_trust.py); one replaced while a session runs is still
+    not read through."""
     doc_id = _ingest_pdf(kb_dir)
     _set_file_path(kb_dir, doc_id, "ledger.pdf")
+    kb = _open_kb(kb_dir)
     shutil.rmtree(kb_dir / "files")
     (kb_dir / "files").symlink_to(outside, target_is_directory=True)
 
-    assert OUTSIDE not in await _read(kb_dir, doc_id, full=True)
+    assert kb.get_file_path(doc_id) is None
+    with pytest.raises(UnsafeKnowledgeBase):
+        await _read(kb_dir, doc_id, full=True)
 
 
 async def test_a_stored_file_that_links_elsewhere_is_not_followed(kb_dir, outside):

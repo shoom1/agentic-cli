@@ -96,6 +96,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the executor backend, sandbox mounts and API keys included. The filter now
   judges the env files the settings actually read: the constructor's
   `_env_file` when one is given.
+- **The knowledge base never follows a symlink in its folder.** The project
+  knowledge base (`./.{app_name}/knowledge_base`) can arrive with a cloned
+  repository, and git keeps symlinks, but its files were opened by path
+  (since 0.5.0): a summary file `documents/<id>.md` linked elsewhere made
+  `kb_read` return that file verbatim (a link to `~/.aws/credentials`, say),
+  an `ingest_log.md` linked to a shell rc got a line per ingest and delete
+  holding the title (a web page's `<title>` or the model's argument), so
+  `$(…)` in it ran at the next shell start, a linked `files` folder let
+  deleting a document remove the file `metadata.json` named there, a
+  link to `/dev/zero` made opening the knowledge base read forever, and a
+  linked `./.{app_name}` or `knowledge_base` folder made the knowledge base
+  create and replace its files in the folder linked to (another
+  repository's `index.md`, say) or read another project's knowledge base.
+  The `kb.*` tools need no approval, so nothing asked. Every file the knowledge
+  base reads or appends to (metadata, texts, summaries, concept pages, the
+  vector and keyword indexes, the lock) is now opened only when it is a
+  regular file, never through a symlink; one that is not counts as missing,
+  with a warning (`memory_file_refused`), and the next write replaces it,
+  except the ingest log, which is left alone (`kb_ingest_log_not_written`).
+  The log's title and arXiv ID are written on one line, control characters
+  removed. A knowledge base whose `documents`, `embeddings`, `files` or
+  `concepts` folder, or `.lock` file, is a symlink does not open
+  (`UnsafeKnowledgeBase`, exported from `agentic_cli.memory.kb`), nor does
+  one reached through a symlink from the folder it is opened `within`
+  (`KnowledgeBaseManager(within=)`, `KnowledgeBase.open(within=)`; the
+  workflow passes the working directory for the project scope, so
+  `./.{app_name}` and its `knowledge_base` must be real folders, and a file
+  there no longer fails the start); it stops working if one becomes a
+  symlink while a session runs (a `git pull`, say). `KnowledgeBase.open`
+  leaves that scope out with a warning (`kb_scope_refused`), so the
+  workflow keeps the other scope, which takes the writes. **Breaking:** a
+  knowledge base with a subfolder linked to another disk no longer opens,
+  and the project knowledge base can no longer be a link; the user
+  knowledge base's whole directory still can.
 
 ### Added
 

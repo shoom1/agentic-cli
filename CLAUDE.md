@@ -50,7 +50,7 @@ agentic-cli/
 │   │   ├── context.py        # ContextBudget/context_budget: when to summarize (window or the 128k floor, budget, trigger, keep; both backends, the CLI); is_context_overflow, overflow_message
 │   │   ├── retry.py          # Rate-limit retry helpers
 │   │   ├── tool_summaries.py
-│   │   ├── memory_services.py # Settings → agentic_cli.memory arguments (KBs, memory store)
+│   │   ├── memory_services.py # Settings → agentic_cli.memory arguments (KBs, memory store); the project KB opened within=Path.cwd()
 │   │   ├── model_services.py # Settings → agentic_cli.models arguments (keys, model_providers, entries, roles); a configured provider's key: the environment, then user_env_files (absolute env_file entries; provider_env); build_catalog (with model_references and computed_roles: the settings', the agents' and the manager's); role_models (the roles' models the list offers, for the pickers and /models)
 │   │   ├── model_wire.py     # What both adapters send: timeouts, placeholder key, an openrouter-kind provider's headers, reasoning_body (by the provider's kind and the model's thinking)
 │   │   ├── langchain_models.py # build_chat_model: ResolvedModel → LangChain chat model (profile=); OpenAICompatibleChat
@@ -136,11 +136,11 @@ agentic-cli/
 │   │   └── webfetch/        # Fetcher, converter, validator, robots, summarizer, saved pages
 │   ├── memory/               # Knowledge base + memory store; imports nothing else from agentic_cli
 │   │   ├── __init__.py       # MemoryStore, MemoryItem, ForgettingPolicy, EmbeddingService, EmbeddingConfig, MockEmbeddingService
-│   │   ├── _core/            # Shared, private: embeddings.py, mock_embeddings.py, io.py, log.py, model_record.py
+│   │   ├── _core/            # Shared, private: embeddings.py, mock_embeddings.py, io.py (atomic writes; reads and appends of regular files only, never through a symlink), log.py, model_record.py
 │   │   ├── store.py          # MemoryStore
 │   │   └── kb/               # Knowledge base (agentic_cli.memory.kb)
-│   │       ├── manager.py    # KnowledgeBaseManager(base_dir, embedding=, summarizer=), Summarizer
-│   │       ├── knowledge_base.py  # KnowledgeBase (provisional): the scopes as one, and the ingestion pipeline (ingest_text, ingest_bytes)
+│   │       ├── manager.py    # KnowledgeBaseManager(base_dir, embedding=, summarizer=), Summarizer; UnsafeKnowledgeBase: a symlinked documents/embeddings/files/concepts folder or .lock, or a link between `within=` and the knowledge base (checked at open and in every transaction)
+│   │       ├── knowledge_base.py  # KnowledgeBase (provisional): the scopes as one (open leaves an unsafe scope out), and the ingestion pipeline (ingest_text, ingest_bytes)
 │   │       ├── enrich.py      # The summary/sidecar prompts and parser: one summarizer call per document
 │   │       ├── models.py     # Document, SearchResult, SourceType
 │   │       ├── convert.py    # convert_document (HTML main text via trafilatura, html2text fallback; pypdf), own _charset.py

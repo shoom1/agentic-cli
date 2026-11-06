@@ -7,7 +7,7 @@ import math
 from collections import Counter
 from pathlib import Path
 
-from agentic_cli.memory._core.io import atomic_write_json
+from agentic_cli.memory._core.io import atomic_write_json, read_if_regular
 from agentic_cli.memory.kb._tokenize import TOKENIZER, tokenize
 
 
@@ -84,13 +84,14 @@ class MockBM25Index:
         atomic_write_json(path / "bm25_index.json", data)
 
     def load(self, path: Path) -> None:
-        index_path = path / "bm25_index.json"
-        if index_path.exists():
-            data = json.loads(index_path.read_text())
-            if data.get("tokenizer") != TOKENIZER:
-                return  # tokenized another way: the knowledge base re-indexes
-            self._chunk_ids = data["chunk_ids"]
-            self._documents = data["documents"]
+        raw = read_if_regular(path / "bm25_index.json")  # a symlink counts as none
+        if raw is None:
+            return
+        data = json.loads(raw)
+        if data.get("tokenizer") != TOKENIZER:
+            return  # tokenized another way: the knowledge base re-indexes
+        self._chunk_ids = data["chunk_ids"]
+        self._documents = data["documents"]
 
     @staticmethod
     def _tokenize(text: str) -> list[str]:

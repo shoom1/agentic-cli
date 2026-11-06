@@ -14,13 +14,11 @@ integer dimension counts as no record.
 from __future__ import annotations
 
 import json
-import os
-import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from agentic_cli.memory._core.io import atomic_write_json
+from agentic_cli.memory._core.io import atomic_write_json, read_regular_file
 
 # Two short fields; anything bigger is not a record.
 _MAX_RECORD_BYTES = 4096
@@ -45,20 +43,10 @@ def _valid(name: Any, dim: Any) -> bool:
 
 
 def _read_small_file(path: Path) -> bytes | None:
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     try:
-        fd = os.open(path, flags)
+        return read_regular_file(path, limit=_MAX_RECORD_BYTES)
     except OSError:
         return None
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            return None
-        data = os.read(fd, _MAX_RECORD_BYTES + 1)
-    except OSError:
-        return None
-    finally:
-        os.close(fd)
-    return None if len(data) > _MAX_RECORD_BYTES else data
 
 
 def read_model_record(path: Path) -> ModelRecord | None:
