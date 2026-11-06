@@ -66,10 +66,14 @@ def open_knowledge_base(
 
     The project scope is ``./.{app_name}/knowledge_base``, the user scope
     ``knowledge_base_dir``; when both resolve to one directory they are one
-    scope. It gets ``summarizer`` only when ``knowledge_base_summarize`` is
-    on, and shares ``embedding_service`` when one is given (else it builds
-    one, except in mock mode). ``scopes`` opens only some of them, for a
-    command that lists one.
+    scope. A cloned repository can ship ``./.{app_name}`` or its
+    ``knowledge_base`` as a symlink, so the project scope opens only when
+    both are real folders (else it is left out, with a warning); the user
+    scope's folder may be a link (to another disk, say). It gets
+    ``summarizer`` only when ``knowledge_base_summarize`` is on, and shares
+    ``embedding_service`` when one is given (else it builds one, except in
+    mock mode). ``scopes`` opens only some of them, for a command that lists
+    one.
     """
     from agentic_cli.memory.kb import KnowledgeBase
 
@@ -85,6 +89,7 @@ def open_knowledge_base(
         embedding=embedding_config(settings),
         summarizer=summarizer,
         use_mock=settings.knowledge_base_use_mock,
+        within={"project": Path.cwd()},
     )
 
 

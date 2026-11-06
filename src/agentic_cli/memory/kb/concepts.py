@@ -1,7 +1,8 @@
 """Concept pages — agent-curated markdown notes layered on top of the KB.
 
 Pure file operations; no vector/embedding coupling. Grep-based search
-suited for the 100-500 concept ceiling.
+suited for the 100-500 concept ceiling. A page is read only when it is a
+regular file, never through a symlink (a project can ship its pages).
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from agentic_cli.memory._core.io import atomic_write_text
+from agentic_cli.memory._core.io import atomic_write_text, read_if_regular
 
 
 _SLUG_INVALID_CHARS = re.compile(r"[^a-z0-9\s-]")
@@ -252,10 +253,8 @@ class ConceptStore:
 
     def read(self, slug: str) -> dict[str, Any] | None:
         """Load a concept page by slug. Returns None if missing."""
-        path = self._concept_path(slug)
-        if not path.exists():
-            return None
-        return parse_concept_markdown(path.read_text())
+        text = _read_page(self._concept_path(slug))
+        return None if text is None else parse_concept_markdown(text)
 
     def list(self) -> list[dict[str, Any]]:
         """Return all concepts as summary dicts, sorted by updated_at desc.
@@ -266,7 +265,8 @@ class ConceptStore:
             return []
         items: list[dict[str, Any]] = []
         for path in self.base_dir.glob("*.md"):
-            parsed = parse_concept_markdown(path.read_text())
+            text = _read_page(path)
+            parsed = None if text is None else parse_concept_markdown(text)
             if parsed is None:
                 continue
             items.append({
@@ -292,7 +292,8 @@ class ConceptStore:
         body_hits: list[dict[str, Any]] = []
 
         for path in self.base_dir.glob("*.md"):
-            parsed = parse_concept_markdown(path.read_text())
+            text = _read_page(path)
+            parsed = None if text is None else parse_concept_markdown(text)
             if parsed is None:
                 continue
             title_lower = parsed["title"].lower()
@@ -333,6 +334,12 @@ class ConceptStore:
         raise RuntimeError(
             f"exhausted collision suffixes 2..999 for slug {base_slug!r}"
         )
+
+
+def _read_page(path: Path) -> str | None:
+    """A page's text; None when it is missing, a symlink or not a regular file."""
+    data = read_if_regular(path)
+    return None if data is None else data.decode("utf-8")
 
 
 def _partition_sources(

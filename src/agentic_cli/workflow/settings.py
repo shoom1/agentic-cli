@@ -30,6 +30,7 @@ from agentic_cli.models import (
     validate_provider_name,
 )
 from agentic_cli.models.entries import check_entries
+from agentic_cli.settings_sources import SettingsSourcesMixin
 from agentic_cli.workflow.context import MIN_BUDGET
 
 logger = Loggers.config()
@@ -63,7 +64,7 @@ class OrchestratorType(str, Enum):
     DEEPAGENTS = "deepagents"
 
 
-class WorkflowSettingsMixin:
+class WorkflowSettingsMixin(SettingsSourcesMixin):
     """Settings for agentic workflow configuration.
 
     Mixin class that provides workflow-specific settings including:
@@ -75,7 +76,9 @@ class WorkflowSettingsMixin:
     - Tool configuration (web search/fetch, KB, shell, executor)
     - HITL and persistence settings
 
-    Should be composed with BaseSettings via multiple inheritance.
+    Should be composed with BaseSettings via multiple inheritance, before
+    pydantic-settings' class: it brings the settings' sources and their trust
+    filters (``SettingsSourcesMixin``) with it.
 
     Note: This is a mixin, not a BaseSettings subclass, to avoid
     MRO issues when composed with other settings classes.
