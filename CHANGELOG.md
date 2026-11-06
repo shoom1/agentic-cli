@@ -48,13 +48,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and writing the credential stores (`~/.ssh`, `~/.gnupg`, `~/.aws`,
   `~/.azure`, `~/.kube`, `~/.config/gcloud`, `~/.config/gh`,
   `~/.docker/config.json`, `~/.netrc`, `~/.git-credentials`, `~/.pypirc`,
-  `~/.npmrc`) and `~/.{app_name}` are denied, as are reading the project's
-  `.env` and writing shell start-up files, `~/.gitconfig`, `~/.claude`, the
-  system directories (now `/Library` too, and `/boot` in the sandbox), the
-  project's `.git` and its `./.{app_name}`. **Breaking:** no allow rule or
-  grant reaches these; an application whose agent reads files it keeps in
-  `~/.{app_name}` (the examples' `workspace_dir`, where the sandbox's
-  artifacts land) must keep them elsewhere.
+  `~/.npmrc`) are denied, as are reading the app's keys
+  (`~/.{app_name}/.env` and every env file its settings read) and the
+  project's `.env`, and writing `~/.{app_name}`, shell start-up files,
+  `~/.gitconfig`, `~/.claude`, the system directories (now `/Library` too,
+  and `/boot` in the sandbox), the project's `.git` and its `./.{app_name}`.
+  The sandbox still hides all of `~/.{app_name}` from the code it runs.
+  **Breaking:** no allow rule or grant reaches these.
 - **A grant for a file in your home directory covers only that file.** "Allow
   for this session" on one file directly in `$HOME` widened to `$HOME/**`
   (since 0.5.1), which covered writing `~/.zshrc` and

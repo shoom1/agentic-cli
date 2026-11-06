@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -87,11 +88,46 @@ BUILTIN_RULES: list[Rule] = list(dict.fromkeys([  # each rule once (the lists ov
     # .${app_name} (its settings): never written. Its .env: never read.
     *_denies((_WRITE,), protected_paths.WORKDIR_NEVER_WRITABLE),
     *_denies((_READ,), protected_paths.WORKDIR_NEVER_READABLE),
-    # The app's own config dir (keys, settings, grants): writing it would let
-    # the agent rewrite permission rules or disable the engine
-    # (self-escalation), and reading it would give away the keys.
-    *_denies((_READ, _WRITE), (protected_paths.APP_CONFIG_DIR,)),
+    # The app's own config dir (keys, settings, grants, jobs, sessions):
+    # writing it would let the agent rewrite permission rules or disable the
+    # engine (self-escalation). Reading it is denied for the keys only: an app
+    # may keep files there for its agent to read, and started from home it is
+    # ./.${app_name}, where the framework saves tool outputs and pages. The
+    # engine also denies reading every env file the settings read
+    # (settings_env_file_denies).
+    *_denies((_WRITE,), (protected_paths.APP_CONFIG_DIR,)),
+    *_denies((_READ,), (protected_paths.APP_ENV_FILE,)),
 ]))
+
+
+def settings_env_file_denies(settings: object, ctx: PermissionContext) -> list[Rule]:
+    """A builtin read deny for each env file the settings read.
+
+    The files are ``BaseSettings.env_files`` (for settings composed from the
+    mixins without it, their class's ``env_file``): the keys an app was given,
+    wherever its ``env_file`` puts them. ``~`` expands to the process's home,
+    as when the settings read the file, and a relative entry is anchored at
+    the working directory. Each rule is the file's resolved path.
+    """
+    entries = getattr(settings, "env_files", None)
+    if not isinstance(entries, (str, os.PathLike, list, tuple)):
+        model_config = getattr(type(settings), "model_config", None)
+        entries = model_config.get("env_file") if isinstance(model_config, dict) else None
+    if entries is None:
+        return []
+    if isinstance(entries, (str, os.PathLike)):
+        entries = (entries,)
+    rules: list[Rule] = []
+    for entry in entries:
+        if entry is None:
+            continue
+        path = Path(entry).expanduser()
+        if not path.is_absolute():
+            path = ctx.workdir / path
+        rule = Rule(_READ, str(path.resolve(strict=False)), Effect.DENY, RuleSource.BUILTIN)
+        if rule not in rules:
+            rules.append(rule)
+    return rules
 
 
 def load_rules(

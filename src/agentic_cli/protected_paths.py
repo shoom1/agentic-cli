@@ -3,7 +3,9 @@
 One set of lists for both enforcers: the permission engine's builtin deny rules
 (``workflow/permissions/store.py::BUILTIN_RULES``) and the OS sandbox's policy
 (``tools/shell/os_sandbox/policy.py``) are built from them, so a file the
-sandbox hides from code is one the engine refuses a tool, and the reverse.
+sandbox protects from code is one the engine refuses a tool, and the reverse,
+with one difference: of ``~/.{app_name}`` the sandbox hides everything, the
+engine denies reading only the keys (see ``APP_CONFIG_DIR``).
 
 A location is spelled ``~/…`` (under the home directory), ``/…`` (absolute) or
 relative (under the working directory), and ``{app_name}`` stands for the
@@ -91,6 +93,16 @@ WORKDIR_NEVER_READABLE: tuple[ProtectedPath, ...] = (
     _file(".env"),
 )
 
-#: The application's own config directory (its ``.env`` with the keys, its
-#: settings, the permission grants): neither readable nor writable.
+#: The application's own config directory: its keys (``.env``), settings,
+#: permission grants, jobs and sessions. Never writable (an agent that wrote
+#: it could rewrite its own permissions). The OS sandbox also hides all of it
+#: from the code it runs; the permission engine denies reading only the keys
+#: (``APP_ENV_FILE``, and every env file the settings read), because an app
+#: may keep files there for its agent to read (a ``workspace_dir``, the
+#: sandbox's artifacts) and, started from home, ``./.{app_name}`` is this
+#: directory, holding the tool outputs and pages the framework saves for
+#: ``read_file``.
 APP_CONFIG_DIR: ProtectedPath = _dir("~/.{app_name}")
+
+#: The application's keys file: never readable by a tool.
+APP_ENV_FILE: ProtectedPath = _file("~/.{app_name}/.env")

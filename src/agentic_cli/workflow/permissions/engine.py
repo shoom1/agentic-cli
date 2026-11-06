@@ -41,6 +41,7 @@ from agentic_cli.workflow.permissions.store import (
     PermissionContext,
     load_project_grants,
     load_rules,
+    settings_env_file_denies,
 )
 
 if TYPE_CHECKING:
@@ -268,6 +269,8 @@ class PermissionEngine:
                     source=r.source,
                 )
             )
+        # The keys the app was given, wherever its env_file puts them.
+        rules += settings_env_file_denies(self._settings, self._ctx)
         app = self._settings.app_name
         rules += load_rules(get_user_config_path(app), RuleSource.USER, self._ctx)
         # PROJECT settings.json is untrusted (a cloned repo can ship it): honor

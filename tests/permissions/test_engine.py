@@ -778,7 +778,8 @@ def _protected_cases() -> list:
         ("never-writable", pp.NEVER_WRITABLE, (write,)),
         ("workdir", pp.WORKDIR_NEVER_WRITABLE, (write,)),
         ("workdir", pp.WORKDIR_NEVER_READABLE, (read,)),
-        ("app-config", (pp.APP_CONFIG_DIR,), (read, write)),
+        ("app-config", (pp.APP_CONFIG_DIR,), (write,)),
+        ("app-keys", (pp.APP_ENV_FILE,), (read,)),
     ]
     return [
         pytest.param(entry, cap, id=f"{name}:{cap}:{entry.location}")
@@ -885,3 +886,89 @@ class TestDefaultPolicyProtectsWhatTheSandboxDoes:
         below = await engine.check("glob", _READ, {"path": str(layout.home / "docs")})
         assert below.allowed is False
         assert len(approver.requests) == 2
+
+
+class TestTheAppHomeDirHidesOnlyItsKeys:
+    """The app's ``~/.{app}`` holds its keys (``.env``) but also what an app
+    keeps for its agent to read (the examples' ``workspace_dir``, the
+    sandbox's artifacts) and, started from home, the framework's own
+    ``./.{app}/tool-output`` and ``fetched`` pages. Reading is denied for the
+    keys only: every env file the settings read, and ``~/.{app}/.env``.
+    Writing all of it stays denied."""
+
+    @pytest.mark.asyncio
+    async def test_an_artifact_in_the_app_home_dir_asks(self, layout):
+        artifact = layout.home / f".{APP}" / "artifacts" / "x.png"
+        approver = _Approver("Deny")
+        engine = _engine_in(layout, approver)
+
+        result = await engine.check("read_file", _READ, {"path": str(artifact)})
+
+        assert len(approver.requests) == 1, result.reason
+        assert result.reason == "no rule + user denied"
+        write = await engine.check("write_file", _WRITE, {"path": str(artifact)})
+        assert write.allowed is False and "builtin/deny" in write.reason
+
+    @pytest.mark.asyncio
+    async def test_the_app_keys_file_is_not_readable(self, layout):
+        approver = _Approver(ALLOW_SESSION_CHOICE)
+        engine = _engine_in(layout, approver)
+
+        for name in (".env", ".ENV"):
+            target = layout.home / f".{APP}" / name
+            result = await engine.check("read_file", _READ, {"path": str(target)})
+            assert result.allowed is False, name
+            assert "builtin/deny" in result.reason
+        assert approver.requests == []
+
+    @pytest.mark.asyncio
+    async def test_an_env_file_the_settings_read_is_not_readable(self, layout, monkeypatch):
+        """Each of ``settings.env_files``: absolute, ``~``-relative, and a
+        cwd-relative entry, which is anchored at the working directory."""
+        from agentic_cli.config import BaseSettings
+
+        absolute = layout.root / "keys" / "app.env"
+        in_home = layout.home / "keys" / "app.env"
+        relative = layout.work / "config" / "app.env"
+        for f in (absolute, in_home, relative):
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text("API_KEY=not-a-key\n")
+        settings = BaseSettings(
+            app_name=APP, _env_file=(str(absolute), "~/keys/app.env", "config/app.env"),
+        )
+        # The process is elsewhere: a relative entry still means the project's.
+        monkeypatch.chdir(layout.root)
+        approver = _Approver(ALLOW_SESSION_CHOICE)
+        ctx = PermissionContext(workdir=layout.work, home=layout.home, app_name=APP)
+        engine = PermissionEngine(settings=settings, workflow=approver, ctx=ctx)
+
+        for target in (absolute, in_home, relative):
+            result = await engine.check("read_file", _READ, {"path": str(target)})
+            assert result.allowed is False, target
+            assert "builtin/deny" in result.reason, result.reason
+        assert approver.requests == []
+
+    @pytest.mark.asyncio
+    async def test_started_from_home_the_framework_files_stay_readable(
+        self, layout, monkeypatch
+    ):
+        """From home, ``./.{app}`` is ``~/.{app}``: the saved tool outputs and
+        pages the framework points the model at are read without a prompt,
+        and the keys beside them are not read at all."""
+        monkeypatch.chdir(layout.home)
+        saved = layout.home / f".{APP}" / "tool-output" / "x.txt"
+        saved.parent.mkdir(parents=True)
+        saved.write_text("saved\n")
+        (layout.home / f".{APP}" / ".env").write_text("API_KEY=not-a-key\n")
+        approver = _Approver("Deny")
+        ctx = PermissionContext(workdir=layout.home, home=layout.home, app_name=APP)
+        engine = PermissionEngine(
+            settings=_stub_settings(app_name=APP), workflow=approver, ctx=ctx
+        )
+
+        result = await engine.check("read_file", _READ, {"path": f"./.{APP}/tool-output/x.txt"})
+        assert result.allowed is True and "builtin/allow" in result.reason, result.reason
+        keys = await engine.check("read_file", _READ, {"path": f"./.{APP}/.env"})
+        assert keys.allowed is False and "builtin/deny" in keys.reason, keys.reason
+        assert approver.requests == []
+
