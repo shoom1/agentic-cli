@@ -5,9 +5,11 @@ from __future__ import annotations
 import ipaddress
 import socket
 from dataclasses import dataclass
-from urllib.parse import urlparse
+from urllib.parse import urlsplit
 
 import httpx
+
+from agentic_cli.urls import canonical_host, canonical_url
 
 
 class BlockedAddressError(httpx.RequestError):
@@ -70,13 +72,19 @@ class URLValidator:
     def validate(self, url: str) -> ValidationResult:
         """Scheme + blocked-domain + hostname-present + IP-literal safety.
 
+        The URL is read as the HTTP client sends it (``canonical_url``): the
+        blocked domains are compared with the host httpx resolves, so
+        ``blocked.example.`` and ``blocked。example`` (U+3002, which httpx
+        sends as ``.``) are ``blocked.example``. A URL httpx cannot send (an
+        invalid IDNA host) is an error here, not an exception out of the fetch.
+
         Does NOT resolve DNS — hostname resolution is done (once) by the
         transport's resolve_and_validate, which pins the connection.
         """
         try:
-            parsed = urlparse(url)
-        except Exception as e:
-            return ValidationResult(valid=False, error=f"Malformed URL: {e}")
+            parsed = urlsplit(canonical_url(url))
+        except ValueError as e:
+            return ValidationResult(valid=False, error=f"Invalid URL: {e}")
 
         if parsed.scheme not in self.ALLOWED_SCHEMES:
             return ValidationResult(
@@ -128,13 +136,23 @@ class URLValidator:
         return str(ips[0])
 
     def _is_domain_blocked(self, hostname: str) -> bool:
-        hostname_lower = hostname.lower()
+        """Whether a canonical ``hostname`` is a blocked domain or, for a
+        ``*.domain`` entry, below it. Each entry is read as a host the client
+        sends (``canonical_host``), so one written with a Unicode host, its
+        dots or a trailing dot blocks the domain it names."""
         for pattern in self.blocked_domains:
-            pattern_lower = pattern.lower()
-            if hostname_lower == pattern_lower:
+            pattern = pattern.strip()
+            wildcard = pattern.startswith("*.")
+            domain = _blocked_domain(pattern[2:] if wildcard else pattern)
+            if hostname.endswith(f".{domain}") if wildcard else hostname == domain:
                 return True
-            if pattern_lower.startswith("*."):
-                suffix = pattern_lower[1:]  # .example.com
-                if hostname_lower.endswith(suffix) and hostname_lower != pattern_lower[2:]:
-                    return True
         return False
+
+
+def _blocked_domain(domain: str) -> str:
+    """A blocked-domains entry as the host the client sends; one it cannot
+    send (no URL's host can equal it) is compared as written, lowercased."""
+    try:
+        return canonical_host(domain)
+    except ValueError:
+        return domain.lower().removesuffix(".")

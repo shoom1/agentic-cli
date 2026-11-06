@@ -24,6 +24,7 @@ from agentic_cli.settings_persistence import (
     get_project_config_path,
     get_user_config_path,
 )
+from agentic_cli.urls import canonical_url
 from agentic_cli.workflow.events import UserInputUnavailable
 from agentic_cli.workflow.permissions.capabilities import (
     Capability,
@@ -99,14 +100,17 @@ def site_scope(url: str) -> str | None:
 
     Only HTTPS, and only a DNS name with a dot: the exact host (no other
     subdomain) and port. A plain-HTTP URL, an IP address, ``localhost`` or a
-    single-label name gets None, so its grant stays the exact URL.
+    single-label name gets None, so its grant stays the exact URL. The host is
+    the one the HTTP client sends (``canonical_url``), so ``localhost.`` is
+    ``localhost`` and ``docs。example。org`` is ``docs.example.org``; a URL the
+    client cannot send has no site.
     """
     try:
-        parts = urlsplit(url)
+        parts = urlsplit(canonical_url(url))
         port = parts.port
     except ValueError:
         return None
-    host = (parts.hostname or "").lower()
+    host = parts.hostname or ""
     if parts.scheme != "https" or "." not in host or host.endswith(".localhost"):
         return None
     try:
