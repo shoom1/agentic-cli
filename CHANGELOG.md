@@ -1754,6 +1754,13 @@ step; each entry says what to use instead.
 
 ### Fixed
 
+- **A finished job is no longer recorded FAILED with exit code 1 when it
+  is polled as it ends.** A subprocess job's shell, and the in-process
+  backend, truncated the `exit_code` sentinel before writing the code, and
+  the reader took an empty sentinel as exit 1: under load about 1 job in 70
+  that succeeded, or exited 3, was recorded FAILED with exit 1, for good
+  (the flaky `test_jobs.py` tests on CI). The sentinel is now written to a
+  temporary file and renamed into place, and an empty one reads as "not yet".
 - **A malformed `permissions` section in a project's settings file no longer
   stops the app.** The engine parsed the project file's section without a
   schema (since 0.5.1), so a cloned repository whose
