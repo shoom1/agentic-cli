@@ -304,10 +304,16 @@ class SandboxManager:
     ) -> ExecutionResult:
         """Run one call; the caller holds the session's lock."""
         with self._lock:
+            backend = None if self._closed else self._ensure_backend()
+            session = self._sessions.get(session_id)
+        if session is None and backend is not None:
+            # The manager knows no such session, so no kernel may serve it: a
+            # reset that came after this call took the session's lock found
+            # no cell to stop and left the kernel's shutdown to this call.
+            self._shut_down(backend, session_id)
+        with self._lock:
             if self._closed:
                 return ExecutionResult(success=False, error="The sandbox is shut down.")
-            backend = self._ensure_backend()
-            session = self._sessions.get(session_id)
             if session is None:
                 max_sessions = self._settings.sandbox_max_sessions
                 if len(self._sessions) >= max_sessions:
@@ -390,17 +396,21 @@ class SandboxManager:
                     return False
                 idle = slot.lock.acquire(blocking=False)
                 backend = self._backend
+                if not idle and backend is not None:
+                    # Under the manager's lock, which the call needs to release
+                    # the session: the stop cannot reach a kernel a later call
+                    # starts. It touches nothing the call waits on, so it
+                    # cannot wait for the call.
+                    try:
+                        backend.stop(session_id)
+                    except Exception as exc:  # noqa: BLE001 - the call still shuts it down
+                        logger.warning("sandbox_stop_failed", session_id=session_id, error=str(exc))
             if idle:
                 try:
                     if backend is not None:
                         backend.reset_session(session_id)
                 finally:
                     slot.lock.release()
-            elif backend is not None:
-                try:
-                    backend.stop(session_id)
-                except Exception as exc:  # noqa: BLE001 - the call still shuts it down
-                    logger.warning("sandbox_stop_failed", session_id=session_id, error=str(exc))
         logger.debug("sandbox_session_reset", session_id=session_id, deferred=not idle)
         return True
 

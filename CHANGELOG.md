@@ -1798,8 +1798,11 @@ step; each entry says what to use instead.
   longer create two backends or pass `sandbox_max_sessions` together, and a
   `/sandbox reset` or shutdown during a call no longer pulls the kernel out
   from under it (`ZMQError: Socket operation on non-socket`): the cell is
-  stopped (the local kernel interrupted, the container killed) and the call
-  shuts the kernel down as it ends.
+  stopped (the local kernel interrupted; the container killed, the call
+  saying a sandbox reset stopped it rather than suggesting an out-of-memory
+  kill) and the call shuts the kernel down as it ends. A reset that lands
+  just as a call takes the session is no longer lost: that call starts a new
+  kernel.
 - **On ADK, a main agent's reply that is no answer ends the turn with an
   error.** A reply with nothing but thoughts or blank text raises nothing on
   ADK: Gemini's `SAFETY`, `MALFORMED_FUNCTION_CALL` or `MAX_TOKENS` (every

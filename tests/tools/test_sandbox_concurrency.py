@@ -78,6 +78,48 @@ class GatedBackend(SandboxBackend):
         return session_id in self._sessions
 
 
+class Kernels(SandboxBackend):
+    """A kernel per session, numbered as started, whose variables live until
+    it is reset. A cell ``hold`` runs until ``release`` is set; ``on_stop``
+    runs inside ``stop`` before it looks for the kernel."""
+
+    backend_name = "kernels"
+
+    def __init__(self) -> None:
+        self.started = 0
+        self.kernels: dict[str, dict] = {}
+        self.stopped: list[int | None] = []
+        self.holding = threading.Event()
+        self.release = threading.Event()
+        self.on_stop = lambda: None
+
+    def execute(self, code, session_id, timeout_seconds=120, working_dir=None, inputs=None):
+        kernel = self.kernels.get(session_id)
+        if kernel is None:
+            self.started += 1
+            kernel = self.kernels[session_id] = {"n": self.started, "x": None}
+        if code.startswith("set "):
+            kernel["x"] = code[4:]
+        elif code == "hold":
+            self.holding.set()
+            self.release.wait(timeout=5)
+        return ExecutionResult(success=True, stdout=f"kernel {kernel['n']}, x={kernel['x']}")
+
+    def reset_session(self, session_id):
+        self.kernels.pop(session_id, None)
+
+    def stop(self, session_id):
+        self.on_stop()
+        kernel = self.kernels.get(session_id)
+        self.stopped.append(kernel and kernel["n"])
+
+    def cleanup(self):
+        self.kernels.clear()
+
+    def has_session(self, session_id):
+        return session_id in self.kernels
+
+
 def until(condition, timeout: float = 5.0) -> bool:
     deadline = time.monotonic() + timeout
     while not condition():
@@ -234,6 +276,65 @@ def test_a_reset_during_a_call_leaves_the_teardown_to_it(ctx):
     mgr.cleanup()
 
 
+def test_a_reset_just_after_a_call_took_the_session_is_not_lost(ctx, monkeypatch):
+    backend = Kernels()
+    mgr = SandboxManager(ctx.settings, backend=backend)
+    assert mgr.execute("set secret", session_id="s1").stdout == "kernel 1, x=secret"
+    real = SandboxManager._execute_holding_lock
+    holding = threading.Event()
+
+    def late(self, *args, **kwargs):
+        holding.set()
+        time.sleep(0.3)  # the session's lock is held, the session not yet looked up
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(SandboxManager, "_execute_holding_lock", late)
+    with ThreadPoolExecutor(1) as pool:
+        call = pool.submit(mgr.execute, "print", session_id="s1")
+        assert holding.wait(5)
+        assert mgr.reset_session("s1") is True
+        during = call.result()
+    monkeypatch.setattr(SandboxManager, "_execute_holding_lock", real)
+    after = mgr.execute("print", session_id="s1")
+    mgr.cleanup()
+
+    # The reset came first: the call, and the next, run in a new kernel.
+    assert (during.stdout, after.stdout) == ("kernel 2, x=None", "kernel 2, x=None")
+
+
+def test_a_reset_stops_only_the_kernel_it_reset(ctx):
+    backend = Kernels()
+    mgr = SandboxManager(ctx.settings, backend=backend)
+    started_again = threading.Event()
+
+    def slow_stop():
+        # The held cell ends now; give the next call time to start a kernel
+        # before this stop looks for the one to stop.
+        backend.release.set()
+        started_again.wait(timeout=0.5)
+
+    backend.on_stop = slow_stop
+    with ThreadPoolExecutor(2) as pool:
+        held = pool.submit(mgr.execute, "hold", session_id="s1")
+        assert backend.holding.wait(5)
+        following = pool.submit(mgr.execute, "print", session_id="s1")
+        time.sleep(0.1)  # the next call waits for the session
+        real_execute = backend.execute
+
+        def noting_a_new_kernel(*args, **kwargs):
+            result = real_execute(*args, **kwargs)
+            started_again.set()
+            return result
+
+        backend.execute = noting_a_new_kernel
+        assert mgr.reset_session("s1") is True
+        results = [held.result().stdout, following.result().stdout]
+    mgr.cleanup()
+
+    assert backend.stopped == [1]  # never the next call's kernel
+    assert results == ["kernel 1, x=None", "kernel 2, x=None"]
+
+
 def test_cleanup_during_a_call_leaves_its_session_to_it(ctx):
     backend = GatedBackend()
     mgr = SandboxManager(ctx.settings, backend=backend)
@@ -304,7 +405,9 @@ def test_a_reset_stops_a_docker_call_at_once():
             mgr.cleanup()
 
     assert took < 1
-    assert stopped.success is False and "exited" in stopped.error
+    assert stopped.success is False
+    # The model is told why, not that the container died (exit 137: an OOM kill?).
+    assert "sandbox reset" in stopped.error and "out-of-memory" not in stopped.error
     assert runtime.killed[0] == (runtime.started[0].name, None)
 
 
