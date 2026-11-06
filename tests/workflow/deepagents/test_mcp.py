@@ -31,6 +31,8 @@ import pytest
 pytest.importorskip("deepagents")
 pytest.importorskip("langchain_mcp_adapters")
 
+import anyio  # noqa: E402
+
 from langchain_core.messages import ToolMessage  # noqa: E402
 from langchain_core.tools import BaseTool, StructuredTool  # noqa: E402
 
@@ -304,6 +306,42 @@ class TestMCPSessions:
         assert exits == ["cancelled"]
         assert "mcp_session_close_timed_out" in recorder.events("warning")
 
+    async def test_a_call_its_session_left_unanswered_fails(self, monkeypatch):
+        """A session that ends with a call in flight fails the call.
+
+        mcp's stdio client can strand one: a request written to a server that
+        has just died breaks the transport's writer, and its error cancels the
+        session's receive loop before that loop fails the calls in flight.
+        """
+        monkeypatch.setattr(mcp_tools, "logger", _Recorder())
+        request = _stranding_sessions(monkeypatch)
+        sessions = MCPSessions()
+        try:
+            (add,), _ = await sessions.start("researcher", [MCPServerConfig(name="s", command="srv")])
+            with pytest.raises(ConnectionError, match="MCP server 's' went away"):
+                await asyncio.wait_for(add.ainvoke(_call(add, {"a": 2, "b": 3})), timeout=5)
+        finally:
+            await sessions.aclose()
+
+        assert request == ["sent", "cancelled"]
+
+    async def test_a_cancelled_call_cancels_its_request(self, monkeypatch):
+        request = _stranding_sessions(monkeypatch, breaks=False)
+        sessions = MCPSessions()
+        try:
+            (add,), _ = await sessions.start("researcher", [MCPServerConfig(name="s", command="srv")])
+            call = asyncio.create_task(add.ainvoke(_call(add, {"a": 2, "b": 3})))
+            while request != ["sent"]:
+                await asyncio.sleep(0)
+            call.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await call
+            await asyncio.sleep(0)
+        finally:
+            await sessions.aclose()
+
+        assert request == ["sent", "cancelled"]
+
 
 def _fake_sessions(
     monkeypatch, *, tools=(), exit_error=None, exit_hangs=False
@@ -337,6 +375,50 @@ def _fake_sessions(
     monkeypatch.setattr(mcp_tools, "load_mcp_tools", load_mcp_tools)
     return exits
 
+
+
+def _stranding_sessions(monkeypatch, *, breaks: bool = True) -> list[str]:
+    """Replace the adapter's session with one whose ``add`` is never answered.
+
+    With ``breaks``, the session's transport fails once the request is sent,
+    as mcp's stdio writer does on a dead server's stdin, and that cancels the
+    session without answering the call. Returns what the request saw.
+    """
+    request: list[str] = []
+    sent = asyncio.Event()
+
+    class _Session:
+        async def initialize(self) -> None:
+            return None
+
+    async def add(a: int, b: int) -> tuple[str, None]:
+        """Add two numbers."""
+        request.append("sent")
+        sent.set()
+        try:
+            await asyncio.Event().wait()  # the reply that never comes
+        except asyncio.CancelledError:
+            request.append("cancelled")
+            raise
+        return "unreachable", None
+
+    @asynccontextmanager
+    async def create_session(connection):
+        async def writer() -> None:
+            await sent.wait()
+            raise anyio.BrokenResourceError
+
+        async with anyio.create_task_group() as group:
+            if breaks:
+                group.start_soon(writer)
+            yield _Session()
+
+    async def load_mcp_tools(session, **kwargs):
+        return [StructuredTool.from_function(coroutine=add, response_format="content_and_artifact")]
+
+    monkeypatch.setattr(mcp_tools, "create_session", create_session)
+    monkeypatch.setattr(mcp_tools, "load_mcp_tools", load_mcp_tools)
+    return request
 
 # --- in the manager -------------------------------------------------------------------
 

@@ -557,7 +557,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rule such as `{"capability": "mcp", "target": "notion_*"}` allows a
   server's tools, and without one the user is asked. A text result is the
   tool's text, images pass through, and an MCP error result is
-  `{"success": false, "error": "<its text>"}`. A server that does not start
+  `{"success": false, "error": "<its text>"}`. A call whose server goes away
+  fails (`ConnectionError`) once its session ends: mcp's stdio client can
+  leave a request written to a server that has just died unanswered, and
+  the turn would wait for it forever. A server that does not start
   within its `timeout` (5 seconds by default) leaves the agent without its
   tools, and a tool whose name the agent already has, or `task`, is
   skipped. Neither stops the app: the next turn opens with a recoverable
