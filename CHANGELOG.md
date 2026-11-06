@@ -1769,7 +1769,8 @@ step; each entry says what to use instead.
   open: a stdio server outlived `cleanup()`, and every `/settings` model
   switch left one more running. The runner is now closed on every release,
   which closes the toolsets; a session service a model switch keeps is only
-  flushed.
+  flushed. Ctrl+C during a model switch stops only the wait: the release
+  goes on to its end.
 - **Two tool questions asked at once are shown one after the other.** The
   calls of one model step run together (both backends gather them), so two
   of them could ask at once (two `ask_clarification` calls, or one beside a

@@ -151,6 +151,37 @@ class TestRunnerClose:
 
         assert (runner.closes, service.closes) == (1, 0)
 
+    async def test_a_cancel_during_the_close_lets_everything_close(self):
+        """Ctrl+C can stop a ``/settings`` model switch while the runner
+        closes: it stops only the wait. Cancelled halfway, the toolsets not
+        yet closed, the session service and the catalog stayed open."""
+        service = _AsyncClosable()
+        mgr = _manager(service)
+        catalog = mgr._catalog = _AsyncClosable()
+        closing, release = asyncio.Event(), asyncio.Event()
+        finished: list[str] = []
+
+        class SlowRunner:
+            async def close(self) -> None:
+                closing.set()
+                await release.wait()
+                finished.append("runner")
+
+        mgr._runner = SlowRunner()
+        task = asyncio.create_task(mgr.cleanup())
+        await asyncio.wait_for(closing.wait(), timeout=5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        release.set()
+        for _ in range(100):
+            if service.closes:
+                break
+            await asyncio.sleep(0.01)
+
+        assert finished == ["runner"]
+        assert (service.closes, catalog.closes) == (1, 1)
+
     async def test_a_failing_close_does_not_block_shutdown(self):
         service = _AsyncClosable()
         mgr = _manager(service)

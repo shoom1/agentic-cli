@@ -88,7 +88,7 @@ async def test_cleanup_stops_the_servers_and_a_model_switch_leaves_one(
     try:
         await turn(manager)
         assert len(alive(pid_dir)) == 1
-        await manager.reinitialize(model="claude-sonnet-4-5")  # a /settings model switch
+        await manager.reinitialize(model="claude-haiku-4-5")  # a /settings model switch
         await turn(manager)
         assert len(alive(pid_dir)) == 1, "the switch left the old server running"
     finally:
