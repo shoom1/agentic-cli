@@ -6,7 +6,9 @@ managers (``AsyncSqliteSaver``/``AsyncPostgresSaver.from_conn_string``) that
 own their connection, so ``open_checkpointer`` returns the saver together with
 that context manager. The caller closes it on shutdown
 (``await cm.__aexit__(None, None, None)``); for ``memory`` and ``None`` it is
-``None`` (nothing to close).
+``None`` (nothing to close). ``open_store`` opens the LangGraph store of the
+same kind beside it, the same way: Deep Agents keeps its session index there
+(``workflow/deepagents/sessions.py``).
 
 Each backend says where its sqlite file is. ``deepagents_sqlite_path`` puts
 Deep Agents' file next to ADK's ``sessions.db`` and reads ``sqlite_uri`` the
@@ -36,6 +38,7 @@ if TYPE_CHECKING:
     from contextlib import AbstractAsyncContextManager
 
     from langgraph.checkpoint.base import BaseCheckpointSaver
+    from langgraph.store.base import BaseStore
 
 logger = Loggers.workflow()
 
@@ -114,6 +117,77 @@ async def open_checkpointer(
     )
 
 
+async def open_store(
+    kind: CheckpointerKind,
+    *,
+    sqlite_path: str | Path | None = None,
+    postgres_uri: str | None = None,
+) -> tuple["BaseStore", "AbstractAsyncContextManager | None"]:
+    """Open the LangGraph store beside the checkpointer ``kind`` names.
+
+    For sqlite it is the checkpointer's file, on a connection of its own: the
+    saver's connection runs transactions it commits itself, the store's runs
+    in autocommit. Its tables (``store``, ``store_migrations``) are neither
+    the saver's nor ADK's, which may share the file.
+
+    Args:
+        kind: ``"memory"``, ``"sqlite"`` or ``"postgres"``.
+        sqlite_path: The sqlite database file (required for ``"sqlite"``).
+        postgres_uri: The Postgres connection URI (required for ``"postgres"``).
+
+    Returns:
+        A ``(store, context_manager)`` tuple, as ``open_checkpointer``'s:
+        ``context_manager`` owns the store's connection for sqlite and
+        Postgres and must be closed on shutdown; it is ``None`` for
+        ``memory``.
+
+    Raises:
+        ImportError: If the store's package is not installed.
+        ValueError: If ``kind`` is unknown or its location is missing.
+    """
+    if kind == "memory":
+        from langgraph.store.memory import InMemoryStore
+
+        logger.debug("memory_store_created")
+        return InMemoryStore(), None
+
+    if kind == "postgres":
+        if not postgres_uri:
+            raise ValueError(
+                "The PostgreSQL store requires 'postgres_uri' in settings. "
+                "Set AGENTIC_POSTGRES_URI environment variable or add "
+                "postgres_uri to settings."
+            )
+        try:
+            from langgraph.store.postgres.aio import AsyncPostgresStore
+        except ImportError as e:
+            raise ImportError(
+                "The PostgreSQL store requires langgraph-checkpoint-postgres. "
+                "Install with: pip install langgraph-checkpoint-postgres"
+            ) from e
+        store, cm = await _enter(AsyncPostgresStore.from_conn_string(postgres_uri))
+        logger.debug("postgres_store_created")
+        return store, cm
+
+    if kind == "sqlite":
+        if not sqlite_path:
+            raise ValueError("The sqlite store requires sqlite_path.")
+        try:
+            from langgraph.store.sqlite.aio import AsyncSqliteStore
+        except ImportError as e:
+            raise ImportError(
+                "The SQLite store requires langgraph-checkpoint-sqlite. "
+                "Install with: pip install langgraph-checkpoint-sqlite"
+            ) from e
+        store, cm = await _enter(AsyncSqliteStore.from_conn_string(str(sqlite_path)))
+        logger.debug("sqlite_store_created", path=str(sqlite_path))
+        return store, cm
+
+    raise ValueError(
+        f"Unknown store type: {kind}. Valid types: 'memory', 'postgres', 'sqlite'"
+    )
+
+
 def _memory_saver() -> "BaseCheckpointSaver":
     """An in-memory saver (no connection to close)."""
     try:
@@ -126,8 +200,8 @@ def _memory_saver() -> "BaseCheckpointSaver":
     return InMemorySaver()
 
 
-async def _enter(cm: Any) -> tuple["BaseCheckpointSaver", "AbstractAsyncContextManager"]:
-    """Enter ``cm`` and create the saver's tables.
+async def _enter(cm: Any) -> tuple[Any, "AbstractAsyncContextManager"]:
+    """Enter ``cm`` and create the tables of the saver or store it yields.
 
     If ``setup()`` fails, the connection just opened is closed before the
     error propagates: the caller never received ``cm``, so nothing else could

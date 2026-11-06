@@ -130,10 +130,13 @@ def build_agent_tree(
         prompts: Each agent's system prompt, already resolved.
         settings: The manager's settings: the model side and the tool result
             cap are built from them.
-        checkpointer: The root's checkpointer. Sub-agents get none: they
-            inherit it through LangGraph's nested-graph rules, so their
-            checkpoints sit in the root's thread under their task's
-            namespace.
+        checkpointer: The root's checkpointer. Sub-agents are compiled with
+            none (``checkpointer=False``), so they do not inherit it through
+            LangGraph's nested-graph rules: a sub-agent's run ends when its
+            ``task`` returns, nothing resumes it or reads its state, and a
+            fork takes its parent's conversation from the parent's state. A
+            checkpoint of theirs would be one nothing reads (a fork's, the
+            whole conversation at every step).
         bound: What every agent's permission gate asks first, for a tool
             object the framework built and bound. Defaults to the framework
             registry's identity map; a manager with tool objects of its own
@@ -180,7 +183,7 @@ def build_agent_tree(
             ),
             state_schema=AgentCliState,
             name=name,
-            checkpointer=checkpointer if name == root else None,
+            checkpointer=checkpointer if name == root else False,
         )
 
     return build(root)

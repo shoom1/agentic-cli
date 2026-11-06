@@ -1754,6 +1754,20 @@ step; each entry says what to use instead.
 
 ### Fixed
 
+- **Listing Deep Agents conversations no longer reads every checkpoint.**
+  `--continue`, `/resume` and `/sessions` listed conversations by reading
+  every checkpoint of the app and user, sub-agents' included, each of which
+  holds the whole conversation, and cut the list only after that: on a
+  sqlite file of 40 conversations of 20 turns, `--continue` took 3.4 s, and
+  longer with every turn. Each conversation's row (its title, turns and
+  time) is now kept in a LangGraph store beside the checkpointer (in the
+  same sqlite file, tables `store` and `store_migrations`, or the same
+  Postgres database), written as each turn ends, however it ends, and after
+  `/compact`, so a listing reads one small row per conversation, and
+  `session_info` one. A database written before is scanned once per app and
+  user, on its first listing. Sub-agents no longer store checkpoints of
+  their own: nothing read them, and a forked one stored the whole
+  conversation at every step.
 - **Two tool questions asked at once are shown one after the other.** The
   calls of one model step run together (both backends gather them), so two
   of them could ask at once (two `ask_clarification` calls, or one beside a

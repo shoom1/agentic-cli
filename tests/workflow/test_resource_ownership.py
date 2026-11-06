@@ -573,11 +573,14 @@ def deepagents_manager(monkeypatch):
     """A Deep Agents manager built through ``__init__``, on counted connections.
 
     ``open_checkpointer`` hands out an in-memory saver with a counted
-    connection each time it is called; ``state["boom"]`` makes building the
-    agents fail, after the checkpointer was opened.
+    connection each time it is called, and ``open_store`` an in-memory store
+    with one of its own (``state["stores"]``); ``state["boom"]`` makes
+    building the agents fail, after both were opened, and
+    ``state["store_fails"]`` makes opening the store fail.
     """
     pytest.importorskip("deepagents")
     from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.store.memory import InMemoryStore
 
     from agentic_cli.workflow.config import AgentConfig
     from agentic_cli.workflow.deepagents import manager as manager_module
@@ -591,7 +594,15 @@ def deepagents_manager(monkeypatch):
         created.append(connection)
         return InMemorySaver(), connection
 
-    state = {"boom": False}
+    state = {"boom": False, "stores": [], "store_fails": False}
+
+    async def _open_store(kind, **kwargs):
+        if state["store_fails"]:
+            raise RuntimeError("store could not open")
+        connection = _CountedConnection()
+        state["stores"].append(connection)
+        return InMemoryStore(), connection
+
     real_build = manager_module.build_agent_tree
 
     def _build(*args, **kwargs):
@@ -600,6 +611,7 @@ def deepagents_manager(monkeypatch):
         return real_build(*args, **kwargs)
 
     monkeypatch.setattr(manager_module, "open_checkpointer", _open)
+    monkeypatch.setattr(manager_module, "open_store", _open_store)
     monkeypatch.setattr(manager_module, "build_agent_tree", _build)
     monkeypatch.setattr(manager_module, "build_chat_model", ScriptedModels(a=[]))
     with MockContext(google_api_key="test-key") as ctx:
@@ -691,4 +703,74 @@ class TestDeepAgentsReinitializeTransaction:
 
         assert mgr.is_initialized is True
         assert len(created) == 2 and created[1].closes == 0
+        await mgr.cleanup()
+
+
+class TestDeepAgentsSessionIndexLifecycle:
+    """The session index's store lives and dies with the checkpointer."""
+
+    async def test_cleanup_closes_its_connection(self, deepagents_manager):
+        mgr, created, state = deepagents_manager
+        await mgr.initialize_services()
+
+        await mgr.cleanup()
+
+        assert [c.closes for c in state["stores"]] == [1]
+        assert created[0].closes == 1
+
+    async def test_a_failed_initialization_closes_it(self, deepagents_manager):
+        mgr, created, state = deepagents_manager
+        state["boom"] = True
+
+        with pytest.raises(RuntimeError, match="backend init failed"):
+            await mgr.initialize_services()
+
+        assert [c.closes for c in state["stores"]] == [1], "the store's connection leaked"
+        assert mgr._sessions is None
+
+    async def test_a_store_that_cannot_open_closes_the_checkpointer(self, deepagents_manager):
+        mgr, created, state = deepagents_manager
+        state["store_fails"] = True
+
+        with pytest.raises(RuntimeError, match="store could not open"):
+            await mgr.initialize_services()
+
+        assert created[0].closes == 1, "the checkpointer's connection leaked"
+        assert mgr._checkpointer is None and mgr.is_initialized is False
+
+    async def test_a_model_switch_keeps_it(self, deepagents_manager):
+        mgr, _created, state = deepagents_manager
+        await mgr.initialize_services()
+        index = mgr._sessions._store
+
+        await mgr.reinitialize(preserve_sessions=True)
+
+        assert mgr._sessions._store is index
+        assert [c.closes for c in state["stores"]] == [0]
+        await mgr.cleanup()
+        assert [c.closes for c in state["stores"]] == [1]
+
+    async def test_a_failed_model_switch_keeps_it(self, deepagents_manager):
+        mgr, _created, state = deepagents_manager
+        await mgr.initialize_services()
+        index = mgr._sessions._store
+
+        state["boom"] = True
+        with pytest.raises(RuntimeError, match="backend init failed"):
+            await mgr.reinitialize(preserve_sessions=True)
+
+        assert mgr._sessions._store is index
+        assert [c.closes for c in state["stores"]] == [0], "the preserved store was lost"
+        await mgr.cleanup()
+        assert [c.closes for c in state["stores"]] == [1]
+
+    async def test_a_switch_that_discards_the_sessions_replaces_it(self, deepagents_manager):
+        mgr, _created, state = deepagents_manager
+        await mgr.initialize_services()
+        index = mgr._sessions._store
+
+        await mgr.reinitialize(preserve_sessions=False)
+
+        assert mgr._sessions._store is not index
+        assert [c.closes for c in state["stores"]] == [1, 0]
         await mgr.cleanup()

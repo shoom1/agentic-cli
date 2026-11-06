@@ -4,11 +4,12 @@ Every ``AgentConfig`` becomes one ``create_agent`` graph on its own chat model
 (``agent_builder``), and the root agent runs each turn on the thread of the
 turn's ``SessionRef`` (``sessions``). The stream's node outputs become
 ``WorkflowEvent``s (``event_processor``). Conversations live in a LangGraph
-checkpointer opened from ``session_store``, which this manager owns: its
-connection is closed on cleanup and by a failed initialization, and a model
-switch keeps it. The agents' MCP sessions (``mcp_tools``) are its too: they
-open at initialization, and every release closes them, so a model switch
-reopens them. An agent's ``skills`` become the skill tools ADK offers
+checkpointer opened from ``session_store``, and their rows in a store beside
+it (the session index, written as each turn ends), which this manager owns:
+their connections are closed on cleanup and by a failed initialization, and
+a model switch keeps them. The agents' MCP sessions (``mcp_tools``) are its
+too: they open at initialization, and every release closes them, so a model
+switch reopens them. An agent's ``skills`` become the skill tools ADK offers
 (``tools/skills/langchain_tools.py``), with ADK's instruction appended to its
 prompt. With ``raw_llm_logging`` on, a turn's every model call is logged
 (``LLM_REQUEST``/``LLM_RESPONSE``, in the stream and in
@@ -43,7 +44,11 @@ from agentic_cli.tools.registry import ToolDefinition, identify_tool
 from agentic_cli.tools.skills import SkillStore
 from agentic_cli.tools.skills.langchain_tools import SKILL_TOOL_NAMES, make_skill_tools
 from agentic_cli.workflow.base_manager import BaseWorkflowManager
-from agentic_cli.workflow.checkpointers import deepagents_sqlite_path, open_checkpointer
+from agentic_cli.workflow.checkpointers import (
+    deepagents_sqlite_path,
+    open_checkpointer,
+    open_store,
+)
 from agentic_cli.workflow.config import (
     AgentConfig,
     AgentGraph,
@@ -147,10 +152,10 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         )
         self.session_id = "default_session"
 
-        # The checkpointer and the context manager owning its connection (None
-        # for the in-memory saver). Pinned while reinitialize(preserve_sessions=
-        # True) carries them across, so neither its release nor a rollback
-        # closes them.
+        # The checkpointer, and what owns its connection and the session
+        # index's (an exit stack; the index's store is the session hooks').
+        # Pinned while reinitialize(preserve_sessions=True) carries them
+        # across, so neither its release nor a rollback closes them.
         self._checkpointer: BaseCheckpointSaver | None = None
         self._checkpointer_cm: AbstractAsyncContextManager | None = None
         self._checkpointer_pinned = False
@@ -218,15 +223,7 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         # A preserving reinitialize keeps the live checkpointer: reuse it
         # rather than open a replacement.
         if self._checkpointer is None:
-            store = self._settings.session_store
-            self._checkpointer, self._checkpointer_cm = await open_checkpointer(
-                store,
-                sqlite_path=(
-                    deepagents_sqlite_path(self._settings) if store == "sqlite" else None
-                ),
-                postgres_uri=self._settings.postgres_uri,
-            )
-            self._sessions = CheckpointSessions(self._checkpointer)
+            await self._open_session_store()
 
         graph = validate_agent_graph(self._agent_configs, backend=self.backend_type)
         # Each agent's context numbers, as its summarization uses them; a
@@ -288,6 +285,36 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             session_store=self._settings.session_store,
             required_managers=list(self._required_managers),
         )
+
+    async def _open_session_store(self) -> None:
+        """Open the checkpointer ``session_store`` names and the index beside it.
+
+        One exit stack owns both connections (``_checkpointer_cm``), so a
+        release closes both, and a failure to open the second closes the
+        first before it propagates. An in-memory saver is opened with its
+        store, so no conversation of it predates the index: it needs no
+        backfill.
+        """
+        kind = self._settings.session_store
+        where: dict[str, Any] = {
+            "sqlite_path": (
+                deepagents_sqlite_path(self._settings) if kind == "sqlite" else None
+            ),
+            "postgres_uri": self._settings.postgres_uri,
+        }
+        connections = contextlib.AsyncExitStack()
+        try:
+            saver, connection = await open_checkpointer(kind, **where)
+            if connection is not None:
+                connections.push_async_exit(connection.__aexit__)
+            store, connection = await open_store(kind, **where)
+            if connection is not None:
+                connections.push_async_exit(connection.__aexit__)
+        except BaseException:
+            await self._close_connection(connections)
+            raise
+        self._checkpointer, self._checkpointer_cm = saver, connections
+        self._sessions = CheckpointSessions(saver, store, backfill=kind != "memory")
 
     def _skill_tools(
         self, config: AgentConfig, tools: list[BaseTool]
@@ -368,8 +395,8 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         of a failed attempt inside it (the checkpointer is pinned then).
 
         Args:
-            keep_checkpointer: Keep the checkpointer, its connection and the
-                session store open.
+            keep_checkpointer: Keep the checkpointer, the session index and
+                their connections open.
         """
         logger.debug("cleaning_up_workflow_manager")
 
@@ -395,7 +422,10 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         logger.info("workflow_manager_cleaned_up")
 
     async def _close_connection(self, connection: "AbstractAsyncContextManager | None") -> None:
-        """Exit the context manager owning the checkpointer's connection. Never raises."""
+        """Exit what owns the checkpointer's and the index's connections.
+
+        Never raises.
+        """
         if connection is None:
             return
         try:
@@ -671,6 +701,7 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
                 await self._root.aupdate_state(
                     config, {SUMMARIZATION_EVENT_KEY: event}, as_node="model"
                 )
+                await self._record(session)
                 result = CompactResult(
                     messages_summarized=cut,
                     tokens_before=middleware.token_counter(sent),
@@ -706,7 +737,8 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         the run callback reports from inside a node (a summary that starts,
         its usage, the summary it made) is merged into the stream as it
         happens, so it shows while the node still runs, before the node's
-        own output.
+        own output. However the turn ends, the conversation's row in the
+        session index is written from what it left (``_record``).
         """
         processor = DeepAgentsEventProcessor(
             root=self._root_name,
@@ -761,9 +793,20 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             if event is not None:
                 yield event
             return
+        finally:
+            await self._record(ref)
         # Every call of the turn has its result in the checkpoint now.
         self._open_calls.clear()
         logger.info("message_processed", event_count=count)
+
+    async def _record(self, ref: "SessionRef") -> None:
+        """Write ``ref``'s row in the session index (``CheckpointSessions.record``).
+
+        Shielded: a cancel landing meanwhile (Ctrl+C pressed again) leaves the
+        write to finish.
+        """
+        if self._sessions is not None:
+            await asyncio.shield(self._sessions.record(ref))
 
     def _raw_llm_log(self) -> LLMLogWriter | None:
         """The raw LLM log when ``raw_llm_logging`` is on, read for each turn.
@@ -797,7 +840,8 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         return str(response.text)
 
     # -------------------------------------------------------------------------
-    # Sessions (the checkpointer saves every step; nothing to flush)
+    # Sessions (the checkpointer saves every step, and each turn's end its
+    # row; nothing to flush)
     # -------------------------------------------------------------------------
 
     async def session_exists(self, session_id: str, *, user_id: str | None = None) -> bool:
@@ -839,7 +883,7 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         return await self._sessions.info(self.session_ref(session_id, user_id))
 
     async def delete_session(self, session_id: str, *, user_id: str | None = None) -> bool:
-        """Delete a conversation, its sub-agents' checkpoints included.
+        """Delete a conversation and its row in the session index.
 
         Args:
             session_id: The conversation.

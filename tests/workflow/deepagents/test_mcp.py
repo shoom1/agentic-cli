@@ -730,11 +730,19 @@ class TestLifecycle:
         model whose window leaves no room to work in fails initialization
         with no server started and the checkpointer's connection closed."""
         opened: list = []
+        closed: list = []
         real_open = manager_module.open_checkpointer
 
         async def open_checkpointer(*args, **kwargs):
             saver, connection = await real_open(*args, **kwargs)
             opened.append(connection)
+            real_exit = connection.__aexit__
+
+            async def counted_exit(*exc):
+                closed.append(connection)
+                return await real_exit(*exc)
+
+            connection.__aexit__ = counted_exit
             return saver, connection
 
         monkeypatch.setattr(manager_module, "open_checkpointer", open_checkpointer)
@@ -745,14 +753,6 @@ class TestLifecycle:
         )
         manager = DeepAgentsWorkflowManager(agent_configs=[_researcher(servers())],
                                             settings=settings)
-        closed: list = []
-        real_close = manager._close_connection
-
-        async def close_connection(connection):
-            closed.append(connection)
-            await real_close(connection)
-
-        monkeypatch.setattr(manager, "_close_connection", close_connection)
 
         with pytest.raises(ContextBudgetError, match="local:small"):
             await manager.initialize_services()
