@@ -203,8 +203,6 @@ class TestSavedWildcardGrantsAreDropped:
             {"capability": "filesystem.write", "target": f"{root}/out*dir/**"},
             {"capability": "filesystem.write", "target": f"{root}/**/**"},
             {"capability": "filesystem.read", "target": f"{root}/a?.txt"},
-            {"capability": "filesystem.write", "target": "/**"},  # the root's file named **
-            {"capability": "filesystem.write", "target": f"{root}/**"},  # holds home
             {"capability": "http.read", "target": "https://example.com/**"},
             {"capability": "http.read", "target": "http://example.org/a*"},
             {"capability": "http.read", "target": "https://203.0.113.7/**"},
@@ -232,12 +230,51 @@ class TestSavedWildcardGrantsAreDropped:
             ("filesystem.write", f"{root}/out*dir/**"),
             ("filesystem.write", f"{root}/**/**"),
             ("filesystem.read", f"{root}/a?.txt"),
-            ("filesystem.write", "/**"),
-            ("filesystem.write", f"{root}/**"),
             ("http.read", "http://example.org/a*"),
             ("http.read", "https://203.0.113.7/**"),
             ("shell.exec", "ls *.py"),
         }
+
+    def test_a_grant_on_home_or_above_is_dropped_on_load(self, env):
+        """A grant may not cover the filesystem root, home itself or a
+        directory above it, so a saved one that does came from an older
+        engine (a file directly in home widened to all of it) or a hand edit.
+        It is dropped under its own event: it holds no wildcard character."""
+        import structlog
+
+        home, root = env["home"], env["root"]
+        self._write_grants(env, [
+            {"capability": "filesystem.write", "target": f"{home}/**"},
+            {"capability": "filesystem.read", "target": f"{home}/**"},
+            {"capability": "filesystem.read", "target": f"{root / home.name.upper()}/**"},
+            {"capability": "filesystem.write", "target": f"{root}/**"},  # holds home
+            {"capability": "filesystem.write", "target": "/**"},  # the root's file named **
+            {"capability": "filesystem.write", "target": f"{home}/docs/**"},
+            {"capability": "filesystem.write", "target": f"{home}/notes.md"},
+            {"capability": "filesystem.read", "target": str(home)},
+        ])
+        ctx = PermissionContext(workdir=env["work"], home=home, app_name=APP)
+
+        with structlog.testing.capture_logs() as logs:
+            loaded = {(r.capability, r.target) for r in load_project_grants(APP, ctx)}
+
+        assert loaded == {
+            ("filesystem.write", f"{home}/docs/**"),
+            ("filesystem.write", f"{home}/notes.md"),
+            ("filesystem.read", str(home)),
+        }
+        dropped = {
+            (e["capability"], e["target"])
+            for e in logs if e.get("event") == "permission_broad_grant_dropped"
+        }
+        assert dropped == {
+            ("filesystem.write", f"{home}/**"),
+            ("filesystem.read", f"{home}/**"),
+            ("filesystem.read", f"{root / home.name.upper()}/**"),
+            ("filesystem.write", f"{root}/**"),
+            ("filesystem.write", "/**"),
+        }
+        assert not [e for e in logs if e.get("event") == "permission_glob_grant_dropped"]
 
     def test_a_saved_deny_keeps_its_glob(self, env):
         """A deny with a wildcard can only deny more: it is kept."""
@@ -275,8 +312,25 @@ class TestFilesystemGrantScope:
         d.mkdir()
         assert self._grant(str(d), env["home"]) == f"{d}/**"
 
-    def test_home_directory_covers_home(self, env):
-        assert self._grant(str(env["home"]), env["home"]) == f"{env['home']}/**"
+    def test_home_itself_is_granted_exactly(self, env):
+        """A grant on all of home would cover ``~/.zshrc``, ``~/Library`` and
+        every file no builtin rule names."""
+        assert self._grant(str(env["home"]), env["home"]) == str(env["home"])
+
+    def test_a_file_directly_in_home_is_granted_exactly(self, env):
+        f = env["home"] / "notes.md"
+        assert self._grant(str(f), env["home"]) == str(f)
+
+    def test_another_spelling_of_home_is_not_widened(self, env):
+        upper = env["root"] / env["home"].name.upper()
+        assert self._grant(str(upper / "notes.md"), env["home"]) == str(upper / "notes.md")
+        assert self._grant(str(upper), env["home"]) == str(upper)
+
+    def test_a_directory_below_home_still_widens(self, env):
+        docs = env["home"] / "docs"
+        docs.mkdir()
+        assert self._grant(str(docs / "a.md"), env["home"]) == f"{docs}/**"
+        assert self._grant(str(docs), env["home"]) == f"{docs}/**"
 
     def test_a_file_directly_in_an_ancestor_of_home_is_not_widened(self, env):
         f = env["root"] / "f.txt"  # root is the parent of home
