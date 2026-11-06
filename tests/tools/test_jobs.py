@@ -115,22 +115,24 @@ class TestTheWorkingDirectory:
         monkeypatch.chdir(here)
         first = JobManager(base_dir=base, max_concurrent=1)
         busy = first.submit(tool="t", backend="subprocess", spec={"command": "sleep 30"})
-        queued = first.submit(
-            tool="t", backend="subprocess", spec={"command": "pwd", "cwd": cwd}
-        )
-        assert queued.state is JobState.QUEUED
-        first.close()  # the first CLI exits with the job still queued
-
-        monkeypatch.chdir(there)
-        second = JobManager(base_dir=base, max_concurrent=2)
+        second = None
         try:
+            queued = first.submit(
+                tool="t", backend="subprocess", spec={"command": "pwd", "cwd": cwd}
+            )
+            assert queued.state is JobState.QUEUED
+            first.close()  # the first CLI exits with the job still queued
+
+            monkeypatch.chdir(there)
+            second = JobManager(base_dir=base, max_concurrent=2)
             rec = _wait(second, queued.job_id)
             assert rec.state is JobState.SUCCEEDED
             ran_in = "".join(second.tail(queued.job_id, 1, "stdout")).strip()
             assert Path(ran_in).resolve() == (here / runs_in).resolve()
         finally:
-            second.cancel(busy.job_id)
-            second.close()
+            first.cancel(busy.job_id)  # its starter reaps it at once
+            if second is not None:
+                second.close()
 
 
 class TestInProcessBackend:

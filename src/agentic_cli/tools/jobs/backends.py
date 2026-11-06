@@ -124,8 +124,10 @@ class JobBackend(ABC):
         """The spec as the job must run, fixed when it is submitted.
 
         A queued job may be launched later by another manager (the next CLI
-        to open the jobs directory), so whatever the spec leaves to the
-        process that starts it is settled here. Default: unchanged.
+        to open the jobs directory, perhaps started elsewhere): what the
+        spec would otherwise take from the launching process, such as the
+        working directory, is settled here. The environment is not: it is
+        the launching process's. Default: unchanged.
         """
         return spec
 
