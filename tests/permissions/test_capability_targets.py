@@ -84,7 +84,8 @@ class TestFixedTargets:
         [rc] = engine._resolve(
             [Capability("http.read", target="https://example.com/${home}")], {}
         )
-        assert rc.target == "https://example.com/${home}"
+        # Not expanded; the braces are escaped, as the HTTP client sends them.
+        assert rc.target == "https://example.com/$%7Bhome%7D"
 
     def test_target_and_target_arg_are_mutually_exclusive(self):
         with pytest.raises(ValueError):

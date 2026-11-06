@@ -16,11 +16,16 @@ Patterns and targets are canonicalized by **different** methods:
   (:func:`agentic_cli.paths.resolve_path`). Using the pattern form here once
   let the engine judge one location while the tool acted on another.
 
+A URL, pattern or target, is the one the HTTP client sends
+(:func:`agentic_cli.urls.canonical_url`), so a rule judges the page and host
+the request reaches, however the URL spells them.
+
 ``"*"`` is the wildcard only on the pattern side. As a *target* it is the
 sentinel a targetless capability resolves to (and what a grant for it widens
 to), so ``canonicalize_target`` never returns it for a real argument: a path
-``*`` is a file named ``*``, a URL is normalised, and a bare ``*`` command or
-string is rejected (``ValueError``), which the engine denies.
+``*`` is a file named ``*``, a URL is canonicalized (``https://*/``), and a
+bare ``*`` command or string is rejected (``ValueError``), which the engine
+denies.
 
 A deny rule is matched with ``matches_deny``: a filesystem deny ignores case
 and Unicode normalization (see ``PathMatcher.matches_deny``), every other
@@ -35,9 +40,10 @@ import unicodedata
 from functools import lru_cache
 from pathlib import Path
 from typing import Protocol, runtime_checkable
-from urllib.parse import SplitResult, urlsplit, urlunsplit
+from urllib.parse import SplitResult, urlsplit
 
 from agentic_cli.paths import resolve_path
+from agentic_cli.urls import canonical_url
 from agentic_cli.workflow.permissions.store import PermissionContext
 
 
@@ -184,37 +190,36 @@ def _fold(path: str) -> str:
 
 
 class URLMatcher:
-    """Matcher for ``http.*`` capabilities."""
+    """Matcher for ``http.*`` capabilities.
+
+    A pattern and a target are both the URL the HTTP client sends
+    (:func:`agentic_cli.urls.canonical_url`): ``/x/../admin``, ``/%61dmin``,
+    ``host.`` and ``host。com`` are the page and the host they reach, so a
+    deny written for one spelling holds for every other. A pattern keeps its
+    wildcards (``*`` and ``**`` in the path, ``fnmatch`` in the query); the
+    host and port are compared exactly. A URL written without a scheme is
+    read as ``https://``. A target the client cannot send raises
+    ``ValueError``, which the engine denies.
+    """
 
     _DEFAULT_PORTS = {"http": 80, "https": 443}
+    _SCHEME = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://")
 
     def canonicalize_pattern(self, s: str, ctx: PermissionContext) -> str:
         if s == "*":
             return "*"
-        return self._normalise(ctx.substitute(s))
+        return self._canonical(ctx.substitute(s).strip())
 
     def canonicalize_target(self, s: str, ctx: PermissionContext) -> str:
-        return self._normalise(s)
+        # Not stripped: the tool hands the client the argument as given.
+        return self._canonical(s)
 
-    def _normalise(self, s: str) -> str:
-        parts = urlsplit(s if "://" in s else f"https://{s}")
-        scheme = parts.scheme.lower() or "https"
-        host = (parts.hostname or "").lower()
-        if ":" in host:  # an IPv6 literal keeps its brackets, or it is unparseable
-            host = f"[{host}]"
-        port = parts.port
-        if port is not None and port == self._DEFAULT_PORTS.get(scheme):
-            netloc = host
-        elif port is not None:
-            netloc = f"{host}:{port}"
-        else:
-            netloc = host
-        path = parts.path
-        query = parts.query
-        # Drop fragment; reassemble
-        return urlunsplit((scheme, netloc, path, query, ""))
+    def _canonical(self, s: str) -> str:
+        return canonical_url(s if self._SCHEME.match(s) else f"https://{s}")
 
     def matches(self, pattern: str, target: str) -> bool:
+        """Whether ``pattern`` covers ``target``; both canonical (see
+        ``canonicalize_pattern`` and ``canonicalize_target``)."""
         if pattern == "*":
             return True
         pp = urlsplit(pattern if "://" in pattern else f"https://{pattern}")

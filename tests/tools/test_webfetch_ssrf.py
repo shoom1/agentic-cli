@@ -126,6 +126,58 @@ class TestPinnedTransport:
         assert seen["sni"] == "example.com"          # TLS SNI bound to hostname
 
     @pytest.mark.asyncio
+    async def test_dns_and_tls_name_the_domain_the_host_header_names(self, monkeypatch):
+        """For an IDNA deviation character (``ß``) httpx encodes the host with
+        IDNA 2008, ``xn--fa-hia.de``, for the Host header, while the Unicode
+        host given to getaddrinfo and as the SNI was encoded with IDNA 2003,
+        ``fass.de``: another registration's server and certificate. All three
+        now use the host httpx sends."""
+        looked_up = []
+        stub = stub_getaddrinfo("93.184.216.34")
+
+        def getaddrinfo(host, port, *args, **kwargs):
+            looked_up.append(host)
+            return stub(host, port, *args, **kwargs)
+
+        monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
+        seen = {}
+
+        def handler(request):
+            seen["host_header"] = request.headers["Host"]
+            seen["sni"] = request.extensions["sni_hostname"]
+            return httpx.Response(200)
+
+        async with httpx.AsyncClient(transport=mock_pinned_transport(handler)) as client:
+            await client.get("https://faß.de/")
+
+        assert looked_up == ["xn--fa-hia.de"]
+        assert seen == {"host_header": "xn--fa-hia.de", "sni": "xn--fa-hia.de"}
+
+    @pytest.mark.asyncio
+    async def test_a_mapped_address_connects_to_the_ipv4_address_judged(self, monkeypatch):
+        """``[::ffff:a.b.c.d]`` is judged as a.b.c.d (the validator and the
+        engine read it so) and the connection goes to that address."""
+        def no_dns(*a, **k):
+            raise AssertionError("an address literal needs no lookup")
+        monkeypatch.setattr(socket, "getaddrinfo", no_dns)
+        seen = {}
+
+        def handler(request):
+            seen["ip"] = ipaddress.ip_address(request.url.host)
+            return httpx.Response(200)
+
+        async with httpx.AsyncClient(transport=mock_pinned_transport(handler)) as client:
+            await client.get("https://[::ffff:93.184.216.34]/")
+            with pytest.raises(BlockedAddressError):
+                await client.get("http://[::ffff:127.0.0.1]/")
+            with pytest.raises(BlockedAddressError):
+                await client.get("http://[::ffff:a00:1]/")
+
+        connected = seen["ip"]
+        connected = getattr(connected, "ipv4_mapped", None) or connected
+        assert connected == ipaddress.ip_address("93.184.216.34")
+
+    @pytest.mark.asyncio
     async def test_blocked_host_raises_and_never_calls_inner(self, monkeypatch):
         monkeypatch.setattr(socket, "getaddrinfo", stub_getaddrinfo("169.254.169.254"))
         called = {"inner": False}

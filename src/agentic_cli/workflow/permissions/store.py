@@ -150,7 +150,9 @@ def load_rules(
     """Load rules from a settings.json file's ``permissions`` section.
 
     Returns an empty list when the file is absent or has no ``permissions``
-    key. Raises ``ValueError`` if the file is not valid JSON.
+    key. Raises ``ValueError`` if the file is not valid JSON. A rule whose
+    target cannot be canonicalized (a URL the HTTP client cannot send) is
+    skipped with a warning (``permission_rule_skipped``).
 
     ``allowed_effects`` restricts which effects are honored from this source.
     The engine passes ``{Effect.DENY}`` for the untrusted PROJECT file so a
@@ -174,9 +176,26 @@ def load_rules(
         for entry in section.get(effect_name) or []:
             cap = entry["capability"]
             target_raw = entry["target"]
-            target = get_matcher(cap).canonicalize_pattern(target_raw, ctx)
+            try:
+                target = get_matcher(cap).canonicalize_pattern(target_raw, ctx)
+            except ValueError as exc:
+                # A URL the HTTP client cannot send (an invalid IDNA host, a
+                # port past 65535), a path with a NUL: no target can match
+                # it, since such a target is itself denied as invalid.
+                _warn_skipped(path, cap, target_raw, exc)
+                continue
             rules.append(Rule(cap, target, effect, source))
     return rules
+
+
+def _warn_skipped(path: Path, capability: str, target: str, exc: ValueError) -> None:
+    Loggers.workflow().warning(
+        "permission_rule_skipped",
+        capability=capability,
+        target=target,
+        path=str(path),
+        error=str(exc),
+    )
 
 
 def load_project_grants(app_name: str, ctx: PermissionContext) -> list[Rule]:
@@ -190,7 +209,9 @@ def load_project_grants(app_name: str, ctx: PermissionContext) -> list[Rule]:
     holds a wildcard character (``permission_glob_grant_dropped``, see
     ``engine.is_literal_saved_grant``) and a filesystem grant on the root,
     home or a directory above it (``permission_broad_grant_dropped``, see
-    ``engine.is_bounded_saved_grant``). Returns ``[]`` when the file or the
+    ``engine.is_bounded_saved_grant``). A grant whose target cannot be
+    canonicalized (a URL the HTTP client cannot send) is skipped with a
+    warning (``permission_rule_skipped``). Returns ``[]`` when the file or the
     project's entry is absent. Raises ``ValueError`` on malformed JSON.
     """
     # Local imports to avoid cycles: matchers.py imports PermissionContext
@@ -231,7 +252,13 @@ def load_project_grants(app_name: str, ctx: PermissionContext) -> list[Rule]:
                     "permission_wildcard_grant_dropped", capability=cap, path=str(path)
                 )
                 continue
-            target = "*" if raw == "*" else get_matcher(cap).canonicalize_target(raw, ctx)
+            try:
+                target = "*" if raw == "*" else get_matcher(cap).canonicalize_target(raw, ctx)
+            except ValueError as exc:
+                # Saved by an engine that judged URLs as spelled: one the HTTP
+                # client cannot send matches nothing now (its target is denied).
+                _warn_skipped(path, cap, raw, exc)
+                continue
             if effect is Effect.ALLOW and not is_literal_saved_grant(cap, target):
                 # Loaded as a target but matched as a pattern: a grant saved
                 # with a wildcard character in its literal part would cover
