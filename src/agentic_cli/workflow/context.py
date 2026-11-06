@@ -19,10 +19,11 @@ so it fails where the agents are built, naming the model and its
 ``max_tokens``.
 
 **Overflow errors.** Each provider says "too long" its own way:
-``is_context_overflow`` reads the error's attributes (status, code, text) and
-never imports a provider SDK, and ``is_overflow_text`` the text alone, for an
-overflow reported in an answer. LangChain's own ``ContextOverflowError`` is
-recognized when LangChain is installed.
+``is_context_overflow`` reads the error's attributes (status, code, text,
+the SDK it came from) and never imports a provider SDK, and
+``is_overflow_text`` the text alone, for an overflow reported in an answer.
+LangChain's own ``ContextOverflowError`` is recognized when LangChain is
+installed.
 
 Imports nothing from ``cli/``, no provider SDK and no LangChain at import.
 """
@@ -62,6 +63,11 @@ ESTIMATE_MARGIN = 1.1
 _OVERFLOW_CODE = "context_length_exceeded"
 #: The statuses an overflow comes with.
 _OVERFLOW_STATUSES = frozenset({400, 413, 422})
+#: Claude's request-size limit: a 413 from Anthropic's SDK, whose class is
+#: ``RequestTooLargeError`` before anthropic 2 and ``ContentTooLargeError``
+#: (or a subclass naming the cause) since. Its text names no context.
+_REQUEST_TOO_LARGE = 413
+_ANTHROPIC_SDK = "anthropic"
 #: Rate limits: never an overflow, whatever the text or the type says.
 _RATE_LIMITED = 429
 #: What an overflow's text says, lowercased: Deep Agents' list (OpenAI,
@@ -203,11 +209,12 @@ def is_context_overflow(error: BaseException) -> bool:
     """Whether ``error`` is a provider saying the request is too long for the model.
 
     True for LangChain's ``ContextOverflowError``; for the code
-    ``context_length_exceeded`` (OpenAI); for a 413 ``RequestTooLargeError``
-    (Claude's request-size limit); and for a 400, 413 or 422 whose text holds
-    one of the providers' overflow phrases. A 429 is never an overflow, even
-    as LangChain's type: langchain-google-genai raises that for any error
-    whose text holds "token limit", a rate limit included.
+    ``context_length_exceeded`` (OpenAI); for a 413 Anthropic's SDK raised
+    (Claude's request-size limit, whatever the SDK names its class and
+    whatever the body says); and for a 400, 413 or 422 whose text holds one
+    of the providers' overflow phrases. A 429 is never an overflow, even as
+    LangChain's type: langchain-google-genai raises that for any error whose
+    text holds "token limit", a rate limit included.
 
     The status is the first int among ``status_code``, ``code`` and
     ``status``: Gemini's ``ClientError`` has an int ``code`` and a string
@@ -230,7 +237,7 @@ def is_context_overflow(error: BaseException) -> bool:
         return True
     if getattr(error, "code", None) == _OVERFLOW_CODE:
         return True
-    if status == 413 and type(error).__name__ == "RequestTooLargeError":
+    if status == _REQUEST_TOO_LARGE and _raised_by(error, _ANTHROPIC_SDK):
         return True
     if status not in _OVERFLOW_STATUSES:
         return False
@@ -254,6 +261,11 @@ def is_overflow_text(text: str) -> bool:
 def overflow_message(model: str) -> str:
     """What the user is told when a conversation no longer fits ``model``."""
     return f"This conversation no longer fits {model}'s context window. Use /compact or /new."
+
+
+def _raised_by(error: BaseException, package: str) -> bool:
+    """Whether ``error``'s class, or a class it derives from, is ``package``'s."""
+    return any(cls.__module__.partition(".")[0] == package for cls in type(error).__mro__)
 
 
 def _is_langchain_overflow(error: BaseException) -> bool:

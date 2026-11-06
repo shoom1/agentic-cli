@@ -498,13 +498,25 @@ older version had, say) is dropped silently.
 **Consequence:** put API keys in real environment variables or an
 absolute/user-level file. A key placed in a cwd `.env` is deliberately ignored.
 
-The JSON sources and this filtering are `agentic_cli.BaseSettings`'s. A class
-composed from the mixins over pydantic-settings' own `BaseSettings` reads the
-constructor, the environment and its `env_file` as pydantic-settings does, with
-no filtering: give such a class no cwd-relative `env_file`, or a cloned
-repository's `.env` can set any setting, `model_providers` included. Its
-configured providers' keys are read from the environment and the absolute
-entries of its class's `env_file`.
+`app_name` names the files above, and the ones settings are saved to, so only
+the constructor or the settings class sets it: an `app_name` in the environment
+(`AGENTIC_APP_NAME`, or your prefix's), in either settings file or in an env
+file is ignored, with a warning (`settings_app_name_ignored`). The one
+exception is the app's own: one that enables pydantic-settings'
+`cli_parse_args` gets a command-line source above all of these, which can set
+it.
+
+These sources and their filtering come with the settings mixins
+(`WorkflowSettingsMixin`, `AppSettingsMixin`): a class composed from them over
+pydantic-settings' own `BaseSettings` reads the same sources, in the same
+order, filtered the same way. The mixins must come before pydantic-settings'
+class, as in `BaseSettings`: a settings class that lists that class first, or
+between the mixins, is refused with a `TypeError` when it is defined (its
+sources would be pydantic-settings' own), unless it defines
+`settings_customise_sources` itself. Its configured providers' keys are read
+from the environment and the absolute entries of its class's `env_file`.
+pydantic-settings' `secrets_dir` is not read by any of these classes; one
+configured is reported (`settings_secrets_dir_ignored`).
 
 ### Key Settings
 
@@ -1589,6 +1601,8 @@ The workflow exposes it as `workflow.knowledge_base` (and the memory store as `w
 `ingest_document` is synchronous and never calls the summarizer itself.
 
 The KB also maintains `index.md` and an append-only `ingest_log.md` audit trail. Source-type constants (`arxiv`, `ssrn`, `web`, `internal`, `user`, `local`) live on `SourceType`.
+
+A project's knowledge base can arrive with a cloned repository, so the knowledge base reads and appends its files only when they are regular files, never through a symlink (one that is not counts as missing, and the next write replaces it). A directory whose `documents`, `embeddings`, `files` or `concepts` folder, or `.lock` file, is a symlink does not open (`UnsafeKnowledgeBase`); `KnowledgeBase.open` leaves that scope out with a warning. The user knowledge base's own directory may be a symlink: to keep it on another disk, link that directory, not a folder inside it. The project knowledge base's may not, nor may `./.{app_name}`: the workflow opens it `within` the working directory (`KnowledgeBase.open(within=...)`), and a project scope reached through a link is left out the same way.
 
 Ingesting a document writes a summary and a sidecar with the workflow's LLM when `knowledge_base_summarize` is on (the default; one call per document). Turn it off in `~/.{app_name}/settings.json` to store the first ~500 characters instead. A knowledge base you build yourself calls the `summarizer=` you pass it in `generate_summary`, `generate_sidecar_payload` and `backfill_sidecars`; `ingest_document` stores the summary and sidecar payload you give it, or a preview. `KnowledgeBase.ingest_text(content, ...)` and `ingest_bytes(data, extension=..., ...)` do the conversion and the summarizer call for you; they raise `EmptyDocument`, `UnsupportedDocument` or `ConversionFailed`, `KeyError` for an unknown `scope=`, and `ValueError` for an unknown `source_type`; errors from storing the document propagate.
 

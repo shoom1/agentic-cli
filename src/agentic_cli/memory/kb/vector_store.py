@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from agentic_cli.memory._core.io import atomic_write_json
+from agentic_cli.memory._core.io import atomic_write_json, open_if_regular, read_if_regular
 
 if TYPE_CHECKING:
     import faiss
@@ -260,20 +260,24 @@ class VectorStore:
             atomic_write_json(mappings_path, mappings)
 
     def load(self) -> None:
-        """Load index and mappings from disk."""
-        if not self.index_path.exists():
-            return
+        """Load index and mappings from disk.
 
+        Neither is read through a symlink, nor unless it is a regular file:
+        a project can ship its knowledge base. One that is counts as missing.
+        """
         import faiss
 
-        with self._lock:
-            # Load FAISS index
-            self._index = faiss.read_index(str(self.index_path))
+        index_file = open_if_regular(self.index_path)
+        if index_file is None:
+            return
+        with self._lock, index_file:
+            # Load FAISS index (faiss would open a path itself, following links)
+            self._index = faiss.read_index(faiss.PyCallbackIOReader(index_file.read))
 
             # Load ID mappings
-            mappings_path = self.index_path.with_suffix(".mappings.json")
-            if mappings_path.exists():
-                mappings = json.loads(mappings_path.read_text())
+            raw = read_if_regular(self.index_path.with_suffix(".mappings.json"))
+            if raw is not None:
+                mappings = json.loads(raw)
                 self._id_map = {int(k): v for k, v in mappings["id_map"].items()}
                 self._chunk_to_faiss = mappings["chunk_to_faiss"]
                 self._next_id = mappings["next_id"]

@@ -213,7 +213,8 @@ class TestUserLevelEnvFiles:
         """Settings composed from the exported mixins over pydantic-settings' own
         BaseSettings have no ``env_files``: their class's ``env_file`` is read
         (its user-level entries), in each form it takes, and they validate:
-        without a file to read the key from, the key is named, nothing crashes."""
+        without a file to read the key from, the key is named, nothing crashes.
+        (Their sources, filters included, are the mixins': test_config_trust.)"""
         env_file = tmp_path / "home" / ".app" / ".env"
         env_file.parent.mkdir()
         env_file.write_text("LAB_KEY=k-from-file\n")
