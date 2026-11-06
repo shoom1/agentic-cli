@@ -1364,7 +1364,7 @@ Tool access is gated by the **permission engine** (see the HITL section below). 
 Two complementary tools:
 
 - **`execute_python`** — stateless, sandboxed Python via `SafePythonExecutor`. Use for quick calculations.
-- **`sandbox_execute`** — stateful, multi-turn Python in a Jupyter kernel. Variables, imports, and DataFrames persist across calls within a session. Shares the workspace filesystem. Network and `pip install` are blocked.
+- **`sandbox_execute`** — stateful, multi-turn Python in a Jupyter kernel. Variables, imports, and DataFrames persist across calls within a session. Off unless `stateful_executor_backend` is set: `"docker"` runs each session in an isolated container (below); `"local"` runs the kernel on your machine as you, with your files, network and privileges. The local backend isolates and restricts nothing, so use it only where you would run the code yourself.
 
 ```python
 from agentic_cli.tools import execute_python
@@ -1380,11 +1380,12 @@ The `/sandbox` CLI command lists and resets sandbox sessions.
 
 #### Docker-isolated sandbox
 
-`sandbox_execute` can run inside a network-isolated Docker container:
+The `docker` backend is the one that isolates the code: `sandbox_execute` runs
+inside a network-isolated container. To use it:
 
 1. Ensure Docker (or podman) is installed and running, and pull the image once:
    `docker pull quay.io/jupyter/scipy-notebook:python-3.12`
-2. In settings: `sandbox_execute_enabled = true`, `sandbox_backend = "jupyter_docker"`.
+2. In settings: `stateful_executor_backend = "docker"`.
 
 Each session runs in its own container with `--network none`, a read-only
 rootfs, dropped Linux capabilities, and memory/CPU/PID caps. Stage data as
@@ -2050,7 +2051,7 @@ agentic-cli/
 │   │   │   ├── __init__.py       # sandbox_execute tool
 │   │   │   ├── manager.py        # SandboxManager + session lifecycle
 │   │   │   ├── models.py
-│   │   │   └── backends/         # Jupyter local backend
+│   │   │   └── backends/         # Jupyter backends: docker (isolated), local (not isolated)
 │   │   ├── shell/                # Layered shell executor (disabled by default)
 │   │   │   ├── executor.py
 │   │   │   ├── os_sandbox/       # macOS seatbelt / Linux namespace sandboxes
