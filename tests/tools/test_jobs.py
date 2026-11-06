@@ -117,6 +117,61 @@ class TestInProcessBackend:
         assert rec.state is JobState.FAILED
 
 
+class TestTheExitSentinel:
+    """A poll that lands while the sentinel is being written waits for it.
+
+    The writer once truncated ``exit_code`` before writing the code, and the
+    reader took an empty file as exit 1: under load about 1 job in 70 that
+    succeeded, or exited 3, was recorded FAILED with exit 1 (the flaky CI tests).
+    """
+
+    def test_an_empty_sentinel_is_not_yet_an_exit_code(self, tmp_path: Path):
+        from agentic_cli.tools.jobs.backends import _read_exit_code
+
+        sentinel = tmp_path / "exit_code"
+        sentinel.write_text("")
+
+        assert _read_exit_code(sentinel) is None
+
+    def test_a_subprocess_job_polled_mid_write_keeps_running(self, tmp_path: Path):
+        from agentic_cli.tools.jobs.backends import SubprocessBackend
+
+        backend = SubprocessBackend()
+        record = JobRecord(job_id="j", tool="t", backend="subprocess", name="t",
+                           state=JobState.QUEUED, spec={"command": "sleep 0.5"})
+        backend.start(record, tmp_path)
+        (tmp_path / "exit_code").write_text("")  # opened by the writer, not yet written
+
+        assert backend.poll(record, tmp_path) is JobState.RUNNING
+        deadline = time.time() + 5
+        while (state := backend.poll(record, tmp_path)) is JobState.RUNNING and time.time() < deadline:
+            time.sleep(0.02)
+        assert (state, record.exit_code) == (JobState.SUCCEEDED, 0)
+
+    def test_an_inprocess_job_polled_mid_write_keeps_running(self, tmp_path: Path):
+        import threading
+
+        from agentic_cli.tools.jobs.backends import InProcessBackend
+
+        release = threading.Event()
+        backend = InProcessBackend(max_workers=1)
+        record = JobRecord(job_id="j", tool="t", backend="inprocess", name="t",
+                           state=JobState.QUEUED, spec={"target": release.wait, "args": (5,)})
+        try:
+            backend.start(record, tmp_path)
+            (tmp_path / "exit_code").write_text("")  # opened by the writer, not yet written
+
+            assert backend.poll(record, tmp_path) is JobState.RUNNING
+            release.set()
+            deadline = time.time() + 5
+            while (state := backend.poll(record, tmp_path)) is JobState.RUNNING and time.time() < deadline:
+                time.sleep(0.02)
+            assert (state, record.exit_code) == (JobState.SUCCEEDED, 0)
+        finally:
+            release.set()
+            backend.close()
+
+
 class TestPersistenceAndReconcile:
     def test_reload_terminal_job(self, tmp_path: Path):
         base = tmp_path / "jobs"

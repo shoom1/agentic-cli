@@ -29,6 +29,8 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from agentic_cli.file_utils import atomic_write_text
+
 if TYPE_CHECKING:
     from agentic_cli.tools.jobs.manager import JobRecord
 
@@ -76,12 +78,18 @@ def _pid_alive(pid: int) -> bool:
 
 
 def _read_exit_code(exit_file: Path) -> int | None:
-    """Read the sentinel exit-code file, or None if absent/unreadable."""
+    """The sentinel's exit code; None while there is none yet.
+
+    The backends write it whole (a temporary file renamed into place), but an
+    empty one, as a writer that truncates first leaves for a moment, is "not
+    yet" too: read as an exit code it made a finished job FAILED for good.
+    Unreadable or not a number: 1.
+    """
     if not exit_file.exists():
         return None
     try:
         text = exit_file.read_text().strip()
-        return int(text) if text else 1
+        return int(text) if text else None
     except (ValueError, OSError):
         return 1
 
@@ -178,9 +186,13 @@ class SubprocessBackend(JobBackend):
         # Run the command in a subshell, then record its exit status on disk so
         # completion is detectable after a CLI restart (we can't waitpid a
         # process we didn't start this session). The subshell ensures a command
-        # that calls ``exit`` doesn't skip the sentinel write.
+        # that calls ``exit`` doesn't skip the sentinel write, which goes to a
+        # temporary file renamed into place, so a poll never reads it half written.
+        partial = exit_file.with_name(exit_file.name + ".tmp")
         wrapped = (
-            f"( {inner} )\nrc=$?\nprintf '%s' \"$rc\" > {shlex.quote(str(exit_file))}\n"
+            f"( {inner} )\nrc=$?\n"
+            f"printf '%s' \"$rc\" > {shlex.quote(str(partial))}"
+            f" && mv -f {shlex.quote(str(partial))} {shlex.quote(str(exit_file))}\n"
         )
 
         out = open(job_dir / "stdout.log", "wb")
@@ -294,13 +306,13 @@ class InProcessBackend(JobBackend):
                     result_file.write_text(json.dumps(res, default=str))
                 except (TypeError, ValueError, OSError):
                     pass
-                exit_file.write_text("0")
+                atomic_write_text(exit_file, "0")
             except BaseException as exc:  # noqa: BLE001 - record any failure
                 try:
                     (job_dir / "stderr.log").write_text(repr(exc))
                 except OSError:
                     pass
-                exit_file.write_text("1")
+                atomic_write_text(exit_file, "1")
 
         self._futures[record.job_id] = self._pool.submit(_run)
         record.backend_handle = "thread"
