@@ -598,6 +598,62 @@ async def test_a_turn_elsewhere_keeps_a_cancelled_turns_results(hermetic, monkey
     assert [t["description"] for t in saved] == ["Brew tea"]
 
 
+async def test_a_second_stop_before_the_answers_are_saved_keeps_them(hermetic, monkeypatch):
+    """Deep Agents answers a stopped turn's calls when its conversation runs
+    next, in a step the next cancel can stop before it is saved: the record
+    keeps them until a turn of that conversation ends, so the third run still
+    sends the call's real result (forgetting them as they were answered lost
+    it again)."""
+    from agentic_cli.workflow.deepagents import middleware
+
+    tasks = [{"description": "Brew tea", "status": "in_progress"}]
+    second: dict = {"run": None}
+
+    class Held(Claude):
+        async def _answer(self, request):
+            if second["run"] is not None:  # the second run is stopped first
+                await asyncio.Event().wait()
+            return await super()._answer(request)
+
+    answered = middleware.InterruptedCallsMiddleware.before_agent
+
+    def before_agent(self, state, runtime):
+        patched = answered(self, state, runtime)
+        if second["run"] is not None and self._root and patched is not None:
+            # Stop it right after it answered, before the step is saved.
+            asyncio.get_running_loop().call_soon(second["run"].cancel)
+        return patched
+
+    monkeypatch.setattr(middleware.InterruptedCallsMiddleware, "before_agent", before_agent)
+    claude = serve(monkeypatch, Held(Answer=[
+        calls(("save_tasks", {"tasks": tasks}, "toolu_t"), ("ic_wait", {}, "toolu_w")),
+        say("Back."),
+    ]), "deepagents")
+    manager = manager_for("deepagents", [AgentConfig(
+        name="solo", prompt="Answer.", tools=[ic_wait], include_state_tools=True,
+    )])
+    try:
+        running = asyncio.create_task(turn(manager, "Plan and wait."))
+        await asyncio.wait_for(SIGNALS["started"].wait(), timeout=5)
+        await asyncio.sleep(0.1)
+        running.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await running
+        second["run"] = asyncio.create_task(turn(manager, "Hello again."))
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(second["run"], timeout=5)
+        second["run"] = None
+        await turn(manager, "Third time.")
+        saved = await saved_tasks(manager, "deepagents")
+    finally:
+        await manager.cleanup()
+
+    sent = results(claude.last("Answer"))
+    assert claude.refused == []
+    assert "1 tasks saved" in sent["toolu_t"]
+    assert [t["description"] for t in saved] == ["Brew tea"]
+
+
 @pytest.mark.parametrize("backend", BACKENDS)
 async def test_a_call_waiting_at_its_question_is_not_run(hermetic, monkeypatch, backend):
     from agentic_cli.tools.interaction_tools import ask_clarification

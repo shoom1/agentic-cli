@@ -96,10 +96,11 @@ class OpenCalls:
     when the user stops its turn. Calls are kept by conversation, the active
     turn's (``workflow.sessions.get_active_turn``), which ``answer`` reads:
     Deep Agents answers a stopped turn's calls at that conversation's next
-    run, after turns in others. ``answer`` forgets the call it answers. A
-    turn that ends without a cancel has every call answered, so ``clear``
-    forgets its conversation's calls; one that fails keeps those that
-    finished (``failed``).
+    run, after turns in others. ``answer`` forgets nothing: that run may be
+    stopped too before its answers are saved, and the next one answers them
+    again. A turn that ends without a cancel has every call answered and
+    saved, so ``clear`` forgets its conversation's calls; one that fails
+    keeps those that finished (``failed``).
     """
 
     def __init__(self) -> None:
@@ -134,8 +135,9 @@ class OpenCalls:
     def answer(self, call_id: str | None, *, by_user: bool) -> Any:
         """An open call's result: what it returned if it finished, else why it has none.
 
-        The call is the active turn's conversation's, and the record forgets
-        it: its answer is in the history now.
+        The call is the active turn's conversation's. It stays recorded until
+        that conversation's turn ends (``clear``): the step that answers it
+        may be stopped before it is saved.
 
         Args:
             call_id: The call.
@@ -145,12 +147,8 @@ class OpenCalls:
         key = get_active_turn()
         finished = self._finished.get(key, {})
         if call_id in finished:
-            result = finished.pop(call_id)
-            if not finished:
-                del self._finished[key]
-            return result
+            return finished[call_id]
         if call_id in self._asking.get(key, ()):
-            self._unmark(key, call_id)
             return interrupted(NOT_RUN)
         record = job_for_call(call_id)
         if record is not None:

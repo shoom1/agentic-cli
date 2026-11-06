@@ -85,17 +85,17 @@ class TestOpenCalls:
             assert calls.answer("call_1", by_user=False) == "its result"
             assert calls.answer("call_2", by_user=False) == interrupted(INTERRUPTED)
 
-    def test_a_call_answered_is_forgotten(self):
-        """The answer is in the history now: the record does not grow with
-        every conversation a stop leaves behind."""
+    def test_an_answer_stands_until_its_conversation_s_turn_ends(self):
+        """The step that answers a call may be stopped before it is saved, and
+        the next run answers it again: the same."""
         calls = OpenCalls()
         with turn_of(ref("a")):
             calls.finished("call_1", "its result")
             cancelled_at_its_prompt(calls, "call_2")
-            calls.answer("call_1", by_user=True)
-            calls.answer("call_2", by_user=True)
+            first = [calls.answer("call_1", by_user=True), calls.answer("call_2", by_user=True)]
+            again = [calls.answer("call_1", by_user=True), calls.answer("call_2", by_user=True)]
 
-        assert calls._finished == {} and calls._asking == {}
+        assert first == again == ["its result", interrupted(NOT_RUN)]
 
     def test_a_turn_that_ends_leaves_nothing_behind(self):
         calls = OpenCalls()
