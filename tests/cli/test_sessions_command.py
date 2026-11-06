@@ -9,6 +9,7 @@ markup; "(no prompt yet)" without one), its turns, and when it last changed.
 from __future__ import annotations
 
 import io
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any
 
@@ -71,6 +72,10 @@ class _App:
         if self._wf is None:
             raise RuntimeError("workflow not initialized")
         return self._wf
+
+    @contextmanager
+    def conversation_held(self, session_id: str):
+        yield None  # no other process has it open (see test_resume_session.py)
 
 
 def _table(app: _App) -> str:

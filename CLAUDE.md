@@ -32,7 +32,7 @@ agentic-cli/
 │   ├── cli/
 │   │   ├── app.py            # BaseCLIApp (main(): the command line, add_arguments/from_args, exit_status; session_start: how run() begins, its resume once the prompt is up (_open_on_startup; Ctrl+C there ends the app; --continue passes over conversations another process holds, _newest_free); the --resume hint at exit; the session it builds; get_theme(name); /settings model pickers: _model_choices (the list: catalog.offered with model_services.role_models, as /models has it); the LangGraph deprecation notice; an orchestrator swap: the new backend takes the conversation's id, `_SWAP_NOTE` says its history stays behind; compact(), start_new_session() and resume_session(): /compact, /new and /resume, under the turn lock (pick_session(), the picker, is not: it waits on a dialog); a conversation's facts saved once per conversation used (_turned); another conversation's job resume keeps ctx and the task list)
 │   │   ├── commands.py       # Command, CommandRegistry
-│   │   ├── conversation_lock.py # ConversationLock: one process per stored conversation (flock under <sessions_dir>/locks/; BaseCLIApp._hold refuses one held elsewhere)
+│   │   ├── conversation_lock.py # ConversationLock: one process per stored conversation (flock under <sessions_dir>/locks/; BaseCLIApp._hold refuses one held elsewhere; /sessions --delete too, through conversation_held)
 │   │   ├── builtin_commands.py # /help, /status (the main agent's context rows: context_budget), /models (ModelsCommand: the list, each model's facts and sources, Status for an entry left out, the providers in use; /models <text> searches the full listings; refresh), /sessions, /resume [<id>] (sessions), /jobs (resume: finished jobs), /compact [focus], /new, ...
 │   │   ├── workflow_controller.py  # WorkflowController (lazy/background init, orchestrator swap (the old manager released in the controller's task: a cancel stops only the wait); the status bar names the main agent's model)
 │   │   ├── session_resume.py # What /resume shows: the picker (picker), the "Resumed:" line, the replay of the last 10 messages
@@ -133,7 +133,7 @@ agentic-cli/
 │   │   ├── langgraph/state_tools.py # LangGraph-library plan/task tools (Command/InjectedState): Deep Agents and LangGraph
 │   │   ├── skills/          # Agent Skills: SkillStore, the ADK toolset (toolset.py)
 │   │   │   └── langchain_tools.py # make_skill_tools: list_skills/load_skill/load_skill_resource for Deep Agents
-│   │   ├── jobs/            # Long-running jobs: JobManager, backends, job_* tools
+│   │   ├── jobs/            # Long-running jobs: JobManager, backends (a spec pinned at submit: a subprocess job runs where it was submitted), job_* tools
 │   │   │   └── resume.py    # job_result_payload, JOB_NOTICE_HEADER: what a finished job tells the agent
 │   │   ├── sandbox/         # Stateful code-execution sandbox (sandbox_execute); stage_inputs and the docker backend's _collect_outputs copy through descriptors of inputs/ and outputs/ (the kernel can swap either for a symlink); an input whose path runs through the session's directory is refused, on docker any session's (sandbox_root_for(settings): <workspace_dir>/sandbox)
 │   │   ├── os_sandbox/      # The OS sandbox execute_python runs in: seatbelt (macOS), bubblewrap (Linux), else NoOpSandbox; policy.py builds its lists from protected_paths

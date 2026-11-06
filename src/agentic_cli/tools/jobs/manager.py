@@ -386,6 +386,10 @@ class JobManager:
         around each call, so a tool that reads its id from ADK's
         ``tool_context`` (None there) is linked all the same. A ``call_id`` or
         ``call_name`` the tool passes wins.
+
+        The backend pins the spec now (``JobBackend.pin``): a queued job may
+        be launched by another CLI, so a subprocess job's working directory
+        is the one it was submitted in, whoever launches it.
         """
         if backend not in self._backends:
             raise ValueError(
@@ -395,6 +399,7 @@ class JobManager:
             session_id, user_id = self._fill_turn_context(session_id, user_id)
         if resume_on_complete and call_id is None:
             call_id, call_name = self._fill_tool_call(call_name)
+        spec = self._backends[backend].pin(dict(spec))
         with self._lock:
             job_id = uuid.uuid4().hex[:12]
             rec = JobRecord(
@@ -403,7 +408,7 @@ class JobManager:
                 backend=backend,
                 name=name or tool,
                 state=JobState.QUEUED,
-                spec=dict(spec),
+                spec=spec,
                 tags=list(tags or []),
                 resume_on_complete=resume_on_complete,
                 call_id=call_id,
