@@ -662,12 +662,17 @@ class TestAFailedSummary:
     async def test_one_asked_for_is_tried_every_time(self, manager, api):
         """``/compact`` or an overflow: never skipped, and its failure is not
         one an automatic summary skips for."""
-        api.script = [self.refused(), self.refused(), written()]
+        api.script = [self.refused(), self.refused(), self.refused(), written()]
         made, asked = summarizer(manager), summarizer(manager, manual=True)
         turn = Recorded()
 
         await as_agent("solo", lambda: made.maybe_summarize_events(events=conversation()), turn)
         skipped = await as_agent("solo", lambda: made.maybe_summarize_events(
+            events=conversation()
+        ), turn)
+        # The same range, asked for: tried although it failed in this turn.
+        made.manual = True
+        tried = await as_agent("solo", lambda: made.maybe_summarize_events(
             events=conversation()
         ), turn)
         refused = await as_agent(None, lambda: asked.maybe_summarize_events(
@@ -677,8 +682,8 @@ class TestAFailedSummary:
             events=conversation()
         ), turn)
 
-        assert len(api.requests) == 3
-        assert (skipped, refused) == (None, None)
+        assert len(api.requests) == 4
+        assert (skipped, tried, refused) == (None, None, None)
         assert written_now is not None
 
     async def test_the_range_after_a_summary_written_since_is_tried(self, manager, api):

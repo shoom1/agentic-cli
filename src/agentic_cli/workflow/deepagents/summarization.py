@@ -59,7 +59,9 @@ count is the prompt the summary replaced, no evidence: the middleware's
 alone, as ADK's engine stops at a summary. They rest on private Deep Agents
 methods (``_apply_event_to_messages``, ``_compute_state_cutoff``,
 ``_build_new_messages_with_path``, ``_should_summarize``, ``_lc_helper``
-and its summary model); contract tests pin them.
+and its summary model, and, for a failed summary's range,
+``_get_effective_messages`` and ``_determine_cutoff_index``); contract tests
+pin them.
 """
 
 from __future__ import annotations
