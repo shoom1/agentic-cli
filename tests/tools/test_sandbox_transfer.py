@@ -7,6 +7,7 @@ from agentic_cli.tools.sandbox import manager
 from agentic_cli.tools.sandbox.backends import jupyter_docker
 from agentic_cli.tools.sandbox.manager import stage_inputs
 from agentic_cli.tools.sandbox.backends.jupyter_docker import JupyterDockerBackend
+from tests.conftest import MockContext
 
 
 def _backend(shared: Path):
@@ -189,7 +190,7 @@ def test_stage_inputs_refuses_an_input_inside_the_session(tmp_path, monkeypatch)
     # becomes a link to a host folder just before the copy.
     session, outs, outside = _session_with_an_output(tmp_path)
     _swap_before_each_copy(monkeypatch, manager, outs, outside)
-    with pytest.raises(ValueError, match="inside the sandbox session"):
+    with pytest.raises(ValueError, match="inside this sandbox session's directory"):
         stage_inputs(session, [str(outs / "id_rsa")])
     assert b"SECRET" not in _staged_bytes(session)
 
@@ -209,13 +210,51 @@ def test_stage_inputs_refuses_the_session_under_any_spelling(tmp_path, monkeypat
         src = "session/outputs/id_rsa"
     elif spelling == "dotdot":          # outside once normalized, but the OS
         src = str(outs / ".." / ".." / "ssh" / "id_rsa")  # walks outputs/.. physically
-    with pytest.raises(ValueError, match="inside the sandbox session"):
+    with pytest.raises(ValueError, match="inside this sandbox session's directory"):
         stage_inputs(staged_session, [src])
     assert _staged_bytes(session) == []
 
 
-def test_stage_inputs_still_stages_a_file_beside_the_session(tmp_path):
-    session, _outs, _outside = _session_with_an_output(tmp_path)
-    beside = tmp_path / "session-notes.csv"; beside.write_bytes(b"NOTES")
-    stage_inputs(session, [str(beside)])
+def test_stage_inputs_still_stages_a_file_beside_the_sandbox_root(tmp_path):
+    # Shares the root's name as a string prefix, not as a folder.
+    root = tmp_path / "sandbox"; session = root / "b"; session.mkdir(parents=True)
+    (root / "a" / "outputs").mkdir(parents=True)
+    beside = tmp_path / "sandbox-notes.csv"; beside.write_bytes(b"NOTES")
+    stage_inputs(session, [str(beside)], sandbox_root=root)
     assert _staged_bytes(session) == [b"NOTES"]
+
+
+def _manager_on_docker(settings):
+    """A SandboxManager on the docker backend, over a fake container runtime
+    that answers one execute with a success."""
+    from agentic_cli.tools.sandbox.backends.detect import DockerAvailability
+    from tests.tools.test_sandbox_docker_backend import FakeRuntime, _feed_result
+    runtime = FakeRuntime(); _feed_result(runtime)
+    docker = JupyterDockerBackend(
+        settings, runtime=runtime,
+        detect_fn=lambda: DockerAvailability(True, "docker", "test"),
+    )
+    return manager.SandboxManager(settings, backend=docker)
+
+
+@pytest.mark.parametrize("folder, name", [("outputs", "id_rsa"), ("artifacts", "plot_0.png")])
+def test_staging_another_sessions_file_is_refused(tmp_path, monkeypatch, folder, name):
+    # Session a's code swaps one of its folders for a link to a host folder
+    # after the permission check, and the model stages a's file (an output,
+    # or the plot path the tool itself reported) into session b.
+    outside = tmp_path / "host"; outside.mkdir()
+    (outside / name).write_bytes(b"SECRET")
+    with MockContext(stateful_executor_backend="docker") as ctx:
+        sessions = Path(ctx.settings.workspace_dir) / "sandbox"   # the manager's layout
+        source = sessions / "a" / folder / name
+        source.parent.mkdir(parents=True); source.write_bytes(b"SESSION A")
+        _swap_before_each_copy(monkeypatch, manager, source.parent, outside)
+        mgr = _manager_on_docker(ctx.settings)
+        try:
+            result = mgr.execute("print(1)", session_id="b", inputs=[str(source)])
+        finally:
+            mgr.cleanup()
+        assert _staged_bytes(sessions / "b") == []
+        assert result.success is False
+        assert "inside another sandbox session's directory" in result.error
+        assert "artifacts directory" in result.error

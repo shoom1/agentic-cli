@@ -376,9 +376,11 @@ class JupyterDockerBackend(SandboxBackend):
         if not ok:
             return ExecutionResult(success=False, error=msg)
         if inputs:
-            from agentic_cli.tools.sandbox.manager import stage_inputs
+            from agentic_cli.tools.sandbox.manager import sandbox_root_for, stage_inputs
             try:
-                stage_inputs(working_dir, inputs)
+                # Every session's kernel controls its own directory, so an
+                # input inside any of them is refused, not only this one.
+                stage_inputs(working_dir, inputs, sandbox_root=sandbox_root_for(self._settings))
             except ValueError as exc:
                 return ExecutionResult(success=False, error=f"input staging failed: {exc}")
         session = self._sessions.get(session_id)

@@ -24,10 +24,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `src_dir_fd`/`dst_dir_fd` and `open_dir_no_follow` is new. A dangling
   `inputs` link now fails the call with the usual "not a real directory"
   error instead of an uncaught `FileExistsError`. An input whose path runs
-  through the session directory (an `outputs/` or plot path the tool
-  reported, say) is refused: below it every folder is the kernel's, so it
-  could redirect that copy to a host file too, and the sandbox already sees
-  the file. **Breaking:** staging such a file fails the call, naming it.
+  through any of the sandbox's session directories (an `outputs/` or plot
+  path the tool reported, staged into another session, say) is refused:
+  below each, every folder is that session's kernel's, so it could redirect
+  the copy to a host file too. The error says to stage the copy collected in
+  the artifacts directory instead. `stage_inputs` takes `sandbox_root=` (the
+  docker backend passes `<workspace_dir>/sandbox`); the local backend, whose
+  kernel runs with host privileges and collects nothing, refuses only the
+  session's own directory.
+  **Breaking:** staging a file from inside a session fails the call, naming
+  it.
 - **Saving settings keeps the project's deny rules.** The project
   `./.{app_name}/settings.json` may hold `permissions.deny` rules, which the
   permission engine reads from the file itself, but a settings save (any
