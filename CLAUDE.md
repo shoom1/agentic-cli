@@ -24,7 +24,7 @@ agentic-cli/
 │   ├── settings_sources.py   # SettingsSourcesMixin: the one settings_customise_sources (init, env, project JSON allowlisted, user JSON, env files: a cwd-relative one allowlisted, the constructor's too), inherited by WorkflowSettingsMixin and AppSettingsMixin, so a class composed from them over pydantic-settings' BaseSettings reads what BaseSettings reads (__init_subclass__ refuses a settings class whose sources would resolve to pydantic-settings' own: its BaseSettings listed before the mixins; a class's own settings_customise_sources is allowed); app_name only from the constructor or the class (another in the env or a file: settings_app_name_ignored; cli_parse_args, an app's opt-in, is above them); secrets_dir never read (settings_secrets_dir_ignored)
 │   ├── settings_persistence.py # Trust-split save (PROJECT_SETTABLE_KEYS → project, rest → user config; excludes SECRET_FIELDS; the project file's PROJECT_PRESERVED_KEYS, its `permissions` deny rules, kept by every save but an explicit `path=` dump); USER_PREFERENCE_KEYS (ui_theme, dialog_placement): user-scoped, yet an app may list them in /settings; HAND_EDITED_KEYS (models, model_providers): never written by a save (the app's shipped entries would be copied into a file), each file's own section kept (a project file's models only), never shown by /settings
 │   ├── constants.py          # Shared constants, truncate()
-│   ├── file_utils.py         # atomic_write_json / atomic_write_text
+│   ├── file_utils.py         # atomic_write_json / atomic_write_text; copy_regular_file_no_follow, open_dir_no_follow (dir_fd: a folder another party can swap for a symlink is opened once, then used by descriptor)
 │   ├── paths.py              # resolve_path: the one interpretation of a path argument
 │   ├── logging.py            # configure_logging; LOG_STREAM, which every logger writes to (structlog through _LineLogger, no lock); log_lines_to(sink): each line to a sink instead of stderr
 │   ├── cli/
@@ -132,7 +132,7 @@ agentic-cli/
 │   │   │   └── langchain_tools.py # make_skill_tools: list_skills/load_skill/load_skill_resource for Deep Agents
 │   │   ├── jobs/            # Long-running jobs: JobManager, backends, job_* tools
 │   │   │   └── resume.py    # job_result_payload, JOB_NOTICE_HEADER: what a finished job tells the agent
-│   │   ├── sandbox/         # Stateful code-execution sandbox (sandbox_execute)
+│   │   ├── sandbox/         # Stateful code-execution sandbox (sandbox_execute); stage_inputs and the docker backend's _collect_outputs copy through descriptors of inputs/ and outputs/ (the kernel can swap either for a symlink); an input whose path runs through the session's directory is refused, on docker any session's (sandbox_root_for(settings): <workspace_dir>/sandbox)
 │   │   ├── shell/           # 8-layer shell security (+ os_sandbox/)
 │   │   └── webfetch/        # Fetcher, converter, validator, robots, summarizer, saved pages
 │   ├── memory/               # Knowledge base + memory store; imports nothing else from agentic_cli
