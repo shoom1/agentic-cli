@@ -548,6 +548,10 @@ class WorkflowController:
         Initializes the replacement fully before swapping, so a failed init
         leaves the working manager in place; whichever manager ends up unused
         is cleaned up. The caller holds ``_lifecycle_lock``.
+
+        Once the replacement is published the swap is made: a cancel while
+        the old manager is released stops only the wait, and the cleanup,
+        the controller's (``_spawn_cleanup``), runs on, joined by ``close()``.
         """
         logger.info(
             "orchestrator_swap", old_model=self._workflow.model, new_model=model
@@ -568,7 +572,9 @@ class WorkflowController:
             raise RuntimeError("WorkflowController is closed")
         old_workflow, self._workflow = self._workflow, new_workflow
         self._init_error = None
-        await self._cleanup_manager(old_workflow)
+        cleanup = self._spawn_cleanup(old_workflow)
+        if cleanup is not None:
+            await asyncio.shield(cleanup)
 
     async def _reinitialize_in_place(self, model: str | None) -> None:
         """Reinitialize the live manager. The caller holds ``_lifecycle_lock``.

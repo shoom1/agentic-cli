@@ -267,6 +267,49 @@ class TestTheRestartIsInterrupted:
         assert app._workflow_controller.is_ready
 
 
+class TestTheSwitchIsInterruptedOnceMade:
+    """Ctrl+C after an orchestrator switch published the new backend, while
+    the old one is being released: too late to undo. The settings were
+    restored to the old orchestrator while the new one ran, so the next model
+    change swapped back without a word. Now the Save stands, the conversation
+    continues on the new backend, the switch is reported as usual, and the
+    cancel goes on."""
+
+    async def test_the_settings_name_the_backend_that_runs(self, settings):
+        manager = FakeManager(OLD_MODEL, backend="adk")
+        releasing, released = asyncio.Event(), asyncio.Event()
+
+        async def cleanup():
+            releasing.set()
+            await released.wait()
+
+        manager.cleanup = AsyncMock(side_effect=cleanup)
+        app = _app(settings, manager)
+        app._open_here = AsyncMock(return_value="history stays behind")
+        replacement = FakeManager(OLD_MODEL, backend="deepagents")
+        replacement.initialize_services = AsyncMock()
+        controller = app._workflow_controller
+        try:
+            with patch(
+                "agentic_cli.cli.workflow_controller.create_workflow_manager_from_settings",
+                return_value=replacement,
+            ):
+                await _interrupt(
+                    asyncio.create_task(app.apply_settings({"orchestrator": "deepagents"})),
+                    releasing,
+                )
+
+            assert settings.orchestrator.value == "deepagents"
+            assert controller.workflow is replacement
+            assert not controller._needs_orchestrator_swap()
+            app._open_here.assert_awaited_once_with(replacement)
+            assert any("deepagents" in line for line in app.successes)
+            app.session.add_message.assert_any_call("system", "history stays behind")
+        finally:
+            released.set()
+            await controller.close()
+
+
 class TestInvalidValue:
     async def test_earlier_fields_in_the_same_change_are_undone(self, settings):
         app = _app(settings, FakeManager(OLD_MODEL))

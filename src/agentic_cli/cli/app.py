@@ -967,7 +967,11 @@ class BaseCLIApp:
         workflow is brought back on the model it was running, so nothing
         unusable stays in memory to be saved by ``/settings``. A restart
         interrupted by Ctrl+C is undone the same way, without a word, and the
-        cancel is re-raised.
+        cancel is re-raised. An orchestrator switch interrupted once the new
+        backend runs (while the old one is released, which goes on) is too
+        late to undo: the change stays in memory, unsaved, and is reported as
+        usual before the cancel is re-raised, so the settings name the
+        backend that runs.
 
         Settings are applied in two ways:
         1. Special settings (model, a role's model, thinking_effort) use
@@ -1022,25 +1026,33 @@ class BaseCLIApp:
         controller = self._workflow_controller
         switched: list[str] = []
         swap_note: str | None = None
+        interrupted: asyncio.CancelledError | None = None
         if needs_reinit and controller.is_ready:
             previous = controller.workflow
             previous_model = previous.model
             previous_models = dict(getattr(previous, "agent_models", {}))
             try:
                 await controller.reinitialize(model=new_model)
-            except asyncio.CancelledError:
-                # Ctrl+C stopped /settings mid-restart. Nothing of the Save
-                # stays, as on a failure, and nothing is said: the session's
-                # interruption is not a cancel of the dialog.
-                _restore_settings(self._settings, snapshot)
-                if not controller.is_ready:
-                    try:
-                        await controller.reinitialize(model=previous_model)
-                    except Exception as restore_error:
-                        # Down, on the old model: the next request retries,
-                        # and reports a failure then.
-                        logger.warning("settings_restore_failed", error=str(restore_error))
-                raise
+            except asyncio.CancelledError as cancel:
+                if not (controller.is_ready and controller.workflow is not previous):
+                    # Ctrl+C stopped /settings mid-restart. Nothing of the
+                    # Save stays, as on a failure, and nothing is said: the
+                    # session's interruption is not a cancel of the dialog.
+                    _restore_settings(self._settings, snapshot)
+                    if not controller.is_ready:
+                        try:
+                            await controller.reinitialize(model=previous_model)
+                        except Exception as restore_error:
+                            # Down, on the old model: the next request
+                            # retries, and reports a failure then.
+                            logger.warning(
+                                "settings_restore_failed", error=str(restore_error)
+                            )
+                    raise
+                # The switch was made, and Ctrl+C came while the old backend
+                # was released (which goes on): too late to undo. The change
+                # is finished and reported, then the cancel goes on.
+                interrupted = cancel
             except Exception as e:
                 _restore_settings(self._settings, snapshot)
                 self.session.add_error(
@@ -1083,6 +1095,8 @@ class BaseCLIApp:
             # The transcript is printed again, the lines above included.
             theme = self.get_theme(self._settings.ui_theme)
             self.session.set_theme(theme, repaint=True)
+        if interrupted is not None:
+            raise interrupted
         return True
 
     async def _open_here(self, workflow: Any) -> str:

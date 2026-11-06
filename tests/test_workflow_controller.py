@@ -413,6 +413,43 @@ class TestOrchestratorSwapLifecycle:
         assert controller._workflow is new
         old.cleanup.assert_awaited_once()
 
+    async def test_a_swap_cancelled_while_releasing_the_old_manager_still_releases_it(self):
+        """Ctrl+C once the replacement is published stops only the wait. The
+        old manager's cleanup is the controller's, as an abandoned
+        construction's is: it runs to its end, and ``close()`` joins it.
+        Cancelled with it, the old manager's MCP servers, kernels and store
+        stayed open for the rest of the process."""
+        import asyncio
+
+        controller, old = self._controller_needing_swap()
+        new = _FakeLangGraphWorkflow()
+        releasing, released = asyncio.Event(), asyncio.Event()
+        finished: list[str] = []
+
+        async def _slow_cleanup() -> None:
+            releasing.set()
+            await released.wait()
+            finished.append("cleanup")
+
+        old.cleanup = AsyncMock(side_effect=_slow_cleanup)
+        with patch(
+            "agentic_cli.cli.workflow_controller.create_workflow_manager_from_settings",
+            return_value=new,
+        ):
+            swapping = asyncio.create_task(controller.reinitialize())
+            await asyncio.wait_for(releasing.wait(), timeout=5)
+            swapping.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await swapping
+
+        assert controller._workflow is new
+        closing = asyncio.create_task(controller.close())
+        await asyncio.sleep(0.05)
+        assert not closing.done(), "close() did not join the old manager's cleanup"
+        released.set()
+        await asyncio.wait_for(closing, timeout=5)
+        assert finished == ["cleanup"], "the cancel aborted the old manager's cleanup"
+
 
 class TestControllerClose:
     """close() releases the manager and is safe to call repeatedly."""
