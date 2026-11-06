@@ -68,6 +68,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the executor backend, sandbox mounts and API keys included. The filter now
   judges the env files the settings actually read: the constructor's
   `_env_file` when one is given.
+- **A settings class composed from the mixins has `BaseSettings`' trust
+  boundary.** The project file's allowlist and the cwd `.env` filter were
+  `agentic_cli.BaseSettings`' own (since 0.6.0), so a class composed from the
+  exported `WorkflowSettingsMixin`, `AppSettingsMixin` and `CLISettingsMixin`
+  over pydantic-settings' own `BaseSettings` read a cwd `.env` in full: a
+  cloned repository's `.env` could turn `permissions_enabled` off, choose the
+  `local` executor, turn raw LLM logging on, or define a provider that sends
+  the user's key to its own server. Such a class read neither settings file
+  either, so what `/settings` saved for it was never read back. The sources
+  now come with the mixins (`settings_sources.SettingsSourcesMixin`): such a
+  class reads the constructor, the environment, the project file
+  (allowlisted), the user file and its env files (a cwd-relative one
+  allowlisted), in that order, as `BaseSettings` does; it no longer reads
+  pydantic-settings' `secrets_dir`, which `BaseSettings` never read. List the
+  mixins before pydantic-settings' class.
 
 ### Added
 

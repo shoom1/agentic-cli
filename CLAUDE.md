@@ -19,8 +19,9 @@ Agentic CLI is a shared library providing the core infrastructure for building d
 agentic-cli/
 ├── src/agentic_cli/
 │   ├── __init__.py           # Package exports, lazy imports
-│   ├── config.py             # BaseSettings (pydantic-settings; env_files: the env files the settings read, the constructor's _env_file else the class's; settings_customise_sources filters a cwd-relative one, the constructor's too); validate_settings: the static model checks
-│   ├── settings_mixins.py    # Composable settings field groups
+│   ├── config.py             # BaseSettings (pydantic-settings; env_files: the env files the settings read, the constructor's _env_file else the class's); validate_settings: the static model checks
+│   ├── settings_mixins.py    # Composable settings field groups (AppSettingsMixin, CLISettingsMixin)
+│   ├── settings_sources.py   # SettingsSourcesMixin: the one settings_customise_sources (init, env, project JSON allowlisted, user JSON, env files: a cwd-relative one allowlisted, the constructor's too), inherited by WorkflowSettingsMixin and AppSettingsMixin, so a class composed from them over pydantic-settings' BaseSettings reads what BaseSettings reads
 │   ├── settings_persistence.py # Trust-split save (PROJECT_SETTABLE_KEYS → project, rest → user config; excludes SECRET_FIELDS; the project file's PROJECT_PRESERVED_KEYS, its `permissions` deny rules, kept by every save but an explicit `path=` dump); USER_PREFERENCE_KEYS (ui_theme, dialog_placement): user-scoped, yet an app may list them in /settings; HAND_EDITED_KEYS (models, model_providers): never written by a save (the app's shipped entries would be copied into a file), each file's own section kept (a project file's models only), never shown by /settings
 │   ├── constants.py          # Shared constants, truncate()
 │   ├── file_utils.py         # atomic_write_json / atomic_write_text

@@ -12,8 +12,10 @@ from typing import Literal
 
 from pydantic import Field, field_validator
 
+from agentic_cli.settings_sources import SettingsSourcesMixin
 
-class AppSettingsMixin:
+
+class AppSettingsMixin(SettingsSourcesMixin):
     """Settings for application identity and disk layout.
 
     Mixin class that provides:
@@ -21,7 +23,9 @@ class AppSettingsMixin:
     - Path expansion for workspace_dir
     - Derived path properties (sessions, artifacts, knowledge base)
 
-    Should be composed with BaseSettings via multiple inheritance.
+    Should be composed with BaseSettings via multiple inheritance, before
+    pydantic-settings' class: it brings the settings' sources
+    (``SettingsSourcesMixin``) with it.
     """
 
     # Application identity (domain projects should override)

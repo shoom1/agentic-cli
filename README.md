@@ -498,13 +498,12 @@ older version had, say) is dropped silently.
 **Consequence:** put API keys in real environment variables or an
 absolute/user-level file. A key placed in a cwd `.env` is deliberately ignored.
 
-The JSON sources and this filtering are `agentic_cli.BaseSettings`'s. A class
-composed from the mixins over pydantic-settings' own `BaseSettings` reads the
-constructor, the environment and its `env_file` as pydantic-settings does, with
-no filtering: give such a class no cwd-relative `env_file`, or a cloned
-repository's `.env` can set any setting, `model_providers` included. Its
-configured providers' keys are read from the environment and the absolute
-entries of its class's `env_file`.
+These sources and their filtering come with the settings mixins
+(`WorkflowSettingsMixin`, `AppSettingsMixin`): a class composed from them over
+pydantic-settings' own `BaseSettings` reads the same sources, in the same
+order, filtered the same way. List the mixins before pydantic-settings' class,
+as `BaseSettings` does. Its configured providers' keys are read from the
+environment and the absolute entries of its class's `env_file`.
 
 ### Key Settings
 
