@@ -21,12 +21,17 @@ sentinel a targetless capability resolves to (and what a grant for it widens
 to), so ``canonicalize_target`` never returns it for a real argument: a path
 ``*`` is a file named ``*``, a URL is normalised, and a bare ``*`` command or
 string is rejected (``ValueError``), which the engine denies.
+
+A deny rule is matched with ``matches_deny``: a filesystem deny ignores case
+and Unicode normalization (see ``PathMatcher.matches_deny``), every other
+matcher denies exactly as it allows.
 """
 
 from __future__ import annotations
 
 import fnmatch
 import re
+import unicodedata
 from functools import lru_cache
 from pathlib import Path
 from typing import Protocol, runtime_checkable
@@ -46,6 +51,8 @@ class Matcher(Protocol):
 
     def matches(self, pattern: str, target: str) -> bool: ...
 
+    def matches_deny(self, pattern: str, target: str) -> bool: ...
+
 
 class StringGlobMatcher:
     """Default fallback: ``${...}`` substitution (patterns only) + ``fnmatch``."""
@@ -62,6 +69,9 @@ class StringGlobMatcher:
         if pattern == "*":
             return True
         return fnmatch.fnmatchcase(target, pattern)
+
+    def matches_deny(self, pattern: str, target: str) -> bool:
+        return self.matches(pattern, target)
 
 
 def _literal_string_target(s: str) -> str:
@@ -153,6 +163,25 @@ class PathMatcher:
             return True
         return bool(_glob_to_regex(pattern).match(target))
 
+    def matches_deny(self, pattern: str, target: str) -> bool:
+        """Whether a deny ``pattern`` covers ``target``, whatever its case.
+
+        On a case-insensitive filesystem (APFS's default, NTFS) ``./.ENV`` and
+        ``./.env`` are one file, and :func:`agentic_cli.paths.resolve_path`
+        keeps the case it was given, so a deny compared case by case missed
+        every other spelling. The two are compared as given and, failing
+        that, casefolded after NFC (the glob characters are unaffected). That
+        only denies more, so it holds on a case-sensitive filesystem too; an
+        allow still compares case, and a case variant of an allowed path asks.
+        """
+        return self.matches(pattern, target) or self.matches(_fold(pattern), _fold(target))
+
+
+def _fold(path: str) -> str:
+    """A path's caseless form: NFC (a decomposed name equals a composed one),
+    then casefolded."""
+    return unicodedata.normalize("NFC", path).casefold()
+
 
 class URLMatcher:
     """Matcher for ``http.*`` capabilities."""
@@ -211,6 +240,11 @@ class URLMatcher:
             return False
         return True
 
+    def matches_deny(self, pattern: str, target: str) -> bool:
+        """A URL deny matches as an allow does: hosts are already lowercased,
+        and a path is case-sensitive by definition."""
+        return self.matches(pattern, target)
+
     def _port(self, parts: SplitResult) -> int | None:
         return parts.port or self._DEFAULT_PORTS.get(parts.scheme.lower())
 
@@ -230,6 +264,9 @@ class ShellMatcher:
         if pattern == "*":
             return True
         return fnmatch.fnmatchcase(target, pattern)
+
+    def matches_deny(self, pattern: str, target: str) -> bool:
+        return self.matches(pattern, target)
 
 
 _MATCHERS: dict[str, Matcher] = {

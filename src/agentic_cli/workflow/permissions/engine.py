@@ -28,7 +28,7 @@ from agentic_cli.workflow.permissions.capabilities import (
     ResolvedCapability,
     is_resource_capability,
 )
-from agentic_cli.workflow.permissions.matchers import get_matcher
+from agentic_cli.workflow.permissions.matchers import _fold, get_matcher
 from agentic_cli.workflow.permissions.rules import (
     AskScope,
     CheckResult,
@@ -74,14 +74,19 @@ def broaden_target_for_grant(cap: ResolvedCapability, home: Path | None = None) 
     if cap.target == "*":
         return "*"
     if cap.name.startswith("filesystem."):
-        target = Path(cap.target)
-        scope = target if target.is_dir() else target.parent
-        if _may_widen_to(scope, (home or Path.home()).resolve()):
-            return f"{scope}/**"
-        return cap.target
+        scope = _grant_scope(cap, home)
+        return cap.target if scope is None else f"{scope}/**"
     if cap.name == "http.read":
         return site_scope(cap.target) or cap.target
     return cap.target
+
+
+def _grant_scope(cap: ResolvedCapability, home: Path | None) -> Path | None:
+    """The directory a ``filesystem.*`` grant covers, or None when it may not
+    widen (the grant is then the exact target)."""
+    target = Path(cap.target)
+    scope = target if target.is_dir() else target.parent
+    return scope if _may_widen_to(scope, (home or Path.home()).resolve()) else None
 
 
 def site_scope(url: str) -> str | None:
@@ -113,21 +118,105 @@ def _may_widen_to(directory: Path, home: Path) -> bool:
 
     Not the filesystem root, and not a proper ancestor of ``home`` (which
     includes the root): those would reach far beyond what was asked for.
+    Compared caseless, as a deny is: on a case-insensitive filesystem
+    ``/USERS`` is ``/Users``, and a grant on ``/USERS/**`` covers every home
+    spelled that way.
     """
     if directory == Path(directory.anchor):
         return False
+    directory, home = Path(_fold(str(directory))), Path(_fold(str(home)))
     return not (home != directory and home.is_relative_to(directory))
 
 
-def is_storable_grant(cap: ResolvedCapability) -> bool:
+#: The characters each matcher treats as wildcards in a rule's target:
+#: ``_glob_to_regex`` (paths, URL paths) and ``fnmatch`` (shell commands,
+#: strings, URL queries).
+_PATH_WILDCARDS = "*?"
+_GLOB_WILDCARDS = "*?["
+
+
+def is_storable_grant(cap: ResolvedCapability, home: Path | None = None) -> bool:
     """Whether approving ``cap`` may be remembered as a rule.
 
     A resource capability (``filesystem``/``http``/``shell``) whose target is
     the wildcard can only come from a declaration that names no target. Storing
     it would approve that capability for every resource and every tool that
     declares it, so such an approval applies to the current call only.
+
+    Nor is a grant remembered when the rule it becomes would match more than
+    the prompt showed: a target is a literal argument, but the stored rule is
+    matched as a pattern, so a ``*`` in an approved ``ls *.py`` or
+    ``/x/**/notes.txt`` would become a wildcard. The literal part of the rule
+    (see ``broaden_target_for_grant``) must hold none of its matcher's
+    wildcard characters:
+
+    * ``filesystem.*``: the scope directory when the grant widens, else the
+      exact target; ``*`` and ``?``.
+    * ``http.*``: a site scope ``https://host[:port]/**`` is literal (hosts are
+      compared exactly); an exact URL must have no ``*``, no ``[`` in its path
+      or query, and no ``?`` in its query.
+    * anything else (``shell.*``, the string fallback): the whole target;
+      ``*``, ``?`` and ``[``.
+
+    ``home`` is the home directory the grant scope is judged against (the
+    process's by default), as in ``broaden_target_for_grant``.
     """
-    return not (cap.target == "*" and is_resource_capability(cap.name))
+    if cap.target == "*":
+        return not is_resource_capability(cap.name)
+    if cap.name.startswith("filesystem."):
+        scope = _grant_scope(cap, home)
+        return _is_literal(cap.target if scope is None else str(scope), _PATH_WILDCARDS)
+    if cap.name.startswith("http."):
+        if cap.name == "http.read" and site_scope(cap.target):
+            return True
+        return _is_literal_url(cap.target)
+    return _is_literal(cap.target, _GLOB_WILDCARDS)
+
+
+def is_literal_saved_grant(capability: str, target: str, home: Path) -> bool:
+    """Whether a saved allow grant matches only what its literal part names.
+
+    The engine writes grants from literal targets (``is_storable_grant``), so
+    a saved one whose literal part holds a wildcard character came from the
+    bug that stored ``/x/**/**`` for ``/x/**/notes.txt``, or from a hand edit.
+    The literal part is the target less one trailing ``/**`` for
+    ``filesystem.*``, and that directory must be one a grant may widen to
+    (``/**`` is the root's file named ``**``, granted as its exact target);
+    for ``http.*`` a site scope is literal, any other URL is checked as in
+    ``is_storable_grant``.
+    """
+    if target == "*":
+        return not is_resource_capability(capability)
+    if capability.startswith("filesystem."):
+        if target.endswith("/**"):
+            scope = target[: -len("/**")]
+            if not scope or not _may_widen_to(Path(scope), home.resolve()):
+                return False
+            return _is_literal(scope, _PATH_WILDCARDS)
+        return _is_literal(target, _PATH_WILDCARDS)
+    if capability.startswith("http."):
+        return site_scope(target) == target or _is_literal_url(target)
+    return _is_literal(target, _GLOB_WILDCARDS)
+
+
+def _is_literal(text: str, wildcards: str) -> bool:
+    return not any(ch in text for ch in wildcards)
+
+
+def _is_literal_url(url: str) -> bool:
+    """Whether an exact-URL rule matches only its own URL: no ``*`` anywhere,
+    no ``[`` in its path or query, no ``?`` in its query (the path is matched
+    as a glob, the query with ``fnmatch``). The host and port are compared
+    exactly, so an IPv6 host's brackets are no wildcard."""
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return False
+    return (
+        "*" not in url
+        and "[" not in parts.path
+        and _is_literal(parts.query, _GLOB_WILDCARDS)
+    )
 
 
 class PermissionEngine:
@@ -280,10 +369,16 @@ class PermissionEngine:
         out: list[tuple[ResolvedCapability, Rule | None]] = []
         for cap in resolved:
             matcher = get_matcher(cap.name)
+            # A deny is matched by its own method: a filesystem deny ignores
+            # case, so another spelling of a denied file is denied too.
             matched: list[Rule] = [
                 r for r in all_rules
                 if _cap_matches(r.capability, cap.name)
-                and matcher.matches(r.target, cap.target)
+                and (
+                    matcher.matches_deny(r.target, cap.target)
+                    if r.effect is Effect.DENY
+                    else matcher.matches(r.target, cap.target)
+                )
             ]
             if not matched:
                 out.append((cap, None))
@@ -340,9 +435,11 @@ class PermissionEngine:
         source = RuleSource.SESSION if scope is AskScope.SESSION else RuleSource.PROJECT
         stored = 0
         for cap in unmatched:
-            if not is_storable_grant(cap):
+            if not is_storable_grant(cap, home=self._ctx.home):
                 logger.warning(
-                    "permission_wildcard_grant_not_stored",
+                    "permission_wildcard_grant_not_stored"
+                    if cap.target == "*"
+                    else "permission_glob_grant_not_stored",
                     tool=tool_name,
                     capability=cap.name,
                 )

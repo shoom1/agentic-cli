@@ -120,12 +120,17 @@ def load_project_grants(app_name: str, ctx: PermissionContext) -> list[Rule]:
 
     Reads ``~/.{app}/project_grants.json`` and returns the allow+deny rules
     stored under ``str(ctx.workdir.resolve())`` — trusted (``RuleSource.PROJECT``,
-    both effects honored), since the user (not a repo) authored them. Returns
-    ``[]`` when the file or the project's entry is absent. Raises ``ValueError``
-    on malformed JSON.
+    both effects honored), since the user (not a repo) authored them. Two
+    kinds of allow are dropped with a warning: a resource capability's
+    wildcard (``permission_wildcard_grant_dropped``) and one whose literal part
+    holds a wildcard character (``permission_glob_grant_dropped``, see
+    ``engine.is_literal_saved_grant``). Returns ``[]`` when the file or the
+    project's entry is absent. Raises ``ValueError`` on malformed JSON.
     """
-    # Local import to avoid a cycle: matchers.py imports PermissionContext here.
+    # Local imports to avoid cycles: matchers.py imports PermissionContext
+    # here, and engine.py imports this module.
     from agentic_cli.workflow.permissions.capabilities import is_resource_capability  # noqa: PLC0415
+    from agentic_cli.workflow.permissions.engine import is_literal_saved_grant  # noqa: PLC0415
     from agentic_cli.workflow.permissions.matchers import get_matcher  # noqa: PLC0415
 
     path = get_user_project_grants_path(app_name)
@@ -158,6 +163,18 @@ def load_project_grants(app_name: str, ctx: PermissionContext) -> list[Rule]:
                 )
                 continue
             target = "*" if raw == "*" else get_matcher(cap).canonicalize_target(raw, ctx)
+            if effect is Effect.ALLOW and not is_literal_saved_grant(cap, target, ctx.home):
+                # Loaded as a target but matched as a pattern: a grant saved
+                # with a wildcard character in its literal part would cover
+                # more than was approved. A deny keeps its glob: it can only
+                # deny more.
+                Loggers.workflow().warning(
+                    "permission_glob_grant_dropped",
+                    capability=cap,
+                    target=target,
+                    path=str(path),
+                )
+                continue
             rules.append(Rule(cap, target, effect, RuleSource.PROJECT))
     return rules
 

@@ -74,6 +74,29 @@ class TestBuildRequest:
         assert "filesystem.write → /hello.txt" in req.prompt
         assert "/**" not in req.prompt
 
+    def test_a_target_with_wildcard_characters_is_approved_once_only(self, tmp_path):
+        """A ``*`` in an approved argument would be a wildcard in the rule, so
+        the approval is for this call, shown with its exact target."""
+        starred = tmp_path.resolve() / "out*dir" / "notes.txt"
+        req = build_request(
+            "tool",
+            [
+                ResolvedCapability("shell.exec", "ls *.py"),
+                ResolvedCapability("filesystem.write", str(starred)),
+            ],
+            home=tmp_path.resolve() / "home",
+        )
+        assert req.choices == [ALLOW_ONCE_CHOICE, DENY_CHOICE]
+        assert (
+            "(This target contains wildcard characters, so approval applies to this call only.)"
+            in req.prompt
+        )
+        assert "names no specific target" not in req.prompt
+        assert "shell.exec → ls *.py" in req.prompt
+        assert f"filesystem.write → {starred}" in req.prompt
+        assert "/**" not in req.prompt
+        assert "whole directory" not in req.prompt
+
     def test_request_id_has_perm_prefix(self):
         req = build_request("x", [])
         assert req.request_id.startswith("perm-")
