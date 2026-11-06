@@ -33,6 +33,16 @@ def test_error_is_captured(driver):
     assert "ZeroDivisionError" in r["error"]
 
 
+def test_a_line_starting_with_an_operator_runs(driver):
+    """The container is the boundary, so the driver runs the code as sent: a
+    continuation line starting with `!=` (black's style) is not refused as a
+    shell escape."""
+    code = "differ = (1\n          != 2)\nprint(differ)"
+    r = driver.handle_request({"type": "execute", "code": code, "timeout": 30})
+    assert r["success"] is True, r["error"]
+    assert "True" in r["stdout"]
+
+
 def test_run_emits_ready_then_result(tmp_path):
     stdin = io.StringIO(json.dumps({"type": "execute", "code": "print('hi')", "timeout": 30}) + "\n")
     stdout = io.StringIO()

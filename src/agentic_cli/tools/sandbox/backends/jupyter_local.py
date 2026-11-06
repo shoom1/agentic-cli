@@ -1,7 +1,9 @@
-"""Jupyter-based local sandbox backend.
+"""The local backend: a Jupyter kernel on the host, with no isolation.
 
 Uses jupyter_client.KernelManager + BlockingKernelClient for stateful
-Python execution with per-session kernels.
+Python execution with per-session kernels. The kernel runs as the user, with
+the user's files, network and privileges; the code runs as written (shell
+escapes and magics included). Isolation is the docker backend's job.
 """
 
 from __future__ import annotations
@@ -18,55 +20,15 @@ from agentic_cli.tools.sandbox.models import ExecutionResult
 
 logger = Loggers.tools()
 
-# Initialization code injected into new kernels to block network modules
-_SANDBOX_INIT_CODE = '''
-import sys as _sys
-
-_BLOCKED_MODULES = frozenset({
-    # Network
-    'requests', 'urllib', 'http', 'httpx', 'aiohttp',
-    'socket', 'ssl', 'ftplib', 'smtplib', 'poplib', 'imaplib',
-    'xmlrpc', 'socketserver',
-    # Package management
-    'pip', 'ensurepip', 'setuptools', 'distutils',
-    # Process execution
-    'subprocess', 'shlex',
-    # System-level
-    'ctypes',
-})
-
-import importlib.abc as _abc
-import importlib.machinery as _mach
-
-class _RestrictedImportFinder(_abc.MetaPathFinder):
-    """Meta-path finder that blocks restricted modules."""
-    def find_spec(self, fullname, path, target=None):
-        top = fullname.split('.')[0]
-        if top in _BLOCKED_MODULES:
-            raise ImportError(
-                f"Module \\'{fullname}\\' is not available in the sandbox. "
-                f"Use the appropriate tool instead (e.g., web_fetch for HTTP requests)."
-            )
-        return None
-
-_sys.meta_path.insert(0, _RestrictedImportFinder())
-
-# Remove pre-imported blocked modules from sys.modules so future
-# `import X` goes through the meta_path hook. Existing kernel internals
-# keep their references via their own module namespaces.
-for _mod_name in list(_sys.modules):
-    _top = _mod_name.split(".")[0]
-    if _top in _BLOCKED_MODULES:
-        del _sys.modules[_mod_name]
-del _mod_name, _top, _sys
-'''
-
 
 class JupyterLocalBackend(SandboxBackend):
     """Local Jupyter kernel backend for stateful code execution.
 
     Each session_id maps to a dedicated KernelManager + BlockingKernelClient
     pair. State (variables, imports) persists across calls within a session.
+    Nothing is restricted: CPython offers no in-process sandbox, and a
+    restriction that can be undone from the code it restricts only breaks
+    libraries.
     """
 
     backend_name = "jupyter_local"
@@ -93,19 +55,6 @@ class JupyterLocalBackend(SandboxBackend):
         kc.start_channels()
         kc.wait_for_ready(timeout=30)
 
-        # Inject sandbox restrictions
-        init_msg_id = kc.execute(_SANDBOX_INIT_CODE)
-        while True:
-            try:
-                msg = kc.get_iopub_msg(timeout=10)
-                if (
-                    msg.get("parent_header", {}).get("msg_id") == init_msg_id
-                    and msg.get("content", {}).get("execution_state") == "idle"
-                ):
-                    break
-            except TimeoutError:
-                break
-
         self._sessions[session_id] = (km, kc)
         logger.debug("jupyter_session_started", session_id=session_id)
         return km, kc
@@ -119,11 +68,6 @@ class JupyterLocalBackend(SandboxBackend):
         inputs: list[str] | None = None,
     ) -> ExecutionResult:
         """Execute code in a Jupyter kernel session."""
-        # Pre-scan for blocked patterns
-        valid, error = kernel_exec.validate_code(code)
-        if not valid:
-            return ExecutionResult(success=False, error=error)
-
         if working_dir is not None:
             (Path(working_dir) / "outputs").mkdir(parents=True, exist_ok=True)
 

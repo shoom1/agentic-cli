@@ -17,7 +17,6 @@ from agentic_cli.file_utils import (
     copy_regular_file_no_follow, open_dir_no_follow, sanitize_filename,
 )
 from agentic_cli.tools.sandbox.backends.base import SandboxBackend
-from agentic_cli.tools.sandbox.backends import kernel_exec
 from agentic_cli.tools.sandbox.backends.container_runtime import (
     ContainerSpec, Mount, DockerContainerRuntime,
 )
@@ -372,9 +371,6 @@ class JupyterDockerBackend(SandboxBackend):
                 error=(f"Docker sandbox backend unavailable ({avail.detail}). "
                        "Refusing to fall back to an unsandboxed kernel."),
             )
-        ok, msg = kernel_exec.validate_code(code)
-        if not ok:
-            return ExecutionResult(success=False, error=msg)
         if inputs:
             from agentic_cli.tools.sandbox.manager import sandbox_root_for, stage_inputs
             try:

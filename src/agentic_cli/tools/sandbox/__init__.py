@@ -27,7 +27,8 @@ from agentic_cli.workflow.permissions import Capability
         "State (variables, imports) persists across calls within the same session. "
         "Isolation depends on stateful_executor_backend: 'docker' runs in a "
         "network-isolated container (no network egress; memory/CPU/PID-capped, "
-        "though disk is not); 'local' runs with host privileges and shared filesystem. "
+        "though disk is not); 'local' is not isolated: the kernel runs on the host "
+        "as the user, with the user's files, network and privileges. "
         "Disabled unless explicitly enabled. Use for data analysis, prototyping, "
         "and producing work output. Use execute_python for quick stateless calculations. "
         "Each `inputs` file is copied to `inputs/<filename>` inside the session before "
@@ -43,7 +44,11 @@ def sandbox_execute(
     timeout_seconds: int | None = None,
     inputs: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Execute Python code in a stateful sandbox.
+    """Execute Python code in a stateful Jupyter session, where variables and
+    imports persist across calls. Where it runs depends on the
+    stateful_executor_backend setting: with 'docker', in an isolated container
+    with no network; with 'local', on the host as the user, with the user's
+    files and network: it is not isolated.
 
     Args:
         code: Python code to execute.
