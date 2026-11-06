@@ -7,7 +7,7 @@ HITL (human-in-the-loop), memory management, API keys, and tool configuration.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from enum import Enum
 from typing import Annotated, Any, Literal, get_args
 
@@ -19,6 +19,8 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+from pydantic_settings import PydanticBaseSettingsSource
+from pydantic_settings.sources import DefaultSettingsSource
 
 from agentic_cli.logging import Loggers
 from agentic_cli.models import (
@@ -564,7 +566,43 @@ class WorkflowSettingsMixin:
             given = data.get(name, {})
             if (shipped or name in data) and isinstance(given, Mapping):
                 merged[name] = _merged_entries(shipped, given)
+        # The rules: the app's, then the sources' (already their union,
+        # _settings_build_values), each rule once.
+        if "permissions" in data:
+            shipped = cls.model_fields["permissions"].get_default(call_default_factory=True)
+            sections = (data["permissions"],) if shipped is None else (shipped, data["permissions"])
+            merged["permissions"] = _union_rules(sections)
         return merged
+
+    @classmethod
+    def _settings_build_values(
+        cls, sources: tuple[Any, ...], init_kwargs: dict[str, Any]
+    ) -> dict[str, Any]:
+        """pydantic-settings' merge of the sources, with ``permissions`` the
+        union of every source's rules.
+
+        pydantic-settings merges a dict setting across the sources key by key
+        but replaces a list inside it, so a ``deny`` list from the environment
+        would drop the user file's, and the constructor's the environment's.
+        Each source's ``permissions`` is kept as it is read
+        (``_RecordingSource``), and their union, lowest priority first
+        (``_union_rules``), is the value validated; ``_merge_shipped_entries``
+        puts the app's class default before it. The project file's section
+        sets no setting (its source passes it over), so it is none of them.
+
+        Overrides pydantic-settings' private ``BaseSettings._settings_build_values``
+        (``tests/workflow/test_settings_permissions.py`` pins its contract).
+        """
+        given: list[Any] = []
+        recording = tuple(
+            source if isinstance(source, DefaultSettingsSource)
+            else _RecordingSource(cls, source, given)
+            for source in sources
+        )
+        state = super()._settings_build_values(recording, init_kwargs)  # type: ignore[misc]
+        if given:
+            state["permissions"] = _union_rules(reversed(given))
+        return state
 
     @field_validator("sandbox_network")
     @classmethod
@@ -855,6 +893,81 @@ class WorkflowSettingsMixin:
 
         if self.anthropic_api_key:
             os.environ["ANTHROPIC_API_KEY"] = self.anthropic_api_key
+
+
+class _RecordingSource(PydanticBaseSettingsSource):
+    """Another settings source, its values passed on as read, its
+    ``permissions`` added to ``record`` (``_settings_build_values``)."""
+
+    def __init__(self, settings_cls: Any, inner: Any, record: list[Any]) -> None:
+        super().__init__(settings_cls)
+        self._inner = inner
+        self._record = record
+        # The name pydantic-settings files the source's values under.
+        self.__name__ = getattr(inner, "__name__", type(inner).__name__)
+
+    def _set_current_state(self, state: dict[str, Any]) -> None:
+        super()._set_current_state(state)
+        if isinstance(self._inner, PydanticBaseSettingsSource):
+            self._inner._set_current_state(state)
+
+    def _set_settings_sources_data(self, states: dict[str, dict[str, Any]]) -> None:
+        super()._set_settings_sources_data(states)
+        if isinstance(self._inner, PydanticBaseSettingsSource):
+            self._inner._set_settings_sources_data(states)
+
+    def get_field_value(self, field: Any, field_name: str) -> tuple[Any, str, bool]:
+        # Unused: __call__ passes on what the inner source read.
+        return None, field_name, False
+
+    def __call__(self) -> dict[str, Any]:
+        values = self._inner()
+        if "permissions" in values:
+            self._record.append(values["permissions"])
+        return values
+
+
+def _union_rules(sections: Iterable[Any]) -> Any:
+    """``permissions`` values as one: ``allow`` and ``deny`` each
+    concatenated in order, a rule already there (the same capability and
+    target) left out.
+
+    A value that is not a section (an object whose ``allow`` and ``deny`` are
+    lists) is returned as it is, for validation to refuse: one source's bad
+    value is not hidden behind another's.
+    """
+    merged: dict[str, list[Any]] = {"allow": [], "deny": []}
+    seen: dict[str, set[tuple[str, str]]] = {"allow": set(), "deny": set()}
+    for section in sections:
+        if isinstance(section, PermissionsConfig):
+            section = {"allow": section.allow, "deny": section.deny}
+        if not isinstance(section, Mapping):
+            return section
+        for effect, rules in merged.items():
+            entries = section.get(effect)
+            if entries is None:
+                continue
+            if not isinstance(entries, (list, tuple)):
+                return section
+            for entry in entries:
+                key = _rule_key(entry)
+                if key is not None:
+                    if key in seen[effect]:
+                        continue
+                    seen[effect].add(key)
+                rules.append(entry)
+    return merged
+
+
+def _rule_key(entry: Any) -> tuple[str, str] | None:
+    """A rule's capability and target, or None for an entry that is no rule."""
+    if isinstance(entry, PermissionRuleConfig):
+        return entry.capability, entry.target
+    if isinstance(entry, Mapping):
+        capability, target = entry.get("capability"), entry.get("target")
+        if isinstance(capability, str) and isinstance(target, str):
+            return capability, target
+    return None
 
 
 def _merged_entries(shipped: Mapping[str, Any], given: Mapping[str, Any]) -> dict[str, Any]:

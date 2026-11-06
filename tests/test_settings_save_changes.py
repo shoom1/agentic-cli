@@ -27,6 +27,7 @@ from agentic_cli.settings_persistence import (
     SettingsPersistence,
     is_secret_field,
 )
+from agentic_cli.workflow.settings import PermissionsConfig
 
 APP = "agentic_cli"
 
@@ -288,3 +289,60 @@ class TestTheProjectPermissionRules:
 
         assert "permissions" not in _read(fs["user"])
         assert _read(fs["project"])["permissions"] == allow
+
+
+class TestTheUnionOfRulesIsNeverSaved:
+    """``settings.permissions`` is the union of the app's default, the user
+    file, the environment and the constructor. A save writes none of it
+    (``HAND_EDITED_KEYS``): the user file keeps its own section as it is,
+    no other source's rules are copied into a file, and the project file
+    keeps its deny section (``PROJECT_PRESERVED_KEYS``)."""
+
+    USER = {"allow": [{"capability": "http.read", "target": "https://docs.example.org/**"}]}
+    PROJECT = {"deny": [{"capability": "filesystem.read", "target": "notes/**"}]}
+
+    @pytest.fixture
+    def loaded(self, fs, monkeypatch):
+        """Settings whose rules came from every trusted source, and a project
+        file with its own deny section."""
+        for path, body in ((fs["user"], {"log_level": "info", "permissions": self.USER}),
+                           (fs["project"], {"permissions": self.PROJECT})):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(body))
+        monkeypatch.setenv("AGENTIC_PERMISSIONS", json.dumps(
+            {"deny": [{"capability": "http.read", "target": "https://env.example.net/**"}]}
+        ))
+
+        class AppSettings(BaseSettings):
+            permissions: PermissionsConfig = Field(
+                default_factory=lambda: PermissionsConfig.model_validate(
+                    {"deny": [{"capability": "shell.exec", "target": "rm -rf *"}]}
+                )
+            )
+
+        settings = AppSettings(
+            permissions={"deny": [{"capability": "http.read", "target": "https://ctor.test/**"}]}
+        )
+        assert len(settings.permissions.deny) == 3, "the union was loaded"
+        return settings
+
+    def _assert_each_file_keeps_its_own_section(self, fs) -> None:
+        assert _read(fs["user"])["permissions"] == self.USER
+        assert _read(fs["project"])["permissions"] == self.PROJECT
+
+    def test_a_full_save(self, fs, loaded):
+        SettingsPersistence(APP).save(loaded)
+
+        self._assert_each_file_keeps_its_own_section(fs)
+
+    def test_a_keyed_save_of_another_setting(self, fs, loaded):
+        loaded.update_setting("thinking_effort", "low")
+
+        SettingsPersistence(APP).save(loaded, keys={"thinking_effort", "log_level"})
+
+        self._assert_each_file_keeps_its_own_section(fs)
+
+    def test_a_keyed_save_naming_the_rules(self, fs, loaded):
+        SettingsPersistence(APP).save(loaded, keys={"permissions"})
+
+        self._assert_each_file_keeps_its_own_section(fs)

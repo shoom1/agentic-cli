@@ -190,6 +190,65 @@ class TestSettingsRulesAreEnforced:
         assert [(r.source, r.effect) for r in named] == [(RuleSource.USER, Effect.DENY)]
 
 
+def _app_settings(**default) -> BaseSettings:
+    class AppSettings(BaseSettings):
+        permissions: PermissionsConfig = Field(
+            default_factory=lambda: PermissionsConfig.model_validate(default)
+        )
+
+    return AppSettings(app_name=APP, google_api_key="test")
+
+
+class TestEverySourceApplies:
+    """The trusted rules are the union of every source's: none replaces another's."""
+
+    _DOCS = {"capability": "http.read", "target": "https://docs.example.org/**"}
+    _TRACKER = {"capability": "http.read", "target": "https://tracker.example.net/**"}
+
+    async def test_an_app_default_deny_and_a_user_file_allow_both_apply(self, layout):
+        _user_file(layout, {"permissions": {"allow": [self._DOCS]}})
+
+        engine = _engine(_app_settings(deny=[_SECRET_DENY]))
+
+        assert not (await _read(engine, layout["secret"])).allowed
+        assert (await _fetch(engine, "https://docs.example.org/page")).allowed
+
+    async def test_an_environment_deny_and_a_user_file_deny_both_deny(self, layout, monkeypatch):
+        _user_file(layout, {"permissions": {"deny": [_SECRET_DENY]}})
+        monkeypatch.setenv("AGENTIC_PERMISSIONS", json.dumps({"deny": [self._TRACKER]}))
+
+        engine = _engine(_settings())
+
+        assert not (await _read(engine, layout["secret"])).allowed
+        result = await _fetch(engine, "https://tracker.example.net/p")
+        assert (result.allowed, "user/deny" in result.reason) == (False, True)
+
+    async def test_a_constructor_deny_and_the_class_default_deny_both_deny(self, layout):
+        class AppSettings(BaseSettings):
+            permissions: PermissionsConfig = Field(
+                default_factory=lambda: PermissionsConfig(
+                    deny=[PermissionRuleConfig(**_SECRET_DENY)]
+                )
+            )
+
+        engine = _engine(AppSettings(
+            app_name=APP, google_api_key="test", permissions={"deny": [self._TRACKER]},
+        ))
+
+        assert not (await _read(engine, layout["secret"])).allowed
+        result = await _fetch(engine, "https://tracker.example.net/p")
+        assert (result.allowed, "user/deny" in result.reason) == (False, True)
+
+    async def test_a_rule_given_in_two_sources_appears_once(self, layout, monkeypatch):
+        _user_file(layout, {"permissions": {"deny": [_SECRET_DENY]}})
+        monkeypatch.setenv("AGENTIC_PERMISSIONS", json.dumps({"deny": [_SECRET_DENY]}))
+
+        engine = _engine(_app_settings(deny=[_SECRET_DENY]))
+
+        trusted = [r for r in engine.rules if r.source is RuleSource.USER]
+        assert [(r.capability, r.effect) for r in trusted] == [("filesystem.read", Effect.DENY)]
+
+
 class TestProjectFileRules:
     """The project file can only deny, and a malformed entry costs only itself."""
 

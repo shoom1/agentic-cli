@@ -86,17 +86,19 @@ USER_PREFERENCE_KEYS = frozenset({"ui_theme", "dialog_placement"})
 
 # Sections of the project file that are not settings: the permission engine
 # reads its deny rules from the file itself (workflow/permissions/store.py,
-# load_project_denies),
-# so the loader passes over them and every save keeps them as they are.
+# load_project_denies), so the loader passes over them and every save keeps
+# them as they are.
 PROJECT_PRESERVED_KEYS = frozenset({"permissions"})
 
 # Settings written by hand, or shipped by the app in its settings class, and
 # never by save(): their live value merges the app's entries with every
-# file's, so a save would copy the app's shipped entries (and the other
-# file's) into the file it writes. Every save leaves each file's own section
-# as it is (a project file's only where the loader reads it: models), and a
-# dump (path=) leaves them out.
-HAND_EDITED_KEYS = frozenset({"models", "model_providers"})
+# file's (permissions: the union of every trusted source's rules, the
+# environment's and the constructor's too), so a save would copy the app's
+# shipped entries (and the other sources') into the file it writes. Every
+# save leaves each file's own section as it is (a project file's only where
+# something reads it: its models, and its permissions, PROJECT_PRESERVED_KEYS),
+# and a dump (path=) leaves them out.
+HAND_EDITED_KEYS = frozenset({"models", "model_providers", "permissions"})
 
 # Identity fields set by the application, not the user
 IDENTITY_FIELDS = frozenset({
