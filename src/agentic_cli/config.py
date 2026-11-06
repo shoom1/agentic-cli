@@ -29,7 +29,8 @@ Settings Loading Priority (highest to lowest; settings_sources.py):
     5. .env file (a cwd-relative one allowlisted keys only)
     6. Default values
 
-    app_name comes only from the constructor or the class.
+    app_name comes only from the constructor or the class (or the command
+    line, for an app that enables pydantic-settings' cli_parse_args).
 """
 
 import os

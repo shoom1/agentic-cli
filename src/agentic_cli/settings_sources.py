@@ -5,9 +5,11 @@ settings mixins that carry the fields it protects (``WorkflowSettingsMixin``,
 ``AppSettingsMixin``) inherit it, so the trust boundary goes with the fields:
 ``agentic_cli.BaseSettings`` and a class composed from those mixins over
 pydantic-settings' own ``BaseSettings`` read the same sources, in the same
-order, through the same filters. (Put the mixins before pydantic-settings'
-class, as ``BaseSettings`` does; a class listed first would bring its own
-sources.)
+order, through the same filters. The mixins must come before
+pydantic-settings' class, as in ``BaseSettings``: otherwise its own sources
+would win, so a settings class built in that order is refused when it is
+defined. A class that defines ``settings_customise_sources`` itself chooses
+its own sources.
 
 This module imports neither ``agentic_cli.config`` nor the mixins, which
 import it.
@@ -54,7 +56,38 @@ class SettingsSourcesMixin:
     ``app_name`` chooses those files, so it comes only from the constructor
     or the class: the environment, both files and the env files cannot set it,
     and one that names another app is reported (``settings_app_name_ignored``).
+    The one exception is an app's own: one that enables pydantic-settings'
+    ``cli_parse_args`` gets a command-line source above all of these (added
+    by pydantic-settings, outside this method), which can set it.
+
+    pydantic-settings' ``secrets_dir`` is never read; one configured (the
+    class's, or the constructor's ``_secrets_dir``) is reported
+    (``settings_secrets_dir_ignored``).
+
+    A settings class (a subclass of pydantic-settings' ``BaseSettings``) gets
+    these sources only when the mixins come before pydantic-settings' class in
+    its bases; one that lists that class first, or between the mixins, is
+    refused with a ``TypeError`` when it is defined, since its sources, and so
+    every filter here, would be pydantic-settings' own. A class that defines
+    ``settings_customise_sources`` itself is its author's choice and is
+    accepted in any order.
     """
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        if not issubclass(cls, PydanticBaseSettings):
+            return  # a mixin of mixins: not a settings class yet
+        for base in cls.__mro__:
+            if "settings_customise_sources" in vars(base):
+                if base is PydanticBaseSettings:
+                    raise TypeError(
+                        f"{cls.__name__}: list the settings mixins (WorkflowSettingsMixin, "
+                        "AppSettingsMixin) before pydantic-settings' BaseSettings in its "
+                        "bases; in this order its sources are pydantic-settings' own, "
+                        "and the trust filters on the project file and a cwd .env, and "
+                        "the user settings file, would not be read."
+                    )
+                return
 
     @classmethod
     def settings_customise_sources(
@@ -67,6 +100,9 @@ class SettingsSourcesMixin:
     ) -> tuple[PydanticBaseSettingsSource, ...]:
         """init, environment, project file, user file, env files (see the class)."""
         app_name = _files_app_name(settings_cls, init_settings)
+        secrets_dir = getattr(file_secret_settings, "secrets_dir", None)
+        if secrets_dir is not None:
+            logger.warning("settings_secrets_dir_ignored", setting="secrets_dir", value=secrets_dir)
 
         def without_app_name(source: PydanticBaseSettingsSource, label: str):
             return _AppNameFilterSource(settings_cls, source, label, app_name)

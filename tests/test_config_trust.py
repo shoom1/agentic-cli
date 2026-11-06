@@ -589,3 +589,123 @@ def test_a_filtered_source_sees_the_values_read_before_it():
 
     assert settings.thinking_effort == "high"
     assert seen == [({"log_level": "info"}, {"InitSettingsSource": {"log_level": "info"}})]
+
+
+class TestTheMixinsComeBeforePydanticSettings:
+    """The sources come through the MRO: with pydantic-settings' BaseSettings
+    before the mixins, its own settings_customise_sources would win and the
+    whole boundary would be gone, silently. Such a class is refused."""
+
+    def test_pydantic_settings_first_is_refused(self):
+        with pytest.raises(TypeError, match="before pydantic-settings' BaseSettings"):
+            class _Wrong(
+                _PydanticBaseSettings, WorkflowSettingsMixin, AppSettingsMixin, CLISettingsMixin
+            ):
+                model_config = _APP_CONFIG
+
+    def test_pydantic_settings_in_the_middle_is_refused(self):
+        with pytest.raises(TypeError, match="_Wrong: list the settings mixins"):
+            class _Wrong(WorkflowSettingsMixin, _PydanticBaseSettings, AppSettingsMixin):
+                model_config = _APP_CONFIG
+
+    def test_the_mixins_first_are_accepted(self):
+        class _Mixins(WorkflowSettingsMixin, AppSettingsMixin, CLISettingsMixin):
+            """Not a settings class yet."""
+
+        class _Right(_Mixins, _PydanticBaseSettings):
+            model_config = _APP_CONFIG
+
+        class _FromBase(_AgenticBaseSettings):
+            model_config = _APP_CONFIG
+
+        assert _Right.settings_customise_sources.__func__ is (
+            _FromBase.settings_customise_sources.__func__
+        )
+
+    def test_a_class_s_own_sources_are_its_choice(self):
+        class _Own(_PydanticBaseSettings, WorkflowSettingsMixin):
+            model_config = _APP_CONFIG
+
+            @classmethod
+            def settings_customise_sources(cls, settings_cls, init_settings, **_):
+                return (init_settings,)
+
+        assert _Own(thinking_effort="low").thinking_effort == "low"
+
+    def test_the_examples_settings_classes_are_accepted(self, tmp_path):
+        """Each example module defines its settings class when it loads: a
+        refused one would raise there. They load in a child process, since
+        some register tools in the global registry, which the suite's own
+        loads of them would then find taken."""
+        import os
+        import subprocess
+        import sys
+
+        examples = Path(__file__).resolve().parent.parent / "examples"
+        files = [examples / name for name in (
+            "research_demo/settings.py", "hello_agent.py", "hello_deepagents.py",
+            "hello_langgraph.py", "jobs_demo.py", "memory_demo.py",
+        )]
+        script = (
+            "import importlib.util, sys, warnings\n"
+            "warnings.simplefilter('ignore')\n"
+            "for i, path in enumerate(sys.argv[1:]):\n"
+            "    spec = importlib.util.spec_from_file_location(f'_example_{i}', path)\n"
+            "    spec.loader.exec_module(importlib.util.module_from_spec(spec))\n"
+            "print('loaded', len(sys.argv) - 1)\n"
+        )
+        (tmp_path / "home").mkdir()
+        done = subprocess.run(
+            [sys.executable, "-c", script, *map(str, files)],
+            cwd=tmp_path, env={**os.environ, "HOME": str(tmp_path / "home")},
+            capture_output=True, text=True,
+        )
+
+        assert done.returncode == 0, done.stderr[-2000:]
+        assert done.stdout.strip() == f"loaded {len(files)}"
+
+
+class TestSecretsDir:
+    """No source the framework builds reads pydantic-settings' secrets_dir;
+    one configured is said to be unread rather than dropped silently."""
+
+    def _class(self, base, **config):
+        if base == "composed":
+            class _S(WorkflowSettingsMixin, AppSettingsMixin, CLISettingsMixin,
+                     _PydanticBaseSettings):
+                model_config = _SettingsConfigDict(**_APP_CONFIG, **config)
+        else:
+            class _S(_AgenticBaseSettings):
+                model_config = _SettingsConfigDict(**_APP_CONFIG, **config)
+        return _S
+
+    @pytest.mark.parametrize("base", ["BaseSettings", "composed"])
+    def test_a_configured_secrets_dir_is_reported_unread(self, project, base):
+        (project / "secrets").mkdir()
+        (project / "secrets" / "app_permissions_enabled").write_text("false")
+        settings_class = self._class(base, secrets_dir="secrets")
+
+        with structlog.testing.capture_logs() as logs:
+            settings = settings_class()
+
+        assert settings.permissions_enabled is True
+        assert [(e["setting"], e["value"], e["log_level"])
+                for e in _events(logs, "settings_secrets_dir_ignored")] == [
+            ("secrets_dir", "secrets", "warning")
+        ]
+
+    def test_the_constructor_s_secrets_dir_is_reported_too(self, project):
+        (project / "secrets").mkdir()
+
+        with structlog.testing.capture_logs() as logs:
+            _FromBaseSettings(_secrets_dir="secrets")
+
+        assert [e["value"] for e in _events(logs, "settings_secrets_dir_ignored")] == [
+            "secrets"
+        ]
+
+    def test_no_secrets_dir_no_warning(self, project):
+        with structlog.testing.capture_logs() as logs:
+            _Composed()
+
+        assert _events(logs, "settings_secrets_dir_ignored") == []

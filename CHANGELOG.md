@@ -80,9 +80,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now come with the mixins (`settings_sources.SettingsSourcesMixin`): such a
   class reads the constructor, the environment, the project file
   (allowlisted), the user file and its env files (a cwd-relative one
-  allowlisted), in that order, as `BaseSettings` does; it no longer reads
-  pydantic-settings' `secrets_dir`, which `BaseSettings` never read. List the
-  mixins before pydantic-settings' class.
+  allowlisted), in that order, as `BaseSettings` does. It no longer reads
+  pydantic-settings' `secrets_dir`, which `BaseSettings` never read either: a
+  configured one (the class's or the constructor's `_secrets_dir`) is now
+  reported, `settings_secrets_dir_ignored`. The mixins must come before
+  pydantic-settings' class, or that class's own sources win: a settings class
+  that lists it first, or between the mixins, is refused with a `TypeError`
+  when it is defined, unless it defines `settings_customise_sources` itself.
 
 ### Added
 
@@ -728,7 +732,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in the environment, either settings file or an env file is ignored, and one
   that differs is reported (`settings_app_name_ignored`, naming the source; in
   the project file or a cwd `.env` it replaces
-  `untrusted_project_setting_ignored`).
+  `untrusted_project_setting_ignored`). The one exception is the app's own:
+  enabling pydantic-settings' `cli_parse_args` adds a command-line source
+  above all of these, which can set it.
   **Breaking:** an app run under another name through `AGENTIC_APP_NAME` (or
   `"app_name"` in a settings file) needs the name in its settings class or
   constructor.
