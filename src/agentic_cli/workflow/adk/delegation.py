@@ -68,8 +68,8 @@ logger = Loggers.workflow()
 
 #: The end of an inheriting sub-agent's instruction: whose conversation it
 #: reads, and which message is its task (Deep Agents' ``_FORK_TASK_PREAMBLE``,
-#: told the way ADK shows that conversation). No braces: ADK fills
-#: ``{name}`` in an instruction from the session state.
+#: told the way ADK shows that conversation). Sent as written, as the whole
+#: prompt is (``manager._as_written``).
 INHERITED_CONTEXT_NOTE = (
     "You are a sub-agent: another agent has handed you a task. The conversation "
     "before the task is that agent's, shown so you know what has been established: "

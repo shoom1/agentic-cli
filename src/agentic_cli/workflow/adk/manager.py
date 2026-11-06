@@ -131,6 +131,18 @@ def _author_of_call(session: Any, call_id: str) -> str | None:
     return None
 
 
+def _as_written(prompt: str) -> Callable[[Any], str]:
+    """``prompt`` as an instruction ADK sends as written.
+
+    ADK fills ``{name}`` in a string instruction from the session state, and
+    raises ``KeyError`` for a name the state lacks (``{{name}}`` too), so a
+    prompt quoting code or JSON failed every turn, and one naming ``{plan}``
+    had the session's plan spliced in. What an instruction provider returns
+    is never filled in, as Deep Agents never fills a prompt in.
+    """
+    return lambda _context: prompt
+
+
 class GoogleADKWorkflowManager(BaseWorkflowManager):
     """Config-based workflow manager for agentic applications using Google ADK.
 
@@ -509,7 +521,9 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         agent = LlmAgent(
             name=config.name,
             model=built.model,
-            instruction=instruction,
+            # None at all for no prompt: ADK adds an instruction only when
+            # there is one, and a provider always looks like one.
+            instruction=_as_written(instruction) if instruction else "",
             tools=tools,
             sub_agents=children,
             planner=built.planner,
