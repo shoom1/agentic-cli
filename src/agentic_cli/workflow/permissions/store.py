@@ -147,10 +147,11 @@ def settings_env_file_denies(settings: object, ctx: PermissionContext) -> list[R
 def settings_rules(settings: object, ctx: PermissionContext) -> list[Rule]:
     """The trusted rules: ``settings.permissions``, allow and deny.
 
-    The settings decide where they come from, by their own source priority:
-    the constructor, the environment, the user's ``~/.{app}/settings.json``,
-    the app's class default. The project file is not among them (its section
-    sets no setting: ``load_project_denies`` reads it). The rules are
+    The setting holds every trusted source's rules together: the app's class
+    default, the user's ``~/.{app}/settings.json``, the environment and the
+    constructor (``WorkflowSettingsMixin._settings_build_values``). The
+    project file is not among them (its section sets no setting:
+    ``load_project_denies`` reads it). The rules are
     ``RuleSource.USER``. A rule whose target cannot be canonicalized (a URL
     the HTTP client cannot send) is skipped with a warning
     (``permission_rule_skipped``). Settings without the field give none.

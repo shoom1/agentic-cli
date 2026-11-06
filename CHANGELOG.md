@@ -187,16 +187,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   environment (`AGENTIC_PERMISSIONS`) or as an app's settings-class default
   was validated and silently not enforced: a deny rule an app shipped denied
   nothing. The engine's trusted rules, allow and deny, are now
-  `settings.permissions`, by the settings' own priority (constructor,
-  environment, user file, the app's class default); the user file is read
-  once, by the settings. As for any setting, a `permissions` value from any
-  source replaces the class default whole, and between sources each of its
-  lists (`allow`, `deny`) comes from the highest source that sets it. The
-  project file still adds only its deny rules. An app's settings class can
-  override the field's default without a pydantic warning. **Breaking:** a
-  `permissions` value given to the constructor or the environment now
-  applies, and replaces the user file's list of the same name, where before
-  it was ignored and the user file's rules applied.
+  `settings.permissions`, and the setting holds every trusted source's rules
+  together: the app's class default, the user file, the environment and the
+  constructor, each list concatenated in that order with a duplicate kept
+  once. No source's section replaces another's, so an allow rule added to
+  the user file keeps the app's deny rules (pydantic-settings would replace
+  the lists inside a setting it merges). The user file is read once, by the
+  settings, and the project file still adds only its deny rules. No save
+  writes the setting (`HAND_EDITED_KEYS`): the app's and the environment's
+  rules are never copied into the user file, which keeps its own section as
+  it is. An app's settings class can override the field's default without a
+  pydantic warning. **Breaking:** a `permissions` value given to the
+  constructor or the environment now applies, beside the user file's rules;
+  a malformed `permissions` value in any trusted source stops the settings
+  from loading, even where another source also sets the field; and a full
+  settings save no longer writes `permissions` into the user file.
 
 ### Added
 

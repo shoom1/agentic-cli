@@ -294,10 +294,9 @@ class PermissionEngine:
             )
         # The keys the app was given, wherever its env_file puts them.
         rules += settings_env_file_denies(self._settings, self._ctx)
-        # The trusted rules, allow and deny: settings.permissions, from the
-        # constructor, the environment, the user file or the app's class
-        # default (the settings' own priority). The user file is read once,
-        # by the settings.
+        # The trusted rules, allow and deny: settings.permissions, the union
+        # of the app's class default, the user file, the environment and the
+        # constructor. The user file is read once, by the settings.
         rules += settings_rules(self._settings, self._ctx)
         app = self._settings.app_name
         # PROJECT settings.json is untrusted (a cloned repo can ship it): honor

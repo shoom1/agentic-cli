@@ -654,11 +654,12 @@ class WorkflowSettingsMixin:
     )
 
     # Permissions. The permission engine enforces these rules (store.py,
-    # settings_rules), whichever source set them: the constructor, the
-    # environment, the user file or the app's class default. Annotated form,
-    # with no class attribute, so an app overriding the default gets no
-    # pydantic warning. The project file's section sets no setting
-    # (PROJECT_PRESERVED_KEYS): the engine reads its deny rules itself.
+    # settings_rules): the union of the app's class default, the user file,
+    # the environment and the constructor (_merge_shipped_entries,
+    # _settings_build_values). No save writes it (HAND_EDITED_KEYS).
+    # Annotated form, with no class attribute, so an app overriding the
+    # default gets no pydantic warning. The project file's section sets no
+    # setting (PROJECT_PRESERVED_KEYS): the engine reads its deny rules itself.
     permissions: Annotated[
         PermissionsConfig,
         Field(
