@@ -70,7 +70,7 @@ agentic-cli/
 │   │   │   ├── matchers.py   # PathMatcher, URLMatcher, ShellMatcher, StringGlobMatcher
 │   │   │   └── rules.py, store.py, prompt.py
 │   │   ├── adk/              # ADK orchestrator
-│   │   │   ├── manager.py    # GoogleADKWorkflowManager (compact: ADK's compaction once, under turn admission; supports_compact False for a native ADK YAML app)
+│   │   │   ├── manager.py    # GoogleADKWorkflowManager (compact: ADK's compaction once, under turn admission; supports_compact False for a native ADK YAML app; _run_config: a config-built app's synchronous tools run in ADK's tool thread pool, 8 workers)
 │   │   │   ├── delegation.py # Sub-agents as single_turn tools of their parent; binding those tools to task
 │   │   │   ├── compaction.py # AgentCliSummarizer (main agent only; summary_range, render_events), MainAgentPlugin, NoAfterTurnCompactionRunner, compact_session
 │   │   │   ├── fit_guard_plugin.py # FitGuardPlugin: a request over its agent's budget has its oldest turns left out (drop_turns); a leading summary folded into the next user text (fold_summary); request_as_seen

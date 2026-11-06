@@ -65,7 +65,7 @@ class _FakeRunner:
         self.calls: list = []
 
     async def run_async(self, *, session_id, user_id, new_message, state_delta=None,
-                        abort_signal=None):
+                        run_config=None, abort_signal=None):
         self.calls.append(
             SimpleNamespace(session_id=session_id, user_id=user_id, new_message=new_message)
         )

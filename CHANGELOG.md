@@ -958,6 +958,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **On ADK, synchronous tools run in worker threads, as on Deep Agents.**
+  A config-built app's synchronous function tools, the framework's and its
+  own, now run in ADK's tool thread pool with a copy of the turn's context
+  variables, and the calls of one model step overlap; before, they ran one
+  after another on the event loop. Such a tool must now be safe to run
+  beside another call and off the loop's thread, as Deep Agents already
+  required; async tools, plugins and callbacks stay on the loop, and a call
+  Ctrl+C left behind runs to its end in its thread. The framework's tools
+  allow for it: calls on one sandbox session wait for each other. A native
+  ADK YAML app is unchanged.
 - **`app_name` comes only from the application.** It chooses the settings
   files, yet the environment (`AGENTIC_APP_NAME`, or an app's prefix) and the
   user file could set it too, after the files had been chosen by the class's
@@ -1754,6 +1764,16 @@ step; each entry says what to use instead.
 
 ### Fixed
 
+- **The CLI no longer freezes while a synchronous tool runs on ADK, and
+  Ctrl+C stops the turn.** ADK calls a synchronous function tool on the
+  event loop unless the run names a tool thread pool, and the ADK manager
+  named none: a `sandbox_execute` cell (two minutes by default, plus up to
+  three for a container to start) or `compile_document` (five) held the loop
+  for as long as it ran, so the spinner and the job monitor stopped and
+  Ctrl+C waited for the tool to finish. A config-built app's turns now run
+  with ADK's tool thread pool (8 workers): Ctrl+C ends the turn at once, the
+  call is answered as interrupted, and the result its thread returns later
+  is dropped. A native ADK YAML app keeps ADK's default.
 - **Two `sandbox_execute` calls on one session no longer break each
   other.** Both backends run a model step's synchronous calls in worker
   threads at once (Deep Agents always, ADK now too), and nothing kept two
