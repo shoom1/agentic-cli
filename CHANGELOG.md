@@ -1754,6 +1754,18 @@ step; each entry says what to use instead.
 
 ### Fixed
 
+- **A summary that failed is no longer paid for again at every tool step of
+  its turn.** Both backends check for a summary before each model call, and
+  after one failed (a model that wrote no text, as a Claude refusal does; on
+  ADK also a provider's error, such as a 429) the next call sent the same
+  range again: a turn of three tool steps made four identical summary calls,
+  and a 20-step turn on a 200,000-token model could re-send some 150,000
+  tokens 20 times, each 429 also waiting through the client's retries. The
+  range that failed is now skipped for the rest of its turn, unless it has
+  grown by a fifth of the trigger (the saving a summary must be worth) or a
+  summary written since starts it elsewhere; the next turn tries again. The
+  warning is still one a turn, and the turn still goes on without a summary.
+  A summary asked for (`/compact`, an overflow's) is never skipped.
 - **Two tool questions asked at once are shown one after the other.** The
   calls of one model step run together (both backends gather them), so two
   of them could ask at once (two `ask_clarification` calls, or one beside a

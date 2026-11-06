@@ -458,7 +458,7 @@ class RunCallback(AsyncCallbackHandler):
             return
         agent = data.get("agent") or self._root
         if name == SUMMARY_NOT_WRITTEN:
-            # Once a turn: every call past the trigger tries again.
+            # Once a turn, however often its calls try again.
             if SUMMARY_FAILED_CODE not in self._notified:
                 self._notified.add(SUMMARY_FAILED_CODE)
                 text = SUMMARY_FAILED if agent == self._root else f"{agent}: {SUMMARY_FAILED}"

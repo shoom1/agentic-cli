@@ -622,7 +622,8 @@ class TestAFailedSummary:
             "type": "invalid_request_error", "message": "max_tokens: 100000 > 64000"
         }})
 
-    async def test_it_is_one_warning_a_turn_and_no_summary(self, manager, api, monkeypatch):
+    async def test_it_is_one_warning_and_one_call_a_turn(self, manager, api, monkeypatch):
+        """The same range again in the same turn would fail again: no call."""
         logs = _Logs()
         monkeypatch.setattr(compaction, "logger", logs)
         api.script = [self.refused(), self.refused(), self.refused()]
@@ -639,6 +640,7 @@ class TestAFailedSummary:
             events=conversation()
         ), next_turn)
 
+        assert len(api.requests) == 2
         assert (first, again, later) == (None, None, None)
         assert made.last_result is None
         errors = [e for e in turn.events if e.type is EventType.ERROR]
@@ -647,13 +649,60 @@ class TestAFailedSummary:
             "Could not summarize the earlier conversation; older turns are left out instead."
         )
         assert error.metadata == {"recoverable": True, "error_code": "summary_failed"}
+        assert [e.type for e in turn.events] == [EventType.CONTEXT_SUMMARIZING, EventType.ERROR]
         assert [e.type for e in next_turn.events] == [
             EventType.CONTEXT_SUMMARIZING, EventType.ERROR
         ]
         assert [(level, event) for level, event, _ in logs.calls] == [
-            ("debug", "adk_summary_failed")
-        ] * 3
+            ("debug", "adk_summary_failed"), ("debug", "adk_summary_not_retried"),
+            ("debug", "adk_summary_failed"),
+        ]
         assert logs.calls[0][2]["error_type"] == "BadRequestError"
+
+    async def test_one_asked_for_is_tried_every_time(self, manager, api):
+        """``/compact`` or an overflow: never skipped, and its failure is not
+        one an automatic summary skips for."""
+        api.script = [self.refused(), self.refused(), written()]
+        made, asked = summarizer(manager), summarizer(manager, manual=True)
+        turn = Recorded()
+
+        await as_agent("solo", lambda: made.maybe_summarize_events(events=conversation()), turn)
+        skipped = await as_agent("solo", lambda: made.maybe_summarize_events(
+            events=conversation()
+        ), turn)
+        refused = await as_agent(None, lambda: asked.maybe_summarize_events(
+            events=conversation()
+        ), turn)
+        written_now = await as_agent(None, lambda: asked.maybe_summarize_events(
+            events=conversation()
+        ), turn)
+
+        assert len(api.requests) == 3
+        assert (skipped, refused) == (None, None)
+        assert written_now is not None
+
+    async def test_the_range_after_a_summary_written_since_is_tried(self, manager, api):
+        """A summary written since (an overflow's, in the same turn) moves where
+        the range starts: what follows it is a range of its own, tried even
+        though it is no larger than the one that failed."""
+        api.script = [self.refused(), written()]
+        made = summarizer(manager)
+        turn = Recorded()
+        after = [seed("The summary.", 1), user(LONG, 3), said("A2.", 4), user(LONG, 5),
+                 said("A3.", 6), user("Four?", 7)]
+        assert tokens(*after[1:3]) <= tokens(*conversation()[:2])
+
+        await as_agent("solo", lambda: made.maybe_summarize_events(events=conversation()), turn)
+        skipped = await as_agent("solo", lambda: made.maybe_summarize_events(
+            events=conversation()
+        ), turn)
+        tried = await as_agent("solo", lambda: made.maybe_summarize_events(events=after), turn)
+
+        assert len(api.requests) == 2
+        assert skipped is None
+        assert tried is not None
+        prompt = api.bodies[1]["messages"][0]["content"][0]["text"]
+        assert "Summary of the conversation before this point:\nThe summary." in prompt
 
     async def test_the_failure_is_kept_until_the_next_call(self, manager, api):
         api.script = [self.refused(), written()]
