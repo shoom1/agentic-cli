@@ -80,21 +80,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   compared a URL as written (since 0.5.1), while `web_fetch` requests what
   httpx makes of it, so with `https://docs.example.com/**` allowed and
   `https://docs.example.com/admin/**` denied, `…/x/../admin/keys` and
-  `…/%61dmin/keys` were allowed without a prompt, and behind an allow-all
-  rule a deny on `https://tracker.example.net/**` missed
+  `…/%61dmin/keys` were allowed without a prompt, and behind an allow-all rule
+  a deny on `https://tracker.example.net/**` missed
   `https://tracker.example.net./p` and `https://tracker。example。net/p`
-  (U+3002, which httpx sends as a dot). Rules and targets are now both read
-  as the client sends them (`agentic_cli.urls.canonical_url`): the host as
-  httpx encodes it (the IDNA dots mapped, a Unicode host as its punycode),
-  lowercased, without a trailing dot; in the path, escapes of unreserved
-  characters decoded (`%61` is `a`, `%2e%2e` is `..`) and dot segments
-  removed; the default port and the fragment dropped. A rule's `*` and `**`
-  are kept, and ordinary rules read as before. The prompt shows that form
-  (`https://faß.de/` as `https://xn--fa-hia.de/`), a site grant names the
-  canonical host (`https://localhost./` no longer gets one), and a URL httpx
-  cannot send (an invalid IDNA host, a port past 65535) is denied as an
-  invalid target. A rule or saved grant that names such a URL is skipped at
-  startup with a `permission_rule_skipped` warning.
+  (U+3002, which httpx sends as a dot). Rules and targets are now both read as
+  the client sends them (`agentic_cli.urls.canonical_url`): the host as httpx
+  encodes it (the IDNA dots mapped, a Unicode host as its punycode),
+  lowercased, without a trailing dot, and an IPv4 address written another way
+  (`3405803783`, `0xcb.0.113.7`) as the address the resolver connects to; in
+  the path, escapes of unreserved characters decoded (`%61` is `a`, `%2e%2e`
+  is `..`) and dot segments removed; the default port and the fragment
+  dropped. A rule's `*` and `**` are kept, and ordinary rules read as before.
+  The prompt shows that form (`https://faß.de/` as `https://xn--fa-hia.de/`),
+  a site grant names the canonical host (`https://localhost./` no longer gets
+  one), and a URL httpx cannot send (an invalid IDNA host, a port past 65535)
+  is denied as an invalid target. A rule or saved grant that names such a URL
+  is skipped at startup with a `permission_rule_skipped` warning.
 - **`webfetch_blocked_domains` blocks a domain however it is spelled.** The
   check compared urllib's hostname, but httpx connects to `blocked.example`
   for `https://blocked。example/` (and the fullwidth and halfwidth dots), and

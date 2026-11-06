@@ -47,6 +47,14 @@ from agentic_cli.urls import canonical_host, canonical_url
         ("https://user:pw@example.com/p#top", "https://example.com/p"),
         # The query is kept as httpx sends it.
         ("https://example.com/p?r=%7e&s=a b", "https://example.com/p?r=%7e&s=a%20b"),
+        # An IPv4 address in another notation is the address the resolver
+        # connects to (getaddrinfo reads it as inet_aton does).
+        ("https://3405803783/a", "https://203.0.113.7/a"),
+        ("https://0xcb007107/a", "https://203.0.113.7/a"),
+        ("https://203.0.0x71.7/a", "https://203.0.113.7/a"),
+        ("https://203.29447/a", "https://203.0.115.7/a"),
+        ("https://0x7f.1/", "https://127.0.0.1/"),
+        ("https://deadbeef.example/", "https://deadbeef.example/"),  # a name
         # A rule's wildcards are left alone.
         ("https://docs.example.com/**", "https://docs.example.com/**"),
         ("https://Docs.Example.com./a/*/b/**?x=*", "https://docs.example.com/a/*/b/**?x=*"),

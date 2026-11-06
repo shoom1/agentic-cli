@@ -119,6 +119,20 @@ async def test_a_host_deny_holds_behind_an_allow_all_rule(url):
     assert approver.prompts == []
 
 
+@pytest.mark.parametrize(
+    "url", ["https://3405803783/x", "https://0xcb007107/x", "https://203.0.0x71.7/x"]
+)
+async def test_an_address_deny_holds_for_every_notation_of_the_address(url):
+    """getaddrinfo reads ``3405803783`` and ``0xcb007107`` as 203.0.113.7."""
+    _user_rules(allow=["*"], deny=["https://203.0.113.7/**"])
+    approver = _Approver()
+
+    result = await _fetch(_engine(approver), url)
+
+    assert not result.allowed, url
+    assert approver.prompts == []
+
+
 async def test_a_deny_written_in_another_spelling_still_names_the_page():
     """A pattern is canonicalized as a target is: a deny written with the
     trailing dot, an escape or a Unicode host denies the page it names."""
@@ -186,6 +200,8 @@ async def test_a_site_grant_names_the_canonical_host():
         ("https://docs。example。org/a", "https://docs.example.org/**"),
         ("https://faß.de/x", "https://xn--fa-hia.de/**"),
         ("https://localhost./a", None),  # a local name, however it is spelled
+        ("https://0xcb007107/a", None),  # an address, however it is written
+        ("https://203.0.0x71.7/a", None),
         ("https://intranet./a", None),  # a single label
         ("https://i❤.ws/", None),  # not a URL the client can send
     ],

@@ -14,7 +14,9 @@ The form is httpx's parse of the URL:
 * the scheme lowercased; the host as httpx sends it (UTS 46 dots mapped, a
   Unicode host as its IDNA 2008 punycode), lowercased, with one trailing dot
   dropped (``host.`` is the same DNS name); an IPv6 address compressed, in
-  brackets; the scheme's default port dropped; no credentials;
+  brackets; an IPv4 address the resolver reads from another notation
+  (``0x7f.1``) dotted-decimal; the scheme's default port dropped; no
+  credentials;
 * the path with percent-escapes of unreserved characters (``A-Z a-z 0-9 - .
   _ ~``) decoded and the others' hex uppercased, then dot segments removed
   (RFC 3986 §5.2.4; httpx removes the literal ones, so the decoded ``%2e``
@@ -30,6 +32,7 @@ from __future__ import annotations
 
 import ipaddress
 import re
+import socket
 import string
 
 __all__ = ["canonical_host", "canonical_url"]
@@ -39,6 +42,9 @@ _UNRESERVED = frozenset(string.ascii_letters + string.digits + "-._~")
 _ESCAPE = re.compile(r"%([0-9A-Fa-f]{2})")
 #: Characters a host given on its own may not hold: they end it in a URL.
 _NOT_IN_HOST = frozenset("/?#@\\")
+#: A host the resolver may read as an IPv4 address (``inet_aton``'s grammar:
+#: decimal, octal or ``0x`` hex parts).
+_NUMERIC_HOST = re.compile(r"[0-9a-fx.]*[0-9][0-9a-fx.]*")
 
 
 def canonical_url(url: str) -> str:
@@ -97,13 +103,20 @@ def canonical_host(host: str) -> str:
 
 def _host(raw_host: bytes) -> str:
     """httpx's ``raw_host`` lowercased, without one trailing dot; an IPv6
-    address compressed."""
+    address compressed; an IPv4 address in another notation (``3405803783``,
+    ``0xcb.0.113.7``, ``203.29447``), which httpx sends as written and
+    getaddrinfo connects to as that address, dotted-decimal."""
     host = raw_host.decode("ascii").lower().removesuffix(".")
     if ":" in host:
         try:
             host = ipaddress.IPv6Address(host).compressed
         except ValueError:
             pass  # a zone id httpx accepts (``fe80::1%25en0``): kept as sent
+    elif _NUMERIC_HOST.fullmatch(host):
+        try:
+            host = socket.inet_ntoa(socket.inet_aton(host))
+        except OSError:
+            pass  # a name after all (``deadbeef.example``)
     return host
 
 
