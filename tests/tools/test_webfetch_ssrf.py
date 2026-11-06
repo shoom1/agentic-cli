@@ -154,6 +154,30 @@ class TestPinnedTransport:
         assert seen == {"host_header": "xn--fa-hia.de", "sni": "xn--fa-hia.de"}
 
     @pytest.mark.asyncio
+    async def test_a_mapped_address_connects_to_the_ipv4_address_judged(self, monkeypatch):
+        """``[::ffff:a.b.c.d]`` is judged as a.b.c.d (the validator and the
+        engine read it so) and the connection goes to that address."""
+        def no_dns(*a, **k):
+            raise AssertionError("an address literal needs no lookup")
+        monkeypatch.setattr(socket, "getaddrinfo", no_dns)
+        seen = {}
+
+        def handler(request):
+            seen["ip"] = ipaddress.ip_address(request.url.host)
+            return httpx.Response(200)
+
+        async with httpx.AsyncClient(transport=mock_pinned_transport(handler)) as client:
+            await client.get("https://[::ffff:93.184.216.34]/")
+            with pytest.raises(BlockedAddressError):
+                await client.get("http://[::ffff:127.0.0.1]/")
+            with pytest.raises(BlockedAddressError):
+                await client.get("http://[::ffff:a00:1]/")
+
+        connected = seen["ip"]
+        connected = getattr(connected, "ipv4_mapped", None) or connected
+        assert connected == ipaddress.ip_address("93.184.216.34")
+
+    @pytest.mark.asyncio
     async def test_blocked_host_raises_and_never_calls_inner(self, monkeypatch):
         monkeypatch.setattr(socket, "getaddrinfo", stub_getaddrinfo("169.254.169.254"))
         called = {"inner": False}

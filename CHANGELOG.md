@@ -96,15 +96,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the client sends them (`agentic_cli.urls.canonical_url`): the host as httpx
   encodes it (the IDNA dots mapped, a Unicode host as its punycode),
   lowercased, without a trailing dot, and an IPv4 address written another way
-  (`3405803783`, `0xcb.0.113.7`) as the address the resolver connects to; in
-  the path, escapes of unreserved characters decoded (`%61` is `a`, `%2e%2e`
-  is `..`) and dot segments removed; the default port and the fragment
-  dropped. A rule's `*` and `**` are kept, and ordinary rules read as before.
-  The prompt shows that form (`https://faß.de/` as `https://xn--fa-hia.de/`),
-  a site grant names the canonical host (`https://localhost./` no longer gets
-  one), and a URL httpx cannot send (an invalid IDNA host, a port past 65535)
-  is denied as an invalid target. A rule or saved grant that names such a URL
-  is skipped at startup with a `permission_rule_skipped` warning.
+  (`3405803783`, `0xcb.0.113.7`, the IPv4-mapped `[::ffff:203.0.113.7]`) as
+  the address the connection reaches; in the path, escapes of unreserved
+  characters decoded (`%61` is `a`, `%2e%2e` is `..`) and dot segments
+  removed; the default port and the fragment dropped. A rule's `*` and `**`
+  are kept, and ordinary rules read as before. The prompt shows that form
+  (`https://faß.de/` as `https://xn--fa-hia.de/`), a site grant names the
+  canonical host (`https://localhost./` no longer gets one), and a URL httpx
+  cannot send (an invalid IDNA host, a port past 65535) is denied as an
+  invalid target. A rule or saved grant that names such a URL is skipped at
+  startup with a `permission_rule_skipped` warning.
 - **`webfetch_blocked_domains` blocks a domain however it is spelled.** The
   check compared urllib's hostname, but httpx connects to `blocked.example`
   for `https://blocked。example/` (and the fullwidth and halfwidth dots), and

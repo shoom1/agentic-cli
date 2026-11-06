@@ -55,6 +55,12 @@ from agentic_cli.urls import canonical_host, canonical_url
         ("https://203.29447/a", "https://203.0.115.7/a"),
         ("https://0x7f.1/", "https://127.0.0.1/"),
         ("https://deadbeef.example/", "https://deadbeef.example/"),  # a name
+        # An IPv4-mapped IPv6 address reaches the IPv4 host (a dual-stack
+        # socket delivers it there): it is that address too.
+        ("https://[::ffff:203.0.113.7]/a", "https://203.0.113.7/a"),
+        ("https://[::ffff:cb00:7107]:8443/a", "https://203.0.113.7:8443/a"),
+        ("https://[0:0:0:0:0:FFFF:203.0.113.7]/a", "https://203.0.113.7/a"),
+        ("https://[64:ff9b::cb00:7107]/a", "https://[64:ff9b::cb00:7107]/a"),  # NAT64: v6
         # A rule's wildcards are left alone.
         ("https://docs.example.com/**", "https://docs.example.com/**"),
         ("https://Docs.Example.com./a/*/b/**?x=*", "https://docs.example.com/a/*/b/**?x=*"),
@@ -92,6 +98,8 @@ def test_a_url_the_client_cannot_send_raises_value_error(url):
         ("blocked．example", "blocked.example"),
         ("faß.de", "xn--fa-hia.de"),
         ("2001:DB8:0::1", "2001:db8::1"),
+        ("::ffff:127.0.0.1", "127.0.0.1"),
+        ("::FFFF:7f00:1", "127.0.0.1"),
     ],
 )
 def test_canonical_host(host, canonical):

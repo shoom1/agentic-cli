@@ -25,7 +25,7 @@ agentic-cli/
 │   ├── constants.py          # Shared constants, truncate()
 │   ├── file_utils.py         # atomic_write_json / atomic_write_text
 │   ├── paths.py              # resolve_path: the one interpretation of a path argument
-│   ├── urls.py               # canonical_url / canonical_host: a URL as the HTTP client sends it (httpx's host, no trailing dot, an IPv4 address in another notation dotted-decimal; unreserved escapes decoded, dot segments removed; httpx imported inside); URL rules, blocked domains, DNS and TLS all use it
+│   ├── urls.py               # canonical_url / canonical_host: a URL as the HTTP client sends it (httpx's host, no trailing dot, an IPv4 address in another notation, IPv4-mapped IPv6 included, dotted-decimal; unreserved escapes decoded, dot segments removed; httpx imported inside); URL rules, blocked domains, DNS and TLS all use it
 │   ├── protected_paths.py    # The locations no tool reaches (credential stores, never-writable files and dirs, the project's .git/.env files/.{app_name}, ~/.{app_name} with its .env and settings.json): the engine's builtin denies and the OS sandbox's policy are both built from it (stdlib only)
 │   ├── logging.py            # configure_logging; LOG_STREAM, which every logger writes to (structlog through _LineLogger, no lock); log_lines_to(sink): each line to a sink instead of stderr
 │   ├── cli/

@@ -120,10 +120,19 @@ async def test_a_host_deny_holds_behind_an_allow_all_rule(url):
 
 
 @pytest.mark.parametrize(
-    "url", ["https://3405803783/x", "https://0xcb007107/x", "https://203.0.0x71.7/x"]
+    "url",
+    [
+        "https://3405803783/x",
+        "https://0xcb007107/x",
+        "https://203.0.0x71.7/x",
+        "https://[::ffff:203.0.113.7]/x",
+        "https://[::ffff:cb00:7107]/x",
+        "https://[0:0:0:0:0:ffff:203.0.113.7]/x",
+    ],
 )
 async def test_an_address_deny_holds_for_every_notation_of_the_address(url):
-    """getaddrinfo reads ``3405803783`` and ``0xcb007107`` as 203.0.113.7."""
+    """getaddrinfo reads ``3405803783`` and ``0xcb007107`` as 203.0.113.7, and
+    a dual-stack socket delivers ``[::ffff:203.0.113.7]`` there."""
     _user_rules(allow=["*"], deny=["https://203.0.113.7/**"])
     approver = _Approver()
 
