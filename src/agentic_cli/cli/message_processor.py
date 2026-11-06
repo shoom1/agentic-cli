@@ -328,6 +328,8 @@ class MessageProcessor:
         self._last_task_progress: str | None = None
         self._task_box: "ThinkingBox | None" = None
         self._last_task_content: str | None = None
+        # Held while a tool's question is on screen (see _handle_input).
+        self._asking = asyncio.Lock()
 
     def reset(self) -> None:
         """Forget the conversation's task list: a new one starts without it (``/new``).
@@ -724,17 +726,22 @@ class MessageProcessor:
         # Set up direct callback so HITL tools can prompt the user without
         # deadlocking the workflow runner.
         async def _handle_input(request: "UserInputRequest") -> str:
-            _finish_events_box()
-            # If the dialog raises, the turn is unwinding (cancelled, or the
-            # dialog failed): reopening the events box then would leave a
-            # panel on screen that nothing downstream will ever finish. The
-            # placement is read now: /settings may have changed it since the
-            # session started with its own.
-            response = await self._prompt_user_input(
-                request, ui, settings.dialog_placement
-            )
-            _open_events_box()
-            return response
+            # One question at a time: thinking-prompt shows one dialog and
+            # raises on a second, and two tool calls of one step can ask at
+            # once (ADK gathers a step's calls), so the second would fail, a
+            # permission prompt as a denial the user never saw.
+            async with self._asking:
+                _finish_events_box()
+                # If the dialog raises, the turn is unwinding (cancelled, or
+                # the dialog failed): reopening the events box then would
+                # leave a panel on screen that nothing downstream will ever
+                # finish. The placement is read now: /settings may have
+                # changed it since the session started with its own.
+                response = await self._prompt_user_input(
+                    request, ui, settings.dialog_placement
+                )
+                _open_events_box()
+                return response
 
         # The callback is context-local, so installing and clearing it here
         # affects only this turn; no token round-trip is needed (and a manager
