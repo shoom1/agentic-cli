@@ -19,9 +19,9 @@ from pathlib import Path
 # Dual import: top-level when bind-mounted beside driver.py in-container;
 # package path in tests / in-repo.
 try:  # pragma: no cover - import shim
-    from kernel_exec import collect_execution, validate_code
+    from kernel_exec import collect_execution
 except ImportError:  # pragma: no cover - import shim
-    from agentic_cli.tools.sandbox.backends.kernel_exec import collect_execution, validate_code
+    from agentic_cli.tools.sandbox.backends.kernel_exec import collect_execution
 
 
 class KernelDriver:
@@ -74,12 +74,7 @@ class KernelDriver:
             self._km.interrupt_kernel()
 
     def handle_request(self, req: dict) -> dict:
-        code = req.get("code", "")
-        ok, msg = validate_code(code)
-        if not ok:
-            return {"type": "result", "success": False, "stdout": "", "stderr": "",
-                    "result": None, "artifacts": [], "execution_time": 0.0, "error": msg}
-        msg_id = self._kc.execute(code)
+        msg_id = self._kc.execute(req.get("code", ""))
         # The HOST owns the timeout/interrupt/kill state machine: it waits the
         # per-cell deadline, then sends a cooperative interrupt (SIGINT ->
         # _on_sigint -> interrupt_kernel), then hard-kills the container if that

@@ -324,7 +324,11 @@ def make_sandbox_tool(sandbox_manager, workflow_manager=None) -> Callable:
         timeout_seconds: int | None = None,
         inputs: list[str] | None = None,
     ) -> dict[str, Any]:
-        """Execute Python code in a stateful sandbox.
+        """Execute Python code in a stateful Jupyter session, where variables and
+        imports persist across calls. Where it runs depends on the
+        stateful_executor_backend setting: with 'docker', in an isolated
+        container with no network; with 'local', on the host as the user, with
+        the user's files and network: it is not isolated.
 
         Args:
             code: Python code to execute.

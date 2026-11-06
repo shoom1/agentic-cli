@@ -10,7 +10,6 @@ import time
 from typing import Any
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
-_BLOCKED_MAGICS = frozenset({"pip", "system", "sx"})
 
 # Per-stream character cap. A runaway cell (e.g. an interruptible print loop)
 # would otherwise buffer output unbounded in-container, ship it all over stdio,
@@ -31,20 +30,6 @@ def _append_capped(parts: list[str], current: int, text: str) -> int:
     parts.append(text[:room])
     parts.append(f"\n...[output truncated at {MAX_STREAM_CHARS} characters]...")
     return MAX_STREAM_CHARS
-
-
-def validate_code(code: str) -> tuple[bool, str]:
-    """Pre-scan code for blocked shell escapes and magics."""
-    for line in code.splitlines():
-        stripped = line.lstrip()
-        if stripped.startswith("!"):
-            return False, "Shell commands (!) are not allowed in the sandbox"
-        if stripped.startswith("%") and not stripped.startswith("%%"):
-            body = stripped.lstrip("%")
-            magic = body.split()[0] if body else ""
-            if magic in _BLOCKED_MAGICS:
-                return False, f"Magic command '%{magic}' is not allowed in the sandbox"
-    return True, ""
 
 
 def collect_execution(kc, msg_id: str, timeout: float | None, working_dir) -> dict:
