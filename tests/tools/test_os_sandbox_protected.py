@@ -54,6 +54,11 @@ class TestProtectedPaths:
         expected = {"~/.ssh", "~/.gnupg", "~/.aws", "~/.config/gcloud", "~/.netrc"}
         assert expected <= set(PROTECTED_HOME_PATHS)
 
+    @pytest.mark.parametrize("entry", ["~/.zshenv", "~/.zlogin", "~/.config/git", "~/.config/fish"])
+    def test_shell_and_git_start_up_files_cannot_be_written(self, home, project, entry):
+        policy = OSSandboxPolicy(app_name=APP)
+        assert Path(entry).expanduser().resolve() in policy.resolved_deny_write_paths(project)
+
     def test_app_config_dir_cannot_be_read_or_written(self, home, project):
         policy = OSSandboxPolicy(app_name=APP)
         assert home / f".{APP}" in policy.resolved_deny_read_paths(project)

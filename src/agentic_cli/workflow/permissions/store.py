@@ -61,9 +61,17 @@ def _denies(
 
 _READ, _WRITE = "filesystem.read", "filesystem.write"
 
+#: Routine reads inside the project: allowed without a prompt. The engine
+#: leaves it out when the working directory is one a grant may not widen to
+#: (the root, home or above it): there it would cover all of home.
+WORKDIR_READ_ALLOW = Rule(_READ, "${workdir}/**", Effect.ALLOW, RuleSource.BUILTIN)
+
 BUILTIN_RULES: list[Rule] = list(dict.fromkeys([  # each rule once (the lists overlap)
-    # Routine reads inside workdir: allowed without prompt.
-    Rule("filesystem.read", "${workdir}/**", Effect.ALLOW, RuleSource.BUILTIN),
+    WORKDIR_READ_ALLOW,
+    # What the framework saves for read_file (workflow/tool_output.py and
+    # tools/webfetch/saved.py, FOLDER_NAME), wherever the app was started.
+    Rule(_READ, "${workdir}/.${app_name}/tool-output/**", Effect.ALLOW, RuleSource.BUILTIN),
+    Rule(_READ, "${workdir}/.${app_name}/fetched/**", Effect.ALLOW, RuleSource.BUILTIN),
 
     # Agent-internal stores — reads and writes to the user's own knowledge base
     # and memory are routine workflow activity, not external side effects.
@@ -88,15 +96,18 @@ BUILTIN_RULES: list[Rule] = list(dict.fromkeys([  # each rule once (the lists ov
     # .${app_name} (its settings): never written. Its .env: never read.
     *_denies((_WRITE,), protected_paths.WORKDIR_NEVER_WRITABLE),
     *_denies((_READ,), protected_paths.WORKDIR_NEVER_READABLE),
+    # And its env files at any depth (.env, .env.*, .envrc).
+    *_denies((_READ,), protected_paths.WORKDIR_ENV_FILE_GLOBS),
     # The app's own config dir (keys, settings, grants, jobs, sessions):
     # writing it would let the agent rewrite permission rules or disable the
     # engine (self-escalation). Reading it is denied for the keys only: an app
     # may keep files there for its agent to read, and started from home it is
     # ./.${app_name}, where the framework saves tool outputs and pages. The
-    # engine also denies reading every env file the settings read
+    # settings file is denied too (it may hold a key), and the engine also
+    # denies reading every env file the settings read
     # (settings_env_file_denies).
     *_denies((_WRITE,), (protected_paths.APP_CONFIG_DIR,)),
-    *_denies((_READ,), (protected_paths.APP_ENV_FILE,)),
+    *_denies((_READ,), protected_paths.APP_NEVER_READABLE),
 ]))
 
 

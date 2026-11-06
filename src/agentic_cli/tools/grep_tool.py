@@ -330,6 +330,16 @@ def _is_hidden_below(file_path: Path, root: Path) -> bool:
     return any(part.startswith(".") for part in parts)
 
 
+def _leads_below_to_hidden(file_path: Path, root: Path) -> bool:
+    """Whether ``file_path`` resolves to a hidden file below ``root`` (one
+    that cannot be resolved counts as hidden: it is not searched)."""
+    try:
+        target = file_path.resolve()
+    except (OSError, RuntimeError):
+        return True
+    return target != root and _is_hidden_below(target, root)
+
+
 def _grep_python(
     pattern: str,
     path: Path,
@@ -381,8 +391,10 @@ def _grep_python(
             continue
         # Hidden files and directories below the root are not searched, as
         # ripgrep does: the engine judged only `path`, and a search of the
-        # project must not read its .env or .git. A hidden root is searched.
-        if f != path and _is_hidden_below(f, path):
+        # project must not read its .env or .git. Judged where a symlink leads
+        # as well (ripgrep follows none): `notes -> .env` would read it. A
+        # hidden root is searched.
+        if f != path and (_is_hidden_below(f, path) or _leads_below_to_hidden(f, path)):
             continue
         files.append(f)
         if len(files) >= _MAX_FILES:
