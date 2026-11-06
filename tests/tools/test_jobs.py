@@ -98,6 +98,43 @@ class TestConcurrency:
         assert all(jm.get(i).state is JobState.SUCCEEDED for i in ids)  # type: ignore[union-attr]
 
 
+class TestTheWorkingDirectory:
+    """A subprocess job runs where it was submitted. One left queued is
+    launched by whichever manager opens the jobs directory next: another CLI,
+    perhaps started in another project, where ``make clean`` would act on the
+    wrong tree."""
+
+    @pytest.mark.parametrize(("cwd", "runs_in"), [(None, "."), ("build", "build")])
+    def test_a_queued_job_runs_where_it_was_submitted(
+        self, tmp_path: Path, monkeypatch, cwd, runs_in
+    ):
+        base = tmp_path / "jobs"
+        here, there = tmp_path / "project_x", tmp_path / "project_y"
+        for project in (here, there):
+            (project / "build").mkdir(parents=True)
+        monkeypatch.chdir(here)
+        first = JobManager(base_dir=base, max_concurrent=1)
+        busy = first.submit(tool="t", backend="subprocess", spec={"command": "sleep 30"})
+        second = None
+        try:
+            queued = first.submit(
+                tool="t", backend="subprocess", spec={"command": "pwd", "cwd": cwd}
+            )
+            assert queued.state is JobState.QUEUED
+            first.close()  # the first CLI exits with the job still queued
+
+            monkeypatch.chdir(there)
+            second = JobManager(base_dir=base, max_concurrent=2)
+            rec = _wait(second, queued.job_id)
+            assert rec.state is JobState.SUCCEEDED
+            ran_in = "".join(second.tail(queued.job_id, 1, "stdout")).strip()
+            assert Path(ran_in).resolve() == (here / runs_in).resolve()
+        finally:
+            first.cancel(busy.job_id)  # its starter reaps it at once
+            if second is not None:
+                second.close()
+
+
 class TestInProcessBackend:
     def test_returns_result(self, jm: JobManager):
         rec = jm.submit(

@@ -474,7 +474,8 @@ class SessionsCommand(Command):
     One row per stored conversation (``SessionInfo``): its id (the current
     one marked ``* ``) and its title (the first prompt), both shown as given,
     never as markup, its turns and when it last changed. ``--delete=<id>``
-    deletes one, never the conversation the user is in.
+    deletes one, never the conversation the user is in nor one open in
+    another process.
     """
 
     def __init__(self) -> None:
@@ -502,7 +503,17 @@ class SessionsCommand(Command):
             if delete_id == app.session_id:
                 app.session.add_error("You are in this conversation; /new or /resume another first.")
                 return
-            if await workflow.delete_session(delete_id):
+            # Held while it is deleted: one open in another process would be
+            # recreated there, empty, at its next turn, and that process not told.
+            with app.conversation_held(delete_id) as holder:
+                if holder is not None:
+                    app.session.add_error(
+                        f"Could not delete '{delete_id}': it is open in another "
+                        f"process ({holder})."
+                    )
+                    return
+                deleted = await workflow.delete_session(delete_id)
+            if deleted:
                 app.session.add_success(f"Session '{delete_id}' deleted.")
             else:
                 app.session.add_error(f"Session '{delete_id}' not found.")

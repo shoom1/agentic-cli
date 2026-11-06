@@ -1761,6 +1761,20 @@ step; each entry says what to use instead.
   at a time, raised on the second: the tool got an error or, for a
   permission prompt, the call was denied without the user seeing it. The CLI
   now asks them in turn.
+- **`/sessions --delete` no longer deletes a conversation open in another
+  terminal.** It refused only the conversation of the process it ran in, so
+  one another CLI had open was deleted, and on ADK that CLI's next turn
+  recreated it empty, losing the whole history without a word. The
+  conversation is now held while it is deleted, and one open elsewhere is
+  refused: "Could not delete '<id>': it is open in another process (<pid>)."
+- **A queued shell job runs in the directory it was submitted in.** A job
+  left queued (the concurrency cap was full) when its CLI exited was
+  launched by the next CLI to open the jobs directory, in that CLI's working
+  directory: started in another project, `make clean` would run there,
+  without a prompt and outside the project it was approved in. A subprocess
+  job's working directory is now fixed when it is submitted (a relative
+  `cwd` taken from there). A backend settles its spec in the new
+  `JobBackend.pin(spec)`, called once at submit (default: unchanged).
 - **A finished job is no longer recorded FAILED with exit code 1 when it
   is polled as it ends.** A subprocess job's shell, and the in-process
   backend, truncated the `exit_code` sentinel before writing the code, and

@@ -1796,6 +1796,26 @@ class BaseCLIApp:
             return None
         return self._lock().acquire(self._conversation_key(session_id))
 
+    @contextmanager
+    def conversation_held(self, session_id: str) -> Iterator[int | None]:
+        """Hold ``session_id``'s conversation for the block, beside the one
+        this process is in, so no other process opens it meanwhile
+        (``/sessions --delete``).
+
+        Yields:
+            None while it is held (on the memory store nothing is held, nor
+            needed); else the process id that has it open (0 when unknown),
+            and nothing is held.
+        """
+        taken = self._acquire(session_id)
+        if isinstance(taken, int):
+            yield taken
+            return
+        try:
+            yield None
+        finally:
+            self._abandon(taken)
+
     def _commit(self, taken: "Taken | None") -> None:
         if taken is not None:
             self._lock().commit(taken)

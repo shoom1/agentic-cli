@@ -20,6 +20,9 @@ its title and its id (the parts that tell rows apart first, since a narrow
 terminal clips a row's end), and returns the id picked, or None: Esc, or
 nothing else stored ("No other conversations to resume.").
 
+A conversation open in another process is neither resumed nor deleted
+(``/sessions --delete``).
+
 The last class runs a resume on the real ADK and Deep Agents managers.
 
 The app is a real ``BaseCLIApp`` whose session is a fake and whose
@@ -114,6 +117,10 @@ class Workflow(CompactWorkflow):
         rows = sorted((info for info, _ in self.stored.values()),
                       key=lambda info: info.updated, reverse=True)
         return rows if limit is None else rows[:limit]
+
+    async def delete_session(self, session_id, *, user_id=None) -> bool:
+        self.calls.append(f"delete_session {session_id}")
+        return self.stored.pop(session_id, None) is not None
 
 
 def replayed(app) -> list[tuple[str, str]]:
@@ -389,6 +396,35 @@ class _Jobs:
 
 
 class TestAConversationOpenElsewhere:
+    async def test_it_is_not_deleted(self, project, monkeypatch):
+        """``/sessions --delete`` checked only that it was not this process's
+        own conversation: one open in another terminal was deleted, and on ADK
+        that process's next turn recreated it empty, without a word."""
+        import os
+
+        from agentic_cli.cli.builtin_commands import SessionsCommand
+        from agentic_cli.cli.conversation_lock import ConversationLock
+        from agentic_cli.config import BaseSettings
+
+        monkeypatch.setenv("HOME", str(project))
+        workflow = Workflow(conversation("abc", "Plan the trip", 2))
+        app = app_on(workflow, BaseSettings(session_store="sqlite"))
+        other = ConversationLock(app.settings.sessions_dir / "locks")
+        key = app._conversation_key("abc")
+        assert other.take(key) is None
+
+        await SessionsCommand().execute("--delete=abc", app)
+
+        assert "abc" in workflow.stored
+        assert said(app.session, "add_error") == [
+            f"Could not delete 'abc': it is open in another process ({os.getpid()})."
+        ]
+        # Closed there, it is deleted, and this process holds it no longer.
+        other.release()
+        await SessionsCommand().execute("--delete=abc", app)
+        assert "abc" not in workflow.stored
+        assert other.take(key) is None
+
     async def test_it_is_refused_and_nothing_changes(self, project, monkeypatch):
         import os
 
