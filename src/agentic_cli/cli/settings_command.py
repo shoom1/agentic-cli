@@ -5,8 +5,9 @@ shown in a thinking_prompt Dialog with Save and Cancel buttons. Apps can
 customize which settings appear by overriding get_ui_setting_keys().
 """
 
+import asyncio
 import inspect
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from thinking_prompt import ButtonConfig, Dialog
 
@@ -71,29 +72,41 @@ class SettingsCommand(Command):
         # live object also wrote values that came from the environment or were
         # derived at startup, making a one-run override permanent.
         before = app.settings.model_dump()
-        if await app.apply_settings(changes) is False:
-            return  # rolled back (an override returning None is still diffed)
-        after = app.settings.model_dump()
-        changed = {k for k, v in after.items() if before.get(k) != v}
-        if not changed:
-            return
-        # A dict the dialog edits entry by entry saves only the entries that
-        # changed: its live value merges entries from the user file, the
-        # environment and the app's defaults, none of which belongs in the
-        # project file a teammate pulls.
-        for key in _SAVED_BY_ENTRY & changed:
-            changed.discard(key)
-            old, new = before.get(key) or {}, after.get(key) or {}
-            changed |= {f"{key}.{entry}" for entry, value in new.items() if old.get(entry) != value}
-
         try:
-            if _accepts_keyword(app.save_settings, "keys"):
-                saved = await app.save_settings(keys=changed)
-            else:  # an app override predating keys=: its own full save
-                saved = await app.save_settings()
-            app.session.add_success(_saved_message(saved))
-        except Exception as e:
-            app.session.add_warning(f"Settings applied but not saved: {e}")
+            if await app.apply_settings(changes) is False:
+                return  # rolled back (an override returning None is still diffed)
+        except asyncio.CancelledError:
+            # Ctrl+C. Undone, unless an orchestrator switch was already made
+            # (too late to undo): what stands is saved, as any Save is, so
+            # the next start runs the backend this one does.
+            await _save(app, before)
+            raise
+        await _save(app, before)
+
+
+async def _save(app: "BaseCLIApp", before: dict[str, Any]) -> None:
+    """Save the settings that differ from ``before``, and say where."""
+    after = app.settings.model_dump()
+    changed = {k for k, v in after.items() if before.get(k) != v}
+    if not changed:
+        return
+    # A dict the dialog edits entry by entry saves only the entries that
+    # changed: its live value merges entries from the user file, the
+    # environment and the app's defaults, none of which belongs in the
+    # project file a teammate pulls.
+    for key in _SAVED_BY_ENTRY & changed:
+        changed.discard(key)
+        old, new = before.get(key) or {}, after.get(key) or {}
+        changed |= {f"{key}.{entry}" for entry, value in new.items() if old.get(entry) != value}
+
+    try:
+        if _accepts_keyword(app.save_settings, "keys"):
+            saved = await app.save_settings(keys=changed)
+        else:  # an app override predating keys=: its own full save
+            saved = await app.save_settings()
+        app.session.add_success(_saved_message(saved))
+    except Exception as e:
+        app.session.add_warning(f"Settings applied but not saved: {e}")
 
 
 # Dict settings the dialog edits one entry at a time (a role's model picker).

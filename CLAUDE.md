@@ -34,7 +34,7 @@ agentic-cli/
 │   │   ├── commands.py       # Command, CommandRegistry
 │   │   ├── conversation_lock.py # ConversationLock: one process per stored conversation (flock under <sessions_dir>/locks/; BaseCLIApp._hold refuses one held elsewhere; /sessions --delete too, through conversation_held)
 │   │   ├── builtin_commands.py # /help, /status (the main agent's context rows: context_budget), /models (ModelsCommand: the list, each model's facts and sources, Status for an entry left out, the providers in use; /models <text> searches the full listings; refresh), /sessions, /resume [<id>] (sessions), /jobs (resume: finished jobs), /compact [focus], /new, ...
-│   │   ├── workflow_controller.py  # WorkflowController (lazy/background init, orchestrator swap; the status bar names the main agent's model)
+│   │   ├── workflow_controller.py  # WorkflowController (lazy/background init, orchestrator swap (the old manager released in the controller's task: a cancel stops only the wait); the status bar names the main agent's model)
 │   │   ├── session_resume.py # What /resume shows: the picker (picker), the "Resumed:" line, the replay of the last 10 messages
 │   │   ├── session_args.py # --continue / --resume <id> → SessionStart (BaseCLIApp.main() adds them; start: new, continue, resume; SessionArgumentParser: --resume without its id names --continue and /resume)
 │   │   ├── message_processor.py    # WorkflowEvent → ThinkingPromptSession rendering; Ctrl+C stops the request being processed (its boxes end with it; "Operation cancelled..." once, then the background jobs it submitted that still run, named; CancelledError re-raised); tool questions as dialogs, one at a time; process_compact: /compact run as a turn (compact() as its event source, live events merged in)

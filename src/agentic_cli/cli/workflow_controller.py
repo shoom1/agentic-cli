@@ -428,9 +428,15 @@ class WorkflowController:
                 cleanup = self._spawn_cleanup(manager)
                 if cleanup is not None:
                     await asyncio.shield(cleanup)
+        await self._join_releases()
+
+    async def _join_releases(self) -> None:
+        """Wait for every release the controller owns (``_spawn_cleanup``).
+
+        Shielded: these are the controller's tasks, and gather() would
+        otherwise cancel them along with its awaiter.
+        """
         if self._orphan_cleanups:
-            # Shielded for the same reason: these are the controller's tasks,
-            # and gather() would otherwise cancel them along with its awaiter.
             await asyncio.shield(
                 asyncio.gather(*list(self._orphan_cleanups), return_exceptions=True)
             )
@@ -536,6 +542,9 @@ class WorkflowController:
         async with self._lifecycle_lock:
             if self._workflow is None:
                 raise RuntimeError("Cannot reinitialize - workflow not initialized")
+            # A release a cancelled swap left running ends first: a switch
+            # back would otherwise start a manager beside the one going.
+            await self._join_releases()
 
             if self._needs_orchestrator_swap(model):
                 await self._swap_orchestrator(model)
@@ -548,6 +557,10 @@ class WorkflowController:
         Initializes the replacement fully before swapping, so a failed init
         leaves the working manager in place; whichever manager ends up unused
         is cleaned up. The caller holds ``_lifecycle_lock``.
+
+        Once the replacement is published the swap is made: a cancel while
+        the old manager is released stops only the wait, and the cleanup,
+        the controller's (``_spawn_cleanup``), runs on, joined by ``close()``.
         """
         logger.info(
             "orchestrator_swap", old_model=self._workflow.model, new_model=model
@@ -568,7 +581,9 @@ class WorkflowController:
             raise RuntimeError("WorkflowController is closed")
         old_workflow, self._workflow = self._workflow, new_workflow
         self._init_error = None
-        await self._cleanup_manager(old_workflow)
+        cleanup = self._spawn_cleanup(old_workflow)
+        if cleanup is not None:
+            await asyncio.shield(cleanup)
 
     async def _reinitialize_in_place(self, model: str | None) -> None:
         """Reinitialize the live manager. The caller holds ``_lifecycle_lock``.

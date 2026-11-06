@@ -1761,6 +1761,15 @@ step; each entry says what to use instead.
   at a time, raised on the second: the tool got an error or, for a
   permission prompt, the call was denied without the user seeing it. The CLI
   now asks them in turn.
+- **Ctrl+C during an orchestrator switch no longer leaves the settings
+  naming the old backend.** Pressed while the old backend was being released,
+  after the new one had started, it restored the settings to the old
+  orchestrator while the new one ran, and abandoned the release halfway: the
+  old backend's MCP servers, sandbox kernels and store stayed open, and the
+  next model change switched back without a word, leaving the conversation's
+  history behind. The release now runs to its end in the background (a later
+  restart or switch waits for it), and the switch, too late to undo, stands,
+  is saved and is reported.
 - **`/sessions --delete` no longer deletes a conversation open in another
   terminal.** It refused only the conversation of the process it ran in, so
   one another CLI had open was deleted, and on ADK that CLI's next turn
