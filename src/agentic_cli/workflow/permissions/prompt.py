@@ -3,20 +3,35 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Collection
 from pathlib import Path
 
-from agentic_cli.constants import truncate
 from agentic_cli.workflow.events import InputType, UserInputRequest
 from agentic_cli.workflow.permissions.capabilities import ResolvedCapability
 from agentic_cli.workflow.permissions.engine import (
+    Unstorable,
     broaden_target_for_grant,
-    is_storable_grant,
+    unstorable_reason,
 )
 from agentic_cli.workflow.permissions.rules import AskScope
 
 # Args that carry executable payloads, shown in the prompt for *.exec grants.
 _CODE_ARGS = ("code", "command", "script")
-_CODE_PREVIEW_MAX = 1000
+
+#: Why a prompt offers only "Allow once" and "Deny", by the reason a grant
+#: may not be remembered (``unstorable_reason``), in the order shown.
+_ONCE_ONLY_NOTES = {
+    Unstorable.UNCONTAINED: (
+        "(This code runs on your machine without a sandbox, "
+        "so approval applies to this call only.)"
+    ),
+    Unstorable.TARGETLESS: (
+        "(This tool names no specific target, so approval applies to this call only.)"
+    ),
+    Unstorable.WILDCARD: (
+        "(This target contains wildcard characters, so approval applies to this call only.)"
+    ),
+}
 
 # Strings kept module-level so the UI and parser stay in sync.
 ALLOW_ONCE_CHOICE = "Allow once"
@@ -48,6 +63,7 @@ def build_request(
     args: dict | None = None,
     *,
     home: Path | None = None,
+    uncontained: Collection[str] = (),
 ) -> UserInputRequest:
     """Construct a ``UserInputRequest`` (CHOICE) describing the pending grant.
 
@@ -58,19 +74,23 @@ def build_request(
     of /foo/**)``. A file directly in home, at the root or above home is
     granted exactly, so its line stands alone.
 
-    When nothing in the request can be remembered (a resource capability whose
-    tool named no target, or a target whose rule would hold a wildcard
-    character, see ``is_storable_grant``), only "Allow once" and "Deny" are
-    offered, with a note saying why, and no capability promises a wider scope:
-    there is none to approve.
+    When nothing in the request can be remembered (see ``unstorable_reason``:
+    code its owner says runs on the host without a sandbox, named in
+    ``uncontained``; a resource capability whose tool named no target; a
+    target whose rule would hold a wildcard character), only "Allow once" and
+    "Deny" are offered, with a note saying why, and no capability promises a
+    wider scope: there is none to approve.
 
     For code-execution capabilities (``*.exec``) the pending ``code``/``command``
-    payload is shown: the capability target is ``*`` (allow-any-code), so the
-    payload — not the target — is what the user is actually approving.
+    payload is shown, all of it (the dialog body scrolls): the capability
+    target is ``*`` (allow-any-code), so the payload — not the target — is
+    what the user is actually approving.
     """
     lines = [f"Tool `{tool_name}` wants:"]
-    unstorable = [cap for cap in capabilities if not is_storable_grant(cap, home=home)]
-    rememberable = not unstorable
+    reasons = {
+        unstorable_reason(cap, home=home, uncontained=uncontained) for cap in capabilities
+    } - {None}
+    rememberable = not reasons
     for cap in capabilities:
         # The exact target is what this call acts on (a file, or a URL and
         # any data it carries), whatever a grant would cover.
@@ -79,16 +99,11 @@ def build_request(
         if rememberable and scope != cap.target:
             lines.append(f"    (for this session / always: all of {scope})")
     lines.append("")
-    if any(cap.target == "*" for cap in unstorable):
-        lines.append("(This tool names no specific target, so approval applies to this call only.)")
-    if any(cap.target != "*" for cap in unstorable):
-        lines.append(
-            "(This target contains wildcard characters, so approval applies to this call only.)"
-        )
-    code_preview = _code_preview(capabilities, args)
-    if code_preview:
+    lines += [note for reason, note in _ONCE_ONLY_NOTES.items() if reason in reasons]
+    code = _code_to_approve(capabilities, args)
+    if code:
         lines.append("Code to execute:")
-        lines.append(code_preview)
+        lines.append(code)
         lines.append("")
     lines.append("Allow?")
     prompt = "\n".join(lines)
@@ -107,10 +122,14 @@ def build_request(
     )
 
 
-def _code_preview(
+def _code_to_approve(
     capabilities: list[ResolvedCapability], args: dict | None
 ) -> str:
-    """Truncated preview of the executable payload for ``*.exec`` grants, else ''."""
+    """The whole executable payload for ``*.exec`` grants, else ''.
+
+    Never cut: a preview that stopped at 1,000 characters let code placed
+    after them be approved unseen.
+    """
     if not args:
         return ""
     # Match the whole exec namespace: "python.exec" AND sub-capabilities like
@@ -122,7 +141,7 @@ def _code_preview(
     for key in _CODE_ARGS:
         value = args.get(key)
         if isinstance(value, str) and value.strip():
-            return truncate(value, _CODE_PREVIEW_MAX)
+            return value
     return ""
 
 

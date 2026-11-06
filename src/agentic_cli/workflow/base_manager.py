@@ -580,14 +580,18 @@ class BaseWorkflowManager(ABC):
         # Always construct the PermissionEngine (all agents may need it)
         if PERMISSION_ENGINE not in existing:
             from pathlib import Path
+            from agentic_cli.tools.exec_policy import uncontained_exec_capabilities
             from agentic_cli.workflow.permissions import PermissionContext, PermissionEngine
             ctx = PermissionContext(
                 workdir=Path.cwd(),
                 home=Path.home(),
                 app_name=self._settings.app_name,
             )
+            # Code that would run on the host without a sandbox is approved
+            # per call; the engine asks which that is at each check.
             s[PERMISSION_ENGINE] = PermissionEngine(
                 settings=self._settings, workflow=self, ctx=ctx,
+                uncontained=uncontained_exec_capabilities,
             )
 
         # Always ensure workflow reference is available

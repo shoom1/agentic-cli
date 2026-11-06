@@ -1375,7 +1375,7 @@ Tool access is gated by the **permission engine** (see the HITL section below). 
 
 Two complementary tools:
 
-- **`execute_python`** — stateless, sandboxed Python via `SafePythonExecutor`. Use for quick calculations.
+- **`execute_python`** — stateless Python via `SafePythonExecutor`, in a fresh subprocess inside the OS sandbox (sandbox-exec on macOS, bubblewrap's `bwrap` on Linux). Use for quick calculations.
 - **`sandbox_execute`** — stateful, multi-turn Python in a Jupyter kernel. Variables, imports, and DataFrames persist across calls within a session. Shares the workspace filesystem. Network and `pip install` are blocked.
 
 ```python
@@ -1389,6 +1389,25 @@ from agentic_cli.tools.sandbox import sandbox_execute
 ```
 
 The `/sandbox` CLI command lists and resets sandbox sessions.
+
+`execute_python` runs its code only inside the OS sandbox: it writes only to
+the working directory (and `os_sandbox_writable_paths`), reads no credential
+store, no `~/.{app_name}` and not the project's `.env`, and has no network
+unless `os_sandbox_allow_network` is on. On a host with no sandbox backend
+(Windows has none), when the sandbox cannot be set up, or when the sandbox tool
+fails as it starts (on Ubuntu 24.04 and later, `bwrap` needs unprivileged user
+namespaces, which AppArmor restricts by default), the call is refused with an
+error that keeps the cause and says how to get a working sandbox. Setting
+`os_sandbox_enabled` to false (a user setting: in `~/.{app_name}/settings.json`
+or the app's environment variable, not the project file or `/settings`) runs
+the code without a sandbox, with your privileges, and so does
+`os_sandbox_strict: false` when the sandbox is unavailable: the executor then
+allows only standard modules (math,
+statistics, json, re, datetime, collections, ...) and checks the code, but
+those checks are no security boundary (CPython has no in-process sandbox, and
+those modules reach the host themselves), so every such call is approved on
+its own. `sandbox_execute` on the `local` backend runs with your privileges
+too.
 
 #### Docker-isolated sandbox
 
@@ -1628,6 +1647,15 @@ written into `./.{app_name}/settings.json`: a repository could otherwise ship
 pre-approved allow-rules that a clone would silently honour. A clone at a
 different path therefore starts with no grants, and a repo-committed grant file
 is never loaded.
+
+**Code that may run on your machine without a sandbox is approved call by
+call.** That is `execute_python` with `os_sandbox_enabled` or
+`os_sandbox_strict` off, and `sandbox_execute` on the `local` backend: the
+prompt offers only `Allow once` and `Deny` and says why, and no grant approves
+it, not even one given while the code ran in the sandbox (an allow rule you
+write in `~/.{app_name}/settings.json` still does: that is your policy). The
+settings are read at each call, so a change applies at once. Every prompt for
+code shows all of it.
 
 ## Context management
 
@@ -2036,6 +2064,7 @@ agentic-cli/
 │   │   ├── registry.py           # ToolRegistry, ToolCategory, register_tool
 │   │   ├── factories.py          # Backend-aware tool factories
 │   │   ├── executor.py           # SafePythonExecutor
+│   │   ├── exec_policy.py        # Which code may run on the host, from the settings
 │   │   ├── arxiv_tools.py        # search_arxiv, fetch_arxiv_paper, ingest_arxiv_paper
 │   │   ├── arxiv_source.py       # ArxivSearchSource (service-registered)
 │   │   ├── search_sources.py     # SearchSource, SearchSourceResult

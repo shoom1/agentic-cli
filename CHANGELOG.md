@@ -36,6 +36,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   says the approval applies to this call only. A saved allow in
   `~/.{app_name}/project_grants.json` whose literal part holds one is dropped
   at startup with a `permission_glob_grant_dropped` warning.
+- **The sandbox's file transfer holds `inputs/` and `outputs/` open while it
+  copies.** Staging an input and the docker backend's collection of
+  `outputs/` checked once that the session's folder was a real folder, then
+  copied each file by a path through it (since 0.6.0). Code in the kernel can
+  rename and link inside its `/workspace` at any moment, so it could swap the
+  folder for a symlink in between: the host then copied a host file of the
+  kernel's choosing (named like an output) into the shared artifacts folder
+  and reported it to the model, or wrote a staged input into a host folder of
+  the kernel's choosing. Each folder is now opened once, without following a
+  link, and every listing, read, temporary file and rename goes through that
+  descriptor, so a later swap changes the path, not the folder the host reads
+  or writes. In `agentic_cli.file_utils`, `copy_regular_file_no_follow` takes
+  `src_dir_fd`/`dst_dir_fd` and `open_dir_no_follow` is new. A dangling
+  `inputs` link now fails the call with the usual "not a real directory"
+  error instead of an uncaught `FileExistsError`. An input whose path runs
+  through any of the sandbox's session directories (an `outputs/` or plot
+  path the tool reported, staged into another session, say) is refused:
+  below each, every folder is that session's kernel's, so it could redirect
+  the copy to a host file too. The error says to stage the copy collected in
+  the artifacts directory instead. `stage_inputs` takes `sandbox_root=` (the
+  docker backend passes `<workspace_dir>/sandbox`); the local backend, whose
+  kernel runs with host privileges and collects nothing, refuses only the
+  session's own directory.
+  **Breaking:** staging a file from inside a session fails the call, naming
+  it.
 - **The default permission rules protect what the OS sandbox protects.** The
   engine allowed reading anything in the project and denied only writes to a
   short list (since 0.5.1), so `read_file(".env")` returned the project's keys
@@ -122,31 +147,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   certificate of `fass.de`, a separate registration, while asking for
   `xn--fa-hia.de`. DNS, TLS and the Host header now all use the host httpx
   sends.
-- **The sandbox's file transfer holds `inputs/` and `outputs/` open while it
-  copies.** Staging an input and the docker backend's collection of
-  `outputs/` checked once that the session's folder was a real folder, then
-  copied each file by a path through it (since 0.6.0). Code in the kernel can
-  rename and link inside its `/workspace` at any moment, so it could swap the
-  folder for a symlink in between: the host then copied a host file of the
-  kernel's choosing (named like an output) into the shared artifacts folder
-  and reported it to the model, or wrote a staged input into a host folder of
-  the kernel's choosing. Each folder is now opened once, without following a
-  link, and every listing, read, temporary file and rename goes through that
-  descriptor, so a later swap changes the path, not the folder the host reads
-  or writes. In `agentic_cli.file_utils`, `copy_regular_file_no_follow` takes
-  `src_dir_fd`/`dst_dir_fd` and `open_dir_no_follow` is new. A dangling
-  `inputs` link now fails the call with the usual "not a real directory"
-  error instead of an uncaught `FileExistsError`. An input whose path runs
-  through any of the sandbox's session directories (an `outputs/` or plot
-  path the tool reported, staged into another session, say) is refused:
-  below each, every folder is that session's kernel's, so it could redirect
-  the copy to a host file too. The error says to stage the copy collected in
-  the artifacts directory instead. `stage_inputs` takes `sandbox_root=` (the
-  docker backend passes `<workspace_dir>/sandbox`); the local backend, whose
-  kernel runs with host privileges and collects nothing, refuses only the
-  session's own directory.
-  **Breaking:** staging a file from inside a session fails the call, naming
-  it.
 - **Saving settings keeps the project's deny rules.** The project
   `./.{app_name}/settings.json` may hold `permissions.deny` rules, which the
   permission engine reads from the file itself, but a settings save (any
@@ -228,6 +228,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a malformed `permissions` value in any trusted source stops the settings
   from loading, even where another source also sets the field; and a full
   settings save no longer writes `permissions` into the user file.
+- **`execute_python` runs code only inside the OS sandbox, unless you turn it
+  off.** Where no sandbox backend existed (a Linux host without `bwrap`, with
+  `os_sandbox_strict` off by default), when the sandbox could not be set up,
+  or with `os_sandbox_enabled` off, the code ran in a plain subprocess with
+  your privileges (since 0.6.0), behind checks the tool and the settings
+  described as containment. They are not one: CPython has no in-process
+  sandbox, and the standard modules the executor allows reach the host
+  themselves (`re.enum.sys.modules["os"].popen(…)` and
+  `json.codecs.open(path, "w")` passed every check). Yet "Allow for this
+  session" was offered and remembered for it, the prompt showed only the
+  code's first 1,000 characters, and a failed wrap kept numpy, pandas and
+  sympy importable. `os_sandbox_strict` now defaults to true (and so does
+  `OSSandboxPolicy.strict`): with the sandbox enabled, the default, the code
+  runs inside it or is refused. The refusal, when there is no backend, when
+  the wrap fails, or when the sandbox tool fails as it starts (a `bwrap` that
+  Ubuntu 24.04's AppArmor keeps from user namespaces, a seatbelt profile the
+  kernel rejects: before, the call failed with the tool's message alone),
+  keeps its cause and says how to get a working sandbox (sandbox-exec ships
+  with macOS; on Linux install bubblewrap, and on Ubuntu 24.04 or later allow
+  it unprivileged user namespaces) and how to opt out: `"os_sandbox_enabled":
+  false` in `~/.{app_name}/settings.json` or the app's environment variable
+  (the project file and `/settings` cannot set it), which runs the code with
+  your privileges. The modules a call may import are chosen from where it runs:
+  inside the sandbox all of them, anywhere else the standard ones only.
+  Code that may run on your machine without a sandbox (`execute_python` with
+  the sandbox off or not strict, `sandbox_execute` on the `local` backend) is
+  approved call by call: the prompt offers only "Allow once" and "Deny" and
+  says why, and no grant stored earlier approves it, though an allow rule you
+  write in your own settings still does. A code prompt shows all of the code.
+  The tool's description, the settings' and the executor's docstring say
+  this, and `SafePythonExecutor.effective_allowed_modules` is gone (the set
+  is chosen per call). **Breaking:** on a host with no working sandbox (a
+  Linux host without bubblewrap, or whose bubblewrap may not create user
+  namespaces, as on Ubuntu 24.04 by default; Windows, which has none),
+  `execute_python` is refused until one works or `os_sandbox_enabled` is set
+  to false.
 - **The knowledge base never follows a symlink in its folder.** The project
   knowledge base (`./.{app_name}/knowledge_base`) can arrive with a cloned
   repository, and git keeps symlinks, but its files were opened by path

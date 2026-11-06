@@ -597,20 +597,22 @@ class WorkflowSettingsMixin(SettingsSourcesMixin):
         default=True,
         title="OS Sandbox Enabled",
         description=(
-            "Wrap Python execution in an OS-level sandbox when a backend is "
-            "available (sandbox-exec on macOS, bwrap on Linux). When no backend "
-            "is present, execution falls back to the restricted in-process "
-            "executor (see os_sandbox_strict) — only pure-computation modules "
-            "are importable in that case."
+            "Run execute_python's code inside an OS-level sandbox (sandbox-exec "
+            "on macOS, bwrap on Linux). Turned off, the code runs on your "
+            "machine with your privileges: the executor's module and syntax "
+            "checks are not a security boundary, so each call is approved on "
+            "its own."
         ),
         json_schema_extra={"ui_order": 134},
     )
     os_sandbox_strict: bool = Field(
-        default=False,
+        default=True,
         title="OS Sandbox Strict",
         description=(
-            "Refuse to run code when OS sandboxing is enabled but no backend is "
-            "available, instead of falling back to the in-process executor."
+            "With the OS sandbox enabled, refuse to run code when no sandbox "
+            "backend is available or the sandbox cannot be set up. Turned off, "
+            "the code then runs without a sandbox, with your privileges, and "
+            "each call is approved on its own."
         ),
         json_schema_extra={"ui_order": 137},
     )
