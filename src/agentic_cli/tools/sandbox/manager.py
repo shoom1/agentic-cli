@@ -278,7 +278,8 @@ class SandboxManager:
         if timeout_seconds is None:
             timeout_seconds = self._settings.sandbox_timeout
 
-        wait = timeout_seconds + self.busy_margin
+        # A lock cannot wait longer than TIMEOUT_MAX (about 292 years).
+        wait = min(timeout_seconds + self.busy_margin, threading.TIMEOUT_MAX)
         with self._session_lock(session_id) as slot:
             if not slot.lock.acquire(timeout=wait):
                 return ExecutionResult(

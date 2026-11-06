@@ -199,6 +199,15 @@ def test_a_call_kept_waiting_past_its_timeout_is_told_the_session_is_busy(ctx):
     assert 0.9 <= waited < 3
 
 
+def test_a_timeout_past_what_a_lock_can_wait_still_runs(ctx):
+    backend = GatedBackend(open_gate=True)
+    mgr = SandboxManager(ctx.settings, backend=backend)
+    result = mgr.execute("one", session_id="s1", timeout_seconds=10**12)
+    mgr.cleanup()
+
+    assert result.success, result.error
+
+
 def test_a_reset_during_a_call_leaves_the_teardown_to_it(ctx):
     backend = GatedBackend()
     mgr = SandboxManager(ctx.settings, backend=backend)
