@@ -1787,7 +1787,9 @@ step; each entry says what to use instead.
   timeout plus a minute, then is told the session is busy), two calls no
   longer create two backends or pass `sandbox_max_sessions` together, and a
   `/sandbox reset` or shutdown during a call no longer pulls the kernel out
-  from under it: the call shuts it down as it ends.
+  from under it (`ZMQError: Socket operation on non-socket`): the cell is
+  stopped (the local kernel interrupted, the container killed) and the call
+  shuts the kernel down as it ends.
 - **Two tool questions asked at once are shown one after the other.** The
   calls of one model step run together (both backends gather them), so two
   of them could ask at once (two `ask_clarification` calls, or one beside a

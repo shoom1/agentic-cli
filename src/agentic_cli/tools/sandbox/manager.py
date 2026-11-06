@@ -374,9 +374,9 @@ class SandboxManager:
         """Reset a sandbox session.
 
         Never waits for a call running in the session (the CLI's /sandbox
-        runs on the event loop): that call shuts the kernel down as it ends,
-        since its client is not thread-safe, and the session's next call
-        starts afresh.
+        runs on the event loop): its cell is stopped (``SandboxBackend.stop``)
+        and the call shuts the kernel down as it ends, since its client is
+        not thread-safe; the session's next call starts afresh.
 
         Args:
             session_id: Session to reset.
@@ -396,6 +396,11 @@ class SandboxManager:
                         backend.reset_session(session_id)
                 finally:
                     slot.lock.release()
+            elif backend is not None:
+                try:
+                    backend.stop(session_id)
+                except Exception as exc:  # noqa: BLE001 - the call still shuts it down
+                    logger.warning("sandbox_stop_failed", session_id=session_id, error=str(exc))
         logger.debug("sandbox_session_reset", session_id=session_id, deferred=not idle)
         return True
 
@@ -420,9 +425,9 @@ class SandboxManager:
     def cleanup(self) -> None:
         """Clean up all sessions and the backend.
 
-        Never waits for a running call: its session is shut down as the call
-        ends (see ``reset_session``), and a call still waiting for a session,
-        or made later, is refused.
+        Never waits for a running call: its cell is stopped and its session
+        shut down as the call ends (see ``reset_session``), and a call still
+        waiting for a session, or made later, is refused.
         """
         atexit.unregister(self._atexit_cleanup)
         with self._lock:

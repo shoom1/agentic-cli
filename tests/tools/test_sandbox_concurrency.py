@@ -8,7 +8,8 @@ local kernel's output socket raised ``ValueError: b'<IDS|MSG>' is not in
 list`` or took each other's output, and two first calls on the docker backend
 both started a container under one name. ``SandboxManager`` holds a lock per
 session across a call (staging, execution, output collection), and a reset or
-cleanup that comes during a call leaves the session's teardown to that call.
+cleanup that comes during a call stops its cell and leaves the session's
+teardown to that call.
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ import pytest
 from agentic_cli.tools.sandbox.backends.base import SandboxBackend
 from agentic_cli.tools.sandbox.backends.detect import DockerAvailability
 from agentic_cli.tools.sandbox.backends.jupyter_docker import JupyterDockerBackend
-from agentic_cli.tools.sandbox.manager import SandboxManager
+from agentic_cli.tools.sandbox.manager import SandboxManager, sandbox_root_for
 from agentic_cli.tools.sandbox.models import ExecutionResult
 from tests.conftest import MockContext
 from tests.tools.test_sandbox_docker_backend import FakeRuntime
@@ -32,7 +33,7 @@ from tests.tools.test_sandbox_docker_backend import FakeRuntime
 class GatedBackend(SandboxBackend):
     """A backend whose calls run until the test opens ``gate``. It records the
     calls that entered, the most that ran at once in one session, and what
-    was reset or cleaned up."""
+    was stopped, reset or cleaned up."""
 
     backend_name = "gated"
 
@@ -43,6 +44,7 @@ class GatedBackend(SandboxBackend):
         self.entered: list[str] = []
         self.most_at_once = 0
         self.reset_calls: list[str] = []
+        self.stops: list[str] = []
         self.cleanups = 0
         self._running: dict[str, int] = {}
         self._sessions: set[str] = set()
@@ -64,6 +66,9 @@ class GatedBackend(SandboxBackend):
     def reset_session(self, session_id):
         self.reset_calls.append(session_id)
         self._sessions.discard(session_id)
+
+    def stop(self, session_id):
+        self.stops.append(session_id)
 
     def cleanup(self):
         self.cleanups += 1
@@ -218,6 +223,7 @@ def test_a_reset_during_a_call_leaves_the_teardown_to_it(ctx):
         assert mgr.reset_session("s1") is True
         assert time.monotonic() - started < 0.5  # it never waits for the call
         assert backend.reset_calls == []  # nothing pulled out from under the call
+        assert backend.stops == ["s1"]  # its cell is stopped
         assert mgr.list_sessions() == []
         backend.gate.set()
         assert running.result().success
@@ -240,6 +246,7 @@ def test_cleanup_during_a_call_leaves_its_session_to_it(ctx):
         mgr.cleanup()
         assert time.monotonic() - started < 0.5
         assert (backend.reset_calls, backend.cleanups) == ([], 0)
+        assert backend.stops == ["s1"]
         backend.gate.set()
         assert running.result().success
         refused = waiting.result()
@@ -248,6 +255,57 @@ def test_cleanup_during_a_call_leaves_its_session_to_it(ctx):
     # The waiting call starts no kernel that nothing would shut down.
     assert backend.entered == ["one"]
     assert refused.success is False and "shut down" in refused.error
+
+
+def test_a_reset_stops_a_local_cell_and_the_next_call_starts_afresh(ctx):
+    from agentic_cli.tools.sandbox.backends.jupyter_local import JupyterLocalBackend
+
+    mgr = SandboxManager(ctx.settings, backend=JupyterLocalBackend(interrupt_grace=1.0))
+    try:
+        assert mgr.execute("x = 1", session_id="s1").success
+        marker = sandbox_root_for(ctx.settings) / "s1" / "started"
+        with ThreadPoolExecutor(1) as pool:
+            running = pool.submit(
+                mgr.execute,
+                "import time\nopen('started', 'w').close()\ntime.sleep(30)",
+                session_id="s1", timeout_seconds=20,
+            )
+            assert until(marker.exists)  # the cell runs
+            started = time.monotonic()
+            assert mgr.reset_session("s1") is True
+            stopped = running.result()
+            took = time.monotonic() - started
+        after = mgr.execute("print('x' in dir())", session_id="s1")
+    finally:
+        mgr.cleanup()
+
+    assert took < 5
+    assert stopped.success is False and "KeyboardInterrupt" in stopped.error
+    assert (after.success, after.stdout) == (True, "False\n")  # a new kernel
+
+
+def test_a_reset_stops_a_docker_call_at_once():
+    runtime = FakeRuntime()  # ready, and then no result: the cell runs on
+    with MockContext(stateful_executor_backend="docker") as ctx:
+        docker = JupyterDockerBackend(
+            ctx.settings, runtime=runtime,
+            detect_fn=lambda: DockerAvailability(True, "docker", "test"),
+        )
+        mgr = SandboxManager(ctx.settings, backend=docker)
+        try:
+            with ThreadPoolExecutor(1) as pool:
+                running = pool.submit(mgr.execute, "x = 1", session_id="s1", timeout_seconds=3)
+                assert until(lambda: docker.session_status("s1").state == "busy")
+                started = time.monotonic()
+                assert mgr.reset_session("s1") is True
+                stopped = running.result()
+                took = time.monotonic() - started
+        finally:
+            mgr.cleanup()
+
+    assert took < 1
+    assert stopped.success is False and "exited" in stopped.error
+    assert runtime.killed[0] == (runtime.started[0].name, None)
 
 
 def test_two_first_calls_on_docker_start_one_container():

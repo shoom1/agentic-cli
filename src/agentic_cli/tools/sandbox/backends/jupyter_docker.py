@@ -392,6 +392,13 @@ class JupyterDockerBackend(SandboxBackend):
                 result.artifacts = list(result.artifacts) + extra
         return result
 
+    def stop(self, session_id: str) -> None:
+        """Kill the session's container: the running call reads the end of
+        its output at once and answers that the container exited."""
+        session = self._sessions.get(session_id)
+        if session is not None:
+            session.close()
+
     def reset_session(self, session_id: str) -> None:
         session = self._sessions.pop(session_id, None)
         if session is not None:
