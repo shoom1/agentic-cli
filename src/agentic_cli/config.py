@@ -28,6 +28,8 @@ Settings Loading Priority (highest to lowest; settings_sources.py):
     4. User config (~/.{app_name}/settings.json)
     5. .env file (a cwd-relative one allowlisted keys only)
     6. Default values
+
+    app_name comes only from the constructor or the class.
 """
 
 import os
@@ -111,6 +113,9 @@ class BaseSettings(WorkflowSettingsMixin, AppSettingsMixin, CLISettingsMixin, Py
     4. User config (~/.{app_name}/settings.json)
     5. Domain-specific .env file (a cwd-relative one allowlisted keys only)
     6. Default values
+
+    ``app_name`` chooses the files, so only the constructor or the class sets
+    it.
 
     Mixins provide organized settings:
     - WorkflowSettingsMixin: Model, orchestrator, API keys, tool config

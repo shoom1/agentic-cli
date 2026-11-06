@@ -97,7 +97,9 @@ PROJECT_PRESERVED_KEYS = frozenset({"permissions"})
 # dump (path=) leaves them out.
 HAND_EDITED_KEYS = frozenset({"models", "model_providers"})
 
-# Identity fields set by the application, not the user
+# Identity fields set by the application, not the user. No save writes them;
+# app_name chooses the files, so no source but the constructor and the class
+# sets it either (settings_sources.SettingsSourcesMixin).
 IDENTITY_FIELDS = frozenset({
     "app_name",
     "workspace_dir",

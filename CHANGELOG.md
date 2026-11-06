@@ -719,6 +719,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`app_name` comes only from the application.** It chooses the settings
+  files, yet the environment (`AGENTIC_APP_NAME`, or an app's prefix) and the
+  user file could set it too, after the files had been chosen by the class's
+  name: the settings were read from `~/.agentic_cli/`, `/settings` saved to
+  `~/.myapp/`, and the permission engine read `./.myapp/settings.json`'s deny
+  rules. Only the constructor or the settings class sets it now; an `app_name`
+  in the environment, either settings file or an env file is ignored, and one
+  that differs is reported (`settings_app_name_ignored`, naming the source; in
+  the project file or a cwd `.env` it replaces
+  `untrusted_project_setting_ignored`).
+  **Breaking:** an app run under another name through `AGENTIC_APP_NAME` (or
+  `"app_name"` in a settings file) needs the name in its settings class or
+  constructor.
 - **`/resume` reopens conversations; finished jobs resume with `/jobs
   resume`** (breaking). The old `ResumeCommand` is gone, and `/jobs`
   gains `resume`: it runs the resumes of finished, resume-flagged jobs, as

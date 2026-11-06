@@ -498,6 +498,11 @@ older version had, say) is dropped silently.
 **Consequence:** put API keys in real environment variables or an
 absolute/user-level file. A key placed in a cwd `.env` is deliberately ignored.
 
+`app_name` names the files above, and the ones settings are saved to, so only
+the constructor or the settings class sets it: an `app_name` in the environment
+(`AGENTIC_APP_NAME`, or your prefix's), in either settings file or in an env
+file is ignored, with a warning (`settings_app_name_ignored`).
+
 These sources and their filtering come with the settings mixins
 (`WorkflowSettingsMixin`, `AppSettingsMixin`): a class composed from them over
 pydantic-settings' own `BaseSettings` reads the same sources, in the same

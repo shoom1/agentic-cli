@@ -439,12 +439,135 @@ class TestComposedSettingsSources:
             assert str(settings.workspace_dir) != "/tmp/evil"
 
 
+class TestAppNameComesFromTheApplication:
+    """``app_name`` chooses the files the settings are read from and saved to,
+    so it is set only by the constructor or the class: one from the
+    environment or a file would read one app's files and save another's."""
+
+    def test_agentic_app_name_is_ignored(self, project, monkeypatch):
+        from agentic_cli.settings_persistence import SettingsPersistence
+
+        _user_file("agentic_cli", {"ui_theme": "light"})
+        monkeypatch.setenv("AGENTIC_APP_NAME", "myapp")
+
+        with structlog.testing.capture_logs() as logs:
+            settings = _AgenticBaseSettings()
+
+        assert settings.app_name == "agentic_cli"
+        assert settings.ui_theme == "light"
+        assert [(e["source"], e["value"], e["app_name"])
+                for e in _events(logs, "settings_app_name_ignored")] == [
+            ("environment", "myapp", "agentic_cli")
+        ]
+        settings.ui_theme = "mono"
+        saved = SettingsPersistence(settings.app_name).save(settings, keys={"ui_theme"})
+        assert saved.user_path == Path.home() / ".agentic_cli" / "settings.json"
+        assert _AgenticBaseSettings().ui_theme == "mono"
+
+    def test_it_is_ignored_in_the_environment(self, project, settings_class, monkeypatch):
+        monkeypatch.setenv("APP_APP_NAME", "myapp")
+
+        with structlog.testing.capture_logs() as logs:
+            settings = settings_class()
+
+        assert settings.app_name == "agentic_cli"
+        assert [e["source"] for e in _events(logs, "settings_app_name_ignored")] == [
+            "environment"
+        ]
+
+    def test_it_is_ignored_in_the_user_file(self, project, settings_class):
+        _user_file("agentic_cli", {"app_name": "myapp", "ui_theme": "light"})
+
+        with structlog.testing.capture_logs() as logs:
+            settings = settings_class()
+
+        assert (settings.app_name, settings.ui_theme) == ("agentic_cli", "light")
+        assert [e["source"] for e in _events(logs, "settings_app_name_ignored")] == [
+            "user settings.json"
+        ]
+
+    def test_it_is_ignored_in_the_project_file(self, project, settings_class):
+        _write_project_settings(project, "agentic_cli", {"app_name": "myapp"})
+
+        with structlog.testing.capture_logs() as logs:
+            settings = settings_class()
+
+        assert settings.app_name == "agentic_cli"
+        assert [e["source"] for e in _events(logs, "settings_app_name_ignored")] == [
+            "project settings.json"
+        ]
+        assert _events(logs, "untrusted_project_setting_ignored") == []
+
+    def test_it_is_ignored_in_a_cwd_env(self, project, settings_class):
+        (project / ".env").write_text("APP_APP_NAME=myapp\n")
+
+        with structlog.testing.capture_logs() as logs:
+            settings = settings_class()
+
+        assert settings.app_name == "agentic_cli"
+        assert [e["source"] for e in _events(logs, "settings_app_name_ignored")] == [
+            "cwd .env"
+        ]
+        assert _events(logs, "untrusted_project_setting_ignored") == []
+
+    def test_it_is_ignored_in_a_user_level_env_file(self, project, settings_class):
+        env_file = Path.home() / "app.env"
+        env_file.write_text("APP_APP_NAME=myapp\n")
+
+        with structlog.testing.capture_logs() as logs:
+            settings = settings_class(_env_file=str(env_file))
+
+        assert settings.app_name == "agentic_cli"
+        assert [e["source"] for e in _events(logs, "settings_app_name_ignored")] == [
+            "env file"
+        ]
+
+    def test_the_constructor_s_app_name_applies(self, project, settings_class, monkeypatch):
+        """It chooses the files, and the same name elsewhere is no conflict."""
+        _user_file("other", {"ui_theme": "light", "app_name": "other"})
+        monkeypatch.setenv("APP_APP_NAME", "other")
+
+        with structlog.testing.capture_logs() as logs:
+            settings = settings_class(app_name="other")
+
+        assert (settings.app_name, settings.ui_theme) == ("other", "light")
+        assert _events(logs, "settings_app_name_ignored") == []
+
+    @pytest.mark.parametrize("declared", ["default", "default_factory"])
+    def test_the_class_s_app_name_applies(self, project, settings_class, monkeypatch, declared):
+        import warnings
+
+        from pydantic import Field
+
+        with warnings.catch_warnings():
+            # pydantic's "shadows an attribute in parent": the mixin's field
+            # is a plain class attribute, as for any app redeclaring it.
+            warnings.simplefilter("ignore", UserWarning)
+
+            if declared == "default":
+                class _Named(settings_class):
+                    app_name: str = "named"
+            else:
+                class _Named(settings_class):
+                    app_name: str = Field(default_factory=lambda: "named")
+
+        _user_file("named", {"ui_theme": "light"})
+        monkeypatch.setenv("APP_APP_NAME", "myapp")
+
+        with structlog.testing.capture_logs() as logs:
+            settings = _Named()
+
+        assert (settings.app_name, settings.ui_theme) == ("named", "light")
+        assert [(e["value"], e["app_name"])
+                for e in _events(logs, "settings_app_name_ignored")] == [("myapp", "named")]
+
+
 def test_a_filtered_source_sees_the_values_read_before_it():
     """pydantic-settings hands each source the values read so far; the source
     a filter wraps gets them too, as it would unwrapped."""
     from pydantic_settings import PydanticBaseSettingsSource
 
-    from agentic_cli.settings_sources import _AllowlistFilterSource
+    from agentic_cli.settings_sources import _AllowlistFilterSource, _AppNameFilterSource
 
     seen = []
 
@@ -454,12 +577,13 @@ def test_a_filtered_source_sees_the_values_read_before_it():
 
         def __call__(self):
             seen.append((dict(self.current_state), dict(self.settings_sources_data)))
-            return {"thinking_effort": "high"}
+            return {"thinking_effort": "high", "app_name": "agentic_cli"}
 
     class _Sources(_AgenticBaseSettings):
         @classmethod
         def settings_customise_sources(cls, settings_cls, init_settings, **_):
-            return init_settings, _AllowlistFilterSource(settings_cls, _Recording(settings_cls), "x")
+            inner = _AppNameFilterSource(settings_cls, _Recording(settings_cls), "x", "agentic_cli")
+            return init_settings, _AllowlistFilterSource(settings_cls, inner, "x")
 
     settings = _Sources(log_level="info")
 

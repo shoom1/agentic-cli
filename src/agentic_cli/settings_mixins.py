@@ -28,7 +28,9 @@ class AppSettingsMixin(SettingsSourcesMixin):
     (``SettingsSourcesMixin``) with it.
     """
 
-    # Application identity (domain projects should override)
+    # Application identity (domain projects should override). It chooses the
+    # settings files, so only the constructor or the class sets it: the
+    # environment and the files cannot (SettingsSourcesMixin).
     app_name: str = Field(
         default="agentic_cli",
         title="App Name",

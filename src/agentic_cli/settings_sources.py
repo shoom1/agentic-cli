@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from pydantic import AliasChoices
+from pydantic_core import PydanticUndefined
 from pydantic_settings import BaseSettings as PydanticBaseSettings
 from pydantic_settings import PydanticBaseSettingsSource
 
@@ -50,7 +51,9 @@ class SettingsSourcesMixin:
        ``env_file``): filtered like the project file when any of them is
        cwd-relative.
 
-    The files are chosen by the constructor's ``app_name``, else the class's.
+    ``app_name`` chooses those files, so it comes only from the constructor
+    or the class: the environment, both files and the env files cannot set it,
+    and one that names another app is reported (``settings_app_name_ignored``).
     """
 
     @classmethod
@@ -64,17 +67,26 @@ class SettingsSourcesMixin:
     ) -> tuple[PydanticBaseSettingsSource, ...]:
         """init, environment, project file, user file, env files (see the class)."""
         app_name = _files_app_name(settings_cls, init_settings)
-        sources: list[PydanticBaseSettingsSource] = [init_settings, env_settings]
+
+        def without_app_name(source: PydanticBaseSettingsSource, label: str):
+            return _AppNameFilterSource(settings_cls, source, label, app_name)
+
+        sources: list[PydanticBaseSettingsSource] = [
+            init_settings,
+            without_app_name(env_settings, "environment"),
+        ]
 
         # The project file. Untrusted: a cloned repo can ship it.
         project_json = _get_json_config_source(
-            settings_cls, get_project_config_path(app_name), untrusted=True
+            settings_cls, get_project_config_path(app_name), untrusted=True, app_name=app_name
         )
         if project_json:
             sources.append(project_json)
 
         # The user file.
-        user_json = _get_json_config_source(settings_cls, get_user_config_path(app_name))
+        user_json = _get_json_config_source(
+            settings_cls, get_user_config_path(app_name), app_name=app_name
+        )
         if user_json:
             sources.append(user_json)
 
@@ -103,9 +115,13 @@ class SettingsSourcesMixin:
             e is not None and not Path(e).expanduser().is_absolute() for e in entries
         )
         if has_cwd_relative:
-            sources.append(_AllowlistFilterSource(settings_cls, dotenv_settings, "cwd .env"))
+            sources.append(
+                _AllowlistFilterSource(
+                    settings_cls, without_app_name(dotenv_settings, "cwd .env"), "cwd .env"
+                )
+            )
         else:
-            sources.append(dotenv_settings)
+            sources.append(without_app_name(dotenv_settings, "env file"))
 
         return tuple(sources)
 
@@ -114,12 +130,22 @@ def _files_app_name(
     settings_cls: type[PydanticBaseSettings], init_settings: PydanticBaseSettingsSource
 ) -> str:
     """The app name the settings files are chosen by: the constructor's, else
-    the class's default, else ``DEFAULT_APP_NAME``."""
+    the class's default (a value or a ``default_factory``), else
+    ``DEFAULT_APP_NAME``."""
     app_name = getattr(init_settings, "init_kwargs", {}).get("app_name")
     if not app_name:
         field_info = settings_cls.model_fields.get("app_name")
-        if field_info is not None and field_info.default and field_info.default != ...:
-            app_name = field_info.default
+        if field_info is not None:
+            default = field_info.default
+            if (
+                default is PydanticUndefined
+                and field_info.default_factory is not None
+                # (pydantic 2.10+: a factory may take the other fields' values)
+                and not getattr(field_info, "default_factory_takes_validated_data", False)
+            ):
+                default = field_info.default_factory()
+            if isinstance(default, str):
+                app_name = default
     return app_name or DEFAULT_APP_NAME
 
 
@@ -147,6 +173,40 @@ class _FilterSource(PydanticBaseSettingsSource):
     def get_field_value(self, field: Any, field_name: str) -> tuple[Any, str, bool]:
         # Unused: __call__ is overridden to filter the inner source's output.
         return None, field_name, False
+
+
+class _AppNameFilterSource(_FilterSource):
+    """Wrap a source, leaving ``app_name`` out of what it read.
+
+    The files were chosen by the constructor's or the class's app name; a
+    source that names another would have the settings read one app's files
+    and save to another's. A different name is reported once per source; the
+    same name is no conflict.
+    """
+
+    def __init__(
+        self,
+        settings_cls: type[PydanticBaseSettings],
+        inner: PydanticBaseSettingsSource,
+        label: str,
+        app_name: str,
+    ) -> None:
+        super().__init__(settings_cls, inner)
+        self._label = label
+        self._app_name = app_name
+
+    def __call__(self) -> dict[str, Any]:
+        values = dict(self._inner())
+        if "app_name" in values:
+            given = values.pop("app_name")
+            if given != self._app_name:
+                logger.warning(
+                    "settings_app_name_ignored",
+                    source=self._label,
+                    value=given,
+                    app_name=self._app_name,
+                )
+        return values
 
 
 class _AllowlistFilterSource(_FilterSource):
@@ -215,6 +275,7 @@ def _get_json_config_source(
     settings_cls: type[PydanticBaseSettings],
     json_file: Path,
     *,
+    app_name: str,
     untrusted: bool = False,
 ) -> PydanticBaseSettingsSource | None:
     """Create a JSON config source if the file exists.
@@ -225,6 +286,8 @@ def _get_json_config_source(
         untrusted: When True (the project file), keep only allowlisted
             (non-security) keys so a cloned workspace cannot flip a security
             boundary.
+        app_name: The app name the file was chosen by: the file's own
+            ``app_name`` is left out, and reported when it differs.
 
     Returns:
         JsonConfigSettingsSource if file exists, None otherwise
@@ -238,7 +301,10 @@ def _get_json_config_source(
         # Older pydantic-settings without JsonConfigSettingsSource
         return None
 
-    source = JsonConfigSettingsSource(settings_cls, json_file=json_file)
+    label = "project settings.json" if untrusted else "user settings.json"
+    source = _AppNameFilterSource(
+        settings_cls, JsonConfigSettingsSource(settings_cls, json_file=json_file), label, app_name
+    )
     if not untrusted:
         return source
 
@@ -247,7 +313,7 @@ def _get_json_config_source(
     return _AllowlistFilterSource(
         settings_cls,
         source,
-        "project settings.json",
+        label,
         # The permission engine reads this file's deny rules itself.
         passed_over=PROJECT_PRESERVED_KEYS,
     )
