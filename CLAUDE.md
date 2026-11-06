@@ -118,7 +118,7 @@ agentic-cli/
 │   │   ├── pdf_utils.py      # extract_pdf_text
 │   │   ├── interaction_tools.py # ask_clarification
 │   │   ├── file_read.py      # read_file, diff_compare
-│   │   ├── file_write.py     # write_file, edit_file
+│   │   ├── file_write.py     # write_file, edit_file (one call per file at a time: a lock per resolved path, from edit_file's read to its write)
 │   │   ├── glob_tool.py      # glob
 │   │   ├── grep_tool.py      # grep
 │   │   ├── search.py         # web_search (Tavily/Brave backends)

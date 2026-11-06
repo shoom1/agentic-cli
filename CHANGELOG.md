@@ -966,8 +966,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   beside another call and off the loop's thread, as Deep Agents already
   required; async tools, plugins and callbacks stay on the loop, and a call
   Ctrl+C left behind runs to its end in its thread. The framework's tools
-  allow for it: calls on one sandbox session wait for each other. A native
-  ADK YAML app is unchanged.
+  allow for it: calls on one sandbox session wait for each other, and
+  `edit_file` and `write_file` take a lock per file, so two edits of one
+  file at once no longer lose one (which Deep Agents already risked). A
+  native ADK YAML app is unchanged.
 - **`app_name` comes only from the application.** It chooses the settings
   files, yet the environment (`AGENTIC_APP_NAME`, or an app's prefix) and the
   user file could set it too, after the files had been chosen by the class's
