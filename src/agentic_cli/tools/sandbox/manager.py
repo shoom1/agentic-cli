@@ -9,6 +9,7 @@ from __future__ import annotations
 import atexit
 import os
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
@@ -29,6 +30,32 @@ if TYPE_CHECKING:
     from agentic_cli.tools.sandbox.backends.base import SandboxBackend
 
 logger = Loggers.tools()
+
+
+def _folded_parts(path: Path) -> tuple[str, ...]:
+    return tuple(unicodedata.normalize("NFC", part).casefold() for part in path.parts)
+
+
+def _refuse_a_path_through_the_session(src: str, path: Path, session_dir: Path) -> None:
+    """Refuse an input whose path runs through the session directory.
+
+    Below the session directory every folder is the kernel's: it can swap one
+    for a symlink between the permission check and the copy, and the host
+    would stage the host file the kernel chose. There is nothing to stage
+    from there anyway: the sandbox already sees the file. The paths are
+    compared as spelled (``..`` kept, since the OS walks it through the
+    folder) and as resolved now, case-insensitively (APFS's default), against
+    the session directory's spelling and its real path."""
+    spellings = {
+        _folded_parts(Path(os.getcwd()) / path),
+        _folded_parts(Path(os.path.realpath(path))),
+    }
+    for session in {Path(session_dir).absolute(), Path(os.path.realpath(session_dir))}:
+        prefix = _folded_parts(session)
+        if any(spelled[: len(prefix)] == prefix for spelled in spellings):
+            raise ValueError(
+                f"input is inside the sandbox session, where the sandbox already sees it: {src}"
+            )
 
 
 def stage_inputs(session_dir: Path, inputs: list[str]) -> None:
@@ -60,6 +87,7 @@ def stage_inputs(session_dir: Path, inputs: list[str]) -> None:
         seen: set[str] = set()
         for src in inputs:
             p = Path(src).expanduser()
+            _refuse_a_path_through_the_session(src, p, session_dir)
             name = p.name
             if name in seen:
                 raise ValueError(f"duplicate input basename {name!r}; rename one of the source files")

@@ -131,7 +131,7 @@ agentic-cli/
 │   │   │   └── langchain_tools.py # make_skill_tools: list_skills/load_skill/load_skill_resource for Deep Agents
 │   │   ├── jobs/            # Long-running jobs: JobManager, backends, job_* tools
 │   │   │   └── resume.py    # job_result_payload, JOB_NOTICE_HEADER: what a finished job tells the agent
-│   │   ├── sandbox/         # Stateful code-execution sandbox (sandbox_execute); stage_inputs and the docker backend's _collect_outputs copy through descriptors of inputs/ and outputs/ (the kernel can swap either for a symlink)
+│   │   ├── sandbox/         # Stateful code-execution sandbox (sandbox_execute); stage_inputs and the docker backend's _collect_outputs copy through descriptors of inputs/ and outputs/ (the kernel can swap either for a symlink); an input whose path runs through the session is refused
 │   │   ├── shell/           # 8-layer shell security (+ os_sandbox/)
 │   │   └── webfetch/        # Fetcher, converter, validator, robots, summarizer, saved pages
 │   ├── memory/               # Knowledge base + memory store; imports nothing else from agentic_cli

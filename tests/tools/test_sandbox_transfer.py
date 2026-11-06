@@ -168,3 +168,54 @@ def test_stage_inputs_refuses_a_dangling_inputs_link(tmp_path):
     with pytest.raises(ValueError, match="not a real directory"):
         stage_inputs(session, [str(src)])
     assert not (tmp_path / "nowhere").exists()
+
+
+def _session_with_an_output(tmp_path):
+    session = tmp_path / "session"; outs = session / "outputs"; outs.mkdir(parents=True)
+    (outs / "id_rsa").write_bytes(b"SESSION")
+    outside = tmp_path / "ssh"; outside.mkdir()
+    (outside / "id_rsa").write_bytes(b"SECRET")
+    return session, outs, outside
+
+
+def _staged_bytes(session):
+    inputs = session / "inputs"
+    return [p.read_bytes() for p in inputs.iterdir()] if inputs.is_dir() else []
+
+
+def test_stage_inputs_refuses_an_input_inside_the_session(tmp_path, monkeypatch):
+    # A source under the session runs through folders the kernel can swap
+    # for a link between the permission check and the copy: here outputs/
+    # becomes a link to a host folder just before the copy.
+    session, outs, outside = _session_with_an_output(tmp_path)
+    _swap_before_each_copy(monkeypatch, manager, outs, outside)
+    with pytest.raises(ValueError, match="inside the sandbox session"):
+        stage_inputs(session, [str(outs / "id_rsa")])
+    assert b"SECRET" not in _staged_bytes(session)
+
+
+@pytest.mark.parametrize("spelling", ["real_session", "case_variant", "relative", "dotdot"])
+def test_stage_inputs_refuses_the_session_under_any_spelling(tmp_path, monkeypatch, spelling):
+    session, outs, outside = _session_with_an_output(tmp_path)
+    alias = tmp_path / "alias"; alias.symlink_to(tmp_path, target_is_directory=True)
+    staged_session = session
+    src = str(outs / "id_rsa")
+    if spelling == "real_session":      # the session named through a link
+        staged_session = alias / "session"
+    elif spelling == "case_variant":    # one folder on a case-insensitive disk
+        src = str(tmp_path / "SESSION" / "outputs" / "id_rsa")
+    elif spelling == "relative":
+        monkeypatch.chdir(tmp_path)
+        src = "session/outputs/id_rsa"
+    elif spelling == "dotdot":          # outside once normalized, but the OS
+        src = str(outs / ".." / ".." / "ssh" / "id_rsa")  # walks outputs/.. physically
+    with pytest.raises(ValueError, match="inside the sandbox session"):
+        stage_inputs(staged_session, [src])
+    assert _staged_bytes(session) == []
+
+
+def test_stage_inputs_still_stages_a_file_beside_the_session(tmp_path):
+    session, _outs, _outside = _session_with_an_output(tmp_path)
+    beside = tmp_path / "session-notes.csv"; beside.write_bytes(b"NOTES")
+    stage_inputs(session, [str(beside)])
+    assert _staged_bytes(session) == [b"NOTES"]
