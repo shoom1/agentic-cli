@@ -1364,7 +1364,7 @@ Tool access is gated by the **permission engine** (see the HITL section below). 
 Two complementary tools:
 
 - **`execute_python`** — stateless, sandboxed Python via `SafePythonExecutor`. Use for quick calculations.
-- **`sandbox_execute`** — stateful, multi-turn Python in a Jupyter kernel. Variables, imports, and DataFrames persist across calls within a session. Off unless `stateful_executor_backend` is set: `"docker"` runs each session in an isolated container (below); `"local"` runs the kernel on your machine as you, with your files, network and privileges. The local backend isolates and restricts nothing, so use it only where you would run the code yourself.
+- **`sandbox_execute`** — stateful, multi-turn Python in a Jupyter kernel. Variables, imports, and DataFrames persist across calls within a session. Off unless `stateful_executor_backend` is set: `"docker"` runs each session in an isolated container (below); `"local"` runs the kernel on your machine as you, with your files, network and privileges, in the app's own Python environment (a `%pip install` there changes the app's dependencies). The local backend isolates and restricts nothing, so use it only where you would run the code yourself.
 
 ```python
 from agentic_cli.tools import execute_python

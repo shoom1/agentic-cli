@@ -1234,12 +1234,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   line starting with `!`, or the `%pip`, `%system` and `%sx` magics, which
   stopped none of that either and refused plain Python whose continuation
   line starts with `!=`, as black formats a long comparison. Both are gone,
-  and code runs as written: `!pip install` and `%pip` run too, on `local`
-  into the kernel's own Python environment. `local` runs the kernel on the
+  and code runs as written: `!pip install` and `%pip` run too, and on
+  `local` they install into the Python environment the app itself runs from
+  (jupyter_client starts the kernel with the app's interpreter), so they can
+  change or break the app's own dependencies. `local` runs the kernel on the
   host as the user, with the user's files, network and privileges; `docker`
   is the isolated backend (each session in its own container, with no
-  network, a read-only root filesystem and no capabilities). The tool's and
-  the setting's descriptions and the README say so.
+  network, a read-only root filesystem and no capabilities). The
+  `sandbox_execute` docstrings, which are what ADK and Deep Agents send the
+  model (they called it "a stateful sandbox"), the setting's description and
+  the README now say so.
 
 ### Deprecated
 

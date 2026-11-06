@@ -354,16 +354,32 @@ class TestSandboxTools:
             err = sandbox_execute("print('hi')")["error"].lower()
             assert "stateful_executor_backend" in err
 
-    def test_description_makes_no_false_network_claim(self):
-        """The tool does NOT block network — the description must not claim it
-        does, since a false safety claim misleads both the model and the user."""
-        from agentic_cli.tools.registry import get_registry
+    @pytest.mark.parametrize("backend", ["adk", "deepagents"])
+    @pytest.mark.parametrize("which", ["module tool", "factory tool"])
+    def test_the_model_is_told_where_the_code_runs(self, backend, which):
+        """What the model reads says where the code runs, in its first paragraph:
+        a false safety claim misleads the model and, through it, the user.
+        Neither backend sends register_tool's description: ADK declares the
+        callable's docstring, and Deep Agents takes the docstring first. The
+        factory tool is the one the workflow binds."""
+        from agentic_cli.tools.factories import make_sandbox_tool
+        from agentic_cli.tools.sandbox import sandbox_execute
 
-        definition = get_registry().get("sandbox_execute")
-        assert definition is not None
-        desc = definition.description.lower()
-        assert "blocked" not in desc
-        assert "host" in desc  # honest: runs with host privileges
+        func = sandbox_execute if which == "module tool" else make_sandbox_tool(MagicMock())
+        if backend == "adk":
+            from google.adk.tools import FunctionTool
+
+            sent = FunctionTool(func)._get_declaration().description
+        else:
+            pytest.importorskip("deepagents")
+            from agentic_cli.workflow.deepagents.tools import to_langchain_tools
+
+            sent = to_langchain_tools([func])[0].description
+        first = " ".join(sent.split("\n\n")[0].split())
+        for fact in ("'docker'", "isolated container", "no network",
+                     "'local'", "on the host as the user", "not isolated"):
+            assert fact in first, (fact, first)
+        assert "blocked" not in sent.lower()
 
     def test_capability_distinct_from_execute_python(self):
         """sandbox_execute must NOT share python.exec with execute_python — else
