@@ -291,12 +291,12 @@ class TestTheOldSettingsAreGone:
         # 0.6.0 and 0.6.1's /settings saved every project-settable field, the
         # two context_window_* counts included, into the project file. A key
         # that is no setting can set nothing: no "untrusted" warning for it.
-        from agentic_cli import config
+        from agentic_cli import settings_sources
 
         # A logger that filters no level: an earlier test's configure_logging
         # leaves the module's own logger dropping debug records before
         # capture_logs could see them.
-        monkeypatch.setattr(config, "logger", structlog.wrap_logger(
+        monkeypatch.setattr(settings_sources, "logger", structlog.wrap_logger(
             None, wrapper_class=structlog.make_filtering_bound_logger(0)
         ))
         project = hermetic / "project" / ".agentic_cli" / "settings.json"
@@ -559,6 +559,42 @@ class TestIsContextOverflow:
         error = _anthropic(413, "request_too_large", "Request exceeds the maximum size")
 
         assert is_context_overflow(error)
+
+    def test_claude_request_too_large_whatever_its_body(self):
+        # A 413 is Claude's request-size limit by its status and its SDK, not
+        # by its text or its body, which a gateway may send as a page.
+        request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+        error = anthropic.RequestTooLargeError(
+            "Request Entity Too Large",
+            response=httpx.Response(413, request=request),
+            body="<html>413 Request Entity Too Large</html>",
+        )
+
+        assert is_context_overflow(error)
+
+    @pytest.mark.skipif(
+        not hasattr(anthropic, "RequestBodyTooLargeAfterDecodingError"),
+        reason="anthropic 2 names a 413's cause in a subclass; anthropic 1 has none",
+    )
+    def test_claude_request_too_large_once_decoded(self):
+        request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+        message = "The decoded request body exceeds the maximum size"
+        error = anthropic.RequestBodyTooLargeAfterDecodingError(
+            message,
+            response=httpx.Response(413, request=request),
+            body={"type": "error", "error": {
+                "type": "request_too_large", "message": message,
+                "details": {"error_code": "request_body_too_large_after_decoding"},
+            }},
+        )
+
+        assert is_context_overflow(error)
+
+    def test_another_413_needs_an_overflow_phrase(self):
+        # A proxy's 413 says nothing of the context: only Claude's SDK error
+        # is taken as its request-size limit without one.
+        assert not is_context_overflow(_StatusError("Request Entity Too Large", 413))
+        assert is_context_overflow(_StatusError("Context window exceeded for model x", 413))
 
     def test_openai_context_length_exceeded_is_read_from_the_code(self):
         # The text alone names nothing; the code does.

@@ -269,6 +269,15 @@ async def _read(
     kb, doc_id_or_title: str, full: bool = False, max_chars: int = READ_DOCUMENT_MAX_CHARS
 ) -> dict[str, Any]:
     """Shared implementation for kb_read: the sidecar by default, the text with ``full``."""
+    from agentic_cli.memory.kb import UnsafeKnowledgeBase
+
+    try:
+        return await _read_document(kb, doc_id_or_title, full, max_chars)
+    except UnsafeKnowledgeBase as e:  # a folder became a symlink while the session ran
+        return {"success": False, "error": str(e)}
+
+
+async def _read_document(kb, doc_id_or_title: str, full: bool, max_chars: int) -> dict[str, Any]:
     from agentic_cli.memory.kb import DocumentNotFound
 
     found = kb.find_document(doc_id_or_title)
@@ -306,6 +315,7 @@ async def _read(
 def _list(kb, query: str = "", source_type: str = "", limit: int = 20) -> dict[str, Any]:
     """Shared implementation for kb_list."""
     from agentic_cli.memory.kb import SourceType as ST
+    from agentic_cli.memory.kb import UnsafeKnowledgeBase
 
     st_filter = None
     if source_type:
@@ -318,7 +328,10 @@ def _list(kb, query: str = "", source_type: str = "", limit: int = 20) -> dict[s
                 "error": f"Invalid source_type: {source_type!r}. Valid: {valid}",
             }
 
-    listed = kb.list_documents(title_or_author=query, source_type=st_filter, limit=limit)
+    try:
+        listed = kb.list_documents(title_or_author=query, source_type=st_filter, limit=limit)
+    except UnsafeKnowledgeBase as e:  # a folder became a symlink while the session ran
+        return {"success": False, "error": str(e)}
     items = [_build_document_item(s.document, s.scope) for s in listed]
     return {"success": True, "documents": items, "count": len(items)}
 

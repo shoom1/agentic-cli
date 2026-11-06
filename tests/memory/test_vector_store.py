@@ -178,6 +178,19 @@ class TestVectorStoreWithFAISS:
         results = store2.search([1.0, 0.0, 0.0, 0.0], top_k=1)
         assert results[0][0] == "chunk-a"
 
+    def test_an_index_that_links_elsewhere_is_not_loaded(self, store, tmp_path: Path):
+        """A project can ship its knowledge base: a symlinked index counts as none."""
+        store.add_embeddings(["chunk-a"], [[1.0, 0.0, 0.0, 0.0]])
+        store.save()
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        for name in ("index.faiss", "index.mappings.json"):
+            (tmp_path / name).rename(elsewhere / name)
+            (tmp_path / name).symlink_to(elsewhere / name)
+
+        from agentic_cli.memory.kb.vector_store import VectorStore
+        assert VectorStore(index_path=tmp_path / "index.faiss", embedding_dim=4).size == 0
+
     def test_save_is_atomic_on_write_failure(self, store, tmp_path: Path):
         """A crash mid-write must not corrupt the existing index or leak temps.
 

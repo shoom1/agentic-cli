@@ -640,9 +640,8 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
                 values = (await self._root.aget_state(config)).values
                 middleware = self._root_summarization
                 previous = values.get(SUMMARIZATION_EVENT_KEY)
-                sent = middleware._apply_event_to_messages(
-                    values.get("messages") or [], previous
-                )
+                messages = values.get("messages") or []
+                sent = middleware._apply_event_to_messages(messages, previous)
                 root = self._root_name
                 model = self._resolved_models[root]
                 cut = compact_cutoff(
@@ -667,7 +666,7 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
                 event = summary_event(
                     middleware, previous, cut, summary,
                     after=newest.id if newest is not None else None,
-                    written_on=len(values.get("messages") or []),
+                    messages=messages,
                 )
                 await self._root.aupdate_state(
                     config, {SUMMARIZATION_EVENT_KEY: event}, as_node="model"

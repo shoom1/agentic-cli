@@ -48,3 +48,44 @@ def test_does_not_follow_dest_symlink(tmp_path):
 def test_missing_source_raises_filenotfound(tmp_path):
     with pytest.raises(FileNotFoundError):
         copy_regular_file_no_follow(tmp_path / "nope.txt", tmp_path / "out.txt")
+
+
+def _open_dir(path):
+    return os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+
+
+def test_copies_between_directory_descriptors_after_both_are_swapped(tmp_path):
+    # Once the directories are open, swapping either for a link elsewhere
+    # changes nothing: the copy reads and writes the directories it opened.
+    src_dir = tmp_path / "src"; src_dir.mkdir()
+    (src_dir / "a.txt").write_bytes(b"INSIDE")
+    dst_dir = tmp_path / "dst"; dst_dir.mkdir()
+    outside = tmp_path / "outside"; outside.mkdir()
+    (outside / "a.txt").write_bytes(b"OUTSIDE")
+    src_fd, dst_fd = _open_dir(src_dir), _open_dir(dst_dir)
+    try:
+        for d in (src_dir, dst_dir):
+            d.rename(d.with_name(d.name + ".parked"))
+            d.symlink_to(outside, target_is_directory=True)
+        copy_regular_file_no_follow("a.txt", "b.txt", src_dir_fd=src_fd, dst_dir_fd=dst_fd)
+    finally:
+        os.close(src_fd)
+        os.close(dst_fd)
+    copied = tmp_path / "dst.parked" / "b.txt"
+    assert copied.read_bytes() == b"INSIDE"
+    assert copied.stat().st_mode & 0o777 == 0o600
+    assert sorted(p.name for p in outside.iterdir()) == ["a.txt"]
+    assert sorted(p.name for p in (tmp_path / "dst.parked").iterdir()) == ["b.txt"]
+
+
+def test_a_directory_descriptor_destination_is_a_name_not_a_path(tmp_path):
+    src = tmp_path / "a.txt"; src.write_bytes(b"x")
+    dst_dir = tmp_path / "dst"; (dst_dir / "sub").mkdir(parents=True)
+    dst_fd = _open_dir(dst_dir)
+    try:
+        for bad in ("sub/a.txt", "..", ".", ""):
+            with pytest.raises(ValueError):
+                copy_regular_file_no_follow(src, bad, dst_dir_fd=dst_fd)
+    finally:
+        os.close(dst_fd)
+    assert list((dst_dir / "sub").iterdir()) == []

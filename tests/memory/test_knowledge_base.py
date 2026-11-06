@@ -490,15 +490,8 @@ def _without_sidecar(manager, title="Doc", **kwargs):
 async def test_a_sidecar_that_vanishes_before_the_read_is_not_found(two, monkeypatch):
     manager = two.manager("project")
     doc = _add(manager, "Doc")
-
-    class _Vanishing:
-        def exists(self):
-            return True
-
-        def read_text(self, *args, **kwargs):
-            raise FileNotFoundError("gone")
-
-    monkeypatch.setattr(manager, "sidecar_path", lambda doc_id: _Vanishing())
+    # Written, then gone (another session deleted the document) before it is read.
+    monkeypatch.setattr(manager, "read_sidecar", lambda doc_id: None)
 
     with pytest.raises(DocumentNotFound):
         await two.sidecar(ScopedDocument(doc, "project"))

@@ -21,44 +21,37 @@ Settings Management:
        (provider SDKs read them from the environment), so a SettingsContext
        does not isolate credentials between contexts in one process.
 
-Settings Loading Priority (highest to lowest):
-    1. Environment variables (AGENTIC_* prefix)
-    2. Project config (./.{app_name}/settings.json)
-    3. User config (~/.{app_name}/settings.json)
-    4. .env file
-    5. Default values
+Settings Loading Priority (highest to lowest; settings_sources.py):
+    1. Constructor arguments
+    2. Environment variables (AGENTIC_* prefix)
+    3. Project config (./.{app_name}/settings.json), allowlisted keys only
+    4. User config (~/.{app_name}/settings.json)
+    5. .env file (a cwd-relative one allowlisted keys only)
+    6. Default values
+
+    app_name comes only from the constructor or the class (or the command
+    line, for an app that enables pydantic-settings' cli_parse_args).
 """
 
 import os
-import re
 from contextvars import ContextVar, Token
-from pathlib import Path
-from typing import Generator, Any, Tuple, Type
+from typing import Generator, Any, Type
 from contextlib import contextmanager
 
-from pydantic import AliasChoices, PrivateAttr
+from pydantic import PrivateAttr
 from pydantic_settings import (
     BaseSettings as PydanticBaseSettings,
     SettingsConfigDict,
-    PydanticBaseSettingsSource,
 )
 from pydantic_settings.sources import ENV_FILE_SENTINEL
 
+# The sources (settings_customise_sources) and their trust filters come with
+# the mixins (settings_sources.SettingsSourcesMixin), so a class composed from
+# them over pydantic-settings' own BaseSettings reads what this one reads.
 from agentic_cli.workflow.settings import WorkflowSettingsMixin
 from agentic_cli.settings_mixins import AppSettingsMixin, CLISettingsMixin
-# PROJECT_SETTABLE_KEYS lives in settings_persistence so the save-side split
-# and the load-side filter below share one definition (and because the reverse
-# import would be circular). See its definition for the trust rationale.
-from agentic_cli.settings_persistence import (
-    CREDENTIAL_KEY_RE as _CREDENTIAL_KEY_RE,
-    PROJECT_SETTABLE_KEYS as _PROJECT_SETTABLE_KEYS,
-    PROJECT_PRESERVED_KEYS as _PROJECT_PRESERVED_KEYS,
-    get_project_config_path,
-    get_user_config_path,
-)
-from agentic_cli.logging import Loggers
-
-logger = Loggers.config()
+from agentic_cli.settings_persistence import CREDENTIAL_KEY_RE as _CREDENTIAL_KEY_RE
+from agentic_cli.settings_sources import _accepted_input_names
 
 #: ``update_setting("model_role:fast", ref)`` maps one role in ``model_roles``.
 MODEL_ROLE_KEY_PREFIX = "model_role:"
@@ -76,77 +69,10 @@ __all__ = [
 ]
 
 
-class _AllowlistFilterSource(PydanticBaseSettingsSource):
-    """Wrap an untrusted settings source, keeping only allowlisted keys.
-
-    Applied to the project ``settings.json`` and a cwd-relative ``.env``. Any
-    non-allowlisted key is dropped and logged (one warning per key) so a cloned
-    repo cannot flip a security boundary. Drops (never raises) a non-allowlisted
-    key, so a repo cannot flip a boundary by *adding* keys. (Malformed JSON or a
-    bad-typed allowlisted value is still rejected upstream, as before P0-1 —
-    this narrows, not removes, that pre-existing surface.)
-
-    A key that names no setting at all (neither a field nor an alias) could
-    set nothing anyway, so it is dropped without a log: a project file saved
-    by an older version still holds settings since removed (0.6's
-    ``context_window_*``), and settings are built before logging is
-    configured, when structlog prints even a debug log above the UI. The
-    ``passed_over`` keys are dropped without a log too: the project file's
-    ``permissions`` section (``PROJECT_PRESERVED_KEYS``) sets no setting, and
-    the permission engine reads its deny rules from the file itself (no one
-    reads one from a ``.env``, which is still reported).
-    """
-
-    def __init__(
-        self,
-        settings_cls: Type[PydanticBaseSettings],
-        inner: PydanticBaseSettingsSource,
-        label: str,
-        passed_over: frozenset[str] = frozenset(),
-    ) -> None:
-        super().__init__(settings_cls)
-        self._inner = inner
-        self._label = label
-        self._passed_over = passed_over
-
-    def get_field_value(self, field: Any, field_name: str) -> Tuple[Any, str, bool]:
-        # Unused: __call__ is overridden to filter the inner source's output.
-        return None, field_name, False
-
-    def __call__(self) -> dict[str, Any]:
-        kept: dict[str, Any] = {}
-        settings = _accepted_input_names(self.settings_cls)
-        for key, value in self._inner().items():
-            if key in _PROJECT_SETTABLE_KEYS:
-                kept[key] = value
-            elif key in self._passed_over:
-                continue  # read by others (the project file's deny rules)
-            elif key in settings:
-                logger.warning(
-                    "untrusted_project_setting_ignored", key=key, source=self._label
-                )
-        return kept
-
-
 # Constructor kwargs matching _CREDENTIAL_KEY_RE (defined in
 # settings_persistence, which also uses it to never save credentials) are
 # credentials; an unrecognised one must fail loudly instead of being swallowed
 # by ``extra="ignore"``.
-
-
-def _accepted_input_names(settings_cls: Type[PydanticBaseSettings]) -> set[str]:
-    """Every name the model accepts for a field: its own name and any aliases."""
-    names: set[str] = set()
-    for field_name, field in settings_cls.model_fields.items():
-        names.add(field_name)
-        alias = field.validation_alias
-        if isinstance(alias, str):
-            names.add(alias)
-        elif isinstance(alias, AliasChoices):
-            names.update(c for c in alias.choices if isinstance(c, str))
-        if isinstance(field.alias, str):
-            names.add(field.alias)
-    return names
 
 
 def _reject_unknown_credential_kwargs(
@@ -172,47 +98,6 @@ def _reject_unknown_credential_kwargs(
     )
 
 
-def _get_json_config_source(
-    settings_cls: Type[PydanticBaseSettings],
-    json_file: Path,
-    *,
-    untrusted: bool = False,
-) -> PydanticBaseSettingsSource | None:
-    """Create a JSON config source if the file exists.
-
-    Args:
-        settings_cls: The settings class
-        json_file: Path to JSON config file
-        untrusted: When True (the project file), keep only allowlisted
-            (non-security) keys so a cloned workspace cannot flip a security
-            boundary.
-
-    Returns:
-        JsonConfigSettingsSource if file exists, None otherwise
-    """
-    if not json_file.exists():
-        return None
-
-    try:
-        from pydantic_settings import JsonConfigSettingsSource
-    except ImportError:
-        # Older pydantic-settings without JsonConfigSettingsSource
-        return None
-
-    if not untrusted:
-        return JsonConfigSettingsSource(settings_cls, json_file=json_file)
-
-    # Untrusted (the project file): keep only allowlisted keys so a cloned
-    # workspace cannot flip a security boundary.
-    return _AllowlistFilterSource(
-        settings_cls,
-        JsonConfigSettingsSource(settings_cls, json_file=json_file),
-        "project settings.json",
-        # The permission engine reads this file's deny rules itself.
-        passed_over=_PROJECT_PRESERVED_KEYS,
-    )
-
-
 class BaseSettings(WorkflowSettingsMixin, AppSettingsMixin, CLISettingsMixin, PydanticBaseSettings):
     """Base settings for agentic CLI applications.
 
@@ -221,12 +106,17 @@ class BaseSettings(WorkflowSettingsMixin, AppSettingsMixin, CLISettingsMixin, Py
     - app_name: Default application name
     - workspace_dir: Default workspace directory
 
-    Settings are loaded from (in order of precedence):
-    1. Environment variables (with domain-specific prefix)
-    2. Project config (./.{app_name}/settings.json)
-    3. User config (~/.{app_name}/settings.json)
-    4. Domain-specific .env file
-    5. Default values
+    Settings are loaded from (in order of precedence; the mixins'
+    ``settings_sources.SettingsSourcesMixin``):
+    1. Constructor arguments
+    2. Environment variables (with domain-specific prefix)
+    3. Project config (./.{app_name}/settings.json), allowlisted keys only
+    4. User config (~/.{app_name}/settings.json)
+    5. Domain-specific .env file (a cwd-relative one allowlisted keys only)
+    6. Default values
+
+    ``app_name`` chooses the files, so only the constructor or the class sets
+    it.
 
     Mixins provide organized settings:
     - WorkflowSettingsMixin: Model, orchestrator, API keys, tool config
@@ -315,96 +205,6 @@ class BaseSettings(WorkflowSettingsMixin, AppSettingsMixin, CLISettingsMixin, Py
             # invalid value or unknown key raises ValidationError, which is a
             # subclass of ValueError — exactly what callers already handle.
             self.__pydantic_validator__.validate_assignment(self, key, value)
-
-    @classmethod
-    def settings_customise_sources(
-        cls,
-        settings_cls: Type[PydanticBaseSettings],
-        init_settings: PydanticBaseSettingsSource,
-        env_settings: PydanticBaseSettingsSource,
-        dotenv_settings: PydanticBaseSettingsSource,
-        file_secret_settings: PydanticBaseSettingsSource,
-    ) -> Tuple[PydanticBaseSettingsSource, ...]:
-        """Customize settings sources for layered JSON configuration.
-
-        Priority (highest to lowest):
-            1. init_settings (constructor arguments)
-            2. env_settings (environment variables)
-            3. project_json (./.app_name/settings.json)
-            4. user_json (~/.app_name/settings.json)
-            5. dotenv_settings (.env file)
-
-        Note: JSON sources are only included if the files exist.
-        """
-        sources: list[PydanticBaseSettingsSource] = [
-            init_settings,
-            env_settings,
-        ]
-
-        # Get app_name from init kwargs (constructor), then class default
-        app_name = None
-        if hasattr(init_settings, "init_kwargs"):
-            app_name = init_settings.init_kwargs.get("app_name")
-
-        if not app_name:
-            if hasattr(cls, "model_fields") and "app_name" in cls.model_fields:
-                field_info = cls.model_fields["app_name"]
-                if field_info.default and field_info.default != ...:
-                    app_name = field_info.default
-
-        app_name = app_name or "agentic_cli"
-
-        # Add project-level JSON config (./.app_name/settings.json). Untrusted:
-        # strip security-sensitive keys (a cloned repo can ship this file).
-        project_json = _get_json_config_source(
-            settings_cls,
-            get_project_config_path(app_name),
-            untrusted=True,
-        )
-        if project_json:
-            sources.append(project_json)
-
-        # Add user-level JSON config (~/.app_name/settings.json)
-        user_json = _get_json_config_source(
-            settings_cls,
-            get_user_config_path(app_name),
-        )
-        if user_json:
-            sources.append(user_json)
-
-        # dotenv: a cwd-relative env_file is an untrusted project source (a
-        # cloned repo can ship ./.env), so filter it like project settings.json.
-        # We inspect EVERY configured env_file (a str/Path or a list of them):
-        # if ANY entry is cwd-relative after ~ expansion, the whole dotenv
-        # source is filtered. DotEnvSettingsSource merges all files into one
-        # dict, so we cannot filter per-file; over-filtering fails safe. An
-        # absolute/user-level env_file (including a "~/..." path) and real
-        # environment variables stay trusted. Consequence: secrets/keys placed
-        # in a cwd .env are dropped — put them in real env vars or an
-        # absolute/user-level file. The files judged are those the dotenv
-        # source reads: the constructor's _env_file when given, else the
-        # class's.
-        env_file = getattr(
-            dotenv_settings, "env_file", settings_cls.model_config.get("env_file")
-        )
-        if env_file is None:
-            _env_entries: list = []
-        elif isinstance(env_file, (list, tuple)):
-            _env_entries = list(env_file)
-        else:
-            _env_entries = [env_file]
-        _has_cwd_relative = any(
-            e is not None and not Path(e).expanduser().is_absolute()
-            for e in _env_entries
-        )
-        if _has_cwd_relative:
-            sources.append(
-                _AllowlistFilterSource(settings_cls, dotenv_settings, "cwd .env")
-            )
-        else:
-            sources.append(dotenv_settings)
-
-        return tuple(sources)
 
 
 # Context variable for settings (takes precedence over global singleton)
