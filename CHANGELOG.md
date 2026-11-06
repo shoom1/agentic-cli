@@ -964,12 +964,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   variables, and the calls of one model step overlap; before, they ran one
   after another on the event loop. Such a tool must now be safe to run
   beside another call and off the loop's thread, as Deep Agents already
-  required; async tools, plugins and callbacks stay on the loop, and a call
-  Ctrl+C left behind runs to its end in its thread. The framework's tools
-  allow for it: calls on one sandbox session wait for each other, and
-  `edit_file` and `write_file` take a lock per file, so two edits of one
-  file at once no longer lose one (which Deep Agents already risked). A
-  native ADK YAML app is unchanged.
+  required; async tools, plugins and callbacks stay on the loop. Python
+  cannot stop a thread, so a call Ctrl+C left behind runs to its end in its
+  own: a sandbox cell keeps its session busy (the session's next call waits
+  for it), and quitting waits for such a call (a sandbox cell is stopped at
+  exit). The framework's tools allow for it: calls on one sandbox session
+  wait for each other, and `edit_file` and `write_file` take a lock per
+  file, so two edits of one file at once no longer lose one (which Deep
+  Agents already risked). A native ADK YAML app is unchanged.
 - **On ADK, an agent's prompt is sent as written.** ADK fills `{name}` in a
   prompt from the session state and raises `KeyError` for a name the state
   lacks, so a prompt quoting code (`f'{value}'`) or JSON failed every turn
