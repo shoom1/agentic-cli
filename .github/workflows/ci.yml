@@ -13,6 +13,8 @@ jobs:
   offline:
     name: Offline tests (no Docker)
     runs-on: ubuntu-latest
+    # A hung test costs half an hour, not GitHub's six-hour default.
+    timeout-minutes: 30
     defaults:
       run:
         shell: bash -el {0}
@@ -29,12 +31,21 @@ jobs:
       - name: Install the langgraph and deepagents extras (backend tests)
         run: conda run -n agenticcli pip install -e '.[langgraph,deepagents]'
 
+      # A test that hangs names itself: -v prints each test's id before it
+      # runs, faulthandler_timeout dumps every thread's stack once a test has
+      # run 120 s (a test stuck in an await shows only the event loop, so the
+      # id is what names it), and --no-capture-output streams both as they
+      # happen: conda run otherwise prints only when the command exits, which
+      # a job stopped at its time limit never does.
       - name: Run offline test suite
-        run: conda run -n agenticcli python -m pytest -m 'not llm and not docker' -q
+        run: >
+          conda run -n agenticcli --no-capture-output python -m pytest
+          -m 'not llm and not docker' -v -o faulthandler_timeout=120
 
   kb-extra:
     name: Offline tests with the kb extra
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     defaults:
       run:
         shell: bash -el {0}
@@ -69,16 +80,20 @@ jobs:
       # KB_REQUIRE_EXTRA makes a missing kb library fail its tests rather
       # than skip them. The HF variables make loading an embedding model an
       # error: no offline test needs one, so none is downloaded or cached.
+      # The output flags are the offline job's: a hang names its test.
       - name: Run offline test suite (fail if the kb extra is missing)
         env:
           KB_REQUIRE_EXTRA: "1"
           HF_HUB_OFFLINE: "1"
           TRANSFORMERS_OFFLINE: "1"
-        run: conda run -n agenticcli python -m pytest -m 'not llm and not docker' -q -rs
+        run: >
+          conda run -n agenticcli --no-capture-output python -m pytest
+          -m 'not llm and not docker' -v -rs -o faulthandler_timeout=120
 
   wheel-acceptance:
     name: Built-wheel acceptance (console smoke, deepagents extra)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     defaults:
       run:
         shell: bash -el {0}
@@ -111,13 +126,15 @@ jobs:
         env:
           AGENTIC_WHEEL_ACCEPTANCE: "1"
         run: >
-          conda run -n agenticcli python -m pytest
+          conda run -n agenticcli --no-capture-output python -m pytest
           tests/examples/test_research_demo_wheel.py
           tests/examples/test_deepagents_wheel.py -m wheel -v
 
   latex-engine:
     name: LaTeX engine tests
     runs-on: ubuntu-latest
+    # Installing TeX Live from the apt mirrors has taken 22 minutes.
+    timeout-minutes: 45
     defaults:
       run:
         shell: bash -el {0}
@@ -144,12 +161,13 @@ jobs:
         env:
           LATEX_REQUIRE: "1"
         run: >
-          conda run -n agenticcli python -m pytest
+          conda run -n agenticcli --no-capture-output python -m pytest
           tests/tools/test_document_compile_latex.py -m latex -v
 
   docker-isolation:
     name: Docker isolation tests
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     defaults:
       run:
         shell: bash -el {0}
@@ -174,4 +192,4 @@ jobs:
       - name: Run docker isolation tests (fail if runtime missing)
         env:
           SANDBOX_REQUIRE_DOCKER: "1"
-        run: conda run -n agenticcli python -m pytest -m docker -v
+        run: conda run -n agenticcli --no-capture-output python -m pytest -m docker -v
