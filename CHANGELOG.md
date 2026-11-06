@@ -964,7 +964,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before any request, and one naming `{plan}` or `{tasks}` had the session's
   plan or task list spliced in once the state tools wrote it. An app built
   from `AgentConfig`s now has every agent's prompt sent as written, as Deep
-  Agents sends it; a native ADK YAML app keeps ADK's templating.
+  Agents sends it. A native ADK YAML app keeps ADK's templating; one
+  translated from ADK YAML (`adk_config_mode="translate"`) is built from
+  `AgentConfig`s, so it does not, and a warning
+  (`adk_translate_instruction_template_dropped`) names the templates.
 - **`app_name` comes only from the application.** It chooses the settings
   files, yet the environment (`AGENTIC_APP_NAME`, or an app's prefix) and the
   user file could set it too, after the files had been chosen by the class's

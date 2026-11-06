@@ -517,7 +517,9 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         agent = LlmAgent(
             name=config.name,
             model=built.model,
-            instruction=_as_written(instruction),
+            # None at all for no prompt: ADK adds an instruction only when
+            # there is one, and a provider always looks like one.
+            instruction=_as_written(instruction) if instruction else "",
             tools=tools,
             sub_agents=children,
             planner=built.planner,

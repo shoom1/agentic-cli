@@ -528,6 +528,13 @@ class TestThePromptsAreSentAsWritten:
             for body in answers.bodies(agent):
                 assert system_text(body).startswith(PROMPTS[agent] + self.BRACES)
 
+    async def test_an_empty_prompt_sends_no_system_instruction(self, project):
+        """As before: ADK adds an instruction only when there is one (Gemini
+        would be sent an empty system text)."""
+        agent = await built([AgentConfig(name="solo", prompt="")])
+
+        assert agent.instruction == ""
+
 
 class TestTheStream:
     """Only the root replies: a sub-agent's text is activity, and its calls'
