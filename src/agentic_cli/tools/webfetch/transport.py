@@ -38,7 +38,12 @@ class PinnedTransport(httpx.AsyncBaseTransport):
         )
 
     def _pin(self, request: httpx.Request) -> None:
-        host = request.url.host
+        # The host as httpx sends it in the Host header: a Unicode host's
+        # IDNA 2008 punycode. ``url.host`` is the Unicode form, which
+        # getaddrinfo and the TLS check encode with IDNA 2003, so for ``faß.de``
+        # they named ``fass.de``, another domain, while Host named
+        # ``xn--fa-hia.de``.
+        host = request.url.raw_host.decode("ascii")
         port = request.url.port or (443 if request.url.scheme == "https" else 80)
         pinned_ip = self._validator.resolve_and_validate(host, port)  # raises on block
         # The client set the Host header from the original URL before this

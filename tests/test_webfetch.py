@@ -137,6 +137,69 @@ class TestURLValidator:
         result = validator.validate("not a url")
         assert result.valid is False
 
+    @pytest.mark.parametrize(
+        "host",
+        [
+            "blocked.example",
+            "blocked.example.",  # the same DNS host
+            "blocked。example",  # U+3002, which httpx sends as "."
+            "blocked．example",  # U+FF0E
+            "blocked｡example",  # U+FF61
+            "BLOCKED.example",
+        ],
+    )
+    def test_a_blocked_domain_is_blocked_however_it_is_spelled(self, host):
+        """The domain is compared as the HTTP client sends it: urllib's
+        hostname kept the Unicode dots and the trailing dot, so these
+        spellings reached the blocked site."""
+        from agentic_cli.tools.webfetch.validator import URLValidator
+        result = URLValidator(blocked_domains=["blocked.example"]).validate(f"https://{host}/page")
+        assert result.valid is False
+        assert result.error == "Domain 'blocked.example' is blocked by policy"
+
+    @pytest.mark.parametrize(
+        "host, blocked",
+        [
+            ("a.sub.blocked.example", True),
+            ("a.sub.blocked.example.", True),
+            ("a.sub.blocked。example", True),
+            ("A.SUB.Blocked．Example", True),
+            ("sub.blocked.example.", False),  # *.x does not block x itself
+            ("blocked.example", False),
+        ],
+    )
+    def test_a_wildcard_blocked_domain_too(self, host, blocked):
+        from agentic_cli.tools.webfetch.validator import URLValidator
+        result = URLValidator(blocked_domains=["*.sub.blocked.example"]).validate(f"https://{host}/")
+        assert result.valid is (not blocked)
+
+    def test_a_blocked_domain_is_read_as_the_client_sends_it(self):
+        """A blocked domain written with a Unicode host, its dots or a trailing
+        dot blocks the domain the client would reach."""
+        from agentic_cli.tools.webfetch.validator import URLValidator
+        validator = URLValidator(blocked_domains=["faß.de", "Tracker。Example.", "*.ads．example"])
+        assert not validator.validate("https://xn--fa-hia.de/").valid
+        assert not validator.validate("https://faß.de/").valid
+        assert not validator.validate("https://tracker.example/").valid
+        assert not validator.validate("https://x.ads.example/").valid
+        assert validator.validate("https://fass.de/").valid
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://i❤.ws/",  # a real emoji domain, not a valid IDNA 2008 name
+            "https://ex­ample.com/",  # a soft hyphen
+            "https://ｅｘａｍｐｌｅ.com/",  # fullwidth letters
+            "https://example.com:99999/",
+        ],
+    )
+    def test_a_url_the_client_cannot_send_is_a_validation_error(self, validator, url):
+        """httpx refuses these with ``InvalidURL``, which the fetcher did not
+        catch, so ``web_fetch`` raised instead of returning an error."""
+        result = validator.validate(url)
+        assert result.valid is False
+        assert result.error.startswith("Invalid URL")
+
 
 class TestRobotsTxtChecker:
     def _checker(self, monkeypatch, handler, resolves_to="93.184.216.34"):
@@ -279,6 +342,35 @@ class TestContentFetcher:
             result = await fetcher.fetch("https://example.com/page")
         assert result.success is False
         assert "redirect" in (result.error or "").lower()
+
+    @pytest.mark.asyncio
+    async def test_an_invalid_host_is_an_error_not_an_exception(self, monkeypatch):
+        requested = []
+        fetcher = _pinned_fetcher(monkeypatch, lambda req: requested.append(req) or httpx.Response(200))
+        with patch.object(fetcher._robots, "can_fetch", new_callable=AsyncMock, return_value=True):
+            result = await fetcher.fetch("https://i❤.ws/")
+        assert result.success is False
+        assert result.error.startswith("Invalid URL")
+        assert requested == []
+
+    @pytest.mark.asyncio
+    async def test_a_redirect_to_a_blocked_domain_in_another_spelling_is_refused(self, monkeypatch):
+        """Each hop goes through the same blocked-domain check as the first URL."""
+        requested = []
+
+        def handler(req):
+            requested.append(req.headers["host"])
+            # A server sends the Location as UTF-8 bytes; httpx decodes them.
+            return httpx.Response(302, headers={"location": "https://blocked。example/x".encode()})
+
+        fetcher = _pinned_fetcher(monkeypatch, handler)
+        fetcher._validator.blocked_domains = ["blocked.example"]
+        with patch.object(fetcher._robots, "can_fetch", new_callable=AsyncMock, return_value=True):
+            result = await fetcher.fetch("https://example.com/page")
+        assert result.success is False
+        assert result.redirect is None
+        assert "blocked by policy" in result.error
+        assert requested == ["example.com"]
 
     @pytest.mark.asyncio
     async def test_too_many_redirects(self, monkeypatch):
@@ -610,6 +702,23 @@ class TestWebFetchTool:
             assert result["url"] == "https://example.com/page"
         finally:
             token.var.reset(token)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("url", ["https://i❤.ws/", "https://ex­ample.com/"])
+    async def test_web_fetch_returns_an_error_for_an_invalid_host(self, monkeypatch, url):
+        """httpx's ``InvalidURL`` is no ``RequestError``: it escaped the tool."""
+        from agentic_cli.tools.webfetch_tool import fetch_and_summarize
+
+        class Summarizer:
+            async def summarize(self, content: str, prompt: str) -> str:
+                return "summary"
+
+        fetcher = _pinned_fetcher(monkeypatch, lambda req: httpx.Response(200, text="ok"))
+        with patch("agentic_cli.tools.webfetch_tool.get_or_create_fetcher", return_value=fetcher):
+            result = await fetch_and_summarize(url, "summarize", 5, Summarizer())
+
+        assert result["success"] is False
+        assert result["error"].startswith("Invalid URL")
 
     @pytest.mark.asyncio
     async def test_web_fetch_no_summarizer(self):

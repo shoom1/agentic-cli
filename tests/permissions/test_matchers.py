@@ -188,6 +188,60 @@ class TestURLMatcher:
         assert m.matches(http, m.canonicalize_target("http://example.com/x", ctx))
         assert not m.matches(http, m.canonicalize_target("http://example.com:8080/x", ctx))
 
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://docs.example.com/x/../admin/k",  # httpx sends /admin/k
+            "https://docs.example.com/%61dmin/k",  # %61 is "a"
+            "https://docs.example.com./admin/k",  # the same DNS host
+            "https://docs。example。com/admin/k",  # U+3002: httpx sends docs.example.com
+        ],
+    )
+    def test_url_deny_survives_dot_segments_encoding_and_fqdn_dot(self, ctx, url):
+        """A URL is compared as the HTTP client sends it, so another spelling
+        of a denied page is that page."""
+        from agentic_cli.workflow.permissions.matchers import URLMatcher
+        m = URLMatcher()
+        allow = m.canonicalize_pattern("https://docs.example.com/**", ctx)
+        deny = m.canonicalize_pattern("https://docs.example.com/admin/**", ctx)
+        target = m.canonicalize_target(url, ctx)
+        assert target == "https://docs.example.com/admin/k"
+        assert m.matches(allow, target)
+        assert m.matches_deny(deny, target)
+
+    def test_a_pattern_keeps_its_wildcards(self, ctx):
+        from agentic_cli.workflow.permissions.matchers import URLMatcher
+        m = URLMatcher()
+        pattern = m.canonicalize_pattern("https://Docs.Example.com./a/*/b/**?x=*", ctx)
+        assert pattern == "https://docs.example.com/a/*/b/**?x=*"
+        assert m.matches(pattern, m.canonicalize_target("https://docs.example.com/a/1/b/c/d?x=2", ctx))
+        assert not m.matches(pattern, m.canonicalize_target("https://docs.example.com/a/1/2/b?x=2", ctx))
+
+    @pytest.mark.parametrize(
+        "pattern",
+        [
+            "https://docs.example.com/**",
+            "https://export.arxiv.org/api/query",
+            "https://arxiv.org/pdf",
+            "http://example.org/a?q=1",
+            "https://example.com:8443/api/**",
+            "https://[2001:db8::1]/a",
+        ],
+    )
+    def test_an_ordinary_rule_reads_as_written(self, ctx, pattern):
+        """The rules users already have keep their meaning."""
+        from agentic_cli.workflow.permissions.matchers import URLMatcher
+        assert URLMatcher().canonicalize_pattern(pattern, ctx) == pattern
+
+    @pytest.mark.parametrize(
+        "url", ["https://i❤.ws/", "https://ｂｌｏｃｋｅｄ.example/", "https://example.com:99999/"]
+    )
+    def test_a_url_the_client_cannot_send_is_no_target(self, ctx, url):
+        """The engine denies a target that raises ``ValueError``."""
+        from agentic_cli.workflow.permissions.matchers import URLMatcher
+        with pytest.raises(ValueError):
+            URLMatcher().canonicalize_target(url, ctx)
+
 
 class TestShellMatcher:
     def test_canonicalize_trims_and_substitutes(self, ctx):
@@ -280,7 +334,8 @@ class TestTargetCanonicalization:
     def test_url_target_keeps_placeholder_text_literal(self, ctx):
         from agentic_cli.workflow.permissions.matchers import URLMatcher
         out = URLMatcher().canonicalize_target("https://example.com/${home}/x", ctx)
-        assert out == "https://example.com/${home}/x"
+        # Not expanded; the braces are escaped, as the client sends them.
+        assert out == "https://example.com/$%7Bhome%7D/x"
 
     def test_url_target_is_still_normalised(self, ctx):
         from agentic_cli.workflow.permissions.matchers import URLMatcher

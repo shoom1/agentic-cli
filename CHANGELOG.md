@@ -76,6 +76,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--glob` overrides ripgrep's hidden-file filter, so `file_pattern="*"`
   searched them). Both now skip hidden files and directories below `path`; a
   hidden file or directory given as `path` is still searched, and judged.
+- **A URL rule judges the URL the HTTP client sends.** The `http.*` matcher
+  compared a URL as written (since 0.5.1), while `web_fetch` requests what
+  httpx makes of it, so with `https://docs.example.com/**` allowed and
+  `https://docs.example.com/admin/**` denied, `…/x/../admin/keys` and
+  `…/%61dmin/keys` were allowed without a prompt, and behind an allow-all
+  rule a deny on `https://tracker.example.net/**` missed
+  `https://tracker.example.net./p` and `https://tracker。example。net/p`
+  (U+3002, which httpx sends as a dot). Rules and targets are now both read
+  as the client sends them (`agentic_cli.urls.canonical_url`): the host as
+  httpx encodes it (the IDNA dots mapped, a Unicode host as its punycode),
+  lowercased, without a trailing dot; in the path, escapes of unreserved
+  characters decoded (`%61` is `a`, `%2e%2e` is `..`) and dot segments
+  removed; the default port and the fragment dropped. A rule's `*` and `**`
+  are kept, and ordinary rules read as before. The prompt shows that form
+  (`https://faß.de/` as `https://xn--fa-hia.de/`), a site grant names the
+  canonical host (`https://localhost./` no longer gets one), and a URL httpx
+  cannot send (an invalid IDNA host, a port past 65535) is denied as an
+  invalid target. A rule or saved grant that names such a URL is skipped at
+  startup with a `permission_rule_skipped` warning.
+- **`webfetch_blocked_domains` blocks a domain however it is spelled.** The
+  check compared urllib's hostname, but httpx connects to `blocked.example`
+  for `https://blocked。example/` (and the fullwidth and halfwidth dots), and
+  DNS reads `blocked.example.` as `blocked.example`: over real TLS the first
+  fetched the blocked site, and over plain HTTP the second did too. The
+  validator now compares the host the client sends with each entry read the
+  same way, so a `*.domain` entry covers these spellings as well, an entry
+  written in Unicode blocks its punycode, and each redirect target is checked
+  alike (a redirect to such a spelling is refused, not offered to the model).
+- **`web_fetch` resolves and verifies the domain its Host header names.** Its
+  transport (since 0.6.0) gave the Unicode host to the DNS lookup and as the
+  TLS name, which Python encodes with IDNA 2003, while httpx sends the Host
+  header with IDNA 2008: for `https://faß.de/` it resolved and verified the
+  certificate of `fass.de`, a separate registration, while asking for
+  `xn--fa-hia.de`. DNS, TLS and the Host header now all use the host httpx
+  sends.
 - **Saving settings keeps the project's deny rules.** The project
   `./.{app_name}/settings.json` may hold `permissions.deny` rules, which the
   permission engine reads from the file itself, but a settings save (any
@@ -1507,6 +1542,11 @@ step; each entry says what to use instead.
 
 ### Fixed
 
+- **`web_fetch` returns an error for a URL httpx cannot send.** An invalid
+  IDNA host (`https://i❤.ws/`, a name with a soft hyphen) passed the URL check
+  and made httpx raise `InvalidURL`, which is no `RequestError`, so the tool
+  raised instead of returning `{"success": false, ...}`. The check now parses
+  the URL as httpx does and returns `Invalid URL: …`.
 - **On ADK, an OpenAI-compatible provider that checks its requests, such as
   Synthetic, answers.** ADK's Chat Completions class sets `tools`,
   `tool_choice` and `response_format` to None when a request has none, and
