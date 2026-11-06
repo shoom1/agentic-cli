@@ -343,3 +343,11 @@ def test_a_keyword_index_that_links_elsewhere_is_not_loaded(kb_dir, elsewhere):
     reopened = KnowledgeBaseManager(kb_dir, use_mock=True)
 
     assert reopened.search("zeppelin")["results"] == []
+
+
+@pytest.mark.parametrize("base", ["elsewhere/knowledge_base", "project/.app/../../elsewhere/knowledge_base"])
+def test_a_knowledge_base_outside_the_folder_it_must_be_within_does_not_open(tmp_path, base):
+    with pytest.raises(ValueError):
+        KnowledgeBaseManager(tmp_path / base, use_mock=True, within=tmp_path / "project")
+
+    assert not (tmp_path / "elsewhere").exists()

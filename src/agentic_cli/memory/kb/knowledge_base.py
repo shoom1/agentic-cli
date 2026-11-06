@@ -195,6 +195,7 @@ class KnowledgeBase:
         embedding: EmbeddingConfig | None = None,
         summarizer: Any = None,
         use_mock: bool = False,
+        within: Mapping[str, Path | str] | None = None,
     ) -> "KnowledgeBase":
         """Open (or create) a knowledge base in each directory of ``dirs``.
 
@@ -211,15 +212,20 @@ class KnowledgeBase:
                 ``EmbeddingConfig()``.
             summarizer: Passed to every scope (see ``KnowledgeBaseManager``).
             use_mock: Mock embeddings and vector store in every scope.
+            within: Scope name → a folder that scope's directory must lie in,
+                every folder between them a real one (see
+                ``KnowledgeBaseManager``): for a project's scope, the working
+                directory. A scope not named here may be a symlink itself.
 
         With the ``kb`` extra and no ``use_mock``, this builds one embedding
         service; the model loads once, when the first real index is opened,
         to size or reconcile it.
 
         A directory whose own folders or lock file are symlinks (a project
-        can ship its knowledge base) is left out, with a warning
-        (``kb_scope_refused``): the knowledge base opens with the other
-        scopes, the first of them taking writes.
+        can ship its knowledge base), or that is reached through one from its
+        ``within`` folder, is left out, with a warning (``kb_scope_refused``):
+        the knowledge base opens with the other scopes, the first of them
+        taking writes.
 
         Raises:
             UnsafeKnowledgeBase: every directory was left out.
@@ -248,6 +254,7 @@ class KnowledgeBase:
                         summarizer=summarizer,
                         use_mock=use_mock,
                         embedding_service=service,
+                        within=(within or {}).get(name),
                     )
                 except UnsafeKnowledgeBase as e:
                     logger.warning("kb_scope_refused", scope=name, error=str(e))

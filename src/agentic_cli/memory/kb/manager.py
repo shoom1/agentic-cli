@@ -91,6 +91,30 @@ def _printable(text: str) -> str:
     return " ".join("".join(ch if ch.isprintable() else " " for ch in text).split())
 
 
+def _folders_below(within: Path, base_dir: Path) -> tuple[Path, ...]:
+    """Each folder from just below ``within`` down to ``base_dir``, in order.
+
+    Raises:
+        ValueError: ``base_dir`` is not inside ``within`` (a ``..`` counts as
+            leaving it).
+    """
+    try:
+        parts = base_dir.relative_to(within).parts
+    except ValueError:
+        raise ValueError(f"{base_dir} is not inside {within}") from None
+    if ".." in parts:
+        raise ValueError(f"{base_dir} is not inside {within}")
+    folders: list[Path] = []
+    for part in parts:
+        folders.append((folders[-1] if folders else within) / part)
+    return tuple(folders)
+
+
+def _refuse(path: Path, mode: int, kind: str) -> UnsafeKnowledgeBase:
+    found = "a symbolic link" if stat.S_ISLNK(mode) else f"not {kind}"
+    return UnsafeKnowledgeBase(f"{path} is {found}: a knowledge base works only in its own folders")
+
+
 def _truncate(text: str, max_length: int = 200) -> str:
     """``text`` cut to ``max_length`` characters, with "..." when cut."""
     if len(text) > max_length:
@@ -184,6 +208,7 @@ class KnowledgeBaseManager:
         use_mock: bool = False,
         embedding_service: Any = None,
         vector_store: Any = None,
+        within: Path | str | None = None,
     ) -> None:
         """Open (or create) the knowledge base kept in ``base_dir``.
 
@@ -201,8 +226,20 @@ class KnowledgeBaseManager:
                 the knowledge base builds its vector store at the service's
                 dimension.
             vector_store: A ready vector store (with ``embedding_service``).
+            within: A folder the caller trusts, which ``base_dir`` lies in
+                (for a project's knowledge base, the working directory).
+                Every folder from it down to ``base_dir`` must then be a real
+                folder, never a symlink: a repository can ship
+                ``.{app}/knowledge_base`` linked to a folder elsewhere.
+                Without it, ``base_dir`` itself may be a link (a knowledge
+                base kept on another disk).
+
+        Raises:
+            ValueError: ``base_dir`` is not inside ``within``.
+            UnsafeKnowledgeBase: see :meth:`_check_layout`.
         """
         base_dir = Path(base_dir)
+        self._root_folders = () if within is None else _folders_below(Path(within), base_dir)
 
         self._lock = threading.Lock()
         self._sidecar_locks: dict[str, asyncio.Lock] = {}
@@ -296,16 +333,36 @@ class KnowledgeBaseManager:
     def _check_layout(self) -> None:
         """Refuse a knowledge base whose own folders or lock file are not what they should be.
 
-        The knowledge base's folder itself may be a symlink: that is where the
-        knowledge base is. A subfolder or the lock file that is a symlink would
-        put its reads, writes and deletes in a folder elsewhere (or create the
-        file a dangling link names). Checked when the knowledge base opens and
-        before each read or change, since a ``git pull`` can replace a folder
-        while a session runs.
+        A subfolder or the lock file that is a symlink would put its reads,
+        writes and deletes in a folder elsewhere (or create the file a
+        dangling link names). The knowledge base's folder itself may be a
+        symlink, unless it was opened ``within`` a folder: then each folder
+        from there down to it must be a real one, so a repository cannot
+        point ``.{app}`` or ``.{app}/knowledge_base`` elsewhere. Checked when
+        the knowledge base opens and before each read or change, since a
+        ``git pull`` can replace a folder while a session runs.
+
+        Each check is an ``lstat`` and the open comes after it. That holds
+        while nothing swaps these folders in between: a repository's files
+        are static, and the model's code cannot write under ``.{app}`` (the
+        permission rules and the sandboxes deny it). A sandbox that mounted
+        the project read-write would need opens anchored on directory
+        descriptors instead (``O_DIRECTORY|O_NOFOLLOW`` and ``dir_fd=``).
 
         Raises:
             UnsafeKnowledgeBase: one of them is a symlink, or the wrong kind of file.
         """
+        for folder in self._root_folders:
+            try:
+                mode = os.lstat(folder).st_mode
+            except FileNotFoundError:
+                break  # created when the knowledge base opens, and all below it
+            except NotADirectoryError:
+                raise UnsafeKnowledgeBase(
+                    f"{folder} is not in a folder: a knowledge base works only in its own folders"
+                ) from None
+            if not stat.S_ISDIR(mode):
+                raise _refuse(folder, mode, "a folder")
         expected = [
             (folder, stat.S_ISDIR, "a folder")
             for folder in (self.documents_dir, self.embeddings_dir, self.files_dir, self.concepts_dir)
@@ -317,10 +374,7 @@ class KnowledgeBaseManager:
             except FileNotFoundError:
                 continue
             if not is_expected(mode):
-                found = "a symbolic link" if stat.S_ISLNK(mode) else f"not {kind}"
-                raise UnsafeKnowledgeBase(
-                    f"{path} is {found}: a knowledge base works only in its own folders"
-                )
+                raise _refuse(path, mode, kind)
 
     @contextmanager
     def _transaction(self) -> Iterator[None]:
