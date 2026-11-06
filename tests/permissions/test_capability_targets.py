@@ -190,6 +190,67 @@ class TestSavedWildcardGrantsAreDropped:
         loaded = {(r.capability, r.target) for r in load_project_grants(APP, ctx)}
         assert loaded == {("python.exec", "*"), ("http.read", "https://example.com/a")}
 
+    def test_a_glob_grant_is_dropped_on_load(self, env):
+        """The engine writes grants from literal targets, so a saved allow
+        whose literal part holds a wildcard came from the bug that stored
+        ``/**/**`` for ``/**/notes.txt`` (or a hand edit): it is not honoured."""
+        import structlog
+
+        root = env["root"]
+        self._write_grants(env, [
+            {"capability": "filesystem.write", "target": f"{env['work']}/**"},
+            {"capability": "filesystem.write", "target": f"{root}/out/notes.txt"},
+            {"capability": "filesystem.write", "target": f"{root}/out*dir/**"},
+            {"capability": "filesystem.write", "target": f"{root}/**/**"},
+            {"capability": "filesystem.read", "target": f"{root}/a?.txt"},
+            {"capability": "filesystem.write", "target": "/**"},  # the root's file named **
+            {"capability": "filesystem.write", "target": f"{root}/**"},  # holds home
+            {"capability": "http.read", "target": "https://example.com/**"},
+            {"capability": "http.read", "target": "http://example.org/a*"},
+            {"capability": "http.read", "target": "https://203.0.113.7/**"},
+            {"capability": "shell.exec", "target": "git status"},
+            {"capability": "shell.exec", "target": "ls *.py"},
+            {"capability": "python.exec", "target": "*"},
+        ])
+        ctx = PermissionContext(workdir=env["work"], home=env["home"], app_name=APP)
+
+        with structlog.testing.capture_logs() as logs:
+            loaded = {(r.capability, r.target) for r in load_project_grants(APP, ctx)}
+
+        assert loaded == {
+            ("filesystem.write", f"{env['work']}/**"),
+            ("filesystem.write", f"{root}/out/notes.txt"),
+            ("http.read", "https://example.com/**"),
+            ("shell.exec", "git status"),
+            ("python.exec", "*"),
+        }
+        dropped = {
+            (e["capability"], e["target"])
+            for e in logs if e.get("event") == "permission_glob_grant_dropped"
+        }
+        assert dropped == {
+            ("filesystem.write", f"{root}/out*dir/**"),
+            ("filesystem.write", f"{root}/**/**"),
+            ("filesystem.read", f"{root}/a?.txt"),
+            ("filesystem.write", "/**"),
+            ("filesystem.write", f"{root}/**"),
+            ("http.read", "http://example.org/a*"),
+            ("http.read", "https://203.0.113.7/**"),
+            ("shell.exec", "ls *.py"),
+        }
+
+    def test_a_saved_deny_keeps_its_glob(self, env):
+        """A deny with a wildcard can only deny more: it is kept."""
+        path = env["home"] / f".{APP}" / "project_grants.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({str(env["work"]): {"permissions": {"deny": [
+            {"capability": "shell.exec", "target": "rm *"},
+        ]}}}))
+        ctx = PermissionContext(workdir=env["work"], home=env["home"], app_name=APP)
+        assert [(r.capability, r.target) for r in load_project_grants(APP, ctx)] == [
+            ("shell.exec", "rm *"),
+        ]
+
     def test_explicit_user_rule_with_a_wildcard_is_kept(self, env):
         cfg = env["home"] / f".{APP}" / "settings.json"
         cfg.parent.mkdir(parents=True, exist_ok=True)
@@ -220,6 +281,13 @@ class TestFilesystemGrantScope:
     def test_a_file_directly_in_an_ancestor_of_home_is_not_widened(self, env):
         f = env["root"] / "f.txt"  # root is the parent of home
         assert self._grant(str(f), env["home"]) == str(f)
+
+    def test_another_spelling_of_an_ancestor_of_home_is_not_widened(self, env):
+        """On a case-insensitive filesystem ``/USERS`` is ``/Users``: a grant
+        for a file in it would have covered every home spelled that way."""
+        upper = env["root"].parent / env["root"].name.upper()
+        assert self._grant(str(upper / "f.txt"), env["home"]) == str(upper / "f.txt")
+        assert self._grant(str(upper), env["home"]) == str(upper)
 
     def test_an_ancestor_of_home_is_not_widened(self, env):
         assert self._grant(str(env["root"]), env["home"]) == str(env["root"])

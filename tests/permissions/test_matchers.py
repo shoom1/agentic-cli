@@ -110,9 +110,37 @@ class TestPathMatcher:
         assert not m.matches("/a/?/c", "/a/bb/c")
 
     def test_match_case_sensitive(self, ctx):
+        """Allow rules compare case: a case variant of an allowed path asks."""
         from agentic_cli.workflow.permissions.matchers import PathMatcher
         m = PathMatcher()
         assert not m.matches("/A/b", "/a/b")
+
+    def test_deny_matches_a_case_variant_path(self, ctx):
+        """On a case-insensitive filesystem (APFS's default, NTFS) ``.ENV`` and
+        ``.env`` are one file, and a deny compared case by case missed the
+        other spelling. A deny compares both sides casefolded (after NFC, so a
+        decomposed name matches a composed one); it can only deny more."""
+        from agentic_cli.workflow.permissions.matchers import PathMatcher
+        m = PathMatcher()
+        assert m.matches_deny("/w/.env", "/w/.ENV")
+        assert m.matches_deny("/h/.ssh/**", "/h/.Ssh/authorized_keys")
+        assert m.matches_deny("/w/.app/**", "/w/.APP/settings.json")
+        assert m.matches_deny("/W/.App/**", "/w/.app/settings.json")
+        assert m.matches_deny("/w/café/**", "/w/CAFÉ/menu.txt")
+        assert m.matches_deny("/w/?", "/w/ß")  # an exact-case match still counts
+        assert not m.matches_deny("/w/.env", "/w/.envrc")
+        assert not m.matches_deny("/h/.ssh/**", "/h/.sshx/k")
+        assert not m.matches("/w/.env", "/w/.ENV")  # allows are unchanged
+
+    def test_other_matchers_deny_as_they_allow(self, ctx):
+        """A URL's path is case-sensitive by definition and its host is
+        already lowercased; shell and string targets have no filesystem."""
+        from agentic_cli.workflow.permissions.matchers import ShellMatcher, URLMatcher
+        url = URLMatcher()
+        assert not url.matches_deny("https://x.test/admin/**", "https://x.test/ADMIN/k")
+        assert url.matches_deny("https://x.test/admin/**", "https://x.test/admin/k")
+        assert not ShellMatcher().matches_deny("rm *", "RM -rf x")
+        assert not StringGlobMatcher().matches_deny("abc", "ABC")
 
 
 class TestURLMatcher:

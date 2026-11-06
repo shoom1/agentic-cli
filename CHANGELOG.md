@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **A filesystem deny rule covers every spelling of its path.** Deny rules
+  compared paths case by case, but on a case-insensitive filesystem (macOS's
+  default APFS, Windows) `./.ENV` and `./.env` are one file, and the engine
+  keeps the case a tool was given (since 0.5.1): under a
+  `deny filesystem.read ${workdir}/.env` rule, `read_file("./.ENV")` was
+  allowed by the built-in read allow for the project, and after one "Allow
+  for this session" on a project file, the app's own `./.APP/settings.json`
+  was writable without a prompt, as was `~/.Ssh/authorized_keys` after a home
+  grant. A `filesystem.*` deny now also matches when both sides are compared
+  casefolded after NFC, on every platform (on a case-sensitive filesystem it
+  only denies more); allows still compare case, so another spelling of an
+  allowed path is asked about. A grant no longer widens to another spelling of
+  a directory above home either (`/USERS/**` on APFS covered every home).
+- **An approval is remembered only when its rule matches what the prompt
+  showed.** A grant was built from the literal argument but matched as a
+  pattern (since 0.5.1), so `*`, `?` and `[` in an approved argument became
+  wildcards: "Allow for this session" on `write_file("/**/notes.txt")`
+  (shown as `filesystem.write → /**/**`) made every file writable, and on
+  `ls *.py` (an application's `shell.exec` tool) also approved
+  `ls x; curl …; echo a.py`. When the literal part of the rule an approval
+  would become holds a character its matcher treats as a wildcard (the
+  directory a filesystem grant covers, or its exact path; an exact URL, while
+  a site scope is always literal; a command or any other target, whole), the
+  prompt shows the exact target, offers only "Allow once" and "Deny", and
+  says the approval applies to this call only. A saved allow in
+  `~/.{app_name}/project_grants.json` whose literal part holds one (or a
+  `/**` grant on the filesystem root or a directory above home) is dropped at
+  startup with a `permission_glob_grant_dropped` warning.
 - **Saving settings keeps the project's deny rules.** The project
   `./.{app_name}/settings.json` may hold `permissions.deny` rules, which the
   permission engine reads from the file itself, but a settings save (any
