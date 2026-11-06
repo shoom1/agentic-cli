@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 import subprocess
 
+import pytest
+
 import agentic_cli.tools.glob_tool as glob_mod
 import agentic_cli.tools.grep_tool as grep_mod
 from agentic_cli.tools.glob_tool import glob
@@ -251,3 +253,100 @@ def test_grep_python_directories_do_not_consume_file_budget(tmp_path, monkeypatc
     files = {m["file"] for m in r["matches"]}
     assert any("a.txt" in f for f in files)
     assert any("b.txt" in f for f in files)
+
+
+# ---------------------------------------------------------------------------
+# Hidden files below the search root are not searched
+# ---------------------------------------------------------------------------
+#
+# The engine judges only grep's ``path``, and the project directory is
+# readable without a prompt, so a search of the project read its ``.env`` (and
+# ``.git``, and the app's ``.{app}``) even though ``read_file(".env")`` is
+# denied. ripgrep skips hidden files by default; the Python search now does
+# too, and both keep doing so when a file pattern is given.
+
+_HIDDEN = {".env", ".hidden/x", "sub/.env", "sub/.deep/y"}
+
+
+def _hidden_tree(tmp_path):
+    root = tmp_path / "root"
+    for rel in _HIDDEN | {"a.txt", "sub/b.txt"}:
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text("needle SECRET\n" if rel in _HIDDEN else "needle here\n")
+    # Non-hidden names for hidden files (a cloned repository can ship them:
+    # git stores symlinks). ripgrep does not follow them; the Python search
+    # judges where they lead.
+    (root / "envlink").symlink_to(".env")
+    (root / "sub" / "envlink2").symlink_to(".env")
+    return root
+
+
+def _found(result, root):
+    from pathlib import Path
+
+    return {Path(m["file"]).resolve().relative_to(root.resolve()).as_posix() for m in result["matches"]}
+
+
+
+@pytest.mark.parametrize("file_pattern", [None, "*", "**/*", ".env", ".*", "x", "*.txt"])
+def test_grep_python_skips_hidden_files_below_the_root(tmp_path, monkeypatch, file_pattern):
+    root = _hidden_tree(tmp_path)
+    monkeypatch.setattr(grep_mod, "_ripgrep_available", lambda: False)
+
+    for mode in ("content", "files", "count"):
+        r = grep(pattern="needle", path=str(root), file_pattern=file_pattern, output_mode=mode)
+        assert r["success"] is True
+        assert not _found(r, root) & _HIDDEN, (file_pattern, mode)
+    if file_pattern in (None, "*", "**/*", "*.txt"):
+        assert _found(r, root) == {"a.txt", "sub/b.txt"}
+        assert r["files_searched"] == 2
+
+
+def test_grep_python_still_searches_a_symlink_to_an_ordinary_file(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "a.txt").write_text("needle\n")
+    (root / "link.txt").symlink_to("a.txt")
+    monkeypatch.setattr(grep_mod, "_ripgrep_available", lambda: False)
+
+    files = {m["file"] for m in grep(pattern="needle", path=str(root))["matches"]}
+
+    assert {f.rsplit("/", 1)[-1] for f in files} == {"a.txt", "link.txt"}
+
+
+def test_grep_python_searches_a_hidden_root_given_explicitly(tmp_path, monkeypatch):
+    """A hidden file or directory named as ``path`` is what the engine judged
+    (and denies, for ``.env``), so it is searched."""
+    root = _hidden_tree(tmp_path)
+    nested = tmp_path / ".outer" / "project"
+    (nested / "src").mkdir(parents=True)
+    (nested / "src" / "c.txt").write_text("needle\n")
+    monkeypatch.setattr(grep_mod, "_ripgrep_available", lambda: False)
+
+    assert _found(grep(pattern="needle", path=str(root / ".env")), root) == {".env"}
+    assert _found(grep(pattern="needle", path=str(root / ".hidden")), root) == {".hidden/x"}
+    # A hidden directory above the root is no part of what is below it.
+    assert _found(grep(pattern="needle", path=str(nested)), nested) == {"src/c.txt"}
+
+
+@pytest.mark.parametrize("file_pattern", ["*", ".env", "**/*"])
+def test_grep_ripgrep_keeps_hidden_files_out_with_a_file_pattern(tmp_path, monkeypatch, file_pattern):
+    """A ``--glob`` overrides ripgrep's hidden-file filter (ripgrep 14.1:
+    ``rg -g '*'`` searches ``.env`` and ``.hidden/x``), so grep excludes them
+    with a later glob, which wins."""
+    root = tmp_path / "root"
+    root.mkdir()
+    monkeypatch.setattr(grep_mod, "_ripgrep_available", lambda: True)
+    captured = {}
+
+    def fake_popen(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return _FakeProc()
+
+    monkeypatch.setattr(grep_mod.subprocess, "Popen", fake_popen)
+    grep(pattern="needle", path=str(root), file_pattern=file_pattern)
+
+    cmd = captured["cmd"]
+    globs = [cmd[i + 1] for i, arg in enumerate(cmd) if arg == "--glob"]
+    assert globs == [file_pattern, "!.*"]
+    assert cmd.index("--") > max(i for i, arg in enumerate(cmd) if arg == "--glob")

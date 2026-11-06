@@ -51,44 +51,34 @@ def build_request(
 ) -> UserInputRequest:
     """Construct a ``UserInputRequest`` (CHOICE) describing the pending grant.
 
-    The displayed target is the **effective grant scope** — i.e. what will be
-    stored as a rule if the user picks Session or Always. For ``filesystem.*``
-    that's a whole directory (``/foo/**``) rather than the exact file, so one
-    grant covers the files there (see ``broaden_target_for_grant``). For a URL
-    it is the site, shown next to the exact URL the call reads.
+    Each capability line names the **exact target** the call acts on, the
+    file or URL "Allow once" approves. When a session or "always" grant would
+    cover more (``broaden_target_for_grant``: the directory a file is in, a
+    URL's site), the next line says what: ``(for this session / always: all
+    of /foo/**)``. A file directly in home, at the root or above home is
+    granted exactly, so its line stands alone.
 
     When nothing in the request can be remembered (a resource capability whose
     tool named no target, or a target whose rule would hold a wildcard
     character, see ``is_storable_grant``), only "Allow once" and "Deny" are
-    offered, with a note saying why, and such a capability shows its exact
-    target: there is no wider scope to approve.
+    offered, with a note saying why, and no capability promises a wider scope:
+    there is none to approve.
 
     For code-execution capabilities (``*.exec``) the pending ``code``/``command``
     payload is shown: the capability target is ``*`` (allow-any-code), so the
     payload — not the target — is what the user is actually approving.
     """
     lines = [f"Tool `{tool_name}` wants:"]
-    has_broadened_filesystem = False
     unstorable = [cap for cap in capabilities if not is_storable_grant(cap, home=home)]
-    for cap in capabilities:
-        display_target = (
-            cap.target if cap in unstorable else broaden_target_for_grant(cap, home=home)
-        )
-        if not display_target:
-            display_target = "*"
-        if cap.name.startswith("http.") and display_target != cap.target:
-            # The exact URL is what this call reads (and any data the URL
-            # carries); a session or "always" approval covers its site.
-            lines.append(f"  • {cap.name} → {cap.target}")
-            lines.append(f"    (for this session / always: all of {display_target})")
-            continue
-        lines.append(f"  • {cap.name} → {display_target}")
-        if cap.name.startswith("filesystem.") and display_target != cap.target:
-            has_broadened_filesystem = True
-    lines.append("")
-    if has_broadened_filesystem:
-        lines.append("(Grant scope widened to cover the whole directory.)")
     rememberable = not unstorable
+    for cap in capabilities:
+        # The exact target is what this call acts on (a file, or a URL and
+        # any data it carries), whatever a grant would cover.
+        lines.append(f"  • {cap.name} → {cap.target or '*'}")
+        scope = broaden_target_for_grant(cap, home=home)
+        if rememberable and scope != cap.target:
+            lines.append(f"    (for this session / always: all of {scope})")
+    lines.append("")
     if any(cap.target == "*" for cap in unstorable):
         lines.append("(This tool names no specific target, so approval applies to this call only.)")
     if any(cap.target != "*" for cap in unstorable):

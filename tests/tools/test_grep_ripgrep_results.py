@@ -204,3 +204,16 @@ class TestRealRipgrep:
 
         python = _python_search(notes, pattern="needle", context_lines=context_lines)
         assert lines(result) == lines(python)
+
+    @pytest.mark.parametrize("file_pattern", [None, "*", ".env", "**/*"])
+    def test_hidden_files_below_the_root_are_not_searched(self, tmp_path, file_pattern):
+        """As the Python search: a ``--glob`` alone would let ripgrep search them."""
+        for rel, text in {".env": "needle", ".hidden/x": "needle", "a.txt": "needle"}.items():
+            (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+            (tmp_path / rel).write_text(text + "\n")
+
+        result = grep("needle", path=str(tmp_path), file_pattern=file_pattern)
+
+        found = {Path(m["file"]).name for m in result["matches"]}
+        assert ".env" not in found and "x" not in found
+        assert grep("needle", path=str(tmp_path / ".env"))["total_matches"] == 1

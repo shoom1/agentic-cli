@@ -38,9 +38,11 @@ from agentic_cli.workflow.permissions.rules import (
 )
 from agentic_cli.workflow.permissions.store import (
     BUILTIN_RULES,
+    WORKDIR_READ_ALLOW,
     PermissionContext,
     load_project_grants,
     load_rules,
+    settings_env_file_denies,
 )
 
 if TYPE_CHECKING:
@@ -56,9 +58,10 @@ def broaden_target_for_grant(cap: ResolvedCapability, home: Path | None = None) 
     A ``filesystem.*`` grant covers a whole directory, so one approval covers
     the files the agent works with there instead of prompting per file: a
     directory target covers itself (``dir/**``), a file target covers the
-    directory it is in. A grant never widens to the filesystem root or to a
-    directory above ``home``: there the exact target is granted instead, since
-    ``/Users/**`` would cover every user's home.
+    directory it is in. A grant never widens to the filesystem root, to
+    ``home`` itself or to a directory above it: there the exact target is
+    granted instead, since ``~/**`` would cover the shell's start-up files and
+    ``~/Library``, and ``/Users/**`` every user's home.
 
     An ``http.read`` grant covers the URL's site (see ``site_scope``), so one
     approval covers the pages read there; a URL with no site scope keeps its
@@ -116,8 +119,10 @@ def site_scope(url: str) -> str | None:
 def _may_widen_to(directory: Path, home: Path) -> bool:
     """Whether a grant may cover all of ``directory``.
 
-    Not the filesystem root, and not a proper ancestor of ``home`` (which
-    includes the root): those would reach far beyond what was asked for.
+    Not the filesystem root, not ``home`` itself and not a directory above it
+    (which includes the root): those would reach far beyond what was asked
+    for. All of home holds the shell's start-up files, ``~/Library`` and every
+    file no builtin rule names, so a file directly in home is granted exactly.
     Compared caseless, as a deny is: on a case-insensitive filesystem
     ``/USERS`` is ``/Users``, and a grant on ``/USERS/**`` covers every home
     spelled that way.
@@ -125,7 +130,7 @@ def _may_widen_to(directory: Path, home: Path) -> bool:
     if directory == Path(directory.anchor):
         return False
     directory, home = Path(_fold(str(directory))), Path(_fold(str(home)))
-    return not (home != directory and home.is_relative_to(directory))
+    return not home.is_relative_to(directory)
 
 
 #: The characters each matcher treats as wildcards in a rule's target:
@@ -173,30 +178,40 @@ def is_storable_grant(cap: ResolvedCapability, home: Path | None = None) -> bool
     return _is_literal(cap.target, _GLOB_WILDCARDS)
 
 
-def is_literal_saved_grant(capability: str, target: str, home: Path) -> bool:
+def is_literal_saved_grant(capability: str, target: str) -> bool:
     """Whether a saved allow grant matches only what its literal part names.
 
     The engine writes grants from literal targets (``is_storable_grant``), so
     a saved one whose literal part holds a wildcard character came from the
     bug that stored ``/x/**/**`` for ``/x/**/notes.txt``, or from a hand edit.
     The literal part is the target less one trailing ``/**`` for
-    ``filesystem.*``, and that directory must be one a grant may widen to
-    (``/**`` is the root's file named ``**``, granted as its exact target);
-    for ``http.*`` a site scope is literal, any other URL is checked as in
-    ``is_storable_grant``.
+    ``filesystem.*`` (whether that directory may be covered at all is
+    ``is_bounded_saved_grant``'s question); for ``http.*`` a site scope is
+    literal, any other URL is checked as in ``is_storable_grant``.
     """
     if target == "*":
         return not is_resource_capability(capability)
     if capability.startswith("filesystem."):
-        if target.endswith("/**"):
-            scope = target[: -len("/**")]
-            if not scope or not _may_widen_to(Path(scope), home.resolve()):
-                return False
-            return _is_literal(scope, _PATH_WILDCARDS)
-        return _is_literal(target, _PATH_WILDCARDS)
+        return _is_literal(target.removesuffix("/**"), _PATH_WILDCARDS)
     if capability.startswith("http."):
         return site_scope(target) == target or _is_literal_url(target)
     return _is_literal(target, _GLOB_WILDCARDS)
+
+
+def is_bounded_saved_grant(capability: str, target: str, home: Path) -> bool:
+    """Whether a saved allow grant covers no more than a grant may.
+
+    A ``filesystem.*`` grant ``<dir>/**`` must name a directory a grant may
+    widen to (``_may_widen_to``): not the filesystem root (``/**`` is the
+    root's file named ``**``, which is granted as its exact target), not
+    ``home`` and not a directory above it. One that does came from an engine
+    that widened a file directly in home to all of it, or from a hand edit.
+    Every other grant is bounded by its own target.
+    """
+    if not capability.startswith("filesystem.") or not target.endswith("/**"):
+        return True
+    scope = target.removesuffix("/**")
+    return bool(scope) and _may_widen_to(Path(scope), home.resolve())
 
 
 def _is_literal(text: str, wildcards: str) -> bool:
@@ -245,7 +260,13 @@ class PermissionEngine:
 
     def _load_all_rules(self) -> list[Rule]:
         rules: list[Rule] = []
+        # Started from home, above it or at the root, the working directory's
+        # read allow would cover all of home (its start-up files, keychains)
+        # without a prompt: there reads ask, as a grant there would.
+        in_a_project = _may_widen_to(self._ctx.workdir.resolve(), self._ctx.home.resolve())
         for r in BUILTIN_RULES:
+            if r == WORKDIR_READ_ALLOW and not in_a_project:
+                continue
             # Canonicalise each builtin rule's target (which may use ${workdir}/${home}).
             rules.append(
                 Rule(
@@ -255,6 +276,8 @@ class PermissionEngine:
                     source=r.source,
                 )
             )
+        # The keys the app was given, wherever its env_file puts them.
+        rules += settings_env_file_denies(self._settings, self._ctx)
         app = self._settings.app_name
         rules += load_rules(get_user_config_path(app), RuleSource.USER, self._ctx)
         # PROJECT settings.json is untrusted (a cloned repo can ship it): honor

@@ -10,55 +10,32 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from agentic_cli.protected_paths import (
+    APP_CONFIG_DIR,
+    CREDENTIAL_STORES,
+    NEVER_WRITABLE,
+    WORKDIR_NEVER_READABLE,
+    WORKDIR_NEVER_WRITABLE,
+    ProtectedPath,
+)
 
-# Paths that must never be writable, regardless of policy.
-# These protect shell configs, credentials, and system directories
-# from agent-generated commands.
+# The protected locations come from ``agentic_cli.protected_paths``, the lists
+# the permission engine's builtin deny rules are built from, so the sandbox
+# protects what the engine does.
+
+# Paths that must never be writable: shell configs, git's config, credentials
+# and system directories (a directory spelled with a trailing slash). Note:
+# the working directory's ``.git`` and ``.{app_name}`` are added in
+# resolved_deny_write_paths().
 MANDATORY_DENY_WRITE: list[str] = [
-    # Shell configuration
-    "~/.bashrc",
-    "~/.bash_profile",
-    "~/.zshrc",
-    "~/.zprofile",
-    "~/.profile",
-    # Git configuration
-    "~/.gitconfig",
-    "~/.git-credentials",
-    # SSH and GPG
-    "~/.ssh/",
-    "~/.gnupg/",
-    # Note: .git/hooks/ and .git/config are added dynamically
-    # relative to working_dir in resolved_deny_write_paths()
-    # System directories
-    "/etc/",
-    "/usr/",
-    "/bin/",
-    "/sbin/",
-    # macOS system
-    "/System/",
-    "/Library/",
-    # Agent config
-    "~/.claude/",
+    f"{p.location}/" if p.is_dir else p.location for p in NEVER_WRITABLE
 ]
 
 # Credential stores: never readable or writable from the sandbox, whatever the
 # configured policy says. Reads are otherwise broad (interpreters need the
 # filesystem), so these must be named. See also the app's own config dir,
 # added per policy from ``app_name``.
-PROTECTED_HOME_PATHS: list[str] = [
-    "~/.ssh",
-    "~/.gnupg",
-    "~/.aws",
-    "~/.azure",
-    "~/.kube",
-    "~/.config/gcloud",
-    "~/.config/gh",
-    "~/.docker/config.json",
-    "~/.netrc",
-    "~/.git-credentials",
-    "~/.pypirc",
-    "~/.npmrc",
-]
+PROTECTED_HOME_PATHS: list[str] = [p.location for p in CREDENTIAL_STORES]
 
 # Paths that are always readable (system libraries, interpreters, etc.)
 DEFAULT_READABLE: list[str] = [
@@ -157,10 +134,7 @@ class OSSandboxPolicy:
         paths = [Path(p).expanduser().resolve() for p in self.deny_write_paths]
         paths += self._protected_home_paths()
         if working_dir is not None:
-            wd = working_dir.resolve()
-            paths.append(wd / ".git")
-            if self.app_name:
-                paths.append(wd / f".{self.app_name}")
+            paths += self._in_working_dir(WORKDIR_NEVER_WRITABLE, working_dir)
         return _dedupe(paths)
 
     def resolved_deny_read_paths(self, working_dir: Path | None = None) -> list[Path]:
@@ -178,14 +152,26 @@ class OSSandboxPolicy:
         paths = [Path(p).expanduser().resolve() for p in self.deny_read_paths]
         paths += self._protected_home_paths()
         if working_dir is not None:
-            paths.append(working_dir.resolve() / ".env")
+            paths += self._in_working_dir(WORKDIR_NEVER_READABLE, working_dir)
         return _dedupe(paths)
 
     def _protected_home_paths(self) -> list[Path]:
         entries = list(PROTECTED_HOME_PATHS)
         if self.app_name:
-            entries.append(f"~/.{self.app_name}")
+            entries.append(APP_CONFIG_DIR.location.format(app_name=self.app_name))
         return [Path(p).expanduser().resolve() for p in entries]
+
+    def _in_working_dir(
+        self, entries: tuple[ProtectedPath, ...], working_dir: Path
+    ) -> list[Path]:
+        """The working directory's protected ``entries``; one naming the app
+        is left out when the policy has no ``app_name``."""
+        wd = working_dir.resolve()
+        return [
+            wd / p.location.format(app_name=self.app_name)
+            for p in entries
+            if self.app_name or "{app_name}" not in p.location
+        ]
 
     def resolved_readable_paths(self) -> list[Path]:
         """Resolve default readable paths.
