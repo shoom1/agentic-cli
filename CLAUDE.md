@@ -96,7 +96,7 @@ agentic-cli/
 │   │   │   ├── event_processor.py # DeepAgentsEventProcessor (stream → WorkflowEvent, by agent); RunCallback
 │   │   │   ├── sessions.py   # thread_id(SessionRef), CheckpointSessions (rows from the newest root checkpoint), job notifications
 │   │   │   ├── summarization.py # Each agent's thresholds from context_budget; NoArchiveBackend; history filters; compact()'s cut, summary and event (marked: the count reported before it is no trigger, _should_summarize); OverflowMapped: the summary model's overflows as ContextOverflowError, inside its retry
-│   │   │   ├── mcp_tools.py  # MCPSessions: one owner task per (agent, server); the mcp identity map
+│   │   │   ├── mcp_tools.py  # MCPSessions: one owner task per (agent, server); the mcp identity map; a call fails once its session ends (_while_open: mcp's stdio client can leave one unanswered)
 │   │   │   └── state.py      # AgentCliState: plan, tasks (last write wins)
 │   │   └── langgraph/        # LangGraph orchestrator (deprecated, removed in 0.8.0)
 │   │       ├── manager.py    # LangGraphWorkflowManager
