@@ -1754,6 +1754,13 @@ step; each entry says what to use instead.
 
 ### Fixed
 
+- **Two tool questions asked at once are shown one after the other.** The
+  calls of one model step run together (both backends gather them), so two
+  of them could ask at once (two `ask_clarification` calls, or one beside a
+  call that needed an approval), and thinking-prompt, which shows one dialog
+  at a time, raised on the second: the tool got an error or, for a
+  permission prompt, the call was denied without the user seeing it. The CLI
+  now asks them in turn.
 - **`/sessions --delete` no longer deletes a conversation open in another
   terminal.** It refused only the conversation of the process it ran in, so
   one another CLI had open was deleted, and on ADK that CLI's next turn

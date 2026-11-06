@@ -16,11 +16,16 @@ real ``Dialog`` (``edited_dialog``), so neither can grow what 0.4 lacks.
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import suppress
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-from thinking_prompt import ButtonConfig, TextField
+from prompt_toolkit.application import create_app_session
+from prompt_toolkit.input import create_pipe_input
+from prompt_toolkit.output import DummyOutput
+from thinking_prompt import ButtonConfig, TextField, ThinkingPromptSession
 
 from agentic_cli.cli import message_processor
 from agentic_cli.cli.message_processor import MessageProcessor
@@ -229,3 +234,77 @@ async def test_a_turn_asks_where_the_settings_say_now(monkeypatch):
     await processor._run_turn(workflow.source, controller, ui, settings)
 
     assert [dialog.placement for dialog in dialog_cls.built] == ["box", "inline"]
+
+
+# --- asked at once -----------------------------------------------------------------------
+
+
+class _AskingTwoAtOnce:
+    """One model step's two tool calls ask at the same time, as ADK runs a
+    step's calls (``asyncio.gather``): a free-text question beside a yes/no
+    one, such as a permission prompt."""
+
+    def __init__(self) -> None:
+        self.callback = None
+        self.answered: list[tuple[str, object]] = []
+
+    def set_input_callback(self, callback) -> None:
+        self.callback = callback
+
+    def clear_input_callback(self) -> None:
+        self.callback = None
+
+    def source(self, _workflow):
+        async def ask(request: UserInputRequest) -> None:
+            try:
+                answer = await self.callback(request)
+            except Exception as error:  # what the tool would have been given
+                answer = error
+            self.answered.append((request.tool_name, answer))
+
+        async def _turn():
+            await asyncio.gather(ask(_text()), ask(_confirmation()))
+            yield WorkflowEvent.text("done")
+
+        return _turn()
+
+
+async def test_questions_asked_at_once_are_shown_one_after_the_other():
+    """thinking-prompt shows one dialog at a time and raises on a second, so
+    the second of two questions failed, and a permission prompt that fails is
+    a denial the user never saw. On a real session both are now shown, in
+    the order they were asked, and each is answered (Esc: the text's "", the
+    yes/no question's "no")."""
+    workflow = _AskingTwoAtOnce()
+    controller = SimpleNamespace(workflow=workflow, update_status_bar=lambda ui: None)
+    settings = SimpleNamespace(
+        verbose_thinking=False, default_user="u", dialog_placement="box"
+    )
+    with create_pipe_input() as keys, create_app_session(input=keys, output=DummyOutput()):
+        ui = ThinkingPromptSession(message="> ")
+        ui.app.ttimeoutlen = 0.01  # a lone Esc is read as Esc at once
+        turn_done = asyncio.Event()
+
+        async def handler(_line: str) -> None:
+            await MessageProcessor()._run_turn(workflow.source, controller, ui, settings)
+            turn_done.set()
+
+        running = asyncio.create_task(ui.run_async(handler))
+        try:
+            for _ in range(500):  # a session that fails to start ends the wait
+                if ui.app.is_running or running.done():
+                    break
+                await asyncio.sleep(0.01)
+            assert ui.app.is_running, "the session did not start"
+            keys.send_text("go\r")
+            for _ in range(50):  # Esc closes whichever dialog is open
+                keys.send_text("\x1b")
+                with suppress(TimeoutError):
+                    await asyncio.wait_for(turn_done.wait(), 0.2)
+                if turn_done.is_set():
+                    break
+        finally:
+            ui.exit()
+            await asyncio.wait_for(running, 5)
+
+    assert workflow.answered == [("ask_clarification", ""), ("approve", "no")]
