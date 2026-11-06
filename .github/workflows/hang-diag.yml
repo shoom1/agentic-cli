@@ -1,0 +1,62 @@
+name: Hang diagnostics
+
+# Diag branch only: many copies of the offline suite at once, so one of them
+# hangs, with a watchdog that records what a hung run is doing.
+on:
+  push:
+    branches: [diag/ci-hang]
+  workflow_dispatch:
+
+jobs:
+  offline:
+    name: offline ${{ matrix.mode }} ${{ matrix.copy }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [captured, streamed]
+        copy: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    defaults:
+      run:
+        shell: bash -el {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up conda env (agenticcli)
+        uses: conda-incubator/setup-miniconda@v3
+        with:
+          miniforge-version: latest
+          environment-file: environment.yml
+          activate-environment: agenticcli
+
+      - name: Install the extras, py-spy and the diagnostics plugin
+        run: |
+          conda run -n agenticcli pip install -e '.[langgraph,deepagents]' py-spy
+          cp .github/diag/hang_diag.py "$(conda run -n agenticcli python -c 'import site; print(site.getsitepackages()[0])')/"
+
+      - name: Run offline test suite (watchdog)
+        env:
+          HANG_DIAG_DIR: ${{ runner.temp }}/hang-diag
+        run: bash .github/diag/run.sh ${{ matrix.mode }}
+
+      - name: Show diagnostics
+        if: always()
+        env:
+          D: ${{ runner.temp }}/hang-diag
+        run: |
+          echo "=== tests that left processes or threads behind"
+          awk '/ END /{h=$0; next} /^   [+-] /{if (h) {print h; h=""}; print}' "$D/tests.log" | tail -300
+          echo "=== last 30 lines of tests.log"
+          tail -30 "$D/tests.log"
+          for f in dump.txt signal-dump.txt faulthandler.txt; do
+            [ -s "$D/$f" ] && { echo "=== $f"; cat "$D/$f"; }
+          done
+          true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hang-diag-${{ matrix.mode }}-${{ matrix.copy }}
+          path: ${{ runner.temp }}/hang-diag
+          retention-days: 7
