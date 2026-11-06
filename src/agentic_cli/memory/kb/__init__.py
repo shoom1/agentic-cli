@@ -20,6 +20,7 @@ from agentic_cli.memory.kb.manager import (
     BackfillAlreadyRunning,
     KnowledgeBaseManager,
     Summarizer,
+    UnsafeKnowledgeBase,
     matches_document_filters,
 )
 from agentic_cli.memory.kb.models import Document, DocumentChunk, SearchResult, SourceType
@@ -42,6 +43,7 @@ __all__ = [
     "SearchResult",
     "SourceType",
     "Summarizer",
+    "UnsafeKnowledgeBase",
     "UnsupportedDocument",
     "VectorStore",
     "convert_document",

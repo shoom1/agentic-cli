@@ -136,11 +136,11 @@ agentic-cli/
 │   │   └── webfetch/        # Fetcher, converter, validator, robots, summarizer, saved pages
 │   ├── memory/               # Knowledge base + memory store; imports nothing else from agentic_cli
 │   │   ├── __init__.py       # MemoryStore, MemoryItem, ForgettingPolicy, EmbeddingService, EmbeddingConfig, MockEmbeddingService
-│   │   ├── _core/            # Shared, private: embeddings.py, mock_embeddings.py, io.py, log.py, model_record.py
+│   │   ├── _core/            # Shared, private: embeddings.py, mock_embeddings.py, io.py (atomic writes; reads and appends of regular files only, never through a symlink), log.py, model_record.py
 │   │   ├── store.py          # MemoryStore
 │   │   └── kb/               # Knowledge base (agentic_cli.memory.kb)
-│   │       ├── manager.py    # KnowledgeBaseManager(base_dir, embedding=, summarizer=), Summarizer
-│   │       ├── knowledge_base.py  # KnowledgeBase (provisional): the scopes as one, and the ingestion pipeline (ingest_text, ingest_bytes)
+│   │       ├── manager.py    # KnowledgeBaseManager(base_dir, embedding=, summarizer=), Summarizer; UnsafeKnowledgeBase: a symlinked documents/embeddings/files/concepts folder or .lock (checked at open and in every transaction)
+│   │       ├── knowledge_base.py  # KnowledgeBase (provisional): the scopes as one (open leaves an unsafe scope out), and the ingestion pipeline (ingest_text, ingest_bytes)
 │   │       ├── enrich.py      # The summary/sidecar prompts and parser: one summarizer call per document
 │   │       ├── models.py     # Document, SearchResult, SourceType
 │   │       ├── convert.py    # convert_document (HTML main text via trafilatura, html2text fallback; pypdf), own _charset.py
