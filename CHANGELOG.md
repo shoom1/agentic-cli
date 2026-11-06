@@ -1462,6 +1462,17 @@ step; each entry says what to use instead.
 
 ### Fixed
 
+- **A Claude request over the API's size limit is summarized and retried
+  with anthropic 2 too.** anthropic 2.0 renamed the error it raises for an
+  HTTP 413 (`request_too_large`) from `RequestTooLargeError` to
+  `ContentTooLargeError`, keeping the old name as an alias, and the overflow
+  check (`workflow/context.py::is_context_overflow`) knew the 413 by the old
+  class name: on either backend such a request ended the turn with the
+  provider's error instead of being summarized and retried once. A 413 is
+  now Claude's size limit by its status and the SDK that raised it, whatever
+  the class is called (a subclass that names the cause included) and
+  whatever the body says; another provider's 413 still has to name the
+  context.
 - **On ADK, an OpenAI-compatible provider that checks its requests, such as
   Synthetic, answers.** ADK's Chat Completions class sets `tools`,
   `tool_choice` and `response_format` to None when a request has none, and
