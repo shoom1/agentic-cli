@@ -1754,6 +1754,13 @@ step; each entry says what to use instead.
 
 ### Fixed
 
+- **A queued shell job runs in the directory it was submitted in.** A job
+  left queued (the concurrency cap was full) when its CLI exited was
+  launched by the next CLI to open the jobs directory, in that CLI's working
+  directory: started in another project, `make clean` would run there,
+  without a prompt and outside the project it was approved in. A subprocess
+  job's working directory is now fixed when it is submitted (a relative
+  `cwd` taken from there).
 - **A finished job is no longer recorded FAILED with exit code 1 when it
   is polled as it ends.** A subprocess job's shell, and the in-process
   backend, truncated the `exit_code` sentinel before writing the code, and
