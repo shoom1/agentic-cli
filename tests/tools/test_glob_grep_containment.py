@@ -273,6 +273,11 @@ def _hidden_tree(tmp_path):
     for rel in _HIDDEN | {"a.txt", "sub/b.txt"}:
         (root / rel).parent.mkdir(parents=True, exist_ok=True)
         (root / rel).write_text("needle SECRET\n" if rel in _HIDDEN else "needle here\n")
+    # Non-hidden names for hidden files (a cloned repository can ship them:
+    # git stores symlinks). ripgrep does not follow them; the Python search
+    # judges where they lead.
+    (root / "envlink").symlink_to(".env")
+    (root / "sub" / "envlink2").symlink_to(".env")
     return root
 
 
@@ -295,6 +300,18 @@ def test_grep_python_skips_hidden_files_below_the_root(tmp_path, monkeypatch, fi
     if file_pattern in (None, "*", "**/*", "*.txt"):
         assert _found(r, root) == {"a.txt", "sub/b.txt"}
         assert r["files_searched"] == 2
+
+
+def test_grep_python_still_searches_a_symlink_to_an_ordinary_file(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "a.txt").write_text("needle\n")
+    (root / "link.txt").symlink_to("a.txt")
+    monkeypatch.setattr(grep_mod, "_ripgrep_available", lambda: False)
+
+    files = {m["file"] for m in grep(pattern="needle", path=str(root))["matches"]}
+
+    assert {f.rsplit("/", 1)[-1] for f in files} == {"a.txt", "link.txt"}
 
 
 def test_grep_python_searches_a_hidden_root_given_explicitly(tmp_path, monkeypatch):

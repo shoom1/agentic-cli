@@ -48,13 +48,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and writing the credential stores (`~/.ssh`, `~/.gnupg`, `~/.aws`,
   `~/.azure`, `~/.kube`, `~/.config/gcloud`, `~/.config/gh`,
   `~/.docker/config.json`, `~/.netrc`, `~/.git-credentials`, `~/.pypirc`,
-  `~/.npmrc`) are denied, as are reading the app's keys
-  (`~/.{app_name}/.env` and every env file its settings read) and the
-  project's `.env`, and writing `~/.{app_name}`, shell start-up files,
-  `~/.gitconfig`, `~/.claude`, the system directories (now `/Library` too,
-  and `/boot` in the sandbox), the project's `.git` and its `./.{app_name}`.
-  The sandbox still hides all of `~/.{app_name}` from the code it runs.
-  **Breaking:** no allow rule or grant reaches these.
+  `~/.npmrc`) are denied, as are reading the app's keys and settings
+  (`~/.{app_name}/.env`, `~/.{app_name}/settings.json` and every env file
+  its settings read) and the project's env files at any depth (`.env`,
+  `.env.*`, `.envrc`), and writing `~/.{app_name}`, shell start-up files
+  (now also `~/.zshenv`, `~/.zlogin` and fish's `~/.config/fish`),
+  `~/.gitconfig` and git's `~/.config/git`, `~/.claude`, the system
+  directories (now `/Library` too, and `/boot` in the sandbox), the
+  project's `.git` and its `./.{app_name}`. The sandbox still hides all of
+  `~/.{app_name}` from the code it runs, and of the project's env files the
+  root `.env` (it cannot express a glob). Started from home, above it or at
+  `/`, the project's read allow no longer applies, since it covered all of
+  home: reads there ask (the tool outputs and pages the framework saves in
+  `./.{app_name}` are still read without a prompt). **Breaking:** no allow
+  rule or grant reaches these.
 - **A grant for a file in your home directory covers only that file.** "Allow
   for this session" on one file directly in `$HOME` widened to `$HOME/**`
   (since 0.5.1), which covered writing `~/.zshrc` and
@@ -74,8 +81,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the project read its `.env`, `.git` and `./.{app_name}`: always on the
   Python search, and with ripgrep whenever a `file_pattern` was given (a
   `--glob` overrides ripgrep's hidden-file filter, so `file_pattern="*"`
-  searched them). Both now skip hidden files and directories below `path`; a
-  hidden file or directory given as `path` is still searched, and judged.
+  searched them). Both now skip hidden files and directories below `path`,
+  and the Python search a symlink that leads to one (`notes -> .env`;
+  ripgrep follows no symlink); a hidden file or directory given as `path` is
+  still searched, and judged.
 - **A URL rule judges the URL the HTTP client sends.** The `http.*` matcher
   compared a URL as written (since 0.5.1), while `web_fetch` requests what
   httpx makes of it, so with `https://docs.example.com/**` allowed and

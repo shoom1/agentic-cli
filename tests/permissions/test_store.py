@@ -53,6 +53,19 @@ class TestBuiltinRules:
         for path in ("${home}/.ssh/**", "${home}/.aws/**", "${home}/.gnupg/**"):
             assert path in system_targets
 
+    def test_the_framework_s_saved_files_are_readable_wherever_it_starts(self):
+        """The two allows name the folders the framework saves into for
+        ``read_file``, so started from home (where the project read allow is
+        left out) they are still read without a prompt."""
+        from agentic_cli.tools.webfetch import saved
+        from agentic_cli.workflow import tool_output
+        from agentic_cli.workflow.permissions.rules import Effect
+        from agentic_cli.workflow.permissions.store import BUILTIN_RULES
+
+        allows = {r.target for r in BUILTIN_RULES if r.effect is Effect.ALLOW}
+        for folder in (tool_output.FOLDER_NAME, saved.FOLDER_NAME):
+            assert f"${{workdir}}/.${{app_name}}/{folder}/**" in allows
+
     def test_all_builtin_have_builtin_source(self):
         from agentic_cli.workflow.permissions.rules import RuleSource
         from agentic_cli.workflow.permissions.store import BUILTIN_RULES

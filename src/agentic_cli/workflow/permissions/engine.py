@@ -39,6 +39,7 @@ from agentic_cli.workflow.permissions.rules import (
 )
 from agentic_cli.workflow.permissions.store import (
     BUILTIN_RULES,
+    WORKDIR_READ_ALLOW,
     PermissionContext,
     load_project_grants,
     load_rules,
@@ -263,7 +264,13 @@ class PermissionEngine:
 
     def _load_all_rules(self) -> list[Rule]:
         rules: list[Rule] = []
+        # Started from home, above it or at the root, the working directory's
+        # read allow would cover all of home (its start-up files, keychains)
+        # without a prompt: there reads ask, as a grant there would.
+        in_a_project = _may_widen_to(self._ctx.workdir.resolve(), self._ctx.home.resolve())
         for r in BUILTIN_RULES:
+            if r == WORKDIR_READ_ALLOW and not in_a_project:
+                continue
             # Canonicalise each builtin rule's target (which may use ${workdir}/${home}).
             rules.append(
                 Rule(
