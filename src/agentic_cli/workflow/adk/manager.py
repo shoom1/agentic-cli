@@ -131,6 +131,11 @@ def _author_of_call(session: Any, call_id: str) -> str | None:
     return None
 
 
+#: Releases still closing after a cancel stopped their wait: held so none is
+#: garbage collected halfway (``_release_resources``).
+_CLOSING: set[asyncio.Future] = set()
+
+
 def _as_written(prompt: str) -> Callable[[Any], str]:
     """``prompt`` as an instruction ADK sends as written.
 
@@ -303,7 +308,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         session_service = None
         if not (keep_session_service or self._session_service_pinned):
             session_service, self._session_service = self._session_service, None
-        self._runner = None
+        runner, self._runner = self._runner, None
         self._root_agent = None
         self._budgets = {}
         self._initialized = False
@@ -313,13 +318,30 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             self._llm_logging_plugin.clear()
             self._llm_logging_plugin = None
 
-        await self._aclose_owned(session_service, "session_service")
-        await self._close_catalog()
+        catalog, self._catalog = self._catalog, None
 
         # Clean up managers (sandbox, jobs, etc.)
         self._cleanup_managers()
 
+        # The rest closes in a task of its own, awaited under a shield: a
+        # cancel (Ctrl+C can stop a /settings model switch) stops only the
+        # wait. Cancelled halfway, ADK's runner would leave the toolsets it
+        # had not reached open, and the service and catalog with them.
+        closing = asyncio.ensure_future(self._close_detached(runner, session_service, catalog))
+        _CLOSING.add(closing)
+        closing.add_done_callback(_CLOSING.discard)
+        await asyncio.shield(closing)
+
         logger.info("workflow_manager_cleaned_up")
+
+    async def _close_detached(self, runner: Any, session_service: Any, catalog: Any) -> None:
+        """Close what ``_release_resources`` detached, in this order."""
+        # The runner closes the agents' toolsets (an MCP server stops with
+        # its toolset) and plugins; the session service it only flushes, so
+        # one a model switch keeps stays open. Before the service closes.
+        await self._aclose_owned(runner, "runner")
+        await self._aclose_owned(session_service, "session_service")
+        await self._aclose_owned(catalog, "model_catalog")
 
     async def reinitialize(
         self,

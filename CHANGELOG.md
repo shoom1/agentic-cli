@@ -1771,6 +1771,13 @@ step; each entry says what to use instead.
   (`MODEL_RETURNED_NO_CONTENT`), a Claude refusal or a Claude reply cut at
   its token limit. The turn ended with no text and no error. It now ends with
   "<model> returned no answer", the reason as its code.
+- **On ADK, an agent's MCP servers stop with the workflow.** The manager
+  dropped its runner without closing it, so each agent's MCP toolset stayed
+  open: a stdio server outlived `cleanup()`, and every `/settings` model
+  switch left one more running. The runner is now closed on every release,
+  which closes the toolsets; a session service a model switch keeps is only
+  flushed. Ctrl+C during a model switch stops only the wait: the release
+  goes on to its end.
 - **Two tool questions asked at once are shown one after the other.** The
   calls of one model step run together (both backends gather them), so two
   of them could ask at once (two `ask_clarification` calls, or one beside a
