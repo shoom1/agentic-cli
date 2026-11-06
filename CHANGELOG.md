@@ -180,6 +180,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the executor backend, sandbox mounts and API keys included. The filter now
   judges the env files the settings actually read: the constructor's
   `_env_file` when one is given.
+- **The permission engine enforces the `permissions` setting, whatever source
+  sets it.** The engine read its rules from `~/.{app_name}/settings.json` and
+  `./.{app_name}/settings.json` itself and never read the setting (since
+  0.5.1), so a rule given to the settings constructor, through the
+  environment (`AGENTIC_PERMISSIONS`) or as an app's settings-class default
+  was validated and silently not enforced: a deny rule an app shipped denied
+  nothing. The engine's trusted rules, allow and deny, are now
+  `settings.permissions`, by the settings' own priority (constructor,
+  environment, user file, the app's class default); the user file is read
+  once, by the settings. As for any setting, a `permissions` value from any
+  source replaces the class default whole, and between sources each of its
+  lists (`allow`, `deny`) comes from the highest source that sets it. The
+  project file still adds only its deny rules. An app's settings class can
+  override the field's default without a pydantic warning. **Breaking:** a
+  `permissions` value given to the constructor or the environment now
+  applies, and replaces the user file's list of the same name, where before
+  it was ignored and the user file's rules applied.
 
 ### Added
 
@@ -1552,6 +1569,20 @@ step; each entry says what to use instead.
 
 ### Fixed
 
+- **A malformed `permissions` section in a project's settings file no longer
+  stops the app.** The engine parsed the project file's section without a
+  schema (since 0.5.1), so a cloned repository whose
+  `./.{app_name}/settings.json` held an entry without a `target`, a string
+  entry or a section that is not an object kept the workflow from starting,
+  with a bare `KeyError`, `AttributeError` or `TypeError` naming neither the
+  file nor the entry. Each deny entry is now checked with the setting's own
+  schema (`PermissionRuleConfig`): a malformed one, or a section or `deny`
+  list of the wrong shape, is skipped with one `permission_project_rule_invalid`
+  warning naming the file and the entry (`permissions.deny[0]`), and the
+  valid entries still apply. A file the engine cannot read as a JSON object
+  gives a `permission_project_file_invalid` warning and no project rules (the
+  settings, which read the file first, still refuse one that is not valid
+  JSON).
 - **`web_fetch` returns an error for a URL httpx cannot send.** An invalid
   IDNA host (`https://i❤.ws/`, a name with a soft hyphen) passed the URL check
   and made httpx raise `InvalidURL`, which is no `RequestError`, so the tool

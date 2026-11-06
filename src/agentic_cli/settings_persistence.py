@@ -85,7 +85,8 @@ PROJECT_SETTABLE_KEYS = frozenset({
 USER_PREFERENCE_KEYS = frozenset({"ui_theme", "dialog_placement"})
 
 # Sections of the project file that are not settings: the permission engine
-# reads its deny rules from the file itself (workflow/permissions/engine.py),
+# reads its deny rules from the file itself (workflow/permissions/store.py,
+# load_project_denies),
 # so the loader passes over them and every save keeps them as they are.
 PROJECT_PRESERVED_KEYS = frozenset({"permissions"})
 
