@@ -3,6 +3,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from agentic_cli.tools.sandbox import manager
+from agentic_cli.tools.sandbox.backends import jupyter_docker
 from agentic_cli.tools.sandbox.manager import stage_inputs
 from agentic_cli.tools.sandbox.backends.jupyter_docker import JupyterDockerBackend
 
@@ -11,6 +13,26 @@ def _backend(shared: Path):
     return JupyterDockerBackend(
         settings=SimpleNamespace(sandbox_outputs_dir=str(shared), workspace_dir=str(shared))
     )
+
+
+def _swap_for_link(directory: Path, target: Path) -> None:
+    """What a kernel thread can do between two host steps: park the real
+    directory and put a symlink to a host directory in its place."""
+    if not directory.is_symlink():
+        directory.rename(directory.with_name(f".{directory.name}.parked"))
+        directory.symlink_to(target, target_is_directory=True)
+
+
+def _swap_before_each_copy(monkeypatch, module, directory: Path, target: Path) -> None:
+    """Swap ``directory`` for a link to ``target`` just before every per-entry
+    copy, so the race the kernel would have to win is won every time."""
+    real_copy = module.copy_regular_file_no_follow
+
+    def swap_then_copy(*args, **kwargs):
+        _swap_for_link(directory, target)
+        return real_copy(*args, **kwargs)
+
+    monkeypatch.setattr(module, "copy_regular_file_no_follow", swap_then_copy)
 
 
 def test_stage_inputs_copies_regular_file(tmp_path):
@@ -105,3 +127,44 @@ def test_collect_outputs_never_raises_on_outputs_dir_error(tmp_path, monkeypatch
         raise OSError("boom")
     monkeypatch.setattr(b, "_outputs_dir", boom)
     assert b._collect_outputs(wd) == []   # best-effort: never raises
+
+
+def test_collect_outputs_reads_nothing_outside_when_outputs_is_swapped(tmp_path, monkeypatch):
+    # The kernel swaps outputs/ for a link to a host directory after the host
+    # looked at it: every file is still read from the session's own directory.
+    shared = tmp_path / "shared"
+    wd = tmp_path / "wd"; outs = wd / "outputs"; outs.mkdir(parents=True)
+    outside = tmp_path / "host_secrets"; outside.mkdir()
+    for name in ("a.csv", "id_rsa"):
+        (outs / name).write_bytes(b"SESSION " + name.encode())
+        (outside / name).write_bytes(b"OUTSIDE " + name.encode())
+    _swap_before_each_copy(monkeypatch, jupyter_docker, outs, outside)
+    got = _backend(shared)._collect_outputs(wd)
+    assert sorted(Path(g).read_bytes() for g in got) == [b"SESSION a.csv", b"SESSION id_rsa"]
+    assert sorted(p.read_bytes() for p in shared.iterdir()) == [b"SESSION a.csv", b"SESSION id_rsa"]
+
+
+def test_stage_inputs_writes_nothing_outside_when_inputs_is_swapped(tmp_path, monkeypatch):
+    # The kernel swaps inputs/ for a link to a host directory after the host
+    # looked at it: every input still lands in the session's own directory.
+    session = tmp_path / "session"; (session / "inputs").mkdir(parents=True)
+    outside = tmp_path / "LaunchAgents"; outside.mkdir()
+    (outside / "keep.plist").write_bytes(b"ORIGINAL")
+    big = tmp_path / "big.csv"; big.write_bytes(b"BIG")
+    payload = tmp_path / "agent.plist"; payload.write_bytes(b"PAYLOAD")
+    _swap_before_each_copy(monkeypatch, manager, session / "inputs", outside)
+    stage_inputs(session, [str(big), str(payload)])
+    assert {p.name: p.read_bytes() for p in outside.iterdir()} == {"keep.plist": b"ORIGINAL"}
+    parked = session / ".inputs.parked"
+    assert {p.name: p.read_bytes() for p in parked.iterdir()} == {
+        "big.csv": b"BIG", "agent.plist": b"PAYLOAD",
+    }
+
+
+def test_stage_inputs_refuses_a_dangling_inputs_link(tmp_path):
+    session = tmp_path / "session"; session.mkdir()
+    (session / "inputs").symlink_to(tmp_path / "nowhere", target_is_directory=True)
+    src = tmp_path / "data.csv"; src.write_bytes(b"INPUT")
+    with pytest.raises(ValueError, match="not a real directory"):
+        stage_inputs(session, [str(src)])
+    assert not (tmp_path / "nowhere").exists()
