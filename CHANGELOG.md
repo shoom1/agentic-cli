@@ -34,9 +34,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a site scope is always literal; a command or any other target, whole), the
   prompt shows the exact target, offers only "Allow once" and "Deny", and
   says the approval applies to this call only. A saved allow in
-  `~/.{app_name}/project_grants.json` whose literal part holds one (or a
-  `/**` grant on the filesystem root or a directory above home) is dropped at
-  startup with a `permission_glob_grant_dropped` warning.
+  `~/.{app_name}/project_grants.json` whose literal part holds one is dropped
+  at startup with a `permission_glob_grant_dropped` warning.
+- **The default permission rules protect what the OS sandbox protects.** The
+  engine allowed reading anything in the project and denied only writes to a
+  short list (since 0.5.1), so `read_file(".env")` returned the project's keys
+  without a prompt while the OS sandbox hid that file, any grant reaching
+  `~/.ssh`, `~/.aws` or the app's `~/.{app_name}/.env` let them be read, and a
+  grant from writing any file at the project root covered `.git/hooks` and
+  `.git/config`, which git runs outside any sandbox. One module,
+  `agentic_cli.protected_paths`, now holds the protected locations, and both
+  the builtin rules and the OS sandbox's policy are built from it: reading
+  and writing the credential stores (`~/.ssh`, `~/.gnupg`, `~/.aws`,
+  `~/.azure`, `~/.kube`, `~/.config/gcloud`, `~/.config/gh`,
+  `~/.docker/config.json`, `~/.netrc`, `~/.git-credentials`, `~/.pypirc`,
+  `~/.npmrc`) and `~/.{app_name}` are denied, as are reading the project's
+  `.env` and writing shell start-up files, `~/.gitconfig`, `~/.claude`, the
+  system directories (now `/Library` too, and `/boot` in the sandbox), the
+  project's `.git` and its `./.{app_name}`. **Breaking:** no allow rule or
+  grant reaches these; an application whose agent reads files it keeps in
+  `~/.{app_name}` (the examples' `workspace_dir`, where the sandbox's
+  artifacts land) must keep them elsewhere.
+- **A grant for a file in your home directory covers only that file.** "Allow
+  for this session" on one file directly in `$HOME` widened to `$HOME/**`
+  (since 0.5.1), which covered writing `~/.zshrc` and
+  `~/Library/LaunchAgents/*.plist` and reading every home file no rule
+  denied. A grant no longer widens to home itself, as it never widened to the
+  filesystem root or above home. A saved grant on the root, home or a
+  directory above it is dropped at startup with a
+  `permission_broad_grant_dropped` warning.
+- **The permission prompt names the file.** A filesystem prompt showed only
+  the directory a session grant would cover (since 0.5.1), so a write to
+  `~/.zshrc` and one to `~/notes.md` read alike and "Allow once" was chosen
+  blind. Each line now shows the exact target, then, when a session or
+  "always" grant would cover more, `(for this session / always: all of
+  /p/**)`, as a URL's prompt already did.
+- **`grep` no longer reads hidden files below its path.** The engine judges
+  only `path`, and the project is readable without a prompt, so `grep` over
+  the project read its `.env`, `.git` and `./.{app_name}`: always on the
+  Python search, and with ripgrep whenever a `file_pattern` was given (a
+  `--glob` overrides ripgrep's hidden-file filter, so `file_pattern="*"`
+  searched them). Both now skip hidden files and directories below `path`; a
+  hidden file or directory given as `path` is still searched, and judged.
 - **Saving settings keeps the project's deny rules.** The project
   `./.{app_name}/settings.json` may hold `permissions.deny` rules, which the
   permission engine reads from the file itself, but a settings save (any

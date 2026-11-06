@@ -1,9 +1,5 @@
 # src/agentic_cli/workflow/permissions/store.py
-"""Context, JSON persistence, and builtin rules for the permission engine.
-
-Only PermissionContext is implemented at this point — load/save helpers
-and BUILTIN_RULES land in Tasks 10–12.
-"""
+"""Context, JSON persistence, and builtin rules for the permission engine."""
 
 from __future__ import annotations
 
@@ -11,6 +7,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from agentic_cli import protected_paths
 from agentic_cli.file_utils import atomic_write_text
 from agentic_cli.logging import Loggers
 from agentic_cli.settings_persistence import get_user_project_grants_path
@@ -40,7 +37,30 @@ class PermissionContext:
         )
 
 
-BUILTIN_RULES: list[Rule] = [
+def _pattern(entry: protected_paths.ProtectedPath) -> str:
+    """A protected location as a rule pattern: a directory covers itself and
+    everything below it (``<dir>/**``), a file only itself."""
+    location = entry.location.replace("{app_name}", "${app_name}")
+    if location.startswith("~/"):
+        location = "${home}/" + location[2:]
+    elif not location.startswith("/"):
+        location = "${workdir}/" + location
+    return f"{location}/**" if entry.is_dir else location
+
+
+def _denies(
+    capabilities: tuple[str, ...], entries: tuple[protected_paths.ProtectedPath, ...]
+) -> list[Rule]:
+    return [
+        Rule(capability, _pattern(entry), Effect.DENY, RuleSource.BUILTIN)
+        for entry in entries
+        for capability in capabilities
+    ]
+
+
+_READ, _WRITE = "filesystem.read", "filesystem.write"
+
+BUILTIN_RULES: list[Rule] = list(dict.fromkeys([  # each rule once (the lists overlap)
     # Routine reads inside workdir: allowed without prompt.
     Rule("filesystem.read", "${workdir}/**", Effect.ALLOW, RuleSource.BUILTIN),
 
@@ -56,25 +76,22 @@ BUILTIN_RULES: list[Rule] = [
     Rule("http.read", "https://export.arxiv.org/api/query", Effect.ALLOW, RuleSource.BUILTIN),
     Rule("http.read", "https://arxiv.org/pdf",              Effect.ALLOW, RuleSource.BUILTIN),
 
-    # System locations — writes always denied.
-    Rule("filesystem.write", "/etc/**",    Effect.DENY, RuleSource.BUILTIN),
-    Rule("filesystem.write", "/usr/**",    Effect.DENY, RuleSource.BUILTIN),
-    Rule("filesystem.write", "/bin/**",    Effect.DENY, RuleSource.BUILTIN),
-    Rule("filesystem.write", "/sbin/**",   Effect.DENY, RuleSource.BUILTIN),
-    Rule("filesystem.write", "/boot/**",   Effect.DENY, RuleSource.BUILTIN),
-    Rule("filesystem.write", "/System/**", Effect.DENY, RuleSource.BUILTIN),  # macOS
-
-    # Credential directories.
-    Rule("filesystem.write", "${home}/.ssh/**",   Effect.DENY, RuleSource.BUILTIN),
-    Rule("filesystem.write", "${home}/.aws/**",   Effect.DENY, RuleSource.BUILTIN),
-    Rule("filesystem.write", "${home}/.gnupg/**", Effect.DENY, RuleSource.BUILTIN),
-
-    # The app's own config: writing it would let the agent rewrite permission
-    # rules / disable the engine (self-escalation). Deny both the project- and
-    # user-level config dirs. Deny-wins, so this beats any broadened grant.
-    Rule("filesystem.write", "${workdir}/.${app_name}/**", Effect.DENY, RuleSource.BUILTIN),
-    Rule("filesystem.write", "${home}/.${app_name}/**",    Effect.DENY, RuleSource.BUILTIN),
-]
+    # What the OS sandbox protects (agentic_cli.protected_paths), denied to
+    # every tool. Deny wins, so no grant or allow rule reaches them.
+    # Credential stores: neither read nor written.
+    *_denies((_READ, _WRITE), protected_paths.CREDENTIAL_STORES),
+    # Shell start-up files, git's config, the system's directories: never
+    # written.
+    *_denies((_WRITE,), protected_paths.NEVER_WRITABLE),
+    # The project's .git (hooks and config git runs outside any sandbox) and
+    # .${app_name} (its settings): never written. Its .env: never read.
+    *_denies((_WRITE,), protected_paths.WORKDIR_NEVER_WRITABLE),
+    *_denies((_READ,), protected_paths.WORKDIR_NEVER_READABLE),
+    # The app's own config dir (keys, settings, grants): writing it would let
+    # the agent rewrite permission rules or disable the engine
+    # (self-escalation), and reading it would give away the keys.
+    *_denies((_READ, _WRITE), (protected_paths.APP_CONFIG_DIR,)),
+]))
 
 
 def load_rules(
@@ -120,17 +137,22 @@ def load_project_grants(app_name: str, ctx: PermissionContext) -> list[Rule]:
 
     Reads ``~/.{app}/project_grants.json`` and returns the allow+deny rules
     stored under ``str(ctx.workdir.resolve())`` — trusted (``RuleSource.PROJECT``,
-    both effects honored), since the user (not a repo) authored them. Two
+    both effects honored), since the user (not a repo) authored them. Three
     kinds of allow are dropped with a warning: a resource capability's
-    wildcard (``permission_wildcard_grant_dropped``) and one whose literal part
+    wildcard (``permission_wildcard_grant_dropped``), one whose literal part
     holds a wildcard character (``permission_glob_grant_dropped``, see
-    ``engine.is_literal_saved_grant``). Returns ``[]`` when the file or the
+    ``engine.is_literal_saved_grant``) and a filesystem grant on the root,
+    home or a directory above it (``permission_broad_grant_dropped``, see
+    ``engine.is_bounded_saved_grant``). Returns ``[]`` when the file or the
     project's entry is absent. Raises ``ValueError`` on malformed JSON.
     """
     # Local imports to avoid cycles: matchers.py imports PermissionContext
     # here, and engine.py imports this module.
     from agentic_cli.workflow.permissions.capabilities import is_resource_capability  # noqa: PLC0415
-    from agentic_cli.workflow.permissions.engine import is_literal_saved_grant  # noqa: PLC0415
+    from agentic_cli.workflow.permissions.engine import (  # noqa: PLC0415
+        is_bounded_saved_grant,
+        is_literal_saved_grant,
+    )
     from agentic_cli.workflow.permissions.matchers import get_matcher  # noqa: PLC0415
 
     path = get_user_project_grants_path(app_name)
@@ -163,13 +185,24 @@ def load_project_grants(app_name: str, ctx: PermissionContext) -> list[Rule]:
                 )
                 continue
             target = "*" if raw == "*" else get_matcher(cap).canonicalize_target(raw, ctx)
-            if effect is Effect.ALLOW and not is_literal_saved_grant(cap, target, ctx.home):
+            if effect is Effect.ALLOW and not is_literal_saved_grant(cap, target):
                 # Loaded as a target but matched as a pattern: a grant saved
                 # with a wildcard character in its literal part would cover
                 # more than was approved. A deny keeps its glob: it can only
                 # deny more.
                 Loggers.workflow().warning(
                     "permission_glob_grant_dropped",
+                    capability=cap,
+                    target=target,
+                    path=str(path),
+                )
+                continue
+            if effect is Effect.ALLOW and not is_bounded_saved_grant(cap, target, ctx.home):
+                # A grant on the root, home or above it: the engine no longer
+                # widens to them, so one saved by an older engine (or by hand)
+                # would cover far more than a prompt now offers.
+                Loggers.workflow().warning(
+                    "permission_broad_grant_dropped",
                     capability=cap,
                     target=target,
                     path=str(path),

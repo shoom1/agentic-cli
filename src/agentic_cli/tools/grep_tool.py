@@ -47,7 +47,9 @@ def grep(
 
     Use this to find code references, definitions, usage sites, or any
     text across a project. Uses ripgrep when available (faster, respects
-    .gitignore), falls back to Python implementation.
+    .gitignore), falls back to Python implementation. Hidden files and
+    directories below ``path`` (``.env``, ``.git``, ...) are not searched;
+    name one as ``path`` to search it.
     For finding files by name/extension, use glob instead.
 
     Args:
@@ -158,6 +160,10 @@ def _grep_with_ripgrep(
 
     if file_pattern:
         cmd.extend(["--glob", file_pattern])
+    # ripgrep skips hidden files below the root, but a --glob overrides that
+    # (`-g '*'` searches .env and .git): the last glob that matches wins, so
+    # this one keeps them out. A hidden path given as the root is searched.
+    cmd.extend(["--glob", "!.*"])
 
     cmd.extend(["--max-count", str(max_results * 10)])  # Get more, then trim
     # Pass the pattern via -e and terminate option parsing with "--" so that a
@@ -315,6 +321,15 @@ def _grep_with_ripgrep(
     }
 
 
+def _is_hidden_below(file_path: Path, root: Path) -> bool:
+    """Whether a component of ``file_path`` below ``root`` starts with a dot."""
+    try:
+        parts = file_path.relative_to(root).parts
+    except ValueError:
+        return False
+    return any(part.startswith(".") for part in parts)
+
+
 def _grep_python(
     pattern: str,
     path: Path,
@@ -363,6 +378,11 @@ def _grep_python(
         # Count only files against the budget — directories must not exhaust it
         # (otherwise dirs before the files silently drop matches).
         if not f.is_file():
+            continue
+        # Hidden files and directories below the root are not searched, as
+        # ripgrep does: the engine judged only `path`, and a search of the
+        # project must not read its .env or .git. A hidden root is searched.
+        if f != path and _is_hidden_below(f, path):
             continue
         files.append(f)
         if len(files) >= _MAX_FILES:

@@ -77,6 +77,58 @@ class TestProtectedPaths:
         assert Path("~/.ssh").expanduser().resolve() in policy.resolved_deny_read_paths(project)
 
 
+def _sandbox_cases() -> list:
+    from agentic_cli import protected_paths as pp
+
+    lists = [
+        ("credential", pp.CREDENTIAL_STORES, ("read", "write")),
+        ("never-writable", pp.NEVER_WRITABLE, ("write",)),
+        ("workdir", pp.WORKDIR_NEVER_WRITABLE, ("write",)),
+        ("workdir", pp.WORKDIR_NEVER_READABLE, ("read",)),
+        ("app-config", (pp.APP_CONFIG_DIR,), ("read", "write")),
+    ]
+    return [
+        pytest.param(entry, ops, id=f"{name}:{entry.location}")
+        for name, entries, ops in lists
+        for entry in entries
+    ]
+
+
+def _located(entry, project: Path) -> Path:
+    location = entry.location.replace("{app_name}", APP)
+    if location.startswith("~/"):
+        return Path(location).expanduser().resolve()
+    if location.startswith("/"):
+        return Path(location).resolve()
+    return project / location
+
+
+class TestTheSharedLists:
+    """The sandbox's policy is built from ``agentic_cli.protected_paths``, the
+    lists the permission engine's builtin denies come from."""
+
+    @pytest.mark.parametrize("entry, ops", _sandbox_cases())
+    def test_every_shared_entry_is_denied(self, home, project, entry, ops):
+        policy = OSSandboxPolicy(app_name=APP)
+        path = _located(entry, project)
+        if "read" in ops:
+            assert path in policy.resolved_deny_read_paths(project)
+        if "write" in ops:
+            assert path in policy.resolved_deny_write_paths(project)
+
+    def test_the_public_lists_are_the_shared_ones(self, home, project):
+        from agentic_cli import protected_paths as pp
+        from agentic_cli.tools.shell.os_sandbox.policy import MANDATORY_DENY_WRITE
+
+        def resolved(entries):
+            return [Path(e).expanduser().resolve() for e in entries]
+
+        assert resolved(MANDATORY_DENY_WRITE) == [_located(e, project) for e in pp.NEVER_WRITABLE]
+        assert resolved(PROTECTED_HOME_PATHS) == [
+            _located(e, project) for e in pp.CREDENTIAL_STORES
+        ]
+
+
 class TestWritableWorkingDir:
     def test_a_project_directory_is_writable(self, home, project):
         assert project in OSSandboxPolicy().resolved_writable_paths(project)

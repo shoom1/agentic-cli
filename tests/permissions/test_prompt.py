@@ -33,9 +33,11 @@ class TestBuildRequest:
             ALLOW_ONCE_CHOICE, ALLOW_SESSION_CHOICE, ALLOW_ALWAYS_CHOICE, DENY_CHOICE
         ]
 
-    def test_prompt_mentions_tool_and_capabilities(self):
-        """For filesystem.* the prompt shows the broadened (parent-directory)
-        scope — matching what an Allow Session/Always would actually store."""
+    def test_prompt_names_the_file_and_then_the_scope(self):
+        """Each line names the exact file the call touches, and the next one
+        what a session or "always" grant would cover, as for a URL: a prompt
+        that showed only the directory made a write to ``~/.zshrc`` look like
+        one to ``~/notes.md``, so "Allow once" was chosen blind."""
         req = build_request(
             "copy_file",
             [
@@ -44,15 +46,26 @@ class TestBuildRequest:
             ],
         )
         assert "copy_file" in req.prompt
-        # Both entries show the parent-directory glob, not the exact file.
-        assert "filesystem.read → /src/**" in req.prompt
-        assert "filesystem.write → /dst/**" in req.prompt
-        # The exact filenames do NOT appear — the scope the user will actually
-        # grant is the directory.
-        assert "file_a.txt" not in req.prompt
-        assert "file_b.txt" not in req.prompt
-        # And a hint explaining the widening:
-        assert "whole directory" in req.prompt
+        assert (
+            "  • filesystem.read → /src/file_a.txt\n"
+            "    (for this session / always: all of /src/**)\n"
+            "  • filesystem.write → /dst/file_b.txt\n"
+            "    (for this session / always: all of /dst/**)\n"
+        ) in req.prompt
+        assert "whole directory" not in req.prompt
+
+    def test_a_grant_that_covers_only_its_target_shows_no_scope(self, tmp_path):
+        """A file directly in home is granted exactly: the prompt names it and
+        promises nothing wider."""
+        home = tmp_path.resolve() / "home"
+        req = build_request(
+            "write_file",
+            [ResolvedCapability("filesystem.write", str(home / ".zshrc"))],
+            home=home,
+        )
+        assert f"  • filesystem.write → {home / '.zshrc'}\n" in req.prompt
+        assert "for this session / always" not in req.prompt
+        assert "/**" not in req.prompt
 
     def test_prompt_preserves_exact_http_target(self):
         """Non-filesystem capabilities keep their exact display target."""

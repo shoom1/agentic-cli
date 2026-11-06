@@ -612,18 +612,20 @@ class TestDenyRulesIgnoreCase:
 
     @pytest.mark.asyncio
     async def test_a_read_deny_covers_every_spelling_of_the_file(self, layout):
+        """A project deny rule ignores case. (A file no builtin rule names:
+        the builtin rules deny ``./.env`` themselves.)"""
         import json
 
-        (layout.work / ".env").write_text("SECRET=1")
+        (layout.work / "secrets.txt").write_text("SECRET=1")
         project_cfg = layout.work / f".{APP}"
         project_cfg.mkdir()
         (project_cfg / "settings.json").write_text(json.dumps({"permissions": {"deny": [
-            {"capability": "filesystem.read", "target": "${workdir}/.env"},
+            {"capability": "filesystem.read", "target": "${workdir}/secrets.txt"},
         ]}}))
         approver = _Approver(ALLOW_SESSION_CHOICE)
         engine = _engine_in(layout, approver)
 
-        for spelling in ("./.env", "./.ENV", "./.Env"):
+        for spelling in ("./secrets.txt", "./SECRETS.TXT", "./Secrets.txt"):
             result = await engine.check("read_file", _READ, {"path": spelling})
             assert result.allowed is False, spelling
             assert "project/deny" in result.reason
@@ -759,3 +761,127 @@ class TestIsStorableGrant:
 
         cap = ResolvedCapability(name, target.format(root=layout.root))
         assert is_storable_grant(cap, home=layout.home) is storable
+
+
+# ---------------------------------------------------------------------------
+# The default policy protects what the OS sandbox protects
+# ---------------------------------------------------------------------------
+
+
+def _protected_cases() -> list:
+    """Each shared protected location with each capability it is denied."""
+    from agentic_cli import protected_paths as pp
+
+    read, write = "filesystem.read", "filesystem.write"
+    lists = [
+        ("credential", pp.CREDENTIAL_STORES, (read, write)),
+        ("never-writable", pp.NEVER_WRITABLE, (write,)),
+        ("workdir", pp.WORKDIR_NEVER_WRITABLE, (write,)),
+        ("workdir", pp.WORKDIR_NEVER_READABLE, (read,)),
+        ("app-config", (pp.APP_CONFIG_DIR,), (read, write)),
+    ]
+    return [
+        pytest.param(entry, cap, id=f"{name}:{cap}:{entry.location}")
+        for name, entries, caps in lists
+        for entry in entries
+        for cap in caps
+    ]
+
+
+def _located(entry, layout) -> Path:
+    """Where a protected location lies under the fake home and the workdir."""
+    location = entry.location.replace("{app_name}", APP)
+    if location.startswith("~/"):
+        return layout.home / location[2:]
+    if location.startswith("/"):
+        return Path(location)
+    return layout.work / location
+
+
+class TestDefaultPolicyProtectsWhatTheSandboxDoes:
+    """The OS sandbox hid ``./.env``, the credential stores and the app's
+    config dir, and kept shell start-up files and ``.git`` read-only, while
+    the engine allowed reading ``./.env`` without a prompt and denied only a
+    short list of writes."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("entry, capability", _protected_cases())
+    async def test_builtin_denies_cover_sandbox_protected_paths(self, layout, entry, capability):
+        approver = _Approver(ALLOW_SESSION_CHOICE)
+        engine = _engine_in(layout, approver)
+        # A broad allow the user wrote does not reach them: deny wins.
+        engine._base_rules.append(Rule(capability, "/**", Effect.ALLOW, RuleSource.USER))
+        location = _located(entry, layout)
+        targets = [location, location / "inner" / "file"] if entry.is_dir else [location]
+
+        for target in targets:
+            result = await engine.check(
+                "tool", [Capability(capability, target_arg="path")], {"path": str(target)}
+            )
+            assert result.allowed is False, target
+            assert "builtin/deny" in result.reason, result.reason
+        assert approver.requests == []
+
+    @pytest.mark.asyncio
+    async def test_the_project_env_file_is_not_readable_without_any_rule(self, layout):
+        (layout.work / ".env").write_text("API_KEY=not-a-key\n")
+        approver = _Approver(ALLOW_SESSION_CHOICE)
+        engine = _engine_in(layout, approver)
+
+        for spelling in (".env", "./.env", str(layout.work / ".env"), "./.ENV"):
+            result = await engine.check("read_file", _READ, {"path": spelling})
+            assert result.allowed is False, spelling
+            assert "builtin/deny" in result.reason, result.reason
+        assert approver.requests == []
+        # The rest of the project stays readable without a prompt.
+        result = await engine.check("read_file", _READ, {"path": "notes.md"})
+        assert result.allowed is True and "builtin/allow" in result.reason
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("folder", ["tool-output", "fetched"])
+    async def test_the_framework_s_own_saved_files_stay_readable(self, layout, folder):
+        """``cap_tool_result`` and ``web_fetch`` save into ``./.{app}/`` and
+        point the model at ``read_file``: no deny may reach them."""
+        saved = layout.work / f".{APP}" / folder / "page.txt"
+        saved.parent.mkdir(parents=True)
+        saved.write_text("saved\n")
+        approver = _Approver("Deny")
+        engine = _engine_in(layout, approver)
+
+        result = await engine.check(
+            "read_file", _READ, {"path": f"./.{APP}/{folder}/page.txt"}
+        )
+        assert result.allowed is True
+        assert "builtin/allow" in result.reason
+        assert approver.requests == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("caps, name", [(_WRITE, "notes.md"), (_READ, ".gitconfig")])
+    async def test_a_grant_for_a_file_in_home_is_that_file(self, layout, caps, name):
+        """A grant for a file directly in home widened to all of home, which
+        covered ``~/.zshrc`` and ``~/Library/LaunchAgents`` (writes) and every
+        file not otherwise denied (reads)."""
+        approver = _Approver(ALLOW_SESSION_CHOICE)
+        engine = _engine_in(layout, approver)
+
+        granted = await engine.check("tool", caps, {"path": str(layout.home / name)})
+        assert granted.allowed is True
+        session = [(r.capability, r.target) for r in engine.rules if r.source is RuleSource.SESSION]
+        assert session == [(caps[0].name, str(layout.home / name))]
+
+        approver.answer = "Deny"
+        sibling = await engine.check("tool", caps, {"path": str(layout.home / "other.md")})
+        assert sibling.allowed is False
+        assert len(approver.requests) == 2
+
+    @pytest.mark.asyncio
+    async def test_a_grant_on_home_itself_covers_only_home(self, layout):
+        (layout.home / "docs").mkdir()
+        approver = _Approver(ALLOW_SESSION_CHOICE)
+        engine = _engine_in(layout, approver)
+
+        assert (await engine.check("glob", _READ, {"path": str(layout.home)})).allowed
+        approver.answer = "Deny"
+        below = await engine.check("glob", _READ, {"path": str(layout.home / "docs")})
+        assert below.allowed is False
+        assert len(approver.requests) == 2
