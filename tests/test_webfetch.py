@@ -185,6 +185,31 @@ class TestURLValidator:
         assert validator.validate("https://fass.de/").valid
 
     @pytest.mark.parametrize(
+        "entry, url",
+        [
+            ("93.184.216.34", "https://93.184.216.34/"),
+            ("93.184.216.34", "https://[::ffff:93.184.216.34]/"),
+            ("93.184.216.34", "https://[::ffff:5db8:d822]/"),
+            ("93.184.216.34", "https://1572395042/"),
+            ("::ffff:93.184.216.34", "https://93.184.216.34/"),
+        ],
+    )
+    def test_a_blocked_address_is_blocked_in_every_notation(self, entry, url):
+        """An IPv4-mapped IPv6 literal reaches the IPv4 host, so it is that
+        address; a global one passes the private-address check."""
+        from agentic_cli.tools.webfetch.validator import URLValidator
+        result = URLValidator(blocked_domains=[entry]).validate(url)
+        assert result.valid is False
+        assert result.error == "Domain '93.184.216.34' is blocked by policy"
+
+    @pytest.mark.parametrize("url", ["http://[::ffff:127.0.0.1]/", "http://[::ffff:a00:1]/"])
+    def test_a_mapped_private_address_is_refused_as_its_ipv4(self, validator, url):
+        result = validator.validate(url)
+        assert result.valid is False
+        assert result.error.startswith("Private/internal IP address blocked: ")
+        assert "::ffff" not in result.error
+
+    @pytest.mark.parametrize(
         "url",
         [
             "https://i❤.ws/",  # a real emoji domain, not a valid IDNA 2008 name
