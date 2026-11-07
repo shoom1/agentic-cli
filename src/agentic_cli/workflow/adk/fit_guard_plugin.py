@@ -35,9 +35,10 @@ belongs to one model call: it is kept under the identity of the call's
 ``EventActions`` (``callback_context.actions``), which ADK makes for each
 call and hands to all three of its callbacks, while two parallel calls of one
 sub-agent share their invocation and agent name. It is released when the
-call ends (``after_model_callback``, ``on_model_error_callback``); a call
-cancelled mid-request fires neither, so each run first drops the copies any
-other invocation left (turns run one at a time).
+call ends (``after_model_callback``, ``on_model_error_callback``). Before
+google-adk 2.14 a call cancelled mid-request fires neither (2.14 runs the
+error callback with the ``CancelledError``), so each run first drops the
+copies any other invocation left (turns run one at a time).
 """
 
 from __future__ import annotations
@@ -133,7 +134,7 @@ class FitGuardPlugin(BasePlugin):
         return None
 
     async def before_run_callback(self, *, invocation_context: "InvocationContext") -> None:
-        # What a cancelled call left: it fired neither release.
+        # What a cancelled call left: before google-adk 2.14 it fired neither release.
         invocation = invocation_context.invocation_id
         self._seen = {
             key: held for key, held in self._seen.items() if held.invocation == invocation

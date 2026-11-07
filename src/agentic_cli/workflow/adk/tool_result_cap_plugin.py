@@ -15,11 +15,13 @@ be skipped for every cut result.
 
 ADK's Claude and OpenAI Responses adapters send a model only part of a
 result: its ``content`` when that is a non-empty string or list (as
-``read_file`` and MCP tools return), and otherwise, on OpenAI Responses, its
-``result`` when that is set (a list result, ``job_result``, the fallback).
-So the note also goes where they read it (:func:`_note_where_sent`):
-otherwise the model would read the cut text without learning where the rest
-is. Gemini and the chat adapters send the whole result, ``truncated``
+``read_file`` and MCP tools return), and otherwise, on OpenAI Responses
+before google-adk 2.14, its ``result`` when that is set (a list result,
+``job_result``, the fallback); from 2.14 Responses sends a dict whole unless
+``result`` is its only key. So the note also goes where they read it
+(:func:`_note_where_sent`): otherwise the model would read the cut text
+without learning where the rest is (on 2.14 the model can read the note
+twice). Gemini and the chat adapters send the whole result, ``truncated``
 included.
 """
 
