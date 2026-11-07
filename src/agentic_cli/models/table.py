@@ -94,6 +94,17 @@ def version_key(model_id: str) -> tuple[int, ...]:
     return tuple(int(n) for n in re.findall(r"(?<!\d)\d{1,2}(?!\d)", model_id))
 
 
+# A dated Claude id's suffix: Anthropic's ``-20250929``, Vertex's ``@2025-09-29``.
+_CLAUDE_DATE_SUFFIX = re.compile(r"-\d{8}$")
+_CLAUDE_VERTEX_DATE_SUFFIX = re.compile(r"@\d{4}-\d{2}-\d{2}$")
+
+
+def claude_alias(model_id: str) -> str:
+    """The alias of a dated Claude id (``claude-sonnet-4-5-20250929`` →
+    ``claude-sonnet-4-5``); any other id unchanged."""
+    return _CLAUDE_VERTEX_DATE_SUFFIX.sub("", _CLAUDE_DATE_SUFFIX.sub("", model_id))
+
+
 def newest(records: Iterable[ModelRecord]) -> ModelRecord:
     """The newest by version; a non-preview id wins a tie, then the first id in order.
 
@@ -255,10 +266,16 @@ class ShippedTable:
         sampling rule and reasoning text; the model's own entry adds its
         numbers and refines its ladder. With neither, the conservative record:
         no thinking knob, tools assumed, every source ``default``.
+
+        A dated Claude id (``claude-sonnet-4-5-20250929``, or the
+        ``@2025-09-29`` form) takes its alias's rule and entry: it is described
+        as its alias is, with a listing and without one. Only the alias's name
+        (``Claude Sonnet 4.5 (latest)``) is not its own.
         """
         table = self._providers.get(kind)
-        rule = next((r.rule for r in self._rules.get(kind, ()) if r.matches(model)), None)
-        entry = table.models.get(model) if table is not None else None
+        known = claude_alias(model) if kind is ProviderKind.ANTHROPIC else model
+        rule = next((r.rule for r in self._rules.get(kind, ()) if r.matches(known)), None)
+        entry = table.models.get(known) if table is not None else None
 
         values: dict[str, Any] = {}
         if rule is not None:
@@ -276,6 +293,8 @@ class ShippedTable:
                 value = getattr(entry, name)
                 if value is not None:
                     values[name] = value
+            if known != model:
+                values.pop("display_name", None)
 
         sources = MappingProxyType(
             {name: "table" if name in values else "default" for name in TRACKED_FIELDS}

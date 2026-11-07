@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import dataclasses
 import json
 from importlib import resources
 
@@ -171,6 +172,28 @@ class TestClaude:
 
     def test_claude_reasoning_text(self):
         assert _record(A, "claude-sonnet-4-5").reasoning_text is True
+
+    @pytest.mark.parametrize(
+        ("model", "alias"),
+        [
+            ("claude-sonnet-5-5-20261001", "claude-sonnet-5-5"),
+            ("claude-sonnet-5-5@2026-10-01", "claude-sonnet-5-5"),
+            ("claude-sonnet-4-6@2026-02-17", "claude-sonnet-4-6"),
+        ],
+    )
+    def test_a_dated_id_is_described_as_its_alias_is(self, model, alias):
+        """Its alias's rule and entry, so its record is the same with a listing
+        and without one; only the alias's name is not its own."""
+        record, expected = _record(A, model), _record(A, alias)
+
+        assert record.model == model
+        assert record.display_name == ""
+        assert record.sources["display_name"] == "default"
+        assert dataclasses.replace(record, model=alias) == dataclasses.replace(
+            expected,
+            display_name="",
+            sources={**expected.sources, "display_name": "default"},
+        )
 
 
 class TestOpenAI:

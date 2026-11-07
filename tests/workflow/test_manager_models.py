@@ -1012,7 +1012,7 @@ def _stale_cache(home: Path) -> None:
     cache = home / "home" / ".agentic_cli" / "model_cache.json"
     cache.parent.mkdir(parents=True, exist_ok=True)
     models = [{"id": m} for m in ("gemini-2.5-flash", "gemini-2.5-pro")]
-    cache.write_text(json.dumps({"version": 2, "providers": {"google": {
+    cache.write_text(json.dumps({"version": 3, "providers": {"google": {
         "fetched_at": time.time() - 3 * 86400, "ok": True, "kind": "google", "models": models,
     }}}))
 
