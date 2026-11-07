@@ -2,8 +2,9 @@
 
 The key goes in ``x-goog-api-key``. Pages follow ``nextPageToken``.
 
-Every model listed is served, so its id is accepted. Only text models are
-shown, by 0.6's rule: a ``gemini-`` model that supports both
+A model that supports ``generateContent`` is served for chat, so its id is
+accepted; the others (embedding, Imagen and Veo models) are left out. Only
+text models are shown, by 0.6's rule: a ``gemini-`` model that supports both
 ``generateContent`` and ``createCachedContent`` (which leaves out image
 generation, TTS, native audio, robotics, computer use and deep research), and
 not a point release (``-001``), a ``-latest`` alias, a dated snapshot
@@ -29,7 +30,9 @@ from agentic_cli.models.discovery import (
 from agentic_cli.models.providers import Provider
 
 URL = "https://generativelanguage.googleapis.com/v1beta/models"
-_REQUIRED_METHODS = frozenset({"generateContent", "createCachedContent"})
+# A chat request is a generateContent call.
+_SERVED_METHOD = "generateContent"
+_REQUIRED_METHODS = frozenset({_SERVED_METHOD, "createCachedContent"})
 _EXCLUDED = re.compile(
     r"-\d{3}$"  # point releases: -001, -002
     r"|-latest$"  # aliases: gemini-flash-latest
@@ -61,7 +64,11 @@ async def fetch(client: httpx.AsyncClient, provider: Provider) -> list[ListedMod
 def _model(entry: Mapping[str, Any]) -> ListedModel | None:
     name = text(entry.get("name"))
     model_id = name.removeprefix("models/") if name is not None else ""
-    if not model_id:
+    methods = entry.get("supportedGenerationMethods")
+    if not isinstance(methods, list):
+        return None
+    supported = {method for method in methods if isinstance(method, str)}
+    if not model_id or _SERVED_METHOD not in supported:
         return None
     thinking = entry.get("thinking")
     return ListedModel(
@@ -70,15 +77,13 @@ def _model(entry: Mapping[str, Any]) -> ListedModel | None:
         context_window=count(entry.get("inputTokenLimit")),
         max_output=count(entry.get("outputTokenLimit")),
         reasoning=thinking if isinstance(thinking, bool) else None,
-        shown=_shown(model_id, entry.get("supportedGenerationMethods")),
+        shown=_shown(model_id, supported),
     )
 
 
-def _shown(model_id: str, methods: Any) -> bool:
+def _shown(model_id: str, methods: set[str]) -> bool:
     """Whether 0.6's rule keeps the model: a ``gemini-`` text model, not an
     alias, snapshot or variant."""
     if not model_id.startswith("gemini-") or _EXCLUDED.search(model_id):
         return False
-    if not isinstance(methods, list):
-        return False
-    return _REQUIRED_METHODS <= {method for method in methods if isinstance(method, str)}
+    return _REQUIRED_METHODS <= methods

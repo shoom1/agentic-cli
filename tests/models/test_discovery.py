@@ -231,11 +231,11 @@ async def test_google_fields():
     assert models["gemini-2.0-flash"].max_output == 8192
 
 
-async def test_google_lists_every_model_and_shows_the_text_models_0_6_kept():
-    """Every model is served, so its id is accepted. Shown: a ``gemini-`` model
-    with ``generateContent`` and ``createCachedContent``, not a point release,
-    a ``-latest`` alias, a dated snapshot, a ``-customtools`` or an ``-exp-``
-    variant."""
+async def test_google_lists_the_models_that_generate_content_and_shows_the_text_models():
+    """Served (its id accepted): a model with ``generateContent``. Shown, as
+    0.6 kept them: a ``gemini-`` model with ``generateContent`` and
+    ``createCachedContent``, not a point release, a ``-latest`` alias, a
+    dated snapshot, a ``-customtools`` or an ``-exp-`` variant."""
     listing = await listed("google", serving(payload("google")))
 
     assert [(model.id, model.shown) for model in listing.models] == [
@@ -253,22 +253,28 @@ async def test_google_lists_every_model_and_shows_the_text_models_0_6_kept():
         ("gemini-2.5-flash-image", False),
         ("gemini-2.5-flash-preview-tts", False),
         ("gemma-3-27b-it", False),
-        ("text-embedding-004", False),
     ]
     assert {model.alias for model in listing.models} == {None}
 
 
-async def test_a_google_entry_without_a_model_id_is_skipped():
+async def test_a_google_entry_that_names_no_chat_model_is_skipped():
+    """No model id, or no ``generateContent``: an embedding, Imagen or Veo
+    model takes no chat request."""
     page = {"models": [
         {"name": "models/"},
         {"name": 5},
         {"displayName": "No name"},
+        {"name": "models/text-embedding-005", "supportedGenerationMethods": ["embedContent"]},
+        {"name": "models/imagen-4.0-generate-001", "supportedGenerationMethods": ["predict"]},
+        {"name": "models/veo-3.0-generate-001", "supportedGenerationMethods": ["predictLongRunning"]},
         {"name": "models/gemini-9-flash", "supportedGenerationMethods": "generateContent"},
+        {"name": "models/gemini-9-pro"},
+        {"name": "models/gemma-9-it", "supportedGenerationMethods": ["generateContent"]},
     ]}
 
     listing = await listed("google", serving(page))
 
-    assert listing.models == (ListedModel(id="gemini-9-flash", shown=False),)
+    assert listing.models == (ListedModel(id="gemma-9-it", shown=False),)
 
 
 async def test_anthropic_fields():

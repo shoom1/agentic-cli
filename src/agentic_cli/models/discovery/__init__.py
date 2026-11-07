@@ -3,8 +3,8 @@
 One lister per provider kind, each over the provider's REST API with httpx,
 never a provider SDK (only the backend adapters touch those):
 
-- ``google``: ``GET /v1beta/models`` (``x-goog-api-key``); it shows the
-  text models 0.6 kept;
+- ``google``: ``GET /v1beta/models`` (``x-goog-api-key``), the models that
+  generate content; it shows the text models 0.6 kept;
 - ``anthropic``: ``GET /v1/models`` (``x-api-key``), with each model's
   thinking types and effort levels, and whether thinking can be turned off;
   it shows a dated id as its alias (``ListedModel.alias``);

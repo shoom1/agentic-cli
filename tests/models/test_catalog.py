@@ -572,6 +572,16 @@ async def test_a_fresh_listing_accepts_every_id_its_provider_serves():
         catalog.record(ModelRef("google", "gemini-9-ultra"))
 
 
+async def test_google_serves_for_chat_only_the_models_that_generate_content():
+    """An embedding model (Imagen and Veo alike) is listed but takes no chat
+    request: a fresh listing rejects it rather than the first turn failing."""
+    catalog = await loaded(google=KEYS["google"])
+
+    assert catalog.record(ModelRef("google", "gemma-3-27b-it")).model == "gemma-3-27b-it"
+    with pytest.raises(ModelResolutionError, match="google:text-embedding-004 is not available"):
+        catalog.record(ModelRef("google", "text-embedding-004"))
+
+
 async def test_what_is_shown_does_not_change():
     """Each provider's records, the tiers a list with no entry offers, the
     status counts and the "not available" message: the same as when the
