@@ -1511,6 +1511,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in one expression; the part is the same), and `/compact` and the overflow
   summary leave 2.13's new `isolation_scope` argument of ADK's compaction at
   its default, a chat session's root agent's own.
+- **google-adk 2.14 is supported, as are 2.12 and 2.13.** The runner that
+  skips ADK's compaction pass after each turn takes the pass's argument under
+  either name (`session` before 2.14, `invocation_context` from it): on 2.14
+  every ADK turn failed with a `TypeError`. From 2.14 ADK runs the model-error
+  callback for a cancelled model call, so the fit guard releases its copy of
+  that request at once instead of at the next turn.
 - **`list_sessions` returns `SessionInfo` rows, not dicts** (breaking for
   library callers): `session["session_id"]` is `session.session_id`,
   `last_update` (epoch seconds) is `updated` (an aware `datetime`), and

@@ -106,11 +106,16 @@ def test_an_experimental_notice_is_logged_not_printed(previous_hook, logged, cap
 def test_an_experimental_class_notice_is_logged_not_printed(
     previous_hook, logged, capsys, monkeypatch
 ):
-    """ADK's other form of notice, for a class marked experimental: a Gemini
-    agent's first turn with prompt caching on builds ADK's context cache
-    manager, which gives it."""
-    from google.adk.models.gemini_context_cache_manager import GeminiContextCacheManager
+    """ADK's other form of notice, for a class marked experimental. Before
+    google-adk 2.14 a Gemini agent's first turn with prompt caching on built
+    one (the context cache manager); the class here is marked the same way,
+    with ADK's own decorator, so the test does not depend on which of ADK's
+    classes are still experimental."""
     from google.adk.utils import feature_decorator
+
+    @feature_decorator.experimental
+    class CacheManagerLike:
+        pass
 
     monkeypatch.setattr(feature_decorator, "_WARNED_MESSAGES", set())  # ADK warns once
     monkeypatch.delenv("ADK_SUPPRESS_EXPERIMENTAL_FEATURE_WARNINGS", raising=False)
@@ -118,13 +123,13 @@ def test_an_experimental_class_notice_is_logged_not_printed(
 
     with warnings.catch_warnings():
         warnings.simplefilter("always")
-        GeminiContextCacheManager(genai_client=None)
+        CacheManagerLike()
 
     assert previous_hook == []
     assert capsys.readouterr().err == ""
     assert {
         "event": "adk_experimental_feature",
-        "feature": "GeminiContextCacheManager",
+        "feature": "CacheManagerLike",
         "log_level": "debug",
     } in logged
 
