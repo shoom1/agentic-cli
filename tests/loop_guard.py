@@ -124,6 +124,8 @@ PRIMITIVES: tuple[Primitive, ...] = (
     Primitive("agentic_cli.memory.kb.convert", "convert_document"),
     Primitive("trafilatura", "extract", optional=True),
     Primitive("html2text", "handle", owner="HTML2Text"),
+    # Feed parsing (an arXiv reply)
+    Primitive("feedparser", "parse"),
     # Embedding
     Primitive("agentic_cli.memory._core.mock_embeddings", "embed_text", owner="MockEmbeddingService"),
     Primitive("agentic_cli.memory._core.mock_embeddings", "embed_batch", owner="MockEmbeddingService"),

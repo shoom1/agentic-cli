@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import functools
 import importlib
 import inspect
 import io
@@ -125,6 +126,29 @@ async def test_a_call_that_does_not_block_passes(tmp_path):
         os.close(fd)
 
 
+async def test_an_asyncio_connection_is_not_refused():
+    """asyncio connects a non-blocking socket: the guard lets that through."""
+
+    async def echo(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        writer.write(await reader.read(5))
+        await writer.drain()
+        writer.close()
+
+    server = await asyncio.start_server(echo, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    try:
+        with no_blocking_calls():
+            reader, writer = await asyncio.open_connection("127.0.0.1", port)
+            writer.write(b"Magma")
+            await writer.drain()
+            assert await reader.read(5) == b"Magma"
+            writer.close()
+            await writer.wait_closed()
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
 def _pdf_reader() -> None:
     import pypdf
 
@@ -141,6 +165,12 @@ def _trafilatura() -> None:
     import trafilatura
 
     trafilatura.extract("<html><body><p>Magma</p></body></html>")
+
+
+def _feedparser() -> None:
+    import feedparser
+
+    feedparser.parse(b"<feed xmlns='http://www.w3.org/2005/Atom'><title>Magma</title></feed>")
 
 
 def _convert_document() -> None:
@@ -222,6 +252,7 @@ PRIMITIVE_CALLS: dict[str, Callable[[_Held], Any]] = {
     "agentic_cli.memory.kb.convert.convert_document": lambda held: _convert_document(),
     "trafilatura.extract": lambda held: _trafilatura(),
     "html2text.HTML2Text.handle": lambda held: _html2text(),
+    "feedparser.parse": lambda held: _feedparser(),
     "agentic_cli.memory._core.mock_embeddings.MockEmbeddingService.embed_text": _embed(True, "embed_text"),
     "agentic_cli.memory._core.mock_embeddings.MockEmbeddingService.embed_batch": _embed(True, "embed_batch"),
     "agentic_cli.memory._core.embeddings.EmbeddingService.embed_text": _embed(False, "embed_text"),
@@ -329,6 +360,13 @@ def _register_every_framework_tool() -> None:
             pass  # a backend of an extra that is not installed
 
 
+def _defined_in_agentic_cli(func: Callable[..., Any]) -> bool:
+    """Whether ``func`` (or what a ``functools.partial`` of it wraps) is the framework's."""
+    while isinstance(func, functools.partial):
+        func = func.func
+    return getattr(inspect.unwrap(func), "__module__", "").startswith("agentic_cli.")
+
+
 def test_the_registry_s_async_tools_are_the_guarded_ones():
     from agentic_cli.tools.registry import get_registry
 
@@ -336,8 +374,7 @@ def test_the_registry_s_async_tools_are_the_guarded_ones():
     found = set()
     for definition in get_registry().list_tools():
         for func in (definition.func, *definition.variants):
-            ours = func is not None and func.__module__.startswith("agentic_cli.")
-            if ours and inspect.iscoroutinefunction(func):
+            if func is not None and _defined_in_agentic_cli(func) and inspect.iscoroutinefunction(func):
                 found.add(definition.name)
 
     assert found == REGISTERED, _ADD_IT.format(where="REGISTERED", calls="CALLS")
@@ -373,7 +410,9 @@ def test_the_factories_async_tools_are_the_guarded_ones(knowledge_base):
     found = set()
     for name, args in arguments.items():
         made = getattr(factories, name)(*args)
-        for tool in made if isinstance(made, list) else [made]:
+        if isinstance(made, dict):
+            made = list(made.values())
+        for tool in made if isinstance(made, (list, tuple)) else [made]:
             if inspect.iscoroutinefunction(tool):
                 found.add(tool.__name__)
 
