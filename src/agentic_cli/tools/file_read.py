@@ -63,7 +63,8 @@ def read_file(
         }
 
     try:
-        content = file_path.read_text()
+        # UTF-8 whatever the locale (the file tools write UTF-8).
+        content = file_path.read_text(encoding="utf-8")
         size = file_path.stat().st_size
 
         # If offset or limit specified, work with lines
@@ -95,7 +96,7 @@ def read_file(
     except UnicodeDecodeError:
         return {
             "success": False,
-            "error": f"Cannot read file as text (binary file?): {path}",
+            "error": f"Not a UTF-8 text file (binary, or another encoding): {path}",
             "path": str(file_path),
         }
     except PermissionError:
@@ -196,9 +197,11 @@ def _get_content(source: str) -> str:
     if not is_file:
         return source
     try:
-        return path.read_text()
+        return path.read_text(encoding="utf-8")
     except UnicodeDecodeError:
-        raise _UnreadableSource(f"Cannot read file as text (binary file?): {source}") from None
+        raise _UnreadableSource(
+            f"Not a UTF-8 text file (binary, or another encoding): {source}"
+        ) from None
     except OSError as e:
         raise _UnreadableSource(f"Cannot read file {source}: {e.strerror or e}") from None
 

@@ -959,6 +959,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`edit_file` changes one place or nothing: text found more than once needs
+  `replace_all=True`.** Without `replace_all` it replaced the first match and
+  reported success, so when the text was in two places (`return None` in two
+  functions) the model got `replacements: 1` for a place it may not have
+  meant, and nothing said so. More than one match is now an error naming the
+  count (include the text around the one to change, or pass
+  `replace_all=True`), in regex mode too, and the file is left as it was;
+  overlapping occurrences count. An empty `old_text`, which put the new text
+  between every two characters, is refused, and a regex replacement naming an
+  unknown group is an error instead of an exception.
+
 - **On ADK, synchronous tools run in worker threads, as on Deep Agents.**
   A config-built app's synchronous function tools, the framework's and its
   own, now run in ADK's tool thread pool with a copy of the turn's context
@@ -1786,6 +1797,29 @@ step; each entry says what to use instead.
   `agentic_cli.tools.os_sandbox`.
 
 ### Fixed
+
+- **`edit_file` keeps a file's line endings and encoding, and the file tools
+  read UTF-8 whatever the locale.** `edit_file` read a file with the locale's
+  encoding and universal newlines and wrote it back as UTF-8: every CRLF
+  became LF after a one-word edit, and where the locale is not UTF-8
+  (Windows' cp1252) a UTF-8 file came back double-encoded. It now reads the
+  bytes as UTF-8 and changes only the text it replaces: `read_file` shows
+  every line ending as LF, so each line break in `old_text` matches the
+  file's own ending there (CRLF, LF or CR, also in a file that mixes them),
+  the new lines take the ending of the text they replace, and a UTF-8 BOM is
+  kept. A regex edit of a file whose lines all end in CRLF is matched with LF
+  and written back with CRLF. `read_file`, `diff_compare` and `grep`'s
+  Python search read UTF-8 too. A file that is not UTF-8 is refused with
+  that reason ("Not a UTF-8 text file (binary, or another encoding)"), never
+  converted; the message said "binary file?".
+- **`glob` and `grep` understand brace patterns such as `*.{js,ts}`.**
+  Python's pattern matching has no braces, so `glob("**/*.{js,ts}")`, the
+  example in `glob`'s own docstring, found nothing and reported success, and
+  so did `grep`'s Python search with that `file_pattern` (ripgrep understood
+  it). A pattern is now expanded into its alternatives first (nested braces
+  too; at most 100, duplicates counted; an empty alternative names no file),
+  ripgrep gets one `--glob` for each, and every alternative is checked
+  against the search root, so `{x,../*}` is refused.
 
 - **An app starts when a knowledge base scope, the embedding model or an
   index cannot be opened.** Opening the knowledge base was all or nothing: a
