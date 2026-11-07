@@ -1780,6 +1780,15 @@ step; each entry says what to use instead.
 
 ### Fixed
 
+- **Two terminals of one app no longer erase each other's model listings.**
+  Each model catalog rewrote the whole model cache from what it had read at
+  startup, so a listing another process (another terminal, another project of
+  the same app) wrote since was dropped at its next write, and that process's
+  next start waited on the network to list it again. A listing now writes only
+  its own provider's entry and leaves the rest of the file as it is, a failed
+  listing never replaces a listing in the file, and the entry of a provider
+  this project does not define is kept for the projects that do.
+
 - **Listing Deep Agents conversations no longer reads every checkpoint.**
   `--continue`, `/resume` and `/sessions` listed conversations by reading
   every checkpoint of the app and user, sub-agents' included, each of which

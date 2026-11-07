@@ -50,8 +50,10 @@ provider in use that has credentials and no entry for its address and kind;
 a fresh entry needs no listing, and an older one (or a cached failure) is
 used while ``start_background_refresh`` lists it again. A broken file, one
 from an older version, or an entry for another address or kind is ignored
-and listed again. The entries of providers not in use are written back as
-they are.
+and listed again. A listing writes its own provider's entry and leaves every
+other entry as the file then holds it: several catalogs share the file (two
+terminals, two projects of one app), and a catalog's own copy of an entry may
+be older than the file's. A failed listing never replaces a listing.
 """
 
 from __future__ import annotations
@@ -231,9 +233,6 @@ class ModelCatalog:
         self._in_use = self._providers_in_use()
         # Providers a search listed (or read from the cache), beside those in use.
         self._searched: set[str] = set()
-        # Cache entries this catalog does not use (a provider not in use, or
-        # without credentials, now), written back unchanged.
-        self._kept: dict[str, _CacheEntry] = {}
         self._refresh_task: asyncio.Task[None] | None = None
         self._closed = False
         # Providers whose cached listing rejected an id (``confirm_rejections``).
@@ -266,9 +265,8 @@ class ModelCatalog:
         for name, state in self._states.items():
             entry = cached.get(name)
             if name not in self._in_use or not state.listable:
-                if entry is not None:
-                    self._kept[name] = entry
-            elif entry is None or not _describes(entry, state.provider):
+                continue
+            if entry is None or not _describes(entry, state.provider):
                 to_list.append(name)
             else:
                 self._adopt(state, entry)
@@ -282,7 +280,7 @@ class ModelCatalog:
             and self._states[ref.provider].from_cache
             and ref.model not in self._states[ref.provider].absent
         )
-        await self._load_builtins_now_needed()
+        await self._load_builtins_now_needed(cached)
         self._warn_of_entries_left_out()
 
     def start_background_refresh(self) -> "asyncio.Task[None] | None":
@@ -365,7 +363,6 @@ class ModelCatalog:
         if unlisted:
             cached = self._read_cache()
             for name in unlisted:
-                self._kept.pop(name, None)
                 entry, state = cached.get(name), self._states[name]
                 if entry is not None and _describes(entry, state.provider):
                     self._adopt(state, entry)
@@ -496,7 +493,7 @@ class ModelCatalog:
             if state.provider.builtin and state.provider.has_credentials
         ]
 
-    async def _load_builtins_now_needed(self) -> None:
+    async def _load_builtins_now_needed(self, cached: Mapping[str, _CacheEntry]) -> None:
         """Ask the built-ins' rules again with the entries the listings left
         offered, and load the built-ins they now need: from the cache when it
         holds their listing, else listed once (a retired entry may have been
@@ -510,7 +507,7 @@ class ModelCatalog:
         self._in_use = tuple(n for n in self._states if n in self._in_use or n in needed)
         to_list: list[str] = []
         for name in needed:
-            entry, state = self._kept.pop(name, None), self._states[name]
+            entry, state = cached.get(name), self._states[name]
             if entry is not None and _describes(entry, state.provider):
                 self._adopt(state, entry)
             else:
@@ -631,7 +628,7 @@ class ModelCatalog:
                 for ref in self._entries
                 if ref.provider == name and ref.model not in state.accepted
             )
-        self._write_cache()
+        self._write_cache(name)
 
     def _adopt(self, state: _ProviderState, entry: _CacheEntry) -> None:
         """Use a cache entry: fresh, stale, or a cached failure."""
@@ -808,27 +805,36 @@ class ModelCatalog:
             return {}
         return dict(document.providers)
 
-    def _write_cache(self) -> None:
-        """Write every entry the catalog holds; a failure is logged, never raised."""
+    def _write_cache(self, name: str) -> None:
+        """Write ``name``'s entry after its listing, keeping every other entry
+        as the file holds it now; a failure is logged, never raised.
+
+        A failed listing keeps a listing: the file's, when it holds one for
+        the provider's address and kind (another catalog may have written it
+        since this one read the file), else this catalog's earlier one. The
+        failure is written only when there is neither.
+        """
         if self._cache_path is None:
             return
-        providers: dict[str, Any] = {
-            name: entry.model_dump() for name, entry in self._kept.items()
+        cached = self._read_cache()
+        state = self._states[name]
+        if state.failure is not None:
+            entry = cached.get(name)
+            if entry is not None and entry.ok and _describes(entry, state.provider):
+                return
+        listing = state.listing or state.failure
+        if listing is None:
+            return
+        providers: dict[str, Any] = {n: entry.model_dump() for n, entry in cached.items()}
+        providers[name] = {
+            "fetched_at": listing.fetched_at,
+            "ok": listing.ok,
+            "error": listing.error,
+            "base_url": state.provider.base_url,
+            "kind": state.provider.kind.value,
+            "models": [dataclasses.asdict(model) for model in listing.models],
+            "absent": sorted(state.absent) if listing.ok else [],
         }
-        for name, state in self._states.items():
-            # A failed refresh keeps the earlier listing; a failure is written
-            # only when there is no listing to keep.
-            listing = state.listing or state.failure
-            if listing is not None:
-                providers[name] = {
-                    "fetched_at": listing.fetched_at,
-                    "ok": listing.ok,
-                    "error": listing.error,
-                    "base_url": state.provider.base_url,
-                    "kind": state.provider.kind.value,
-                    "models": [dataclasses.asdict(model) for model in listing.models],
-                    "absent": sorted(state.absent) if listing.ok else [],
-                }
         try:
             _atomic_write_json(self._cache_path, {"version": CACHE_VERSION, "providers": providers})
         except OSError as exc:
