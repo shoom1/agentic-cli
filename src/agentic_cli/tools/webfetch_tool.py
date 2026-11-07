@@ -22,9 +22,9 @@ from agentic_cli.tools.webfetch import (
     FetchResult,
     URLValidator,
     RobotsTxtChecker,
-    HTMLToMarkdown,
     build_summarize_prompt,
 )
+from agentic_cli.tools.webfetch.converter import page_text, text_extension
 from agentic_cli.tools.webfetch.saved import (
     SaveError,
     cleanup_saved_pages,
@@ -173,7 +173,16 @@ def _redirect_check(prompt: str) -> RedirectCheck | None:
 
 
 async def fetch_and_summarize(url: str, prompt: str, timeout: int, summarizer) -> dict[str, Any]:
-    """Fetch ``url``, save the page, and summarize it with ``summarizer``."""
+    """Fetch ``url``, save the page, and summarize it with ``summarizer``.
+
+    The summary is written from the whole page converted to text, cut at
+    ``webfetch_max_content_bytes`` (``converter.page_text``, in a worker
+    thread: pypdf and the HTML converters take a while on a large page).
+    ``truncated`` says the text was cut, or the download was. A page with no
+    text to summarize is an error, not a summary of nothing: a type that is
+    not text (an image, an archive), a PDF cut at ``webfetch_max_pdf_bytes``
+    (unreadable), or a page whose conversion holds no text.
+    """
     fetcher = get_or_create_fetcher()
     fetch_result = await fetcher.fetch(url, timeout=timeout, authorize=_redirect_check(prompt))
 
@@ -195,21 +204,59 @@ async def fetch_and_summarize(url: str, prompt: str, timeout: int, summarizer) -
 
     saved = await asyncio.to_thread(save_fetched_page, url, fetch_result)
 
+    content_type = fetch_result.content_type or "text/html"
+    extension = text_extension(content_type)
+    if extension is None:
+        return {
+            "success": False,
+            "error": (
+                f"Not a text page: {url} is {content_type}. web_fetch summarizes "
+                "HTML, text (Markdown, CSV, ...), JSON, XML and PDF pages."
+            ),
+            "url": url,
+        }
+    if extension == ".pdf" and fetch_result.raw_truncated:
+        limit = get_settings().webfetch_max_pdf_bytes
+        return {
+            "success": False,
+            "error": (
+                f"The PDF is larger than webfetch_max_pdf_bytes ({limit:,} bytes): "
+                "only its start was read, and a cut PDF cannot be read. Raise the "
+                "setting to read it."
+            ),
+            "url": url,
+            **saved,
+        }
     try:
-        markdown_content = HTMLToMarkdown().convert(
-            fetch_result.content,
-            fetch_result.content_type or "text/html",
+        text, cut = await asyncio.to_thread(
+            page_text,
+            fetch_result.raw or b"",
+            content_type=content_type,
+            extension=extension,
+            charset=fetch_result.charset,
+            url=fetch_result.final_url or url,
+            max_bytes=get_settings().webfetch_max_content_bytes,
         )
-    except Exception as e:  # html2text is a third-party parser; never raise out of web_fetch
+    except Exception as e:  # third-party parsers; never raise out of web_fetch
         return {
             "success": False,
             "error": f"Could not convert the page ({type(e).__name__})",
             "url": url,
             **saved,
         }
-    full_prompt = build_summarize_prompt(markdown_content, prompt)
+    if not text:
+        return {
+            "success": False,
+            "error": (
+                f"No text in the page: {url} ({content_type}) converts to no text "
+                "to summarize (an empty page, one its scripts build, or a scanned PDF)."
+            ),
+            "url": url,
+            **saved,
+        }
+    full_prompt = build_summarize_prompt(text, prompt)
     try:
-        summary = await summarizer.summarize(markdown_content, full_prompt)
+        summary = await summarizer.summarize(text, full_prompt)
     except Exception as e:
         return {
             "success": False,
@@ -222,7 +269,7 @@ async def fetch_and_summarize(url: str, prompt: str, timeout: int, summarizer) -
         "success": True,
         "summary": summary,
         "url": url,
-        "truncated": fetch_result.truncated,
+        "truncated": cut or fetch_result.raw_truncated,
         "cached": fetch_result.from_cache,
         **saved,
     }
@@ -256,7 +303,8 @@ async def web_fetch(url: str, prompt: str, timeout: int = 30) -> dict[str, Any]:
         - success: Whether the operation succeeded
         - summary: The LLM-generated summary (if successful)
         - url: The fetched URL
-        - truncated: Whether the summarized content was truncated
+        - truncated: Whether the page's text was cut for the summary, or the
+          page itself at the download limit
         - cached: Whether content came from cache
         - saved_path: Where the full page was saved (HTML, text, JSON, XML and PDF pages)
         - save_error: Why the page could not be saved (the summary is still returned)

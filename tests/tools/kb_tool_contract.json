@@ -184,6 +184,7 @@
   "ingest": {
    "chunks_created": 1,
    "document_id": "<id2>",
+   "pdf_download_error": "network down",
    "pdf_downloaded": false,
    "success": true,
    "summary": "Synthesis of Attention Is All You Need.",
@@ -233,6 +234,7 @@
   "ingest": {
    "chunks_created": 1,
    "document_id": "<id2>",
+   "pdf_download_error": "network down",
    "pdf_downloaded": false,
    "success": true,
    "summary": "Synthesis of Attention Is All You Need.",
@@ -282,6 +284,7 @@
   "ingest": {
    "chunks_created": 1,
    "document_id": "<id2>",
+   "pdf_download_error": "network down",
    "pdf_downloaded": false,
    "success": true,
    "summary": "Synthesis of Attention Is All You Need.",

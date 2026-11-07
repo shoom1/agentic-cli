@@ -665,9 +665,11 @@ class TestWebFetchTool:
             # Mock the fetcher
             with patch("agentic_cli.tools.webfetch_tool.get_or_create_fetcher") as mock_get_fetcher:
                 mock_fetcher = AsyncMock()
+                page = "<html><body><h1>Test Page</h1><p>Content here</p></body></html>"
                 mock_fetcher.fetch.return_value = FetchResult(
                     success=True,
-                    content="<html><body><h1>Test Page</h1><p>Content here</p></body></html>",
+                    content=page,
+                    raw=page.encode(),
                     content_type="text/html",
                     truncated=False,
                     from_cache=False,

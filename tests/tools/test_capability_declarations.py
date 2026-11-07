@@ -103,8 +103,10 @@ class TestArxivPdfDownloadIsPinned:
         from agentic_cli.tools import arxiv_source
         from agentic_cli.tools import webfetch_tool
 
+        from agentic_cli.tools.webfetch.fetcher import FetchResult
+
         fetcher = MagicMock()
-        result = MagicMock(success=True, content=b"%PDF-1.4", error=None)
+        result = FetchResult(success=True, content=b"%PDF-1.4", raw=b"%PDF-1.4")
         fetcher.fetch = AsyncMock(return_value=result)
         monkeypatch.setattr(webfetch_tool, "get_or_create_fetcher", lambda: fetcher)
         src = arxiv_source.ArxivSearchSource()  # its first request waits for nothing

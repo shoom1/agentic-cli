@@ -1,10 +1,11 @@
-"""The fetcher keeps a page's whole body; the summarizer sees what it saw before.
+"""The fetcher keeps a page's whole body, up to the download limit.
 
 The fetcher stopped reading text at ``webfetch_max_content_bytes`` (100 KB), so
 a saved page would be cut off: the Wikipedia article on Okapi BM25 is 144 KB.
 It now reads text up to ``webfetch_max_download_bytes`` (5 MB) and keeps the
-body as received in ``FetchResult.raw``. ``content``, which the summarizer
-gets, is still the first ``webfetch_max_content_bytes`` decoded.
+body as received in ``FetchResult.raw``. ``content`` is still the first
+``max_content_bytes`` decoded; ``web_fetch`` converts ``raw`` whole and caps
+the text instead (``test_webfetch_summary_text.py``).
 """
 
 from __future__ import annotations
@@ -116,6 +117,27 @@ async def test_a_pdf_is_still_returned_as_bytes(monkeypatch):
     assert result.raw == body
 
 
+async def test_a_call_with_its_own_pdf_limit_reads_to_it_and_bypasses_the_cache(monkeypatch):
+    """ingest_arxiv_paper reads a paper up to arxiv_max_pdf_bytes: neither a
+    copy cached at web_fetch's limit nor its own (up to 50 MB) in the cache."""
+    requests = []
+    body = b"%PDF-1.4 " + b"p" * 5000
+
+    def handler(req):
+        requests.append(req)
+        return httpx.Response(200, content=body, headers={"content-type": "application/pdf"})
+
+    fetcher = _fetcher(monkeypatch, handler, max_pdf_bytes=1000)
+    cut = await fetcher.fetch(URL)
+    whole = await fetcher.fetch(URL, max_pdf_bytes=10_000)
+    again = await fetcher.fetch(URL)
+
+    assert (len(cut.raw), cut.raw_truncated) == (1000, True)
+    assert (whole.raw, whole.raw_truncated, whole.from_cache) == (body, False, False)
+    assert (len(again.raw), again.from_cache) == (1000, True)
+    assert len(requests) == 2
+
+
 def test_the_fetcher_gets_the_download_limit_from_settings(monkeypatch):
     from agentic_cli.config import BaseSettings
     from agentic_cli.tools import webfetch_tool
@@ -138,15 +160,25 @@ def test_the_download_limit_setting():
     assert "webfetch_max_download_bytes" in PROJECT_SETTABLE_KEYS
 
 
-def test_an_out_of_range_download_limit_is_rejected():
+@pytest.mark.parametrize(
+    ("name", "top"),
+    [
+        ("webfetch_max_download_bytes", 104857600),
+        # A project file could set any of these (50 GiB, or a negative value).
+        ("webfetch_max_content_bytes", 10485760),
+        ("webfetch_max_pdf_bytes", 104857600),
+    ],
+)
+def test_an_out_of_range_download_limit_is_rejected(name, top):
     from pydantic import ValidationError
 
     from agentic_cli.config import BaseSettings
 
+    assert getattr(BaseSettings(**{name: top}), name) == top
     with pytest.raises(ValidationError):
-        BaseSettings(webfetch_max_download_bytes=0)
+        BaseSettings(**{name: 0})
     with pytest.raises(ValidationError):
-        BaseSettings(webfetch_max_download_bytes=104857600 + 1)
+        BaseSettings(**{name: top + 1})
 
 
 # -- I-2(a): only types that are saved get the generous download cap. --

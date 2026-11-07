@@ -250,6 +250,7 @@ async def test_a_pdf_download_waits_its_turn_too(api, source, monkeypatch):
     """arXiv's policy covers arxiv.org's PDFs too: a download and a search
     never overlap."""
     from agentic_cli.tools import webfetch_tool
+    from agentic_cli.tools.webfetch.fetcher import FetchResult
 
     spans: list[tuple[str, float, float]] = []
 
@@ -257,7 +258,7 @@ async def test_a_pdf_download_waits_its_turn_too(api, source, monkeypatch):
         start = time.monotonic()
         await asyncio.sleep(2 * GAP)
         spans.append(("pdf", start, time.monotonic()))
-        return MagicMock(success=True, content=b"%PDF-1.4", error=None)
+        return FetchResult(success=True, content=b"%PDF-1.4", raw=b"%PDF-1.4")
 
     fetcher = MagicMock()
     fetcher.fetch = AsyncMock(side_effect=slow_fetch)

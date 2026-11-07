@@ -629,13 +629,48 @@ class BaseWorkflowManager(ABC):
 
     async def summarize(self, content: str, prompt: str) -> str:
         """Summarize content using the configured LLM.
+
+        A prompt longer than the default model takes is cut in the middle
+        (``_fit_prompt``): its callers cap what they send (web_fetch's page
+        text, the knowledge base's content), and this is the backstop.
+
         Args:
             content: The content to summarize (included in prompt by caller).
             prompt: The full summarization prompt.
         Returns:
             Summarized text response.
         """
-        return await self.generate_simple(prompt, max_tokens=12000)
+        return await self.generate_simple(
+            self._fit_prompt(prompt, 12000), max_tokens=12000
+        )
+
+    def _fit_prompt(self, prompt: str, max_tokens: int) -> str:
+        """``prompt`` as a side call on the default model may send it.
+
+        A side call that carries outside text (``summarize``: a fetched page,
+        a knowledge base document; fact extraction: the session's last
+        messages) could be longer than the model's window: a context
+        overflow, or a very expensive call. One over the room the model
+        leaves (``context.prompt_room``, with the ``max_tokens`` the call is
+        resolved to; the 128k floor before initialization) keeps its start
+        and its end, where the instructions are, and leaves out the middle.
+        A room under ``MIN_PROMPT_ROOM`` holds no useful prompt: the prompt
+        goes as it is, and the provider answers.
+        """
+        from agentic_cli.workflow.context import (
+            MIN_PROMPT_ROOM,
+            cut_middle,
+            prompt_room,
+        )
+
+        model = None
+        if self._default_model is not None:
+            model = self._simple_model(max_tokens)
+        room = prompt_room(model, max_tokens)
+        if len(prompt) <= room or room < MIN_PROMPT_ROOM:
+            return prompt
+        logger.debug("side_call_prompt_cut", chars=len(prompt), room=room)
+        return cut_middle(prompt, room)
 
     async def on_session_end(
         self,
@@ -698,7 +733,9 @@ class BaseWorkflowManager(ABC):
         )
 
         try:
-            summary = await self.generate_simple(prompt + content, max_tokens=2000)
+            summary = await self.generate_simple(
+                self._fit_prompt(prompt + content, 2000), max_tokens=2000
+            )
         except Exception:
             logger.debug("session_fact_extraction_failed", exc_info=True)
             return []

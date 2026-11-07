@@ -30,6 +30,11 @@ the SDK it came from) and never imports a provider SDK, and
 LangChain's own ``ContextOverflowError`` is recognized when LangChain is
 installed.
 
+**A side call's prompt** (a summary of a fetched page, fact extraction) goes
+to the default model whole: ``prompt_room`` is how many characters it may
+hold, and ``cut_middle`` leaves out the middle of a longer one (never to
+less than ``MIN_PROMPT_ROOM``).
+
 Imports nothing from ``cli/``, no provider SDK and no LangChain at import.
 """
 
@@ -259,6 +264,45 @@ def usage_fields(budget: ContextBudget | None) -> dict[str, int | bool]:
 def chars_per_token(kind: ProviderKind) -> float:
     """Characters per token for estimating a request to a ``kind`` provider."""
     return _CHARS_PER_TOKEN.get(kind, _DEFAULT_CHARS_PER_TOKEN)
+
+
+#: Where the middle of a side call's prompt too long for its model is left out.
+PROMPT_MIDDLE_OMITTED = "[... middle of the text omitted: too long for the model ...]"
+#: The smallest room, in characters, a side call's prompt is cut down to; with
+#: less, the prompt goes as it is and the provider answers.
+MIN_PROMPT_ROOM = 4_000
+
+
+def prompt_room(resolved: "ResolvedModel | None", max_tokens: int) -> int:
+    """How many characters a one-off prompt to ``resolved`` may hold.
+
+    95% of its window (``UNKNOWN_WINDOW`` when it is unknown, or when there
+    is no model yet), less what the call may write, at the provider's
+    characters per token with the estimates' margin: as the conversation
+    summarizer sizes its rendering. What the call may write is ``resolved``'s
+    ``max_tokens`` (the resolver clamps a request to the model's max output),
+    else ``max_tokens``. Never negative.
+    """
+    window, ratio, output = UNKNOWN_WINDOW, _DEFAULT_CHARS_PER_TOKEN, max_tokens
+    if resolved is not None:
+        window = resolved.record.context_window or UNKNOWN_WINDOW
+        ratio = chars_per_token(resolved.record.kind)
+        output = resolved.max_tokens or max_tokens
+    tokens = window * _WINDOW_SHARE // 100 - output
+    return max(int(tokens * ratio / ESTIMATE_MARGIN), 0)
+
+
+def cut_middle(text: str, room: int) -> str:
+    """``text`` in ``room`` characters: its start and its end, half each, and
+    ``PROMPT_MIDDLE_OMITTED`` between them, so the instructions a prompt
+    starts or ends with stay."""
+    if len(text) <= room:
+        return text
+    omitted = f"\n\n{PROMPT_MIDDLE_OMITTED}\n\n"
+    space = max(room - len(omitted), 0)
+    start = space // 2
+    end = space - start
+    return f"{text[:start]}{omitted}{text[len(text) - end:]}"
 
 
 def is_context_overflow(error: BaseException) -> bool:

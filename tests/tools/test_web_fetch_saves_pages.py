@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import socket
+import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -98,7 +99,7 @@ async def test_the_summary_is_unchanged(summarizer):
 async def test_a_type_that_is_not_saved_has_no_saved_path(summarizer):
     result = await _web_fetch(_ok(raw=b"\x89PNG", content_type="image/png"))
 
-    assert result["success"] is True
+    assert result["success"] is False  # not text: nothing to summarize
     assert "saved_path" not in result and "save_error" not in result
     assert not _folder().exists()
 
@@ -106,7 +107,7 @@ async def test_a_type_that_is_not_saved_has_no_saved_path(summarizer):
 async def test_a_result_without_the_raw_body_is_not_saved(summarizer):
     result = await _web_fetch(FetchResult(success=True, content="<p>x</p>", content_type="text/html"))
 
-    assert result["success"] is True
+    assert result["success"] is False  # no body: no text to summarize
     assert "saved_path" not in result
     assert not _folder().exists()
 
@@ -177,15 +178,17 @@ async def test_saving_runs_cleanup(summarizer, monkeypatch):
     })]
 
 
-async def test_a_page_html2text_cannot_convert_is_a_failure(summarizer):
+async def test_a_page_html2text_cannot_convert_is_a_failure(summarizer, monkeypatch):
     """Pre-existing, same class as I-1: html2text fails an assert on
     ``<ol start>``; that must come back as a failure, not an exception out
-    of web_fetch, and the page must still be reported as saved."""
+    of web_fetch, and the page must still be reported as saved. Without
+    trafilatura, so html2text converts the page."""
+    monkeypatch.setitem(sys.modules, "trafilatura", None)
     page = b"<html><body><ol start><li>x</li></ol></body></html>"
     result = await _web_fetch(_ok(raw=page))
 
     assert result["success"] is False
-    assert "AssertionError" in result["error"]
+    assert result["error"].startswith("Could not convert the page")
     assert "saved_path" in result
     assert Path(result["saved_path"]).read_bytes() == page
 
@@ -257,6 +260,7 @@ async def test_a_raising_cleanup_still_returns_the_summary_and_saved_path(summar
 
 async def test_a_real_fetch_saves_the_whole_page(summarizer, monkeypatch):
     """Through the real fetcher, a page over the summary limit is saved whole."""
+    from agentic_cli.config import BaseSettings, SettingsContext
     from agentic_cli.tools.webfetch.fetcher import ContentFetcher
     from agentic_cli.tools.webfetch.robots import RobotsTxtChecker
     from agentic_cli.tools.webfetch.transport import PinnedTransport
@@ -275,10 +279,10 @@ async def test_a_real_fetch_saves_the_whole_page(summarizer, monkeypatch):
                              transport=transport, max_content_bytes=1000)
     fetcher._robots.can_fetch = AsyncMock(return_value=True)
 
-    with patch("agentic_cli.tools.webfetch_tool.get_or_create_fetcher", return_value=fetcher):
+    with SettingsContext(BaseSettings(webfetch_max_content_bytes=1000)), \
+            patch("agentic_cli.tools.webfetch_tool.get_or_create_fetcher", return_value=fetcher):
         result = await web_fetch(URL, "summarize")
 
     assert Path(result["saved_path"]).read_bytes() == body
     assert result["truncated"] is True
-    # html2text may escape the brackets around the marker.
-    assert "Content truncated at 1000 bytes" in summarizer.contents[0]
+    assert summarizer.contents[0].endswith("[Content truncated at 1000 bytes of text]")

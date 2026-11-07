@@ -30,11 +30,14 @@ class RedirectInfo:
 class FetchResult:
     """The outcome of a fetch.
 
-    ``content`` is what the summarizer sees: for text, the first
-    ``max_content_bytes`` decoded, with a marker when cut (``truncated``); for
-    a PDF, the bytes. ``raw`` is the body as received, up to the download
-    limit (``raw_truncated`` when it went over), with its ``charset`` and the
-    ``final_url`` after same-host redirects.
+    ``raw`` is the body as received, up to the download limit
+    (``raw_truncated`` when it went over), with its ``charset`` and the
+    ``final_url`` after same-host redirects: ``web_fetch`` converts it whole
+    and caps the text. ``content`` is the body for a caller that wants it as
+    it is: for text, the first ``max_content_bytes`` decoded, with a marker
+    when cut (``truncated``); for a PDF, the bytes. A failure is
+    ``transient`` when the request did not get through (a timeout, a
+    connection error): the same fetch may work later.
     """
 
     success: bool
@@ -49,6 +52,7 @@ class FetchResult:
     charset: str | None = None
     final_url: str | None = None
     raw_truncated: bool = False
+    transient: bool = False
 
 
 @dataclass
@@ -89,6 +93,7 @@ class ContentFetcher:
 
     async def fetch(
         self, url: str, timeout: int = 30, *, authorize: RedirectCheck | None = None,
+        max_pdf_bytes: int | None = None,
     ) -> FetchResult:
         """Fetch content from a URL.
 
@@ -100,8 +105,16 @@ class ContentFetcher:
         target before it is requested, and about the URL a cached page was
         finally read from, since the caller vouched only for ``url``: a
         reason it returns ends the fetch with that reason.
+
+        ``max_pdf_bytes``, when given, is this call's PDF limit in place of
+        the fetcher's (``ingest_arxiv_paper`` reads a paper up to
+        ``arxiv_max_pdf_bytes``). Such a call neither reads nor fills the
+        cache: a cached PDF was read up to the fetcher's limit, and a paper,
+        read once, need not stay in memory (up to 50 MB) for the cache's TTL.
         """
-        cached = self._get_cached(url)
+        own_limit = max_pdf_bytes is not None
+        pdf_cap = max_pdf_bytes if own_limit else self._max_pdf_bytes
+        cached = None if own_limit else self._get_cached(url)
         if cached is not None:
             if authorize is not None and cached.final_url != url:
                 refused = await authorize(cached.final_url)
@@ -131,10 +144,10 @@ class ContentFetcher:
                         # Only types that are actually saved (saved.py's own
                         # list) get the generous download cap; everything
                         # else (images, archives, octet-stream, redirect and
-                        # error bodies, ...) is capped at what the summarizer
-                        # would see anyway, since it is never saved.
+                        # error bodies, ...) is capped at max_content_bytes,
+                        # since it is never saved nor summarized.
                         if is_pdf:
-                            cap = self._max_pdf_bytes
+                            cap = pdf_cap
                         elif saved_page_extension(content_type) is not None:
                             cap = self._max_download_bytes
                         else:
@@ -190,8 +203,9 @@ class ContentFetcher:
                         final_url=current_url, timestamp=time.time(),
                         raw_truncated=raw_truncated,
                     )
-                    self._sweep_expired_cache()
-                    self._cache[original_url] = cached
+                    if not own_limit:
+                        self._sweep_expired_cache()
+                        self._cache[original_url] = cached
                     return self._result(cached, from_cache=False, status_code=status)
                 else:
                     return FetchResult(success=False, error=f"Too many redirects (max {self.MAX_REDIRECTS})")
@@ -199,9 +213,11 @@ class ContentFetcher:
         except BlockedAddressError as e:
             return FetchResult(success=False, error=f"Blocked (SSRF): {e}")
         except httpx.TimeoutException:
-            return FetchResult(success=False, error=f"Request timeout after {timeout}s")
+            error = f"Request timeout after {timeout}s"
+            return FetchResult(success=False, error=error, transient=True)
         except httpx.RequestError as e:
-            return FetchResult(success=False, error=f"Request failed: {e}")
+            error = f"Request failed: {e}"
+            return FetchResult(success=False, error=error, transient=True)
 
     def _result(
         self, cached: CachedResponse, *, from_cache: bool, status_code: int | None = None,

@@ -1,6 +1,6 @@
 """The ingestion converter (``agentic_cli.memory.kb.convert``).
 
-Ingestion has its own converter, separate from ``web_fetch``'s. A web page
+Ingestion owns the converter (``web_fetch``'s summaries use it too). A web page
 goes in as its main text, not its HTML: trafilatura (the ``kb`` extra) keeps
 the main text and reads the page's title, author, date and description;
 html2text, which keeps the whole page, is the fallback.
@@ -84,6 +84,46 @@ def test_html_falls_back_to_html2text_without_trafilatura(no_trafilatura, log):
     assert doc.title == "Volcano notes"
     assert doc.authors == ()
     assert {"event": "kb_convert_html", "extractor": "html2text", "reason": "not_installed"} in log.events
+
+
+LINKED = (
+    "<html><head><title>Volcano notes</title></head><body><article><h1>Volcanoes</h1><p>"
+    + "Magma rises through the crust and erupts as lava. " * 12
+    + "See <a href='https://records.example.org/etna'>the eruption records</a>.</p>"
+    "</article></body></html>"
+)
+
+
+@pytest.mark.parametrize("converter", ["trafilatura", "html2text"])
+def test_ingestion_leaves_link_urls_out_and_web_fetch_keeps_them(converter, monkeypatch):
+    """The options web_fetch passes change nothing the knowledge base stores."""
+    if converter == "trafilatura":
+        require_kb_module("trafilatura")
+    else:
+        monkeypatch.setitem(sys.modules, "trafilatura", None)
+
+    stored = convert_document(LINKED.encode(), content_type="text/html", extension=".html", charset="utf-8")
+    fetched = convert_document(
+        LINKED.encode(), content_type="text/html", extension=".html", charset="utf-8",
+        links=True, metadata=False,
+    )
+
+    assert stored.extractor == fetched.extractor == converter
+    assert "the eruption records" in stored.text
+    assert "records.example.org" not in stored.text
+    assert stored.title  # read from the page's metadata
+    assert "https://records.example.org/etna" in fetched.text
+    assert fetched.title is None
+
+
+def test_main_text_false_converts_the_whole_page_with_html2text(log):
+    require_kb_module("trafilatura")
+    doc = convert_document(ARTICLE.encode(), content_type="text/html", extension=".html",
+                           charset="utf-8", main_text=False)
+
+    assert doc.extractor == "html2text"
+    assert "Home" in doc.text and "Magma rises through the crust" in doc.text
+    assert {"event": "kb_convert_html", "extractor": "html2text", "reason": "not_asked"} in log.events
 
 
 def test_html_falls_back_when_trafilatura_finds_no_main_text(log):
