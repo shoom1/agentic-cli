@@ -877,7 +877,7 @@ class TestTheADKItRestsOn:
 
         class Recording(Runner):
             async def _run_post_invocation_compaction(self, **kwargs) -> None:
-                after.append(*kwargs)
+                after.append("pass")
                 return await super()._run_post_invocation_compaction(**kwargs)
 
         summarizer = Counting()

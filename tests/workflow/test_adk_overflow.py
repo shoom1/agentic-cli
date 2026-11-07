@@ -998,7 +998,7 @@ async def test_a_cancelled_call_leaves_no_copy_past_the_next_turn(project, monke
         (guard,) = [p for p in manager._runner.app.plugins if isinstance(p, FitGuardPlugin)]
         consumer = asyncio.create_task(turn(manager, "First."))
         await asyncio.wait_for(started.wait(), 5)
-        consumer.cancel()  # mid-request: neither release fires
+        consumer.cancel()  # mid-request: before google-adk 2.14 neither release fires
         with pytest.raises(asyncio.CancelledError):
             await consumer
         left_by_the_cancel = len(guard._seen)
