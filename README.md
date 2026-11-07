@@ -1497,7 +1497,11 @@ write_file("output.txt", content="Hello, World!", create_dirs=True)
 edit_file("config.py", old_text="DEBUG = True", new_text="DEBUG = False")
 ```
 
-Writes are atomic (temp file + rename) via `agentic_cli.file_utils`.
+Writes are atomic (temp file + rename) via `agentic_cli.file_utils`. `edit_file` changes
+one place: `old_text` must appear exactly once unless `replace_all=True`. The
+file tools read and write UTF-8 (a file in another encoding is refused, never
+converted), and an edit keeps the file's line endings. `glob` and `grep`'s
+`file_pattern` take brace patterns such as `*.{js,ts}`.
 
 #### Knowledge Base Tools
 

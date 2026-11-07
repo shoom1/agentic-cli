@@ -24,7 +24,7 @@ agentic-cli/
 │   ├── settings_sources.py   # SettingsSourcesMixin: the one settings_customise_sources (init, env, project JSON allowlisted, user JSON, env files: a cwd-relative one allowlisted, the constructor's too), inherited by WorkflowSettingsMixin and AppSettingsMixin, so a class composed from them over pydantic-settings' BaseSettings reads what BaseSettings reads (__init_subclass__ refuses a settings class whose sources would resolve to pydantic-settings' own: its BaseSettings listed before the mixins; a class's own settings_customise_sources is allowed); app_name only from the constructor or the class (another in the env or a file: settings_app_name_ignored; cli_parse_args, an app's opt-in, is above them); secrets_dir never read (settings_secrets_dir_ignored); each source's `permissions` filed under its rank (RULES_BY_SOURCE, _RulesBySource: pydantic-settings' merge replaces the lists inside a dict), so WorkflowSettingsMixin joins every source's rules
 │   ├── settings_persistence.py # Trust-split save (PROJECT_SETTABLE_KEYS → project, rest → user config; excludes SECRET_FIELDS; the project file's PROJECT_PRESERVED_KEYS, its `permissions` deny rules, kept by every save but an explicit `path=` dump); USER_PREFERENCE_KEYS (ui_theme, dialog_placement): user-scoped, yet an app may list them in /settings; HAND_EDITED_KEYS (models, model_providers, permissions): never written by a save (the app's shipped entries, and for permissions the other sources' rules, would be copied into a file), each file's own section kept (a project file's models, and its permissions as PROJECT_PRESERVED_KEYS), never shown by /settings
 │   ├── constants.py          # Shared constants, truncate()
-│   ├── file_utils.py         # atomic_write_json / atomic_write_text; copy_regular_file_no_follow, open_dir_no_follow (dir_fd: a folder another party can swap for a symlink is opened once, then used by descriptor)
+│   ├── file_utils.py         # atomic_write_json / atomic_write_text; copy_regular_file_no_follow, open_dir_no_follow (dir_fd: a folder another party can swap for a symlink is opened once, then used by descriptor); expand_braces (a brace pattern's alternatives, at most 100, duplicates counted), glob_pattern_escapes_root (each alternative checked)
 │   ├── paths.py              # resolve_path: the one interpretation of a path argument
 │   ├── urls.py               # canonical_url / canonical_host: a URL as the HTTP client sends it (httpx's host, no trailing dot, an IPv4 address in another notation, IPv4-mapped IPv6 included, dotted-decimal; unreserved escapes decoded, dot segments removed; httpx imported inside); URL rules, blocked domains, DNS and TLS all use it
 │   ├── protected_paths.py    # The locations no tool reaches (credential stores, never-writable files and dirs, the project's .git/.env files/.{app_name}, ~/.{app_name} with its .env and settings.json): the engine's builtin denies and the OS sandbox's policy are both built from it (stdlib only)
@@ -117,10 +117,10 @@ agentic-cli/
 │   │   ├── search_sources.py # SearchSource, SearchSourceResult
 │   │   ├── pdf_utils.py      # extract_pdf_text
 │   │   ├── interaction_tools.py # ask_clarification
-│   │   ├── file_read.py      # read_file, diff_compare
-│   │   ├── file_write.py     # write_file, edit_file (one call per file at a time: a lock per resolved path, from edit_file's read to its write)
-│   │   ├── glob_tool.py      # glob
-│   │   ├── grep_tool.py      # grep
+│   │   ├── file_read.py      # read_file, diff_compare (UTF-8 whatever the locale)
+│   │   ├── file_write.py     # write_file, edit_file (one call per file at a time: a lock per resolved path, from edit_file's read to its write; old_text must match once (overlaps count) unless replace_all, an empty one refused; the bytes read as UTF-8, each line break in old_text matching the file's own (CRLF, LF, CR), new lines taking the replaced text's)
+│   │   ├── glob_tool.py      # glob (brace patterns expanded: expand_braces)
+│   │   ├── grep_tool.py      # grep (file_pattern's braces expanded; ripgrep gets one --glob each)
 │   │   ├── search.py         # web_search (Tavily/Brave backends)
 │   │   ├── webfetch_tool.py  # web_fetch + get_or_create_fetcher (orchestrator); the summary from the whole page converted in a worker thread (converter.page_text: convert_document, then the text cut at webfetch_max_content_bytes); a type not saved is an error
 │   │   ├── memory_tools.py   # save_memory, search_memory, update_memory, delete_memory (store: agentic_cli.memory)

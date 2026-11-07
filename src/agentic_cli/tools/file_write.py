@@ -60,6 +60,24 @@ def _one_writer(file_path: Path) -> Iterator[None]:
                 del _FILE_LOCKS[file_path]
 
 
+#: A line break as a file may have it: CRLF, LF or a lone CR. A CR before
+#: an LF is never a break of its own, so one CRLF is never read as two.
+_LINE_BREAK = r"(?:\r\n|\r(?!\n)|\n)"
+_LINE_BREAK_RE = re.compile(_LINE_BREAK)
+
+
+def _lf(text: str) -> str:
+    """``text`` with every line break as LF."""
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _main_line_break(content: str) -> str:
+    """The line break most of ``content``'s lines end with (LF on a tie)."""
+    crlf = content.count("\r\n")
+    counts = {"\n": content.count("\n") - crlf, "\r\n": crlf, "\r": content.count("\r") - crlf}
+    return max(counts, key=lambda brk: (counts[brk], brk == "\n"))
+
+
 @register_tool(
     category=ToolCategory.WRITE,
     capabilities=[Capability("filesystem.write", target_arg="path")],
@@ -133,7 +151,7 @@ def _write(file_path: Path, path: str, content: str, create_dirs: bool) -> dict[
 @register_tool(
     category=ToolCategory.WRITE,
     capabilities=[Capability("filesystem.read", target_arg="path"), Capability("filesystem.write", target_arg="path")],
-    description="Replace specific text in an existing file. Use this for targeted edits (find-and-replace). For creating or fully rewriting files use write_file instead.",
+    description="Replace specific text in an existing file. old_text must appear exactly once unless replace_all is set. Use this for targeted edits (find-and-replace). For creating or fully rewriting files use write_file instead.",
 )
 def edit_file(
     path: str,
@@ -144,9 +162,14 @@ def edit_file(
 ) -> dict[str, Any]:
     """Replace text in a file (sed-like find-and-replace).
 
-    Use this for precise, targeted edits within existing files. Replaces
-    the first occurrence by default; use replace_all=True for global
-    replacement. Supports regex patterns via use_regex=True.
+    Use this for precise, targeted edits within existing files. old_text
+    must appear exactly once: include enough of the text around it to make
+    it unique, or pass replace_all=True to replace every occurrence. Supports
+    regex patterns via use_regex=True (the same rule applies to its matches).
+
+    The file must be UTF-8 text, and keeps its line endings: each line break
+    in old_text matches the file's own (CRLF, LF or CR), and new lines take
+    the ending of the text they replace.
 
     For creating new files or full rewrites, use write_file instead.
 
@@ -154,7 +177,8 @@ def edit_file(
         path: Path to the file to edit.
         old_text: Text to find and replace (or regex pattern if use_regex=True).
         new_text: Replacement text.
-        replace_all: Replace all occurrences (default False = first only).
+        replace_all: Replace every occurrence (default False: old_text must
+            appear exactly once).
         use_regex: Treat old_text as a regex pattern (default False).
 
     Returns:
@@ -178,6 +202,14 @@ def _edit(
     use_regex: bool,
 ) -> dict[str, Any]:
     """``edit_file``'s work, holding the file's lock from its read to its write."""
+    # An empty old_text matches between every two characters.
+    if not old_text:
+        return {
+            "success": False,
+            "error": "old_text is empty: give the text to replace",
+            "path": str(file_path),
+        }
+
     if not file_path.exists():
         return {
             "success": False,
@@ -192,12 +224,14 @@ def _edit(
             "path": str(file_path),
         }
 
+    # UTF-8 whatever the locale: read with Windows' cp1252, a UTF-8 file came
+    # back double-encoded. Bytes, not text mode, so no line ending is changed.
     try:
-        content = file_path.read_text()
+        content = file_path.read_bytes().decode("utf-8")
     except UnicodeDecodeError:
         return {
             "success": False,
-            "error": f"Cannot read file as text (binary file?): {path}",
+            "error": f"Not a UTF-8 text file (binary, or another encoding): {path}",
             "path": str(file_path),
         }
     except PermissionError:
@@ -207,7 +241,6 @@ def _edit(
             "path": str(file_path),
         }
 
-    # Perform replacement
     if use_regex:
         try:
             pattern = re.compile(old_text)
@@ -216,25 +249,20 @@ def _edit(
                 "success": False,
                 "error": f"Invalid regex pattern: {e}",
             }
-
-        try:
-            new_content, count = pattern.subn(
-                new_text, content, count=0 if replace_all else 1
-            )
-        except re.error as e:
-            return {
-                "success": False,
-                "error": f"Invalid regex replacement text: {e}",
-                "path": str(file_path),
-            }
+        # A file whose every line ends in CRLF is searched with LF endings, as
+        # a regex written for its text expects, and written back with CRLF.
+        crlf = "\r\n" in content and content.count("\r\n") == content.count("\n")
+        if crlf:
+            content = content.replace("\r\n", "\n")
+        count = sum(1 for _ in pattern.finditer(content))
     else:
-        # Plain text replacement
-        if replace_all:
-            count = content.count(old_text)
-            new_content = content.replace(old_text, new_text)
-        else:
-            count = 1 if old_text in content else 0
-            new_content = content.replace(old_text, new_text, 1)
+        # read_file shows every line ending as LF, so each line break in
+        # old_text matches whichever ending the file has there.
+        pattern = re.compile(
+            _LINE_BREAK.join(re.escape(line) for line in _lf(old_text).split("\n"))
+        )
+        # Overlapping occurrences count too: "end\nend" is twice in three "end" lines.
+        count = sum(1 for _ in re.finditer(f"(?={pattern.pattern})", content))
 
     if count == 0:
         return {
@@ -242,6 +270,43 @@ def _edit(
             "error": f"Text not found in file: {old_text[:50]}{'...' if len(old_text) > 50 else ''}",
             "path": str(file_path),
         }
+
+    # Replacing the first of several matches edited a place the model may not
+    # have meant, and reported success.
+    if count > 1 and not replace_all:
+        return {
+            "success": False,
+            "error": (
+                f"old_text appears {count} times in the file: include the text around "
+                f"the one to change so it appears once, or pass replace_all=True to "
+                f"change all {count}"
+            ),
+            "path": str(file_path),
+        }
+
+    if use_regex:
+        try:
+            if crlf:
+                new_content, count = pattern.subn(lambda m: _lf(m.expand(new_text)), content)
+                new_content = new_content.replace("\n", "\r\n")
+            else:
+                new_content, count = pattern.subn(new_text, content)
+        except (re.error, IndexError) as e:  # IndexError: an unknown group name
+            return {
+                "success": False,
+                "error": f"Invalid regex replacement text: {e}",
+                "path": str(file_path),
+            }
+    else:
+        default_break = _main_line_break(content)
+        lines = _lf(new_text).split("\n")
+
+        def replacement(match: re.Match[str]) -> str:
+            # The new lines take the ending of the text they replace.
+            found = _LINE_BREAK_RE.search(match.group())
+            return (found.group() if found else default_break).join(lines)
+
+        new_content, count = pattern.subn(replacement, content)
 
     # Write the modified content
     try:
