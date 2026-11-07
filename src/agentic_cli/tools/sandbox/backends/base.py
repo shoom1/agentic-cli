@@ -38,6 +38,15 @@ class SandboxBackend(ABC):
         """Reset (restart) a session's kernel/state."""
         ...
 
+    def stop(self, session_id: str) -> None:
+        """Stop the cell a call is running in a session, from another thread.
+
+        A reset or cleanup during a call asks this, then leaves the session's
+        teardown to the call, which ends soon after; so it must not touch
+        what the call is using (a kernel client is not thread-safe). The
+        default does nothing: the call runs to its end or its timeout.
+        """
+
     @abstractmethod
     def cleanup(self) -> None:
         """Clean up all sessions and resources."""

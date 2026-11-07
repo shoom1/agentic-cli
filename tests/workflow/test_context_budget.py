@@ -327,9 +327,10 @@ class TestTheOldSettingsAreGone:
         with pytest.raises(ValueError):
             BaseSettings().update_setting("context_window_enabled", True)
 
-    async def test_an_adk_turn_runs_without_a_run_config(self, hermetic, monkeypatch):
+    async def test_an_adk_turn_compresses_no_context(self, hermetic, monkeypatch):
         # 0.6 built a RunConfig compressing the context for Gemini's Live API
-        # alone; the old keys in a settings file now build nothing.
+        # alone; the old keys in a settings file now build nothing (a turn's
+        # RunConfig names only the tool thread pool).
         from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager
         from tests.workflow.test_manager_models import route
 
@@ -355,7 +356,7 @@ class TestTheOldSettingsAreGone:
         finally:
             await manager.cleanup()
 
-        assert run_configs == ["not passed"]
+        assert [config.context_window_compression for config in run_configs] == [None]
         assert [e.content for e in events if e.type is EventType.TEXT] == ["Hi."]
 
     async def test_a_langgraph_turn_sends_the_whole_conversation(self, hermetic, monkeypatch):

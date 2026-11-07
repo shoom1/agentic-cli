@@ -119,6 +119,19 @@ class JupyterLocalBackend(SandboxBackend):
         )
         return merged
 
+    def stop(self, session_id: str) -> None:
+        """Interrupt the session's kernel (KeyboardInterrupt in the cell),
+        leaving its client to the running call. Stopping the kernel's process
+        instead would leave that call waiting until its timeout: the client
+        hears nothing from a kernel that is gone."""
+        pair = self._sessions.get(session_id)
+        if pair is None:
+            return
+        try:
+            pair[0].interrupt_kernel()
+        except Exception:
+            logger.debug("jupyter_interrupt_failed", session_id=session_id, exc_info=True)
+
     def reset_session(self, session_id: str) -> None:
         """Restart the kernel for a session."""
         if session_id not in self._sessions:

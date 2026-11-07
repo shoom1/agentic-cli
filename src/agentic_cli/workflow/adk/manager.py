@@ -21,6 +21,7 @@ from google.adk.apps import App
 from google.adk.apps.app import EventsCompactionConfig, validate_app_name
 from google.adk.agents import LlmAgent, Agent
 from google.adk.agents.context_cache_config import ContextCacheConfig
+from google.adk.agents.run_config import RunConfig, ToolThreadPoolConfig
 from google.adk.sessions import InMemorySessionService, BaseSessionService, Session
 from google.adk.errors import StaleSessionError
 from google.adk.tools import LongRunningFunctionTool
@@ -87,6 +88,11 @@ _CACHING = (CacheMechanism.ANTHROPIC, CacheMechanism.GEMINI)
 # request uncached, and ContextCachePlugin keeps it from trying again at every
 # tool step of the turn.
 _CACHE_CREATE_TIMEOUT_MS = 60_000
+
+# Worker threads for a config-built app's synchronous tools (ADK's tool
+# thread pool, one per event loop). A call a cancel left behind keeps its
+# thread until it returns, so there are more than ADK's default 4.
+_TOOL_THREADS = 8
 
 
 def _check_app_name(app_name: str) -> None:
@@ -868,6 +874,24 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             create_http_options=types.HttpOptions(timeout=_CACHE_CREATE_TIMEOUT_MS)
         )
 
+    def _run_config(self) -> RunConfig | None:
+        """A turn's ``RunConfig``: a config-built app's synchronous tools run
+        in ADK's tool thread pool; None keeps ADK's default.
+
+        Without the pool ADK calls a synchronous function tool on the event
+        loop, which a two-minute sandbox cell then holds: the spinner, the job
+        monitor and Ctrl+C all wait for it. In the pool only the function
+        leaves the loop (plugins, callbacks and async tools stay on it), with
+        a copy of the turn's context variables, and the calls of one model
+        step overlap, as on Deep Agents. A native ADK YAML app's tools are its
+        own, so it keeps ADK's default.
+        """
+        if self._adk_config_path:
+            return None
+        return RunConfig(
+            tool_thread_pool_config=ToolThreadPoolConfig(max_workers=_TOOL_THREADS)
+        )
+
     def _validate_agent_graph(self) -> AgentGraph | None:
         """Reject an unbuildable agent graph before anything is allocated.
 
@@ -1056,6 +1080,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                 user_id=user_id,
                 new_message=new_message,
                 state_delta=state_delta,
+                run_config=self._run_config(),
                 abort_signal=aborted,
             )
             try:

@@ -959,6 +959,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **On ADK, synchronous tools run in worker threads, as on Deep Agents.**
+  A config-built app's synchronous function tools, the framework's and its
+  own, now run in ADK's tool thread pool with a copy of the turn's context
+  variables, and the calls of one model step overlap; before, they ran one
+  after another on the event loop. Such a tool must now be safe to run
+  beside another call and off the loop's thread, as Deep Agents already
+  required; async tools, plugins and callbacks stay on the loop. Python
+  cannot stop a thread, so a call Ctrl+C left behind runs to its end in its
+  own: a sandbox cell keeps its session busy (the session's next call waits
+  for it), and quitting waits for such a call (a sandbox cell is stopped at
+  exit). The framework's tools allow for it: calls on one sandbox session
+  wait for each other, and `edit_file` and `write_file` take a lock per
+  file, so two edits of one file at once no longer lose one (which Deep
+  Agents already risked). A native ADK YAML app is unchanged.
 - **On ADK, an agent's prompt is sent as written.** ADK fills `{name}` in a
   prompt from the session state and raises `KeyError` for a name the state
   lacks, so a prompt quoting code (`f'{value}'`) or JSON failed every turn
@@ -1794,6 +1808,33 @@ step; each entry says what to use instead.
   summary written since starts it elsewhere; the next turn tries again. The
   warning is still one a turn, and the turn still goes on without a summary.
   A summary asked for (`/compact`, an overflow's) is never skipped.
+- **The CLI no longer freezes while a synchronous tool runs on ADK, and
+  Ctrl+C stops the turn.** ADK calls a synchronous function tool on the
+  event loop unless the run names a tool thread pool, and the ADK manager
+  named none: a `sandbox_execute` cell (two minutes by default, plus up to
+  three for a container to start) or `compile_document` (five) held the loop
+  for as long as it ran, so the spinner and the job monitor stopped and
+  Ctrl+C waited for the tool to finish. A config-built app's turns now run
+  with ADK's tool thread pool (8 workers): Ctrl+C ends the turn at once, the
+  call is answered as interrupted, and the result its thread returns later
+  is dropped. A native ADK YAML app keeps ADK's default.
+- **Two `sandbox_execute` calls on one session no longer break each
+  other.** Both backends run a model step's synchronous calls in worker
+  threads at once (Deep Agents always, ADK now too), and nothing kept two
+  calls on one session apart: on the local backend both read the kernel's
+  one output socket, so a call failed with `ValueError: b'<IDS|MSG>' is not
+  in list`, lost its output or timed out waiting for the end the other call
+  had read; on docker, two first calls each started a container under one
+  name. Calls on one session now run one at a time (a call waits up to its
+  timeout plus a minute, then is told the session is busy), two calls no
+  longer create two backends or pass `sandbox_max_sessions` together, and a
+  `/sandbox reset` or shutdown during a call no longer pulls the kernel out
+  from under it (`ZMQError: Socket operation on non-socket`): the cell is
+  stopped (the local kernel interrupted; the container killed, the call
+  saying a sandbox reset stopped it rather than suggesting an out-of-memory
+  kill) and the call shuts the kernel down as it ends. A reset that lands
+  just as a call takes the session is no longer lost: that call starts a new
+  kernel.
 - **On ADK, a main agent's reply that is no answer ends the turn with an
   error.** A reply with nothing but thoughts or blank text raises nothing on
   ADK: Gemini's `SAFETY`, `MALFORMED_FUNCTION_CALL` or `MAX_TOKENS` (every
