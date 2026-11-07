@@ -943,7 +943,9 @@ as 128,000 tokens.
   address and kind: a change to either lists it again. Startup waits only to
   list a provider in use that can be called and has no cache entry yet: all
   of them at once, each for at most 10 seconds. An older entry is used while
-  it is listed again in the background.
+  it is listed again in the background. Every process of the app shares the
+  file, and a listing writes only its own provider's entry; a failed listing
+  never replaces one of the provider's address and kind.
 - **Checking ids**: a model a provider does not list is rejected only when
   that provider's listing is fresh; a failed, untried or older listing
   accepts any id. A rejection read from the cache is confirmed by one new

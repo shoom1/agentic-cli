@@ -2,8 +2,9 @@
 
 Fresh entries (under 24 hours) spare startup the network; stale ones are used
 while a background refresh runs; a broken file, a file from before version 2,
-or an entry for another address or kind is ignored and listed again (R9). The
-entries of providers not in use are kept as they are, and a search adopts one.
+or an entry for another address or kind is ignored and listed again (R9). A
+catalog writes only the providers it listed and keeps every other entry as the
+file holds it (another catalog may have written it), and a search adopts one.
 The file is private and holds no credential.
 """
 
@@ -268,12 +269,79 @@ async def test_entries_of_providers_not_in_use_are_kept_as_they_are(cache):
     assert [s.provider for s in catalog.status()] == ["google"]
 
 
-async def test_entries_of_providers_no_longer_defined_are_dropped(cache):
+async def test_entries_of_providers_this_catalog_does_not_define_are_kept(cache):
+    """Another project of the same app may define the provider."""
     await make(cache, specs={"local-vllm": VLLM}, references=ON_VLLM).load()
 
     await make(cache, google=KEYS["google"]).load()
 
-    assert set(read(cache)["providers"]) == {"google"}
+    assert set(read(cache)["providers"]) == {"google", "local-vllm"}
+
+
+# --- several catalogs, one file ----------------------------------------------------------
+# Two terminals, or two projects of one app, share the file: each catalog writes
+# the providers it listed, and leaves every other entry as the file holds it.
+
+
+async def test_a_write_keeps_the_entries_another_catalog_wrote(cache):
+    clock = Clock()
+    first = make(cache, google=KEYS["google"], openrouter=KEYS["openrouter"], clock=clock)
+    await first.load()
+    await make(
+        cache, references=ON_OPENROUTER, google=KEYS["google"], openrouter=KEYS["openrouter"],
+        clock=clock,
+    ).load()
+    written = read(cache)["providers"]["openrouter"]
+
+    await first.refresh(["google"])
+
+    assert read(cache)["providers"]["openrouter"] == written
+
+
+async def test_a_listing_read_from_the_file_never_replaces_a_newer_one(cache):
+    clock = Clock()
+    await make(cache, google=KEYS["google"], anthropic=KEYS["anthropic"], clock=clock).load()
+    clock.now += 2 * DAY
+    first = make(cache, google=KEYS["google"], anthropic=KEYS["anthropic"], clock=clock)
+    await first.load()
+    second = make(cache, google=KEYS["google"], anthropic=KEYS["anthropic"], clock=clock)
+    await second.load()
+    await second.refresh(["google"])
+
+    await first.refresh(["anthropic"])
+
+    assert read(cache)["providers"]["google"]["fetched_at"] == clock.now
+
+
+async def test_a_failed_refresh_keeps_its_earlier_listing_when_the_file_lost_it(cache):
+    """With no listing in the file (deleted, or a failure written since), a
+    failed refresh writes the listing this catalog had, not the failure."""
+    clock = Clock()
+    await make(cache, google=KEYS["google"], clock=clock).load()
+    good = read(cache)["providers"]["google"]
+    clock.now += 2 * DAY
+    catalog = make(cache, ProviderAPI(google=500), google=KEYS["google"], clock=clock)
+    await catalog.load()
+    cache.unlink()
+
+    await catalog.start_background_refresh()
+
+    assert read(cache)["providers"]["google"] == good
+
+
+async def test_a_failed_listing_never_replaces_one_another_catalog_wrote(cache):
+    clock = Clock()
+    failing = make(cache, ProviderAPI(google=500), google=KEYS["google"], clock=clock)
+    await failing.load()
+    other = make(cache, google=KEYS["google"], clock=clock)
+    await other.load()
+    await other.refresh(["google"])
+
+    await failing.refresh(["google"])
+
+    entry = read(cache)["providers"]["google"]
+    assert (entry["ok"], entry["error"]) == (True, None)
+    assert entry["models"]
 
 
 async def test_a_missing_cache_folder_is_created(tmp_path):
