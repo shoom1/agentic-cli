@@ -1,0 +1,443 @@
+"""Calls on one sandbox session run one at a time.
+
+Both backends run a model step's synchronous calls in worker threads at once
+(Deep Agents in LangChain's executor, ADK in its tool thread pool), so two
+``sandbox_execute`` calls can reach one session together. A kernel runs one
+cell at a time and its client is not thread-safe: two threads reading one
+local kernel's output socket raised ``ValueError: b'<IDS|MSG>' is not in
+list`` or took each other's output, and two first calls on the docker backend
+both started a container under one name. ``SandboxManager`` holds a lock per
+session across a call (staging, execution, output collection), and a reset or
+cleanup that comes during a call stops its cell and leaves the session's
+teardown to that call.
+"""
+
+from __future__ import annotations
+
+import json
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+
+import pytest
+
+from agentic_cli.tools.sandbox.backends.base import SandboxBackend
+from agentic_cli.tools.sandbox.backends.detect import DockerAvailability
+from agentic_cli.tools.sandbox.backends.jupyter_docker import JupyterDockerBackend
+from agentic_cli.tools.sandbox.manager import SandboxManager, sandbox_root_for
+from agentic_cli.tools.sandbox.models import ExecutionResult
+from tests.conftest import MockContext
+from tests.tools.test_sandbox_docker_backend import FakeRuntime
+
+
+class GatedBackend(SandboxBackend):
+    """A backend whose calls run until the test opens ``gate``. It records the
+    calls that entered, the most that ran at once in one session, and what
+    was stopped, reset or cleaned up."""
+
+    backend_name = "gated"
+
+    def __init__(self, *, open_gate: bool = False) -> None:
+        self.gate = threading.Event()
+        if open_gate:
+            self.gate.set()
+        self.entered: list[str] = []
+        self.most_at_once = 0
+        self.reset_calls: list[str] = []
+        self.stops: list[str] = []
+        self.cleanups = 0
+        self._running: dict[str, int] = {}
+        self._sessions: set[str] = set()
+        self._count = threading.Lock()
+
+    def execute(self, code, session_id, timeout_seconds=120, working_dir=None, inputs=None):
+        with self._count:
+            self._running[session_id] = self._running.get(session_id, 0) + 1
+            self.most_at_once = max(self.most_at_once, self._running[session_id])
+            self._sessions.add(session_id)
+            self.entered.append(code)
+        try:
+            self.gate.wait(timeout=5)
+            return ExecutionResult(success=True, stdout=f"{code}\n")
+        finally:
+            with self._count:
+                self._running[session_id] -= 1
+
+    def reset_session(self, session_id):
+        self.reset_calls.append(session_id)
+        self._sessions.discard(session_id)
+
+    def stop(self, session_id):
+        self.stops.append(session_id)
+
+    def cleanup(self):
+        self.cleanups += 1
+        self._sessions.clear()
+
+    def has_session(self, session_id):
+        return session_id in self._sessions
+
+
+class Kernels(SandboxBackend):
+    """A kernel per session, numbered as started, whose variables live until
+    it is reset. A cell ``hold`` runs until ``release`` is set; ``on_stop``
+    runs inside ``stop`` before it looks for the kernel."""
+
+    backend_name = "kernels"
+
+    def __init__(self) -> None:
+        self.started = 0
+        self.kernels: dict[str, dict] = {}
+        self.stopped: list[int | None] = []
+        self.holding = threading.Event()
+        self.release = threading.Event()
+        self.on_stop = lambda: None
+
+    def execute(self, code, session_id, timeout_seconds=120, working_dir=None, inputs=None):
+        kernel = self.kernels.get(session_id)
+        if kernel is None:
+            self.started += 1
+            kernel = self.kernels[session_id] = {"n": self.started, "x": None}
+        if code.startswith("set "):
+            kernel["x"] = code[4:]
+        elif code == "hold":
+            self.holding.set()
+            self.release.wait(timeout=5)
+        return ExecutionResult(success=True, stdout=f"kernel {kernel['n']}, x={kernel['x']}")
+
+    def reset_session(self, session_id):
+        self.kernels.pop(session_id, None)
+
+    def stop(self, session_id):
+        self.on_stop()
+        kernel = self.kernels.get(session_id)
+        self.stopped.append(kernel and kernel["n"])
+
+    def cleanup(self):
+        self.kernels.clear()
+
+    def has_session(self, session_id):
+        return session_id in self.kernels
+
+
+def until(condition, timeout: float = 5.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while not condition():
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.01)
+    return True
+
+
+@pytest.fixture
+def ctx():
+    with MockContext(stateful_executor_backend="local") as context:
+        yield context
+
+
+def test_two_calls_on_one_local_session_each_get_their_own_output(ctx):
+    from agentic_cli.tools.sandbox.backends.jupyter_local import JupyterLocalBackend
+
+    mgr = SandboxManager(ctx.settings, backend=JupyterLocalBackend(interrupt_grace=1.0))
+    try:
+        assert mgr.execute("import time", session_id="s1").success  # the kernel is up
+        with ThreadPoolExecutor(2) as pool:
+            slow = pool.submit(
+                mgr.execute,
+                "for i in range(3):\n    print('A', i); time.sleep(0.3)\n'A-done'",
+                session_id="s1", timeout_seconds=5,
+            )
+            time.sleep(0.2)
+            quick = pool.submit(
+                mgr.execute, "print('B'); 'B-done'", session_id="s1", timeout_seconds=5,
+            )
+            a, b = slow.result(), quick.result()
+    finally:
+        mgr.cleanup()
+
+    assert (a.success, a.stdout, a.result, a.error) == (True, "A 0\nA 1\nA 2\n", "'A-done'", "")
+    assert (b.success, b.stdout, b.result, b.error) == (True, "B\n", "'B-done'", "")
+
+
+def test_calls_on_one_session_run_one_at_a_time(ctx):
+    backend = GatedBackend()
+    mgr = SandboxManager(ctx.settings, backend=backend)
+    with ThreadPoolExecutor(2) as pool:
+        first = pool.submit(mgr.execute, "one", session_id="s1")
+        assert until(lambda: backend.entered == ["one"])
+        second = pool.submit(mgr.execute, "two", session_id="s1")
+        time.sleep(0.2)  # the second call has reached the session
+        backend.gate.set()
+        results = [first.result(), second.result()]
+    mgr.cleanup()
+
+    assert backend.most_at_once == 1
+    assert [r.stdout for r in results] == ["one\n", "two\n"]
+
+
+def test_calls_on_two_sessions_run_side_by_side(ctx):
+    backend = GatedBackend()
+    mgr = SandboxManager(ctx.settings, backend=backend)
+    with ThreadPoolExecutor(2) as pool:
+        calls = [pool.submit(mgr.execute, code, session_id=code) for code in ("s1", "s2")]
+        both_inside = until(lambda: len(backend.entered) == 2, timeout=2)
+        backend.gate.set()
+        assert all(call.result().success for call in calls)
+    mgr.cleanup()
+
+    assert both_inside
+
+
+def test_calls_that_start_together_create_one_backend(ctx, monkeypatch):
+    made: list[GatedBackend] = []
+
+    def slow_backend(self, name):
+        time.sleep(0.2)  # long enough for the other call to look too
+        made.append(GatedBackend(open_gate=True))
+        return made[-1]
+
+    monkeypatch.setattr(SandboxManager, "_create_backend", slow_backend)
+    mgr = SandboxManager(ctx.settings)
+    with ThreadPoolExecutor(2) as pool:
+        results = list(pool.map(lambda sid: mgr.execute("x", session_id=sid), ["s1", "s2"]))
+    mgr.cleanup()
+
+    assert len(made) == 1
+    assert all(r.success for r in results)
+
+
+def test_max_sessions_holds_for_calls_that_start_together(monkeypatch):
+    real_dir = SandboxManager._get_session_dir
+
+    def slow_dir(self, session_id):
+        time.sleep(0.2)  # between the count and the new session's entry
+        return real_dir(self, session_id)
+
+    monkeypatch.setattr(SandboxManager, "_get_session_dir", slow_dir)
+    with MockContext(stateful_executor_backend="local", sandbox_max_sessions=1) as ctx:
+        mgr = SandboxManager(ctx.settings, backend=GatedBackend(open_gate=True))
+        with ThreadPoolExecutor(2) as pool:
+            results = list(pool.map(lambda sid: mgr.execute("x", session_id=sid), ["s1", "s2"]))
+        sessions = mgr.list_sessions()
+        mgr.cleanup()
+
+    assert sorted(r.success for r in results) == [False, True]
+    assert "Maximum sessions (1) reached" in next(r.error for r in results if not r.success)
+    assert len(sessions) == 1
+
+
+def test_a_call_kept_waiting_past_its_timeout_is_told_the_session_is_busy(ctx):
+    backend = GatedBackend()
+    mgr = SandboxManager(ctx.settings, backend=backend)
+    mgr.busy_margin = 0.0
+    with ThreadPoolExecutor(1) as pool:
+        first = pool.submit(mgr.execute, "one", session_id="s1")
+        assert until(lambda: backend.entered == ["one"])
+        started = time.monotonic()
+        second = mgr.execute("two", session_id="s1", timeout_seconds=1)
+        waited = time.monotonic() - started
+        backend.gate.set()
+        assert first.result().success
+    mgr.cleanup()
+
+    assert second.success is False
+    assert "busy" in second.error and "'s1'" in second.error
+    assert backend.entered == ["one"]
+    assert 0.9 <= waited < 3
+
+
+def test_a_timeout_past_what_a_lock_can_wait_still_runs(ctx):
+    backend = GatedBackend(open_gate=True)
+    mgr = SandboxManager(ctx.settings, backend=backend)
+    result = mgr.execute("one", session_id="s1", timeout_seconds=10**12)
+    mgr.cleanup()
+
+    assert result.success, result.error
+
+
+def test_a_reset_during_a_call_leaves_the_teardown_to_it(ctx):
+    backend = GatedBackend()
+    mgr = SandboxManager(ctx.settings, backend=backend)
+    with ThreadPoolExecutor(1) as pool:
+        running = pool.submit(mgr.execute, "one", session_id="s1")
+        assert until(lambda: backend.entered == ["one"])
+        started = time.monotonic()
+        assert mgr.reset_session("s1") is True
+        assert time.monotonic() - started < 0.5  # it never waits for the call
+        assert backend.reset_calls == []  # nothing pulled out from under the call
+        assert backend.stops == ["s1"]  # its cell is stopped
+        assert mgr.list_sessions() == []
+        backend.gate.set()
+        assert running.result().success
+    assert backend.reset_calls == ["s1"]  # torn down as the call ended
+
+    assert mgr.execute("two", session_id="s1").success  # a fresh session
+    assert [row["execution_count"] for row in mgr.list_sessions()] == [1]
+    mgr.cleanup()
+
+
+def test_a_reset_just_after_a_call_took_the_session_is_not_lost(ctx, monkeypatch):
+    backend = Kernels()
+    mgr = SandboxManager(ctx.settings, backend=backend)
+    assert mgr.execute("set secret", session_id="s1").stdout == "kernel 1, x=secret"
+    real = SandboxManager._execute_holding_lock
+    holding = threading.Event()
+
+    def late(self, *args, **kwargs):
+        holding.set()
+        time.sleep(0.3)  # the session's lock is held, the session not yet looked up
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(SandboxManager, "_execute_holding_lock", late)
+    with ThreadPoolExecutor(1) as pool:
+        call = pool.submit(mgr.execute, "print", session_id="s1")
+        assert holding.wait(5)
+        assert mgr.reset_session("s1") is True
+        during = call.result()
+    monkeypatch.setattr(SandboxManager, "_execute_holding_lock", real)
+    after = mgr.execute("print", session_id="s1")
+    mgr.cleanup()
+
+    # The reset came first: the call, and the next, run in a new kernel.
+    assert (during.stdout, after.stdout) == ("kernel 2, x=None", "kernel 2, x=None")
+
+
+def test_a_reset_stops_only_the_kernel_it_reset(ctx):
+    backend = Kernels()
+    mgr = SandboxManager(ctx.settings, backend=backend)
+    started_again = threading.Event()
+
+    def slow_stop():
+        # The held cell ends now; give the next call time to start a kernel
+        # before this stop looks for the one to stop.
+        backend.release.set()
+        started_again.wait(timeout=0.5)
+
+    backend.on_stop = slow_stop
+    with ThreadPoolExecutor(2) as pool:
+        held = pool.submit(mgr.execute, "hold", session_id="s1")
+        assert backend.holding.wait(5)
+        following = pool.submit(mgr.execute, "print", session_id="s1")
+        time.sleep(0.1)  # the next call waits for the session
+        real_execute = backend.execute
+
+        def noting_a_new_kernel(*args, **kwargs):
+            result = real_execute(*args, **kwargs)
+            started_again.set()
+            return result
+
+        backend.execute = noting_a_new_kernel
+        assert mgr.reset_session("s1") is True
+        results = [held.result().stdout, following.result().stdout]
+    mgr.cleanup()
+
+    assert backend.stopped == [1]  # never the next call's kernel
+    assert results == ["kernel 1, x=None", "kernel 2, x=None"]
+
+
+def test_cleanup_during_a_call_leaves_its_session_to_it(ctx):
+    backend = GatedBackend()
+    mgr = SandboxManager(ctx.settings, backend=backend)
+    with ThreadPoolExecutor(2) as pool:
+        running = pool.submit(mgr.execute, "one", session_id="s1")
+        assert until(lambda: backend.entered == ["one"])
+        waiting = pool.submit(mgr.execute, "two", session_id="s1")
+        time.sleep(0.2)  # the second call waits for the session
+        started = time.monotonic()
+        mgr.cleanup()
+        assert time.monotonic() - started < 0.5
+        assert (backend.reset_calls, backend.cleanups) == ([], 0)
+        assert backend.stops == ["s1"]
+        backend.gate.set()
+        assert running.result().success
+        refused = waiting.result()
+
+    assert backend.reset_calls == ["s1"]
+    # The waiting call starts no kernel that nothing would shut down.
+    assert backend.entered == ["one"]
+    assert refused.success is False and "shut down" in refused.error
+
+
+def test_a_reset_stops_a_local_cell_and_the_next_call_starts_afresh(ctx):
+    from agentic_cli.tools.sandbox.backends.jupyter_local import JupyterLocalBackend
+
+    mgr = SandboxManager(ctx.settings, backend=JupyterLocalBackend(interrupt_grace=1.0))
+    try:
+        assert mgr.execute("x = 1", session_id="s1").success
+        marker = sandbox_root_for(ctx.settings) / "s1" / "started"
+        with ThreadPoolExecutor(1) as pool:
+            running = pool.submit(
+                mgr.execute,
+                "import time\nopen('started', 'w').close()\ntime.sleep(30)",
+                session_id="s1", timeout_seconds=20,
+            )
+            assert until(marker.exists)  # the cell runs
+            started = time.monotonic()
+            assert mgr.reset_session("s1") is True
+            stopped = running.result()
+            took = time.monotonic() - started
+        after = mgr.execute("print('x' in dir())", session_id="s1")
+    finally:
+        mgr.cleanup()
+
+    assert took < 5
+    assert stopped.success is False and "KeyboardInterrupt" in stopped.error
+    assert (after.success, after.stdout) == (True, "False\n")  # a new kernel
+
+
+def test_a_reset_stops_a_docker_call_at_once():
+    runtime = FakeRuntime()  # ready, and then no result: the cell runs on
+    with MockContext(stateful_executor_backend="docker") as ctx:
+        docker = JupyterDockerBackend(
+            ctx.settings, runtime=runtime,
+            detect_fn=lambda: DockerAvailability(True, "docker", "test"),
+        )
+        mgr = SandboxManager(ctx.settings, backend=docker)
+        try:
+            with ThreadPoolExecutor(1) as pool:
+                running = pool.submit(mgr.execute, "x = 1", session_id="s1", timeout_seconds=3)
+                assert until(lambda: docker.session_status("s1").state == "busy")
+                started = time.monotonic()
+                assert mgr.reset_session("s1") is True
+                stopped = running.result()
+                took = time.monotonic() - started
+        finally:
+            mgr.cleanup()
+
+    assert took < 1
+    assert stopped.success is False
+    # The model is told why, not that the container died (exit 137: an OOM kill?).
+    assert "sandbox reset" in stopped.error and "out-of-memory" not in stopped.error
+    assert runtime.killed[0] == (runtime.started[0].name, None)
+
+
+def test_two_first_calls_on_docker_start_one_container():
+    result = json.dumps({"type": "result", "success": True, "stdout": "", "stderr": "",
+                         "result": None, "artifacts": [], "execution_time": 0.0, "error": ""})
+    runtime = FakeRuntime()
+    start = runtime.start
+
+    def slow_start(spec):
+        time.sleep(0.2)  # docker run takes a while
+        handle = start(spec)
+        for _ in range(2):
+            handle.stdout.feed(result + "\n")
+        return handle
+
+    runtime.start = slow_start
+    with MockContext(stateful_executor_backend="docker") as ctx:
+        docker = JupyterDockerBackend(
+            ctx.settings, runtime=runtime,
+            detect_fn=lambda: DockerAvailability(True, "docker", "test"),
+        )
+        mgr = SandboxManager(ctx.settings, backend=docker)
+        try:
+            with ThreadPoolExecutor(2) as pool:
+                results = list(pool.map(
+                    lambda _: mgr.execute("x = 1", session_id="s1", timeout_seconds=5), range(2),
+                ))
+        finally:
+            mgr.cleanup()
+
+    assert len(runtime.started) == 1
+    assert all(r.success for r in results)

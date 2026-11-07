@@ -28,6 +28,7 @@ import asyncio
 import contextlib
 import json
 import threading
+import time
 from pathlib import Path
 
 import anthropic
@@ -267,6 +268,52 @@ async def test_a_running_call_is_answered_as_interrupted_by_the_user(
 
     assert claude.refused == []
     assert INTERRUPTED_BY_USER in results(claude.last("Answer"))["toolu_w"]
+
+
+#: ``ic_sync_wait`` notes when it starts and sets STARTED, then works until
+#: RELEASE is set.
+SYNC_STARTS: list[float] = []
+SYNC_STARTED = threading.Event()
+SYNC_RELEASE = threading.Event()
+
+
+@register_tool(capabilities=EXEMPT, description="Works until released (a test tool).")
+def ic_sync_wait() -> dict:
+    """Work without yielding, as a sandbox cell does, until the test lets go."""
+    SYNC_STARTS.append(time.monotonic())
+    SYNC_STARTED.set()
+    SYNC_RELEASE.wait(timeout=5)
+    return {"success": True}
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+async def test_a_running_synchronous_call_stops_at_once(hermetic, monkeypatch, backend):
+    """A synchronous tool runs in a worker thread on both backends, so the
+    loop is free to take the cancel: the turn ends at once, and the result
+    the thread returns later is dropped."""
+    claude = serve(monkeypatch, Claude(Answer=[
+        calls(("ic_sync_wait", {}, "toolu_s")), say("Back again."), say("Back again."),
+    ]), backend)
+    manager = solo(backend, ic_sync_wait)
+    SYNC_STARTS.clear()
+    SYNC_STARTED.clear()
+    SYNC_RELEASE.clear()
+    try:
+        running = asyncio.create_task(turn(manager, "Work."))
+        assert await asyncio.to_thread(SYNC_STARTED.wait, 5)
+        running.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await running
+        took = time.monotonic() - SYNC_STARTS[0]  # from the tool's start to the turn's end
+        SYNC_RELEASE.set()
+        await turn(manager, "Hello again.")
+    finally:
+        SYNC_RELEASE.set()
+        await manager.cleanup()
+
+    assert took < 1
+    assert claude.refused == []
+    assert INTERRUPTED_BY_USER in results(claude.last("Answer"))["toolu_s"]
 
 
 @pytest.mark.parametrize("backend", BACKENDS)

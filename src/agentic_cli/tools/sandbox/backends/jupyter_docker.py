@@ -48,6 +48,7 @@ class ContainerSession:
         self._lock = threading.Lock()
         self._status = "starting"
         self._token: str | None = None  # captured from the driver's ready message
+        self._stopped = False  # set by stop(): a sandbox reset killed the container
         self._reader = threading.Thread(target=self._read_stdout, daemon=True)
         self._reader.start()
         self._stderr_reader = None
@@ -100,8 +101,7 @@ class ContainerSession:
         with self._lock:
             if self._handle.poll() is not None:
                 self._status = "dead"
-                return ExecutionResult(success=False,
-                                       error=f"sandbox container exited unexpectedly ({self._exit_detail()})")
+                return ExecutionResult(success=False, error=self._exit_error())
             self._status = "busy"
             try:
                 # The host owns the timeout/interrupt/kill state machine; the
@@ -120,8 +120,7 @@ class ContainerSession:
                                                error=f"Execution timed out after {timeout}s; container killed")
                 if msg is _EOF:
                     self._status = "dead"
-                    return ExecutionResult(success=False,
-                                           error=f"sandbox container exited unexpectedly ({self._exit_detail()})")
+                    return ExecutionResult(success=False, error=self._exit_error())
 
                 self._status = "ready"
                 return self._to_result(msg)
@@ -159,6 +158,14 @@ class ContainerSession:
                 continue  # missing/wrong token — forged, skip it
             return msg
 
+    def _exit_error(self) -> str:
+        """What a call is told when the container is gone: why, when a sandbox
+        reset stopped it (its 137 would otherwise read as an OOM kill)."""
+        if self._stopped:
+            return ("Stopped by a sandbox reset: the session's container was shut "
+                    "down while this code ran, and the session's variables are gone.")
+        return f"sandbox container exited unexpectedly ({self._exit_detail()})"
+
     def _exit_detail(self) -> str:
         """Describe why the container process exited, from the docker-run exit
         code (reliable even with --rm, which removes the container before it
@@ -187,6 +194,12 @@ class ContainerSession:
             rel = container_path[len(prefix):].lstrip("/")
             return str(Path(self._working_dir) / rel)
         return container_path
+
+    def stop(self) -> None:
+        """Kill the container for a sandbox reset: the running call reads the
+        end of its output at once and says it was stopped."""
+        self._stopped = True
+        self.close()
 
     def close(self) -> None:
         try:
@@ -391,6 +404,13 @@ class JupyterDockerBackend(SandboxBackend):
             if extra:
                 result.artifacts = list(result.artifacts) + extra
         return result
+
+    def stop(self, session_id: str) -> None:
+        """Kill the session's container: the running call reads the end of
+        its output at once and answers that a sandbox reset stopped it."""
+        session = self._sessions.get(session_id)
+        if session is not None:
+            session.stop()
 
     def reset_session(self, session_id: str) -> None:
         session = self._sessions.pop(session_id, None)

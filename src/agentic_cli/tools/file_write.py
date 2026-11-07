@@ -7,7 +7,10 @@ Provides tools for file system modifications:
 The framework ships no delete, move or copy tool.
 """
 
+import contextlib
 import re
+import threading
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +21,43 @@ from agentic_cli.tools.registry import (
     register_tool,
 )
 from agentic_cli.workflow.permissions import Capability
+
+
+class _FileLock:
+    """One file's lock, and how many calls hold it or wait for it: the entry
+    is dropped when none does."""
+
+    __slots__ = ("lock", "users")
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.users = 0
+
+
+#: The files a call is writing, by resolved path.
+_FILE_LOCKS: dict[Path, _FileLock] = {}
+_FILE_LOCKS_GUARD = threading.Lock()
+
+
+@contextlib.contextmanager
+def _one_writer(file_path: Path) -> Iterator[None]:
+    """Hold ``file_path``'s lock for one call.
+
+    One model step's calls run together in worker threads (both backends),
+    and ``edit_file`` reads a file, then writes it back: two calls on one
+    file would each write over the other's change.
+    """
+    with _FILE_LOCKS_GUARD:
+        entry = _FILE_LOCKS.setdefault(file_path, _FileLock())
+        entry.users += 1
+    try:
+        with entry.lock:
+            yield
+    finally:
+        with _FILE_LOCKS_GUARD:
+            entry.users -= 1
+            if not entry.users:
+                del _FILE_LOCKS[file_path]
 
 
 @register_tool(
@@ -49,6 +89,12 @@ def write_file(
         - created: True if file was newly created, False if overwritten
     """
     file_path = resolve_path(path)
+    with _one_writer(file_path):
+        return _write(file_path, path, content, create_dirs)
+
+
+def _write(file_path: Path, path: str, content: str, create_dirs: bool) -> dict[str, Any]:
+    """``write_file``'s work, holding the file's lock."""
     existed = file_path.exists()
 
     if not create_dirs and not file_path.parent.exists():
@@ -119,7 +165,19 @@ def edit_file(
         - size: File size in bytes after edit
     """
     file_path = resolve_path(path)
+    with _one_writer(file_path):
+        return _edit(file_path, path, old_text, new_text, replace_all, use_regex)
 
+
+def _edit(
+    file_path: Path,
+    path: str,
+    old_text: str,
+    new_text: str,
+    replace_all: bool,
+    use_regex: bool,
+) -> dict[str, Any]:
+    """``edit_file``'s work, holding the file's lock from its read to its write."""
     if not file_path.exists():
         return {
             "success": False,
