@@ -267,3 +267,32 @@ class TestResolveEmbeddingDevice:
         monkeypatch.setattr(emb_mod, "resolve_embedding_device", lambda p: "cpu")
         svc = EmbeddingService(device="auto")
         assert svc.device == "cpu"
+
+
+class TestAModelThatDoesNotLoad:
+    """A failed load is remembered: the memory store and the knowledge base
+    each probed the shared service, and every probe tried the network again."""
+
+    def test_a_failed_load_is_not_tried_again(self, monkeypatch):
+        import sys
+        import types
+
+        loads: list[str] = []
+
+        class SentenceTransformer:
+            def __init__(self, name, device=None):
+                loads.append(name)
+                raise OSError("We couldn't connect to 'https://huggingface.co'")
+
+        monkeypatch.setitem(
+            sys.modules, "sentence_transformers", types.SimpleNamespace(SentenceTransformer=SentenceTransformer)
+        )
+        service = EmbeddingService(model_name="all-MiniLM-L6-v2", device="cpu")
+
+        for _ in range(3):
+            with pytest.raises(OSError, match="huggingface"):
+                service.embedding_dim
+        with pytest.raises(OSError, match="huggingface"):
+            service.embed_text("otters")
+
+        assert loads == ["all-MiniLM-L6-v2"]

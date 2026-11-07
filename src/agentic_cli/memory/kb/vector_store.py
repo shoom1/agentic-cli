@@ -27,8 +27,8 @@ def _parse_mappings(raw: bytes) -> tuple[dict[int, str], dict[str, int], int]:
     """The ID mappings saved beside an index.
 
     Raises:
-        Exception: ``raw`` is not mappings this store wrote (bad JSON, a
-            missing key, the wrong types).
+        Exception: ``raw`` is not in the shape this store writes (bad JSON,
+            a missing key, the wrong types).
     """
     mappings = json.loads(raw)
     id_map = {int(k): v for k, v in mappings["id_map"].items()}
@@ -292,9 +292,11 @@ class VectorStore:
         a project can ship its knowledge base. One that is counts as missing.
 
         An index FAISS cannot read (a git-LFS pointer, a foreign file) or
-        mappings this store did not write count as no index, with a warning:
-        the store is left empty and ``unreadable`` set, and the knowledge
-        base embeds its chunks again rather than failing to open.
+        mappings not in the shape this store writes count as no index, with
+        a warning: the store is left empty and ``unreadable`` set, and the
+        knowledge base embeds its chunks again rather than failing to open.
+        Well-formed mappings that name other chunks, or none beside the
+        index, still load as they are.
         """
         import faiss
 

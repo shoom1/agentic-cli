@@ -97,3 +97,33 @@ async def test_the_app_starts_and_the_tools_answer(tmp_path, monkeypatch):
     assert [item["content"] for item in tools["search_memory"]("metric")["items"]] == [
         "The user prefers metric units"
     ]
+
+
+def test_a_model_that_does_not_load_is_tried_once(tmp_path, monkeypatch):
+    """The memory store and the knowledge base each probe the shared service:
+    each probe of a failed model went to the network again."""
+    import sys
+    import types
+
+    loads: list[str] = []
+
+    class SentenceTransformer:
+        def __init__(self, name, device=None):
+            loads.append(name)
+            raise OSError("We couldn't connect to 'https://huggingface.co'")
+
+    monkeypatch.setitem(
+        sys.modules, "sentence_transformers", types.SimpleNamespace(SentenceTransformer=SentenceTransformer)
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    settings = BaseSettings(
+        workspace_dir=tmp_path / "workspace", knowledge_base_use_mock=False, embedding_device="cpu"
+    )
+    mgr = _Manager(agent_configs=[], settings=settings)
+    mgr._required_managers = {"knowledge_base", "memory_store"}
+
+    services = mgr._build_services()
+
+    assert len(loads) == 1
+    assert services["memory_store"]._embedding_service is None

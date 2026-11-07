@@ -30,6 +30,7 @@ from agentic_cli.memory.kb.manager import (
     KnowledgeBaseManager,
     UnsafeKnowledgeBase,
     _faiss_available,
+    _Threads,
     _loaded_or_keyword,
     _printable,
 )
@@ -592,7 +593,8 @@ class KnowledgeBase:
 
         The summarizer is called under the document's sidecar lock, so two
         first reads make one call. Reads and writes run on a worker thread
-        (they wait for the folder's lock; a PDF's text is extracted).
+        (they wait for the folder's lock; a PDF's text is extracted); a
+        cancelled call keeps the lock until the one its thread is in ends.
 
         A sidecar that is a symlink counts as missing: it is never read
         through, and the one written replaces it.
@@ -605,17 +607,22 @@ class KnowledgeBase:
         doc_id = doc.document.id
         sidecar = await asyncio.to_thread(manager.read_sidecar, doc_id)
         if sidecar is None:
-            async with manager.get_or_create_sidecar_lock(doc_id):
-                sidecar = await asyncio.to_thread(manager.read_sidecar, doc_id)
+            lock = manager.get_or_create_sidecar_lock(doc_id)
+            await lock.acquire()
+            threads = _Threads()
+            try:
+                sidecar = await threads.run(manager.read_sidecar, doc_id)
                 if sidecar is None:
-                    live = await asyncio.to_thread(manager.get_document, doc_id)
+                    live = await threads.run(manager.get_document, doc_id)
                     if live is None:
                         raise DocumentNotFound(doc_id)
-                    text, _ = await asyncio.to_thread(self.read_text, ScopedDocument(live, doc.scope))
+                    text, _ = await threads.run(self.read_text, ScopedDocument(live, doc.scope))
                     payload = await manager.generate_sidecar_payload(text, title=live.title)
-                    if not await asyncio.to_thread(manager.write_sidecar_if_present, live, payload):
+                    if not await threads.run(manager.write_sidecar_if_present, live, payload):
                         raise DocumentNotFound(doc_id)
-                    sidecar = await asyncio.to_thread(manager.read_sidecar, doc_id)
+                    sidecar = await threads.run(manager.read_sidecar, doc_id)
+            finally:
+                threads.release_after(lock.release)
         if sidecar is None:
             raise DocumentNotFound(doc_id)
         return sidecar

@@ -32,6 +32,10 @@ TICK = 0.01
 # Far below what a blocked loop shows (the whole embedding, or the whole
 # hold of the lock: several tenths of a second here).
 MAX_STALL = 0.05
+# Chunking a long text is Python code on the worker thread, which holds the
+# GIL between switches: on a loaded machine the loop has waited 52 ms for it.
+# A loop that embeds on its own thread stalls 0.43 s and more here.
+MAX_STALL_WHILE_CHUNKING = 0.2
 HOLD = 0.5
 
 
@@ -97,7 +101,7 @@ async def test_embedding_runs_off_the_loop(tmp_path):
     stall, found = await _longest_stall(kb.ingest_text(text, title="long"))
 
     assert len(found.document.chunks) > 50
-    assert stall < MAX_STALL
+    assert stall < MAX_STALL_WHILE_CHUNKING
 
 
 async def test_an_ingest_waits_for_another_process_off_the_loop(tmp_path):
@@ -143,3 +147,82 @@ async def test_backfill_waits_off_the_loop(tmp_path):
 
     assert (result.scope, result.written, result.error) == ("project", 1, None)
     assert stall < MAX_STALL
+
+
+# -- a cancelled call ---------------------------------------------------------
+#
+# Cancelling a coroutine does not stop the worker thread it waits on. A
+# sidecar's lock, or backfill's running flag, released by the cancelled
+# coroutine let a second call start while the first one's thread still wrote:
+# it found no sidecar yet and called the summarizer again.
+
+
+class _CountingSummarizer:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def summarize(self, content: str, prompt: str) -> str:
+        self.calls += 1
+        return "SUMMARY: Herons wade at dawn."
+
+
+def _slow_sidecar_writes(manager: KnowledgeBaseManager, monkeypatch) -> threading.Event:
+    """Make the manager's sidecar write take 0.3 s; the event is set when one starts."""
+    started = threading.Event()
+    write = manager.write_sidecar_if_present
+
+    def slow(doc, payload):
+        started.set()
+        time.sleep(0.3)
+        return write(doc, payload)
+
+    monkeypatch.setattr(manager, "write_sidecar_if_present", slow)
+    return started
+
+
+def _without_sidecar(tmp_path, summarizer) -> tuple[KnowledgeBaseManager, KnowledgeBase]:
+    manager = KnowledgeBaseManager(tmp_path / "kb", use_mock=True, summarizer=summarizer)
+    doc = manager.ingest_document(content="Herons wade at dawn.", title="Herons", source_type=SourceType.USER)
+    manager.sidecar_path(doc.id).unlink()
+    return manager, KnowledgeBase({"project": manager})
+
+
+async def _cancel_once_writing(task: asyncio.Task, started: threading.Event) -> None:
+    await asyncio.to_thread(started.wait, 5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+async def test_a_sidecar_cancelled_while_it_writes_is_not_written_twice(tmp_path, monkeypatch):
+    summarizer = _CountingSummarizer()
+    manager, kb = _without_sidecar(tmp_path, summarizer)
+    started = _slow_sidecar_writes(manager, monkeypatch)
+    [found] = kb.list_documents()
+
+    await _cancel_once_writing(asyncio.create_task(kb.sidecar(found)), started)
+    sidecar = await kb.sidecar(found)
+
+    assert "Herons wade at dawn." in sidecar
+    assert summarizer.calls == 1
+
+
+async def test_a_backfill_cancelled_while_it_writes_holds_off_the_next_until_the_write_ends(
+    tmp_path, monkeypatch
+):
+    from agentic_cli.memory.kb import BackfillAlreadyRunning
+
+    summarizer = _CountingSummarizer()
+    manager, kb = _without_sidecar(tmp_path, summarizer)
+    started = _slow_sidecar_writes(manager, monkeypatch)
+
+    await _cancel_once_writing(asyncio.create_task(manager.backfill_sidecars()), started)
+    with pytest.raises(BackfillAlreadyRunning):
+        await manager.backfill_sidecars()
+    for _ in range(100):  # the write ends within 0.3 s, and lets go then
+        if not manager._backfill_running:
+            break
+        await asyncio.sleep(0.01)
+
+    assert await manager.backfill_sidecars() == 0
+    assert summarizer.calls == 1

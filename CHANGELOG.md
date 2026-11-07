@@ -1835,8 +1835,12 @@ step; each entry says what to use instead.
   scope opens); a model that does not load leaves the knowledge base
   searching by keyword and the memory store by substring for the session,
   with one warning each (`kb_keyword_search_only`,
-  `memory_substring_search_only`); and an unreadable index counts as none, so
-  the stored text is embedded again (`kb_vector_index_unreadable`).
+  `memory_substring_search_only`), and is not tried again by the same
+  `EmbeddingService`; what such a session writes makes the knowledge base's
+  model record name no model, so the next open with a working model embeds
+  the stored text again rather than keeping an index without those
+  documents; and an unreadable index counts as none, so the stored text is
+  embedded again (`kb_vector_index_unreadable`).
 
 - **Ingesting into the knowledge base no longer freezes the app.**
   `kb_ingest_text`, `kb_ingest_file` and `ingest_arxiv_paper` embedded every
@@ -1849,7 +1853,11 @@ step; each entry says what to use instead.
   knowledge base on open holds it for minutes). Every synchronous
   knowledge-base call those make, and `kb_ingest_file`'s read of the file,
   now runs on a worker thread; concept pages are still written one at a
-  time.
+  time. A thread cannot be stopped: an ingest cancelled with Ctrl+C is
+  answered as interrupted yet still stores its document (a model that
+  retries it stores a second copy), and a cancelled `kb_read` or backfill
+  keeps the document's sidecar lock, or the backfill flag, until its write
+  ends, so the next call does not ask the summarizer again.
 
 - **Ingesting works with nltk installed without its data.** With nltk
   importable, chunking split sentences with `nltk.sent_tokenize`, which

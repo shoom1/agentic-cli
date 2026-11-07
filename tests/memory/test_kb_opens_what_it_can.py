@@ -237,3 +237,22 @@ async def test_an_unreadable_index_is_rebuilt_from_the_stored_text(tmp_path, log
     reopened = FakeEmbeddingService()
     KnowledgeBase.open({"project": project}, embedding_service=reopened)
     assert reopened.calls == 0
+
+
+async def test_documents_ingested_without_the_model_are_embedded_when_it_loads_again(tmp_path, log):
+    """Keyword mode leaves index.faiss and its model record as they were; a
+    record that still named the model made the next open with a working model
+    keep that index, and the documents ingested meanwhile were never embedded."""
+    require_kb_module("faiss")
+    kb_dir = tmp_path / "kb"
+    await KnowledgeBase.open({"project": kb_dir}, embedding_service=FakeEmbeddingService()).ingest_text(
+        "Otters nest in burrows.", title="Otters"
+    )
+    offline = KnowledgeBase.open({"project": kb_dir}, embedding_service=_OfflineModel())
+    await offline.ingest_text("Herons wade at dawn.", title="Herons")
+
+    manager = KnowledgeBase.open({"project": kb_dir}, embedding_service=FakeEmbeddingService()).manager("project")
+
+    assert len(manager._chunks) == 2
+    assert manager._vector_store.chunk_ids() == set(manager._chunks)
+    assert manager._vector_store.size == 2

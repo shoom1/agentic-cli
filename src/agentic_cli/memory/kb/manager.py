@@ -21,7 +21,7 @@ import re
 import stat
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -173,6 +173,21 @@ def _faiss_available() -> bool:
     return True
 
 
+class _KeywordFallback(MockEmbeddingService):
+    """The mock service of a knowledge base whose model is unavailable.
+
+    Unlike one chosen (``use_mock``, no ``kb`` extra), it stands in for a
+    model whose real index stays on disk: what this session writes, that
+    index lacks (see ``_save_vectors``).
+    """
+
+
+# The prefixes of a model record that names no model: the next open with a
+# working model re-embeds every chunk.
+_REBUILDING = "rebuilding:"
+_KEYWORD_WRITES = "keyword-writes:"
+
+
 def _loaded_or_keyword(service: Any) -> Any:
     """``service`` with its model loaded, or a mock service for keyword search.
 
@@ -193,8 +208,41 @@ def _loaded_or_keyword(service: Any) -> Any:
             model=model,
             error=f"{type(e).__name__}: {e}",
         )
-        return MockEmbeddingService(model_name=model, batch_size=getattr(service, "batch_size", 32))
+        return _KeywordFallback(model_name=model, batch_size=getattr(service, "batch_size", 32))
     return service
+
+
+class _Threads:
+    """One async operation's blocking calls, each on a worker thread in turn.
+
+    Cancelling the coroutine that awaits a call does not stop its thread.
+    What the operation holds (a sidecar lock, the backfill flag) is let go
+    by :meth:`release_after`: at once, or when the call still running ends,
+    so a second caller cannot start the same work while the first one's
+    thread still writes.
+    """
+
+    def __init__(self) -> None:
+        self._running: asyncio.Future[Any] | None = None
+
+    async def run(self, func: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
+        """``func(*args, **kwargs)`` on a worker thread."""
+        self._running = asyncio.ensure_future(asyncio.to_thread(func, *args, **kwargs))
+        return await asyncio.shield(self._running)
+
+    def release_after(self, release: Callable[[], None]) -> None:
+        """Call ``release`` now, or when the call still running ends."""
+        running = self._running
+        if running is None or running.done():
+            release()
+            return
+
+        def ended(future: asyncio.Future[Any]) -> None:
+            if not future.cancelled() and future.exception() is not None:
+                logger.debug("kb_cancelled_call_failed", exc_info=future.exception())
+            release()
+
+        running.add_done_callback(ended)
 
 
 class KnowledgeBaseManager:
@@ -211,8 +259,9 @@ class KnowledgeBaseManager:
       (``ingest_document``, ``search``, ``delete_document``, ``clear``)
       is safe to call from any thread. It is held while waiting for the
       folder lock (see :meth:`_transaction`), which another process can
-      hold for minutes, so the event loop never takes it: async callers
-      run these calls on a worker thread.
+      hold for minutes, so the async methods here and in ``KnowledgeBase``
+      run these calls on a worker thread. A synchronous caller on the
+      event loop (a CLI command listing documents) still waits with it.
     * ``_quick_lock`` (``threading.Lock``) — guards what the event loop
       itself touches: the ``_sidecar_locks`` inserts and the
       check-and-set of ``_backfill_running``. Never held across I/O.
@@ -520,8 +569,9 @@ class KnowledgeBaseManager:
 
         With chunks and no index (or one the store could not read), every
         chunk is embedded. A record that names the current model, with an
-        index of its dimension, loads as it is; any other record means
-        re-embedding. With no record (a knowledge base from 0.6.3), an index
+        index of its dimension, loads as it is; any other record (one a
+        session without its model left among them: see ``_save_vectors``)
+        means re-embedding. With no record (a knowledge base from 0.6.3), an index
         of the model's dimension whose mappings name exactly the stored chunks
         is adopted; anything else is re-embedded. A new knowledge base (no
         chunks, no index) gets its record with its first save.
@@ -537,7 +587,8 @@ class KnowledgeBaseManager:
         if recorded is not None:
             if recorded == current and dimension == current.embedding_dim:
                 return
-            self._reembed(current, "model_changed")
+            keyword_writes = recorded.model_name.startswith(_KEYWORD_WRITES)
+            self._reembed(current, "keyword_writes" if keyword_writes else "model_changed")
             return
         try:
             covers = store.chunk_ids() == set(self._chunks)
@@ -584,7 +635,7 @@ class KnowledgeBaseManager:
             # record, forces a re-embedding on the next open.
             write_model_record(
                 self._model_record_path,
-                ModelRecord(f"rebuilding:{current.model_name}", current.embedding_dim),
+                ModelRecord(f"{_REBUILDING}{current.model_name}", current.embedding_dim),
             )
             os.replace(new_mappings, old.index_path.with_suffix(".mappings.json"))
             os.replace(new_index, old.index_path)
@@ -611,7 +662,7 @@ class KnowledgeBaseManager:
         """Use the mock service and store for this session; the real index stays on disk."""
         from agentic_cli.memory.kb._mock_vector_store import MockVectorStore
 
-        self._embedding_service = MockEmbeddingService(
+        self._embedding_service = _KeywordFallback(
             model_name=getattr(self._embedding_service, "model_name", "mock-model"),
             batch_size=getattr(self._embedding_service, "batch_size", 32),
         )
@@ -626,10 +677,32 @@ class KnowledgeBaseManager:
 
         Rewritten on every save: when two sessions with different models save
         one knowledge base, the record names the model of the index last saved.
+
+        A session whose model is unavailable (``_KeywordFallback``) leaves the
+        real index as it was, without the chunks it writes, so it makes the
+        record name no model, as an interrupted re-embedding does: the next
+        open with a working model embeds every chunk again, rather than
+        keeping an index that lacks them. Each change does it, since another
+        process may have re-embedded in between.
         """
         self._vector_store.save()
         if self._has_real_index():
             write_model_record(self._model_record_path, self._current_record())
+        elif isinstance(self._embedding_service, _KeywordFallback):
+            self._invalidate_record()
+
+    def _invalidate_record(self) -> None:
+        """Make the model record name no model (see ``_save_vectors``)."""
+        recorded = read_model_record(self._model_record_path)
+        if recorded is None or recorded.model_name.startswith((_REBUILDING, _KEYWORD_WRITES)):
+            return  # no record: the next open checks the index covers the chunks
+        try:
+            write_model_record(
+                self._model_record_path,
+                ModelRecord(f"{_KEYWORD_WRITES}{recorded.model_name}", recorded.embedding_dim),
+            )
+        except OSError as e:
+            logger.warning("kb_model_record_write_failed", error=str(e))
 
     # ------------------------------------------------------------------
     # Persistence — v2/v3 format (content in per-document files)
@@ -1422,10 +1495,11 @@ class KnowledgeBaseManager:
 
         Raises ``BackfillAlreadyRunning`` if another ``backfill_sidecars``
         call is already in progress on this manager. The in-progress flag
-        is set and cleared synchronously (before/after any ``await``), so
-        two concurrent callers cannot both acquire it. Reads and writes of
-        the knowledge base run on a worker thread: each waits for the
-        folder's lock.
+        is set synchronously (before any ``await``), so two concurrent
+        callers cannot both acquire it. Reads and writes of the knowledge
+        base run on a worker thread: each waits for the folder's lock. A
+        cancelled backfill keeps the flag, and the document's sidecar lock,
+        until the call its thread is in ends.
 
         Skips ingest_log/index updates — they're already current; only
         the sidecar files are out of date.
@@ -1449,32 +1523,39 @@ class KnowledgeBaseManager:
                     "backfill_sidecars is already running on this KB"
                 )
             self._backfill_running = True
+        threads = _Threads()
         try:
-            todo = await asyncio.to_thread(self._documents_without_sidecar)
+            todo = await threads.run(self._documents_without_sidecar)
             written = 0
             total = len(todo)
             for i, doc in enumerate(todo):
                 # Guard against delete-during-backfill — doc may have
                 # been removed since the snapshot was taken.
-                if not await asyncio.to_thread(self._needs_sidecar, doc.id):
+                if not await threads.run(self._needs_sidecar, doc.id):
                     continue
                 lock = self.get_or_create_sidecar_lock(doc.id)
-                async with lock:
+                await lock.acquire()
+                try:
                     # Double-check inside the lock — another task may
                     # have written it (e.g. lazy kb_read fallback).
-                    if not await asyncio.to_thread(self._needs_sidecar, doc.id):
+                    if not await threads.run(self._needs_sidecar, doc.id):
                         continue
                     if progress_cb is not None:
                         progress_cb(i, total, doc)
                     payload = await self.generate_sidecar_payload(
                         doc.content, title=doc.title
                     )
-                    if await asyncio.to_thread(self.write_sidecar_if_present, doc, payload):
+                    if await threads.run(self.write_sidecar_if_present, doc, payload):
                         written += 1
+                finally:
+                    threads.release_after(lock.release)
             return written
         finally:
-            with self._quick_lock:
-                self._backfill_running = False
+            threads.release_after(self._end_backfill)
+
+    def _end_backfill(self) -> None:
+        with self._quick_lock:
+            self._backfill_running = False
 
     def _documents_without_sidecar(self) -> list[Document]:
         """The documents that have no sidecar, as the knowledge base is now."""
