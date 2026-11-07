@@ -386,6 +386,95 @@ class TestSummarizing:
         assert (answers.sent, api.requests) == ([], [])
 
 
+# --- a summary that fails, within its turn ---------------------------------------------------
+
+
+@register_tool(category=ToolCategory.READ, capabilities=EXEMPT,
+               description="Read a note (an exempt test tool).")
+def compaction_probe_read(size: str = "short") -> dict:
+    """Return a short note, or a long one (about 3,600 tokens on Claude)."""
+    return {"success": True, "text": LONG if size == "long" else "A short note."}
+
+
+def reader() -> GoogleADKWorkflowManager:
+    return GoogleADKWorkflowManager(
+        agent_configs=[AgentConfig(name="solo", prompt=PROMPTS["solo"],
+                                   tools=[compaction_probe_read], include_state_tools=False)],
+        settings=settings(),
+    )
+
+
+def unwritten() -> dict:
+    """A summary call the model ends with no text, as a Claude refusal does."""
+    return says("", 7_000)
+
+
+def warnings_in(events) -> list[str]:
+    return [event.metadata["error_code"] for event in events if event.type is EventType.ERROR]
+
+
+class TestAFailedSummary:
+    """ADK checks before every model call: a summary that failed would be paid
+    for again at each tool step of its turn, over the same range."""
+
+    async def test_it_is_tried_once_a_turn(self, project, monkeypatch):
+        answers = serve(monkeypatch, Claude(
+            solo=[says("A1."), says("A2.", OVER),
+                  calls("compaction_probe_read", "toolu_1", OVER),
+                  calls("compaction_probe_read", "toolu_2", OVER),
+                  calls("compaction_probe_read", "toolu_3", OVER),
+                  says("A3.", OVER), says("A4.", OVER)],
+            summaries=[unwritten() for _ in range(5)],
+        ))
+        manager = reader()
+        try:
+            for text in TURNS[:2]:
+                await turn(manager, text)
+            third = await turn(manager, "Three? Read three notes.")
+            asked = len(answers.asked)
+            fourth = await turn(manager, TURNS[3])
+        finally:
+            await manager.cleanup()
+
+        # One summary call, before the turn's first model call; the three
+        # after it go on with the whole history.
+        assert answers.asked[2:asked] == ["summary", "solo", "solo", "solo", "solo"]
+        assert warnings_in(third) == ["summary_failed"]
+        assert texts(third) == ["A3."]
+        # The next turn tries once more.
+        assert answers.asked[asked:] == ["summary", "solo"]
+        assert warnings_in(fourth) == ["summary_failed"]
+
+    async def test_it_is_tried_again_once_its_range_has_grown(self, project, monkeypatch):
+        """A short note leaves the range as it was; a long one moves the kept
+        tail into the current turn, so the turn before it joins the range: a
+        fifth of the trigger and more."""
+        answers = serve(monkeypatch, Claude(
+            solo=[says("A1."), says("A2.", OVER),
+                  calls("compaction_probe_read", "toolu_1", OVER),
+                  calls("compaction_probe_read", "toolu_2", OVER, size="long"),
+                  says("A3.", OVER)],
+            summaries=[unwritten(), says(SUMMARY, 7_000)],
+        ))
+        manager = reader()
+        try:
+            for text in TURNS[:2]:
+                await turn(manager, text)
+            third = await turn(manager, "Three? Read two notes.")
+            events = await stored(manager)
+        finally:
+            await manager.cleanup()
+
+        assert answers.asked[2:] == ["summary", "solo", "solo", "summary", "solo"]
+        first, second = (lines(body)[0] for body in answers.bodies("summary"))
+        assert "One:" in first and "Two:" not in first
+        assert "One:" in second and "Two:" in second
+        assert len(summaries_in(events)) == 1
+        assert lines(answers.bodies("solo")[-1])[0] == f"user: {SUMMARY_PREFIX}\n\n{SUMMARY}"
+        assert warnings_in(third) == ["summary_failed"]
+        assert texts(third) == ["A3."]
+
+
 class TestTheApp:
     async def test_the_main_agents_trigger_and_model_are_the_summarys(self, project, monkeypatch):
         serve(monkeypatch, Claude())

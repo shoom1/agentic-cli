@@ -683,7 +683,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   switched off (`NoAfterTurnCompactionRunner`), so the prompt never waits
   for a summary after the answer. A summary that fails is one warning a
   turn, "Could not summarize the earlier conversation; older turns are left
-  out instead.", and the next call tries again; Ctrl+C during one writes
+  out instead.", and the next turn tries again (a later call of the same
+  turn only once the range has grown); Ctrl+C during one writes
   nothing. A request still over its agent's input budget (the summary
   lags a call, a sub-agent may run on a smaller model, an unknown window
   counts as 128,000 tokens) has its oldest whole turns left out of that
@@ -1487,7 +1488,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   window that works. A summary the model writes no text for (Claude can
   refuse one) is not stored: the request goes on in full, the user is told
   "Could not summarize the earlier conversation; it is sent in full
-  instead." once a turn, and the next call tries again. Both settings are
+  instead." once a turn, and the next turn tries again (a later call of the
+  same turn only once the range has grown). Both settings are
   project-settable, and a `/settings` change of either rebuilds the agents,
   keeping the conversation.
 - **google-adk 2.13 is supported, as is 2.12.** The OpenAI-compatible model
@@ -1764,6 +1766,18 @@ step; each entry says what to use instead.
 
 ### Fixed
 
+- **A summary that failed is no longer paid for again at every tool step of
+  its turn.** Both backends check for a summary before each model call, and
+  after one failed (a model that wrote no text, as a Claude refusal does; on
+  ADK also a provider's error, such as a 429) the next call sent the same
+  range again: a turn of three tool steps made four identical summary calls,
+  and a 20-step turn on a 200,000-token model could re-send some 150,000
+  tokens 20 times, each 429 also waiting through the client's retries. The
+  range that failed is now skipped for the rest of its turn, unless it has
+  grown by a fifth of the trigger (the saving a summary must be worth) or a
+  summary written since starts it elsewhere; the next turn tries again. The
+  warning is still one a turn, and the turn still goes on without a summary.
+  A summary asked for (`/compact`, an overflow's) is never skipped.
 - **On ADK, a main agent's reply that is no answer ends the turn with an
   error.** A reply with nothing but thoughts or blank text raises nothing on
   ADK: Gemini's `SAFETY`, `MALFORMED_FUNCTION_CALL` or `MAX_TOKENS` (every

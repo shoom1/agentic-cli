@@ -33,6 +33,13 @@ every refusal ``workflow/context.py`` recognizes (OpenRouter's, an
 OpenAI-compatible server's, older Claude's) is raised as that error, inside
 the helper's retry, so it is not sent again as it was.
 
+**A summary the model wrote no text for** is not stored (``NoSummaryWritten``):
+the call goes on with the conversation in full, and the turn's later calls
+skip that range (``FailedSummaries``, keyed by the turn's live events) until
+it has grown by ``MIN_SAVING`` of the trigger; the next turn tries again.
+Any other failure of the summary call, after LangChain's retries, ends the
+turn: there is no later call in it to skip for.
+
 **Reporting.** The summary call runs on the agent's own model, tagged
 ``lc_source="summarization"``; the run callback reports its start
 (``CONTEXT_SUMMARIZING``) and its usage. Each summary applied is reported as
@@ -52,7 +59,9 @@ count is the prompt the summary replaced, no evidence: the middleware's
 alone, as ADK's engine stops at a summary. They rest on private Deep Agents
 methods (``_apply_event_to_messages``, ``_compute_state_cutoff``,
 ``_build_new_messages_with_path``, ``_should_summarize``, ``_lc_helper``
-and its summary model); contract tests pin them.
+and its summary model, and, for a failed summary's range,
+``_get_effective_messages`` and ``_determine_cutoff_index``); contract tests
+pin them.
 """
 
 from __future__ import annotations
@@ -86,7 +95,13 @@ from langchain_core.runnables import Runnable
 from langchain_core.runnables.config import set_config_context
 
 from agentic_cli.logging import Loggers
-from agentic_cli.workflow.context import chars_per_token, context_budget, is_context_overflow
+from agentic_cli.workflow import live_events
+from agentic_cli.workflow.context import (
+    FailedSummaries,
+    chars_per_token,
+    context_budget,
+    is_context_overflow,
+)
 from agentic_cli.workflow.summary_prompt import SUMMARY_PROMPT, with_focus
 
 if TYPE_CHECKING:
@@ -230,8 +245,9 @@ class ReportingSummarizationMiddleware(SummarizationMiddleware):
 
     Its helper's summary model is ``OverflowMapped``, inside LangChain's
     retry, so a summary refused as too long is cut and sent again, whatever
-    the provider calls it. And a summary ``/compact`` wrote is not written
-    again on the strength of a count reported before it (``_should_summarize``).
+    the provider calls it. A summary ``/compact`` wrote is not written again
+    on the strength of a count reported before it, and one that wrote no text
+    is not tried again in its turn over the same range (``_should_summarize``).
 
     Args:
         agent: The agent whose stack this is.
@@ -248,6 +264,8 @@ class ReportingSummarizationMiddleware(SummarizationMiddleware):
         )
         kind, value = kwargs.get("trigger") or (None, None)
         self._trigger_tokens: int | None = int(value) if kind == "tokens" else None
+        # The ranges whose summary wrote no text this turn.
+        self._failures = FailedSummaries(self._trigger_tokens or 0)
 
     def _should_summarize(self, messages: list["AnyMessage"], total_tokens: int) -> bool:
         """Whether to summarize the request, which holds ``messages``.
@@ -257,11 +275,30 @@ class ReportingSummarizationMiddleware(SummarizationMiddleware):
         the trigger. Right after a summary ``/compact`` wrote, the newest
         answer is the one it was written after (its mark's ``after``), and
         its count is the prompt the summary replaced: then the estimate
-        alone decides. Otherwise Deep Agents decides.
+        alone decides. Otherwise Deep Agents decides. Either way, a range
+        whose summary wrote no text earlier in the turn is skipped until it
+        has grown (``FailedSummaries``): it would come back empty again.
         """
         if self._trigger_tokens is not None and _counted_before_the_summary(messages):
-            return total_tokens >= self._trigger_tokens
-        return super()._should_summarize(messages, total_tokens)
+            due = total_tokens >= self._trigger_tokens
+        else:
+            due = super()._should_summarize(messages, total_tokens)
+        if due and self._failures.skips(live_events.current(), *self._range(messages)):
+            logger.debug("deepagents_summary_not_retried", agent=self.agent)
+            return False
+        return due
+
+    def _range(self, messages: list["AnyMessage"]) -> tuple[str | None, int]:
+        """Where a summary of ``messages`` would start, and its size in tokens.
+
+        The messages Deep Agents would summarize (``_determine_cutoff_index``)
+        but the summary so far, which is replaced, not removed: the first's
+        id, and the middleware's own count of them.
+        """
+        cutoff = self._determine_cutoff_index(messages)
+        summarized = [m for m in messages[:cutoff] if not _is_summary(m)]
+        start = summarized[0].id if summarized else None
+        return start, self.token_counter(summarized)
 
     async def awrap_model_call(
         self,
@@ -280,8 +317,10 @@ class ReportingSummarizationMiddleware(SummarizationMiddleware):
         except NoSummaryWritten as error:
             if sent:
                 raise _refused_unsummarized(error) from error
+            messages = self._get_effective_messages(request)
+            self._failures.failed(live_events.current(), *self._range(messages))
             await self._anot_summarized()
-            return await handler(request.override(messages=self._get_effective_messages(request)))
+            return await handler(request.override(messages=messages))
         report = self._report(request, response)
         if report is not None:
             try:
@@ -307,8 +346,10 @@ class ReportingSummarizationMiddleware(SummarizationMiddleware):
         except NoSummaryWritten as error:
             if sent:
                 raise _refused_unsummarized(error) from error
+            messages = self._get_effective_messages(request)
+            self._failures.failed(live_events.current(), *self._range(messages))
             self._not_summarized()
-            return handler(request.override(messages=self._get_effective_messages(request)))
+            return handler(request.override(messages=messages))
         report = self._report(request, response)
         if report is not None:
             try:
@@ -353,9 +394,10 @@ class ReportingSummarizationMiddleware(SummarizationMiddleware):
         summary in place of the messages it stands for, so the model would
         never see them again. Raising ``NoSummaryWritten`` instead stores
         nothing: the model call goes on with the conversation in full, the
-        user is told once a turn (``SUMMARY_NOT_WRITTEN``), and the next call
-        tries again. After the provider refused the request as too long,
-        that is a context overflow.
+        user is told once a turn (``SUMMARY_NOT_WRITTEN``), and the turn's
+        later calls try again only once the range has grown; the next turn
+        does. After the provider refused the request as too long, that is a
+        context overflow.
         """
         return _written(super()._create_summary(messages_to_summarize))
 
