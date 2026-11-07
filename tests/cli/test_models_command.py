@@ -360,11 +360,13 @@ async def test_a_search_finds_models_in_a_full_listing_and_marks_the_list_s(api,
 
     screen = await models(App(settings, workflow), "flash")
 
-    assert _tables(screen) == ["Models matching 'flash' (4)"]
+    # Every id Google serves: its aliases, snapshots and other modalities too.
+    assert _tables(screen) == ["Models matching 'flash' (10)"]
     assert "in the list" in _row(screen, "google:gemini-2.5-flash")
     assert "in the list" in _row(screen, "google:gemini-2.5-flash-lite")  # the fast role's
     assert "in the list" not in _row(screen, "google:gemini-2.0-flash")
     assert "in the list" not in _row(screen, "google:gemini-3-flash-preview")
+    assert "in the list" not in _row(screen, "google:gemini-flash-latest")
 
 
 async def test_a_search_lists_a_provider_not_in_use_the_first_time(api, monkeypatch):

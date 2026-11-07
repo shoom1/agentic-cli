@@ -29,9 +29,16 @@ fresh.
 **The list** (``offered``) is what the model pickers offer: the entries that
 can run, then the models the references and the caller name, each once; when
 no entry can run, each built-in provider's newest fast, default and strong
-models. Listings never add to it. ``not_offered`` says why an entry is left
-out, and ``load`` warns, once per process, of an entry whose provider is not
-defined or whose listing lacks its model.
+models, of those it shows. Listings never add to it. ``not_offered`` says why
+an entry is left out, and ``load`` warns, once per process, of an entry whose
+provider is not defined or whose listing lacks its model.
+
+**Served and shown.** A listing holds every model the provider serves, and
+the catalog accepts each of their ids (``record()``, ``search``). A provider
+shows fewer (``records()``, the tier picks above, the models an "is not
+available" message names, the status count): Google its text models, without
+aliases, snapshots or variants; Anthropic each dated id as its alias, which
+takes the first one listed's facts; OpenAI its curated and reasoning models.
 
 **Validation.** An unknown id is rejected only when its provider's listing is
 fresh (``ProviderState.FRESH``); a stale, failed or untried listing cannot
@@ -45,7 +52,8 @@ one at every start.
 
 **Cache.** Listings are kept in a JSON file (``~/.<app>/model_cache.json`` in
 the workflow), one entry per provider: fetch time, outcome, address, kind,
-models and the entries' models it lacked, never a key. Startup reads it and waits on the network only for a
+models (each with whether it is shown) and the entries' models it lacked,
+never a key. Startup reads it and waits on the network only for a
 provider in use that has credentials and no entry for its address and kind;
 a fresh entry needs no listing, and an older one (or a cached failure) is
 used while ``start_background_refresh`` lists it again. A broken file, one
@@ -85,8 +93,10 @@ logger = logging.getLogger(__name__)
 
 #: Seconds a listing stays fresh.
 DEFAULT_TTL = 86400.0
-#: Version 2 records each provider's kind; a file of another version is listed again.
-CACHE_VERSION = 2
+#: Version 3 holds every model a provider serves, and which are shown
+#: (version 2 held only those shown, so it rejected the others while fresh);
+#: a file of another version is listed again.
+CACHE_VERSION = 3
 
 # OpenRouter's ``reasoning.effort`` values, lowest first.
 _OPENROUTER_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh")
@@ -168,7 +178,8 @@ class _ProviderState:
     #: The entries' models the listing lacked when it was made: a cached
     #: listing that lacks one of these is not listed again for it.
     absent: frozenset[str] = frozenset()
-    #: Every id ``record()`` knows, and the records ``records()`` offers.
+    #: Every id the provider serves, which ``record()`` accepts and ``search``
+    #: finds; and the records it shows, which ``records()`` offers.
     accepted: Mapping[str, ModelRecord] = field(default_factory=dict)
     offered: tuple[ModelRecord, ...] = ()
 
@@ -421,7 +432,8 @@ class ModelCatalog:
         return _with_entry(record, self._entries.get(ref))
 
     def records(self, provider: str) -> list[ModelRecord]:
-        """The models offered for ``provider``: its listing's, else the fallbacks."""
+        """The models offered for ``provider``: those its listing shows, else
+        the fallbacks."""
         found = self._states.get(provider)
         return list(found.offered) if found is not None else []
 
@@ -702,12 +714,23 @@ class ModelCatalog:
             ProviderKind.OPENAI: self._openai,
             ProviderKind.OPENROUTER: self._openrouter,
         }[kind]
+        # Every id the provider serves is accepted; only the shown ones are offered.
         accepted: dict[str, ModelRecord] = {}
+        shown: dict[str, ModelRecord] = {}
         for listed in listing.models:
             if listed.id not in accepted:
                 accepted[listed.id] = build(name, listed)
+            if listed.alias is None:
+                if listed.shown:
+                    shown.setdefault(listed.id, accepted[listed.id])
+                continue
+            # Anthropic: a dated id is shown as its alias, which takes the
+            # first one listed's facts, as in 0.6.
+            if listed.alias not in accepted:
+                accepted[listed.alias] = build(name, dataclasses.replace(listed, id=listed.alias))
+            shown.setdefault(listed.alias, accepted[listed.alias])
         if kind is not ProviderKind.OPENAI:
-            return accepted, list(accepted.values())
+            return accepted, list(shown.values())
         # R15: the curated ids the account has, then any other reasoning
         # model it lists. Other ids (embeddings, TTS, gpt-4.1) are accepted by
         # record() but never offered.
@@ -974,6 +997,8 @@ class _CachedModel(_Strict):
     thinking_types: tuple[str, ...] = ()
     effort_levels: tuple[str, ...] = ()
     can_disable: bool | None = None
+    shown: bool = True
+    alias: str | None = Field(default=None, min_length=1)
 
 
 class _CacheEntry(_Strict):
@@ -989,5 +1014,5 @@ class _CacheEntry(_Strict):
 
 
 class _CacheFile(_Strict):
-    version: Literal[2]
+    version: Literal[3]
     providers: dict[str, _CacheEntry]

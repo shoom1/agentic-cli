@@ -3,17 +3,22 @@
 One lister per provider kind, each over the provider's REST API with httpx,
 never a provider SDK (only the backend adapters touch those):
 
-- ``google``: ``GET /v1beta/models`` (``x-goog-api-key``), the text models
-  0.6 kept;
+- ``google``: ``GET /v1beta/models`` (``x-goog-api-key``); it shows the
+  text models 0.6 kept;
 - ``anthropic``: ``GET /v1/models`` (``x-api-key``), with each model's
   thinking types and effort levels, and whether thinking can be turned off;
-  dated ids become their alias;
+  it shows a dated id as its alias (``ListedModel.alias``);
 - ``openai``: ``GET /v1/models`` (bearer key), ids only;
 - ``openrouter``: OpenRouter's public ``GET {base_url}/models`` (the key
   is sent when there is one), with tool and reasoning support;
 - ``openai_compatible``: ``GET {base_url}/models`` on a configured provider,
   the served names and their context length, from an object with ``data``
   or a bare array.
+
+A listing holds every model the provider serves, each under its own id, and
+says which to show (``ListedModel.shown``; the last three show them all): a
+model not shown is still served, so its id is accepted and found by search,
+but no list of the provider's models shows it.
 
 ``list_models`` never raises for an HTTP or network failure: it returns a
 failed ``Listing`` whose ``error`` is a short reason that never contains the
@@ -62,6 +67,14 @@ class ListedModel:
     #: Anthropic: whether thinking can be turned off (the ``disabled`` thinking
     #: type); None when the listing does not say.
     can_disable: bool | None = None
+    #: Whether to show the model under its own id. One not shown is still
+    #: served: its id is accepted and found by search. Google does not show
+    #: its other modalities, aliases, snapshots and variants, nor Anthropic
+    #: its dated ids.
+    shown: bool = True
+    #: Anthropic: the alias a dated id is shown as (``claude-sonnet-4-5`` for
+    #: ``claude-sonnet-4-5-20250929``); None for any other id.
+    alias: str | None = None
 
 
 @dataclass(frozen=True)

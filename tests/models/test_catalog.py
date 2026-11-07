@@ -9,6 +9,7 @@ behind ``httpx.MockTransport``. The on-disk cache is covered in
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 import time
 
@@ -544,6 +545,139 @@ class TestValidation:
         )
 
 
+# --- served and shown: validation and search see every id, the list the shown ones ---
+
+#: Ids the recorded listings serve but do not show: Google's alias, dated
+#: snapshot, variant and point release; Anthropic's dated ids.
+SERVED_NOT_SHOWN = (
+    ModelRef("google", "gemini-flash-latest"),
+    ModelRef("google", "gemini-2.5-flash-preview-09-2025"),
+    ModelRef("google", "gemini-3.1-pro-preview-customtools"),
+    ModelRef("google", "gemini-2.0-flash-001"),
+    ModelRef("anthropic", "claude-sonnet-4-5-20250929"),
+    ModelRef("anthropic", "claude-haiku-4-5-20251001"),
+)
+
+
+async def test_a_fresh_listing_accepts_every_id_its_provider_serves():
+    """A pinned snapshot or alias the provider lists is no unknown id, though
+    the list never offers it."""
+    catalog = await loaded(google=KEYS["google"], anthropic=KEYS["anthropic"])
+
+    assert catalog.is_authoritative("google") and catalog.is_authoritative("anthropic")
+    assert [str(catalog.record(ref).ref) for ref in SERVED_NOT_SHOWN] == [
+        str(ref) for ref in SERVED_NOT_SHOWN
+    ]
+    with pytest.raises(ModelResolutionError, match="google:gemini-9-ultra is not available"):
+        catalog.record(ModelRef("google", "gemini-9-ultra"))
+
+
+async def test_what_is_shown_does_not_change():
+    """Each provider's records, the tiers a list with no entry offers, the
+    status counts and the "not available" message: the same as when the
+    listers dropped what they do not show."""
+    catalog = await loaded(references=ON_OPENROUTER, openrouter="r-test-key", **KEYS)
+
+    assert {name: ids(catalog.records(name)) for name in (*KEYS, "openrouter")} == {
+        "google": [
+            "gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.5-flash-lite",
+            "gemini-3.1-pro-preview", "gemini-3-flash-preview", "gemini-2.0-flash",
+        ],
+        "anthropic": [
+            "claude-sonnet-5-5", "claude-opus-4-7", "claude-sonnet-4-6", "claude-sonnet-4-5",
+            "claude-haiku-4-5", "claude-3-5-haiku", "claude-3-haiku",
+        ],
+        "openai": [
+            "gpt-5.5", "gpt-5.5-2026-03-05", "gpt-5.5-pro", "gpt-5.4-mini", "gpt-5-codex", "o3",
+        ],
+        "openrouter": [
+            "qwen/qwen3-235b-a22b", "qwen/qwen3-235b-a22b:free", "anthropic/claude-sonnet-4.5",
+            "meta-llama/llama-3.3-70b-instruct",
+        ],
+    }
+    assert catalog.offered() == [
+        "openrouter:qwen/qwen3-235b-a22b",
+        "google:gemini-2.5-flash-lite",
+        "google:gemini-3-flash-preview",
+        "google:gemini-3.1-pro-preview",
+        "anthropic:claude-haiku-4-5",
+        "anthropic:claude-sonnet-5-5",
+        "anthropic:claude-opus-4-7",
+        "openai:gpt-5.4-mini",
+        "openai:gpt-5.5",
+        "openai:gpt-5.5-pro",
+    ]
+    assert [(s.provider, s.model_count) for s in catalog.status()] == [
+        ("google", 6), ("anthropic", 7), ("openai", 6), ("openrouter", 4),
+    ]
+    with pytest.raises(ModelResolutionError) as caught:
+        catalog.record(ModelRef("anthropic", "claude-sonnet-9-9"))
+    assert str(caught.value).endswith(
+        "Available anthropic models: claude-sonnet-5-5, claude-opus-4-7, claude-sonnet-4-6, "
+        "claude-sonnet-4-5, claude-haiku-4-5, claude-3-5-haiku, claude-3-haiku"
+    )
+
+
+async def test_search_finds_an_id_its_provider_serves_but_does_not_show():
+    catalog = await loaded(google=KEYS["google"], anthropic=KEYS["anthropic"])
+
+    dated = await catalog.search("sonnet-4-5-2025")
+    alias = await catalog.search("flash-latest")
+
+    assert [str(record.ref) for record in dated] == ["anthropic:claude-sonnet-4-5-20250929"]
+    assert [str(record.ref) for record in alias] == ["google:gemini-flash-latest"]
+
+
+async def test_a_listed_dated_claude_id_is_described_as_its_alias_is():
+    catalog = await loaded(anthropic=KEYS["anthropic"])
+
+    for alias, dated in [
+        ("claude-sonnet-4-5", "claude-sonnet-4-5-20250929"),
+        ("claude-haiku-4-5", "claude-haiku-4-5-20251001"),
+    ]:
+        record = catalog.record(ModelRef("anthropic", dated))
+        expected = catalog.record(ModelRef("anthropic", alias))
+        assert record == dataclasses.replace(expected, model=dated)
+
+
+async def test_a_dated_claude_id_is_offered_as_its_alias_described_by_the_first_listed():
+    """As in 0.6, the alias takes the facts of the first id listed under it;
+    each id the provider serves keeps its own."""
+    data = recorded("anthropic")["data"]
+    dated = next(m for m in data if m["id"] == "claude-sonnet-4-5-20250929")
+    page = {"data": [
+        dated,
+        {**dated, "id": "claude-sonnet-4-5", "display_name": "The alias"},
+        {**dated, "id": "claude-sonnet-4-5@2025-09-29", "max_input_tokens": 100_000},
+    ], "has_more": False}
+    catalog = await loaded(ProviderAPI(anthropic=page), anthropic=KEYS["anthropic"])
+
+    assert ids(catalog.records("anthropic")) == ["claude-sonnet-4-5"]
+    alias = catalog.record(ModelRef("anthropic", "claude-sonnet-4-5"))
+    vertex = catalog.record(ModelRef("anthropic", "claude-sonnet-4-5@2025-09-29"))
+    assert (alias.display_name, alias.context_window) == ("Claude Sonnet 4.5", 200_000)
+    assert (vertex.display_name, vertex.context_window) == ("Claude Sonnet 4.5", 100_000)
+
+
+@pytest.mark.parametrize("listed", [True, False], ids=["listed", "not listed"])
+async def test_a_dated_claude_id_has_its_alias_s_thinking_and_sampling(listed):
+    """Claude Sonnet 5.5 cannot turn thinking off and takes no sampling
+    parameters (its table entry), under a dated id too: with a listing that
+    does not say, and with none."""
+    dated = ModelRef("anthropic", "claude-sonnet-5-5-20261001")
+    api = ProviderAPI(anthropic=claude_listing(dated.model, disabled=None))
+    catalog = catalog_for(api, anthropic=KEYS["anthropic"])
+    if listed:
+        await catalog.load()
+        assert catalog.is_authoritative("anthropic")
+
+    record = catalog.record(dated)
+
+    assert record.thinking.mechanism is ADAPTIVE
+    assert record.thinking.can_disable is False
+    assert record.sampling == "never"
+
+
 # --- status and authority ------------------------------------------------------
 
 
@@ -984,6 +1118,7 @@ class TestSearch:
 
         assert [str(record.ref) for record in found] == [
             "anthropic:claude-sonnet-4-5",
+            "anthropic:claude-sonnet-4-5-20250929",
             "anthropic:claude-sonnet-4-6",
             "anthropic:claude-sonnet-5-5",
             "openrouter:anthropic/claude-sonnet-4.5",
@@ -1022,7 +1157,11 @@ class TestSearch:
 
         found = await catalog.search("2.0-flash")
 
-        assert [str(record.ref) for record in found] == ["google:gemini-2.0-flash"]
+        assert [str(record.ref) for record in found] == [
+            "google:gemini-2.0-flash",
+            "google:gemini-2.0-flash-001",
+            "google:gemini-2.0-flash-exp-image-generation",
+        ]
         assert catalog.is_authoritative("google")
 
 

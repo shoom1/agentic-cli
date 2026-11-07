@@ -231,20 +231,44 @@ async def test_google_fields():
     assert models["gemini-2.0-flash"].max_output == 8192
 
 
-async def test_google_keeps_the_text_models_as_0_6_did():
-    """``generateContent`` and ``createCachedContent``, ``gemini-`` only, no
-    point releases, ``-latest`` aliases, dated snapshots, ``-customtools`` or
-    ``-exp-`` variants."""
+async def test_google_lists_every_model_and_shows_the_text_models_0_6_kept():
+    """Every model is served, so its id is accepted. Shown: a ``gemini-`` model
+    with ``generateContent`` and ``createCachedContent``, not a point release,
+    a ``-latest`` alias, a dated snapshot, a ``-customtools`` or an ``-exp-``
+    variant."""
     listing = await listed("google", serving(payload("google")))
 
-    assert [model.id for model in listing.models] == [
-        "gemini-2.5-flash",
-        "gemini-2.5-pro",
-        "gemini-2.5-flash-lite",
-        "gemini-3.1-pro-preview",
-        "gemini-3-flash-preview",
-        "gemini-2.0-flash",
+    assert [(model.id, model.shown) for model in listing.models] == [
+        ("gemini-2.5-flash", True),
+        ("gemini-2.5-pro", True),
+        ("gemini-2.5-flash-lite", True),
+        ("gemini-3.1-pro-preview", True),
+        ("gemini-3-flash-preview", True),
+        ("gemini-2.0-flash", True),
+        ("gemini-2.0-flash-001", False),
+        ("gemini-flash-latest", False),
+        ("gemini-2.5-flash-preview-09-2025", False),
+        ("gemini-3.1-pro-preview-customtools", False),
+        ("gemini-2.0-flash-exp-image-generation", False),
+        ("gemini-2.5-flash-image", False),
+        ("gemini-2.5-flash-preview-tts", False),
+        ("gemma-3-27b-it", False),
+        ("text-embedding-004", False),
     ]
+    assert {model.alias for model in listing.models} == {None}
+
+
+async def test_a_google_entry_without_a_model_id_is_skipped():
+    page = {"models": [
+        {"name": "models/"},
+        {"name": 5},
+        {"displayName": "No name"},
+        {"name": "models/gemini-9-flash", "supportedGenerationMethods": "generateContent"},
+    ]}
+
+    listing = await listed("google", serving(page))
+
+    assert listing.models == (ListedModel(id="gemini-9-flash", shown=False),)
 
 
 async def test_anthropic_fields():
@@ -264,14 +288,19 @@ async def test_anthropic_fields():
     assert models["claude-sonnet-4-6"].thinking_types == ("adaptive", "enabled")
     assert models["claude-sonnet-4-6"].effort_levels == ("low", "medium", "high", "max")
     # Effort unsupported: no ladder, even though each level is listed.
-    assert models["claude-sonnet-4-5"].thinking_types == ("enabled",)
-    assert models["claude-sonnet-4-5"].effort_levels == ()
+    assert models["claude-sonnet-4-5-20250929"].thinking_types == ("enabled",)
+    assert models["claude-sonnet-4-5-20250929"].effort_levels == ()
     # Thinking unsupported: no types, and says so.
-    assert models["claude-3-5-haiku"].reasoning is False
-    assert models["claude-3-5-haiku"].thinking_types == ()
-    assert models["claude-3-5-haiku"].image_input is True
+    assert models["claude-3-5-haiku-20241022"].reasoning is False
+    assert models["claude-3-5-haiku-20241022"].thinking_types == ()
+    assert models["claude-3-5-haiku-20241022"].image_input is True
     # No capabilities in the payload: nothing known.
-    assert models["claude-3-haiku"] == ListedModel("claude-3-haiku", display_name="Claude Haiku 3")
+    assert models["claude-3-haiku-20240307"] == ListedModel(
+        "claude-3-haiku-20240307",
+        display_name="Claude Haiku 3",
+        shown=False,
+        alias="claude-3-haiku",
+    )
 
 
 async def test_anthropic_says_whether_thinking_can_be_turned_off():
@@ -291,10 +320,10 @@ async def test_anthropic_says_whether_thinking_can_be_turned_off():
         can_disable=False,
     )
     assert models["claude-opus-4-7"].can_disable is True
-    assert models["claude-sonnet-4-5"].can_disable is True
+    assert models["claude-sonnet-4-5-20250929"].can_disable is True
     # The types without a disabled entry, or no capabilities: not said.
-    assert models["claude-haiku-4-5"].can_disable is None
-    assert models["claude-3-haiku"].can_disable is None
+    assert models["claude-haiku-4-5-20251001"].can_disable is None
+    assert models["claude-3-haiku-20240307"].can_disable is None
 
 
 @pytest.mark.parametrize(
@@ -319,7 +348,21 @@ def test_a_listed_model_does_not_say_whether_thinking_can_be_turned_off_by_defau
     assert ListedModel(id="any").can_disable is None
 
 
-async def test_a_dated_anthropic_id_is_listed_once_as_its_alias():
+async def test_anthropic_lists_every_id_and_shows_a_dated_one_as_its_alias():
+    listing = await listed("anthropic", serving(payload("anthropic")))
+
+    assert [(m.id, m.shown, m.alias) for m in listing.models] == [
+        ("claude-sonnet-5-5", True, None),
+        ("claude-opus-4-7", True, None),
+        ("claude-sonnet-4-6", True, None),
+        ("claude-sonnet-4-5-20250929", False, "claude-sonnet-4-5"),
+        ("claude-haiku-4-5-20251001", False, "claude-haiku-4-5"),
+        ("claude-3-5-haiku-20241022", False, "claude-3-5-haiku"),
+        ("claude-3-haiku-20240307", False, "claude-3-haiku"),
+    ]
+
+
+async def test_an_anthropic_id_is_listed_once_a_dated_one_in_either_form():
     data = payload("anthropic")["data"]
     dated = next(m for m in data if m["id"] == "claude-sonnet-4-5-20250929")
     page = {
@@ -327,15 +370,18 @@ async def test_a_dated_anthropic_id_is_listed_once_as_its_alias():
             dated,
             {**dated, "id": "claude-sonnet-4-5", "display_name": "The alias"},
             {**dated, "id": "claude-sonnet-4-5@2025-09-29", "display_name": "The Vertex form"},
+            {**dated, "display_name": "Listed again"},
         ],
         "has_more": False,
     }
 
     listing = await listed("anthropic", serving(page))
 
-    # The first one listed wins, as in 0.6.
-    assert [(m.id, m.display_name) for m in listing.models] == [
-        ("claude-sonnet-4-5", "Claude Sonnet 4.5"),
+    # The first one listed under an id wins.
+    assert [(m.id, m.display_name, m.shown, m.alias) for m in listing.models] == [
+        ("claude-sonnet-4-5-20250929", "Claude Sonnet 4.5", False, "claude-sonnet-4-5"),
+        ("claude-sonnet-4-5", "The alias", True, None),
+        ("claude-sonnet-4-5@2025-09-29", "The Vertex form", False, "claude-sonnet-4-5"),
     ]
 
 

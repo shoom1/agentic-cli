@@ -158,7 +158,7 @@ agentic-cli/
 │   │   ├── table.py          # ShippedTable, load_table() (data/table.json: family rules, numbers, fallbacks)
 │   │   ├── roles.py          # RoleMap: default / fast / strong / app roles → references; an unmapped built-in role: the newest of its tier among the offered models entries (the first provider in list order with one), else of the first keyed built-in, else unfilled_role_message (also config's static check)
 │   │   ├── resolve.py        # resolve_model → ResolvedModel (thinking, max_tokens, sampling)
-│   │   ├── catalog.py        # ModelCatalog: entries + listings + table, validation; in_use (the providers listed), offered/not_offered (the list the pickers offer), search; listing cache (address, kind, and the entries' ids a listing lacked, `absent`: a retired entry costs one listing, not one per start)
+│   │   ├── catalog.py        # ModelCatalog: entries + listings + table, validation (every id a provider serves; records() only those it shows); in_use (the providers listed), offered/not_offered (the list the pickers offer), search; listing cache (address, kind, and the entries' ids a listing lacked, `absent`: a retired entry costs one listing, not one per start)
 │   │   └── discovery/        # One lister per provider kind, over httpx
 │   └── persistence/
 │       └── session.py        # SessionPersistence

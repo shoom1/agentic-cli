@@ -1780,6 +1780,22 @@ step; each entry says what to use instead.
 
 ### Fixed
 
+- **A pinned snapshot or alias a provider serves is accepted, and `/models`
+  search finds it.** The Google and Anthropic listers dropped what the model
+  list does not show (Google's `-latest` aliases, dated snapshots, point
+  releases, variants and other modalities; Anthropic listed each dated id as
+  its alias only), and the catalog validated ids against what was left: with
+  a fresh listing, `default_model: anthropic:claude-sonnet-4-5-20250929` or
+  `google:gemini-flash-latest` failed startup as "not available", and with a
+  stale cache it started but failed mid-session once the background refresh
+  landed (`/compact`'s summary, `generate_simple`). A listing now keeps every
+  model the provider serves, each marked whether it is shown: every id is
+  accepted and found by `/models <text>`, while the list the pickers offer,
+  `/models`, the roles' tier picks and the "not available" message show what
+  they showed. Without a listing, a dated Claude id is described as its alias
+  is (`claude-sonnet-5-5-20261001` cannot turn thinking off and takes no
+  sampling parameters, like `claude-sonnet-5-5`). The model cache moves to
+  version 3, so each provider in use is listed once more after the upgrade.
 - **Listing Deep Agents conversations no longer reads every checkpoint.**
   `--continue`, `/resume` and `/sessions` listed conversations by reading
   every checkpoint of the app and user, sub-agents' included, each of which

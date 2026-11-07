@@ -6,14 +6,16 @@ follow ``has_more`` and ``last_id`` (as ``after_id``).
 Each model's ``capabilities`` say whether it thinks, with which thinking
 types (``adaptive``, ``enabled``) and effort levels, whether thinking can be
 turned off (``types.disabled``: false exactly when a request with thinking
-disabled is a 400 from that model), and whether it takes image input. A dated
-id (``claude-sonnet-4-5-20250929``, or the ``@2025-09-29`` form) is listed as
-its alias, once: the first one listed wins, as in 0.6.
+disabled is a 400 from that model), and whether it takes image input.
+
+Every model is listed under its own id, once (the first one listed wins), so
+each id is accepted. A dated id (``claude-sonnet-4-5-20250929``, or the
+``@2025-09-29`` form) is shown as its alias (``claude-sonnet-4-5``), not
+under its own id: 0.6 listed only the alias.
 """
 
 from __future__ import annotations
 
-import re
 from collections.abc import Mapping
 from typing import Any
 
@@ -30,13 +32,12 @@ from agentic_cli.models.discovery import (
     text,
 )
 from agentic_cli.models.providers import Provider
+from agentic_cli.models.table import claude_alias
 
 URL = "https://api.anthropic.com/v1/models"
 API_VERSION = "2023-06-01"
 _THINKING_TYPES = ("adaptive", "enabled")
 _EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
-_DATE_SUFFIX = re.compile(r"-\d{8}$")
-_VERTEX_DATE_SUFFIX = re.compile(r"@\d{4}-\d{2}-\d{2}$")
 
 
 async def fetch(client: httpx.AsyncClient, provider: Provider) -> list[ListedModel]:
@@ -63,11 +64,6 @@ async def fetch(client: httpx.AsyncClient, provider: Provider) -> list[ListedMod
     return list(models.values())
 
 
-def alias(model_id: str) -> str:
-    """The alias of a dated id: ``claude-sonnet-4-5-20250929`` → ``claude-sonnet-4-5``."""
-    return _VERTEX_DATE_SUFFIX.sub("", _DATE_SUFFIX.sub("", model_id))
-
-
 def _model(entry: Mapping[str, Any]) -> ListedModel | None:
     model_id = text(entry.get("id"))
     if model_id is None:
@@ -76,8 +72,10 @@ def _model(entry: Mapping[str, Any]) -> ListedModel | None:
     thinking = child(capabilities, "thinking")
     types = child(thinking, "types")
     effort = child(capabilities, "effort")
+    alias = claude_alias(model_id)
+    dated = bool(alias) and alias != model_id
     return ListedModel(
-        id=alias(model_id),
+        id=model_id,
         display_name=text(entry.get("display_name")) or "",
         context_window=count(entry.get("max_input_tokens")),
         max_output=count(entry.get("max_tokens")),
@@ -86,6 +84,8 @@ def _model(entry: Mapping[str, Any]) -> ListedModel | None:
         thinking_types=_supported(thinking, types, _THINKING_TYPES),
         effort_levels=_supported(effort, effort, _EFFORT_LEVELS),
         can_disable=_flag(child(types, "disabled")),
+        shown=not dated,
+        alias=alias if dated else None,
     )
 
 

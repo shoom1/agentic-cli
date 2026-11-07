@@ -37,7 +37,7 @@ def home(tmp_path, monkeypatch) -> Path:
     cache = tmp_path / "home" / ".agentic_cli" / "model_cache.json"
     cache.parent.mkdir(parents=True)
     models = [{"id": m} for m in ("gemini-2.5-flash", "gemini-2.5-pro")]
-    cache.write_text(json.dumps({"version": 2, "providers": {"google": {
+    cache.write_text(json.dumps({"version": 3, "providers": {"google": {
         "fetched_at": time.time() - 3600, "ok": True, "kind": "google", "models": models,
     }}}))
     return tmp_path

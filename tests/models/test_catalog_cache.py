@@ -91,7 +91,7 @@ async def test_the_file_holds_each_listing_versioned(cache):
 
     document = read(cache)
 
-    assert document["version"] == 2
+    assert document["version"] == 3
     entry = document["providers"]["google"]
     assert (entry["fetched_at"], entry["ok"], entry["error"]) == (1234.5, True, None)
     assert (entry["base_url"], entry["kind"]) == (None, "google")
@@ -116,7 +116,7 @@ async def test_what_a_listing_says_about_turning_thinking_off_survives_the_cache
     await make(cache, anthropic=KEYS["anthropic"], clock=clock).load()
     models = {m["id"]: m for m in read(cache)["providers"]["anthropic"]["models"]}
     assert models["claude-sonnet-5-5"]["can_disable"] is False
-    assert models["claude-haiku-4-5"]["can_disable"] is None
+    assert models["claude-haiku-4-5-20251001"]["can_disable"] is None
     clock.now += 60
 
     catalog = make(cache, NoNetwork(), anthropic=KEYS["anthropic"], clock=clock)
@@ -125,6 +125,40 @@ async def test_what_a_listing_says_about_turning_thinking_off_survives_the_cache
     assert states(catalog) == {"anthropic": ProviderState.FRESH}
     sonnet = catalog.record(ModelRef("anthropic", "claude-sonnet-5-5")).thinking
     assert sonnet.can_disable is False
+
+
+async def test_what_a_listing_serves_and_what_it_shows_survive_the_cache(cache):
+    clock = Clock()
+    await make(cache, google=KEYS["google"], anthropic=KEYS["anthropic"], clock=clock).load()
+    written = read(cache)["providers"]
+    google = {m["id"]: m for m in written["google"]["models"]}
+    anthropic = {m["id"]: m for m in written["anthropic"]["models"]}
+    assert (google["gemini-flash-latest"]["shown"], google["gemini-flash-latest"]["alias"]) == (
+        False, None,
+    )
+    dated = anthropic["claude-sonnet-4-5-20250929"]
+    assert (dated["shown"], dated["alias"]) == (False, "claude-sonnet-4-5")
+    clock.now += 60
+
+    catalog = make(
+        cache, NoNetwork(), google=KEYS["google"], anthropic=KEYS["anthropic"], clock=clock
+    )
+    await catalog.load()
+
+    assert states(catalog) == {"google": ProviderState.FRESH, "anthropic": ProviderState.FRESH}
+    for ref in (
+        ModelRef("google", "gemini-flash-latest"),
+        ModelRef("anthropic", "claude-sonnet-4-5-20250929"),
+    ):
+        assert catalog.record(ref).ref == ref
+    assert [r.model for r in catalog.records("google")] == [
+        "gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.5-flash-lite",
+        "gemini-3.1-pro-preview", "gemini-3-flash-preview", "gemini-2.0-flash",
+    ]
+    assert [r.model for r in catalog.records("anthropic")] == [
+        "claude-sonnet-5-5", "claude-opus-4-7", "claude-sonnet-4-6", "claude-sonnet-4-5",
+        "claude-haiku-4-5", "claude-3-5-haiku", "claude-3-haiku",
+    ]
 
 
 async def test_a_configured_provider_s_entry_records_its_base_url_and_kind(cache):
@@ -300,7 +334,7 @@ async def test_an_unwritable_cache_never_fails_startup(tmp_path):
 BROKEN = {
     "invalid JSON": lambda doc: b"{not json",
     "not an object": lambda doc: b"[1, 2, 3]",
-    "wrong version": lambda doc: json.dumps({**doc, "version": 3}).encode(),
+    "wrong version": lambda doc: json.dumps({**doc, "version": 4}).encode(),
     "no version": lambda doc: json.dumps({"providers": doc["providers"]}).encode(),
     "fetched_at a string": lambda doc: _with_google(doc, fetched_at="yesterday"),
     "ok a number": lambda doc: _with_google(doc, ok=1),
@@ -334,7 +368,7 @@ async def test_a_broken_cache_file_is_ignored(cache, damage):
 
     assert api.calls == ["google"]  # listed again
     assert states(catalog) == {"google": ProviderState.FRESH}
-    assert read(cache)["version"] == 2  # and rewritten
+    assert read(cache)["version"] == 3  # and rewritten
 
 
 async def test_a_provider_whose_base_url_changed_is_listed_again(cache):
@@ -397,10 +431,42 @@ async def test_a_version_1_cache_is_listed_again(cache):
     assert sorted(api.calls) == ["google", "openrouter"]
     assert states(catalog) == {"google": ProviderState.FRESH, "openrouter": ProviderState.FRESH}
     document = read(cache)
-    assert document["version"] == 2
+    assert document["version"] == 3
     assert {name: entry["kind"] for name, entry in document["providers"].items()} == {
         "google": "google", "openrouter": "openrouter",
     }
+
+
+async def test_a_version_2_cache_is_listed_again(cache):
+    """A file from before the listers kept every id a provider serves holds
+    Google's listing without its aliases and Anthropic's without its dated
+    ids: fresh, it would reject those until it aged. It is ignored, and every
+    provider in use is listed again."""
+    clock = Clock()
+    cache.parent.mkdir(parents=True)
+    cache.write_text(json.dumps({"version": 2, "providers": {
+        "google": {
+            "fetched_at": clock.now - 60, "ok": True, "kind": "google",
+            "models": [{"id": "gemini-2.5-flash"}, {"id": "gemini-2.0-flash"}],
+        },
+        "anthropic": {
+            "fetched_at": clock.now - 60, "ok": True, "kind": "anthropic",
+            "models": [{"id": "claude-sonnet-4-5", "display_name": "Claude Sonnet 4.5"}],
+        },
+    }}))
+    api = ProviderAPI()
+
+    catalog = make(cache, api, google=KEYS["google"], anthropic=KEYS["anthropic"], clock=clock)
+    await catalog.load()
+
+    assert sorted(api.calls) == ["anthropic", "google"]
+    assert states(catalog) == {"google": ProviderState.FRESH, "anthropic": ProviderState.FRESH}
+    for ref in (
+        ModelRef("google", "gemini-flash-latest"),
+        ModelRef("anthropic", "claude-sonnet-4-5-20250929"),
+    ):
+        assert catalog.record(ref).ref == ref
+    assert read(cache)["version"] == 3
 
 
 # --- search: a provider not in use, from the cache or listed --------------------------
