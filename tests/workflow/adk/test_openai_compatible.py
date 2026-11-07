@@ -4,7 +4,8 @@ A fake OpenAI-compatible server (``httpx.MockTransport`` behind the
 ``AsyncOpenAI`` client) answers a streamed request with SSE chunks and an
 unstreamed one with a single completion. Reasoning arrives the way those
 servers send it, as ``reasoning`` (OpenRouter, newer vLLM) or
-``reasoning_content`` (older vLLM) beside the answer.
+``reasoning_content`` (older vLLM) beside the answer, and on OpenRouter with
+``reasoning_details``, which go back to the model with its tool results.
 """
 
 from __future__ import annotations
@@ -431,3 +432,264 @@ async def test_a_second_turn_does_not_replay_the_first_turn_s_reasoning():
 
     second = server.bodies[1]["messages"]
     assert [m["content"] for m in second if m["role"] == "assistant"] == ["The answer."]
+
+
+# --- OpenRouter's reasoning details go back with the tool results ---------------------
+#
+# Beside its reasoning text OpenRouter sends ``reasoning_details``: Claude's
+# signed thinking, Gemini's thought signatures, OpenAI's encrypted reasoning.
+# The model needs them back, exactly as it sent them, on the assistant message
+# that called a tool; the thought text itself still stays out of the request.
+
+CLAUDE = "anthropic/claude-sonnet-4.5"
+GEMINI = "google/gemini-3-pro-preview"
+
+#: Claude's reasoning as OpenRouter sends it whole: its signed thinking, then
+#: a redacted (encrypted) block.
+SIGNED = [
+    {"type": "reasoning.text", "text": "I need the weather.", "signature": "sig-1",
+     "format": "anthropic-claude-v1", "index": 0},
+    {"type": "reasoning.encrypted", "data": "c2VjcmV0", "format": "anthropic-claude-v1",
+     "index": 1},
+]
+
+
+def signed_deltas() -> list[dict[str, Any]]:
+    """``SIGNED`` streamed: the thinking in pieces of one entry (``index`` 0),
+    its signature last, then the redacted block, then the call."""
+    def piece(**fields):
+        return {"type": "reasoning.text", "format": "anthropic-claude-v1", "index": 0,
+                **fields}
+
+    return [
+        {"role": "assistant", "reasoning": "I need ",
+         "reasoning_details": [piece(text="I need ")]},
+        {"reasoning": "the weather.", "reasoning_details": [piece(text="the weather.")]},
+        {"reasoning_details": [piece(text="", signature="sig-1"), SIGNED[1]]},
+        *tool_call_deltas(),
+    ]
+
+
+class Scripted(Server):
+    """A server answering each request with the next reply (``Server``'s keywords)."""
+
+    def __init__(self, *replies: dict[str, Any]) -> None:
+        super().__init__()
+        self.replies = list(replies)
+
+    def _handle(self, request: httpx.Request) -> httpx.Response:
+        reply = self.replies.pop(0)
+        self.deltas = list(reply.get("deltas", ()))
+        self.message = reply.get("message") or {"role": "assistant", "content": "ok"}
+        self.finish_reason = reply.get("finish_reason", "stop")
+        return super()._handle(request)
+
+
+def calls_the_tool(**reasoning: Any) -> dict[str, Any]:
+    """A reply that calls get_weather, streamed or not, ``reasoning`` on its message."""
+    return dict(
+        deltas=tool_call_deltas(), message={**TOOL_CALL_MESSAGE, **reasoning},
+        finish_reason="tool_calls",
+    )
+
+
+SUNNY = dict(deltas=[{"role": "assistant", "content": "It is sunny."}],
+             message={"role": "assistant", "content": "It is sunny."})
+
+
+def get_weather(city: str) -> dict:
+    """The weather in a city."""
+    return {"result": "sunny"}
+
+
+async def tool_loop(model: OpenAICompatibleLlm, *, stream: bool):
+    """One turn of an agent on ``model`` through ADK's runner: it calls
+    get_weather, then answers. Returns the session."""
+    from google.adk import Runner
+    from google.adk.agents import LlmAgent, RunConfig
+    from google.adk.agents.run_config import StreamingMode
+    from google.adk.apps import App
+    from google.adk.sessions import InMemorySessionService
+
+    agent = LlmAgent(name="writer", model=model, instruction="Write.", tools=[get_weather])
+    app = App(name="compatible_test", root_agent=agent)
+    runner = Runner(app=app, session_service=InMemorySessionService())
+    session = await runner.session_service.create_session(app_name=app.name, user_id="u")
+    config = RunConfig(streaming_mode=StreamingMode.SSE if stream else StreamingMode.NONE)
+    asked = user("What is the weather in Paris?")
+    [e async for e in runner.run_async(
+        user_id="u", session_id=session.id, new_message=asked, run_config=config
+    )]
+    return await runner.session_service.get_session(
+        app_name=app.name, user_id="u", session_id=session.id
+    )
+
+
+def on(model: str, server: Server) -> OpenAICompatibleLlm:
+    """``model`` on OpenRouter, here ``server``."""
+    return OpenAICompatibleLlm(model=model, client=server.client())
+
+
+def replayed(body: dict[str, Any]) -> dict[str, Any]:
+    """The request's one assistant message: the call the model made."""
+    (assistant,) = [m for m in body["messages"] if m["role"] == "assistant"]
+    return assistant
+
+
+def thoughts(session) -> list[str | None]:
+    return [
+        part.text
+        for event in session.events if event.content and event.author == "writer"
+        for part in event.content.parts or () if part.thought
+    ]
+
+
+@pytest.mark.parametrize("stream", [True, False], ids=["streamed", "unstreamed"])
+async def test_reasoning_details_go_back_across_a_tool_call(stream):
+    """The ADK twin of the LangChain adapter's test: Claude and Gemini through
+    OpenRouter need their signed reasoning back with the tool result."""
+    first = calls_the_tool(reasoning="I need the weather.", reasoning_details=SIGNED)
+    server = Scripted({**first, "deltas": signed_deltas()}, SUNNY)
+
+    session = await tool_loop(on(CLAUDE, server), stream=stream)
+
+    call = replayed(server.bodies[1])
+    assert call["reasoning_details"] == SIGNED  # merged, in order, every field
+    assert call["tool_calls"][0]["id"] == "call_1"
+    assert not call.get("content") and "reasoning" not in call  # no thought text
+    assert "Thought" not in json.dumps(server.bodies[1])
+    assert thoughts(session) == ["I need the weather."]  # the thinking box's text
+
+
+async def test_reasoning_details_without_reasoning_text_go_back():
+    """Gemini's thought signature can come alone, as an encrypted entry."""
+    signature = [{"type": "reasoning.encrypted", "data": "Z2VtaW5p", "id": "call_1",
+                  "format": "google-gemini-v1", "index": 0}]
+    server = Scripted(calls_the_tool(reasoning_details=signature), SUNNY)
+
+    session = await tool_loop(on(GEMINI, server), stream=False)
+
+    assert replayed(server.bodies[1])["reasoning_details"] == signature
+    assert thoughts(session) == [None]  # nothing for the thinking box
+
+
+async def test_a_streamed_summary_is_joined_and_its_null_fields_kept():
+    """A summary streams in pieces like the reasoning text; a field OpenRouter
+    sends as null goes back as null."""
+    def piece(summary: str) -> dict[str, Any]:
+        return {"type": "reasoning.summary", "summary": summary, "id": None,
+                "format": "openai-responses-v1", "index": 0}
+
+    first = calls_the_tool()
+    first["deltas"] = [
+        {"role": "assistant", "reasoning_details": [piece("Look the ")]},
+        {"reasoning_details": [piece("weather up.")]},
+        *tool_call_deltas(),
+    ]
+    server = Scripted(first, SUNNY)
+
+    await tool_loop(on("openai/gpt-5", server), stream=True)
+
+    assert replayed(server.bodies[1])["reasoning_details"] == [piece("Look the weather up.")]
+
+
+async def test_openai_s_ephemeral_reasoning_ids_are_not_sent_back():
+    """OpenAI's ``rs_`` item ids name reasoning OpenRouter does not store
+    (``store`` false); the details go back without them, as ChatOpenRouter
+    sends them on Deep Agents."""
+    encrypted = {"type": "reasoning.encrypted", "data": "gAAAA", "id": "rs_1",
+                 "format": "openai-responses-v1", "index": 0}
+    server = Scripted(calls_the_tool(reasoning_details=[encrypted]), SUNNY)
+
+    await tool_loop(on("openai/gpt-5", server), stream=False)
+
+    assert replayed(server.bodies[1])["reasoning_details"] == [
+        {key: value for key, value in encrypted.items() if key != "id"}
+    ]
+
+
+@pytest.mark.parametrize("stream", [True, False], ids=["streamed", "unstreamed"])
+async def test_another_model_is_not_sent_them(stream):
+    """A model switch within OpenRouter keeps the provider: the details go
+    back only to the model that wrote them."""
+    reply = calls_the_tool(reasoning="I need the weather.", reasoning_details=SIGNED)
+    first = Scripted({**reply, "deltas": signed_deltas()})
+    asked = LlmRequest(model=CLAUDE, contents=[user("What is the weather in Paris?")],
+                       config=types.GenerateContentConfig())
+    *_, response = [
+        r async for r in on(CLAUDE, first).generate_content_async(asked, stream=stream)
+    ]
+    result = types.FunctionResponse(id="call_1", name="get_weather", response={"result": "sunny"})
+    history = [
+        *asked.contents,
+        response.content,
+        types.Content(role="user", parts=[types.Part(function_response=result)]),
+    ]
+    server = Server(deltas=SUNNY["deltas"], message=SUNNY["message"])
+
+    for model in (GEMINI, CLAUDE):
+        again = LlmRequest(model=model, contents=history, config=types.GenerateContentConfig())
+        [r async for r in on(model, server).generate_content_async(again, stream=stream)]
+
+    to_gemini, to_claude = (replayed(body) for body in server.bodies)
+    assert "reasoning_details" not in to_gemini
+    assert to_gemini["tool_calls"] == to_claude["tool_calls"]
+    assert to_claude["reasoning_details"] == SIGNED
+
+
+async def test_reasoning_text_alone_leaves_the_request_as_it_was():
+    """A server that sends only reasoning text (vLLM, Synthetic, qwen on
+    OpenRouter): the call goes back exactly as ADK sends it."""
+    server = Scripted(calls_the_tool(reasoning="I need the weather."), SUNNY)
+
+    await tool_loop(compatible(server), stream=False)
+
+    assert replayed(server.bodies[1]) == {
+        "role": "assistant",
+        "tool_calls": [{"id": "call_1", "type": "function",
+                        "function": {"name": "get_weather", "arguments": '{"city": "Paris"}'}}],
+    }
+
+
+async def test_adk_builds_the_messages_one_content_at_a_time():
+    """OpenAICompatibleLlm finds a model turn's assistant message in the
+    request ADK built by converting each content again with ADK's own
+    ``_content_to_openai_messages``: the system instruction, then each
+    content's messages in order, a model turn's call in one assistant message.
+    An ADK upgrade that builds the messages otherwise fails here."""
+    from google.adk.integrations.openai._openai_llm import _content_to_openai_messages
+
+    server = Server()
+    contents = _history().contents
+    asked = LlmRequest(model=MODEL, contents=contents,
+                       config=types.GenerateContentConfig(system_instruction="Be brief."))
+
+    adk = OpenAILlm(model=MODEL, client=server.client())
+    [r async for r in adk.generate_content_async(asked)]
+
+    assert server.bodies[0]["messages"] == [
+        {"role": "system", "content": "Be brief."},
+        *(m for content in contents for m in _content_to_openai_messages(content)),
+    ]
+    assert [m["role"] for m in _content_to_openai_messages(contents[1])] == ["assistant"]
+
+
+async def test_a_request_adk_built_otherwise_goes_without_the_details(monkeypatch):
+    """Should ADK build the messages some other way, the details are left out
+    (with a warning) rather than put on the wrong message."""
+    import structlog
+
+    from agentic_cli.workflow.adk import openai_compatible
+
+    server = Scripted(calls_the_tool(reasoning_details=SIGNED), SUNNY)
+    monkeypatch.setattr(
+        openai_compatible, "_content_to_openai_messages", lambda content: [{"role": "other"}]
+    )
+
+    with structlog.testing.capture_logs() as logs:
+        await tool_loop(on(CLAUDE, server), stream=False)
+
+    assert "reasoning_details" not in replayed(server.bodies[1])
+    assert [log["event"] for log in logs if log["log_level"] == "warning"] == [
+        "reasoning_details_not_sent"
+    ]
